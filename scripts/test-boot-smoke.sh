@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Minimal real-hardware smoke test: `fluxvm serve` comes up, answers
 # /healthz, boots a real QEMU VM via the REST API (no agent, no network —
 # just the bare create path), and the VM actually reaches a real systemd

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Real-hardware regression for `fluxvm build-image` via **guestkit only**
 # (fluxvm_image::customize_image) — every BuildImageRequest field that mutates
 # the guest filesystem: hostname, packages, commands, ssh_key, copy_in,

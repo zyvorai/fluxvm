@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
 use std::os::raw::{c_char, c_int, c_ulong, c_void};
 
 #[cfg(not(fluxvm_no_host_c))]

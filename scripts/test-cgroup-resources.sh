@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Real-hardware regression test for cgroup v2 resource control
 # (fluxvm-cgroup, VmManager::set_resources/freeze/thaw/metrics/pressure).
 # Boots a real QEMU VM and drives it entirely through the REST API against

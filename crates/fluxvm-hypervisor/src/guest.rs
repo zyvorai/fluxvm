@@ -1,5 +1,6 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
+
 //! Guest runtime: spawn Firecracker as the KVM engine behind the FluxVM
 //! control API so create/exec/pause/resume work end-to-end today while the
 //! in-tree KVM demo path remains available for freestanding netboot.

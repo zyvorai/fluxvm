@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
 //! Host network bring-up helpers (documentation + command generation).
 //! FluxVM does not create TAP devices itself when running jailed.
 

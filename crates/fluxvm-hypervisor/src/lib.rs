@@ -1,5 +1,6 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
+
 //! FluxVM hypervisor — lightweight KVM microVMM (one VM per process).
 //!
 //! Long-lived mode: JSON-over-UDS control API (`--api-sock`).

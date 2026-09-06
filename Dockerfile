@@ -1,6 +1,5 @@
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-#
 # Builds one image with two entrypoints: `fluxvm serve` (the VMM control
 # plane REST API) and `fluxvm-kube` (the DisposableVm operator). They run
 # as two containers in the same DaemonSet pod — see deploy/k8s/daemonset.yaml

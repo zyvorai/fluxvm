@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Real-hardware regression test for per-VM network namespaces
 # (NetworkSpec::Tap { netns: true }, fluxvm_network::netns). Boots a real
 # QEMU VM whose tap device — and the VMM process itself — live inside a

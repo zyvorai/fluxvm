@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 # Build fluxvm_tc.bpf.o and fluxvm_xdp.bpf.o into dist/bpf/ (or OUT_DIR).
 # Docs: docs/network-fabric.md

@@ -1,5 +1,6 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
+
 //! Build host C helpers and (on Linux) the freestanding netboot guest payload.
 
 use std::env;

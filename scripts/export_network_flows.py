@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
 """Export FluxVM network-flow changes as NDJSON without extra dependencies.
 
 This intentionally consumes the stable REST flow-map API rather than the

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # End-to-end lifecycle smoke test for Zyvor FluxVM: boots a real QEMU VM
 # with the vsock guest agent enabled and proves pause/resume/exec/graceful
 # shutdown actually work — not just that the CLI calls returned 200/0.

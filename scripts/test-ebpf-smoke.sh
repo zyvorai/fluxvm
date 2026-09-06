@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-#
 # Privileged kernel smoke for Network Fabric v3.
 # Covers: TC attach, fail-closed policy, IPv4/IPv6 CIDRs, L4 policy,
 # fixed-window PPS limiting, flow/stats maps, and IPv4/IPv6 XDP blocking.

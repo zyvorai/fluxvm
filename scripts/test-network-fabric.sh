@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-#
 # End-to-end Network Fabric regression: kernel TC/XDP smoke + FluxVm dataplane
 # attach + REST policy/status/stats/flows (including live reconfigure and rate
 # limits).

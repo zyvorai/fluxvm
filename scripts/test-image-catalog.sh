@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Real-hardware regression test for the image catalog + Ed25519 signing
 # (fluxvm_image::catalog, `fluxvm catalog keygen/sign`,
 # GET /v1/images/catalog). Boots a real QEMU VM created by referencing a

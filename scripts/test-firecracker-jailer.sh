@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Real-hardware regression test for the Firecracker jailer integration
 # (config.jailer.enabled, fluxvm-firecracker::launch_jailed). Boots a real
 # Firecracker microVM through the actual `jailer` binary.

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-#
 # Rough sandbox cold-start / density benchmark against a local fluxvm serve.
 # Requires Linux + KVM + fluxvm built. Placeholder-friendly when no hardware.
 

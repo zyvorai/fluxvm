@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Real-hardware regression test for the pluggable storage-provisioning
 # abstraction (fluxvm_core::model::StorageBackend,
 # fluxvm_image::storage). Boots real VMs against two of its three new

@@ -1,4 +1,4 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
 //! Minimal QMP client: connects fresh for each call (QEMU's QMP chardev

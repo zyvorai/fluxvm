@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Prepare a fresh Linux host to run Zyvor FluxVM: install QEMU/cloud-init
 # tooling via the system package manager, load the nbd kernel module (used by
 # guestkit for image customization), install Cloud Hypervisor and Firecracker

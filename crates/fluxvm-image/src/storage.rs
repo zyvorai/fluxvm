@@ -1,4 +1,4 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
 //! Pluggable disk-provisioning backends — see `fluxvm_core::model::StorageBackend`

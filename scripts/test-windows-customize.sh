@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-#
 # Gated Windows offline-customize smoke test. Skips unless WINDOWS_IMAGE is set
 # to a Windows qcow2/raw disk. Does not boot the guest.
 #

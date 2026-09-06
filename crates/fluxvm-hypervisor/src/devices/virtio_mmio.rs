@@ -1,3 +1,6 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::bus::MmioDevice;
 use crate::error::Result;
 use std::sync::atomic::{AtomicU32, Ordering};

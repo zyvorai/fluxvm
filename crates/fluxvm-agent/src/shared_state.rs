@@ -1,5 +1,6 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
+
 //! Multi-node sandbox metadata index.
 //!
 //! Set `FLUXVM_SANDBOX_STATE_URL` (e.g. `redis://127.0.0.1:6379`) to use Redis;

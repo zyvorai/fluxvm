@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Real-hardware regression test for warm VM pools (VmManager::create_pool /
 # claim_from_pool / delete_pool). Boots real QEMU VMs.
 #

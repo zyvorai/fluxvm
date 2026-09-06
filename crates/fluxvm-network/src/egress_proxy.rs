@@ -1,5 +1,6 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
+
 //! Live L7 egress proxy: allowlist + credential injection for FluxVm sandboxes.
 
 use crate::egress::{EgressDecision, decide};

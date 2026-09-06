@@ -1,5 +1,6 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
+
 //! Agent-sandbox helpers: templates, AutoPause activity tracking, snapshot create.
 
 use anyhow::{Context, Result, bail};

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # End-to-end networking smoke test for Zyvor FluxVM: boots a real VM over
 # each supported network mode and verifies it is actually reachable over SSH.
 #

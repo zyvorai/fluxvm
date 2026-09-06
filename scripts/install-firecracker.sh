@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-
 # Install Firecracker (+ jailer) from upstream GitHub releases, verified
 # against the SHA-256 digest GitHub records for the release asset.
 #

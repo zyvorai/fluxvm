@@ -1,4 +1,4 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
 //! Minimal HTTP/1.1-over-Unix-socket client for Firecracker's API. Firecracker

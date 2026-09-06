@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Copyright 2026 Zyvor
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-#
 # Enable Network Fabric v3 GA on this host: ensure BPF objects, merge the GA
 # dataplane profile into /etc/fluxvm.toml, restart fluxvm when requested.
 #

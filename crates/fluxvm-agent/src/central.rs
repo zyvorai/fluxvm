@@ -1,4 +1,4 @@
-// Copyright 2026 Zyvor
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
 //! Central fleet registry + proxy. Deliberately doesn't depend on
