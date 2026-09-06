@@ -16,7 +16,7 @@ separate projects rather than expanding this blast radius.
 
 For a README-level walkthrough with diagrams, see
 [Network Fabric architecture](../README.md#network-fabric-architecture-how-it-works).
-For a **customer-facing speed comparison** vs traditional VM firewalls / bridges /
+For a **user-facing speed comparison** vs traditional VM firewalls / bridges /
 user-mode NAT (plus lab policy-update numbers), see
 [Why Network Fabric is faster](../README.md#why-network-fabric-is-faster-than-traditional-vm-networking).
 

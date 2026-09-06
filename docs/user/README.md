@@ -1,4 +1,4 @@
-# FluxVM — Customer Documentation
+# FluxVM — User Documentation
 
 A standalone, minimal-dependency disposable-VM control plane — QEMU/KVM, Cloud Hypervisor, and Firecracker behind one API.
 
@@ -17,12 +17,12 @@ A standalone, minimal-dependency disposable-VM control plane — QEMU/KVM, Cloud
 ## Printable PDFs
 
 ```bash
-node scripts/customer-docs/build-customer-pdfs.mjs
+node scripts/user-docs/build-user-pdfs.mjs
 ```
 
 Output lands in [`pdf/`](pdf/):
 
-- `FluxVM-Customer-README.pdf`
+- `FluxVM-User-README.pdf`
 - `FluxVM-Getting-Started.pdf`
 - `FluxVM-Page-by-Page.pdf`
 - `FluxVM-Admin-Basics.pdf`

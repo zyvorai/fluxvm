@@ -21,11 +21,11 @@ table{width:100%;border-collapse:collapse;margin:.8em 0 1.1em;font-size:9.5pt}
 th,td{border:1px solid #e5e7eb;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f1f5f9}
 hr{border:none;border-top:1px solid #e5e7eb;margin:1.2em 0}
 </style></head><body>
-<section class="cover"><div class="kicker">ZyvorAI Labs · Customer Documentation</div>
+<section class="cover"><div class="kicker">ZyvorAI Labs · User Documentation</div>
 <h1>Ephe<span>mera</span></h1>
 <div class="sub">Page-by-Page Product Manual</div>
 <div class="badge">2026-08-29</div>
-<div class="foot">zyvor.dev · Confidential — for licensed customers</div></section>
+<div class="foot">zyvor.dev · Confidential — for licensed users</div></section>
 <main><h2>Page-by-page guides</h2>
 <p>Each guide follows: Purpose → When to use it → How to get there → What you can do → Related pages.</p>
 <p>Every route is also listed in the <a href="../PAGE_INDEX.md">complete page index</a>.</p>
@@ -125,7 +125,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:1.2em 0}
 </tr>
 </tbody></table>
 <hr>
-<p>8 guides. Regenerate: <code>node scripts/customer-docs/generate-guide-index.mjs</code>.</p>
+<p>8 guides. Regenerate: <code>node scripts/user-docs/generate-guide-index.mjs</code>.</p>
 <hr>
 <h2>Admin Basics</h2>
 <h3>Purpose</h3>
@@ -262,7 +262,7 @@ process labels it.</li>
 <li>Optional: wire Ragnarok OIDC/SSO (<code>--with-oidc</code>) — identity stays on Ragnarok; FluxVM does not terminate browser SSO.</li>
 <li>Open Ragnarok → <a href="/docs/ragnarok-manual/pages/compute/fluxvm-vms">FluxVM VMs</a>. Missing operator → explicit banner, not a silent empty page.</li>
 </ol>
-<p>Customer manuals: <a href="/docs/fluxvm-manual">FluxVM</a> · <a href="/docs/ragnarok-manual">Ragnarok</a>.</p>
+<p>User manuals: <a href="/docs/fluxvm-manual">FluxVM</a> · <a href="/docs/ragnarok-manual">Ragnarok</a>.</p>
 <h3>Next steps</h3>
 <ul>
 <li><a href="admin-basics.md">Admin basics</a></li>
@@ -494,7 +494,7 @@ providing it isn&#39;t installed yet.</li>
 </tr>
 </tbody></table>
 <p>Ragnarok never calls <code>fluxvm serve</code> over the host REST API from the product path — it creates/reads/deletes <code>DisposableVm</code> CRs and lets the per-node operator talk to a <strong>local</strong> <code>fluxvm serve</code>.</p>
-<h3>Install order (customer / lab)</h3>
+<h3>Install order (user / lab)</h3>
 <ol start="0">
 <li><p><strong>Optional — Ragnarok binary trial</strong> (proprietary; FluxVM stays free):</p>
 <pre><code class="language-bash">VER=0.5.1
@@ -521,7 +521,7 @@ kubectl label node &lt;node&gt; ragnarok.io/fluxvm-capable=true
 <li><p><strong>Ragnarok</strong> — install KubeVirt first, then Ragnarok (Helm / Kustomize / <code>./scripts/deploy-remote.sh</code>). Docs:</p>
 <ul>
 <li>Technical: <a href="https://zyvor.dev/docs/ragnarok">zyvor.dev Ragnarok docs</a></li>
-<li>Customer manual: <a href="https://zyvor.dev/docs/ragnarok-manual">Ragnarok manual</a></li>
+<li>User manual: <a href="https://zyvor.dev/docs/ragnarok-manual">Ragnarok manual</a></li>
 <li>OIDC/SSO: Ragnarok repo <code>docs/OIDC.md</code> and deploy <code>--with-oidc</code> (IdP proxy is Ragnarok’s concern; FluxVM does not terminate SSO)</li>
 </ul>
 </li>
@@ -535,7 +535,7 @@ kubectl label node &lt;node&gt; ragnarok.io/fluxvm-capable=true
 <li>CRUD under <code>/api/v1/fluxvm/vms</code> — namespace-scoped to the caller’s RBAC</li>
 </ul>
 <p>No Ragnarok-specific CRD fields: anything you can <code>kubectl apply</code> as a <code>DisposableVm</code>, Ragnarok can create.</p>
-<h3>Customer manuals (published)</h3>
+<h3>User manuals (published)</h3>
 <table>
 <thead>
 <tr>
@@ -553,7 +553,7 @@ kubectl label node &lt;node&gt; ragnarok.io/fluxvm-capable=true
 </tr>
 <tr>
 <td>Suite index</td>
-<td><a href="https://zyvor.dev/docs/customer-manuals">https://zyvor.dev/docs/customer-manuals</a></td>
+<td><a href="https://zyvor.dev/docs/user-manuals">https://zyvor.dev/docs/user-manuals</a></td>
 </tr>
 </tbody></table>
 <h3>Auth note</h3>
@@ -901,7 +901,7 @@ tests.</p>
 <h2>FluxVM — Complete page index</h2>
 <p>Every primary navigable dashboard route.</p>
 <p><em>Generated: 2026-08-29 · 8 routes</em></p>
-<p>Regenerate: <code>node scripts/customer-docs/generate-page-index.mjs</code></p>
+<p>Regenerate: <code>node scripts/user-docs/generate-page-index.mjs</code></p>
 <h3>Onboarding</h3>
 <table>
 <thead>
@@ -1029,7 +1029,7 @@ tests.</p>
 </tbody></table>
 <h3>Related</h3>
 <ul>
-<li><a href="README.md">Customer docs home</a></li>
+<li><a href="README.md">User docs home</a></li>
 <li><a href="pages/README.md">Page-by-page guides</a></li>
 </ul>
 </main></body></html>

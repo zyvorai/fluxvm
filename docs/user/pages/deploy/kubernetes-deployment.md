@@ -1,4 +1,15 @@
-# Kubernetes deployment
+# Kubernetes Deployment
+
+## Purpose
+
+DaemonSet / DisposableVm CRD operator path.
+
+## How to get there
+
+- Topic id: `kubernetes-deployment`
+- Section: **Deploy → Kubernetes Deployment**
+
+## Guide
 
 `fluxvm-kube` — the `DisposableVm` custom resource plus its node-local operator — ships as a
 proper container image and a set of `deploy/k8s/` manifests, so it can run as an actual
@@ -73,13 +84,13 @@ VM is torn down, so a brief pause there is expected, not a hang.
 3. Optional: wire Ragnarok OIDC/SSO (`--with-oidc`) — identity stays on Ragnarok; FluxVM does not terminate browser SSO.
 4. Open Ragnarok → [FluxVM VMs](/docs/ragnarok-manual/pages/compute/fluxvm-vms). Missing operator → explicit banner, not a silent empty page.
 
-Customer manuals: [FluxVM](/docs/fluxvm-manual) · [Ragnarok](/docs/ragnarok-manual).
+User manuals: [FluxVM](/docs/fluxvm-manual) · [Ragnarok](/docs/ragnarok-manual).
 
 ## Next steps
 
-- [Admin basics](admin-basics.md)
-- [Configuration](configuration.md)
-- [Use cases](use-cases.md)
+- [Admin basics](../admin/admin-basics.md)
+- [Configuration](../setup/configuration.md)
+- [Use cases](../onboarding/use-cases.md)
 
 ## Operate from the console (UX)
 
@@ -89,3 +100,7 @@ Customer manuals: [FluxVM](/docs/fluxvm-manual) · [Ragnarok](/docs/ragnarok-man
 4. **Empty / fail:** Check service health, auth, and that required CRDs/backends for this domain are installed.
 5. **Success:** Live data loads; created/updated objects appear without error toasts.
 
+## Related pages
+
+- [Getting Started](../../getting-started.md)
+- [Page index](../../PAGE_INDEX.md)

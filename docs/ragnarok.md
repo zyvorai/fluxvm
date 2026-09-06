@@ -11,7 +11,7 @@
 
 Ragnarok never calls `fluxvm serve` over the host REST API from the product path — it creates/reads/deletes `DisposableVm` CRs and lets the per-node operator talk to a **local** `fluxvm serve`.
 
-## Install order (customer / lab)
+## Install order (user / lab)
 
 0. **Optional — Ragnarok binary trial** (proprietary; FluxVM stays free):
 
@@ -42,7 +42,7 @@ Ragnarok never calls `fluxvm serve` over the host REST API from the product path
 
 2. **Ragnarok** — install KubeVirt first, then Ragnarok (Helm / Kustomize / `./scripts/deploy-remote.sh`). Docs:
    - Technical: [zyvor.dev Ragnarok docs](https://zyvor.dev/docs/ragnarok)
-   - Customer manual: [Ragnarok manual](https://zyvor.dev/docs/ragnarok-manual)
+   - User manual: [Ragnarok manual](https://zyvor.dev/docs/ragnarok-manual)
    - OIDC/SSO: Ragnarok repo `docs/OIDC.md` and deploy `--with-oidc` (IdP proxy is Ragnarok’s concern; FluxVM does not terminate SSO)
 
 3. **Open Ragnarok UI** → **FluxVM VMs** (or Confidential / FluxVM Hub). If the operator is missing, Ragnarok shows an explicit “operator not detected” banner instead of a silent empty list.
@@ -55,13 +55,13 @@ Ragnarok never calls `fluxvm serve` over the host REST API from the product path
 
 No Ragnarok-specific CRD fields: anything you can `kubectl apply` as a `DisposableVm`, Ragnarok can create.
 
-## Customer manuals (published)
+## User manuals (published)
 
 | Product | Manual |
 |---------|--------|
 | FluxVM | https://zyvor.dev/docs/fluxvm-manual |
 | Ragnarok | https://zyvor.dev/docs/ragnarok-manual |
-| Suite index | https://zyvor.dev/docs/customer-manuals |
+| Suite index | https://zyvor.dev/docs/user-manuals |
 
 ## Auth note
 

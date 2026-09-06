@@ -1,15 +1,4 @@
-# Ragnarok Integration
-
-## Purpose
-
-Drive FluxVM disposable VMs from Ragnarok UI + SSO.
-
-## How to get there
-
-- Topic id: `ragnarok-integration`
-- Section: **Integrations → Ragnarok Integration**
-
-## Guide
+# Using FluxVM with Ragnarok
 
 [Ragnarok](https://zyvor.dev/ragnarok) is the primary product UI/API that consumes FluxVM’s Kubernetes path (`DisposableVm` + `fluxvm-kube`). FluxVM stays a focused disposable-VM engine; Ragnarok is the operator console, RBAC, and SSO layer on top.
 
@@ -22,7 +11,7 @@ Drive FluxVM disposable VMs from Ragnarok UI + SSO.
 
 Ragnarok never calls `fluxvm serve` over the host REST API from the product path — it creates/reads/deletes `DisposableVm` CRs and lets the per-node operator talk to a **local** `fluxvm serve`.
 
-## Install order (customer / lab)
+## Install order (user / lab)
 
 0. **Optional — Ragnarok binary trial** (proprietary; FluxVM stays free):
 
@@ -53,7 +42,7 @@ Ragnarok never calls `fluxvm serve` over the host REST API from the product path
 
 2. **Ragnarok** — install KubeVirt first, then Ragnarok (Helm / Kustomize / `./scripts/deploy-remote.sh`). Docs:
    - Technical: [zyvor.dev Ragnarok docs](https://zyvor.dev/docs/ragnarok)
-   - Customer manual: [Ragnarok manual](https://zyvor.dev/docs/ragnarok-manual)
+   - User manual: [Ragnarok manual](https://zyvor.dev/docs/ragnarok-manual)
    - OIDC/SSO: Ragnarok repo `docs/OIDC.md` and deploy `--with-oidc` (IdP proxy is Ragnarok’s concern; FluxVM does not terminate SSO)
 
 3. **Open Ragnarok UI** → **FluxVM VMs** (or Confidential / FluxVM Hub). If the operator is missing, Ragnarok shows an explicit “operator not detected” banner instead of a silent empty list.
@@ -66,13 +55,13 @@ Ragnarok never calls `fluxvm serve` over the host REST API from the product path
 
 No Ragnarok-specific CRD fields: anything you can `kubectl apply` as a `DisposableVm`, Ragnarok can create.
 
-## Customer manuals (published)
+## User manuals (published)
 
 | Product | Manual |
 |---------|--------|
 | FluxVM | https://zyvor.dev/docs/fluxvm-manual |
 | Ragnarok | https://zyvor.dev/docs/ragnarok-manual |
-| Suite index | https://zyvor.dev/docs/customer-manuals |
+| Suite index | https://zyvor.dev/docs/user-manuals |
 
 ## Auth note
 
@@ -84,7 +73,7 @@ FluxVM’s own REST API uses optional bearer tokens for direct `fluxvm serve`
 callers; that is separate from the Ragnarok dashboard login and from Ragnarok
 trial tokens (`scripts/trial-tool.py` stays in the private Ragnarok repo only).
 
-See also the longer integration notes in the [root README — Using FluxVM through Ragnarok](../../../../README.md#using-fluxvm-through-ragnarok).
+See also the longer integration notes in the [root README — Using FluxVM through Ragnarok](../../README.md#using-fluxvm-through-ragnarok).
 
 ## Operate from the console (UX)
 
@@ -94,7 +83,3 @@ See also the longer integration notes in the [root README — Using FluxVM throu
 4. **Empty / fail:** Check service health, auth, and that required CRDs/backends for this domain are installed.
 5. **Success:** Live data loads; created/updated objects appear without error toasts.
 
-## Related pages
-
-- [Getting Started](../../getting-started.md)
-- [Page index](../../PAGE_INDEX.md)

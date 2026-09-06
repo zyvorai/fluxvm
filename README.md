@@ -8,7 +8,7 @@
 [![License: Apache-2.0](https://img.shields.io/github/license/zyvorai/fluxvm)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/zyvorai/fluxvm?sort=semver)](https://github.com/zyvorai/fluxvm/releases)
 
-[Quick start](#build) · [Customer path](#who-does-what-customers) · [Use cases](docs/use-cases.md) · [zyvor.dev/docs](https://zyvor.dev/docs?utm_source=github&utm_medium=fluxvm) · [Blog](https://zyvor.dev/blog?utm_source=github&utm_medium=fluxvm)
+[Quick start](#build) · [User path](#who-does-what-users) · [Use cases](docs/use-cases.md) · [zyvor.dev/docs](https://zyvor.dev/docs?utm_source=github&utm_medium=fluxvm) · [Blog](https://zyvor.dev/blog?utm_source=github&utm_medium=fluxvm)
 
 </div>
 
@@ -35,7 +35,7 @@ placement across multiple hosts — see "Kubernetes CRD/operator" and "Distribut
 
 See [`docs/use-cases.md`](docs/use-cases.md) for concrete use cases — ephemeral CI runners, a golden-image pipeline, Kubernetes-native disposable workloads, multi-host fleets without Kubernetes, and sandboxed code execution — each grounded in what's actually implemented below. **Ragnarok product path:** [`docs/ragnarok.md`](docs/ragnarok.md).
 
-## Who does what (customers)
+## Who does what (users)
 
 | You need… | Use |
 |-----------|-----|
@@ -110,7 +110,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 
 ## Table of contents
 
-- [Who does what (customers)](#who-does-what-customers)
+- [Who does what (users)](#who-does-what-users)
 - [Libvirt / virsh replacement (host-local)](#libvirt--virsh-replacement-host-local)
 - [Architecture](#architecture)
 - [Project layout](#project-layout)
@@ -210,8 +210,8 @@ and "Kubernetes CRD/operator" below.
 
 This project also depends on the sibling [`guestkit`](https://github.com/zyvorai/guestkit)
 project (path dep from `fluxvm-image`) for offline image customization — see
-"Build an image" below. For the **customer certify → run** path, see
-[Who does what](#who-does-what-customers) above.
+"Build an image" below. For the **user certify → run** path, see
+[Who does what](#who-does-what-users) above.
 
 ## What is implemented
 
@@ -560,7 +560,7 @@ Numbers are **control-plane round-trips** (HTTP + map rewrite), not raw NIC Gbps
 Reproduce with `POST /v1/vms/{id}/network/policy` against an attached VM; see
 [docs/network-fabric.md](docs/network-fabric.md).
 
-### What “faster” means for customers
+### What “faster” means for users
 
 | Need | Traditional pain | Fabric win |
 |------|------------------|------------|
@@ -1638,8 +1638,8 @@ Requires Linux x86_64, Kubernetes, and **KubeVirt**. After the token expires ema
 **sales@zyvor.dev** for a renewed signed JWT (see `LICENSING.md` / `AFTER-TRIAL.md`
 in the tarball).
 
-**Customer / install guide:** [docs/ragnarok.md](docs/ragnarok.md) — install order, manuals, SSO note.
-Published manuals: [FluxVM](https://zyvor.dev/docs/fluxvm-manual) · [Ragnarok](https://zyvor.dev/docs/ragnarok-manual) · [suite](https://zyvor.dev/docs/customer-manuals).
+**User / install guide:** [docs/ragnarok.md](docs/ragnarok.md) — install order, manuals, SSO note.
+Published manuals: [FluxVM](https://zyvor.dev/docs/fluxvm-manual) · [Ragnarok](https://zyvor.dev/docs/ragnarok-manual) · [suite](https://zyvor.dev/docs/user-manuals).
 
 **Setup**, from FluxVM's side, is exactly "Deploy order" above — install the CRD/RBAC/DaemonSet,
 label each capable node `ragnarok.io/fluxvm-capable=true`, stage images. Ragnarok has no separate
