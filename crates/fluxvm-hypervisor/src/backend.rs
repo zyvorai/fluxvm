@@ -46,10 +46,14 @@ impl VmBackend for FluxVmBackend {
             seed: ctx.seed_disk.clone(),
             memory_mib: req.memory_mib,
             vcpus: req.vcpus,
-            kernel_args: req
-                .kernel_args
-                .clone()
-                .or_else(|| Some("console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw".into())),
+            kernel_args: req.kernel_args.clone().or_else(|| {
+                Some(
+                    "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw \
+                     virtio_mmio.device=0x200@0xfeb00000:5 \
+                     virtio_mmio.device=0x200@0xfeb00200:6"
+                        .into(),
+                )
+            }),
             tap: match &ctx.network.spec {
                 NetworkSpec::Tap {
                     tap_name: Some(t), ..

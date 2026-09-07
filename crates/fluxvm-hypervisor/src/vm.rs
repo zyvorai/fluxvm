@@ -5,6 +5,7 @@ use crate::boot;
 use crate::bus::Bus;
 use crate::config::VmConfig;
 use crate::devices::serial::Serial16550;
+use crate::devices::virtio_blk::{self, BlockBackend};
 use crate::devices::virtio_mmio::{self, VirtioMmio};
 use crate::devices::virtio_net::{self, VirtioNetConfig};
 use crate::error::{FluxError, Result};
@@ -18,11 +19,16 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+/// Second virtio-mmio slot (blk) after net at MMIO_WINDOW.
+pub const MMIO_BLK_WINDOW: u64 = MMIO_WINDOW + 0x200;
+
 pub struct VirtualMachine {
     pub cfg: VmConfig,
     pub mem: GuestMemory,
     pub bus: Arc<Bus>,
     pub net: Option<Arc<VirtioMmio>>,
+    pub blk: Option<Arc<VirtioMmio>>,
+    pub blk_backend: Option<Arc<BlockBackend>>,
     pub tap: Option<Tap>,
     pub boot_rip: u64,
     pub notes: Vec<String>,
@@ -72,6 +78,8 @@ impl VirtualMachine {
             mem,
             bus: Arc::new(bus),
             net: Some(net),
+            blk: None,
+            blk_backend: None,
             tap,
             boot_rip: KERNEL_LOAD_ADDR,
             notes,
@@ -93,6 +101,33 @@ impl VirtualMachine {
         let net = Arc::new(VirtioMmio::net(MMIO_WINDOW, mac));
         bus.add_mmio(net.clone());
 
+        let (blk, blk_backend) = if let Some(disk) = &cfg.disk {
+            match BlockBackend::open(disk, false) {
+                Ok(backend) => {
+                    notes.push(format!(
+                        "virtio-blk {} sectors={} ({})",
+                        disk.display(),
+                        backend.capacity_sectors,
+                        backend.path.display()
+                    ));
+                    let mmio = Arc::new(VirtioMmio::block(
+                        MMIO_BLK_WINDOW,
+                        backend.capacity_sectors,
+                        backend.read_only,
+                    ));
+                    bus.add_mmio(mmio.clone());
+                    (Some(mmio), Some(backend))
+                }
+                Err(e) => {
+                    notes.push(format!("virtio-blk open failed: {e}"));
+                    (None, None)
+                }
+            }
+        } else {
+            notes.push("no disk — virtio-blk not attached".into());
+            (None, None)
+        };
+
         let tap = if let Some(tap_name) = &cfg.tap {
             match Tap::open(tap_name, [192, 168, 100, 1]) {
                 Ok(t) => {
@@ -113,6 +148,8 @@ impl VirtualMachine {
             mem,
             bus: Arc::new(bus),
             net: Some(net),
+            blk,
+            blk_backend,
             tap,
             boot_rip: boot_info.entry_rip,
             notes,
@@ -193,6 +230,20 @@ impl VirtualMachine {
                             ) {
                                 Ok(n) => eprintln!("[net] processed q={q} frames={n}"),
                                 Err(e) => eprintln!("[net] notify err {e}"),
+                            }
+                        }
+                    }
+                    if let (Some(blk), Some(backend)) = (&this.blk, &this.blk_backend) {
+                        if let Some(q) = virtio_mmio::take_notify(&blk.state) {
+                            let mut st = blk.state.lock().unwrap();
+                            match virtio_blk::handle_notify(
+                                &mut this.mem,
+                                &mut st,
+                                backend.as_ref(),
+                                q,
+                            ) {
+                                Ok(n) => eprintln!("[blk] processed q={q} reqs={n}"),
+                                Err(e) => eprintln!("[blk] notify err {e}"),
                             }
                         }
                     }

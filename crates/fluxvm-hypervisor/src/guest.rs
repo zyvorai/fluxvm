@@ -221,7 +221,12 @@ fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
         cmdline: cfg
             .kernel_args
             .clone()
-            .unwrap_or_else(|| "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw".into()),
+            .unwrap_or_else(|| {
+                "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw \
+                 virtio_mmio.device=0x200@0xfeb00000:5 \
+                 virtio_mmio.device=0x200@0xfeb00200:6"
+                    .into()
+            }),
         firmware: None,
         net_mbit_limit: 0,
         dry_run: false,

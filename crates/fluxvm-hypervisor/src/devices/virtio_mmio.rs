@@ -11,6 +11,7 @@ pub const VIRTIO_MMIO_VERSION: u32 = 2;
 pub const VIRTIO_ID_NET: u32 = 1;
 pub const VIRTIO_ID_BLOCK: u32 = 2;
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
+pub const VIRTIO_BLK_F_RO: u64 = 1 << 5;
 
 #[derive(Clone, Debug, Default)]
 pub struct QueueState {
@@ -29,6 +30,8 @@ pub struct VirtioState {
     pub driver_features: u64,
     pub status: u32,
     pub mac: [u8; 6],
+    /// Block capacity in 512-byte sectors (config space).
+    pub capacity_sectors: u64,
     pub queues: [QueueState; 2],
     pub sel: u32,
     pub notify: Option<u32>,
@@ -42,6 +45,7 @@ impl Default for VirtioState {
             driver_features: 0,
             status: 0,
             mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02],
+            capacity_sectors: 0,
             queues: [QueueState::default(), QueueState::default()],
             sel: 0,
             notify: None,
@@ -70,6 +74,24 @@ impl VirtioMmio {
         }
     }
 
+    pub fn block(base: u64, capacity_sectors: u64, read_only: bool) -> Self {
+        let mut st = VirtioState::default();
+        st.device_id = VIRTIO_ID_BLOCK;
+        st.features = VIRTIO_F_VERSION_1;
+        if read_only {
+            st.features |= VIRTIO_BLK_F_RO;
+        }
+        st.capacity_sectors = capacity_sectors;
+        st.mac = [0; 6];
+        Self {
+            base,
+            size: 0x200,
+            state: Arc::new(Mutex::new(st)),
+            dev_feat_sel: AtomicU32::new(0),
+            drv_feat_sel: AtomicU32::new(0),
+        }
+    }
+
     fn rel(&self, addr: u64) -> u64 {
         addr.saturating_sub(self.base)
     }
@@ -82,7 +104,12 @@ impl VirtioMmio {
 
 impl MmioDevice for VirtioMmio {
     fn name(&self) -> &'static str {
-        "virtio-mmio-net"
+        let id = self.state.lock().unwrap().device_id;
+        if id == VIRTIO_ID_BLOCK {
+            "virtio-mmio-blk"
+        } else {
+            "virtio-mmio-net"
+        }
     }
 
     fn mmio_range(&self) -> std::ops::RangeInclusive<u64> {
@@ -149,14 +176,22 @@ impl MmioDevice for VirtioMmio {
     fn mmio_read(&self, addr: u64, data: &mut [u8]) -> Result<()> {
         let off = self.rel(addr);
         let st = self.state.lock().unwrap();
-        if (0x100..0x106).contains(&off) {
+        if st.device_id == VIRTIO_ID_BLOCK {
+            // virtio_blk_config.capacity at config offset 0 (MMIO 0x100).
+            if (0x100..0x108).contains(&off) && !data.is_empty() {
+                let bytes = st.capacity_sectors.to_le_bytes();
+                let i = (off - 0x100) as usize;
+                let n = data.len().min(8 - i);
+                data[..n].copy_from_slice(&bytes[i..i + n]);
+                return Ok(());
+            }
+        } else if (0x100..0x106).contains(&off) {
             let i = (off - 0x100) as usize;
             if !data.is_empty() {
                 data[0] = st.mac[i];
             }
             return Ok(());
-        }
-        if off == 0x106 && data.len() >= 2 {
+        } else if off == 0x106 && data.len() >= 2 {
             data[0] = 1;
             data[1] = 0;
             return Ok(());
