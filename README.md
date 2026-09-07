@@ -149,6 +149,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [AI-agent sandbox gaps](docs/agent-sandbox-gaps.md)
 - [eBPF / Cilium dataplane](docs/ebpf-cilium.md)
 - [Network Fabric v3](docs/network-fabric.md)
+- [Security groups](docs/network-groups.md)
 - [License](#license)
 
 ## Architecture
@@ -233,6 +234,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - QEMU user-mode networking + host port forwarding.
 - Static-IP network-namespace mode — the guest gets a real, deterministically-reserved DHCP-leased IP, not just host↔namespace NAT.
 - **Sandbox dataplane / Network Fabric v3** — default **legacy nftables** per sandbox; optional **native TC/eBPF** (`ebpf`) and **Cilium coexistence** (`cilium`) with IPv4/IPv6 L3+L4 allowlists, Mbps/PPS limits, schema/fingerprint repair, per-VM policy/status/stats/flows API, optional XDP guard, and safe nftables fallback. See [eBPF / Cilium sandbox dataplane](#ebpf--cilium-sandbox-dataplane), [Network Fabric architecture](#network-fabric-architecture-how-it-works), [docs/network-fabric.md](docs/network-fabric.md), and [docs/ebpf-cilium.md](docs/ebpf-cilium.md).
+- **Security groups** — Cilium-style `key=value` labels and numeric identities (`0x10000+`), deny CIDRs, ICMP passthrough, `fluxvm group` CLI, `/v1/network/groups` + `/v1/vms/{id}/network/effective`. See [docs/network-groups.md](docs/network-groups.md).
 - VNC for every QEMU-backed VM, over a unix socket — no port allocation.
 - Interactive console/shell: `GET /v1/vms/{id}/console` (WebSocket) and a guest-agent `OpenShell` vsock op for a real PTY.
 - File transfer over the guest agent: `PutFile`/`GetFile` vsock ops (`POST /v1/vms/{id}/agent/{put,get}-file`).
@@ -824,12 +826,15 @@ Useful routes once `fluxvm serve` is up:
 | `ANY /sandbox/{id}/{*path}` | Same proxy, default guest port 8080 |
 | `GET/POST /v1/vms/{id}/network/policy` | Per-VM dataplane policy (Network Fabric v3) |
 | `GET /v1/vms/{id}/network/status` | Attachment, schema_version, policy_synced, effective policy |
+| `GET /v1/vms/{id}/network/effective` | Declared + group-merged policy and membership |
+| `GET/POST /v1/network/groups` · `GET/DELETE …/groups/{name}` | Security-group CRUD |
 | `GET /v1/vms/{id}/network/stats` · `…/flows` | eBPF counters / flow table (`family` 4/6) |
 | `GET /console` | Lightweight ops UI |
 
 For multi-node shared sandbox index, set `FLUXVM_SANDBOX_STATE_URL` (Redis). Capability matrix:
 [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md). Dataplane:
-[docs/network-fabric.md](docs/network-fabric.md), [docs/ebpf-cilium.md](docs/ebpf-cilium.md).
+[docs/network-fabric.md](docs/network-fabric.md), [docs/ebpf-cilium.md](docs/ebpf-cilium.md),
+[docs/network-groups.md](docs/network-groups.md).
 
 ## Firecracker jailer (chroot, uid/gid isolation, cgroups)
 

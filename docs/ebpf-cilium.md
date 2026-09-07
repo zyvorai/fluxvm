@@ -179,6 +179,9 @@ Per-VM maps (pinned under each VM’s `maps/` directory):
 | `fluxvm_stats` | per-CPU allow/drop counters |
 | `fluxvm_flows` | LRU flow table (`family` 4/6) |
 | `fluxvm_events` | ring buffer for drop / sampled-allow events |
+| `fluxvm_gid` | ifindex → up to eight shared group identities |
+| `fluxvm_ct` | LRU established 5-tuple table |
+| `fluxvm_deny4` / `fluxvm_deny6` | LPM destination deny lists |
 
 REST (see [network-fabric.md](network-fabric.md)):
 
@@ -196,7 +199,10 @@ GET  /v1/vms/{id}/network/flows?limit=100
 ./scripts/validate-network-fabric.sh
 FLUXVM_PRIVILEGED_SMOKE=1 ./scripts/validate-network-fabric.sh
 sudo -E ./scripts/test-network-fabric.sh
+sudo -E ./scripts/test-security-groups-e2e.sh   # groups + deny/ICMP maps
 ```
+
+Security-group control plane: [network-groups.md](network-groups.md).
 
 Privileged integration smoke (FluxVm + `NetworkSpec::Tap { netns: true }`):
 

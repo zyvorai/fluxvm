@@ -87,6 +87,11 @@ enum Command {
         #[command(subcommand)]
         command: CatalogCommand,
     },
+    /// Cilium-style security groups for the VM-edge dataplane.
+    Group {
+        #[command(subcommand)]
+        command: GroupCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -131,6 +136,36 @@ enum QgaCommand {
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
+}
+
+#[derive(Subcommand)]
+enum GroupCommand {
+    List,
+    Get { name: String },
+    Set {
+        name: String,
+        #[arg(long)]
+        label: Vec<String>,
+        #[arg(long)]
+        allow_cidr: Vec<String>,
+        #[arg(long)]
+        deny_cidr: Vec<String>,
+        #[arg(long)]
+        allow_port: Vec<String>,
+        #[arg(long)]
+        default_allow: Option<bool>,
+        #[arg(long)]
+        allow_icmp: bool,
+        #[arg(long)]
+        priority: Option<u32>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        max_egress_mbps: Option<u32>,
+        #[arg(long)]
+        max_egress_pps: Option<u32>,
+    },
+    Delete { name: String },
 }
 
 #[derive(Subcommand)]
@@ -357,6 +392,59 @@ async fn main() -> Result<()> {
                 );
             }
             PoolCommand::Delete { name } => m.delete_pool(&name).await?,
+        },
+        Command::Group { command } => match command {
+            GroupCommand::List => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.list_network_groups().await?)?
+                );
+            }
+            GroupCommand::Get { name } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.get_network_group(&name).await?)?
+                );
+            }
+            GroupCommand::Set {
+                name,
+                label,
+                allow_cidr,
+                deny_cidr,
+                allow_port,
+                default_allow,
+                allow_icmp,
+                priority,
+                description,
+                max_egress_mbps,
+                max_egress_pps,
+            } => {
+                let group = fluxvm_network::groups::SecurityGroup {
+                    name,
+                    labels: label,
+                    policy: fluxvm_network::dataplane::VmNetworkPolicy {
+                        default_allow: default_allow.unwrap_or(true),
+                        allow_cidrs: allow_cidr,
+                        deny_cidrs: deny_cidr,
+                        allow_ports: allow_port,
+                        allow_icmp,
+                        max_egress_mbps,
+                        max_egress_pps,
+                        ..Default::default()
+                    },
+                    identity: 0,
+                    priority: priority.unwrap_or(100),
+                    description: description.unwrap_or_default(),
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.upsert_network_group(group).await?)?
+                );
+            }
+            GroupCommand::Delete { name } => {
+                m.delete_network_group(&name).await?;
+                println!("{{\"deleted\":\"ok\"}}");
+            }
         },
         Command::Catalog { command } => match command {
             CatalogCommand::Keygen => {

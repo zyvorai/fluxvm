@@ -5,7 +5,7 @@ dataplane.
 
 | File | Role |
 |------|------|
-| `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allowlists, Mbps/PPS, stats, flows, events |
+| `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allow/deny, group identities, CT, ICMP, Mbps/PPS, stats, flows, events |
 | `fluxvm_xdp.bpf.c` | Optional node-ingress XDP IPv4/IPv6 source-CIDR blocklist (disabled by default; refused in `cilium` mode) |
 
 ## Map layout (TC)

@@ -34,7 +34,7 @@ struct iface_config {
     __u32 enforce_cidr;
     __u32 enforce_l4;
     __u32 sample_rate;
-    __u32 pad;
+    __u32 allow_icmp;
     __u64 rate_bytes_per_sec;
     __u64 rate_packets_per_sec;
 };
@@ -167,6 +167,41 @@ struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 20);
 } fluxvm_events SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __uint(max_entries, 4096);
+    __type(key, struct ipv4_lpm_key);
+    __type(value, __u32);
+} fluxvm_deny4 SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __uint(max_entries, 4096);
+    __type(key, struct ipv6_lpm_key);
+    __type(value, __u32);
+} fluxvm_deny6 SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 32768);
+    __type(key, struct flow_key);
+    __type(value, __u8);
+} fluxvm_ct SEC(".maps");
+
+struct group_ids {
+    __u32 n;
+    __u32 ids[8];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8);
+    __type(key, __u32);
+    __type(value, struct group_ids);
+} fluxvm_gid SEC(".maps");
 
 static __always_inline void count(__u32 identity, __u32 verdict, __u32 bytes)
 {
@@ -318,26 +353,46 @@ static __always_inline int rate_allowed(
     return allowed;
 }
 
-static __always_inline int cidr_allowed4(__u32 identity, __u32 daddr)
+static __always_inline int cidr_lookup4(void *map, __u32 identity, __u32 daddr)
 {
     struct ipv4_lpm_key key = {
         .prefixlen = 64,
         .identity = identity,
         .addr = daddr,
     };
-    __u32 *allow = bpf_map_lookup_elem(&fluxvm_v4, &key);
-    return allow && *allow;
+    __u32 *hit = bpf_map_lookup_elem(map, &key);
+    return hit && *hit;
 }
 
-static __always_inline int cidr_allowed6(__u32 identity, const struct in6_addr *daddr)
+static __always_inline int cidr_allowed4(__u32 identity, __u32 daddr)
+{
+    return cidr_lookup4(&fluxvm_v4, identity, daddr);
+}
+
+static __always_inline int cidr_denied4(__u32 identity, __u32 daddr)
+{
+    return cidr_lookup4(&fluxvm_deny4, identity, daddr);
+}
+
+static __always_inline int cidr_lookup6(void *map, __u32 identity, const struct in6_addr *daddr)
 {
     struct ipv6_lpm_key key = {
         .prefixlen = 160,
         .identity = identity,
     };
     __builtin_memcpy(key.addr, daddr->in6_u.u6_addr8, 16);
-    __u32 *allow = bpf_map_lookup_elem(&fluxvm_v6, &key);
-    return allow && *allow;
+    __u32 *hit = bpf_map_lookup_elem(map, &key);
+    return hit && *hit;
+}
+
+static __always_inline int cidr_allowed6(__u32 identity, const struct in6_addr *daddr)
+{
+    return cidr_lookup6(&fluxvm_v6, identity, daddr);
+}
+
+static __always_inline int cidr_denied6(__u32 identity, const struct in6_addr *daddr)
+{
+    return cidr_lookup6(&fluxvm_deny6, identity, daddr);
 }
 
 static __always_inline int l4_allowed(__u32 identity, __u8 protocol, __u16 port)
@@ -349,7 +404,96 @@ static __always_inline int l4_allowed(__u32 identity, __u8 protocol, __u16 port)
         .pad = 0,
     };
     __u32 *allow = bpf_map_lookup_elem(&fluxvm_l4, &key);
+    if (allow && *allow)
+        return 1;
+    key.port = 0;
+    allow = bpf_map_lookup_elem(&fluxvm_l4, &key);
     return allow && *allow;
+}
+
+static __always_inline int any_cidr4(__u32 ifindex, __u32 identity, __u32 daddr)
+{
+    if (cidr_allowed4(identity, daddr))
+        return 1;
+    struct group_ids *g = bpf_map_lookup_elem(&fluxvm_gid, &ifindex);
+    if (!g)
+        return 0;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (i >= g->n)
+            break;
+        if (cidr_allowed4(g->ids[i], daddr))
+            return 1;
+    }
+    return 0;
+}
+
+static __always_inline int any_deny4(__u32 ifindex, __u32 identity, __u32 daddr)
+{
+    if (cidr_denied4(identity, daddr))
+        return 1;
+    struct group_ids *g = bpf_map_lookup_elem(&fluxvm_gid, &ifindex);
+    if (!g)
+        return 0;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (i >= g->n)
+            break;
+        if (cidr_denied4(g->ids[i], daddr))
+            return 1;
+    }
+    return 0;
+}
+
+static __always_inline int any_cidr6(__u32 ifindex, __u32 identity, const struct in6_addr *daddr)
+{
+    if (cidr_allowed6(identity, daddr))
+        return 1;
+    struct group_ids *g = bpf_map_lookup_elem(&fluxvm_gid, &ifindex);
+    if (!g)
+        return 0;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (i >= g->n)
+            break;
+        if (cidr_allowed6(g->ids[i], daddr))
+            return 1;
+    }
+    return 0;
+}
+
+static __always_inline int any_deny6(__u32 ifindex, __u32 identity, const struct in6_addr *daddr)
+{
+    if (cidr_denied6(identity, daddr))
+        return 1;
+    struct group_ids *g = bpf_map_lookup_elem(&fluxvm_gid, &ifindex);
+    if (!g)
+        return 0;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (i >= g->n)
+            break;
+        if (cidr_denied6(g->ids[i], daddr))
+            return 1;
+    }
+    return 0;
+}
+
+static __always_inline int any_l4(__u32 ifindex, __u32 identity, __u8 protocol, __u16 port)
+{
+    if (l4_allowed(identity, protocol, port))
+        return 1;
+    struct group_ids *g = bpf_map_lookup_elem(&fluxvm_gid, &ifindex);
+    if (!g)
+        return 0;
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        if (i >= g->n)
+            break;
+        if (l4_allowed(g->ids[i], protocol, port))
+            return 1;
+    }
+    return 0;
 }
 
 static __always_inline void record_flow_raw(
@@ -484,13 +628,25 @@ static __always_inline int handle_ipv4(
         return TC_ACT_OK;
     }
 
+    if (any_deny4(skb->ifindex, cfg->identity, iph->daddr)) {
+        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+        record_flow4(skb, cfg->identity, iph, sport, dport,
+                     FLUXVM_VERDICT_DROP, cfg->sample_rate);
+        return TC_ACT_SHOT;
+    }
+    if (cfg->allow_icmp && iph->protocol == IPPROTO_ICMP) {
+        count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+        record_flow4(skb, cfg->identity, iph, sport, dport,
+                     FLUXVM_VERDICT_ALLOW, cfg->sample_rate);
+        return TC_ACT_OK;
+    }
     int has_policy = cfg->enforce_cidr || cfg->enforce_l4;
     int allowed = has_policy ? 1 : (cfg->default_allow != 0);
     if (cfg->enforce_cidr)
-        allowed = allowed && cidr_allowed4(cfg->identity, iph->daddr);
+        allowed = allowed && any_cidr4(skb->ifindex, cfg->identity, iph->daddr);
     if (cfg->enforce_l4)
         allowed = allowed && parsed_l4 > 0 &&
-                  l4_allowed(cfg->identity, iph->protocol, dport);
+                  any_l4(skb->ifindex, cfg->identity, iph->protocol, dport);
     if (allowed && !rate_allowed(cfg, skb->len))
         allowed = 0;
 
@@ -527,13 +683,25 @@ static __always_inline int handle_ipv6(
         return TC_ACT_OK;
     }
 
+    if (any_deny6(skb->ifindex, cfg->identity, &ip6->daddr)) {
+        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+        record_flow6(skb, cfg->identity, ip6, sport, dport,
+                     FLUXVM_VERDICT_DROP, cfg->sample_rate);
+        return TC_ACT_SHOT;
+    }
+    if (cfg->allow_icmp && ip6->nexthdr == IPPROTO_ICMPV6) {
+        count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+        record_flow6(skb, cfg->identity, ip6, sport, dport,
+                     FLUXVM_VERDICT_ALLOW, cfg->sample_rate);
+        return TC_ACT_OK;
+    }
     int has_policy = cfg->enforce_cidr || cfg->enforce_l4;
     int allowed = has_policy ? 1 : (cfg->default_allow != 0);
     if (cfg->enforce_cidr)
-        allowed = allowed && cidr_allowed6(cfg->identity, &ip6->daddr);
+        allowed = allowed && any_cidr6(skb->ifindex, cfg->identity, &ip6->daddr);
     if (cfg->enforce_l4)
         allowed = allowed && parsed_l4 > 0 &&
-                  l4_allowed(cfg->identity, ip6->nexthdr, dport);
+                  any_l4(skb->ifindex, cfg->identity, ip6->nexthdr, dport);
     if (allowed && !rate_allowed(cfg, skb->len))
         allowed = 0;
 

@@ -317,6 +317,14 @@ Full FluxVm + REST e2e (also invoked by the privileged validator):
 sudo -E ./scripts/test-network-fabric.sh
 ```
 
+Security groups (label identities, deny CIDRs, effective merge, deny/L4 maps):
+
+```bash
+sudo -E ./scripts/test-security-groups-e2e.sh
+```
+
+See [network-groups.md](network-groups.md).
+
 The kernel smoke covers:
 
 - map configuration before TC attach;

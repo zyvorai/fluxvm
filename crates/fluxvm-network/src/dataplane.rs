@@ -37,6 +37,18 @@ pub struct VmNetworkPolicy {
     /// 0 disables allow-event sampling. N emits about 1/N allowed packets
     /// to the BPF ring buffer; drop flows are always represented in maps.
     pub sample_rate: u32,
+    /// Destination CIDRs that drop even if an allow CIDR would match.
+    #[serde(default)]
+    pub deny_cidrs: Vec<String>,
+    /// Allow ICMP / ICMPv6 echo and errors through L4 enforcement.
+    #[serde(default)]
+    pub allow_icmp: bool,
+    /// Explicit security-group names (Cilium-style). Combined with `labels`.
+    #[serde(default)]
+    pub groups: Vec<String>,
+    /// `key=value` labels. A group matches when every group label is present.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 impl Default for VmNetworkPolicy {
@@ -48,6 +60,10 @@ impl Default for VmNetworkPolicy {
             max_egress_mbps: None,
             max_egress_pps: None,
             sample_rate: 0,
+            deny_cidrs: Vec::new(),
+            allow_icmp: false,
+            groups: Vec::new(),
+            labels: Vec::new(),
         }
     }
 }
@@ -61,6 +77,10 @@ pub fn default_policy(cfg: &Config) -> VmNetworkPolicy {
         max_egress_mbps: dp.max_egress_mbps,
         max_egress_pps: dp.max_egress_pps,
         sample_rate: dp.sample_rate,
+        deny_cidrs: Vec::new(),
+        allow_icmp: false,
+        groups: Vec::new(),
+        labels: Vec::new(),
     }
 }
 
@@ -146,7 +166,7 @@ pub fn apply_sandbox_policy(
     let dp = &cfg.sandbox.dataplane;
     let base_policy = effective_policy(cfg, id)?;
     let base_fingerprint = policy_fingerprint(&base_policy)?;
-    let mut policy = base_policy;
+    let (mut policy, _group_ids) = crate::groups::merge_group_policy(cfg, base_policy)?;
     policy.allow_cidrs.extend_from_slice(extra_allow_cidrs);
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
@@ -223,7 +243,7 @@ pub fn reconfigure_sandbox_policy(
     let dp = &cfg.sandbox.dataplane;
     let base_policy = effective_policy(cfg, id)?;
     let base_fingerprint = policy_fingerprint(&base_policy)?;
-    let mut policy = base_policy;
+    let (mut policy, _group_ids) = crate::groups::merge_group_policy(cfg, base_policy)?;
     policy.allow_cidrs.extend_from_slice(extra_allow_cidrs);
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
@@ -335,7 +355,7 @@ pub fn ensure_sandbox_policy(
     let iface = iface.context("eBPF reconcile needs a host-visible VM interface")?;
     let base_policy = effective_policy(cfg, id)?;
     let desired_fingerprint = policy_fingerprint(&base_policy)?;
-    let mut policy = base_policy;
+    let (mut policy, _group_ids) = crate::groups::merge_group_policy(cfg, base_policy)?;
     policy.allow_cidrs.extend_from_slice(extra_allow_cidrs);
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
@@ -553,6 +573,10 @@ mod tests {
             max_egress_mbps: Some(100),
             max_egress_pps: Some(50_000),
             sample_rate: 10,
+            deny_cidrs: Vec::new(),
+            allow_icmp: false,
+            groups: Vec::new(),
+            labels: Vec::new(),
         };
         save_policy(&cfg, id, &policy).unwrap();
         assert_eq!(load_policy(&cfg, id).unwrap(), Some(policy.clone()));

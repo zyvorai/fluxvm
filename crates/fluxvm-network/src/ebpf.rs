@@ -25,8 +25,10 @@ use crate::dataplane::VmNetworkPolicy;
 
 const TC_PRIORITY: &str = "49152";
 const TC_HANDLE: &str = "1";
+const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
+const IPPROTO_ICMPV6: u8 = 58;
 pub const DATAPLANE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,6 +517,10 @@ pub fn validate_policy(policy: &VmNetworkPolicy) -> Result<()> {
         parse_ip_cidr(cidr)
             .with_context(|| format!("invalid eBPF allow CIDR {cidr:?}"))?;
     }
+    for cidr in &policy.deny_cidrs {
+        parse_ip_cidr(cidr)
+            .with_context(|| format!("invalid eBPF deny CIDR {cidr:?}"))?;
+    }
     for rule in &policy.allow_ports {
         parse_port_rule(rule)
             .with_context(|| format!("invalid eBPF L4 rule {rule:?}"))?;
@@ -559,20 +565,41 @@ fn configure_maps(
     let id_map = map_dir.join("fluxvm_id");
     let cidr4_map = map_dir.join("fluxvm_v4");
     let cidr6_map = map_dir.join("fluxvm_v6");
+    let deny4_map = map_dir.join("fluxvm_deny4");
+    let deny6_map = map_dir.join("fluxvm_deny6");
     let l4_map = map_dir.join("fluxvm_l4");
     if fail_closed_first {
         // Publish deny-all first, before deleting any old allowlist keys.
-        update_iface_config(&id_map, ifindex, identity, false, false, false, 0, 0, 0)?;
+        update_iface_config(
+            &id_map, ifindex, identity, false, false, false, 0, false, 0, 0,
+        )?;
     }
 
     clear_map(&cidr4_map)?;
     clear_map(&cidr6_map)?;
+    if deny4_map.exists() {
+        let _ = clear_map(&deny4_map);
+    }
+    if deny6_map.exists() {
+        let _ = clear_map(&deny6_map);
+    }
     clear_map(&l4_map)?;
 
     for cidr in &policy.allow_cidrs {
         match parse_ip_cidr(cidr)? {
             IpCidr::V4(cidr) => update_ipv4_allow(&cidr4_map, identity, cidr)?,
             IpCidr::V6(cidr) => update_ipv6_allow(&cidr6_map, identity, cidr)?,
+        }
+    }
+    for cidr in &policy.deny_cidrs {
+        match parse_ip_cidr(cidr)? {
+            IpCidr::V4(cidr) if deny4_map.exists() => {
+                update_ipv4_allow(&deny4_map, identity, cidr)?
+            }
+            IpCidr::V6(cidr) if deny6_map.exists() => {
+                update_ipv6_allow(&deny6_map, identity, cidr)?
+            }
+            _ => {}
         }
     }
     for rule in &policy.allow_ports {
@@ -594,6 +621,7 @@ fn configure_maps(
         !policy.allow_cidrs.is_empty(),
         !policy.allow_ports.is_empty(),
         policy.sample_rate,
+        policy.allow_icmp,
         rate_bytes,
         rate_packets,
     )
@@ -607,6 +635,7 @@ fn update_iface_config(
     enforce_cidr: bool,
     enforce_l4: bool,
     sample_rate: u32,
+    allow_icmp: bool,
     rate_bytes_per_sec: u64,
     rate_packets_per_sec: u64,
 ) -> Result<()> {
@@ -621,7 +650,7 @@ fn update_iface_config(
     value.extend_from_slice(&(enforce_cidr as u32).to_ne_bytes());
     value.extend_from_slice(&(enforce_l4 as u32).to_ne_bytes());
     value.extend_from_slice(&sample_rate.to_ne_bytes());
-    value.extend_from_slice(&0u32.to_ne_bytes());
+    value.extend_from_slice(&(allow_icmp as u32).to_ne_bytes());
     value.extend_from_slice(&rate_bytes_per_sec.to_ne_bytes());
     value.extend_from_slice(&rate_packets_per_sec.to_ne_bytes());
     bpftool_map_update(map, &key, &value)
@@ -872,24 +901,30 @@ fn normalize_ipv6(ip: Ipv6Addr, prefix: u8) -> Result<Ipv6Cidr> {
 fn parse_port_rule(raw: &str) -> Result<PortRule> {
     let (proto, port) = raw
         .split_once('/')
-        .with_context(|| format!("port rule {raw:?} must be tcp/PORT or udp/PORT"))?;
+        .with_context(|| format!("port rule {raw:?} must be proto/PORT"))?;
     let protocol = match proto.trim().to_ascii_lowercase().as_str() {
         "tcp" => IPPROTO_TCP,
         "udp" => IPPROTO_UDP,
-        other => bail!("unsupported L4 protocol {other:?}; use tcp or udp"),
+        "icmp" => IPPROTO_ICMP,
+        "icmp6" | "icmpv6" => IPPROTO_ICMPV6,
+        other => bail!("unsupported L4 protocol {other:?}; use tcp, udp, icmp, or icmp6"),
     };
     let port: u16 = port
         .trim()
         .parse()
         .with_context(|| format!("invalid port in {raw:?}"))?;
-    if port == 0 {
+    if port == 0 && protocol != IPPROTO_ICMP && protocol != IPPROTO_ICMPV6 {
         bail!("port must be 1..65535");
     }
     Ok(PortRule { protocol, port })
 }
 
 pub fn policy_contains_ipv6(policy: &VmNetworkPolicy) -> bool {
-    policy.allow_cidrs.iter().any(|cidr| matches!(parse_ip_cidr(cidr), Ok(IpCidr::V6(_))))
+    policy
+        .allow_cidrs
+        .iter()
+        .chain(policy.deny_cidrs.iter())
+        .any(|cidr| matches!(parse_ip_cidr(cidr), Ok(IpCidr::V6(_))))
 }
 
 fn require_bpftool() -> Result<()> {
@@ -1076,8 +1111,16 @@ mod tests {
             parse_port_rule("UDP/53").unwrap(),
             PortRule { protocol: 17, port: 53 }
         );
-        assert!(parse_port_rule("icmp/8").is_err());
+        assert_eq!(
+            parse_port_rule("icmp/0").unwrap(),
+            PortRule { protocol: IPPROTO_ICMP, port: 0 }
+        );
+        assert_eq!(
+            parse_port_rule("icmp/8").unwrap(),
+            PortRule { protocol: IPPROTO_ICMP, port: 8 }
+        );
         assert!(parse_port_rule("tcp/0").is_err());
+        assert!(parse_port_rule("sctp/443").is_err());
     }
 
     #[test]

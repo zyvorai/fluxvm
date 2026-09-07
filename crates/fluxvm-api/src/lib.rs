@@ -172,6 +172,18 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/vms/{id}/network/policy",
             get(get_vm_network_policy).post(set_vm_network_policy),
         )
+        .route(
+            "/v1/vms/{id}/network/effective",
+            get(get_vm_network_effective),
+        )
+        .route(
+            "/v1/network/groups",
+            get(list_network_groups).post(upsert_network_group),
+        )
+        .route(
+            "/v1/network/groups/{name}",
+            get(get_network_group).delete(delete_network_group),
+        )
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
@@ -864,6 +876,45 @@ async fn get_vm_network_policy(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(m.network_policy(id).await?)))
+}
+
+async fn list_network_groups(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_network_groups().await?})))
+}
+
+async fn get_network_group(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.get_network_group(&name).await?)))
+}
+
+async fn upsert_network_group(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(group): Json<fluxvm_network::groups::SecurityGroup>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.upsert_network_group(group).await?)))
+}
+
+async fn delete_network_group(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.delete_network_group(&name).await?;
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn get_vm_network_effective(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_effective(id).await?)))
 }
 
 async fn set_vm_network_policy(

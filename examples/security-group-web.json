@@ -1,0 +1,16 @@
+{
+  "name": "web",
+  "labels": ["app=web", "env=prod"],
+  "priority": 10,
+  "description": "HTTPS + DNS egress for front-end VMs",
+  "policy": {
+    "default_allow": false,
+    "allow_cidrs": ["10.0.0.0/8", "172.16.0.0/12", "2001:db8::/32"],
+    "deny_cidrs": ["10.66.0.0/16"],
+    "allow_ports": ["tcp/443", "tcp/80", "udp/53", "icmp/0"],
+    "allow_icmp": true,
+    "max_egress_mbps": 250,
+    "max_egress_pps": 100000,
+    "sample_rate": 100
+  }
+}

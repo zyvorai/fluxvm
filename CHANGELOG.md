@@ -3,6 +3,17 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Security groups** — Cilium-style label identities for the VM-edge
+  dataplane. Named groups with `key=value` labels allocate a stable
+  identity in the `0x10000+` range; VM policy `groups` / `labels` select
+  membership; allow + deny CIDRs merge into the TC maps. REST
+  `/v1/network/groups` and `/v1/vms/{id}/network/effective`, CLI
+  `fluxvm group`. BPF `fluxvm_gid`, `fluxvm_ct`, `fluxvm_deny4/6`,
+  ICMP passthrough, `icmp/0` L4 rules.
+  Docs: [docs/network-groups.md](docs/network-groups.md).
+  Tests: `scripts/test-security-groups.py`,
+  `scripts/test-security-groups-e2e.sh`.
+
 - **Fleet agent hardening** — bearer auth (`--token`), optional TLS (`--tls-cert`/`--tls-key`), persisted `fleet-nodes.json`, residual CPU/memory placement.
 - **Kubernetes CRD** — `tap`/`macvtap` fields (`bridge`, `parent`, `netns`, …); optional `spec.node` + `fluxvm-kube --enable-placement`; DaemonSet packaging documented; CI container image build.
 - **Security boundary** — fail-closed auth off-loopback, JSON audit logs (`fluxvm_audit`), `allowed_network_modes` / `allow_extra_args` policy, per-token VM/memory quotas, seccomp-bpf (Linux), AppArmor profile, UDS `0o600`, optional cosign catalog verify.

@@ -437,6 +437,68 @@ impl VmManager {
         })
     }
 
+    pub async fn list_network_groups(
+        &self,
+    ) -> Result<Vec<fluxvm_network::groups::SecurityGroup>> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::groups::list_groups(&cfg))
+            .await
+            .context("network group list panicked")?
+    }
+
+    pub async fn get_network_group(
+        &self,
+        name: &str,
+    ) -> Result<fluxvm_network::groups::SecurityGroup> {
+        let cfg = self.cfg.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || fluxvm_network::groups::get_group(&cfg, &name))
+            .await
+            .context("network group get panicked")?
+    }
+
+    pub async fn upsert_network_group(
+        &self,
+        group: fluxvm_network::groups::SecurityGroup,
+    ) -> Result<fluxvm_network::groups::SecurityGroup> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::groups::upsert_group(&cfg, group))
+            .await
+            .context("network group upsert panicked")?
+    }
+
+    pub async fn delete_network_group(&self, name: &str) -> Result<()> {
+        let cfg = self.cfg.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || fluxvm_network::groups::delete_group(&cfg, &name))
+            .await
+            .context("network group delete panicked")?
+    }
+
+    pub async fn network_effective(
+        &self,
+        id: Uuid,
+    ) -> Result<serde_json::Value> {
+        self.get(id).await?;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            let policy = fluxvm_network::dataplane::effective_policy(&cfg, id)?;
+            let membership = fluxvm_network::groups::resolve_membership(&cfg, &policy)?;
+            let (merged, identities) =
+                fluxvm_network::groups::merge_group_policy(&cfg, policy.clone())?;
+            Ok(serde_json::json!({
+                "vm_id": id,
+                "vm_identity": fluxvm_network::ebpf::identity_for(id),
+                "declared": policy,
+                "membership": membership,
+                "effective": merged,
+                "group_identities": identities,
+            }))
+        })
+        .await
+        .context("network effective reader panicked")?
+    }
+
     pub async fn network_policy(
         &self,
         id: Uuid,
