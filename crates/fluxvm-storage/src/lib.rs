@@ -326,6 +326,7 @@ mod tests {
             error: None,
             request: CreateVmRequest {
                 name: name.to_string(),
+                tenant: None,
                 backend: BackendKind::Qemu,
                 image: PathBuf::from("/tmp/base.qcow2"),
                 vcpus: 1,

@@ -144,6 +144,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [Using FluxVM through Ragnarok](#using-fluxvm-through-ragnarok)
 - [Distributed node-agent](#distributed-node-agent)
 - [State layout](#state-layout)
+- [Production checklist](docs/PRODUCTION.md)
 - [Production changes I would make next](#production-changes-i-would-make-next)
 - [Important limitations in this MVP](#important-limitations-in-this-mvp)
 - [AI-agent sandbox gaps](docs/agent-sandbox-gaps.md)
@@ -1820,7 +1821,7 @@ assigned the same vsock CID.
 4. **Storage abstraction** — already implemented and fully verified (qcow2/raw, LVM thin, NBD, Ceph RBD). NVMe-local as a distinct backend remains unnecessary.
 5. **Image catalog** — Ed25519 signing shipped; optional `catalog.cosign_identities` shells out to `cosign verify-blob`.
 6. **Policy** — `allowed_network_modes` and `allow_extra_args` (default false) are enforced alongside existing vCPU/RAM/disk/TTL/backend/image-dir limits.
-7. **Auth** — fail-closed off-loopback, JSON audit (`fluxvm_audit`), per-token quotas. Still open: mTLS/OIDC and first-class tenant IDs.
+7. **Auth** — fail-closed off-loopback, JSON audit (`fluxvm_audit`), per-token quotas, VM/token `tenant`, `/readyz`. Still open: mTLS/OIDC token exchange (`auth.oidc_issuer` reserved).
 8. **Observability** — Prometheus `/metrics` now includes auth/egress deny counters and create/start latency; OpenTelemetry remains optional.
 9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see "Kubernetes CRD/operator" and `deploy/k8s/`.
 10. **Distributed node-agent** — TLS/auth, persisted registry, and residual-capacity placement are implemented; see "Distributed node-agent".

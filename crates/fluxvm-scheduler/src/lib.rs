@@ -548,6 +548,25 @@ impl VmManager {
         Ok(())
     }
 
+    pub async fn readyz(&self) -> Result<serde_json::Value> {
+        let kvm = std::path::Path::new("/dev/kvm").exists();
+        let state_ok = self.cfg.state_dir.exists();
+        let health = fluxvm_network::dataplane::health(&self.cfg).ok();
+        let dp_ok = health.as_ref().map(|h| h.ok).unwrap_or(true);
+        let required = self.cfg.sandbox.dataplane.required
+            && !matches!(
+                self.cfg.sandbox.dataplane.mode,
+                fluxvm_core::config::DataplaneMode::Legacy
+            );
+        let ok = state_ok && (!required || (dp_ok && health.is_some()));
+        Ok(serde_json::json!({
+            "ok": ok,
+            "kvm": kvm,
+            "state_dir": self.cfg.state_dir,
+            "dataplane": health,
+        }))
+    }
+
     pub async fn network_health(&self) -> Result<fluxvm_network::dataplane::DataplaneHealth> {
         let cfg = self.cfg.clone();
         tokio::task::spawn_blocking(move || fluxvm_network::dataplane::health(&cfg))
@@ -1878,6 +1897,7 @@ mod tests {
     fn req(backend: BackendKind, kernel: Option<&str>, firmware: Option<&str>) -> CreateVmRequest {
         CreateVmRequest {
             name: "fixture".into(),
+            tenant: None,
             backend,
             image: "/tmp/base.qcow2".into(),
             vcpus: 1,

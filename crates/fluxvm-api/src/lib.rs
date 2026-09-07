@@ -62,14 +62,15 @@ async fn auth_middleware(
 ) -> Response {
     let path = req.uri().path().to_string();
     let method = req.method().clone();
-    if path == "/healthz" {
+    // Liveness/readiness probes must work without auth (Kubernetes convention).
+    if path == "/healthz" || path == "/readyz" {
         return next.run(req).await;
     }
     let must = m.cfg.auth.must_authenticate(&m.cfg.listen);
-    let (role, token_name) = if !must && m.cfg.auth.tokens.is_empty() {
-        (Some(Role::Admin), Some("anonymous-admin".to_string()))
+    let (role, token_name, token_tenant) = if !must && m.cfg.auth.tokens.is_empty() {
+        (Some(Role::Admin), Some("anonymous-admin".to_string()), None)
     } else if m.cfg.auth.tokens.is_empty() && must {
-        (None, None)
+        (None, None, None)
     } else {
         let presented = req
             .headers()
@@ -86,8 +87,9 @@ async fn auth_middleware(
             Some(entry) => (
                 Some(entry.role),
                 entry.name.clone().or_else(|| Some("unnamed".into())),
+                entry.tenant.clone(),
             ),
-            None => (None, None),
+            None => (None, None, None),
         }
     };
     match role {
@@ -95,6 +97,9 @@ async fn auth_middleware(
             req.extensions_mut().insert(role);
             if let Some(name) = token_name.clone() {
                 req.extensions_mut().insert(AuditActor(name));
+            }
+            if let Some(tenant) = token_tenant {
+                req.extensions_mut().insert(TokenTenant(tenant));
             }
             let response = next.run(req).await;
             audit_log(
@@ -120,6 +125,10 @@ async fn auth_middleware(
 
 #[derive(Clone, Debug)]
 struct AuditActor(pub String);
+
+/// Tenant claim carried by the authenticated API token (if any).
+#[derive(Clone, Debug)]
+struct TokenTenant(pub String);
 
 fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16) {
     let role = match role {
@@ -147,6 +156,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 pub fn router(manager: Arc<VmManager>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
+        .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/v1/vms", post(create_vm).get(list_vms))
         .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
@@ -388,9 +398,16 @@ async fn create_vm(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     actor: Option<Extension<AuditActor>>,
-    Json(req): Json<CreateVmRequest>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(mut req): Json<CreateVmRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
+    // Token tenant fills in when the body omitted one (body wins if both set).
+    if req.tenant.is_none() {
+        if let Some(Extension(TokenTenant(t))) = token_tenant {
+            req.tenant = Some(t);
+        }
+    }
     enforce_token_quotas(&m, actor.as_ref().map(|a| a.0.0.as_str()), &req).await?;
     Ok((StatusCode::CREATED, Json(m.create(req).await?)))
 }
@@ -717,6 +734,8 @@ struct ListVmsQuery {
     /// every lookup.
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    tenant: Option<String>,
 }
 
 async fn list_vms(
@@ -727,7 +746,19 @@ async fn list_vms(
     if let Some(name) = q.name {
         items.retain(|vm| vm.name == name);
     }
+    if let Some(tenant) = q.tenant {
+        items.retain(|vm| vm.request.tenant.as_deref() == Some(tenant.as_str()));
+    }
     Json(json!({"items": items}))
+}
+
+async fn readyz(
+    State(m): State<Arc<VmManager>>,
+) -> Json<serde_json::Value> {
+    match m.readyz().await {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
+    }
 }
 async fn get_vm(
     State(m): State<Arc<VmManager>>,
@@ -1500,6 +1531,7 @@ mod tests {
             error: None,
             request: CreateVmRequest {
                 name: "fixture".into(),
+                tenant: None,
                 backend,
                 image: PathBuf::from("/tmp/base.qcow2"),
                 vcpus: 1,
@@ -1645,6 +1677,7 @@ mod tests {
                     token: "secret".into(),
                     role: Role::Admin,
                     name: None,
+                    tenant: None,
                 }],
                 ..Default::default()
             };
@@ -1662,6 +1695,7 @@ mod tests {
                     token: "secret".into(),
                     role: Role::Admin,
                     name: None,
+                    tenant: None,
                 }],
                 ..Default::default()
             };
@@ -1679,6 +1713,7 @@ mod tests {
                     token: "secret".into(),
                     role: Role::Admin,
                     name: None,
+                    tenant: None,
                 }],
                 ..Default::default()
             };
@@ -1699,6 +1734,7 @@ mod tests {
                     token: "ro".into(),
                     role: Role::ReadOnly,
                     name: None,
+                    tenant: None,
                 }],
                 ..Default::default()
             };
@@ -1720,6 +1756,7 @@ mod tests {
                     token: "admin".into(),
                     role: Role::Admin,
                     name: None,
+                    tenant: None,
                 }],
                 ..Default::default()
             };

@@ -313,6 +313,12 @@ pub struct AuthConfig {
     pub max_vms_per_token: Option<usize>,
     /// Per-token aggregate memory MiB quota.
     pub max_memory_mib_per_token: Option<u64>,
+    /// Optional OIDC issuer URL. Reserved for a follow-up token exchange;
+    /// if set without `oidc_audience`, serve logs a warning only.
+    #[serde(default)]
+    pub oidc_issuer: Option<String>,
+    #[serde(default)]
+    pub oidc_audience: Option<String>,
 }
 
 impl Default for AuthConfig {
@@ -322,6 +328,8 @@ impl Default for AuthConfig {
             require: false,
             max_vms_per_token: None,
             max_memory_mib_per_token: None,
+            oidc_issuer: None,
+            oidc_audience: None,
         }
     }
 }
@@ -355,6 +363,10 @@ pub struct ApiToken {
     pub role: Role,
     #[serde(default)]
     pub name: Option<String>,
+    /// When set, VMs created with this token inherit this tenant unless the
+    /// request already specified one.
+    #[serde(default)]
+    pub tenant: Option<String>,
 }
 
 /// `Admin` can do anything (create/stop/pause/resume/exec/delete/build

@@ -85,6 +85,7 @@ reaper_interval_secs = 5
 # token = "REPLACE_ME_ADMIN_TOKEN"
 # role = "admin"
 # name = "ci"
+# tenant = "acme"
 #
 # [[auth.tokens]]
 # token = "REPLACE_ME_READONLY_TOKEN"

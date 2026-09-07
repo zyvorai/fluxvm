@@ -1,0 +1,10 @@
+{
+  "name": "web-1",
+  "tenant": "acme",
+  "backend": "qemu",
+  "image": "/var/lib/fluxvm/images/base.qcow2",
+  "vcpus": 2,
+  "memory_mib": 2048,
+  "network": { "mode": "tap", "netns": true },
+  "ttl_seconds": 3600
+}

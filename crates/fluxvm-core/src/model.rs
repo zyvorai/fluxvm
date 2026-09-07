@@ -217,6 +217,9 @@ pub struct SharedFolder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateVmRequest {
     pub name: String,
+    /// First-class tenant id for multi-team hosts. Optional; filterable on list.
+    #[serde(default)]
+    pub tenant: Option<String>,
     pub backend: BackendKind,
     pub image: PathBuf,
     #[serde(default = "default_vcpus")]

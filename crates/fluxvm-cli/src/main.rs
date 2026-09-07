@@ -302,6 +302,12 @@ async fn main() -> Result<()> {
                     "API auth is OFF (no [[auth.tokens]]); every request is admin"
                 );
             }
+            if cfg.auth.oidc_issuer.is_some() && cfg.auth.oidc_audience.is_none() {
+                tracing::warn!(
+                    "auth.oidc_issuer is set but auth.oidc_audience is empty — \
+                     OIDC token exchange is reserved; bearer [[auth.tokens]] remain the GA path"
+                );
+            }
             m.start_reaper();
             m.spawn_autopause_loop();
             if !cfg.sandbox.egress_proxy_listen.is_empty() {

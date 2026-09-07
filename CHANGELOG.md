@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Project production baseline** — `SECURITY.md`, `CONTRIBUTING.md`,
+  `Makefile`, whole-stack [docs/PRODUCTION.md](docs/PRODUCTION.md),
+  `/readyz`, VM `tenant` + `GET /v1/vms?tenant=`, token `tenant`,
+  reserved OIDC config keys, `scripts/release-checklist.sh`.
 - **Production dataplane** — FQDN→IPv4/IPv6 resolve at apply, FluxVM ipcache,
   `GET /v1/network/health|/ipcache`, `POST /v1/network/refresh-dns`,
   `fluxvm dataplane health|ipcache|refresh-dns`, prod TOML + runbook

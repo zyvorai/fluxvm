@@ -161,6 +161,7 @@ impl VmManager {
             .context("OCI template build needs config.fluxvm_kernel or firecracker_kernel")?;
         let spec = CreateVmRequest {
             name: name.into(),
+            tenant: None,
             backend: BackendKind::FluxVm,
             image: rootfs.clone(),
             vcpus: 1,

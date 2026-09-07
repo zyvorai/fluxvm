@@ -461,6 +461,7 @@ mod tests {
     fn req(memory_mib: u64) -> CreateVmRequest {
         CreateVmRequest {
             name: "fixture".into(),
+            tenant: None,
             backend: BackendKind::Qemu,
             image: "/tmp/base.qcow2".into(),
             vcpus: 1,
