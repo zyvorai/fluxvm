@@ -8,7 +8,7 @@ use fluxvm_kube::crd::DisposableVm;
 use futures::StreamExt;
 use kube::{
     Api, Client, Resource, ResourceExt,
-    api::{Patch, PatchParams, PostParams},
+    api::PostParams,
     runtime::{controller::{Action, Controller}, watcher},
 };
 use std::{sync::Arc, time::Duration};
@@ -48,9 +48,6 @@ async fn reconcile(obj: Arc<DisposableVm>, client: Arc<Client>) -> Result<Action
     match api.create(&PostParams::default(), &mvm).await {
         Ok(_) => {
             tracing::info!(%name, %ns, "created MicroVM from DisposableVm");
-            let _ = api.patch(&name, &PatchParams::default(), &Patch::Merge(serde_json::json!({
-                "metadata": {"annotations": {"microvm.fluxvm.zyvor.io/converted-from": "disposablevm"}}
-            }))).await;
             Ok(Action::requeue(Duration::from_secs(60)))
         }
         Err(kube::Error::Api(ae)) if ae.code == 409 => Ok(Action::await_change()),
@@ -80,9 +77,7 @@ pub fn disposable_to_microvm(dvm: &DisposableVm) -> MicroVM {
     };
     let mut mvm = MicroVM::new(&dvm.name_any(), spec);
     mvm.meta_mut().namespace = dvm.namespace();
-    mvm.meta_mut().labels = Some(
-        [("microvm.fluxvm.zyvor.io/converted-from".into(), "disposablevm".into())].into_iter().collect(),
-    );
+    mvm.meta_mut().annotations = Some(crate::policy::converted_annotations());
     mvm
 }
 
@@ -114,5 +109,7 @@ mod tests {
         assert_eq!(mvm.spec.node_name.as_deref(), Some("worker-1"));
         assert!(mvm.spec.persist);
         assert_eq!(mvm.spec.ttl_seconds, Some(600));
+        let anns = mvm.meta().annotations.as_ref().expect("converted annotations");
+        assert!(!crate::policy::node_agent_should_drive(Some(anns)));
     }
 }

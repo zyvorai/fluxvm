@@ -12,5 +12,6 @@ pub mod crd;
 pub mod fluxvm_client;
 pub mod jobs;
 pub mod node_agent;
+pub mod policy;
 pub mod pools;
 pub mod shadow;

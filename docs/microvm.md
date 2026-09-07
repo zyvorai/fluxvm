@@ -99,15 +99,18 @@ kubectl apply -f deploy/k8s/microvm/
 # crd.yaml → rbac.yaml → controller.yaml → node-agent.yaml
 ```
 
-The controller Deployment runs `fluxvm-microvm controller --convert` by default
-(also bridges `DisposableVm` → `MicroVM`). The node-agent DaemonSet selects
-`ragnarok.io/fluxvm-capable=true` and uses `NODE_NAME` + `FLUXVM_URL`.
+The controller Deployment runs `fluxvm-microvm controller` **without**
+`--convert` by default (opt-in dual-run bridge). The node-agent DaemonSet
+selects `ragnarok.io/fluxvm-capable=true` and uses `NODE_NAME` + `FLUXVM_URL`.
+
+Shadow Pods request a tiny pause budget (`10m` CPU / `32Mi` RAM), not the
+guest’s vCPU/memory — guest resources live under the host VMM cgroup.
 
 Local / lab without the full DaemonSet image:
 
 ```bash
 fluxvm-microvm --print-crd | kubectl apply -f -
-fluxvm-microvm controller --convert &
+fluxvm-microvm controller &
 NODE_NAME=$(hostname) FLUXVM_URL=http://127.0.0.1:7788 fluxvm-microvm node-agent
 ```
 
@@ -177,17 +180,21 @@ Tutorial: [tutorials/microvm/03-pool.md](tutorials/microvm/03-pool.md).
 under `/var/lib/fluxvm/images` (or your `state_dir`) with GuestKit the same way
 you do for DisposableVm.
 
-## DisposableVm bridge (`--convert`)
+## DisposableVm bridge (`--convert`, opt-in)
 
 ```bash
 fluxvm-microvm controller --convert
 ```
 
 Watches `DisposableVm` (`fluxvm.zyvor.io`) and creates a same-name `MicroVM`
-with `persist: true` and `nodeName` copied. Annotation:
-`microvm.fluxvm.zyvor.io/converted-from=disposablevm`.
+with `persist: true` and `nodeName` copied. Converted guests get:
 
-Deployed controller already passes `--convert`. Tutorial:
+- `microvm.fluxvm.zyvor.io/converted-from=disposablevm`
+- `microvm.fluxvm.zyvor.io/driven-by=fluxvm-kube` — the MicroVM node agent
+  **skips** `POST /v1/vms` so fluxvm-kube remains the sole VMM driver
+
+Deploy manifests leave `--convert` **off**. Enable only when you understand the
+`driven-by` skip. Tutorial:
 [tutorials/microvm/04-convert-disposablevm.md](tutorials/microvm/04-convert-disposablevm.md).
 
 ## Verify

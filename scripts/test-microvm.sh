@@ -4,6 +4,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+python3 scripts/test-microvm-policy.py
 cargo test -p fluxvm-microvm
 bin=target/debug/fluxvm-microvm
 [[ -x $bin ]] || { cargo build -p fluxvm-microvm; }

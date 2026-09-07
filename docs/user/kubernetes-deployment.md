@@ -68,8 +68,10 @@ VM is torn down, so a brief pause there is expected, not a hang.
 
 Deploy MicroVM **after** this DaemonSet: `kubectl apply -f deploy/k8s/microvm/`.
 Full guide: [microvm.md](../microvm.md). Tutorials:
-[tutorials/microvm/](../tutorials/microvm/README.md). Optional
-`fluxvm-microvm controller --convert` projects each DisposableVm to a same-name MicroVM.
+[tutorials/microvm/](../tutorials/microvm/README.md). Deploy leaves `--convert`
+**off**; opt in with `fluxvm-microvm controller --convert` (converted MicroVMs
+get `driven-by=fluxvm-kube` so the node agent does not double-create VMs).
+Shadow Pods request `10m`/`32Mi` only.
 
 ## Known limitations
 

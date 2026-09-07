@@ -2,6 +2,13 @@
 
 ## 0.4.0 (unreleased)
 
+### Changed
+- **MicroVM dual-run hardening** — shadow Pods request `10m`/`32Mi` (not guest
+  vCPU/RAM); converted MicroVMs annotate
+  `microvm.fluxvm.zyvor.io/driven-by=fluxvm-kube` so the node agent skips
+  `POST /v1/vms`; deploy controller leaves `--convert` off (opt-in). Policy
+  gates: `scripts/test-microvm-policy.py`.
+
 ### Added
 - **MicroVM** (`fluxvm-microvm`) — Kubernetes-native disposable compute without
   KubeVirt: `MicroVM` / `MicroVMJob` / `MicroVMPool` / `GuestImage` on

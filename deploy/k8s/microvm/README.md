@@ -12,5 +12,10 @@ kubectl apply -f node-agent.yaml
 
 Or `fluxvm-microvm --print-crd | kubectl apply -f -`.
 
+**Defaults:** controller runs **without** `--convert`. Shadow Pods request
+`10m`/`32Mi` only. Converted MicroVMs (when you opt in) get
+`microvm.fluxvm.zyvor.io/driven-by=fluxvm-kube` so the node agent does not
+double-create VMs.
+
 Guide: [docs/microvm.md](../../../docs/microvm.md) ·
 tutorials: [docs/tutorials/microvm/](../../../docs/tutorials/microvm/README.md).

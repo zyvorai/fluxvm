@@ -46,6 +46,10 @@ pub async fn run(client: Client, fluxvm: FluxVMClient, node_name: String) {
 }
 
 async fn reconcile(obj: Arc<MicroVM>, ctx: Arc<Context>) -> Result<Action, Error> {
+    if !crate::policy::node_agent_should_drive(obj.meta().annotations.as_ref()) {
+        tracing::debug!(vm = %obj.name_any(), "skip: driven by fluxvm-kube");
+        return Ok(Action::await_change());
+    }
     let mine = obj.status.as_ref().and_then(|s| s.runtime.node.as_deref()) == Some(ctx.node_name.as_str())
         || obj.spec.node_name.as_deref() == Some(ctx.node_name.as_str());
     if !mine { return Ok(Action::await_change()); }

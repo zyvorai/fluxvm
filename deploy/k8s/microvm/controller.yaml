@@ -1,3 +1,7 @@
+# Convert is OFF by default. Dual-running fluxvm-kube + MicroVM convert on the
+# same DisposableVm would POST /v1/vms twice unless the MicroVM is annotated
+# microvm.fluxvm.zyvor.io/driven-by=fluxvm-kube (node agent skips). Enable with
+# --convert only after you understand that annotation.
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: fluxvm-microvm-controller, namespace: fluxvm-system}
@@ -11,7 +15,7 @@ spec:
       containers:
         - name: controller
           image: ghcr.io/zyvorai/fluxvm:0.1.0
-          command: ["fluxvm-microvm", "controller", "--convert"]
+          command: ["fluxvm-microvm", "controller"]
           env: [{name: RUST_LOG, value: info}]
           securityContext:
             runAsNonRoot: true

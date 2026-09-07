@@ -24,9 +24,11 @@ pub fn desired_pod(vm: &MicroVM, request_kvm_device: bool) -> Pod {
     labels.insert("app.kubernetes.io/part-of".into(), "fluxvm-microvm".into());
     let mut node_selector = BTreeMap::new();
     node_selector.insert(CAPABLE_LABEL.to_string(), "true".into());
+    // Pause-only budget. Guest RAM/CPU live in the host VMM cgroup, not
+    // this Pod — requesting spec.memoryMiB here double-counts the node.
     let mut requests = BTreeMap::new();
-    requests.insert("cpu".into(), Quantity(vm.spec.vcpus.to_string()));
-    requests.insert("memory".into(), Quantity(format!("{}Mi", vm.spec.memory_mib)));
+    requests.insert("cpu".into(), Quantity(crate::policy::SHADOW_CPU.into()));
+    requests.insert("memory".into(), Quantity(crate::policy::SHADOW_MEMORY.into()));
     if request_kvm_device {
         requests.insert("fluxvm.dev/kvm".into(), Quantity("1".into()));
     }
@@ -76,12 +78,13 @@ mod tests {
     use super::*;
     use crate::crd::MicroVMSpec;
     #[test]
-    fn shadow_requests_match_spec() {
+    fn shadow_requests_tiny_budget() {
         let vm = MicroVM::new("sandbox-42", MicroVMSpec { image: "/img".into(), vcpus: 4, memory_mib: 4096, ..Default::default() });
         let pod = desired_pod(&vm, true);
         let req = pod.spec.as_ref().unwrap().containers[0].resources.as_ref().unwrap().requests.as_ref().unwrap();
-        assert_eq!(req.get("cpu").unwrap().0, "4");
-        assert_eq!(req.get("memory").unwrap().0, "4096Mi");
+        assert_eq!(req.get("cpu").unwrap().0, crate::policy::SHADOW_CPU);
+        assert_eq!(req.get("memory").unwrap().0, crate::policy::SHADOW_MEMORY);
         assert_eq!(req.get("fluxvm.dev/kvm").unwrap().0, "1");
+        assert_ne!(req.get("memory").unwrap().0, "4096Mi");
     }
 }
