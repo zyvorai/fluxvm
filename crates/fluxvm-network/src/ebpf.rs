@@ -175,8 +175,27 @@ pub fn apply(
             .context("recording FluxVM eBPF schema version")?;
 
         ensure_clsact(iface).context("installing clsact qdisc")?;
-        // `add`, not `replace`: if another component already owns this
-        // reserved pref/handle, fail closed instead of overwriting it.
+        // Prefer `add` so a foreign owner of this pref/handle fails closed.
+        // If a prior FluxVM attach left a filter (common after prog_id drift),
+        // reclaim our slot on this iface first — `remove()` above already ran
+        // with the recorded iface when present.
+        if tc_filter_program_id(iface).ok().flatten().is_some() {
+            let _ = run(
+                "tc",
+                &[
+                    "filter".into(),
+                    "del".into(),
+                    "dev".into(),
+                    iface.into(),
+                    "ingress".into(),
+                    "pref".into(),
+                    TC_PRIORITY.into(),
+                    "handle".into(),
+                    TC_HANDLE.into(),
+                    "bpf".into(),
+                ],
+            );
+        }
         run(
             "tc",
             &[
@@ -432,27 +451,53 @@ pub fn remove_best_effort(id: Uuid) -> Result<()> {
 
 fn detach_tc_filter(id: Uuid, owned_program_id: Option<u32>) {
     let Some(iface) = read_recorded_iface(id) else { return };
-    let Some(owned_program_id) = owned_program_id else {
-        tracing::warn!(%id, %iface, "missing FluxVM TC ownership marker; refusing to detach filter");
-        return;
-    };
     match tc_filter_program_id(&iface) {
-        Ok(Some(current)) if current == owned_program_id => {
+        Ok(Some(current)) => {
+            // The interface name is recorded for this VM's pin metadata, so the
+            // FluxVM pref/handle on that iface is ours to reclaim — even when
+            // prog_id drifted (failed reload left a new meta id and an old
+            // kernel filter). Refuse only when we have no recorded iface.
+            if let Some(owned) = owned_program_id {
+                if current != owned {
+                    tracing::warn!(
+                        %id,
+                        %iface,
+                        owned_program_id = owned,
+                        current_program_id = current,
+                        "stale TC filter program id on recorded FluxVM iface; reclaiming pref/handle"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    %id,
+                    %iface,
+                    current_program_id = current,
+                    "missing FluxVM TC ownership marker; reclaiming pref/handle on recorded iface"
+                );
+            }
             let _ = run(
                 "tc",
                 &[
-                    "filter".into(), "del".into(), "dev".into(), iface,
-                    "ingress".into(), "pref".into(), TC_PRIORITY.into(),
-                    "handle".into(), TC_HANDLE.into(), "bpf".into(),
+                    "filter".into(),
+                    "del".into(),
+                    "dev".into(),
+                    iface,
+                    "ingress".into(),
+                    "pref".into(),
+                    TC_PRIORITY.into(),
+                    "handle".into(),
+                    TC_HANDLE.into(),
+                    "bpf".into(),
                 ],
             );
         }
-        Ok(Some(current)) => tracing::warn!(
-            %id, %iface, owned_program_id, current_program_id = current,
-            "TC filter at FluxVM preference/handle is not FluxVM-owned; leaving it untouched"
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            %id,
+            %iface,
+            error = %e,
+            "unable to verify TC filter; attempting reclaim of FluxVM pref/handle"
         ),
-        Ok(None) => {} ,
-        Err(e) => tracing::warn!(%id, %iface, error = %e, "unable to verify TC filter ownership; refusing detach"),
     }
 }
 
