@@ -49,6 +49,18 @@ pub struct VmNetworkPolicy {
     /// `key=value` labels. A group matches when every group label is present.
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Cilium `toFQDNs` names/patterns; resolved at apply time.
+    #[serde(default)]
+    pub allow_fqdns: Vec<String>,
+    /// Cilium entities (`world`, `host`, `cluster`, …).
+    #[serde(default)]
+    pub entities: Vec<String>,
+    /// Log-and-allow instead of drop (Cilium audit mode).
+    #[serde(default)]
+    pub audit_mode: bool,
+    /// Filled by group merge; not persisted as operator input.
+    #[serde(default, skip_serializing)]
+    pub compiled_group_ids: Vec<u32>,
 }
 
 impl Default for VmNetworkPolicy {
@@ -64,6 +76,10 @@ impl Default for VmNetworkPolicy {
             allow_icmp: false,
             groups: Vec::new(),
             labels: Vec::new(),
+            allow_fqdns: Vec::new(),
+            entities: Vec::new(),
+            audit_mode: false,
+            compiled_group_ids: Vec::new(),
         }
     }
 }
@@ -81,6 +97,10 @@ pub fn default_policy(cfg: &Config) -> VmNetworkPolicy {
         allow_icmp: false,
         groups: Vec::new(),
         labels: Vec::new(),
+        allow_fqdns: Vec::new(),
+        entities: Vec::new(),
+        audit_mode: false,
+        compiled_group_ids: Vec::new(),
     }
 }
 
@@ -140,6 +160,28 @@ fn policy_path(cfg: &Config, id: Uuid) -> PathBuf {
     cfg.state_dir
         .join("network-policy")
         .join(format!("{id}.json"))
+}
+
+/// VM ids that have a persisted network policy file.
+pub fn list_policy_vm_ids(cfg: &Config) -> Result<Vec<Uuid>> {
+    let dir = cfg.state_dir.join("network-policy");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for ent in fs::read_dir(&dir)? {
+        let ent = ent?;
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if let Ok(id) = stem.parse::<Uuid>() {
+            out.push(id);
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 /// Stable dependency-free fingerprint of the durable policy. Transient
@@ -335,6 +377,10 @@ fn policy_uses_native_only_features(policy: &VmNetworkPolicy) -> bool {
     policy.max_egress_mbps.is_some()
         || policy.max_egress_pps.is_some()
         || crate::ebpf::policy_contains_ipv6(policy)
+        || !policy.deny_cidrs.is_empty()
+        || policy.audit_mode
+        || !policy.compiled_group_ids.is_empty()
+        || !policy.allow_fqdns.is_empty()
 }
 
 /// Heal a missing/stale native TC attachment without disturbing a healthy
@@ -573,10 +619,7 @@ mod tests {
             max_egress_mbps: Some(100),
             max_egress_pps: Some(50_000),
             sample_rate: 10,
-            deny_cidrs: Vec::new(),
-            allow_icmp: false,
-            groups: Vec::new(),
-            labels: Vec::new(),
+            ..VmNetworkPolicy::default()
         };
         save_policy(&cfg, id, &policy).unwrap();
         assert_eq!(load_policy(&cfg, id).unwrap(), Some(policy.clone()));

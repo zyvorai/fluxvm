@@ -395,6 +395,24 @@ static __always_inline int cidr_denied6(__u32 identity, const struct in6_addr *d
     return cidr_lookup6(&fluxvm_deny6, identity, daddr);
 }
 
+static __always_inline int ct_hit(const struct flow_key *probe)
+{
+    struct flow_key key = *probe;
+    key.verdict = 0;
+    key.pad = 0;
+    __u8 *hit = bpf_map_lookup_elem(&fluxvm_ct, &key);
+    return hit != 0;
+}
+
+static __always_inline void ct_learn(const struct flow_key *probe)
+{
+    struct flow_key key = *probe;
+    key.verdict = 0;
+    key.pad = 0;
+    __u8 one = 1;
+    bpf_map_update_elem(&fluxvm_ct, &key, &one, BPF_ANY);
+}
+
 static __always_inline int l4_allowed(__u32 identity, __u8 protocol, __u16 port)
 {
     struct l4_key key = {
@@ -628,16 +646,46 @@ static __always_inline int handle_ipv4(
         return TC_ACT_OK;
     }
 
+    __u32 sample = cfg->sample_rate & 0x7fffffffu;
+    __u32 audit = cfg->sample_rate >> 31;
+    __u8 src[16] = {};
+    __u8 dst[16] = {};
+    __builtin_memcpy(src, &iph->saddr, 4);
+    __builtin_memcpy(dst, &iph->daddr, 4);
+    struct flow_key ctkey = {
+        .identity = cfg->identity,
+        .sport = sport,
+        .dport = dport,
+        .protocol = iph->protocol,
+        .verdict = 0,
+        .family = FLUXVM_AF_INET,
+        .pad = 0,
+    };
+    __builtin_memcpy(ctkey.src, src, 16);
+    __builtin_memcpy(ctkey.dst, dst, 16);
+    if (ct_hit(&ctkey)) {
+        count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+        record_flow4(skb, cfg->identity, iph, sport, dport,
+                     FLUXVM_VERDICT_ALLOW, sample);
+        return TC_ACT_OK;
+    }
     if (any_deny4(skb->ifindex, cfg->identity, iph->daddr)) {
+        if (audit) {
+            count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+            record_flow4(skb, cfg->identity, iph, sport, dport,
+                         FLUXVM_VERDICT_DROP, sample);
+            return TC_ACT_OK;
+        }
         count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
         record_flow4(skb, cfg->identity, iph, sport, dport,
-                     FLUXVM_VERDICT_DROP, cfg->sample_rate);
+                     FLUXVM_VERDICT_DROP, sample);
         return TC_ACT_SHOT;
     }
     if (cfg->allow_icmp && iph->protocol == IPPROTO_ICMP) {
         count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
         record_flow4(skb, cfg->identity, iph, sport, dport,
-                     FLUXVM_VERDICT_ALLOW, cfg->sample_rate);
+                     FLUXVM_VERDICT_ALLOW, sample);
+        ct_learn(&ctkey);
         return TC_ACT_OK;
     }
     int has_policy = cfg->enforce_cidr || cfg->enforce_l4;
@@ -649,10 +697,14 @@ static __always_inline int handle_ipv4(
                   any_l4(skb->ifindex, cfg->identity, iph->protocol, dport);
     if (allowed && !rate_allowed(cfg, skb->len))
         allowed = 0;
+    if (!allowed && audit)
+        allowed = 1;
+    if (allowed)
+        ct_learn(&ctkey);
 
     __u8 verdict = allowed ? FLUXVM_VERDICT_ALLOW : FLUXVM_VERDICT_DROP;
     count(cfg->identity, verdict, skb->len);
-    record_flow4(skb, cfg->identity, iph, sport, dport, verdict, cfg->sample_rate);
+    record_flow4(skb, cfg->identity, iph, sport, dport, verdict, sample);
     return allowed ? TC_ACT_OK : TC_ACT_SHOT;
 }
 

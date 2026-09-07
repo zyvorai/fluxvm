@@ -184,6 +184,13 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/network/groups/{name}",
             get(get_network_group).delete(delete_network_group),
         )
+        .route(
+            "/v1/network/cnp",
+            get(list_cnp).post(apply_cnp),
+        )
+        .route("/v1/network/cnp/{name}", get(get_cnp).delete(delete_cnp))
+        .route("/v1/network/identities", get(list_identities))
+        .route("/v1/network/observe", get(network_observe))
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
@@ -908,6 +915,50 @@ async fn delete_network_group(
     require_admin(role)?;
     m.delete_network_group(&name).await?;
     Ok(Json(json!({"deleted": name})))
+}
+
+async fn list_cnp(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_cnp().await?})))
+}
+
+async fn get_cnp(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.get_cnp(&name).await?)))
+}
+
+async fn apply_cnp(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(policy): Json<fluxvm_network::cnp::CiliumNetworkPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.apply_cnp(policy).await?)))
+}
+
+async fn delete_cnp(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.delete_cnp(&name).await?;
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn list_identities(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_identities().await?})))
+}
+
+async fn network_observe(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_observe().await?)))
 }
 
 async fn get_vm_network_effective(

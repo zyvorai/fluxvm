@@ -200,9 +200,11 @@ GET  /v1/vms/{id}/network/flows?limit=100
 FLUXVM_PRIVILEGED_SMOKE=1 ./scripts/validate-network-fabric.sh
 sudo -E ./scripts/test-network-fabric.sh
 sudo -E ./scripts/test-security-groups-e2e.sh   # groups + deny/ICMP maps
+python3 scripts/test-cilium-parity.py          # CNP / identity / audit unit
 ```
 
 Security-group control plane: [network-groups.md](network-groups.md).
+Cilium parity (CNP / identities / audit): [cilium-parity.md](cilium-parity.md).
 
 Privileged integration smoke (FluxVm + `NetworkSpec::Tap { netns: true }`):
 
@@ -211,7 +213,7 @@ Privileged integration smoke (FluxVm + `NetworkSpec::Tap { netns: true }`):
 3. Confirm `tc filter show dev vh<short-id> ingress` shows `fluxvm_egress`.
 4. Inspect pins under `/sys/fs/bpf/fluxvm/vms/<uuid-simple>/` and meta under
    `/run/fluxvm/ebpf/vms/<uuid-simple>/`.
-5. Exercise `GET …/network/status` (`schema_version=3`, `policy_synced`).
+5. Exercise `GET …/network/status` (`schema_version=4`, `policy_synced`).
 6. Delete the VM; pins, meta, and the TC filter should be gone.
 7. With `required = false` and a missing `.o`, create should warn and fall back
    to nftables when fallback is safe.

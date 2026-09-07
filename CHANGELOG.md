@@ -3,6 +3,15 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Cilium parity (Network Fabric v4)** — CNP compiler (`toCIDR`,
+  `toCIDRSet`, `toEntities`, `toFQDNs`, `toPorts` ranges, deny,
+  `enableDefaultDeny`, `auditMode`), reserved identities matching
+  Cilium numbers, `fluxvm_gid` updates, conntrack learn/hit,
+  `fluxvm cnp` / `fluxvm identity` / `fluxvm observe`, REST
+  `/v1/network/cnp`, `/v1/network/identities`, `/v1/network/observe`.
+  Docs: [docs/cilium-parity.md](docs/cilium-parity.md).
+  Tutorials: [docs/tutorials/cilium/](docs/tutorials/cilium/README.md).
+  Tests: `scripts/test-cilium-parity.py`.
 - **Security groups** — Cilium-style label identities for the VM-edge
   dataplane. Named groups with `key=value` labels allocate a stable
   identity in the `0x10000+` range; VM policy `groups` / `labels` select

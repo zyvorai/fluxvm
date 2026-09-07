@@ -317,6 +317,10 @@ Full FluxVm + REST e2e (also invoked by the privileged validator):
 sudo -E ./scripts/test-network-fabric.sh
 ```
 
+Cilium-style hands-on tutorials (groups, CNP, identities, observe):
+
+- [docs/tutorials/cilium/](tutorials/cilium/README.md)
+
 Security groups (label identities, deny CIDRs, effective merge, deny/L4 maps):
 
 ```bash

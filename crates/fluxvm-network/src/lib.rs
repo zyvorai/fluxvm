@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod cilium;
+pub mod cnp;
 pub mod dataplane;
 pub mod ebpf;
 pub mod egress;
 pub mod egress_proxy;
 pub mod groups;
+pub mod identity;
 pub mod ipam;
 pub mod netns;
 pub mod xdp;

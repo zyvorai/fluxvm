@@ -1,0 +1,26 @@
+{
+  "apiVersion": "cilium.io/v2",
+  "kind": "CiliumNetworkPolicy",
+  "metadata": {
+    "name": "talk-to-world",
+    "namespace": "default"
+  },
+  "spec": {
+    "description": "Tutorial: toEntities world + cluster",
+    "endpointSelector": { "matchLabels": { "app": "egress" } },
+    "enableDefaultDeny": { "egress": true },
+    "egress": [
+      {
+        "toEntities": ["world", "cluster", "host"],
+        "toPorts": [
+          {
+            "ports": [
+              { "port": "https", "protocol": "TCP" },
+              { "port": "dns", "protocol": "UDP" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

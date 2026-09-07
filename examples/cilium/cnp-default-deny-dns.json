@@ -1,0 +1,31 @@
+{
+  "apiVersion": "cilium.io/v2",
+  "kind": "CiliumNetworkPolicy",
+  "metadata": {
+    "name": "dns-only",
+    "namespace": "default",
+    "labels": { "tutorial": "default-deny" }
+  },
+  "spec": {
+    "description": "Tutorial: default-deny egress except DNS",
+    "endpointSelector": { "matchLabels": { "app": "resolver" } },
+    "enableDefaultDeny": { "egress": true, "ingress": false },
+    "auditMode": false,
+    "egress": [
+      {
+        "toCIDR": ["1.1.1.1/32", "8.8.8.8/32"],
+        "toPorts": [
+          {
+            "ports": [
+              { "port": "53", "protocol": "UDP" },
+              { "port": "53", "protocol": "TCP" }
+            ]
+          }
+        ]
+      }
+    ],
+    "egressDeny": [
+      { "toCIDRSet": [{ "cidr": "0.0.0.0/0", "except": ["1.1.1.1/32", "8.8.8.8/32"] }] }
+    ]
+  }
+}

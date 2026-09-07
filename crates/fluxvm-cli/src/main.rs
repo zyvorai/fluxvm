@@ -92,6 +92,18 @@ enum Command {
         #[command(subcommand)]
         command: GroupCommand,
     },
+    /// CiliumNetworkPolicy documents compiled onto FluxVM groups.
+    Cnp {
+        #[command(subcommand)]
+        command: CnpCommand,
+    },
+    /// Reserved + group identities (Cilium identity space).
+    Identity {
+        #[command(subcommand)]
+        command: IdentityCommand,
+    },
+    /// Hubble-lite snapshot of identities, groups, CNPs, and labeled VMs.
+    Observe,
 }
 
 #[derive(Subcommand)]
@@ -136,6 +148,22 @@ enum QgaCommand {
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
+}
+
+#[derive(Subcommand)]
+enum CnpCommand {
+    List,
+    Get { name: String },
+    Apply {
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    Delete { name: String },
+}
+
+#[derive(Subcommand)]
+enum IdentityCommand {
+    List,
 }
 
 #[derive(Subcommand)]
@@ -392,6 +420,40 @@ async fn main() -> Result<()> {
                 );
             }
             PoolCommand::Delete { name } => m.delete_pool(&name).await?,
+        },
+        Command::Cnp { command } => match command {
+            CnpCommand::List => {
+                println!("{}", serde_json::to_string_pretty(&m.list_cnp().await?)?);
+            }
+            CnpCommand::Get { name } => {
+                println!("{}", serde_json::to_string_pretty(&m.get_cnp(&name).await?)?);
+            }
+            CnpCommand::Apply { spec } => {
+                let raw = std::fs::read_to_string(&spec)?;
+                let policy: fluxvm_network::cnp::CiliumNetworkPolicy = serde_json::from_str(&raw)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.apply_cnp(policy).await?)?
+                );
+            }
+            CnpCommand::Delete { name } => {
+                m.delete_cnp(&name).await?;
+                println!("{{\"deleted\":\"ok\"}}");
+            }
+        },
+        Command::Observe => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.network_observe().await?)?
+            );
+        }
+        Command::Identity { command } => match command {
+            IdentityCommand::List => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.list_identities().await?)?
+                );
+            }
         },
         Command::Group { command } => match command {
             GroupCommand::List => {

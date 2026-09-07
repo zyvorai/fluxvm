@@ -1,0 +1,26 @@
+{
+  "apiVersion": "cilium.io/v2",
+  "kind": "CiliumNetworkPolicy",
+  "metadata": {
+    "name": "named-ports-demo",
+    "namespace": "default"
+  },
+  "spec": {
+    "description": "Tutorial: named ports https + dns",
+    "endpointSelector": { "matchLabels": { "tier": "front" } },
+    "enableDefaultDeny": { "egress": true },
+    "egress": [
+      {
+        "toCIDR": ["0.0.0.0/0"],
+        "toPorts": [
+          {
+            "ports": [
+              { "port": "https", "protocol": "TCP" },
+              { "port": "dns", "protocol": "UDP" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

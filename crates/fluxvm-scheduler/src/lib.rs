@@ -462,9 +462,15 @@ impl VmManager {
         group: fluxvm_network::groups::SecurityGroup,
     ) -> Result<fluxvm_network::groups::SecurityGroup> {
         let cfg = self.cfg.clone();
-        tokio::task::spawn_blocking(move || fluxvm_network::groups::upsert_group(&cfg, group))
-            .await
-            .context("network group upsert panicked")?
+        let group = tokio::task::spawn_blocking({
+            let cfg = cfg.clone();
+            let group = group.clone();
+            move || fluxvm_network::groups::upsert_group(&cfg, group)
+        })
+        .await
+        .context("network group upsert panicked")??;
+        self.reconcile_group_members(&group.name).await?;
+        Ok(group)
     }
 
     pub async fn delete_network_group(&self, name: &str) -> Result<()> {
@@ -473,6 +479,128 @@ impl VmManager {
         tokio::task::spawn_blocking(move || fluxvm_network::groups::delete_group(&cfg, &name))
             .await
             .context("network group delete panicked")?
+    }
+
+    pub async fn list_cnp(&self) -> Result<Vec<fluxvm_network::cnp::CiliumNetworkPolicy>> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::cnp::list_cnp(&cfg))
+            .await
+            .context("cnp list panicked")?
+    }
+
+    pub async fn get_cnp(
+        &self,
+        name: &str,
+    ) -> Result<fluxvm_network::cnp::CiliumNetworkPolicy> {
+        let cfg = self.cfg.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || fluxvm_network::cnp::get_cnp(&cfg, &name))
+            .await
+            .context("cnp get panicked")?
+    }
+
+    pub async fn apply_cnp(
+        &self,
+        policy: fluxvm_network::cnp::CiliumNetworkPolicy,
+    ) -> Result<fluxvm_network::groups::SecurityGroup> {
+        let cfg = self.cfg.clone();
+        let group = tokio::task::spawn_blocking(move || fluxvm_network::cnp::apply_cnp(&cfg, policy))
+            .await
+            .context("cnp apply panicked")??;
+        self.reconcile_group_members(&group.name).await?;
+        Ok(group)
+    }
+
+    async fn reconcile_group_members(&self, group_name: &str) -> Result<()> {
+        let vms = self.list().await;
+        for vm in vms {
+            if vm.status != VmStatus::Running && vm.status != VmStatus::Paused {
+                continue;
+            }
+            let policy = match fluxvm_network::dataplane::load_policy(&self.cfg, vm.id)? {
+                Some(p) => p,
+                None => continue,
+            };
+            let groups = fluxvm_network::groups::resolve_groups(&self.cfg, &policy)?;
+            if !groups.iter().any(|g| g.name == group_name) {
+                continue;
+            }
+            let guest_cidr = vm.guest_ip.as_deref().map(|ip| format!("{ip}/32"));
+            let iface = fluxvm_network::dataplane_interface_name(
+                vm.id,
+                vm.netns.is_some(),
+                vm.tap_name.as_deref(),
+            );
+            let extra = if self.cfg.sandbox.egress_allow_domains.is_empty() {
+                vec![]
+            } else {
+                fluxvm_network::egress::resolve_allow_cidrs(&self.cfg.sandbox.egress_allow_domains)
+                    .await
+            };
+            fluxvm_network::dataplane::reconfigure_sandbox_policy(
+                &self.cfg,
+                vm.id,
+                iface.as_deref(),
+                guest_cidr.as_deref(),
+                &extra,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub async fn network_observe(&self) -> Result<serde_json::Value> {
+        let groups = self.list_network_groups().await?;
+        let cnps = self.list_cnp().await?;
+        let identities = self.list_identities().await?;
+        let vms = self.list().await;
+        let mut members = Vec::new();
+        for vm in vms {
+            if let Ok(Some(policy)) = fluxvm_network::dataplane::load_policy(&self.cfg, vm.id) {
+                members.push(serde_json::json!({
+                    "vm_id": vm.id,
+                    "name": vm.name,
+                    "status": format!("{:?}", vm.status),
+                    "labels": policy.labels,
+                    "groups": policy.groups,
+                    "identity": fluxvm_network::ebpf::identity_for(vm.id),
+                }));
+            }
+        }
+        Ok(serde_json::json!({
+            "identities": identities,
+            "groups": groups,
+            "policies": cnps,
+            "endpoints": members,
+        }))
+    }
+
+    pub async fn delete_cnp(&self, name: &str) -> Result<()> {
+        let cfg = self.cfg.clone();
+        let name = name.to_string();
+        tokio::task::spawn_blocking(move || fluxvm_network::cnp::delete_cnp(&cfg, &name))
+            .await
+            .context("cnp delete panicked")?
+    }
+
+    pub async fn list_identities(&self) -> Result<Vec<serde_json::Value>> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for id in fluxvm_network::identity::reserved_identities() {
+                out.push(serde_json::to_value(id)?);
+            }
+            for g in fluxvm_network::groups::list_groups(&cfg)? {
+                out.push(serde_json::json!({
+                    "id": g.identity,
+                    "name": g.name,
+                    "labels": g.labels,
+                    "reserved": false,
+                }));
+            }
+            Ok(out)
+        })
+        .await
+        .context("identity list panicked")?
     }
 
     pub async fn network_effective(

@@ -1,0 +1,29 @@
+{
+  "apiVersion": "cilium.io/v2",
+  "kind": "CiliumNetworkPolicy",
+  "metadata": {
+    "name": "audit-web",
+    "namespace": "default"
+  },
+  "spec": {
+    "description": "Tutorial: auditMode — log would-be drops, still forward",
+    "endpointSelector": { "matchLabels": { "app": "audit" } },
+    "enableDefaultDeny": { "egress": true },
+    "auditMode": true,
+    "egress": [
+      {
+        "toCIDR": ["10.0.0.0/8"],
+        "toPorts": [
+          {
+            "ports": [
+              { "port": "https", "protocol": "TCP" }
+            ]
+          }
+        ]
+      }
+    ],
+    "egressDeny": [
+      { "toCIDRSet": [{ "cidr": "10.66.0.0/16" }] }
+    ]
+  }
+}

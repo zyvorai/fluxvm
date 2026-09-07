@@ -1,0 +1,35 @@
+{
+  "apiVersion": "cilium.io/v2",
+  "kind": "CiliumNetworkPolicy",
+  "metadata": {
+    "name": "web-egress",
+    "namespace": "default",
+    "labels": { "app": "web" }
+  },
+  "spec": {
+    "description": "HTTPS/DNS egress for app=web VMs",
+    "endpointSelector": { "matchLabels": { "app": "web" } },
+    "enableDefaultDeny": { "egress": true, "ingress": false },
+    "auditMode": false,
+    "egress": [
+      {
+        "toCIDR": ["10.0.0.0/8"],
+        "toEntities": ["world", "cluster"],
+        "toFQDNs": [{ "matchName": "example.com" }],
+        "toPorts": [
+          {
+            "ports": [
+              { "port": "443", "protocol": "TCP" },
+              { "port": "80", "protocol": "TCP" },
+              { "port": "53", "protocol": "UDP" },
+              { "port": "8000-8003", "protocol": "TCP" }
+            ]
+          }
+        ]
+      }
+    ],
+    "egressDeny": [
+      { "toCIDRSet": [{ "cidr": "10.66.0.0/16", "except": [] }] }
+    ]
+  }
+}

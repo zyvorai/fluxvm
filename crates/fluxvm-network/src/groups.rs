@@ -250,9 +250,23 @@ pub fn merge_group_policy(
         if g.policy.allow_icmp {
             policy.allow_icmp = true;
         }
+        if g.policy.audit_mode {
+            policy.audit_mode = true;
+        }
+        policy
+            .allow_fqdns
+            .extend(g.policy.allow_fqdns.iter().cloned());
+        policy.entities.extend(g.policy.entities.iter().cloned());
         policy.max_egress_mbps = min_opt(policy.max_egress_mbps, g.policy.max_egress_mbps);
         policy.max_egress_pps = min_opt(policy.max_egress_pps, g.policy.max_egress_pps);
         policy.sample_rate = policy.sample_rate.max(g.policy.sample_rate);
+    }
+    for ent in policy.entities.clone() {
+        if let Some(name) = crate::identity::parse_entity(&ent) {
+            policy
+                .allow_cidrs
+                .extend(crate::identity::entity_cidrs(name));
+        }
     }
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
@@ -260,6 +274,11 @@ pub fn merge_group_policy(
     policy.deny_cidrs.dedup();
     policy.allow_ports.sort();
     policy.allow_ports.dedup();
+    policy.allow_fqdns.sort();
+    policy.allow_fqdns.dedup();
+    policy.entities.sort();
+    policy.entities.dedup();
+    policy.compiled_group_ids = membership.identities.clone();
     Ok((policy, membership.identities))
 }
 

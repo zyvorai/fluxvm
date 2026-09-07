@@ -116,3 +116,5 @@ sudo -E ./scripts/test-network-fabric.sh
 ```
 
 Example group: [examples/security-group-web.json](../examples/security-group-web.json).
+
+Hands-on Cilium-style walkthroughs: [tutorials/cilium/](tutorials/cilium/README.md).

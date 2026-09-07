@@ -29,7 +29,7 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 3;
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -612,6 +612,17 @@ fn configure_maps(
         .transpose()?
         .unwrap_or(0);
     let rate_packets = policy.max_egress_pps.map(u64::from).unwrap_or(0);
+    let packed_sample = policy.sample_rate
+        | if policy.audit_mode {
+            1u32 << 31
+        } else {
+            0
+        };
+
+    let gid_map = map_dir.join("fluxvm_gid");
+    if gid_map.exists() {
+        let _ = write_group_ids(&gid_map, ifindex, &policy.compiled_group_ids);
+    }
 
     update_iface_config(
         &id_map,
@@ -620,11 +631,23 @@ fn configure_maps(
         policy.default_allow,
         !policy.allow_cidrs.is_empty(),
         !policy.allow_ports.is_empty(),
-        policy.sample_rate,
+        packed_sample,
         policy.allow_icmp,
         rate_bytes,
         rate_packets,
     )
+}
+
+fn write_group_ids(map: &Path, ifindex: u32, ids: &[u32]) -> Result<()> {
+    let key = Vec::from(ifindex.to_ne_bytes());
+    let mut value = Vec::with_capacity(36);
+    let n = ids.len().min(8) as u32;
+    value.extend_from_slice(&n.to_ne_bytes());
+    for i in 0..8 {
+        let id = ids.get(i).copied().unwrap_or(0);
+        value.extend_from_slice(&id.to_ne_bytes());
+    }
+    bpftool_map_update(map, &key, &value)
 }
 
 fn update_iface_config(
