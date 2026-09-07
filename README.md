@@ -1650,7 +1650,8 @@ need `bridge` / `parent` etc. on the CR — see the CRD OpenAPI).
 
 `fluxvm-microvm` is the scheduled MicroVM path: kube-scheduler places a shadow Pod
 (capacity ticket); a node agent drives local `fluxvm serve`. QEMU does not run in a
-Pod. Full design: [docs/microvm.md](docs/microvm.md).
+Pod. Full design: [docs/microvm.md](docs/microvm.md). Tutorials:
+[docs/tutorials/microvm/](docs/tutorials/microvm/README.md).
 
 ```bash
 fluxvm-microvm --print-crd | kubectl apply -f -

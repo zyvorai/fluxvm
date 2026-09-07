@@ -99,6 +99,19 @@ few seconds. Deleting the CR should tear down the VM before the object is
 actually removed (finalizer-gated) — `kubectl delete dvm smoke-test` will
 appear to hang briefly for exactly that reason, not because it's stuck.
 
+## MicroVM (scheduled path)
+
+After this DaemonSet is healthy, deploy the MicroVM stack (shadow-Pod
+scheduler + node-agent) from [`microvm/`](microvm/):
+
+```bash
+kubectl apply -f microvm/
+```
+
+Guide: [docs/microvm.md](../../docs/microvm.md) ·
+tutorials: [docs/tutorials/microvm/](../../docs/tutorials/microvm/README.md) ·
+deploy notes: [microvm/README.md](microvm/README.md).
+
 ## Rebuilding the CRD manifest
 
 `crd.yaml` is generated, not hand-written:

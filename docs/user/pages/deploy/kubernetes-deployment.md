@@ -68,6 +68,20 @@ Then create a test `DisposableVm` targeting the labeled node and watch `phase` m
 the full manifest. Deleting the object is finalizer-gated: `kubectl delete` blocks until the real
 VM is torn down, so a brief pause there is expected, not a hang.
 
+## DisposableVm vs MicroVM
+
+| | **DisposableVm** (`fluxvm-kube`) | **MicroVM** (`fluxvm-microvm`) |
+|---|---|---|
+| API | `fluxvm.zyvor.io` | `microvm.fluxvm.zyvor.io` |
+| Placement | Explicit `spec.node` (optional placer) | kube-scheduler via shadow Pod |
+| Where the VMM runs | Host `fluxvm serve` | Host `fluxvm serve` (same DaemonSet) |
+| Extra kinds | — | `MicroVMJob`, `MicroVMPool`, `GuestImage` stub |
+
+Deploy MicroVM **after** this DaemonSet: `kubectl apply -f deploy/k8s/microvm/`.
+Full guide: [microvm.md](../../../microvm.md). Tutorials:
+[tutorials/microvm/](../../../tutorials/microvm/README.md). Optional
+`fluxvm-microvm controller --convert` projects each DisposableVm to a same-name MicroVM.
+
 ## Known limitations
 
 - **Networking**: only `networkMode: none`/`user` are wired through the CRD today (NAT/port-forward),
@@ -76,7 +90,8 @@ VM is torn down, so a brief pause there is expected, not a hang.
   with your cluster's CNI — not something to improvise per-cluster.
 - **No scheduler**: whatever creates `DisposableVm` objects — e.g. [Ragnarok](/docs/ragnarok-manual),
   which surfaces these as a parallel **FluxVM VMs** workload type alongside its KubeVirt VMs and
-  Kata containers — is responsible for picking a concrete, capable node.
+  Kata containers — is responsible for picking a concrete, capable node. For scheduler-driven
+  placement, use MicroVM instead (above).
 - **No image distribution**: images must be staged identically on every capable node by whatever
   process labels it.
 

@@ -13,6 +13,7 @@ Also read:
 - [production-dataplane.md](../../production-dataplane.md) — Network Fabric ops
 - [SECURITY.md](../../../SECURITY.md) · [CONTRIBUTING.md](../../../CONTRIBUTING.md)
 - Network policy series: [../network-policy/](../network-policy/README.md)
+- MicroVM (k8s scheduled guests): [../microvm/](../microvm/README.md) · [microvm.md](../../microvm.md)
 
 Validate locally:
 

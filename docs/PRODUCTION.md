@@ -53,6 +53,10 @@ images — not only the dataplane.
 - [ ] Privileged DaemonSet + hostNetwork as in `deploy/k8s/`
 - [ ] Host `nbd` module loaded if GuestKit customize runs on-node
 - [ ] Operator talks to an already-healthy fabricd/FluxVM API
+- [ ] Optional MicroVM stack after DaemonSet: `deploy/k8s/microvm/`
+      (`fluxvm-microvm` controller + node-agent; API
+      `microvm.fluxvm.zyvor.io`) — [microvm.md](microvm.md),
+      [tutorials/microvm/](tutorials/microvm/README.md)
 
 ## 6. Fleet (non-k8s)
 
