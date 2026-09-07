@@ -2,9 +2,8 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 #
-# In-tree KVM linux-loader smoke: load a real vmlinux/bzImage via
-# fluxvm-hypervisor (from_boot_config), confirm loader notes, then KVM_RUN
-# briefly and look for a Linux serial banner.
+# In-tree KVM boot smoke: linux-loader dry-run, then KVM_RUN through
+# virtio-blk root mount into userspace (init=/bin/sh).
 #
 # Usage (Linux/KVM host):
 #   sudo ./scripts/test-kvm-linux-boot-smoke.sh
@@ -16,7 +15,9 @@
 #   FLUXVM_HYPERVISOR  binary (default: target/release or PATH)
 #   KERNEL             ELF/bzImage path
 #   ROOTFS             optional virtio-blk image
-#   TIMEOUT_SECS       wall clock for KVM_RUN (default 25)
+#   TIMEOUT_SECS       wall clock for KVM_RUN (default 30)
+#   MEMORY_MIB         guest RAM (default 512)
+#   INIT               guest init path (default /bin/sh when ROOTFS set)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -50,7 +51,12 @@ pass() { PASS=$((PASS + 1)); echo "  [PASS] $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  [FAIL] $1" >&2; }
 section() { echo ""; echo "=== $1 ==="; }
 
-CMDLINE="console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
+INIT_ARG=""
+if [ -f "$ROOTFS" ]; then
+    INIT_ARG="init=${INIT:-/bin/sh}"
+fi
+
+CMDLINE="console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw ${INIT_ARG} \
 virtio_mmio.device=0x200@0xfeb00000:5 \
 virtio_mmio.device=0x200@0xfeb00200:6"
 
@@ -75,23 +81,28 @@ if echo "$DRY_OUT" | grep -qE 'raw dump path'; then
     fail "fell back to raw dump (loader did not accept kernel)"
 fi
 
-section "KVM_RUN for up to ${TIMEOUT_SECS}s (serial banner / root)"
+section "KVM_RUN for up to ${TIMEOUT_SECS}s (userspace)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 LOG="${TMP}/run.log"
 set +e
-FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" timeout --signal=KILL "$((TIMEOUT_SECS + 5))" \
+timeout --signal=KILL "$((TIMEOUT_SECS + 5))" \
   env FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" "$BIN" "${ARGS[@]}" >"$LOG" 2>&1
 RC=$?
 set -e
-# 124 = timeout, 137 = SIGKILL — both OK if we saw a banner first.
 tail -n 120 "$LOG" || true
-if grep -qE 'VFS: Mounted root|Run /sbin/init|Freeing unused kernel memory|\[ok\] guest reached root' "$LOG"; then
-    pass "guest reached root/init"
+
+if grep -qE "can't access tty|FLUXVM_USERSPACE|login:|\[ok\] guest reached userspace" "$LOG"; then
+    pass "guest reached userspace"
+elif grep -qE 'VFS: Mounted root|Freeing unused kernel memory|\[ok\] guest reached root' "$LOG"; then
+    pass "guest reached root mount"
+    fail "userspace marker missing (root mounted but init/shell not observed)"
 elif grep -qE 'Linux version|\[ok\] guest printed Linux' "$LOG"; then
     pass "serial/log shows Linux boot banner (or ok path)"
     if grep -qE 'Kernel panic|alloc_low_pages' "$LOG"; then
         fail "kernel panicked after banner (e820/memory)"
+    else
+        fail "stopped before root/userspace"
     fi
 elif grep -qE 'KVM_EXIT_FAIL_ENTRY|instantiate failed|neither bzImage' "$LOG"; then
     fail "KVM/loader hard failure"
@@ -102,5 +113,5 @@ fi
 section "Summary"
 echo "  pass: ${PASS}  fail: ${FAIL}"
 echo "  kernel: $KERNEL"
-[ -f "$ROOTFS" ] && echo "  rootfs: $ROOTFS" || echo "  rootfs: (none)"
+[ -f "$ROOTFS" ] && echo "  rootfs: $ROOTFS  init: ${INIT:-/bin/sh}" || echo "  rootfs: (none)"
 [ "$FAIL" -eq 0 ]

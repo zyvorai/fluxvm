@@ -309,9 +309,12 @@ impl VirtualMachine {
             }
             if serial_log.contains("NETWORK IS UP")
                 || serial_log.contains("NET TIMEOUT")
-                || serial_log.contains("VFS: Mounted root")
+                // Userspace reached (PID1 shell without ctty is a clear signal).
+                || serial_log.contains("can't access tty")
+                || serial_log.contains("FLUXVM_USERSPACE")
+                || serial_log.contains("login:")
                 || serial_log.contains("Run /sbin/init")
-                || serial_log.contains("Freeing unused kernel memory")
+                || serial_log.contains("Kernel panic")
             {
                 break;
             }
