@@ -1916,6 +1916,7 @@ mod tests {
             extra_args: vec![],
             agent: None,
             qga: None,
+            hyperv: false,
             storage: StorageBackend::Default,
             shared_folders: vec![],
             numa_node: None,

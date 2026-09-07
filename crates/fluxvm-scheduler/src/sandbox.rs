@@ -184,6 +184,7 @@ impl VmManager {
                 token: None,
             }),
             qga: None,
+            hyperv: false,
             storage: Default::default(),
             shared_folders: Vec::new(),
             numa_node: None,

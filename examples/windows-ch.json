@@ -1,0 +1,16 @@
+{
+  "name": "windows-ch",
+  "backend": "cloud-hypervisor",
+  "image": "/var/lib/fluxvm/images/windows-server.raw",
+  "vcpus": 4,
+  "memory_mib": 8192,
+  "disk_size_gib": 60,
+  "hyperv": true,
+  "firmware": "/usr/share/cloud-hypervisor/CLOUDHV.fd",
+  "network": {
+    "mode": "tap",
+    "bridge": "vmbr0"
+  },
+  "ttl_seconds": 7200,
+  "_comment": "CH Windows boot (Phase-1). QGA is not supported on CH — use QEMU + examples/windows-qga.json for guest-agent day-2. Image must be raw; install Windows via QEMU first if needed."
+}

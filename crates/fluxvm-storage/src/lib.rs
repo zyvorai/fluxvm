@@ -345,6 +345,7 @@ mod tests {
                 extra_args: vec![],
                 agent: None,
                 qga: None,
+            hyperv: false,
                 storage: Default::default(),
                 shared_folders: vec![],
                 numa_node: None,

@@ -30,7 +30,24 @@ Restart `fluxvm serve` between runs and compare `avg_create_ms`.
 
 | Engine        | avg create (ms) | Notes                          |
 |---------------|-----------------|--------------------------------|
-| firecracker   | ~TBD            | Lab measurement required       |
-| kvm           | ~TBD            | In-tree engine; lab only       |
+| firecracker   | ~TBD            | Lab: run bench, paste below    |
+| kvm           | ~TBD            | Lab only — not production density |
 
-Record your numbers here after running on real hardware.
+**How to fill:** on a KVM host with a bootable `/var/lib/fluxvm/images/base.raw`
+(or edit the script image path), restart `fluxvm serve` once with each engine:
+
+```bash
+# firecracker (default)
+FLUXVM_API=http://127.0.0.1:7788 BENCH_N=10 ./scripts/bench-sandbox.sh | tee /tmp/bench-fc.txt
+# then set fluxvm_engine = "kvm", restart serve
+FLUXVM_API=http://127.0.0.1:7788 BENCH_N=10 ./scripts/bench-sandbox.sh | tee /tmp/bench-kvm.txt
+```
+
+Paste `avg_create_ms` into the table. Do **not** claim density until Phase-2
+virtio-blk works — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+
+### Lab notes (YYYY-MM-DD)
+
+| Engine | avg_create_ms | host | notes |
+|--------|---------------|------|-------|
+| | | | |

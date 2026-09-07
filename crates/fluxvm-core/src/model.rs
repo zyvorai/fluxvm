@@ -268,6 +268,10 @@ pub struct CreateVmRequest {
     /// Enable QEMU guest-agent virtio-serial channel (QEMU backend only).
     #[serde(default)]
     pub qga: Option<QgaSpec>,
+    /// Cloud Hypervisor: pass `kvm_hyperv=on` on `--cpus` for Windows guests.
+    /// Required for most Windows boots on CH; ignored by other backends.
+    #[serde(default)]
+    pub hyperv: bool,
     #[serde(default)]
     pub storage: StorageBackend,
     #[serde(default)]

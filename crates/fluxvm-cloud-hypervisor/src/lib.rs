@@ -33,7 +33,11 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
         "--api-socket".into(),
         api.display().to_string(),
         "--cpus".into(),
-        format!("boot={}", req.vcpus),
+        if req.hyperv {
+            format!("boot={},kvm_hyperv=on", req.vcpus)
+        } else {
+            format!("boot={}", req.vcpus)
+        },
         "--memory".into(),
         format!("size={}M", req.memory_mib),
         "--disk".into(),

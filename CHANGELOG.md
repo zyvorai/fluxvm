@@ -6,6 +6,10 @@
 - **OIDC JWT validation** — `auth.oidc_issuer` + `auth.oidc_audience` enable
   discovery/JWKS bearer validation alongside `[[auth.tokens]]` (role/tenant claims).
 - **API TLS / mTLS** — optional `[tls]` cert/key; `tls.client_ca` requires client certs.
+- **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
+  `examples/windows-ch.json`; QGA remains QEMU-only ([ch-windows-qga.md](docs/ch-windows-qga.md)).
+- **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md) for Cilium CEP,
+  CH QGA Phase-2, and in-tree KVM phases.
 - **Project production baseline** — `SECURITY.md`, `CONTRIBUTING.md`,
   `Makefile`, whole-stack [docs/PRODUCTION.md](docs/PRODUCTION.md),
   `/readyz` (HTTP 503 when not ready), VM `tenant` + `GET /v1/vms?tenant=`,

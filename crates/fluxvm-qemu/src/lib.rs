@@ -480,6 +480,7 @@ mod tests {
             extra_args: vec![],
             agent: None,
             qga: None,
+            hyperv: false,
             storage: fluxvm_core::model::StorageBackend::Default,
             shared_folders: vec![],
             numa_node: None,

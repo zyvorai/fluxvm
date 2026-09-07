@@ -1,16 +1,40 @@
 # Cloud Hypervisor Windows + QGA
 
-**Status:** not GA. Windows guest customization and live QGA
-(`fluxvm qga …`, virtio-serial) are implemented for the **QEMU** backend
-only. See `examples/windows-qga.json`.
+## Phase status
 
-Cloud Hypervisor (`backend: cloud-hypervisor`) rejects `qga.enabled` at
-admission. CH Windows + a guest-control channel (virtio-serial/QGA or an
-equivalent agent) remains a follow-up; use QEMU for Windows day-2 today.
+| Capability | Status |
+|------------|--------|
+| CH Windows **boot** (UEFI + `hyperv: true`) | Phase-1 — supported |
+| Live QGA (`fluxvm qga …`) on CH | **Not supported** — QEMU only |
+| In-tree Hubble / Cilium-native CEP | Separate roadmap |
 
-## In-tree KVM engine
+## Boot Windows on Cloud Hypervisor
 
-`fluxvm_engine = "kvm"` is an opt-in lab path for `BackendKind::FluxVm`.
-It is **not** a production density story — Firecracker remains the default
-sandbox engine. Snapshots require `fluxvm_engine=firecracker`. Publish
-real numbers via `scripts/bench-sandbox.sh` before claiming density.
+1. Install / customize the guest as a **raw** disk (CH does not use qcow2 for this path). QEMU + GuestKit `windows{}` offline customize still applies.
+2. Place UEFI firmware (typically `CLOUDHV.fd`) where FluxVM can read it.
+3. Create with `backend: cloud-hypervisor`, `hyperv: true`, and `firmware` (or `cloud_hypervisor_firmware` in config):
+
+```bash
+fluxvm create --spec examples/windows-ch.json
+```
+
+`hyperv: true` passes `kvm_hyperv=on` on CH `--cpus` (required for most Windows guests).
+
+Networking must be `tap` or `macvtap` (no user-mode NAT on CH).
+
+Console: CH Windows uses serial (SAC); `console` is off. Use RDP once the guest has network.
+
+## QGA
+
+`qga.enabled` remains **QEMU-only**. Cloud Hypervisor has no named virtio-serial
+port (`org.qemu.guest_agent.0`) in FluxVM today. For PowerShell / firewall /
+`guest-ping`, use [`examples/windows-qga.json`](../examples/windows-qga.json).
+
+Phase-2 (months): CH virtio-serial (or a GuestKit Windows agent on another
+channel) before claiming `fluxvm qga` parity.
+
+## In-tree KVM density
+
+Unrelated to CH: `fluxvm_engine = "kvm"` is a lab prototype. Production density
+for the FluxVm sandbox track remains Firecracker. See [benchmarks](benchmarks/README.md)
+and [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
