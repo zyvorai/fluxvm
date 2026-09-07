@@ -32,6 +32,8 @@ enum GuestEngine {
     },
     Kvm {
         stop: Arc<AtomicBool>,
+        /// When true, the vCPU thread parks (no KVM_RUN) until cleared.
+        paused: Arc<AtomicBool>,
         thread: Option<std::thread::JoinHandle<()>>,
     },
 }
@@ -47,7 +49,7 @@ impl Drop for GuestHandle {
             GuestEngine::Firecracker { child, .. } => {
                 let _ = child.start_kill();
             }
-            GuestEngine::Kvm { stop, thread } => {
+            GuestEngine::Kvm { stop, thread, .. } => {
                 stop.store(true, Ordering::SeqCst);
                 if let Some(t) = thread.take() {
                     let _ = t.join();
@@ -61,14 +63,20 @@ impl GuestHandle {
     pub async fn pause(&self) -> Result<()> {
         match &self.engine {
             GuestEngine::Firecracker { api_sock, .. } => pause(api_sock).await,
-            GuestEngine::Kvm { .. } => Ok(()),
+            GuestEngine::Kvm { paused, .. } => {
+                paused.store(true, Ordering::SeqCst);
+                Ok(())
+            }
         }
     }
 
     pub async fn resume(&self) -> Result<()> {
         match &self.engine {
             GuestEngine::Firecracker { api_sock, .. } => resume(api_sock).await,
-            GuestEngine::Kvm { .. } => Ok(()),
+            GuestEngine::Kvm { paused, .. } => {
+                paused.store(false, Ordering::SeqCst);
+                Ok(())
+            }
         }
     }
 
@@ -78,7 +86,7 @@ impl GuestHandle {
                 shutdown(api_sock).await.ok();
                 let _ = child.kill().await;
             }
-            GuestEngine::Kvm { stop, thread } => {
+            GuestEngine::Kvm { stop, thread, .. } => {
                 stop.store(true, Ordering::SeqCst);
                 if let Some(t) = thread.take() {
                     let _ = t.join();
@@ -104,7 +112,7 @@ impl GuestHandle {
             GuestEngine::Firecracker { child, .. } => {
                 let _ = child.start_kill();
             }
-            GuestEngine::Kvm { stop, thread } => {
+            GuestEngine::Kvm { stop, thread, .. } => {
                 stop.store(true, Ordering::SeqCst);
                 if let Some(t) = thread.take() {
                     let _ = t.join();
@@ -180,12 +188,14 @@ pub async fn start_kvm(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle
     fs::create_dir_all(workspace)?;
     let vm_cfg = boot_to_vm_config(cfg)?;
     let stop = Arc::new(AtomicBool::new(false));
+    let paused = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
+    let paused_thread = Arc::clone(&paused);
     let ws = workspace.to_path_buf();
     let thread = std::thread::spawn(move || {
         match VirtualMachine::from_boot_config(vm_cfg) {
             Ok(vm) => {
-                if let Err(e) = vm.run_until(stop_thread) {
+                if let Err(e) = vm.run_until(stop_thread, paused_thread) {
                     eprintln!("[kvm-engine] run error: {e}");
                 }
             }
@@ -198,6 +208,7 @@ pub async fn start_kvm(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle
         workspace: workspace.to_path_buf(),
         engine: GuestEngine::Kvm {
             stop,
+            paused,
             thread: Some(thread),
         },
     })

@@ -25,10 +25,14 @@
   for interactive UART; smoke injects `/userspace-probe.sh` onto a temp rootfs.
 - **In-tree KVM serial stdin** — host stdin → UART RX; `FLUXVM_SERIAL_INJECT`
   one-shot after userspace; smoke checks `FLUXVM_STDIN_OK:ping`.
+- **In-tree KVM pause/resume** — park vCPU (no `KVM_RUN` while paused);
+  `scripts/test-kvm-pause-smoke.sh`. Memory snapshots remain Firecracker-only.
+- **Sandbox bench image paths** — `scripts/bench-sandbox.sh` honors `IMAGE` /
+  `FLUXVM_BENCH_IMAGE` with lab fallbacks (`bionic-fabric-rootfs.ext4`, etc.).
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
   `examples/windows-ch.json`; QGA remains QEMU-only ([ch-windows-qga.md](docs/ch-windows-qga.md)).
-- **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md) for Cilium CEP,
-  CH QGA Phase-2, and in-tree KVM phases.
+- **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md): KVM boot +
+  pause Done; Cilium CEP / CH QGA Phase-2–3 stay Not started / Blocked.
 - **Project production baseline** — `SECURITY.md`, `CONTRIBUTING.md`,
   `Makefile`, whole-stack [docs/PRODUCTION.md](docs/PRODUCTION.md),
   `/readyz` (HTTP 503 when not ready), VM `tenant` + `GET /v1/vms?tenant=`,

@@ -194,10 +194,13 @@ impl VirtualMachine {
     }
 
     pub fn run(self) -> Result<String> {
-        self.run_until(Arc::new(AtomicBool::new(false)))
+        self.run_until(
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
     }
 
-    pub fn run_until(mut self, stop: Arc<AtomicBool>) -> Result<String> {
+    pub fn run_until(mut self, stop: Arc<AtomicBool>, paused: Arc<AtomicBool>) -> Result<String> {
         let cr3 = 0x8000u64;
         let mut kvm = KvmVm::create(&self.mem)?;
         let rsi = self.boot_params_gpa.unwrap_or(0);
@@ -220,6 +223,15 @@ impl VirtualMachine {
         make_stdin_nonblocking();
 
         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+            while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(2));
+                if Instant::now() >= deadline {
+                    break;
+                }
+            }
+            if stop.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                break;
+            }
             // Host → guest console: stdin bytes and optional one-shot inject.
             let mut fed = drain_stdin_to_serial(&this.serial);
             if !serial_injected {

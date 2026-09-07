@@ -4,9 +4,9 @@
 
 | Capability | Status |
 |------------|--------|
-| CH Windows **boot** (UEFI + `hyperv: true`) | Phase-1 — supported |
-| Live QGA (`fluxvm qga …`) on CH | **Not supported** — QEMU only |
-| In-tree Hubble / Cilium-native CEP | Separate roadmap |
+| CH Windows **boot** (UEFI + `hyperv: true`) | **Done** (Phase-1) |
+| Live QGA (`fluxvm qga …`) on CH | **Blocked** — QEMU only until CH day-2 channel |
+| In-tree Hubble / Cilium-native CEP | **Not started** — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md) |
 
 ## Boot Windows on Cloud Hypervisor
 
