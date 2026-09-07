@@ -77,10 +77,14 @@ reaper_interval_secs = 5
 # REST API bearer-token auth/RBAC. Absent or empty -> auth is off on
 # loopback only. Non-loopback listen with empty tokens fails at serve-time.
 # Set auth.require = true to always require tokens.
+# Unauthenticated probes: GET /healthz (liveness), GET /readyz (readiness).
 # [auth]
 # require = false
 # max_vms_per_token = 32
 # max_memory_mib_per_token = 65536
+# Reserved for a future OIDC exchange (warn-only today; bearer tokens are GA):
+# oidc_issuer = "https://login.example.com/"
+# oidc_audience = "fluxvm"
 # [[auth.tokens]]
 # token = "REPLACE_ME_ADMIN_TOKEN"
 # role = "admin"

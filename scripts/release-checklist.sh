@@ -20,6 +20,8 @@ need CONTRIBUTING.md
 need Makefile
 need docs/PRODUCTION.md
 need docs/production-dataplane.md
+need docs/tutorials/production/README.md
+need examples/create-vm-prod.json
 need configs/network-fabric-prod.toml
 need LICENSE
 need NOTICE

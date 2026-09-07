@@ -11,6 +11,9 @@ FluxVM is a **host-local disposable VM control plane**. It is not a finished
 multi-tenant public cloud. Before exposing it off-loopback:
 
 1. Set `auth.require = true` and populate `[[auth.tokens]]`.
+   Optional per-token `tenant` is inherited on create when the body omits it;
+   filter with `GET /v1/vms?tenant=`. Probes `GET /healthz` and `GET /readyz`
+   stay auth-exempt (liveness vs readiness).
 2. Bind loopback or put TLS in front (nginx/Caddy/Fabric).
 3. Keep `allow_extra_args = false`.
 4. Restrict `allowed_network_modes`, `allowed_image_dirs`, `allowed_backends`.
@@ -18,6 +21,8 @@ multi-tenant public cloud. Before exposing it off-loopback:
    when VMs have a host-visible edge.
 6. Use Firecracker jailer + cgroup v2 limits for untrusted guests.
 7. Sign catalog images (Ed25519 / optional cosign).
+8. Walk [docs/PRODUCTION.md](docs/PRODUCTION.md) and run
+   `./scripts/release-checklist.sh` before calling a host production-ready.
 
 ## Report a vulnerability
 

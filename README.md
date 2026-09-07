@@ -85,6 +85,7 @@ fluxvm delete <id>              # or wait for ttl_seconds
 | L2 macvtap | `"network": {"mode":"macvtap","parent":"eth0","mac":"06:…"}` | Your L2 / static via cloud-init |
 
 Full examples: [`examples/qemu.json`](examples/qemu.json) (user-mode lab),
+[`examples/create-vm-prod.json`](examples/create-vm-prod.json) (tenant + tap/netns),
 [`examples/guestkit-handoff.json`](examples/guestkit-handoff.json) (post-GuestKit
 netns + known IP), [`examples/macvtap.json`](examples/macvtap.json).
 Networking tests: `sudo ./scripts/test-networking.sh --image /path/to/disk.qcow2`.

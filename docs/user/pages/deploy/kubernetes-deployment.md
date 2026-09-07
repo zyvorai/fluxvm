@@ -58,6 +58,9 @@ not hand-maintained — regenerate it whenever the CRD's Rust definition changes
 ```bash
 kubectl -n fluxvm-system get pods -o wide
 kubectl -n fluxvm-system logs ds/fluxvm-kube -c fluxvm-kube --follow
+# On the node (or via port-forward to the fluxvm container):
+# liveness  GET /healthz · readiness GET /readyz  (see deploy/k8s/README.md Probes)
+curl -sf http://127.0.0.1:7788/readyz | jq .
 ```
 
 Then create a test `DisposableVm` targeting the labeled node and watch `phase` move from

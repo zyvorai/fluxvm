@@ -38,6 +38,18 @@ Before labeling a node `ragnarok.io/fluxvm-capable=true`:
    [docs/production-dataplane.md](../../docs/production-dataplane.md), and
    [docs/ebpf-cilium.md](../../docs/ebpf-cilium.md).
 
+## Probes
+
+The `fluxvm` container uses:
+
+| Probe | Path | Meaning |
+|-------|------|---------|
+| Liveness | `GET /healthz` | Process up (auth-exempt) |
+| Readiness | `GET /readyz` | State dir + dataplane when `required=true` (auth-exempt) |
+
+`/readyz` may return `"ok": false` until BPF/bpffs (or Cilium sock) is healthy —
+that is intentional fail-closed readiness, not a crash loop.
+
 ## Deploy order
 
 ```bash

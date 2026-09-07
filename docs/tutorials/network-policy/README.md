@@ -64,7 +64,9 @@ fx list
 
 | Task | Command |
 |------|---------|
-| API health / VM list | `curl -s localhost:7788/v1/vms` |
+| Liveness | `curl -sf localhost:7788/healthz` |
+| Readiness | `curl -sf localhost:7788/readyz` |
+| API / VM list | `curl -s localhost:7788/v1/vms` |
 | Per-VM dataplane status | `GET …/v1/vms/{id}/network/status` |
 | List identities | `fluxvm identity list` |
 | Apply / list CNP | `fluxvm cnp apply\|list\|get\|delete` |

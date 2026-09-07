@@ -18,6 +18,8 @@ Ensure `[sandbox.dataplane] mode = "ebpf"` in `/etc/fluxvm.toml`, then:
 
 ```bash
 sudo systemctl restart fluxvm
+curl -sf http://127.0.0.1:7788/healthz >/dev/null && echo LIVENESS_OK
+curl -sf http://127.0.0.1:7788/readyz | python3 -c 'import json,sys; assert json.load(sys.stdin).get("ok") is True; print("READYZ_OK")'
 curl -sf http://127.0.0.1:7788/v1/vms >/dev/null && echo API_OK
 ```
 
