@@ -148,7 +148,7 @@ pub struct HubbleFlow {
     pub hops: Option<Vec<crate::packetflow::PacketHop>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct HubbleEndpoint {
     pub identity: u32,
     pub labels: Vec<String>,
