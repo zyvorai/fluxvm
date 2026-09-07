@@ -93,6 +93,9 @@ pub const KVM_GET_REGS: c_ulong = 0x8090_ae81;
 pub const KVM_SET_REGS: c_ulong = 0x4090_ae82;
 pub const KVM_GET_SREGS: c_ulong = 0x8138_ae83;
 pub const KVM_SET_SREGS: c_ulong = 0x4138_ae84;
+/// `sizeof(struct kvm_cpuid2)` header only (8); buffer must hold `nent` entries.
+pub const KVM_GET_SUPPORTED_CPUID: c_ulong = 0xc008_ae05;
+pub const KVM_SET_CPUID2: c_ulong = 0x4008_ae90;
 
 pub const KVM_EXIT_IO: u32 = 2;
 pub const KVM_EXIT_HLT: u32 = 5;

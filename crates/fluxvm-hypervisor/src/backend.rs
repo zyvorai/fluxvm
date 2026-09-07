@@ -48,7 +48,7 @@ impl VmBackend for FluxVmBackend {
             vcpus: req.vcpus,
             kernel_args: req.kernel_args.clone().or_else(|| {
                 Some(
-                    "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw \
+                    "console=ttyS0 earlyprintk=serial,ttyS0,115200 reboot=k panic=1 pci=off root=/dev/vda rw \
                      virtio_mmio.device=0x200@0xfeb00000:5 \
                      virtio_mmio.device=0x200@0xfeb00200:6"
                         .into(),

@@ -13,6 +13,9 @@
 - **In-tree KVM linux-loader** — bzImage/ELF load via `linux-loader`, zero-page
   `boot_params` (cmdline/initrd/e820), RSI set for 64-bit boot protocol;
   raw-dump fallback if parse fails.
+- **In-tree KVM CPUID + boot smoke** — `KVM_SET_CPUID2` so Linux can run;
+  `--kernel`/`--disk` use `from_boot_config`; 
+  `scripts/test-kvm-linux-boot-smoke.sh` checks for `Linux version` on serial.
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
   `examples/windows-ch.json`; QGA remains QEMU-only ([ch-windows-qga.md](docs/ch-windows-qga.md)).
 - **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md) for Cilium CEP,

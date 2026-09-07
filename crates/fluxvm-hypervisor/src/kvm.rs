@@ -148,14 +148,63 @@ impl KvmVm {
             if run as usize == ffi::MAP_FAILED {
                 return Err(FluxError::Hypervisor("mmap kvm_run".into()));
             }
-            Ok(Self {
+            let mut this = Self {
                 kvm_fd,
                 vm_fd,
                 vcpu_fd,
                 run: run as *mut u8,
                 run_size: mmap_size as usize,
-            })
+            };
+            this.setup_cpuid()?;
+            Ok(this)
         }
+    }
+
+    /// Expose host-supported CPUID leaves to the guest. Without this, Linux
+    /// hits #UD on the first `cpuid` (empty IDT → triple fault → SHUTDOWN).
+    fn setup_cpuid(&mut self) -> Result<()> {
+        const MAX: usize = 256;
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct Entry {
+            function: u32,
+            index: u32,
+            flags: u32,
+            eax: u32,
+            ebx: u32,
+            ecx: u32,
+            edx: u32,
+            padding: [u32; 3],
+        }
+        #[repr(C)]
+        struct Header {
+            nent: u32,
+            padding: u32,
+        }
+        let entry_size = std::mem::size_of::<Entry>();
+        let mut buf = vec![0u8; std::mem::size_of::<Header>() + MAX * entry_size];
+        unsafe {
+            let hdr = buf.as_mut_ptr() as *mut Header;
+            (*hdr).nent = MAX as u32;
+            if ffi::flux_ioctl(
+                self.kvm_fd,
+                ffi::KVM_GET_SUPPORTED_CPUID,
+                buf.as_mut_ptr() as *mut c_void,
+            ) < 0
+            {
+                return Err(FluxError::Hypervisor("KVM_GET_SUPPORTED_CPUID".into()));
+            }
+            if ffi::flux_ioctl(
+                self.vcpu_fd,
+                ffi::KVM_SET_CPUID2,
+                buf.as_mut_ptr() as *mut c_void,
+            ) < 0
+            {
+                return Err(FluxError::Hypervisor("KVM_SET_CPUID2".into()));
+            }
+            eprintln!("[kvm] CPUID leaves={}", (*hdr).nent);
+        }
+        Ok(())
     }
 
     pub fn setup_long_mode(

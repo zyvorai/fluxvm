@@ -83,7 +83,12 @@ async fn real_main() -> anyhow::Result<()> {
         return Ok(());
     }
     let dry = cfg.dry_run;
-    let vm = VirtualMachine::instantiate(cfg)?;
+    let has_boot_image = cfg.kernel.is_some() || cfg.initrd.is_some() || cfg.disk.is_some();
+    let vm = if has_boot_image {
+        VirtualMachine::from_boot_config(cfg)?
+    } else {
+        VirtualMachine::instantiate(cfg)?
+    };
     print!("{}", vm.dump());
     if dry {
         return Ok(());
@@ -91,6 +96,9 @@ async fn real_main() -> anyhow::Result<()> {
     let log = vm.run()?;
     if log.contains("NETWORK IS UP") {
         eprintln!("[ok] guest reported NETWORK IS UP");
+        Ok(())
+    } else if log.contains("Linux version") {
+        eprintln!("[ok] guest printed Linux banner (linux-loader path)");
         Ok(())
     } else if log.contains("FluxVM guest boot") || log.contains("guest boot") {
         eprintln!("[warn] guest booted but network handshake incomplete:\n{log}");

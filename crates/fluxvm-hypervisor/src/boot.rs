@@ -156,6 +156,13 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     let mut params = boot_params::default();
     if let Some(hdr) = loader_result.setup_header {
         params.hdr = hdr;
+    } else {
+        // ELF path: synthesize a minimal setup_header so the kernel recognizes
+        // the zero page (HdrS / boot_flag).
+        params.hdr.boot_flag = 0xaa55;
+        params.hdr.header = 0x5372_6448; // "HdrS"
+        params.hdr.version = 0x20c;
+        params.hdr.kernel_alignment = 0x0100_0000;
     }
     params.hdr.type_of_loader = 0xff;
     params.hdr.cmd_line_ptr = CMDLINE_GPA as u32;

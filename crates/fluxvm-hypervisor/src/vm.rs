@@ -281,7 +281,10 @@ impl VirtualMachine {
                     }
                 }
             }
-            if serial_log.contains("NETWORK IS UP") || serial_log.contains("NET TIMEOUT") {
+            if serial_log.contains("NETWORK IS UP")
+                || serial_log.contains("NET TIMEOUT")
+                || serial_log.contains("Linux version")
+            {
                 break;
             }
         }
