@@ -88,6 +88,9 @@ pub const KVM_GET_VCPU_MMAP_SIZE: c_ulong = 0xae04;
 pub const KVM_CREATE_VCPU: c_ulong = 0xae41;
 pub const KVM_SET_USER_MEMORY_REGION: c_ulong = 0x4020_ae46;
 pub const KVM_CREATE_IRQCHIP: c_ulong = 0xae60;
+pub const KVM_IRQ_LINE: c_ulong = 0x4008_ae61;
+/// `sizeof(struct kvm_pit_config)` == 64
+pub const KVM_CREATE_PIT2: c_ulong = 0x4040_ae77;
 pub const KVM_RUN: c_ulong = 0xae80;
 pub const KVM_GET_REGS: c_ulong = 0x8090_ae81;
 pub const KVM_SET_REGS: c_ulong = 0x4090_ae82;

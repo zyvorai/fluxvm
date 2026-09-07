@@ -4,6 +4,7 @@
 use crate::boot;
 use crate::bus::Bus;
 use crate::config::VmConfig;
+use crate::devices::cmos::CmosRtc;
 use crate::devices::serial::Serial16550;
 use crate::devices::virtio_blk::{self, BlockBackend};
 use crate::devices::virtio_mmio::{self, VirtioMmio};
@@ -56,6 +57,7 @@ impl VirtualMachine {
 
         let mut bus = Bus::new();
         bus.add_pio(Arc::new(Serial16550::com1()));
+        bus.add_pio(Arc::new(CmosRtc::new()));
 
         let mac = VirtioNetConfig::parse_mac(&cfg.mac).unwrap_or([0x02, 0, 0, 0, 0, 2]);
         let net = Arc::new(VirtioMmio::net(MMIO_WINDOW, mac));
@@ -96,9 +98,19 @@ impl VirtualMachine {
         let _cr3 = boot::build_identity_page_tables(&mut mem)?;
         let boot_info = boot::prepare(&mut mem, &cfg)?;
         let mut notes = boot_info.notes;
+        if let Err(e) = crate::mptable::write_mptable(&mut mem, cfg.cpus) {
+            notes.push(format!("mptable write failed: {e}"));
+        } else {
+            notes.push(format!(
+                "MP table at GPA {:#x} (cpus={})",
+                crate::mptable::MPFLOAT_GPA,
+                cfg.cpus
+            ));
+        }
 
         let mut bus = Bus::new();
         bus.add_pio(Arc::new(Serial16550::com1()));
+        bus.add_pio(Arc::new(CmosRtc::new()));
 
         let mac = VirtioNetConfig::parse_mac(&cfg.mac).unwrap_or([0x02, 0, 0, 0, 0, 2]);
         let net = Arc::new(VirtioMmio::net(MMIO_WINDOW, mac));
@@ -190,7 +202,11 @@ impl VirtualMachine {
         );
 
         let mut serial_log = String::new();
-        let deadline = Instant::now() + Duration::from_secs(3600);
+        let run_secs: u64 = std::env::var("FLUXVM_KVM_RUN_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3600);
+        let deadline = Instant::now() + Duration::from_secs(run_secs);
         let mut exits = 0u64;
         let mut this = self;
 
@@ -236,7 +252,12 @@ impl VirtualMachine {
                                 this.tap.as_ref(),
                                 q,
                             ) {
-                                Ok(n) => eprintln!("[net] processed q={q} frames={n}"),
+                                Ok(n) => {
+                                    eprintln!("[net] processed q={q} frames={n}");
+                                    drop(st);
+                                    net.raise_vring_interrupt();
+                                    let _ = kvm.pulse_irq(net.irq());
+                                }
                                 Err(e) => eprintln!("[net] notify err {e}"),
                             }
                         }
@@ -250,7 +271,12 @@ impl VirtualMachine {
                                 backend.as_ref(),
                                 q,
                             ) {
-                                Ok(n) => eprintln!("[blk] processed q={q} reqs={n}"),
+                                Ok(n) => {
+                                    eprintln!("[blk] processed q={q} reqs={n}");
+                                    drop(st);
+                                    blk.raise_vring_interrupt();
+                                    let _ = kvm.pulse_irq(blk.irq());
+                                }
                                 Err(e) => eprintln!("[blk] notify err {e}"),
                             }
                         }
@@ -283,7 +309,9 @@ impl VirtualMachine {
             }
             if serial_log.contains("NETWORK IS UP")
                 || serial_log.contains("NET TIMEOUT")
-                || serial_log.contains("Linux version")
+                || serial_log.contains("VFS: Mounted root")
+                || serial_log.contains("Run /sbin/init")
+                || serial_log.contains("Freeing unused kernel memory")
             {
                 break;
             }

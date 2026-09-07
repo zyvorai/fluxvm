@@ -19,6 +19,7 @@ pub mod guest;
 pub mod hypervisor;
 pub mod kvm;
 pub mod memory;
+pub mod mptable;
 pub mod net;
 pub mod seccomp;
 pub mod snapshot;

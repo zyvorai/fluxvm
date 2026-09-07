@@ -13,6 +13,9 @@ pub const VIRTIO_ID_BLOCK: u32 = 2;
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 pub const VIRTIO_BLK_F_RO: u64 = 1 << 5;
 
+pub const VIRTIO_MMIO_INT_VRING: u32 = 1 << 0;
+pub const VIRTIO_MMIO_INT_CONFIG: u32 = 1 << 1;
+
 #[derive(Clone, Debug, Default)]
 pub struct QueueState {
     pub num: u32,
@@ -35,6 +38,9 @@ pub struct VirtioState {
     pub queues: [QueueState; 2],
     pub sel: u32,
     pub notify: Option<u32>,
+    pub interrupt_status: u32,
+    /// GSI advertised via `virtio_mmio.device=…:irq` cmdline.
+    pub irq: u32,
 }
 
 impl Default for VirtioState {
@@ -49,6 +55,8 @@ impl Default for VirtioState {
             queues: [QueueState::default(), QueueState::default()],
             sel: 0,
             notify: None,
+            interrupt_status: 0,
+            irq: 5,
         }
     }
 }
@@ -65,6 +73,7 @@ impl VirtioMmio {
     pub fn net(base: u64, mac: [u8; 6]) -> Self {
         let mut st = VirtioState::default();
         st.mac = mac;
+        st.irq = 5;
         Self {
             base,
             size: 0x200,
@@ -83,6 +92,7 @@ impl VirtioMmio {
         }
         st.capacity_sectors = capacity_sectors;
         st.mac = [0; 6];
+        st.irq = 6;
         Self {
             base,
             size: 0x200,
@@ -90,6 +100,15 @@ impl VirtioMmio {
             dev_feat_sel: AtomicU32::new(0),
             drv_feat_sel: AtomicU32::new(0),
         }
+    }
+
+    pub fn irq(&self) -> u32 {
+        self.state.lock().unwrap().irq
+    }
+
+    pub fn raise_vring_interrupt(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.interrupt_status |= VIRTIO_MMIO_INT_VRING;
     }
 
     fn rel(&self, addr: u64) -> u64 {
@@ -143,6 +162,9 @@ impl MmioDevice for VirtioMmio {
             0x038 => Self::q(&mut st).num = val,
             0x044 => Self::q(&mut st).ready = val,
             0x050 => st.notify = Some(val),
+            0x064 => {
+                st.interrupt_status &= !val;
+            }
             0x070 => st.status = val,
             0x080 => {
                 let q = Self::q(&mut st);
@@ -210,7 +232,7 @@ impl MmioDevice for VirtioMmio {
             }
             0x034 => 256,
             0x044 => st.queues[st.sel.min(1) as usize].ready,
-            0x060 => 0,
+            0x060 => st.interrupt_status,
             0x070 => st.status,
             _ => 0,
         };

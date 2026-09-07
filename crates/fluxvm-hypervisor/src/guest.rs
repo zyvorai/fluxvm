@@ -222,7 +222,7 @@ fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
             .kernel_args
             .clone()
             .unwrap_or_else(|| {
-                "console=ttyS0 earlyprintk=serial,ttyS0,115200 reboot=k panic=1 pci=off root=/dev/vda rw \
+        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
                  virtio_mmio.device=0x200@0xfeb00000:5 \
                  virtio_mmio.device=0x200@0xfeb00200:6"
                     .into()

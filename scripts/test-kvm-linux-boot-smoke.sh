@@ -24,7 +24,8 @@ PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 KERNEL="${KERNEL:-/var/lib/fluxvm/kernels/vmlinux}"
 ROOTFS="${ROOTFS:-/var/lib/fluxvm/images/bionic-fabric-rootfs.ext4}"
-TIMEOUT_SECS="${TIMEOUT_SECS:-25}"
+TIMEOUT_SECS="${TIMEOUT_SECS:-30}"
+MEMORY_MIB="${MEMORY_MIB:-512}"
 
 [ "$(uname -s)" = "Linux" ] || { echo "requires Linux/KVM" >&2; exit 1; }
 [ -e /dev/kvm ] || { echo "/dev/kvm missing" >&2; exit 1; }
@@ -49,11 +50,11 @@ pass() { PASS=$((PASS + 1)); echo "  [PASS] $1"; }
 fail() { FAIL=$((FAIL + 1)); echo "  [FAIL] $1" >&2; }
 section() { echo ""; echo "=== $1 ==="; }
 
-CMDLINE="console=ttyS0 earlyprintk=serial,ttyS0,115200 reboot=k panic=1 pci=off root=/dev/vda rw \
+CMDLINE="console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
 virtio_mmio.device=0x200@0xfeb00000:5 \
 virtio_mmio.device=0x200@0xfeb00200:6"
 
-ARGS=(--guest linux --memory-mib 256 --cpus 1 --kernel "$KERNEL" --cmdline "$CMDLINE")
+ARGS=(--guest linux --memory-mib "$MEMORY_MIB" --cpus 1 --kernel "$KERNEL" --cmdline "$CMDLINE")
 if [ -f "$ROOTFS" ]; then
     ARGS+=(--disk "$ROOTFS")
 fi
@@ -74,22 +75,27 @@ if echo "$DRY_OUT" | grep -qE 'raw dump path'; then
     fail "fell back to raw dump (loader did not accept kernel)"
 fi
 
-section "KVM_RUN for up to ${TIMEOUT_SECS}s (serial banner)"
+section "KVM_RUN for up to ${TIMEOUT_SECS}s (serial banner / root)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 LOG="${TMP}/run.log"
 set +e
-timeout --signal=KILL "${TIMEOUT_SECS}" "$BIN" "${ARGS[@]}" >"$LOG" 2>&1
+FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" timeout --signal=KILL "$((TIMEOUT_SECS + 5))" \
+  env FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" "$BIN" "${ARGS[@]}" >"$LOG" 2>&1
 RC=$?
 set -e
 # 124 = timeout, 137 = SIGKILL — both OK if we saw a banner first.
-tail -n 80 "$LOG" || true
-if grep -qE 'Linux version|linux-loader path|\[ok\] guest printed Linux' "$LOG"; then
+tail -n 120 "$LOG" || true
+if grep -qE 'VFS: Mounted root|Run /sbin/init|Freeing unused kernel memory|\[ok\] guest reached root' "$LOG"; then
+    pass "guest reached root/init"
+elif grep -qE 'Linux version|\[ok\] guest printed Linux' "$LOG"; then
     pass "serial/log shows Linux boot banner (or ok path)"
+    if grep -qE 'Kernel panic|alloc_low_pages' "$LOG"; then
+        fail "kernel panicked after banner (e820/memory)"
+    fi
 elif grep -qE 'KVM_EXIT_FAIL_ENTRY|instantiate failed|neither bzImage' "$LOG"; then
     fail "KVM/loader hard failure"
 else
-    # Soft fail: loader worked in dry-run but guest may lack earlyprintk/virtio yet.
     fail "no Linux banner within ${TIMEOUT_SECS}s (loader dry-run OK — guest may need more devices)"
 fi
 

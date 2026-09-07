@@ -91,8 +91,6 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     use std::fs::File;
     use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
 
-    const E820_RAM: u32 = 1;
-
     let path = cfg
         .kernel
         .as_ref()
@@ -171,10 +169,7 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
         params.hdr.ramdisk_image = memory::INITRD_ADDR as u32;
         params.hdr.ramdisk_size = initrd_len;
     }
-    params.e820_entries = 1;
-    params.e820_table[0].addr = 0;
-    params.e820_table[0].size = mem.len() as u64;
-    params.e820_table[0].r#type = E820_RAM;
+    fill_e820(&mut params, mem.len() as u64);
 
     let zero_page = GuestAddress(memory::BOOT_PARAMS_ADDR);
     let boot_cfg = BootParams::new::<boot_params>(&params, zero_page);
@@ -228,6 +223,30 @@ fn copy_mmap_to_guest(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn fill_e820(params: &mut linux_loader::loader::bootparam::boot_params, mem_size: u64) {
+    // Firecracker-style layout: low conventional RAM + high memory from 1 MiB.
+    // A single 0..mem_size RAM entry makes some kernels try GB direct-map pages
+    // and exhaust early BRK (`alloc_low_pages`).
+    const E820_RAM: u32 = 1;
+    const LOW_RAM: u64 = 0x0009_fc00;
+    const HIMEM: u64 = 0x0010_0000;
+    params.e820_entries = 0;
+    if mem_size > 0 {
+        params.e820_table[0].addr = 0;
+        params.e820_table[0].size = LOW_RAM.min(mem_size);
+        params.e820_table[0].r#type = E820_RAM;
+        params.e820_entries = 1;
+    }
+    if mem_size > HIMEM {
+        let i = params.e820_entries as usize;
+        params.e820_table[i].addr = HIMEM;
+        params.e820_table[i].size = mem_size - HIMEM;
+        params.e820_table[i].r#type = E820_RAM;
+        params.e820_entries += 1;
+    }
+}
+
 fn write_linux_cmdline(mem: &mut GuestMemory, cmdline: &str) -> Result<()> {
     let mut bytes = cmdline.as_bytes().to_vec();
     bytes.push(0);
@@ -244,10 +263,18 @@ fn write_minimal_boot_params(mem: &mut GuestMemory, cfg: &VmConfig, initrd_len: 
         page[0x218..0x21c].copy_from_slice(&(memory::INITRD_ADDR as u32).to_le_bytes());
         page[0x21c..0x220].copy_from_slice(&initrd_len.to_le_bytes());
     }
-    page[0x1e8] = 1; // e820_entries
+    // Firecracker-style e820 (see fill_e820): two RAM regions.
+    let mem_size = mem.len() as u64;
+    let low = 0x9fc00u64.min(mem_size);
+    page[0x1e8] = if mem_size > 0x100000 { 2 } else { 1 };
     page[0x2d0..0x2d8].copy_from_slice(&0u64.to_le_bytes());
-    page[0x2d8..0x2e0].copy_from_slice(&(mem.len() as u64).to_le_bytes());
+    page[0x2d8..0x2e0].copy_from_slice(&low.to_le_bytes());
     page[0x2e0..0x2e4].copy_from_slice(&1u32.to_le_bytes()); // E820_RAM
+    if mem_size > 0x100000 {
+        page[0x2e4..0x2ec].copy_from_slice(&0x100000u64.to_le_bytes());
+        page[0x2ec..0x2f4].copy_from_slice(&(mem_size - 0x100000).to_le_bytes());
+        page[0x2f4..0x2f8].copy_from_slice(&1u32.to_le_bytes());
+    }
     mem.write_at(memory::BOOT_PARAMS_ADDR, &page)
 }
 

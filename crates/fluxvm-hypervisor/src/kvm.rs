@@ -127,6 +127,26 @@ impl KvmVm {
                 return Err(FluxError::Hypervisor("KVM_SET_USER_MEMORY_REGION".into()));
             }
             let _ = ffi::flux_ioctl(vm_fd, ffi::KVM_CREATE_IRQCHIP, std::ptr::null_mut());
+            // In-kernel PIT so the guest can calibrate timers / get IRQ0.
+            #[repr(C)]
+            struct KvmPitConfig {
+                flags: u32,
+                pad: [u32; 15],
+            }
+            let mut pit = KvmPitConfig {
+                flags: 0,
+                pad: [0; 15],
+            };
+            if ffi::flux_ioctl(
+                vm_fd,
+                ffi::KVM_CREATE_PIT2,
+                &mut pit as *mut _ as *mut c_void,
+            ) < 0
+            {
+                eprintln!("[kvm] KVM_CREATE_PIT2 optional failed (errno {})", ffi::flux_errno());
+            } else {
+                eprintln!("[kvm] PIT2 created");
+            }
 
             let mmap_size =
                 ffi::flux_ioctl(kvm_fd, ffi::KVM_GET_VCPU_MMAP_SIZE, std::ptr::null_mut());
@@ -308,6 +328,8 @@ impl KvmVm {
         sregs.cr3 = cr3;
         sregs.cr4 = 0x20; // PAE
         sregs.efer = 0x500; // LME | LMA
+        // BSP local APIC enabled at the default MMIO address.
+        sregs.apic_base = 0xfee0_0000 | (1 << 11) | (1 << 8); // enable + BSP
 
         if unsafe {
             ffi::flux_ioctl(
@@ -336,6 +358,53 @@ impl KvmVm {
             return Err(FluxError::Hypervisor("KVM_SET_REGS".into()));
         }
         Ok(())
+    }
+
+    /// Assert or deassert a GSI on the in-kernel irqchip (IOAPIC).
+    pub fn set_irq_line(&self, gsi: u32, level: bool) -> Result<()> {
+        #[repr(C)]
+        struct KvmIrqLevel {
+            irq: u32,
+            level: u32,
+        }
+        let mut irq = KvmIrqLevel {
+            irq: gsi,
+            level: u32::from(level),
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vm_fd,
+                ffi::KVM_IRQ_LINE,
+                &mut irq as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!(
+                "KVM_IRQ_LINE gsi={gsi} level={level}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Edge pulse used after virtio used-ring updates.
+    pub fn pulse_irq(&self, gsi: u32) -> Result<()> {
+        self.set_irq_line(gsi, true)?;
+        self.set_irq_line(gsi, false)
+    }
+
+    pub fn get_regs(&self) -> Result<KvmRegs> {
+        let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpu_fd,
+                ffi::KVM_GET_REGS,
+                &mut regs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_GET_REGS".into()));
+        }
+        Ok(regs)
     }
 
     pub fn run_once(&mut self) -> Result<u32> {

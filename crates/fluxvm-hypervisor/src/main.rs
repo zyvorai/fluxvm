@@ -97,6 +97,12 @@ async fn real_main() -> anyhow::Result<()> {
     if log.contains("NETWORK IS UP") {
         eprintln!("[ok] guest reported NETWORK IS UP");
         Ok(())
+    } else if log.contains("VFS: Mounted root")
+        || log.contains("Run /sbin/init")
+        || log.contains("Freeing unused kernel memory")
+    {
+        eprintln!("[ok] guest reached root/init (in-tree KVM)");
+        Ok(())
     } else if log.contains("Linux version") {
         eprintln!("[ok] guest printed Linux banner (linux-loader path)");
         Ok(())
