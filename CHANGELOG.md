@@ -7,6 +7,8 @@
   `GET /v1/network/health|/ipcache`, `POST /v1/network/refresh-dns`,
   `fluxvm dataplane health|ipcache|refresh-dns`, prod TOML + runbook
   ([docs/production-dataplane.md](docs/production-dataplane.md)).
+  Tests: `scripts/test-production-dataplane.py`,
+  `scripts/test-production-dataplane-e2e.sh`.
 - **Network policy (Fabric v4)** — CNP compiler (`toCIDR`,
   `toCIDRSet`, `toEntities`, `toFQDNs`, `toPorts` ranges/named ports, deny,
   `enableDefaultDeny`, `auditMode`), reserved identities, `fluxvm_gid`
@@ -15,7 +17,9 @@
   `/v1/network/observe`.
   Docs: [docs/network-policy.md](docs/network-policy.md).
   Tutorials: [docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
-  Tests: `scripts/test-network-policy.py`.
+  Tests: `scripts/test-network-policy.py`;
+  e2e via `scripts/test-security-groups-e2e.sh`,
+  `scripts/test-production-dataplane-e2e.sh`.
 - **Security groups** — label identities for the VM-edge
   dataplane. Named groups with `key=value` labels allocate a stable
   identity in the `0x10000+` range; VM policy `groups` / `labels` select
@@ -46,6 +50,8 @@
   `ping -I` fails and `/sys` remounts drop bpffs pins across separate execs.
 
 ### Changed
+- Docs refreshed for Network Fabric **schema v4** + production dataplane runbook
+  (groups/CNP/health/ipcache/refresh-dns links, e2e scripts).
 - Docs/README refreshed for Network Fabric v1–v3 (architecture diagrams, L4 ports,
   IPv6, rate limits, REST status/schema, XDP meta paths, `LimitMEMLOCK`, dual-netns
   smoke, e2e) plus a **vs traditional networking** comparison table (lab policy

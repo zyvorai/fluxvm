@@ -1,13 +1,21 @@
-# FluxVM Network Fabric v3 GA
+# FluxVM Network Fabric (GA; dataplane schema v4)
 
-**Status: GA.** v3 freezes the **core VM-edge dataplane** ABI (TC/eBPF policy,
-status/stats/flows, schema fingerprints, ownership, reconcile). Upgrade-safe
-installs keep `mode = "legacy"` until you opt into the GA profile:
+**Status: GA.** The Network Fabric **v3 GA path** freezes the core VM-edge
+dataplane ABI (TC/eBPF policy, status/stats/flows, schema fingerprints,
+ownership, reconcile). The live BPF schema is **v4** (groups, deny CIDRs,
+conntrack, CNP-shaped policy). Upgrade-safe installs keep `mode = "legacy"`
+until you opt into the GA profile:
 
 ```bash
 sudo ./scripts/enable-network-fabric-ga.sh --restart
 # or merge configs/network-fabric-ga.toml into /etc/fluxvm.toml
 ```
+
+Production profile (FQDN resolve, ipcache, health, refresh-dns):
+[`configs/network-fabric-prod.toml`](../configs/network-fabric-prod.toml) —
+see [production-dataplane.md](production-dataplane.md). Policy:
+[network-policy.md](network-policy.md), [network-groups.md](network-groups.md),
+[tutorials/network-policy/](tutorials/network-policy/README.md).
 
 `required = true` fail-closes when a host-visible VM edge exists but attach
 fails; `network.mode=none` / user NAT still soft-skip (no edge). Service load
@@ -30,7 +38,7 @@ Web tab and `zyvorctl dataplane` — see Fabric’s
 ```mermaid
 flowchart TB
   subgraph control [Control plane]
-    API["REST /v1/vms/.../network"]
+    API["REST /v1/vms/.../network + /v1/network/*"]
     Sched[Scheduler]
     DP[fluxvm-network]
     API --> Sched --> DP
@@ -256,6 +264,9 @@ Per VM:
 - `fluxvm_stats` — per-CPU allow/drop packet and byte counters.
 - `fluxvm_flows` — family-neutral LRU flow state.
 - `fluxvm_events` — kernel ring buffer for drops and sampled allows.
+- `fluxvm_gid` — ifindex → up to eight shared group identities (schema v4).
+- `fluxvm_ct` — LRU established 5-tuple table.
+- `fluxvm_deny4` / `fluxvm_deny6` — LPM destination deny lists (before allow).
 
 The REST/export path deliberately uses the durable LRU map. A future dedicated
 libbpf process can consume the ring buffer for sub-second event streaming
@@ -276,7 +287,12 @@ Cilium acceleration. Existing third-party XDP is never replaced.
 
 ## Recommended production configuration (GA)
 
-Ship file: [`configs/network-fabric-ga.toml`](../configs/network-fabric-ga.toml).
+Ship files:
+
+- GA enable: [`configs/network-fabric-ga.toml`](../configs/network-fabric-ga.toml)
+- Production dataplane: [`configs/network-fabric-prod.toml`](../configs/network-fabric-prod.toml)
+  — [production-dataplane.md](production-dataplane.md)
+
 One-shot: `sudo ./scripts/enable-network-fabric-ga.sh --restart`
 (use `--cilium` on Cilium nodes).
 
@@ -327,7 +343,16 @@ Security groups (label identities, deny CIDRs, effective merge, deny/L4 maps):
 sudo -E ./scripts/test-security-groups-e2e.sh
 ```
 
-See [network-groups.md](network-groups.md).
+Network policy (CNP / identity / audit) and production dataplane:
+
+```bash
+python3 scripts/test-network-policy.py
+python3 scripts/test-production-dataplane.py
+sudo -E ./scripts/test-production-dataplane-e2e.sh
+```
+
+See [network-groups.md](network-groups.md), [network-policy.md](network-policy.md),
+and [production-dataplane.md](production-dataplane.md).
 
 The kernel smoke covers:
 
@@ -354,7 +379,7 @@ TAP+netns. Known independent lab gaps (not dataplane ABI regressions):
 - Warm-pool second `serve` can clash with systemd-bound FluxVM port.
 
 Fabric console UX (Status / Policy save / Stats / Flows + dashboard capability)
-has been verified end-to-end against attached schema v3 VMs.
+has been verified end-to-end against attached schema v4 VMs.
 
 ## What should be separate after v3
 

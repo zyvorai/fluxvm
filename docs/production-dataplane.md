@@ -1,7 +1,7 @@
 # Production dataplane runbook
 
-Use this after Network Fabric v4 + network policy (groups/CNP) are in place.
-See also [network-policy.md](network-policy.md).
+Use this after **Network Fabric (GA; dataplane schema v4)** + network policy
+(groups/CNP) are in place. See also [network-policy.md](network-policy.md).
 
 ## Host checklist
 
@@ -35,3 +35,21 @@ REST: `GET /v1/network/health`, `/ipcache`, `/observe`; `POST /v1/network/refres
 ## Still not a CNI
 
 No kube-proxy replacement, Maglev, WireGuard datapath, L7 Envoy, or full flow UI.
+
+## Validation
+
+```bash
+python3 scripts/test-production-dataplane.py
+sudo -E ./scripts/test-production-dataplane-e2e.sh
+```
+
+Related: `python3 scripts/test-network-policy.py`,
+`sudo -E ./scripts/test-security-groups-e2e.sh`.
+
+## See also
+
+- [tutorials/network-policy/](tutorials/network-policy/README.md)
+- [network-groups.md](network-groups.md)
+- [network-policy.md](network-policy.md)
+- [network-fabric.md](network-fabric.md)
+- [ebpf-cilium.md](ebpf-cilium.md)

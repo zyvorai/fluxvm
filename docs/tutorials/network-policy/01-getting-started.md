@@ -1,6 +1,6 @@
 # 01 — Getting started (Network Fabric)
 
-**Goal:** Turn on the Fabric eBPF edge, confirm schema **v4** parity bits, and
+**Goal:** Turn on the Fabric eBPF edge, confirm schema **v4**, and
 take a first observe glance at identities and network status.
 
 **You will use:** `fluxvm identity list`, `fluxvm observe`, REST
@@ -57,7 +57,7 @@ ID=<vm-uuid>
 curl -s "http://127.0.0.1:7788/v1/vms/${ID}/network/status" | python3 -m json.tool
 ```
 
-**Expect:** `mode=ebpf`, `attached=true`, `schema_version=4` (parity build),
+**Expect:** `mode=ebpf`, `attached=true`, `schema_version=4`,
 `schema_compatible=true`.
 
 ## Next

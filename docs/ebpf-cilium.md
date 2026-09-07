@@ -1,10 +1,13 @@
 # FluxVM eBPF dataplane and Cilium coexistence
 
-FluxVM ships a real TC/eBPF VM-edge dataplane (**Network Fabric v3**) while
-keeping the existing nftables path as the **backwards-compatible default**.
+FluxVM ships a real TC/eBPF VM-edge dataplane (**Network Fabric GA;
+dataplane schema v4**) while keeping the existing nftables path as the
+**backwards-compatible default**.
 
 Operator reference with full safety properties:
 [network-fabric.md](network-fabric.md).
+Production runbook: [production-dataplane.md](production-dataplane.md).
+CNP / identities: [network-policy.md](network-policy.md).
 README diagrams:
 [Network Fabric architecture](../README.md#network-fabric-architecture-how-it-works).
 
@@ -27,7 +30,8 @@ exists. No host-visible iface (`network.mode=none` / user NAT) always
 limits are native-only and refuse silent nftables downgrade.
 
 GA enable: `sudo ./scripts/enable-network-fabric-ga.sh --restart` or
-`configs/network-fabric-ga.toml`.
+`configs/network-fabric-ga.toml`. Production profile:
+`configs/network-fabric-prod.toml` — [production-dataplane.md](production-dataplane.md).
 
 ## How coexistence fits
 
@@ -183,7 +187,8 @@ Per-VM maps (pinned under each VM’s `maps/` directory):
 | `fluxvm_ct` | LRU established 5-tuple table |
 | `fluxvm_deny4` / `fluxvm_deny6` | LPM destination deny lists |
 
-REST (see [network-fabric.md](network-fabric.md)):
+REST (see [network-fabric.md](network-fabric.md),
+[network-groups.md](network-groups.md), [network-policy.md](network-policy.md)):
 
 ```http
 GET  /v1/vms/{id}/network/policy
@@ -191,6 +196,16 @@ POST /v1/vms/{id}/network/policy   # admin role when auth is enabled
 GET  /v1/vms/{id}/network/status
 GET  /v1/vms/{id}/network/stats
 GET  /v1/vms/{id}/network/flows?limit=100
+GET  /v1/vms/{id}/network/effective
+GET/POST /v1/network/groups
+GET/DELETE /v1/network/groups/{name}
+GET/POST /v1/network/cnp
+GET/DELETE /v1/network/cnp/{name}
+GET  /v1/network/identities
+GET  /v1/network/observe
+GET  /v1/network/health
+GET  /v1/network/ipcache
+POST /v1/network/refresh-dns
 ```
 
 ## Validation
@@ -201,10 +216,13 @@ FLUXVM_PRIVILEGED_SMOKE=1 ./scripts/validate-network-fabric.sh
 sudo -E ./scripts/test-network-fabric.sh
 sudo -E ./scripts/test-security-groups-e2e.sh   # groups + deny/ICMP maps
 python3 scripts/test-network-policy.py          # CNP / identity / audit unit
+python3 scripts/test-production-dataplane.py
+sudo -E ./scripts/test-production-dataplane-e2e.sh
 ```
 
 Security-group control plane: [network-groups.md](network-groups.md).
 Network policy (CNP / identities / audit): [network-policy.md](network-policy.md).
+Production dataplane: [production-dataplane.md](production-dataplane.md).
 
 Privileged integration smoke (FluxVm + `NetworkSpec::Tap { netns: true }`):
 

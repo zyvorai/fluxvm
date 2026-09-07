@@ -609,7 +609,7 @@ else
 fi
 
 STATUS=$(api GET "/v1/vms/${ID}/network/status")
-echo "$STATUS" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("mode")=="ebpf"; assert d.get("schema_version")==3' \
+echo "$STATUS" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("mode")=="ebpf"; assert d.get("schema_version")==4' \
   && pass "network/status still schema_v3 ebpf" \
   || fail "status unexpected: $STATUS"
 

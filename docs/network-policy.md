@@ -1,11 +1,15 @@
 # Network policy on the FluxVM VM-edge
 
 FluxVM is not a CNI. This document is the supported **CNP-shaped** policy
-subset that compiles onto Network Fabric v4 pins under `/sys/fs/bpf/fluxvm`.
+subset that compiles onto **Network Fabric (GA; dataplane schema v4)** pins
+under `/sys/fs/bpf/fluxvm`.
 
 Coexistence with a node CNI (`mode=cilium`) is separate — see
 [ebpf-cilium.md](ebpf-cilium.md). That mode only *checks* the agent socket;
 FluxVM never writes foreign private BPF maps.
+
+Production runbook: [production-dataplane.md](production-dataplane.md).
+Security groups: [network-groups.md](network-groups.md).
 
 ## Mapped features
 
@@ -60,4 +64,7 @@ entities/FQDNs, audit mode, observe, multi-group merge.
 ```bash
 python3 scripts/test-network-policy.py
 cargo test -p fluxvm-network --lib
+python3 scripts/test-production-dataplane.py
+sudo -E ./scripts/test-security-groups-e2e.sh
+sudo -E ./scripts/test-production-dataplane-e2e.sh
 ```

@@ -137,9 +137,12 @@ boot, egress vault, AutoPause), see
 [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md). The FluxVm backend
 (`backend: "flux-vm"`) is the agent-sandbox track: memory snapshots, `/v1/sandboxes`,
 guest HTTP proxy with AutoResume, L7 egress, `/console`, and an optional native
-TC/eBPF Network Fabric v3 dataplane (nftables default; IPv4/IPv6 L3+L4, rate
-limits, Cilium coexistence without mutating Cilium
+TC/eBPF Network Fabric (GA; dataplane schema v4) (nftables default; IPv4/IPv6 L3+L4, rate
+limits, security groups / CNP, Cilium coexistence without mutating Cilium
 maps — [docs/network-fabric.md](network-fabric.md),
+[docs/network-groups.md](network-groups.md),
+[docs/network-policy.md](network-policy.md),
+[docs/production-dataplane.md](production-dataplane.md),
 [docs/ebpf-cilium.md](ebpf-cilium.md)).
 
 ## Disposable dev/test environments

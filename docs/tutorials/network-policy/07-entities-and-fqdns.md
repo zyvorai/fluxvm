@@ -29,8 +29,16 @@ sudo fluxvm --config /etc/fluxvm.toml identity list \
 ## FQDNs
 
 CNP `toFQDNs[].matchName` is stored on the compiled group as `allow_fqdns`.
-Resolution uses FluxVM’s existing domain-allowlist / egress path (not an
-inline DNS proxy inside the TC program).
+At apply/reconfigure, FluxVM **resolves** names to IPv4 `/32` and IPv6 `/128`
+CIDRs (wildcards with `*` are skipped). This is not an inline DNS proxy inside
+the TC program. After DNS TTL or allowlist changes, refresh:
+
+```bash
+sudo fluxvm --config /etc/fluxvm.toml dataplane refresh-dns
+# or POST /v1/network/refresh-dns
+```
+
+See [production-dataplane.md](../../production-dataplane.md).
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \

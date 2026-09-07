@@ -148,7 +148,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [Important limitations in this MVP](#important-limitations-in-this-mvp)
 - [AI-agent sandbox gaps](docs/agent-sandbox-gaps.md)
 - [eBPF / Cilium dataplane](docs/ebpf-cilium.md)
-- [Network Fabric v3](docs/network-fabric.md)
+- [Network Fabric](docs/network-fabric.md)
 - [Security groups](docs/network-groups.md)
 - [Network policy (CNP)](docs/network-policy.md)
 - [Network policy tutorials](docs/tutorials/network-policy/README.md)
@@ -236,7 +236,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - macvtap networking (QEMU and Cloud Hypervisor) — a VM's own MAC directly on a parent link, no bridge.
 - QEMU user-mode networking + host port forwarding.
 - Static-IP network-namespace mode — the guest gets a real, deterministically-reserved DHCP-leased IP, not just host↔namespace NAT.
-- **Sandbox dataplane / Network Fabric v3** — default **legacy nftables** per sandbox; optional **native TC/eBPF** (`ebpf`) and **Cilium coexistence** (`cilium`) with IPv4/IPv6 L3+L4 allowlists, Mbps/PPS limits, schema/fingerprint repair, per-VM policy/status/stats/flows API, optional XDP guard, and safe nftables fallback. See [eBPF / Cilium sandbox dataplane](#ebpf--cilium-sandbox-dataplane), [Network Fabric architecture](#network-fabric-architecture-how-it-works), [docs/network-fabric.md](docs/network-fabric.md), and [docs/ebpf-cilium.md](docs/ebpf-cilium.md).
+- **Sandbox dataplane / Network Fabric** — default **legacy nftables**; optional **native TC/eBPF** (`ebpf`) and **Cilium coexistence** (`cilium`) with IPv4/IPv6 L3+L4, rate limits, schema **v4**, security groups, CNP, observe/health/ipcache/FQDN refresh, optional XDP, safe nftables fallback. See [eBPF / Cilium sandbox dataplane](#ebpf--cilium-sandbox-dataplane), [Network Fabric architecture](#network-fabric-architecture-how-it-works), [docs/network-fabric.md](docs/network-fabric.md), [docs/network-policy.md](docs/network-policy.md), and [docs/production-dataplane.md](docs/production-dataplane.md).
 - **Security groups** — `key=value` labels and numeric identities (`0x10000+`), deny CIDRs, ICMP passthrough, `fluxvm group` CLI, `/v1/network/groups` + `/v1/vms/{id}/network/effective`. See [docs/network-groups.md](docs/network-groups.md).
 - **Network policy (CNP)** — CNP compiler, reserved identities, CT learn/hit, audit mode, `fluxvm cnp` / `fluxvm identity` / `fluxvm observe`. See [docs/network-policy.md](docs/network-policy.md). Hands-on: [docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
 - **Production dataplane** — FQDN resolve at apply, FluxVM ipcache, health/ipcache/refresh-dns API + CLI, fail-closed prod profile. See [docs/production-dataplane.md](docs/production-dataplane.md).
@@ -438,13 +438,14 @@ sudo ./scripts/test-network-namespace.sh --image /path/to/base.qcow2
 
 ## eBPF / Cilium sandbox dataplane
 
-**Network Fabric v3 is GA.** Upgrade-safe installs keep **nftables** (`mode =
+**Network Fabric is GA (dataplane schema v4).** Upgrade-safe installs keep **nftables** (`mode =
 legacy`) until you opt in with `sudo ./scripts/enable-network-fabric-ga.sh
---restart` (or `configs/network-fabric-ga.toml`). The native TC/eBPF path applies
-on every backend when a host-visible VM edge exists.
+--restart` (or `configs/network-fabric-ga.toml`). Fail-closed production profile:
+`configs/network-fabric-prod.toml` — see [docs/production-dataplane.md](docs/production-dataplane.md).
+The native TC/eBPF path applies on every backend when a host-visible VM edge exists.
 How the pieces fit together: [Network Fabric architecture](#network-fabric-architecture-how-it-works).
-Full operator detail: [docs/network-fabric.md](docs/network-fabric.md) and
-[docs/ebpf-cilium.md](docs/ebpf-cilium.md).
+Full operator detail: [docs/network-fabric.md](docs/network-fabric.md),
+[docs/ebpf-cilium.md](docs/ebpf-cilium.md), [docs/network-policy.md](docs/network-policy.md).
 
 ### Modes
 
@@ -463,9 +464,12 @@ Backwards compatibility: configs without `[sandbox.dataplane]` keep `legacy` / n
 - Stores detach metadata under `/run/fluxvm/ebpf/` (bpffs cannot hold regular files); XDP markers under `/run/fluxvm/xdp/`
 - IPv4 **and IPv6** L3 (CIDR) + L4 (`tcp/443`, `udp/53`) allowlists; optional Mbps/PPS egress limits; ARP/DHCP/NDP/DHCPv6 bootstrap always allowed
 - Allow/drop counters, family-aware LRU flows, drop/sampled-allow ring buffer (`sample_rate`; `0` = off)
-- REST: `GET/POST /v1/vms/{id}/network/policy`, `GET …/status`, `GET …/stats`, `GET …/flows` (`POST` needs admin when auth is on)
+- REST: per-VM `…/network/{policy,status,stats,flows,effective}`; cluster
+  `/v1/network/{groups,cnp,identities,observe,health,ipcache}` and
+  `POST /v1/network/refresh-dns` (`POST` needs admin when auth is on)
 - Live policy updates reconfigure maps in place (deny-all window; never allow-all gap); applies to **Running** and **Paused** VMs
-- Schema version + policy fingerprint: reconcile heals missing/stale TC after daemon restart; orphan pins GC’d
+- Schema **v4** + policy fingerprint: reconcile heals missing/stale TC after daemon restart; orphan pins GC’d
+- Security groups + CNP documents, FQDN→CIDR at apply, FluxVM ipcache, `fluxvm dataplane health|ipcache|refresh-dns`
 - Attach: host veth for `netns: true`, else TAP/macvtap (native path does not require a known guest IP); maps configured **before** TC attach
 - Tears BPF state down on VM network cleanup (only if TC/XDP program ID still matches FluxVM’s)
 - Falls back to nftables unless `required = true` **and** a host-visible edge exists (user NAT / `mode=none` soft-skip; IPv6 / rate limits never silently downgrade)
@@ -710,10 +714,11 @@ sequenceDiagram
 
 | Location | Contents |
 |----------|----------|
-| `/sys/fs/bpf/fluxvm/vms/<uuid>/` | Pinned TC program + maps (`fluxvm_id`, `v4`, `v6`, `l4`, `rate`, `stats`, `flows`, `events`) |
-| `/run/fluxvm/ebpf/vms/<uuid>/` | `iface`, `prog_id`, `schema_version`, `policy_fingerprint` (not on bpffs) |
+| `/sys/fs/bpf/fluxvm/vms/<uuid>/` | Pinned TC program + maps (`fluxvm_id`, `v4`, `v6`, `l4`, `deny4`, `deny6`, `gid`, `ct`, `rate`, `stats`, `flows`, `events`) |
+| `/run/fluxvm/ebpf/vms/<uuid>/` | `iface`, `prog_id`, `schema_version` (v4), `policy_fingerprint` (not on bpffs) |
 | `/run/fluxvm/xdp/` | Optional XDP `iface` + `prog_id` |
 | `/var/lib/fluxvm/network-policy/<uuid>.json` | Durable per-VM policy (fsync + rename) |
+| `/var/lib/fluxvm/network-groups/` | Security groups, CNP store, ipcache JSON |
 
 ### Modes vs ownership
 
@@ -734,9 +739,21 @@ flowchart TB
 | Route | Role |
 |-------|------|
 | `GET/POST /v1/vms/{id}/network/policy` | Read / replace durable policy (+ live map update) |
-| `GET /v1/vms/{id}/network/status` | mode, attached, schema_version, policy_synced, iface |
+| `GET /v1/vms/{id}/network/effective` | Declared + group-merged policy and membership |
+| `GET /v1/vms/{id}/network/status` | mode, attached, schema_version (v4), policy_synced, iface |
 | `GET /v1/vms/{id}/network/stats` | allow/drop packet + byte counters |
 | `GET /v1/vms/{id}/network/flows` | LRU flows with `family` 4/6 |
+| `GET/POST /v1/network/groups` · `…/groups/{name}` | Security-group CRUD |
+| `GET/POST /v1/network/cnp` · `…/cnp/{name}` | CNP apply/list/delete |
+| `GET /v1/network/identities` | Reserved + group identities |
+| `GET /v1/network/observe` | Snapshot identities/groups/CNPs/labeled VMs |
+| `GET /v1/network/health` | Dataplane health (`ok`, BPF/bpffs notes) |
+| `GET /v1/network/ipcache` | Guest IP → identity |
+| `POST /v1/network/refresh-dns` | Re-resolve FQDN allowlists into CIDRs |
+
+CLI: `fluxvm group|cnp|identity|observe|dataplane`. Tutorials:
+[docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
+Production runbook: [docs/production-dataplane.md](docs/production-dataplane.md).
 
 NDJSON export: `./scripts/export_network_flows.py <vm-uuid> --base http://127.0.0.1:7788`.
 
@@ -829,20 +846,23 @@ Useful routes once `fluxvm serve` is up:
 | `POST /v1/sandboxes/{id}/process` | Run a process in the guest |
 | `ANY /v1/sandboxes/{id}/http/{port}/{*path}` | Reverse-proxy into guest (AutoResume) |
 | `ANY /sandbox/{id}/{*path}` | Same proxy, default guest port 8080 |
-| `GET/POST /v1/vms/{id}/network/policy` | Per-VM dataplane policy (Network Fabric v3) |
+| `GET/POST /v1/vms/{id}/network/policy` | Per-VM dataplane policy (Network Fabric schema v4) |
 | `GET /v1/vms/{id}/network/status` | Attachment, schema_version, policy_synced, effective policy |
 | `GET /v1/vms/{id}/network/effective` | Declared + group-merged policy and membership |
 | `GET/POST /v1/network/groups` · `GET/DELETE …/groups/{name}` | Security-group CRUD |
 | `GET/POST /v1/network/cnp` · `GET/DELETE …/cnp/{name}` | CNP document apply/list |
 | `GET /v1/network/identities` | Reserved + group identities |
 | `GET /v1/network/observe` | Snapshot of identities, groups, CNPs, labeled VMs |
+| `GET /v1/network/health` · `/ipcache` | Dataplane health + guest IP→identity |
+| `POST /v1/network/refresh-dns` | Re-resolve FQDN policies |
 | `GET /v1/vms/{id}/network/stats` · `…/flows` | eBPF counters / flow table (`family` 4/6) |
 | `GET /console` | Lightweight ops UI |
 
 For multi-node shared sandbox index, set `FLUXVM_SANDBOX_STATE_URL` (Redis). Capability matrix:
 [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md). Dataplane:
 [docs/network-fabric.md](docs/network-fabric.md), [docs/ebpf-cilium.md](docs/ebpf-cilium.md),
-[docs/network-groups.md](docs/network-groups.md), [docs/network-policy.md](docs/network-policy.md).
+[docs/network-groups.md](docs/network-groups.md), [docs/network-policy.md](docs/network-policy.md),
+[docs/production-dataplane.md](docs/production-dataplane.md).
 
 ## Firecracker jailer (chroot, uid/gid isolation, cgroups)
 
@@ -1368,6 +1388,25 @@ POST   /v1/sandboxes/{id}/fs/write
 POST   /v1/sandboxes/{id}/process
 ANY    /v1/sandboxes/{id}/http/{port}/{*path}
 ANY    /sandbox/{id}/{*path}
+GET    /v1/vms/{uuid}/network/policy
+POST   /v1/vms/{uuid}/network/policy
+GET    /v1/vms/{uuid}/network/effective
+GET    /v1/vms/{uuid}/network/status
+GET    /v1/vms/{uuid}/network/stats
+GET    /v1/vms/{uuid}/network/flows
+GET    /v1/network/groups
+POST   /v1/network/groups
+GET    /v1/network/groups/{name}
+DELETE /v1/network/groups/{name}
+GET    /v1/network/cnp
+POST   /v1/network/cnp
+GET    /v1/network/cnp/{name}
+DELETE /v1/network/cnp/{name}
+GET    /v1/network/identities
+GET    /v1/network/observe
+GET    /v1/network/health
+GET    /v1/network/ipcache
+POST   /v1/network/refresh-dns
 GET    /console
 ```
 
@@ -1743,6 +1782,8 @@ only fewest-VMs).
 /var/lib/fluxvm/
   vms.json
   vms.lock
+  network-policy/             (per-VM dataplane policy JSON)
+  network-groups/             (security groups, CNP store, ipcache.json)
   downloads/
   images/
   kernels/
@@ -1774,7 +1815,7 @@ assigned the same vsock CID.
 ## Production changes I would make next
 
 1. **Firecracker jailer's own `--cgroup`/`--resource-limit` flags** — superseded: every VM already gets cgroup v2 resource control independent of the jailer (see "Resource control (cgroup v2)" above). Wiring jailer-native limits remains optional hardening only.
-2. **Network namespace policy** — nftables NAT + real IPAM (`state_dir/ipam.json`) are implemented; optional FluxVm TC/eBPF Network Fabric **v3** (IPv4/IPv6 L3+L4, rate limits, policy/status/stats/flows, optional XDP, schema repair) is implemented (default remains nftables — see [eBPF / Cilium](#ebpf--cilium-sandbox-dataplane), [architecture](#network-fabric-architecture-how-it-works), and [docs/network-fabric.md](docs/network-fabric.md)). Follow-ups: DNS-TTL refresh for egress allowlists; Cilium-native VM endpoints.
+2. **Network namespace / Fabric** — nftables NAT + IPAM are implemented; optional TC/eBPF Network Fabric (schema **v4**: L3+L4, rate limits, groups/CNP, observe/health/ipcache, FQDN refresh, optional XDP) is implemented (default remains nftables — see [eBPF / Cilium](#ebpf--cilium-sandbox-dataplane), [docs/network-fabric.md](docs/network-fabric.md), [docs/network-policy.md](docs/network-policy.md), [docs/production-dataplane.md](docs/production-dataplane.md)). Follow-ups: Cilium-native VM endpoints / first-class Hubble attribution.
 3. **Snapshots on QEMU/CH** — QEMU `savevm` + `POST /v1/vms/{id}/snapshot` and Cloud Hypervisor `ch-remote snapshot` are implemented (pair with `POST /v1/vms/{id}/start-from-snapshot`). FluxVm memory+disk snapshots remain on the agent-sandbox track.
 4. **Storage abstraction** — already implemented and fully verified (qcow2/raw, LVM thin, NBD, Ceph RBD). NVMe-local as a distinct backend remains unnecessary.
 5. **Image catalog** — Ed25519 signing shipped; optional `catalog.cosign_identities` shells out to `cosign verify-blob`.

@@ -21,7 +21,7 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 | **Multi-port proxy defaults** on sandbox create (`http_proxy_port(s)`) | Yes |
 | AutoPause + activity tracking + wake-on-request | Yes |
 | Egress allowlist + credential vault + live L7 proxy | Yes |
-| **Sandbox dataplane** — Network Fabric **v3**: `legacy` nftables (default), `ebpf` TC IPv4/IPv6 L3+L4 + rate limits, `cilium` coexistence, policy/status/stats/flows API, optional XDP, schema/fingerprint repair | Yes — [docs/network-fabric.md](network-fabric.md) |
+| **Sandbox dataplane** — Network Fabric **GA (schema v4)**: `legacy` nftables (default), `ebpf` TC IPv4/IPv6 L3+L4 + rate limits + groups/deny/CT, `cilium` coexistence, CNP/identities/observe, health/ipcache/refresh-dns, policy/status/stats/flows API, optional XDP, schema/fingerprint repair | Yes — [network-fabric.md](network-fabric.md), [network-groups.md](network-groups.md), [network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md) |
 | OCI → template export | Yes |
 | **Redis shared sandbox index** (`FLUXVM_SANDBOX_STATE_URL`) | Yes |
 | `/console` ops UI | Yes |
@@ -30,11 +30,13 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 ### Dataplane (summary)
 
 - **Status: GA** — enable with `sudo ./scripts/enable-network-fabric-ga.sh --restart`
-  or merge `configs/network-fabric-ga.toml`.
+  or merge `configs/network-fabric-ga.toml`. Production profile:
+  `configs/network-fabric-prod.toml` — [production-dataplane.md](production-dataplane.md).
 - **Default (upgrade-safe):** `sandbox.dataplane.mode = "legacy"` (nftables).
 - **`ebpf`:** TC program from `bpf/fluxvm_tc.bpf.c`; pins under `/sys/fs/bpf/fluxvm`;
   iface/schema/fingerprint meta under `/run/fluxvm/ebpf`; IPv4/IPv6 L3+L4
   allowlists (`allow_cidrs`, `allow_ports`); Mbps/PPS limits; stats/flows/events;
+  schema **v4** maps (`fluxvm_gid`, `fluxvm_ct`, `fluxvm_deny4/6`);
   ARP/DHCP/NDP bootstrap always allowed; fallback to nftables unless
   `required = true` **and** a host-visible edge exists (user NAT / `mode=none`
   soft-skip; IPv6/rate never silently downgrade). Optional node XDP
@@ -42,14 +44,17 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
   and refused in `cilium` mode.
 - **`cilium`:** same FluxVM edge attach after verifying `/var/run/cilium/cilium.sock` +
   bpffs; **does not** write Cilium private maps (coexistence, not Cilium endpoint identity).
-- **REST:** `GET/POST /v1/vms/{id}/network/policy`, `GET …/status`, `GET …/stats`,
-  `GET …/flows` (native modes only; `POST` needs admin when auth is enabled).
-- **v3:** dual-stack, pre-attach maps, prog-ID ownership, reconcile heal + orphan GC,
-  NDJSON flow exporter.
+- **REST:** per-VM `GET/POST …/network/policy`, `…/status`, `…/stats`, `…/flows`,
+  `…/effective`; fabric-wide `/v1/network/groups`, `/cnp`, `/identities`,
+  `/observe`, `/health`, `/ipcache`, `POST /refresh-dns` (native modes;
+  writes need admin when auth is enabled).
+- **v3 GA path / schema v4:** dual-stack core ABI plus groups, CNP, deny CIDRs,
+  conntrack, FQDN resolve-at-apply, ipcache, health; NDJSON flow exporter.
 
 Applied on FluxVm create/start/restart on the host-visible interface (guest CIDR
-optional for native). See [network-fabric.md](network-fabric.md) and README
-[eBPF / Cilium sandbox dataplane](../README.md#ebpf--cilium-sandbox-dataplane)
+optional for native). See [network-fabric.md](network-fabric.md),
+[network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md),
+and README [eBPF / Cilium sandbox dataplane](../README.md#ebpf--cilium-sandbox-dataplane)
 plus [architecture](../README.md#network-fabric-architecture-how-it-works).
 
 ## Remaining (optional hardening)

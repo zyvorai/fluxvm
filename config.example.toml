@@ -28,11 +28,12 @@ reaper_interval_secs = 5
 # egress_proxy_listen = "127.0.0.1:18080"
 # http_proxy_default_port = 8080
 #
-# Native VM-edge networking — Network Fabric v3 GA.
+# Native VM-edge networking — Network Fabric GA (dataplane schema v4).
 # Absent / commented = upgrade-safe legacy nftables.
 # Production GA profile: configs/network-fabric-ga.toml
 #   or: sudo ./scripts/enable-network-fabric-ga.sh --restart
-# See docs/network-fabric.md and docs/ebpf-cilium.md.
+# Production dataplane (FQDN/ipcache/health): configs/network-fabric-prod.toml
+# See docs/network-fabric.md, docs/production-dataplane.md, docs/ebpf-cilium.md.
 #
 # [sandbox.dataplane]
 # mode = "ebpf"                         # legacy | ebpf | cilium

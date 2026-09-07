@@ -45,4 +45,5 @@ Docs: [docs/network-fabric.md](../docs/network-fabric.md),
 [docs/ebpf-cilium.md](../docs/ebpf-cilium.md),
 [docs/network-policy.md](../docs/network-policy.md),
 [docs/network-groups.md](../docs/network-groups.md),
+[docs/production-dataplane.md](../docs/production-dataplane.md),
 [README architecture](../README.md#network-fabric-architecture-how-it-works).

@@ -109,3 +109,11 @@ sudo -E ./scripts/test-network-fabric.sh
 Example group: [examples/security-group-web.json](../examples/security-group-web.json).
 
 Hands-on walkthroughs: [tutorials/network-policy/](tutorials/network-policy/README.md).
+
+## See also
+
+- [network-policy.md](network-policy.md) — CNP-shaped policy, identities, observe
+- [production-dataplane.md](production-dataplane.md) — health, ipcache, refresh-dns
+- [tutorials/network-policy/](tutorials/network-policy/README.md) — operator walkthroughs
+- [network-fabric.md](network-fabric.md) — GA dataplane / schema v4
+- [ebpf-cilium.md](ebpf-cilium.md) — `mode=cilium` coexistence

@@ -68,6 +68,9 @@ fx list
 | Apply / list CNP | `fluxvm cnp apply\|list\|get\|delete` |
 | Security groups | `fluxvm group …` |
 | Observe snapshot | `fluxvm observe` |
+| Dataplane health | `fluxvm dataplane health` |
+| Guest IP → identity | `fluxvm dataplane ipcache` |
+| Refresh FQDN allowlist | `fluxvm dataplane refresh-dns` |
 | Per-VM flows | `GET …/network/flows` |
 
 ## Automated checks
@@ -75,8 +78,8 @@ fx list
 ```bash
 python3 scripts/test-security-groups.py
 python3 scripts/test-network-policy.py
+python3 scripts/test-production-dataplane.py
 cargo test -p fluxvm-network --lib
 sudo -E ./scripts/test-security-groups-e2e.sh
-# when present:
-sudo -E ./scripts/test-network-policy-e2e.sh
+sudo -E ./scripts/test-production-dataplane-e2e.sh
 ```

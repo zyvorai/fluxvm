@@ -29,12 +29,13 @@ Before labeling a node `ragnarok.io/fluxvm-capable=true`:
    same host-prep step that applies the label, or by hand for a first test.
 4. A per-node bridge if you intend to use `network_mode: tap` — stage
    bridges/parents on the host the same way a bare-metal FluxVM deploy does.
-5. **Optional eBPF / Cilium dataplane (Network Fabric v1)**: the DaemonSet mounts
+5. **Optional eBPF / Cilium dataplane (Network Fabric GA; schema v4)**: the DaemonSet mounts
    host `/sys/fs/bpf` and read-only `/var/run/cilium`, and grants `SYS_RESOURCE`
    for BPF memlock. For `sandbox.dataplane.mode = "ebpf"` or `"cilium"`, ensure
    the image includes `/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o` (and optionally
    `fluxvm_xdp.bpf.o`; Dockerfile builds both) and set dataplane fields in the
-   ConfigMap. See [docs/network-fabric.md](../../docs/network-fabric.md) and
+   ConfigMap. See [docs/network-fabric.md](../../docs/network-fabric.md),
+   [docs/production-dataplane.md](../../docs/production-dataplane.md), and
    [docs/ebpf-cilium.md](../../docs/ebpf-cilium.md).
 
 ## Deploy order
@@ -107,6 +108,7 @@ Regenerate it whenever `crates/fluxvm-kube/src/crd.rs` changes.
   bridges/parents on the host the same way a bare-metal FluxVM deploy does.
 - **eBPF dataplane** is opt-in (`legacy` nftables remains default). Cilium mode
   only verifies agent presence; it does not turn FluxVM VMs into Cilium
-  endpoints. L4 policy / stats / flows / optional XDP:
+  endpoints. L4 policy / stats / flows / optional XDP (schema v4):
   [docs/network-fabric.md](../../docs/network-fabric.md),
+  [docs/production-dataplane.md](../../docs/production-dataplane.md),
   [docs/ebpf-cilium.md](../../docs/ebpf-cilium.md).
