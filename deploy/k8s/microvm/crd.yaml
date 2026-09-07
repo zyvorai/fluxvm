@@ -14,6 +14,8 @@ spec:
         - {name: Phase, type: string, jsonPath: .status.phase}
         - {name: Node, type: string, jsonPath: .status.runtime.node}
         - {name: GuestIP, type: string, jsonPath: .status.guestIP}
+        - {name: Backend, type: string, jsonPath: .spec.backend}
+        - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
       schema:
         openAPIV3Schema:
           type: object
@@ -33,6 +35,9 @@ spec:
       served: true
       storage: true
       subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Succeeded, type: integer, jsonPath: .status.succeeded}
       schema:
         openAPIV3Schema:
           type: object
@@ -52,6 +57,11 @@ spec:
       served: true
       storage: true
       subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Phase, type: string, jsonPath: .status.phase}
+        - {name: Ready, type: integer, jsonPath: .status.ready}
+        - {name: Claimed, type: integer, jsonPath: .status.claimed}
+        - {name: Replicas, type: integer, jsonPath: .spec.replicas}
       schema:
         openAPIV3Schema:
           type: object
@@ -71,6 +81,10 @@ spec:
       served: true
       storage: true
       subresources: {status: {}}
+      additionalPrinterColumns:
+        - {name: Ready, type: boolean, jsonPath: .status.ready}
+        - {name: Path, type: string, jsonPath: .status.path}
+        - {name: Age, type: date, jsonPath: .metadata.creationTimestamp}
       schema:
         openAPIV3Schema:
           type: object

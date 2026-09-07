@@ -97,6 +97,7 @@ See [deploy/k8s/README.md](../deploy/k8s/README.md) and
 ```bash
 kubectl apply -f deploy/k8s/microvm/
 # crd.yaml → rbac.yaml → controller.yaml → node-agent.yaml
+# Create Secret fluxvm-microvm-token (key: token) before node-agent when auth is on.
 ```
 
 The controller Deployment runs `fluxvm-microvm controller` **without**

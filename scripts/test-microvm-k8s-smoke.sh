@@ -188,13 +188,79 @@ done
 [[ "$GIMG_OK" == "true" ]] || { echo FAIL_GIMG_MVM; sudo kubectl describe mvm lab-from-gimg | tail -40; sudo tail -40 /tmp/microvm-lab/node-agent.log; exit 1; }
 echo GUESTIMAGE_RESOLVE_OK
 
+# MicroVMPool + MicroVMJob (qemu/user — no TAP)
+sudo kubectl delete mvmp lab-pool mvmj lab-job --ignore-not-found --wait=false || true
+sleep 1
+cat >/tmp/mvmp-lab.yaml <<YAML
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: MicroVMPool
+metadata:
+  name: lab-pool
+  namespace: default
+spec:
+  replicas: 1
+  nodeName: ${NODE}
+  template:
+    backend: qemu
+    image: ${IMG}
+    vcpus: 1
+    memoryMib: 512
+    networkMode: user
+    persist: true
+YAML
+sudo kubectl apply -f /tmp/mvmp-lab.yaml
+POOL_OK=false
+for i in $(seq 1 60); do
+  PRED="$(sudo kubectl get mvmp lab-pool -o jsonpath='{.status.ready}' 2>/dev/null || true)"
+  PPH="$(sudo kubectl get mvmp lab-pool -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  echo "t=$i pool ready=$PRED phase=$PPH"
+  if [[ "${PRED:-0}" -ge 1 ]]; then POOL_OK=true; break; fi
+  sleep 3
+done
+[[ "$POOL_OK" == "true" ]] || { echo FAIL_POOL; sudo kubectl describe mvmp lab-pool | tail -40; sudo tail -40 /tmp/microvm-lab/node-agent.log; exit 1; }
+echo MICROVMPOOL_OK
+
+cat >/tmp/mvmj-lab.yaml <<YAML
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: MicroVMJob
+metadata:
+  name: lab-job
+  namespace: default
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 1
+  template:
+    backend: qemu
+    image: ${IMG}
+    vcpus: 1
+    memoryMib: 512
+    networkMode: user
+    ttlSeconds: 120
+    persist: false
+YAML
+sudo kubectl apply -f /tmp/mvmj-lab.yaml
+JOB_OK=false
+for i in $(seq 1 45); do
+  JPH="$(sudo kubectl get mvmj lab-job -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  JACT="$(sudo kubectl get mvmj lab-job -o jsonpath='{.status.active}' 2>/dev/null || true)"
+  CHILD="$(sudo kubectl get mvm -l microvm.fluxvm.zyvor.io/job=lab-job -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)"
+  echo "t=$i job phase=$JPH active=$JACT child=$CHILD"
+  if [[ "$CHILD" == "Running" || "$JPH" == "Succeeded" || "${JACT:-0}" -ge 1 ]]; then
+    if [[ "$CHILD" == "Running" || "$JPH" == "Succeeded" ]]; then JOB_OK=true; break; fi
+  fi
+  sleep 2
+done
+[[ "$JOB_OK" == "true" ]] || { echo FAIL_JOB; sudo kubectl describe mvmj lab-job | tail -40; sudo kubectl get mvm -A | head -20; exit 1; }
+echo MICROVMJOB_OK
+
 FINAL="$(sudo kubectl get mvm lab-smoke -o jsonpath='{.status.phase}' 2>/dev/null || true)"
 MSG="$(sudo kubectl get mvm lab-smoke -o jsonpath='{.status.message}' 2>/dev/null || true)"
 UUID="$(sudo kubectl get mvm lab-smoke -o jsonpath='{.status.runtime.uuid}' 2>/dev/null || true)"
 UUID2="$(sudo kubectl get mvm lab-from-gimg -o jsonpath='{.status.runtime.uuid}' 2>/dev/null || true)"
+UUID3="$(sudo kubectl get mvm -l microvm.fluxvm.zyvor.io/job=lab-job -o jsonpath='{.items[0].status.runtime.uuid}' 2>/dev/null || true)"
 echo "lab_smoke_phase=$FINAL msg=$MSG uuid=$UUID"
-sudo kubectl get mvm -A -o wide || true
-sudo kubectl get gimg -A || true
+sudo kubectl get mvm,mvmj,mvmp,gimg -A || true
 
 TOKEN="$(python3 - <<'PY'
 from pathlib import Path
@@ -213,12 +279,15 @@ for line in text.splitlines():
 print(tok)
 PY
 )"
-for id in "$UUID" "$UUID2"; do
+for id in "$UUID" "$UUID2" "$UUID3"; do
   [[ -n "$id" ]] || continue
   curl -sf -H "Authorization: Bearer $TOKEN" -X DELETE "http://127.0.0.1:7788/v1/vms/$id" || true
 done
 
+sudo kubectl delete mvmj lab-job --ignore-not-found --wait=false || true
+sudo kubectl delete mvmp lab-pool --ignore-not-found --wait=false || true
 sudo kubectl delete mvm lab-smoke lab-converted-skip lab-from-gimg --ignore-not-found --wait=false || true
+sudo kubectl delete mvm -l microvm.fluxvm.zyvor.io/job=lab-job --ignore-not-found --wait=false || true
 sudo kubectl delete gimg lab-ubuntu --ignore-not-found --wait=false || true
 sudo kill "$(sudo cat /tmp/microvm-lab/controller.pid)" 2>/dev/null || true
 sudo kill "$(sudo cat /tmp/microvm-lab/agent.pid)" 2>/dev/null || true

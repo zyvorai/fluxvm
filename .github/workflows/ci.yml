@@ -50,6 +50,12 @@ jobs:
         working-directory: fluxvm
         run: cargo test --workspace
 
+      - name: MicroVM gates (policy + unit + print-crd)
+        working-directory: fluxvm
+        run: |
+          chmod +x scripts/test-microvm.sh scripts/test-microvm-policy.py
+          ./scripts/test-microvm.sh
+
       - name: cargo clippy (informational — not a merge gate yet)
         working-directory: fluxvm
         run: cargo clippy --workspace --all-targets || true

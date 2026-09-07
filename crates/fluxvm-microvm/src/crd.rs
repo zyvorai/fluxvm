@@ -149,7 +149,11 @@ pub struct MicroVMJobStatus {
     plural = "microvmpools",
     shortname = "mvmp",
     namespaced,
-    status = "MicroVMPoolStatus"
+    status = "MicroVMPoolStatus",
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Ready","type":"integer","jsonPath":".status.ready"}"#,
+    printcolumn = r#"{"name":"Claimed","type":"integer","jsonPath":".status.claimed"}"#,
+    printcolumn = r#"{"name":"Replicas","type":"integer","jsonPath":".spec.replicas"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct MicroVMPoolSpec {
@@ -181,7 +185,10 @@ pub struct MicroVMPoolStatus {
     plural = "guestimages",
     shortname = "gimg",
     namespaced,
-    status = "GuestImageStatus"
+    status = "GuestImageStatus",
+    printcolumn = r#"{"name":"Ready","type":"boolean","jsonPath":".status.ready"}"#,
+    printcolumn = r#"{"name":"Path","type":"string","jsonPath":".status.path"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct GuestImageSpec {

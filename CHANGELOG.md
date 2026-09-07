@@ -14,6 +14,12 @@
 - **Lab performance publish** — `scripts/bench-microvm.sh` + refreshed
   [docs/benchmarks/README.md](docs/benchmarks/README.md) (2026-09-08 sandbox
   avg_create **5444** ms; MicroVM p50_running **2736** ms).
+- **MicroVM production deploy path** — `deploy-remote` installs
+  `fluxvm-microvm`/`fluxvm-kube`; DaemonSet `FLUXVM_TOKEN` from Secret;
+  `publish-image.yml` for GHCR; CI MicroVM gates; dataplane e2e uses bearer
+  auth; Job/Pool in k8s smoke; GuestImage/Pool printer columns.
+- **rustls CryptoProvider** — `fluxvm-microvm` / `fluxvm-kube` install `ring`
+  before kube TLS clients (rustls 0.23).
 
 ### Added
 - **MicroVM** (`fluxvm-microvm`) — Kubernetes-native disposable compute without

@@ -383,13 +383,15 @@ SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 source "$HOME/.cargo/env" 2>/dev/null || true
 cd "${REMOTE_STAGING}"
-cargo build --release -p fluxvm-cli -p fluxvm-guest-agent -p fluxvm-hypervisor 2>&1 | tail -20
+cargo build --release -p fluxvm-cli -p fluxvm-guest-agent -p fluxvm-hypervisor -p fluxvm-microvm -p fluxvm-kube 2>&1 | tail -30
 $SUDO install -m755 target/release/fluxvm /usr/local/bin/fluxvm
 $SUDO install -m755 target/release/fluxvm-hypervisor /usr/local/bin/fluxvm-hypervisor
+$SUDO install -m755 target/release/fluxvm-microvm /usr/local/bin/fluxvm-microvm
+$SUDO install -m755 target/release/fluxvm-kube /usr/local/bin/fluxvm-kube
 [ -f /etc/fluxvm.toml ] || $SUDO install -m644 config.example.toml /etc/fluxvm.toml
 $SUDO install -m644 systemd/fluxvm.service /etc/systemd/system/fluxvm.service
 $SUDO systemctl daemon-reload 2>/dev/null || true
-echo "Installed: $(fluxvm --version 2>/dev/null || echo ok) + fluxvm-hypervisor"
+echo "Installed: $(fluxvm --version 2>/dev/null || echo ok) + fluxvm-hypervisor + fluxvm-microvm + fluxvm-kube"
 REMOTE
 }
 

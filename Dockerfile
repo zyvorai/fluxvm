@@ -1,9 +1,9 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-# Builds one image with two entrypoints: `fluxvm serve` (the VMM control
-# plane REST API) and `fluxvm-kube` (the DisposableVm operator). They run
-# as two containers in the same DaemonSet pod — see deploy/k8s/daemonset.yaml
-# — sharing this image, selected via each container's `command:`.
+# Builds one image with three entrypoints: `fluxvm serve` (VMM REST API),
+# `fluxvm-kube` (DisposableVm operator), and `fluxvm-microvm` (scheduled
+# MicroVM controller / node-agent). Deploy selects via each container's
+# `command:` — see deploy/k8s/daemonset.yaml and deploy/k8s/microvm/.
 #
 # fluxvm-image depends on the sibling `guestkit` repo via a relative path
 # (`../../../guestkit` from crates/fluxvm-image — see its Cargo.toml), so

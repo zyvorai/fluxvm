@@ -23,6 +23,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
 

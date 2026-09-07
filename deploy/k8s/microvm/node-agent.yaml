@@ -19,8 +19,16 @@ spec:
               valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
             - name: FLUXVM_URL
               value: "http://127.0.0.1:7788"
+            - name: FLUXVM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fluxvm-microvm-token
+                  key: token
+                  optional: true
             - name: MICROVM_KVM_SLOTS
               value: "16"
+            - name: RUST_LOG
+              value: info
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532

@@ -75,16 +75,15 @@ Shadow Pods request `10m`/`32Mi` only.
 
 ## Known limitations
 
-- **Networking**: only `networkMode: none`/`user` are wired through the CRD today (NAT/port-forward),
-  even though the underlying VMM backends already support TAP and macvtap. Bridged networking needs
-  a CRD field addition plus a decision about how the DaemonSet's `hostNetwork: true` pod interacts
-  with your cluster's CNI — not something to improvise per-cluster.
-- **No scheduler**: whatever creates `DisposableVm` objects — e.g. [Ragnarok](/docs/ragnarok-manual),
-  which surfaces these as a parallel **FluxVM VMs** workload type alongside its KubeVirt VMs and
-  Kata containers — is responsible for picking a concrete, capable node. For scheduler-driven
-  placement, use MicroVM instead (above).
-- **No image distribution**: images must be staged identically on every capable node by whatever
-  process labels it.
+- **Networking**: MicroVM CRD maps `networkMode` `none` / `user` / `tap` /
+  `macvtap` through to `fluxvm serve`. Bridged TAP still needs the bridge/TAP
+  present on the scheduled node and a clear story with the DaemonSet's
+  `hostNetwork: true` vs cluster CNI — validate per site before production.
+- **No scheduler on DisposableVm**: whatever creates `DisposableVm` objects —
+  e.g. [Ragnarok](/docs/ragnarok-manual) — picks `spec.node`. For
+  scheduler-driven placement, use MicroVM instead (above).
+- **No CDI image pull**: stage disks on each capable node (or use GuestImage
+  Ready when the host file exists).
 
 ## Ragnarok product path
 

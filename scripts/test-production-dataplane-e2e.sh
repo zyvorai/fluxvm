@@ -61,6 +61,34 @@ fi
 KERNEL="${KERNEL:-$STATE_DIR/kernels/vmlinux}"
 ROOTFS="${ROOTFS:-$STATE_DIR/images/ubuntu-22.04.ext4}"
 
+# Prefer FLUXVM_TOKEN; else first [[auth.tokens]] entry from config.
+if [[ -z "${FLUXVM_TOKEN:-}" ]]; then
+  FLUXVM_TOKEN="$(python3 - "$CONFIG" <<'PY'
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text()
+tok = ""
+in_auth = False
+for line in text.splitlines():
+    s = line.strip()
+    if s == "[auth]":
+        in_auth = True
+        continue
+    if in_auth and s.startswith("[") and not s.startswith("[["):
+        break
+    if in_auth and s.startswith("token"):
+        tok = s.split("=", 1)[1].strip().strip('"')
+        break
+print(tok)
+PY
+)"
+fi
+export FLUXVM_TOKEN
+AUTH_HDR=()
+if [[ -n "${FLUXVM_TOKEN:-}" ]]; then
+  AUTH_HDR=(-H "Authorization: Bearer ${FLUXVM_TOKEN}")
+fi
+
 TMP="$(mktemp -d)"
 CFG_BACKUP="${TMP}/fluxvm.toml.bak"
 CFG_TEST="${TMP}/fluxvm-prod.toml"
@@ -69,10 +97,10 @@ ID=""
 SIMPLE=""
 
 cleanup() {
-  curl -sf -m 5 -X DELETE "${LISTEN}/v1/network/cnp/web-egress" >/dev/null 2>&1 || true
-  curl -sf -m 5 -X DELETE "${LISTEN}/v1/network/groups/web-egress" >/dev/null 2>&1 || true
+  curl -sf -m 5 "${AUTH_HDR[@]}" -X DELETE "${LISTEN}/v1/network/cnp/web-egress" >/dev/null 2>&1 || true
+  curl -sf -m 5 "${AUTH_HDR[@]}" -X DELETE "${LISTEN}/v1/network/groups/web-egress" >/dev/null 2>&1 || true
   if [ -n "$ID" ]; then
-    curl -sf -m 30 -X DELETE "${LISTEN}/v1/vms/${ID}" >/dev/null 2>&1 || \
+    curl -sf -m 30 "${AUTH_HDR[@]}" -X DELETE "${LISTEN}/v1/vms/${ID}" >/dev/null 2>&1 || \
       "$EPH" --config "$CONFIG" delete "$ID" >/dev/null 2>&1 || true
   fi
   if [ "$SERVICE_RESTARTED" = "1" ] && [ -f "$CFG_BACKUP" ]; then
@@ -101,7 +129,11 @@ print(dig(d, sys.argv[1]))
 
 api() {
   local method="$1" path="$2"; shift 2
-  curl -sS -m 60 -X "$method" "${LISTEN}${path}" -H 'Content-Type: application/json' "$@"
+  local auth=()
+  if [[ -n "${FLUXVM_TOKEN:-}" ]]; then
+    auth=(-H "Authorization: Bearer ${FLUXVM_TOKEN}")
+  fi
+  curl -sS -m 60 -X "$method" "${LISTEN}${path}" -H 'Content-Type: application/json' "${auth[@]}" "$@"
 }
 
 section "Unit suites"
@@ -171,8 +203,8 @@ PY
 cp "$CFG_TEST" "$CONFIG"
 systemctl restart fluxvm
 SERVICE_RESTARTED=1
-for _ in $(seq 1 40); do curl -sf -m 2 "${LISTEN}/v1/vms" >/dev/null && break; sleep 0.5; done
-curl -sf "${LISTEN}/v1/vms" >/dev/null && pass "API up with prod profile" || fail "API down"
+for _ in $(seq 1 40); do curl -sf -m 2 "${AUTH_HDR[@]}" "${LISTEN}/v1/vms" >/dev/null && break; sleep 0.5; done
+curl -sf "${AUTH_HDR[@]}" "${LISTEN}/v1/vms" >/dev/null && pass "API up with prod profile" || fail "API down"
 
 section "Health / ipcache / refresh-dns API+CLI"
 HEALTH=$(api GET /v1/network/health)

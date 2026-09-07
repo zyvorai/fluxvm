@@ -60,8 +60,11 @@ plus [architecture](../README.md#network-fabric-architecture-how-it-works).
 ## Remaining (optional hardening)
 
 - Production-grade in-tree KVM guests (virtio-blk from rootfs, vsock, snapshots without Firecracker)
-- Published density/cold-start numbers from your lab hardware
+- Concurrent density numbers (VMs/host); cold-start benches are published —
+  [benchmarks](benchmarks/README.md)
 - Cilium-native VM endpoints / identity-aware Hubble (beyond coexistence mode)
+- MicroVM-specific Prometheus histograms (schedule→Running); global create
+  counters on `fluxvm serve` already exist
 
 ## Host config
 

@@ -40,6 +40,18 @@ class PolicySource(unittest.TestCase):
         self.assertIn("resolve_image", agent)
         self.assertIn("looks_like_direct_image", agent)
 
+    def test_node_agent_token_secret(self):
+        src = (ROOT / "deploy/k8s/microvm/node-agent.yaml").read_text()
+        self.assertIn("FLUXVM_TOKEN", src)
+        self.assertIn("fluxvm-microvm-token", src)
+        self.assertTrue((ROOT / "deploy/k8s/microvm/secret.yaml").is_file())
+
+    def test_crd_printer_columns(self):
+        src = (ROOT / "deploy/k8s/microvm/crd.yaml").read_text()
+        self.assertIn("additionalPrinterColumns", src)
+        self.assertIn(".status.ready", src)
+        self.assertIn(".status.path", src)
+
 
 class Manifests(unittest.TestCase):
     def test_controller_convert_off(self):

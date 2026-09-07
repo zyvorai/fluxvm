@@ -36,6 +36,8 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // rustls 0.23: select a process-wide CryptoProvider before any TLS client.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     if cli.print_crd {
