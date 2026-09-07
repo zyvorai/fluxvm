@@ -86,6 +86,10 @@
 - Richer Prometheus metrics (auth/egress denies, create/start latency).
 
 ### Fixed
+- **TLS / mTLS serve** — install rustls `ring` CryptoProvider before binding so
+  `[tls]` / `client_ca` no longer panic on rustls 0.23 feature detection.
+- **CH QGA gate** — allow `qga.enabled` on `cloud-hypervisor` (serial socket),
+  not only QEMU virtio-serial.
 - **eBPF smoke** — `scripts/test-ebpf-smoke.sh` uses dual netns and one persistent
   `ip netns exec` session so policy/XDP checks work on hosts where same-netns
   `ping -I` fails and `/sys` remounts drop bpffs pins across separate execs.

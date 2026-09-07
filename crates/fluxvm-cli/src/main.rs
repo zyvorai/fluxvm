@@ -341,6 +341,9 @@ async fn main() -> Result<()> {
             }
             let app = api::router(m);
             if cfg.tls.enabled() {
+                // rustls 0.23: select a process-wide CryptoProvider (ring) before
+                // any ServerConfig / axum-server TLS bind.
+                let _ = rustls::crypto::ring::default_provider().install_default();
                 let addr: std::net::SocketAddr = cfg.listen.parse()?;
                 let cert = cfg.tls.cert.clone().unwrap();
                 let key = cfg.tls.key.clone().unwrap();

@@ -924,8 +924,15 @@ impl VmManager {
             .await?;
         let guest_cid = record.guest_cid;
 
-        if req.qga.as_ref().is_some_and(|q| q.enabled) && req.backend != BackendKind::Qemu {
-            anyhow::bail!("qga.enabled requires backend qemu (virtio-serial guest-agent channel)");
+        if req.qga.as_ref().is_some_and(|q| q.enabled)
+            && !matches!(
+                req.backend,
+                BackendKind::Qemu | BackendKind::CloudHypervisor
+            )
+        {
+            anyhow::bail!(
+                "qga.enabled requires backend qemu (virtio-serial) or cloud-hypervisor (serial socket)"
+            );
         }
 
         let result: Result<()> = async {
