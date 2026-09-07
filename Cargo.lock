@@ -1778,6 +1778,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-microvm"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "fluxvm-kube",
+ "futures",
+ "k8s-openapi",
+ "kube",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fluxvm-network"
 version = "0.3.0"
 dependencies = [

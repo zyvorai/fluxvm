@@ -141,6 +141,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [REST API](#rest-api)
 - [VM JSON contract](#vm-json-contract)
 - [Kubernetes CRD/operator](#kubernetes-crdoperator)
+- [MicroVM (Kubernetes without KubeVirt)](#microvm-kubernetes-without-kubevirt)
 - [Using FluxVM through zyvor-fabric](#using-fluxvm-through-zyvor-fabric)
 - [Using FluxVM through Ragnarok](#using-fluxvm-through-ragnarok)
 - [Distributed node-agent](#distributed-node-agent)
@@ -207,7 +208,8 @@ crates/
 ├── fluxvm-api                   REST API (axum)
 ├── fluxvm-cli                   `fluxvm` CLI binary (composition root)
 ├── fluxvm-agent                 fleet registry + per-host node-agent daemon (multi-node)
-└── fluxvm-kube                  DisposableVm CRD + node-local Kubernetes operator
+├── fluxvm-kube                  DisposableVm CRD + node-local Kubernetes operator
+└── fluxvm-microvm               MicroVM/Job/Pool/GuestImage, shadow-Pod scheduler, node agent
 ```
 
 `fluxvm-agent` (a distinct concept from `fluxvm-guest-agent` above — this one is the
@@ -1643,6 +1645,22 @@ need `bridge` / `parent` etc. on the CR — see the CRD OpenAPI).
 **Placement**: set `spec.node` explicitly, or leave it empty and run one
 `fluxvm-kube --enable-placement` instance to pin to the capable node with the fewest
 `DisposableVm` objects. Node-local operators still only reconcile CRs targeting their node.
+
+## MicroVM (Kubernetes without KubeVirt)
+
+`fluxvm-microvm` is the scheduled MicroVM path: kube-scheduler places a shadow Pod
+(capacity ticket); a node agent drives local `fluxvm serve`. QEMU does not run in a
+Pod. Full design: [docs/microvm.md](docs/microvm.md).
+
+```bash
+fluxvm-microvm --print-crd | kubectl apply -f -
+kubectl apply -f deploy/k8s/microvm/
+fluxvm-microvm controller --convert
+NODE_NAME=$(hostname) FLUXVM_URL=http://127.0.0.1:7788 fluxvm-microvm node-agent
+```
+
+Kinds: `MicroVM`, `MicroVMJob`, `MicroVMPool`, `GuestImage` (`microvm.fluxvm.zyvor.io`).
+Examples: [`examples/microvm/`](examples/microvm/). Controllers run in `fluxvm-system`.
 
 ## Using FluxVM through zyvor-fabric
 

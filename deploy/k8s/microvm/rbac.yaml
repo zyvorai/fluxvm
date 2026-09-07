@@ -1,0 +1,54 @@
+# Copyright 2026 Zyvor
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: fluxvm-microvm-controller, namespace: fluxvm-system}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: fluxvm-microvm-node, namespace: fluxvm-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: fluxvm-microvm-controller}
+rules:
+  - apiGroups: [microvm.fluxvm.zyvor.io]
+    resources: [microvms, microvms/status, microvmjobs, microvmjobs/status, microvmpools, microvmpools/status, guestimages, guestimages/status]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [fluxvm.zyvor.io]
+    resources: [disposablevms]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [pods, services]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: fluxvm-microvm-node}
+rules:
+  - apiGroups: [microvm.fluxvm.zyvor.io]
+    resources: [microvms, microvms/status, microvmpools, microvmpools/status, guestimages, guestimages/status]
+    verbs: [get, list, watch, update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [nodes, nodes/status]
+    verbs: [get, list, watch, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: fluxvm-microvm-controller}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fluxvm-microvm-controller}
+subjects: [{kind: ServiceAccount, name: fluxvm-microvm-controller, namespace: fluxvm-system}]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: fluxvm-microvm-node}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: fluxvm-microvm-node}
+subjects: [{kind: ServiceAccount, name: fluxvm-microvm-node, namespace: fluxvm-system}]

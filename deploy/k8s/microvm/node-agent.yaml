@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: fluxvm-microvm-node, namespace: fluxvm-system}
+spec:
+  selector: {matchLabels: {app: fluxvm-microvm-node}}
+  template:
+    metadata: {labels: {app: fluxvm-microvm-node}}
+    spec:
+      serviceAccountName: fluxvm-microvm-node
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector: {ragnarok.io/fluxvm-capable: "true"}
+      containers:
+        - name: agent
+          image: ghcr.io/zyvorai/fluxvm:0.1.0
+          command: ["fluxvm-microvm", "node-agent"]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: FLUXVM_URL
+              value: "http://127.0.0.1:7788"
+            - name: MICROVM_KVM_SLOTS
+              value: "16"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}

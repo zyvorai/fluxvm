@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: fluxvm-microvm-controller, namespace: fluxvm-system}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: fluxvm-microvm-controller}}
+  template:
+    metadata: {labels: {app: fluxvm-microvm-controller}}
+    spec:
+      serviceAccountName: fluxvm-microvm-controller
+      containers:
+        - name: controller
+          image: ghcr.io/zyvorai/fluxvm:0.1.0
+          command: ["fluxvm-microvm", "controller", "--convert"]
+          env: [{name: RUST_LOG, value: info}]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}

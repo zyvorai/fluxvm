@@ -34,7 +34,7 @@ COPY . ./fluxvm
 COPY --from=guestkit . ./guestkit
 
 WORKDIR /build/fluxvm
-RUN cargo build --locked --release -p fluxvm-cli -p fluxvm-kube -p fluxvm-hypervisor
+RUN cargo build --locked --release -p fluxvm-cli -p fluxvm-kube -p fluxvm-microvm -p fluxvm-hypervisor
 RUN ./scripts/build-ebpf.sh
 
 FROM docker.io/library/debian:bookworm-slim AS runtime
@@ -57,6 +57,7 @@ RUN bash /tmp/install-cloud-hypervisor.sh \
 
 COPY --from=builder /build/fluxvm/target/release/fluxvm /usr/local/bin/fluxvm
 COPY --from=builder /build/fluxvm/target/release/fluxvm-kube /usr/local/bin/fluxvm-kube
+COPY --from=builder /build/fluxvm/target/release/fluxvm-microvm /usr/local/bin/fluxvm-microvm
 COPY --from=builder /build/fluxvm/target/release/fluxvm-hypervisor /usr/local/bin/fluxvm-hypervisor
 COPY --from=builder /build/fluxvm/dist/bpf/fluxvm_tc.bpf.o /usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o
 COPY --from=builder /build/fluxvm/dist/bpf/fluxvm_xdp.bpf.o /usr/lib/fluxvm/bpf/fluxvm_xdp.bpf.o

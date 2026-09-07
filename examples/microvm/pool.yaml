@@ -1,0 +1,15 @@
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: MicroVMPool
+metadata:
+  name: ci-warm
+spec:
+  replicas: 4
+  template:
+    backend: firecracker
+    image: /var/lib/fluxvm/images/ci-rootfs.ext4
+    vcpus: 4
+    memoryMib: 4096
+    networkMode: tap
+    bridge: vmbr0
+    netns: true
+    persist: true

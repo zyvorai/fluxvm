@@ -3,6 +3,13 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **MicroVM** (`fluxvm-microvm`) — Kubernetes-native disposable compute without
+  KubeVirt: `MicroVM` / `MicroVMJob` / `MicroVMPool` / `GuestImage` on
+  `microvm.fluxvm.zyvor.io`, shadow-Pod capacity tickets, cluster controller +
+  node agent against local `fluxvm serve`, optional `DisposableVm` → `MicroVM`
+  conversion. Docs: [docs/microvm.md](docs/microvm.md). Manifests:
+  `deploy/k8s/microvm/`. Tests: `cargo test -p fluxvm-microvm` /
+  `scripts/test-microvm.sh`. (Formerly internal aether design.)
 - Hubble-style **packet flow** renderer: hop path (guest → tap → tc/eBPF →
   uplink → peer), `--output color|plain|json`, `fluxvm hubble flow` detailed
   view, `/v1/network/hubble/flows/text`, and a Colorful/Normal Hubble-lite UI

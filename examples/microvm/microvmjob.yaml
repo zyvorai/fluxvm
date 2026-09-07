@@ -1,0 +1,19 @@
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: MicroVMJob
+metadata:
+  name: compile-main
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 2
+  template:
+    backend: firecracker
+    image: /var/lib/fluxvm/images/ci-rootfs.ext4
+    vcpus: 4
+    memoryMib: 4096
+    networkMode: tap
+    bridge: vmbr0
+    netns: true
+    claimFrom: ci-warm
+    command: "/usr/local/bin/run-ci"
+    persist: false

@@ -7,6 +7,10 @@ resources:
   - ../configmap.yaml
   - ../crd.yaml
   - ../daemonset.yaml
+  - ../microvm/crd.yaml
+  - ../microvm/rbac.yaml
+  - ../microvm/controller.yaml
+  - ../microvm/node-agent.yaml
 commonLabels:
   app.kubernetes.io/part-of: zyvor
   zyvor.dev/component: fluxvm

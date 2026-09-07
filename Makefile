@@ -1,13 +1,16 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 
-.PHONY: build test test-policy bpf preflight check test-devops test-packetflow
+.PHONY: build test test-policy bpf preflight check test-devops test-packetflow test-microvm
 
 build:
 	cargo build --workspace --all-targets
 
 test:
 	cargo test --workspace
+
+test-microvm:
+	bash scripts/test-microvm.sh
 
 test-policy:
 	python3 scripts/test-security-groups.py

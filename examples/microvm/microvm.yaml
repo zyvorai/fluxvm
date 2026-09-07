@@ -1,0 +1,16 @@
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: MicroVM
+metadata:
+  name: sandbox-42
+spec:
+  backend: qemu
+  image: /var/lib/fluxvm/images/ubuntu.qcow2
+  vcpus: 2
+  memoryMib: 2048
+  networkMode: tap
+  bridge: vmbr0
+  netns: true
+  service: true
+  servicePort: 22
+  ttlSeconds: 900
+  persist: false
