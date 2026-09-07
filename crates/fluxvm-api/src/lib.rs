@@ -23,6 +23,14 @@ use std::sync::Arc;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod oidc;
+
+#[derive(Clone)]
+struct AuthState {
+    manager: Arc<VmManager>,
+    oidc: Option<Arc<oidc::OidcValidator>>,
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
@@ -55,11 +63,13 @@ type ApiResult<T> = Result<T, ApiError>;
 /// Bounces a request without a valid bearer token; requests that do have
 /// one carry their resolved `Role` (and optional token name) onward.
 /// Fail-closed when `auth.must_authenticate(listen)` is true.
+/// Static `[[auth.tokens]]` are tried first; OIDC JWTs when configured.
 async fn auth_middleware(
-    State(m): State<Arc<VmManager>>,
+    State(auth): State<AuthState>,
     mut req: Request,
     next: Next,
 ) -> Response {
+    let m = &auth.manager;
     let path = req.uri().path().to_string();
     let method = req.method().clone();
     // Liveness/readiness probes must work without auth (Kubernetes convention).
@@ -67,30 +77,41 @@ async fn auth_middleware(
         return next.run(req).await;
     }
     let must = m.cfg.auth.must_authenticate(&m.cfg.listen);
-    let (role, token_name, token_tenant) = if !must && m.cfg.auth.tokens.is_empty() {
+    let presented = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(str::to_string);
+
+    let (role, token_name, token_tenant) = if !must && !m.cfg.auth.has_credentials() {
         (Some(Role::Admin), Some("anonymous-admin".to_string()), None)
-    } else if m.cfg.auth.tokens.is_empty() && must {
-        (None, None, None)
-    } else {
-        let presented = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "));
-        match presented.and_then(|t| {
-            m.cfg
-                .auth
-                .tokens
-                .iter()
-                .find(|entry| constant_time_eq(&entry.token, t))
-        }) {
-            Some(entry) => (
+    } else if let Some(ref t) = presented {
+        if let Some(entry) = m
+            .cfg
+            .auth
+            .tokens
+            .iter()
+            .find(|entry| constant_time_eq(&entry.token, t))
+        {
+            (
                 Some(entry.role),
                 entry.name.clone().or_else(|| Some("unnamed".into())),
                 entry.tenant.clone(),
-            ),
-            None => (None, None, None),
+            )
+        } else if let Some(ref oidc) = auth.oidc {
+            match oidc.validate(t).await {
+                Ok(id) => (Some(id.role), Some(id.actor), id.tenant),
+                Err(e) => {
+                    tracing::debug!(error = %e, "OIDC bearer rejected");
+                    (None, None, None)
+                }
+            }
+        } else {
+            (None, None, None)
         }
+    } else {
+        (None, None, None)
     };
     match role {
         Some(role) => {
@@ -185,6 +206,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 }
 
 pub fn router(manager: Arc<VmManager>) -> Router {
+    let oidc = build_oidc(&manager.cfg.auth);
     Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/readyz", get(readyz))
@@ -289,11 +311,29 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             tenant_guard_middleware,
         ))
         .layer(middleware::from_fn_with_state(
-            manager.clone(),
+            AuthState {
+                manager: manager.clone(),
+                oidc: oidc.clone(),
+            },
             auth_middleware,
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(manager)
+}
+
+fn build_oidc(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<oidc::OidcValidator>> {
+    if !cfg.oidc_enabled() {
+        if cfg.oidc_issuer.is_some() && cfg.oidc_audience.is_none() {
+            tracing::warn!(
+                "auth.oidc_issuer is set without auth.oidc_audience — OIDC JWT validation disabled"
+            );
+        }
+        return None;
+    }
+    let issuer = cfg.oidc_issuer.clone()?;
+    let audience = cfg.oidc_audience.clone()?;
+    tracing::info!(%issuer, %audience, "OIDC JWT validation enabled (JWKS)");
+    Some(Arc::new(oidc::OidcValidator::new(issuer, audience)))
 }
 
 async fn metrics(State(m): State<Arc<VmManager>>) -> Response {

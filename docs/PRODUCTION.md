@@ -5,16 +5,17 @@ images — not only the dataplane.
 
 ## 1. Control plane
 
-- [ ] `listen` is loopback **or** `auth.require = true` with real tokens
+- [ ] `listen` is loopback **or** `auth.require = true` with real tokens and/or OIDC
 - [ ] Per-token `max_vms_per_token` / `max_memory_mib_per_token`
 - [ ] Tokens carry optional `tenant`; VM specs set `tenant`
-- [ ] Token tenant is authoritative on create (inherited when omitted; mismatch → 403)
+- [ ] Token/OIDC tenant is authoritative on create (inherited when omitted; mismatch → 403)
 - [ ] Token tenant auto-scopes list / get / mutate (other tenants → 404)
 - [ ] `GET /readyz` returns HTTP 503 when `"ok": false`
 - [ ] `GET /v1/vms?tenant=<id>` filters the fleet
 - [ ] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
 - [ ] `GET /healthz` for liveness; `/readyz` for readiness probes
-- [ ] Reserved `auth.oidc_issuer` / `auth.oidc_audience` are unset or understood as warn-only
+- [ ] `auth.oidc_issuer` + `auth.oidc_audience` set together when using OIDC JWTs (or left unset)
+- [ ] Optional `[tls]` / `tls.client_ca` when terminating TLS on FluxVM itself
 - [ ] JSON audit target `fluxvm_audit` shipped to your collector
 - [ ] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
 - [ ] Example: [examples/create-vm-prod.json](../examples/create-vm-prod.json)
@@ -26,6 +27,7 @@ images — not only the dataplane.
 - [ ] `allowed_backends` pinned
 - [ ] Warm pools only on dedicated hosts
 - [ ] Snapshots tested for the backends you run (QEMU `savevm`, CH `ch-remote`)
+- [ ] Windows + QGA only on QEMU ([ch-windows-qga.md](ch-windows-qga.md)); `fluxvm_engine=kvm` lab-only
 
 ## 3. Images & storage
 
@@ -39,11 +41,13 @@ images — not only the dataplane.
 - [ ] Merge `configs/network-fabric-prod.toml` when VMs have a host edge
 - [ ] `fluxvm dataplane health` ok
 - [ ] CNP/groups for tenant labels; `fluxvm observe`
-- [ ] Cilium nodes: `mode = "cilium"`, no FluxVM XDP
+- [ ] Cilium coexistence (`mode=cilium`) only if sock/bpffs present — not Cilium-native endpoints
+- [ ] Cilium nodes: no FluxVM XDP on the shared datapath
 - [ ] See [production-dataplane.md](production-dataplane.md)
 
 ## 5. Kubernetes
 
+- [ ] DaemonSet readiness → `/readyz`; liveness → `/healthz`
 - [ ] Privileged DaemonSet + hostNetwork as in `deploy/k8s/`
 - [ ] Host `nbd` module loaded if GuestKit customize runs on-node
 - [ ] Operator talks to an already-healthy fabricd/FluxVM API
@@ -56,5 +60,5 @@ images — not only the dataplane.
 
 ## Do not ship yet as “done”
 
-OIDC/mTLS exchange, Cilium-native VM endpoints, Hubble UI, CH Windows+QGA,
+Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.

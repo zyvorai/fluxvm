@@ -3,11 +3,14 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **OIDC JWT validation** — `auth.oidc_issuer` + `auth.oidc_audience` enable
+  discovery/JWKS bearer validation alongside `[[auth.tokens]]` (role/tenant claims).
+- **API TLS / mTLS** — optional `[tls]` cert/key; `tls.client_ca` requires client certs.
 - **Project production baseline** — `SECURITY.md`, `CONTRIBUTING.md`,
   `Makefile`, whole-stack [docs/PRODUCTION.md](docs/PRODUCTION.md),
   `/readyz` (HTTP 503 when not ready), VM `tenant` + `GET /v1/vms?tenant=`,
   token `tenant` (authoritative create + scoped list/get/mutate),
-  reserved OIDC config keys, `scripts/release-checklist.sh`.
+  `scripts/release-checklist.sh`.
 - **Production dataplane** — FQDN→IPv4/IPv6 resolve at apply, FluxVM ipcache,
   `GET /v1/network/health|/ipcache`, `POST /v1/network/refresh-dns`,
   `fluxvm dataplane health|ipcache|refresh-dns`, prod TOML + runbook

@@ -82,7 +82,7 @@ reaper_interval_secs = 5
 # require = false
 # max_vms_per_token = 32
 # max_memory_mib_per_token = 65536
-# Reserved for a future OIDC exchange (warn-only today; bearer tokens are GA):
+# OIDC: accept IdP JWTs (discovery + JWKS) in addition to static tokens:
 # oidc_issuer = "https://login.example.com/"
 # oidc_audience = "fluxvm"
 # [[auth.tokens]]
@@ -95,6 +95,13 @@ reaper_interval_secs = 5
 # token = "REPLACE_ME_READONLY_TOKEN"
 # role = "read-only"
 # name = "dashboard"
+
+# Optional HTTPS for the API. When client_ca is set, require client certs (mTLS).
+# Bearer / OIDC still apply after the TLS handshake.
+# [tls]
+# cert = "/etc/fluxvm/tls/server.crt"
+# key = "/etc/fluxvm/tls/server.key"
+# client_ca = "/etc/fluxvm/tls/client-ca.crt"
 
 # Firecracker only: run every Firecracker VM through Firecracker's own
 # `jailer` binary (chroot, uid/gid drop) instead of exec'ing it directly.

@@ -34,6 +34,9 @@ pub struct Config {
     pub reaper_interval_secs: u64,
     pub policy: Policy,
     pub auth: AuthConfig,
+    /// Optional TLS for the REST API (server cert/key; optional client CA = mTLS).
+    #[serde(default)]
+    pub tls: TlsConfig,
     pub jailer: JailerConfig,
     pub catalog: CatalogConfig,
     pub storage: StorageConfig,
@@ -75,6 +78,7 @@ impl Default for Config {
             reaper_interval_secs: 5,
             policy: Policy::default(),
             auth: AuthConfig::default(),
+            tls: TlsConfig::default(),
             jailer: JailerConfig::default(),
             catalog: CatalogConfig::default(),
             storage: StorageConfig::default(),
@@ -298,6 +302,28 @@ impl Default for JailerConfig {
     }
 }
 
+/// TLS termination for `fluxvm serve`. When `cert` + `key` are set the API
+/// listens with HTTPS. When `client_ca` is also set, clients must present a
+/// certificate signed by that CA (mTLS). Bearer tokens / OIDC still apply.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TlsConfig {
+    pub cert: Option<PathBuf>,
+    pub key: Option<PathBuf>,
+    /// PEM CA bundle; when set, require and verify client certificates.
+    pub client_ca: Option<PathBuf>,
+}
+
+impl TlsConfig {
+    pub fn enabled(&self) -> bool {
+        self.cert.is_some() && self.key.is_some()
+    }
+
+    pub fn mtls_enabled(&self) -> bool {
+        self.enabled() && self.client_ca.is_some()
+    }
+}
+
 /// REST API bearer-token auth, enforced by `fluxvm-api`'s auth middleware.
 /// Empty `tokens` with `require` false keeps local-dev open (admin). When
 /// `require` is true, or when listen is non-loopback and tokens are empty,
@@ -313,8 +339,9 @@ pub struct AuthConfig {
     pub max_vms_per_token: Option<usize>,
     /// Per-token aggregate memory MiB quota.
     pub max_memory_mib_per_token: Option<u64>,
-    /// Optional OIDC issuer URL. Reserved for a follow-up token exchange;
-    /// if set without `oidc_audience`, serve logs a warning only.
+    /// Optional OIDC issuer URL. When set with `oidc_audience`, FluxVM
+    /// accepts IdP-issued bearer JWTs validated via discovery + JWKS
+    /// (in addition to static `[[auth.tokens]]`).
     #[serde(default)]
     pub oidc_issuer: Option<String>,
     #[serde(default)]
@@ -335,16 +362,29 @@ impl Default for AuthConfig {
 }
 
 impl AuthConfig {
+    /// OIDC JWT path is enabled when both issuer and audience are set.
+    pub fn oidc_enabled(&self) -> bool {
+        self.oidc_issuer
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
+            && self.oidc_audience.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
     /// Fail closed when explicitly required, or when binding off-loopback
-    /// with no tokens configured.
+    /// with no tokens / OIDC configured.
     pub fn must_authenticate(&self, listen: &str) -> bool {
-        if self.require {
+        if self.require || self.oidc_enabled() {
             return true;
         }
         if self.tokens.is_empty() && !is_loopback_listen(listen) {
             return true;
         }
         !self.tokens.is_empty()
+    }
+
+    /// True when some credential path is configured (static tokens and/or OIDC).
+    pub fn has_credentials(&self) -> bool {
+        !self.tokens.is_empty() || self.oidc_enabled()
     }
 }
 

@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fluxvm_api as api;
 use fluxvm_core::{
@@ -10,7 +10,7 @@ use fluxvm_core::{
 };
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
-use std::{path::PathBuf, sync::Arc};
+use std::{path::{Path, PathBuf}, sync::Arc};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -289,24 +289,29 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Serve => {
-            if cfg.auth.must_authenticate(&cfg.listen) && cfg.auth.tokens.is_empty() {
+            if cfg.auth.must_authenticate(&cfg.listen) && !cfg.auth.has_credentials() {
                 anyhow::bail!(
-                    "auth is required for listen={} but [[auth.tokens]] is empty — \
-                     add tokens or bind 127.0.0.1 / set auth.require=false for loopback-only lab use",
+                    "auth is required for listen={} but no [[auth.tokens]] and OIDC is not \
+                     configured — add tokens, set auth.oidc_issuer+oidc_audience, or bind \
+                     127.0.0.1 / set auth.require=false for loopback-only lab use",
                     cfg.listen
                 );
             }
-            if cfg.auth.tokens.is_empty() {
+            if !cfg.auth.has_credentials() {
                 tracing::warn!(
                     listen = %cfg.listen,
-                    "API auth is OFF (no [[auth.tokens]]); every request is admin"
+                    "API auth is OFF (no [[auth.tokens]] / OIDC); every request is admin"
                 );
             }
-            if cfg.auth.oidc_issuer.is_some() {
+            if cfg.auth.oidc_enabled() {
+                tracing::info!(
+                    issuer = ?cfg.auth.oidc_issuer,
+                    audience = ?cfg.auth.oidc_audience,
+                    "OIDC bearer JWT validation enabled alongside static tokens"
+                );
+            } else if cfg.auth.oidc_issuer.is_some() {
                 tracing::warn!(
-                    has_audience = cfg.auth.oidc_audience.is_some(),
-                    "auth.oidc_issuer is set — OIDC token exchange is not implemented yet; \
-                     bearer [[auth.tokens]] remain the GA path"
+                    "auth.oidc_issuer set without auth.oidc_audience — OIDC disabled"
                 );
             }
             m.start_reaper();
@@ -323,9 +328,31 @@ async fn main() -> Result<()> {
                     }
                 });
             }
-            let listener = TcpListener::bind(&cfg.listen).await?;
-            tracing::info!(listen=%cfg.listen, "API listening");
-            axum::serve(listener, api::router(m)).await?;
+            let app = api::router(m);
+            if cfg.tls.enabled() {
+                let addr: std::net::SocketAddr = cfg.listen.parse()?;
+                let cert = cfg.tls.cert.clone().unwrap();
+                let key = cfg.tls.key.clone().unwrap();
+                let rustls_config = if let Some(ca) = cfg.tls.client_ca.clone() {
+                    build_mtls_config(&cert, &key, &ca).await?
+                } else {
+                    axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+                        .await
+                        .context("loading TLS cert/key")?
+                };
+                tracing::info!(
+                    listen = %cfg.listen,
+                    mtls = cfg.tls.mtls_enabled(),
+                    "API listening (TLS)"
+                );
+                axum_server::bind_rustls(addr, rustls_config)
+                    .serve(app.into_make_service())
+                    .await?;
+            } else {
+                let listener = TcpListener::bind(&cfg.listen).await?;
+                tracing::info!(listen=%cfg.listen, "API listening");
+                axum::serve(listener, app).await?;
+            }
         }
         Command::Create { spec } => {
             let req: CreateVmRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
@@ -585,4 +612,47 @@ async fn main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+async fn build_mtls_config(
+    cert: &Path,
+    key: &Path,
+    client_ca: &Path,
+) -> Result<axum_server::tls_rustls::RustlsConfig> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::server::WebPkiClientVerifier;
+    use rustls::{RootCertStore, ServerConfig};
+    use std::fs::File;
+    use std::io::BufReader;
+    use std::sync::Arc;
+
+    let mut cert_reader = BufReader::new(File::open(cert).context("open TLS cert")?);
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()
+        .context("parse TLS cert PEM")?;
+    let mut key_reader = BufReader::new(File::open(key).context("open TLS key")?);
+    let key = rustls_pemfile::private_key(&mut key_reader)
+        .context("parse TLS key PEM")?
+        .ok_or_else(|| anyhow::anyhow!("TLS key PEM contained no private key"))?;
+
+    let mut roots = RootCertStore::empty();
+    let mut ca_reader = BufReader::new(File::open(client_ca).context("open client CA")?);
+    for cert in rustls_pemfile::certs(&mut ca_reader) {
+        roots
+            .add(cert.context("parse client CA cert")?)
+            .context("add client CA to trust store")?;
+    }
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .build()
+        .context("build client cert verifier")?;
+
+    let mut config = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, PrivateKeyDer::from(key))
+        .context("build rustls ServerConfig")?;
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    Ok(axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
+        config,
+    )))
 }
