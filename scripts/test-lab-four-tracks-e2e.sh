@@ -247,9 +247,13 @@ VID=$(echo "$CREATE" | python3 -c 'import sys,json
 try: print(json.load(sys.stdin).get("id",""))
 except: print("")')
 if [[ -n "$VID" ]]; then
-  sleep 2
-  EP=$(curl -sf "${AUTH[@]}" "$API/v1/network/endpoints")
-  echo "$EP" | grep -q "$VID" && ok "endpoint for $VID" || bad "no endpoint for $VID"
+  FOUND=0
+  for _ in $(seq 1 15); do
+    EP=$(curl -sf "${AUTH[@]}" "$API/v1/network/endpoints" || true)
+    if echo "$EP" | grep -q "$VID"; then FOUND=1; break; fi
+    sleep 1
+  done
+  [[ "$FOUND" == 1 ]] && ok "endpoint for $VID" || bad "no endpoint for $VID"
   curl -sf "${AUTH[@]}" "$API/v1/network/hubble/flows" | grep -q '"items"' && ok "hubble flows" || bad "hubble flows"
   curl -sf "${AUTH[@]}" "$API/v1/network/hubble/ui" | head -c 120 | grep -qiE 'html|hubble|flow' && ok "hubble ui" || bad "hubble ui"
   "$BIN" --config "$CFG" hubble endpoints >/dev/null && ok "cli hubble endpoints" || bad "cli hubble"
