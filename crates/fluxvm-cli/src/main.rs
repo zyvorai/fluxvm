@@ -302,10 +302,11 @@ async fn main() -> Result<()> {
                     "API auth is OFF (no [[auth.tokens]]); every request is admin"
                 );
             }
-            if cfg.auth.oidc_issuer.is_some() && cfg.auth.oidc_audience.is_none() {
+            if cfg.auth.oidc_issuer.is_some() {
                 tracing::warn!(
-                    "auth.oidc_issuer is set but auth.oidc_audience is empty — \
-                     OIDC token exchange is reserved; bearer [[auth.tokens]] remain the GA path"
+                    has_audience = cfg.auth.oidc_audience.is_some(),
+                    "auth.oidc_issuer is set — OIDC token exchange is not implemented yet; \
+                     bearer [[auth.tokens]] remain the GA path"
                 );
             }
             m.start_reaper();

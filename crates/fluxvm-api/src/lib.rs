@@ -130,6 +130,37 @@ struct AuditActor(pub String);
 #[derive(Clone, Debug)]
 struct TokenTenant(pub String);
 
+fn extract_vm_uuid(path: &str) -> Option<Uuid> {
+    let rest = path.strip_prefix("/v1/vms/")?;
+    let id = rest.split('/').next()?;
+    Uuid::parse_str(id).ok()
+}
+
+/// When a token carries a tenant, scope all `/v1/vms/{uuid}…` access to that tenant.
+async fn tenant_guard_middleware(
+    State(m): State<Arc<VmManager>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(TokenTenant(tenant)) = req.extensions().get::<TokenTenant>().cloned() else {
+        return next.run(req).await;
+    };
+    let path = req.uri().path().to_string();
+    if let Some(id) = extract_vm_uuid(&path) {
+        match m.get(id).await {
+            Ok(vm) if vm.request.tenant.as_deref() == Some(tenant.as_str()) => {}
+            _ => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": "VM not found"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    next.run(req).await
+}
+
 fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16) {
     let role = match role {
         Role::Admin => "admin",
@@ -253,6 +284,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/pools", post(create_pool).get(list_pools))
         .route("/v1/pools/{name}", get(get_pool).delete(delete_pool))
         .route("/v1/pools/{name}/claim", post(claim_pool))
+        .layer(middleware::from_fn_with_state(
+            manager.clone(),
+            tenant_guard_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             auth_middleware,
@@ -402,11 +437,16 @@ async fn create_vm(
     Json(mut req): Json<CreateVmRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
-    // Token tenant fills in when the body omitted one (body wins if both set).
-    if req.tenant.is_none() {
-        if let Some(Extension(TokenTenant(t))) = token_tenant {
-            req.tenant = Some(t);
+    // Token tenant is authoritative: inherit when omitted; reject mismatch.
+    if let Some(Extension(TokenTenant(t))) = token_tenant {
+        if let Some(ref body) = req.tenant {
+            if body != &t {
+                return Err(ApiError::forbidden(format!(
+                    "token tenant '{t}' cannot create VM for tenant '{body}'"
+                )));
+            }
         }
+        req.tenant = Some(t);
     }
     enforce_token_quotas(&m, actor.as_ref().map(|a| a.0.0.as_str()), &req).await?;
     Ok((StatusCode::CREATED, Json(m.create(req).await?)))
@@ -740,25 +780,41 @@ struct ListVmsQuery {
 
 async fn list_vms(
     State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
     Query(q): Query<ListVmsQuery>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, ApiError> {
     let mut items = m.list().await;
     if let Some(name) = q.name {
         items.retain(|vm| vm.name == name);
     }
-    if let Some(tenant) = q.tenant {
+    // Token tenant forces scope; query ?tenant= must match when both present.
+    if let Some(Extension(TokenTenant(t))) = token_tenant {
+        if let Some(ref qt) = q.tenant {
+            if qt != &t {
+                return Err(ApiError::forbidden(format!(
+                    "token tenant '{t}' cannot list tenant '{qt}'"
+                )));
+            }
+        }
+        items.retain(|vm| vm.request.tenant.as_deref() == Some(t.as_str()));
+    } else if let Some(tenant) = q.tenant {
         items.retain(|vm| vm.request.tenant.as_deref() == Some(tenant.as_str()));
     }
-    Json(json!({"items": items}))
+    Ok(Json(json!({"items": items})))
 }
 
-async fn readyz(
-    State(m): State<Arc<VmManager>>,
-) -> Json<serde_json::Value> {
-    match m.readyz().await {
-        Ok(v) => Json(v),
-        Err(e) => Json(json!({"ok": false, "error": e.to_string()})),
-    }
+async fn readyz(State(m): State<Arc<VmManager>>) -> impl IntoResponse {
+    let body = match m.readyz().await {
+        Ok(v) => v,
+        Err(e) => json!({"ok": false, "error": e.to_string()}),
+    };
+    let ok = body.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body))
 }
 async fn get_vm(
     State(m): State<Arc<VmManager>>,

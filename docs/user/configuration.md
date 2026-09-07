@@ -25,7 +25,7 @@ Every create request may set `"storage"` to switch how that VM's disk is provisi
 
 ## Auth
 
-An empty `[auth]` section (the default) leaves the REST API open — every request is treated as admin. Add one or more `[[auth.tokens]]` entries (`token`, `role: "admin" | "read-only"`, optional `tenant`, optional `name`) to require a bearer token on every request except `/healthz` and `/readyz`. When a token has `tenant` and the create body omits `tenant`, FluxVM inherits the token’s tenant. Reserved `oidc_issuer` / `oidc_audience` keys are placeholders only — bearer tokens remain the supported path. See [PRODUCTION.md](../PRODUCTION.md) and [SECURITY.md](../../SECURITY.md).
+An empty `[auth]` section (the default) leaves the REST API open — every request is treated as admin. Add one or more `[[auth.tokens]]` entries (`token`, `role: "admin" | "read-only"`, optional `tenant`, optional `name`) to require a bearer token on every request except `/healthz` and `/readyz`. When a token has `tenant`, FluxVM inherits it on create (body mismatch → 403) and scopes list/get/mutate to that tenant. Reserved `oidc_issuer` / `oidc_audience` keys are placeholders only — bearer tokens remain the supported path. See [PRODUCTION.md](../PRODUCTION.md) and [SECURITY.md](../../SECURITY.md).
 
 ## Policy (admission limits)
 

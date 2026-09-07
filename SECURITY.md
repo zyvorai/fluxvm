@@ -11,9 +11,10 @@ FluxVM is a **host-local disposable VM control plane**. It is not a finished
 multi-tenant public cloud. Before exposing it off-loopback:
 
 1. Set `auth.require = true` and populate `[[auth.tokens]]`.
-   Optional per-token `tenant` is inherited on create when the body omits it;
-   filter with `GET /v1/vms?tenant=`. Probes `GET /healthz` and `GET /readyz`
-   stay auth-exempt (liveness vs readiness).
+   Optional per-token `tenant` is authoritative on create (inherited when
+   omitted; mismatch → 403) and scopes list/get/mutate. Probes `GET /healthz`
+   and `GET /readyz` stay auth-exempt (liveness vs readiness; `/readyz` → 503
+   when not ready).
 2. Bind loopback or put TLS in front (nginx/Caddy/Fabric).
 3. Keep `allow_extra_args = false`.
 4. Restrict `allowed_network_modes`, `allowed_image_dirs`, `allowed_backends`.

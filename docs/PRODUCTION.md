@@ -8,7 +8,9 @@ images — not only the dataplane.
 - [ ] `listen` is loopback **or** `auth.require = true` with real tokens
 - [ ] Per-token `max_vms_per_token` / `max_memory_mib_per_token`
 - [ ] Tokens carry optional `tenant`; VM specs set `tenant`
-- [ ] Token tenant is inherited on create when the body omits `tenant` (body wins if both set)
+- [ ] Token tenant is authoritative on create (inherited when omitted; mismatch → 403)
+- [ ] Token tenant auto-scopes list / get / mutate (other tenants → 404)
+- [ ] `GET /readyz` returns HTTP 503 when `"ok": false`
 - [ ] `GET /v1/vms?tenant=<id>` filters the fleet
 - [ ] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
 - [ ] `GET /healthz` for liveness; `/readyz` for readiness probes

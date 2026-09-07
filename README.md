@@ -1445,8 +1445,9 @@ route except `GET /healthz` and `GET /readyz` (liveness vs readiness). Absent or
 - `read-only` — any `GET` route (`/v1/vms`, `/v1/vms/{uuid}`, `/metrics`, `/frozen`, `/stats`,
   `/pressure`, pool list/get) only; any mutating route (including `resources`/`freeze`/`thaw`) returns 403.
 
-Optional per-token `tenant` fills `CreateVmRequest.tenant` when the body omits it (body wins if both
-are set). List with `GET /v1/vms?tenant=acme`. Reserved keys `auth.oidc_issuer` /
+Optional per-token `tenant` is authoritative on create (inherited when the body omits it;
+mismatch → 403) and scopes list/get/mutate to that tenant.
+List with `GET /v1/vms?tenant=acme`. Reserved keys `auth.oidc_issuer` /
 `auth.oidc_audience` are placeholders for a future OIDC exchange — bearer tokens remain the GA path.
 
 ```bash

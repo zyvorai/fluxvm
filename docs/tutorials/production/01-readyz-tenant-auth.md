@@ -61,7 +61,9 @@ tenant = "acme"
 ```
 
 Restart `fluxvm`, then create **without** `"tenant"` in the body — the VM
-inherits `acme` from the token. If the body sets `"tenant"`, the body wins.
+inherits `acme` from the token. If the body sets a different `"tenant"`,
+FluxVM returns **403**. Token-scoped callers only see and mutate their own
+tenant’s VMs (other UUIDs → **404**).
 
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms \

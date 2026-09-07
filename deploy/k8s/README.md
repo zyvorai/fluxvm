@@ -47,8 +47,8 @@ The `fluxvm` container uses:
 | Liveness | `GET /healthz` | Process up (auth-exempt) |
 | Readiness | `GET /readyz` | State dir + dataplane when `required=true` (auth-exempt) |
 
-`/readyz` may return `"ok": false` until BPF/bpffs (or Cilium sock) is healthy —
-that is intentional fail-closed readiness, not a crash loop.
+`/readyz` returns HTTP **503** when `"ok": false` (until BPF/bpffs or Cilium sock
+is healthy) — intentional fail-closed readiness, not a crash loop.
 
 ## Deploy order
 
