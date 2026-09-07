@@ -655,10 +655,11 @@ impl VmManager {
 
     pub async fn hubble_observe(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
         let views = self.hubble_observe_views(limit).await?;
-        views
-            .iter()
-            .map(|v| serde_json::to_value(fluxvm_network::packetflow::to_hubble_flow(v)))
-            .collect()
+        let mut out = Vec::with_capacity(views.len());
+        for v in &views {
+            out.push(serde_json::to_value(fluxvm_network::packetflow::to_hubble_flow(v))?);
+        }
+        Ok(out)
     }
 
     pub async fn network_observe(&self) -> Result<serde_json::Value> {
