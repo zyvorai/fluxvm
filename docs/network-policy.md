@@ -16,7 +16,7 @@ FluxVM never writes foreign private BPF maps.
 | CNP document (`kind` NetworkPolicy / CNP JSON) | `POST /v1/network/cnp`, `fluxvm cnp apply` |
 | `toCIDR` / `toCIDRSet` / `except` | `allow_cidrs` / `deny_cidrs` |
 | `toEntities` world/host/cluster/remote-node | Entity → CIDR expansion |
-| `toFQDNs` | Stored on policy; resolve with existing domain allowlist |
+| `toFQDNs` | Resolve to IPv4/32 + IPv6/128 at apply; wildcards skipped |
 | `toPorts` + ranges + named ports | `tcp/443`, `tcp/8000-8003`, `https`→443 |
 | `egressDeny` / `ingressDeny` | `fluxvm_deny4/6` before allow |
 | `enableDefaultDeny` | `default_allow=false` |
@@ -25,6 +25,9 @@ FluxVM never writes foreign private BPF maps.
 | Identity list | `GET /v1/network/identities`, `fluxvm identity list` |
 | Group / identity policy | `fluxvm_gid` written at configure_maps |
 | Observe snapshot | `GET /v1/network/observe`, `fluxvm observe` |
+| toFQDNs live refresh | `POST /v1/network/refresh-dns`, `fluxvm dataplane refresh-dns` |
+| ipcache | Guest IP → identity (`GET /v1/network/ipcache`) |
+| Production health | `fluxvm dataplane health`, [production-dataplane.md](production-dataplane.md) |
 
 Not in scope: kube-proxy replacement, Maglev/DSR service LB, WireGuard/IPsec
 datapath, L7 Envoy/Kafka parsers, ClusterMesh, or a full flow UI.

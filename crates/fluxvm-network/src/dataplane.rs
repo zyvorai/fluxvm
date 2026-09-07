@@ -209,9 +209,17 @@ pub fn apply_sandbox_policy(
     let base_policy = effective_policy(cfg, id)?;
     let base_fingerprint = policy_fingerprint(&base_policy)?;
     let (mut policy, _group_ids) = crate::groups::merge_group_policy(cfg, base_policy)?;
+    if !policy.allow_fqdns.is_empty() {
+        policy
+            .allow_cidrs
+            .extend(crate::egress::resolve_allow_cidrs_sync(&policy.allow_fqdns));
+    }
     policy.allow_cidrs.extend_from_slice(extra_allow_cidrs);
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
+    if let Some(cidr) = guest_cidr {
+        let _ = crate::ipcache::upsert(cfg, cidr, crate::ebpf::identity_for(id), id);
+    }
 
     match dp.mode {
         DataplaneMode::Legacy => match guest_cidr {
@@ -286,9 +294,17 @@ pub fn reconfigure_sandbox_policy(
     let base_policy = effective_policy(cfg, id)?;
     let base_fingerprint = policy_fingerprint(&base_policy)?;
     let (mut policy, _group_ids) = crate::groups::merge_group_policy(cfg, base_policy)?;
+    if !policy.allow_fqdns.is_empty() {
+        policy
+            .allow_cidrs
+            .extend(crate::egress::resolve_allow_cidrs_sync(&policy.allow_fqdns));
+    }
     policy.allow_cidrs.extend_from_slice(extra_allow_cidrs);
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
+    if let Some(cidr) = guest_cidr {
+        let _ = crate::ipcache::upsert(cfg, cidr, crate::ebpf::identity_for(id), id);
+    }
 
     match dp.mode {
         DataplaneMode::Legacy => {
@@ -402,6 +418,11 @@ pub fn ensure_sandbox_policy(
     let base_policy = effective_policy(cfg, id)?;
     let desired_fingerprint = policy_fingerprint(&base_policy)?;
     let (mut policy, _group_ids) = crate::groups::merge_group_policy(cfg, base_policy)?;
+    if !policy.allow_fqdns.is_empty() {
+        policy
+            .allow_cidrs
+            .extend(crate::egress::resolve_allow_cidrs_sync(&policy.allow_fqdns));
+    }
     policy.allow_cidrs.extend_from_slice(extra_allow_cidrs);
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
@@ -427,10 +448,65 @@ pub fn reconcile_orphan_pins(cfg: &Config, live_ids: &[Uuid]) -> Result<usize> {
 
 pub fn remove_sandbox_policy(cfg: &Config, id: Uuid) -> Result<()> {
     remove_nftables(id);
+    let _ = crate::ipcache::remove_vm(cfg, id);
     if let Err(e) = crate::ebpf::remove(&cfg.sandbox.dataplane, id) {
         warn!(%id, error = %e, "eBPF dataplane cleanup failed");
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DataplaneHealth {
+    pub mode: String,
+    pub required: bool,
+    pub default_allow: bool,
+    pub bpf_object_present: bool,
+    pub pin_root_present: bool,
+    pub bpffs_present: bool,
+    pub cilium_socket_present: bool,
+    pub groups: usize,
+    pub policies: usize,
+    pub ipcache_entries: usize,
+    pub ok: bool,
+    pub notes: Vec<String>,
+}
+
+pub fn health(cfg: &Config) -> Result<DataplaneHealth> {
+    let dp = &cfg.sandbox.dataplane;
+    let mode = format!("{:?}", dp.mode).to_ascii_lowercase();
+    let bpf_object_present = dp.bpf_object.exists();
+    let pin_root_present = dp.pin_root.exists();
+    let bpffs_present = std::path::Path::new("/sys/fs/bpf").exists();
+    let cilium_socket_present = std::path::Path::new("/var/run/cilium/cilium.sock").exists();
+    let groups = crate::groups::list_groups(cfg).map(|g| g.len()).unwrap_or(0);
+    let policies = crate::cnp::list_cnp(cfg).map(|g| g.len()).unwrap_or(0);
+    let ipcache_entries = crate::ipcache::list(cfg).map(|e| e.len()).unwrap_or(0);
+    let mut notes = Vec::new();
+    if matches!(dp.mode, DataplaneMode::Ebpf | DataplaneMode::Cilium) && !bpf_object_present {
+        notes.push(format!("missing BPF object {}", dp.bpf_object.display()));
+    }
+    if dp.mode == DataplaneMode::Cilium && !cilium_socket_present {
+        notes.push("mode=cilium but cilium.sock is not visible".into());
+    }
+    if dp.required && matches!(dp.mode, DataplaneMode::Ebpf | DataplaneMode::Cilium) && !bpffs_present
+    {
+        notes.push("required native dataplane but /sys/fs/bpf is missing".into());
+    }
+    let ok = notes.is_empty();
+    Ok(DataplaneHealth {
+        mode,
+        required: dp.required,
+        default_allow: dp.default_allow,
+        bpf_object_present,
+        pin_root_present,
+        bpffs_present,
+        cilium_socket_present,
+        groups,
+        policies,
+        ipcache_entries,
+        ok,
+        notes,
+    })
 }
 
 /// Used by low-level network teardown which historically has no Config

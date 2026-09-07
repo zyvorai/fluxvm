@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Production dataplane** — FQDN→IPv4/IPv6 resolve at apply, FluxVM ipcache,
+  `GET /v1/network/health|/ipcache`, `POST /v1/network/refresh-dns`,
+  `fluxvm dataplane health|ipcache|refresh-dns`, prod TOML + runbook
+  ([docs/production-dataplane.md](docs/production-dataplane.md)).
 - **Network policy (Fabric v4)** — CNP compiler (`toCIDR`,
   `toCIDRSet`, `toEntities`, `toFQDNs`, `toPorts` ranges/named ports, deny,
   `enableDefaultDeny`, `auditMode`), reserved identities, `fluxvm_gid`

@@ -191,6 +191,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/cnp/{name}", get(get_cnp).delete(delete_cnp))
         .route("/v1/network/identities", get(list_identities))
         .route("/v1/network/observe", get(network_observe))
+        .route("/v1/network/health", get(network_health))
+        .route("/v1/network/ipcache", get(network_ipcache))
+        .route("/v1/network/refresh-dns", post(network_refresh_dns))
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
@@ -959,6 +962,26 @@ async fn network_observe(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(m.network_observe().await?)))
+}
+
+async fn network_health(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.network_health().await?)))
+}
+
+async fn network_ipcache(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.network_ipcache().await?})))
+}
+
+async fn network_refresh_dns(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"refreshed": m.refresh_fqdn_policies().await?})))
 }
 
 async fn get_vm_network_effective(

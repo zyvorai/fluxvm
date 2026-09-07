@@ -152,6 +152,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [Security groups](docs/network-groups.md)
 - [Network policy (CNP)](docs/network-policy.md)
 - [Network policy tutorials](docs/tutorials/network-policy/README.md)
+- [Production dataplane](docs/production-dataplane.md)
 - [License](#license)
 
 ## Architecture
@@ -238,6 +239,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - **Sandbox dataplane / Network Fabric v3** — default **legacy nftables** per sandbox; optional **native TC/eBPF** (`ebpf`) and **Cilium coexistence** (`cilium`) with IPv4/IPv6 L3+L4 allowlists, Mbps/PPS limits, schema/fingerprint repair, per-VM policy/status/stats/flows API, optional XDP guard, and safe nftables fallback. See [eBPF / Cilium sandbox dataplane](#ebpf--cilium-sandbox-dataplane), [Network Fabric architecture](#network-fabric-architecture-how-it-works), [docs/network-fabric.md](docs/network-fabric.md), and [docs/ebpf-cilium.md](docs/ebpf-cilium.md).
 - **Security groups** — `key=value` labels and numeric identities (`0x10000+`), deny CIDRs, ICMP passthrough, `fluxvm group` CLI, `/v1/network/groups` + `/v1/vms/{id}/network/effective`. See [docs/network-groups.md](docs/network-groups.md).
 - **Network policy (CNP)** — CNP compiler, reserved identities, CT learn/hit, audit mode, `fluxvm cnp` / `fluxvm identity` / `fluxvm observe`. See [docs/network-policy.md](docs/network-policy.md). Hands-on: [docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
+- **Production dataplane** — FQDN resolve at apply, FluxVM ipcache, health/ipcache/refresh-dns API + CLI, fail-closed prod profile. See [docs/production-dataplane.md](docs/production-dataplane.md).
 - VNC for every QEMU-backed VM, over a unix socket — no port allocation.
 - Interactive console/shell: `GET /v1/vms/{id}/console` (WebSocket) and a guest-agent `OpenShell` vsock op for a real PTY.
 - File transfer over the guest agent: `PutFile`/`GetFile` vsock ops (`POST /v1/vms/{id}/agent/{put,get}-file`).

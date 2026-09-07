@@ -104,6 +104,11 @@ enum Command {
     },
     /// Snapshot of identities, groups, CNPs, and labeled VMs.
     Observe,
+    /// Production dataplane health, ipcache, and FQDN refresh.
+    Dataplane {
+        #[command(subcommand)]
+        command: DataplaneCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -164,6 +169,13 @@ enum CnpCommand {
 #[derive(Subcommand)]
 enum IdentityCommand {
     List,
+}
+
+#[derive(Subcommand)]
+enum DataplaneCommand {
+    Health,
+    Ipcache,
+    RefreshDns,
 }
 
 #[derive(Subcommand)]
@@ -447,6 +459,24 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&m.network_observe().await?)?
             );
         }
+        Command::Dataplane { command } => match command {
+            DataplaneCommand::Health => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_health().await?)?
+                );
+            }
+            DataplaneCommand::Ipcache => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_ipcache().await?)?
+                );
+            }
+            DataplaneCommand::RefreshDns => {
+                let n = m.refresh_fqdn_policies().await?;
+                println!("{{\"refreshed\":{n}}}");
+            }
+        },
         Command::Identity { command } => match command {
             IdentityCommand::List => {
                 println!(

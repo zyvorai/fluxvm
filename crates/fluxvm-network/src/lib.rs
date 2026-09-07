@@ -10,6 +10,7 @@ pub mod egress_proxy;
 pub mod groups;
 pub mod identity;
 pub mod ipam;
+pub mod ipcache;
 pub mod netns;
 pub mod xdp;
 

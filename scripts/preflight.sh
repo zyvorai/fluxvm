@@ -13,7 +13,7 @@ for cmd in qemu-system-x86_64 qemu-img cloud-localds ip; do
   fi
 done
 
-for cmd in cloud-hypervisor firecracker fluxvm fluxvm-hypervisor; do
+for cmd in cloud-hypervisor firecracker fluxvm fluxvm-hypervisor bpftool tc; do
   if command -v "$cmd" >/dev/null 2>&1; then
     printf '%-24s %s\n' "$cmd" "OK ($(command -v "$cmd"))"
   else

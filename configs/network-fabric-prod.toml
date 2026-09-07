@@ -1,0 +1,21 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Production Network Fabric + network-policy profile.
+# Merge into /etc/fluxvm.toml after installing BPF objects.
+
+[sandbox.dataplane]
+mode = "ebpf"
+bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+pin_root = "/sys/fs/bpf/fluxvm"
+required = true
+default_allow = false
+allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+allow_ports = ["tcp/443", "tcp/80", "udp/53"]
+max_egress_mbps = 250
+max_egress_pps = 100000
+sample_rate = 100
+
+# On nodes that already run a CNI agent:
+# mode = "cilium"
+# and leave XDP disabled.

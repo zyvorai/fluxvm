@@ -23,6 +23,7 @@ write foreign CNI private maps. For node CNI coexistence (`mode=cilium`), see
 Reference: [network-policy.md](../network-policy.md) ·
 [network-groups.md](../network-groups.md) ·
 [network-fabric.md](../network-fabric.md) ·
+[production-dataplane.md](../production-dataplane.md) ·
 [ebpf-cilium.md](../ebpf-cilium.md).
 
 ## Shared prerequisites

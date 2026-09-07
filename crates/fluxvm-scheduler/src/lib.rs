@@ -548,6 +548,51 @@ impl VmManager {
         Ok(())
     }
 
+    pub async fn network_health(&self) -> Result<fluxvm_network::dataplane::DataplaneHealth> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::dataplane::health(&cfg))
+            .await
+            .context("dataplane health panicked")?
+    }
+
+    pub async fn network_ipcache(&self) -> Result<Vec<fluxvm_network::ipcache::IpcacheEntry>> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::ipcache::list(&cfg))
+            .await
+            .context("ipcache list panicked")?
+    }
+
+    pub async fn refresh_fqdn_policies(&self) -> Result<usize> {
+        let vms = self.list().await;
+        let mut n = 0usize;
+        for vm in vms {
+            if vm.status != VmStatus::Running && vm.status != VmStatus::Paused {
+                continue;
+            }
+            let guest_cidr = vm.guest_ip.as_deref().map(|ip| format!("{ip}/32"));
+            let iface = fluxvm_network::dataplane_interface_name(
+                vm.id,
+                vm.netns.is_some(),
+                vm.tap_name.as_deref(),
+            );
+            let extra = if self.cfg.sandbox.egress_allow_domains.is_empty() {
+                vec![]
+            } else {
+                fluxvm_network::egress::resolve_allow_cidrs(&self.cfg.sandbox.egress_allow_domains)
+                    .await
+            };
+            fluxvm_network::dataplane::reconfigure_sandbox_policy(
+                &self.cfg,
+                vm.id,
+                iface.as_deref(),
+                guest_cidr.as_deref(),
+                &extra,
+            )?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub async fn network_observe(&self) -> Result<serde_json::Value> {
         let groups = self.list_network_groups().await?;
         let cnps = self.list_cnp().await?;

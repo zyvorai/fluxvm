@@ -62,14 +62,43 @@ pub async fn resolve_allow_cidrs(domains: &[String]) -> Vec<String> {
     let mut cidrs = Vec::new();
     for domain in domains {
         let name = dns_lookup_name(domain);
-        if name.is_empty() {
+        if name.is_empty() || name.contains('*') {
             continue;
         }
         match tokio::net::lookup_host(format!("{name}:443")).await {
             Ok(addrs) => {
                 for addr in addrs {
-                    if let std::net::IpAddr::V4(v4) = addr.ip() {
-                        cidrs.push(format!("{v4}/32"));
+                    match addr.ip() {
+                        std::net::IpAddr::V4(v4) => cidrs.push(format!("{v4}/32")),
+                        std::net::IpAddr::V6(v6) => cidrs.push(format!("{v6}/128")),
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(domain = %name, error = %e, "egress allow domain DNS lookup failed");
+            }
+        }
+    }
+    cidrs.sort();
+    cidrs.dedup();
+    cidrs
+}
+
+/// Blocking resolver for apply/reconfigure paths that are not async.
+pub fn resolve_allow_cidrs_sync(domains: &[String]) -> Vec<String> {
+    use std::net::ToSocketAddrs;
+    let mut cidrs = Vec::new();
+    for domain in domains {
+        let name = dns_lookup_name(domain);
+        if name.is_empty() || name.contains('*') {
+            continue;
+        }
+        match format!("{name}:443").to_socket_addrs() {
+            Ok(addrs) => {
+                for addr in addrs {
+                    match addr.ip() {
+                        std::net::IpAddr::V4(v4) => cidrs.push(format!("{v4}/32")),
+                        std::net::IpAddr::V6(v6) => cidrs.push(format!("{v6}/128")),
                     }
                 }
             }
