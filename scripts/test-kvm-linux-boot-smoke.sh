@@ -75,7 +75,9 @@ elif [ -c /dev/console ]; then
 fi
 echo FLUXVM_USERSPACE_OK
 echo FLUXVM_PROMPT_READY
-# Keep the guest alive briefly for the host smoke harness.
+# Block for one line from the host UART inject / stdin path.
+IFS= read -r line || line=
+echo "FLUXVM_STDIN_OK:${line}"
 exec sleep 3600
 EOF
     chmod +x "${MNT}/userspace-probe.sh"
@@ -109,19 +111,24 @@ if echo "$DRY_OUT" | grep -qE 'raw dump path'; then
     fail "fell back to raw dump (loader did not accept kernel)"
 fi
 
-section "KVM_RUN for up to ${TIMEOUT_SECS}s (console userspace)"
+section "KVM_RUN for up to ${TIMEOUT_SECS}s (console stdin round-trip)"
 LOG="${TMP}/run.log"
 set +e
 timeout --signal=KILL "$((TIMEOUT_SECS + 5))" \
-  env FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" "$BIN" "${ARGS[@]}" >"$LOG" 2>&1
+  env FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" FLUXVM_SERIAL_INJECT="ping" \
+  "$BIN" "${ARGS[@]}" >"$LOG" 2>&1
 RC=$?
 set -e
 tail -n 120 "$LOG" || true
 
-if grep -qE 'FLUXVM_USERSPACE_OK|FLUXVM_PROMPT_READY|\[ok\] guest reached userspace' "$LOG"; then
+if grep -qE 'FLUXVM_STDIN_OK|\[ok\] guest console stdin' "$LOG"; then
+    pass "guest console stdin round-trip"
+elif grep -qE 'FLUXVM_USERSPACE_OK|FLUXVM_PROMPT_READY|\[ok\] guest reached userspace' "$LOG"; then
     pass "guest reached console userspace"
+    fail "stdin round-trip missing (userspace OK but no FLUXVM_STDIN_OK)"
 elif grep -qE "can't access tty|login:" "$LOG"; then
     pass "guest reached userspace (shell without probe banner)"
+    fail "stdin round-trip missing"
 elif grep -qE 'VFS: Mounted root|Freeing unused kernel memory|\[ok\] guest reached root' "$LOG"; then
     pass "guest reached root mount"
     fail "userspace console marker missing"

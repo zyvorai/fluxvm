@@ -23,6 +23,8 @@
   `FLUXVM_PROMPT_READY`.
 - **In-tree KVM serial console** — 16550 RX queue, IIR/LSR, COM1 IRQ 4 pulse
   for interactive UART; smoke injects `/userspace-probe.sh` onto a temp rootfs.
+- **In-tree KVM serial stdin** — host stdin → UART RX; `FLUXVM_SERIAL_INJECT`
+  one-shot after userspace; smoke checks `FLUXVM_STDIN_OK:ping`.
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
   `examples/windows-ch.json`; QGA remains QEMU-only ([ch-windows-qga.md](docs/ch-windows-qga.md)).
 - **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md) for Cilium CEP,

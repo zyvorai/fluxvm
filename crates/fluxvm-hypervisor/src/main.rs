@@ -97,6 +97,9 @@ async fn real_main() -> anyhow::Result<()> {
     if log.contains("NETWORK IS UP") {
         eprintln!("[ok] guest reported NETWORK IS UP");
         Ok(())
+    } else if log.contains("FLUXVM_STDIN_OK") {
+        eprintln!("[ok] guest console stdin round-trip (in-tree KVM)");
+        Ok(())
     } else if log.contains("FLUXVM_USERSPACE_OK")
         || log.contains("FLUXVM_PROMPT_READY")
         || log.contains("can't access tty")

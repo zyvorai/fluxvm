@@ -14,6 +14,7 @@ use crate::ffi;
 use crate::kvm::KvmVm;
 use crate::memory::{GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
 use crate::tap::Tap;
+use std::io;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -214,8 +215,32 @@ impl VirtualMachine {
         let deadline = Instant::now() + Duration::from_secs(run_secs);
         let mut exits = 0u64;
         let mut this = self;
+        let mut serial_injected = false;
+        let inject = std::env::var("FLUXVM_SERIAL_INJECT").ok();
+        make_stdin_nonblocking();
 
         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
+            // Host → guest console: stdin bytes and optional one-shot inject.
+            let mut fed = drain_stdin_to_serial(&this.serial);
+            if !serial_injected {
+                if let Some(payload) = inject.as_ref() {
+                    if serial_log.contains("FLUXVM_USERSPACE_OK")
+                        || serial_log.contains("FLUXVM_PROMPT_READY")
+                    {
+                        this.serial.push_rx(payload.as_bytes());
+                        if !payload.ends_with('\n') {
+                            this.serial.push_rx(b"\n");
+                        }
+                        serial_injected = true;
+                        fed = true;
+                        eprintln!("[kvm] serial inject {} bytes after userspace", payload.len());
+                    }
+                }
+            }
+            if fed && this.serial.irq_pending() {
+                let _ = kvm.pulse_irq(this.serial.irq);
+            }
+
             let reason = kvm.run_once()?;
             exits += 1;
             if exits <= 20 {
@@ -317,13 +342,15 @@ impl VirtualMachine {
             }
             if serial_log.contains("NETWORK IS UP")
                 || serial_log.contains("NET TIMEOUT")
-                // Userspace / console markers (exact OK token — avoid prefix match).
-                || serial_log.contains("FLUXVM_USERSPACE_OK")
-                || serial_log.contains("FLUXVM_PROMPT_READY")
-                || serial_log.contains("can't access tty")
+                || serial_log.contains("FLUXVM_STDIN_OK")
                 || serial_log.contains("login:")
                 || serial_log.contains("Run /sbin/init")
                 || serial_log.contains("Kernel panic")
+                // Fallbacks when no stdin inject is configured.
+                || (inject.is_none()
+                    && (serial_log.contains("FLUXVM_USERSPACE_OK")
+                        || serial_log.contains("FLUXVM_PROMPT_READY")
+                        || serial_log.contains("can't access tty")))
             {
                 break;
             }
@@ -331,5 +358,29 @@ impl VirtualMachine {
 
         eprintln!("[kvm] serial log:\n{serial_log}");
         Ok(serial_log)
+    }
+}
+
+fn make_stdin_nonblocking() {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = io::stdin().as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags >= 0 {
+            let _ = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        }
+    }
+}
+
+fn drain_stdin_to_serial(serial: &Serial16550) -> bool {
+    use std::io::Read;
+    let mut buf = [0u8; 256];
+    match io::stdin().lock().read(&mut buf) {
+        Ok(0) | Err(_) => false,
+        Ok(n) => {
+            serial.push_rx(&buf[..n]);
+            true
+        }
     }
 }
