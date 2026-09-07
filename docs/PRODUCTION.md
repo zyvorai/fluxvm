@@ -8,9 +8,11 @@ images — not only the dataplane.
 - [ ] `listen` is loopback **or** `auth.require = true` with real tokens
 - [ ] Per-token `max_vms_per_token` / `max_memory_mib_per_token`
 - [ ] Tokens carry optional `tenant`; VM specs set `tenant`
+- [ ] Token tenant is inherited on create when the body omits `tenant`
 - [ ] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
 - [ ] `GET /healthz` for liveness; `/readyz` for readiness probes
 - [ ] JSON audit target `fluxvm_audit` shipped to your collector
+- [ ] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
 
 ## 2. Compute
 

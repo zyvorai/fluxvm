@@ -58,6 +58,9 @@
   health/ipcache/FQDN refresh, production runbook, tutorials) while keeping
   historical v1–v3 notes; architecture, L4/IPv6/rate limits, REST status/schema,
   XDP, `LimitMEMLOCK`, dual-netns smoke/e2e, and vs-traditional comparison remain.
+- Docs/tutorials for project production: `/readyz`, token/VM `tenant`,
+  [docs/tutorials/production/](docs/tutorials/production/README.md),
+  auth exceptions, and links from [PRODUCTION.md](docs/PRODUCTION.md).
 - **Network Fabric v3 GA ship** — `configs/network-fabric-ga.toml` +
   `scripts/enable-network-fabric-ga.sh`; `required=true` fail-closes only when a
   host-visible VM edge exists (user NAT / `mode=none` soft-skip).

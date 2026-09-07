@@ -153,6 +153,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [Security groups](docs/network-groups.md)
 - [Network policy (CNP)](docs/network-policy.md)
 - [Network policy tutorials](docs/tutorials/network-policy/README.md)
+- [Production readiness tutorials](docs/tutorials/production/README.md)
 - [Production dataplane](docs/production-dataplane.md)
 - [License](#license)
 
@@ -1344,9 +1345,12 @@ Endpoints:
 
 ```text
 GET    /healthz
+GET    /readyz
 GET    /metrics
 POST   /v1/vms
 GET    /v1/vms
+GET    /v1/vms?name=<name>
+GET    /v1/vms?tenant=<tenant>
 GET    /v1/vms/{uuid}
 POST   /v1/vms/{uuid}/start
 POST   /v1/vms/{uuid}/start-from-snapshot
@@ -1432,22 +1436,29 @@ follow stream return real, growing boot output.
 ### Auth / RBAC
 
 `[[auth.tokens]]` entries in the config (see `config.example.toml`) enable bearer-token auth on every
-route except `GET /healthz`. Absent or empty `auth.tokens` (the default) leaves the API exactly as
-open as the pre-auth MVP — every request is treated as `admin`. Two roles:
+route except `GET /healthz` and `GET /readyz` (liveness vs readiness). Absent or empty `auth.tokens`
+(the default) leaves the API exactly as open as the pre-auth MVP — every request is treated as
+`admin`. Two roles:
 
 - `admin` — everything: create/stop/pause/resume/exec/delete/build-image/resources/freeze/thaw.
 - `read-only` — any `GET` route (`/v1/vms`, `/v1/vms/{uuid}`, `/metrics`, `/frozen`, `/stats`,
   `/pressure`, pool list/get) only; any mutating route (including `resources`/`freeze`/`thaw`) returns 403.
 
+Optional per-token `tenant` fills `CreateVmRequest.tenant` when the body omits it (body wins if both
+are set). List with `GET /v1/vms?tenant=acme`. Reserved keys `auth.oidc_issuer` /
+`auth.oidc_audience` are placeholders for a future OIDC exchange — bearer tokens remain the GA path.
+
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms -H 'Authorization: Bearer <token>'
+curl -sS 'http://127.0.0.1:7788/v1/vms?tenant=acme' -H 'Authorization: Bearer <token>'
+curl -sS http://127.0.0.1:7788/readyz   # no token; "ok" requires state_dir (+ dataplane if required)
 ```
 
 No token, or a token not in the config, gets 401. A `read-only` token on a mutating route gets 403.
 Token comparison is constant-time. Verified on real hardware: 401 with no/wrong token, 200 for
 `read-only` on `GET /v1/vms`, 403 for `read-only` on `POST /v1/vms`, 400 for `admin` on the same route
-with an invalid body (proving auth let it through to the actual handler), 200 on `/healthz` with no
-token at all even with auth enabled.
+with an invalid body (proving auth let it through to the actual handler), 200 on `/healthz` and
+`/readyz` with no token at all even with auth enabled.
 
 Create through REST:
 
@@ -1455,7 +1466,14 @@ Create through REST:
 curl -sS http://127.0.0.1:7788/v1/vms \
   -H 'content-type: application/json' \
   --data-binary @examples/qemu.json | jq
+# Production-shaped example (tenant + tap/netns):
+curl -sS http://127.0.0.1:7788/v1/vms \
+  -H 'content-type: application/json' \
+  --data-binary @examples/create-vm-prod.json | jq
 ```
+
+Whole-stack production checklist: [docs/PRODUCTION.md](docs/PRODUCTION.md) ·
+`./scripts/release-checklist.sh`.
 
 Exec through REST (`agent.enabled: true` required, see below):
 
@@ -1474,6 +1492,7 @@ selection" above — the persisted/returned record always shows the resolved con
 ```json
 {
   "name": "job-123",
+  "tenant": "acme",
   "backend": "qemu",
   "image": "/var/lib/fluxvm/images/ubuntu.qcow2",
   "vcpus": 2,
@@ -1498,6 +1517,9 @@ selection" above — the persisted/returned record always shows the resolved con
   "storage": "default"
 }
 ```
+
+Optional `tenant` is a first-class string for multi-team hosts (`GET /v1/vms?tenant=`). See
+`examples/create-vm-prod.json`.
 
 `agent.enabled` turns on the vsock guest agent (`fluxvm exec`) for this VM — the guest image must
 have `fluxvm-guest-agent` installed and enabled (see "Build an image" above). `agent.port` is the

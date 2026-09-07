@@ -21,10 +21,16 @@ A one-command host bootstrap script (`scripts/bootstrap-host.sh`) installs the s
 ## 2. Create your first VM
 
 ```bash
+# Optional: confirm the API is ready (if `fluxvm serve` is running)
+curl -sf http://127.0.0.1:7788/healthz
+curl -sf http://127.0.0.1:7788/readyz | jq .
+
 fluxvm create --spec examples/qemu.json
+# Production-shaped example (tenant + tap/netns):
+# fluxvm create --spec examples/create-vm-prod.json
 ```
 
-The response is the VM's full record — id, status, disk path, PID. It boots from a disposable copy-on-write overlay of the base image named in the spec, so the base image itself is never modified.
+The response is the VM's full record — id, status, disk path, PID. It boots from a disposable copy-on-write overlay of the base image named in the spec, so the base image itself is never modified. Optional `tenant` on the JSON is filterable via `GET /v1/vms?tenant=`. See [production tutorials](../tutorials/production/README.md) and [PRODUCTION.md](../PRODUCTION.md).
 
 ## 3. Run something inside it
 

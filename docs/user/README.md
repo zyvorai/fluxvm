@@ -5,6 +5,7 @@ A standalone, minimal-dependency disposable-VM control plane — QEMU/KVM, Cloud
 | You want to… | Open |
 |--------------|------|
 | Install and boot your first VM | [Getting Started](getting-started.md) |
+| Production readiness (`/readyz`, tenant) | [PRODUCTION.md](../PRODUCTION.md) · [tutorials](../tutorials/production/README.md) |
 | Configure backends, storage, auth | [Configuration](configuration.md) |
 | Run common jobs | [Workflows](workflows.md) |
 | Deploy, systemd, ports | [Admin basics](admin-basics.md) |

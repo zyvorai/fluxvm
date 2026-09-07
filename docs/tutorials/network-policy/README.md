@@ -24,6 +24,8 @@ Reference: [network-policy.md](../network-policy.md) ·
 [network-groups.md](../network-groups.md) ·
 [network-fabric.md](../network-fabric.md) ·
 [production-dataplane.md](../production-dataplane.md) ·
+[PRODUCTION.md](../PRODUCTION.md) ·
+[production readiness tutorials](../production/README.md) ·
 [ebpf-cilium.md](../ebpf-cilium.md).
 
 ## Shared prerequisites

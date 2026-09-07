@@ -3,13 +3,18 @@
 Use this after **Network Fabric (GA; dataplane schema v4)** + network policy
 (groups/CNP) are in place. See also [network-policy.md](network-policy.md).
 
+For the **whole-project** bar (auth, `/readyz`, tenant, storage, k8s — not only
+the dataplane), start with [PRODUCTION.md](PRODUCTION.md) and
+`./scripts/release-checklist.sh`.
+
 ## Host checklist
 
 1. `./scripts/build-ebpf.sh` and install both `.o` files under `/usr/lib/fluxvm/bpf/`.
 2. `LimitMEMLOCK=infinity`, `ReadWritePaths` includes `/sys/fs/bpf` and `/run/fluxvm`.
 3. Merge [`configs/network-fabric-prod.toml`](../configs/network-fabric-prod.toml).
 4. Nodes with an existing CNI agent: `mode = "cilium"`, mount `/var/run/cilium` read-only, do not enable FluxVM XDP.
-5. `fluxvm dataplane health` must report `"ok": true` before creating tenant VMs.
+5. `curl -sf http://127.0.0.1:7788/readyz` and `fluxvm dataplane health` must report `"ok": true` before creating tenant VMs.
+6. Prefer `tenant` on create (or token `tenant`) so `GET /v1/vms?tenant=` works for fleet filters.
 
 ## Operator loop
 
