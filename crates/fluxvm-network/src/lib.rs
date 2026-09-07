@@ -7,6 +7,7 @@ pub mod dataplane;
 pub mod ebpf;
 pub mod egress;
 pub mod egress_proxy;
+pub mod endpoint;
 pub mod groups;
 pub mod identity;
 pub mod ipam;

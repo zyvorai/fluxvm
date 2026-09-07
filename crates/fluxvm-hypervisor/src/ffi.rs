@@ -22,6 +22,7 @@ extern "C" {
         off: i64,
     ) -> *mut c_void;
     pub fn munmap(addr: *mut c_void, len: usize) -> c_int;
+    pub fn mlock(addr: *const c_void, len: usize) -> c_int;
     pub fn read(fd: c_int, buf: *mut c_void, n: usize) -> isize;
     pub fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
 }
@@ -63,6 +64,9 @@ mod stubs {
     pub unsafe fn munmap(_: *mut c_void, _: usize) -> c_int {
         -1
     }
+    pub unsafe fn mlock(_: *const c_void, _: usize) -> c_int {
+        -1
+    }
     pub unsafe fn read(_: c_int, _: *mut c_void, _: usize) -> isize {
         -1
     }
@@ -80,6 +84,7 @@ pub const PROT_WRITE: c_int = 2;
 pub const MAP_SHARED: c_int = 0x01;
 pub const MAP_ANONYMOUS: c_int = 0x20;
 pub const MAP_NORESERVE: c_int = 0x4000;
+pub const MAP_POPULATE: c_int = 0x8000;
 pub const MAP_FAILED: usize = !0;
 
 pub const KVM_GET_API_VERSION: c_ulong = 0xae00;

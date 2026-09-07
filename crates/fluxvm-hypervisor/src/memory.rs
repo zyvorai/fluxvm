@@ -27,18 +27,28 @@ impl GuestMemory {
                 "size must be non-zero and 4 KiB aligned".into(),
             ));
         }
+        let dense = std::env::var("FLUXVM_KVM_LOCK_MEM").ok().as_deref() == Some("1");
+        let mut flags = ffi::MAP_SHARED | ffi::MAP_ANONYMOUS;
+        if dense {
+            flags |= ffi::MAP_POPULATE;
+        } else {
+            flags |= ffi::MAP_NORESERVE;
+        }
         let p = unsafe {
             ffi::mmap(
                 std::ptr::null_mut(),
                 len,
                 ffi::PROT_READ | ffi::PROT_WRITE,
-                ffi::MAP_SHARED | ffi::MAP_ANONYMOUS | ffi::MAP_NORESERVE,
+                flags,
                 -1,
                 0,
             )
         };
         if p as usize == ffi::MAP_FAILED {
             return Err(FluxError::Memory("mmap guest ram failed".into()));
+        }
+        if dense {
+            let _ = unsafe { ffi::mlock(p as *const c_void, len) };
         }
         Ok(Self {
             ptr: NonNull::new(p as *mut u8).unwrap(),

@@ -109,6 +109,11 @@ enum Command {
         #[command(subcommand)]
         command: DataplaneCommand,
     },
+    /// Hubble-lite flows and CiliumEndpoint views.
+    Hubble {
+        #[command(subcommand)]
+        command: HubbleCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -176,6 +181,12 @@ enum DataplaneCommand {
     Health,
     Ipcache,
     RefreshDns,
+}
+
+#[derive(Subcommand)]
+enum HubbleCommand {
+    Observe,
+    Endpoints,
 }
 
 #[derive(Subcommand)]
@@ -485,6 +496,20 @@ async fn main() -> Result<()> {
             CnpCommand::Delete { name } => {
                 m.delete_cnp(&name).await?;
                 println!("{{\"deleted\":\"ok\"}}");
+            }
+        },
+        Command::Hubble { command } => match command {
+            HubbleCommand::Observe => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.hubble_observe(64).await?)?
+                );
+            }
+            HubbleCommand::Endpoints => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_endpoints().await?)?
+                );
             }
         },
         Command::Observe => {

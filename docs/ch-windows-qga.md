@@ -5,8 +5,9 @@
 | Capability | Status |
 |------------|--------|
 | CH Windows **boot** (UEFI + `hyperv: true`) | **Done** (Phase-1) |
-| Live QGA (`fluxvm qga …`) on CH | **Blocked** — QEMU only until CH day-2 channel |
-| In-tree Hubble / Cilium-native CEP | **Not started** — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md) |
+| Live QGA (`fluxvm qga …`) on CH | **Host path shipped** — `--serial socket=qga.sock`; guest must speak QGA |
+| Named virtio-serial `org.qemu.guest_agent.0` | **QEMU-only** |
+| In-tree Hubble-lite / CEP-*shaped* views | **Done** — see [hubble-lite.md](hubble-lite.md); real Cilium-agent CEP still Not started |
 
 ## Boot Windows on Cloud Hypervisor
 
@@ -26,15 +27,22 @@ Console: CH Windows uses serial (SAC); `console` is off. Use RDP once the guest 
 
 ## QGA
 
-`qga.enabled` remains **QEMU-only**. Cloud Hypervisor has no named virtio-serial
-port (`org.qemu.guest_agent.0`) in FluxVM today. For PowerShell / firewall /
-`guest-ping`, use [`examples/windows-qga.json`](../examples/windows-qga.json).
+`qga.enabled` on Cloud Hypervisor now opens `--serial socket=<workspace>/qga.sock`
+and keeps boot logs on `--console file=…`. `fluxvm qga ping|exec|powershell`
+uses the same `fluxvm_image::qga` client as QEMU.
 
-Phase-2 (months): CH virtio-serial (or a GuestKit Windows agent on another
-channel) before claiming `fluxvm qga` parity.
+The guest must speak the QEMU guest-agent JSON protocol on that serial
+(Windows: install qemu-ga and bind it to the CH serial port, or use a
+serial-attached agent). Named virtio-serial `org.qemu.guest_agent.0` remains
+QEMU-only.
+
+Example: [`examples/windows-ch-qga.json`](../examples/windows-ch-qga.json).
+
+Auth / mTLS notes: [auth-oidc-mtls.md](auth-oidc-mtls.md). Density roadmap:
+[ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
 
 ## In-tree KVM density
 
 Unrelated to CH: `fluxvm_engine = "kvm"` is a lab prototype. Production density
-for the FluxVm sandbox track remains Firecracker. See [benchmarks](benchmarks/README.md)
-and [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+for the FluxVm sandbox track remains Firecracker. See [benchmarks](benchmarks/README.md),
+[kvm-density.md](kvm-density.md), and [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).

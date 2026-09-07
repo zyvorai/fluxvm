@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Four-track production** — OIDC already shipped; mTLS header identity
+  (`X-Client-Cert-*` when `[tls].client_ca` set); CiliumEndpoint views +
+  Hubble-lite UI/flows; Cloud Hypervisor `qga.enabled` serial socket;
+  in-tree KVM `FLUXVM_KVM_LOCK_MEM=1` (MAP_POPULATE+mlock).
 - **OIDC JWT validation** — `auth.oidc_issuer` + `auth.oidc_audience` enable
   discovery/JWKS bearer validation alongside `[[auth.tokens]]` (role/tenant claims).
 - **API TLS / mTLS** — optional `[tls]` cert/key; `tls.client_ca` requires client certs.
@@ -30,9 +34,11 @@
 - **Sandbox bench image paths** — `scripts/bench-sandbox.sh` honors `IMAGE` /
   `FLUXVM_BENCH_IMAGE` with lab fallbacks (`bionic-fabric-rootfs.ext4`, etc.).
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
-  `examples/windows-ch.json`; QGA remains QEMU-only ([ch-windows-qga.md](docs/ch-windows-qga.md)).
+  `examples/windows-ch.json`; CH QGA host path via serial socket
+  ([ch-windows-qga.md](docs/ch-windows-qga.md)); named virtio-serial remains QEMU-only.
 - **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md): KVM boot +
-  pause Done; Cilium CEP / CH QGA Phase-2–3 stay Not started / Blocked.
+  pause + lock-mem Done; CEP-*shaped* Hubble-lite Done; real Cilium-agent CEP
+  and kvm memory snapshots stay Not started / FC-only.
 - **Project production baseline** — `SECURITY.md`, `CONTRIBUTING.md`,
   `Makefile`, whole-stack [docs/PRODUCTION.md](docs/PRODUCTION.md),
   `/readyz` (HTTP 503 when not ready), VM `tenant` + `GET /v1/vms?tenant=`,

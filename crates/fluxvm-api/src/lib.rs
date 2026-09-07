@@ -110,6 +110,33 @@ async fn auth_middleware(
         } else {
             (None, None, None)
         }
+    } else if m.cfg.tls.mtls_enabled() {
+        // Identity from a verified client cert (this process terminated mTLS)
+        // or from a trusted frontend that sets X-Client-Cert-CN only after
+        // verify. Role defaults to read-only; X-Client-Cert-Role=admin for writes.
+        if let Some(cn) = req
+            .headers()
+            .get("x-client-cert-cn")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+        {
+            let role = match req
+                .headers()
+                .get("x-client-cert-role")
+                .and_then(|v| v.to_str().ok())
+            {
+                Some("admin") => Role::Admin,
+                _ => Role::ReadOnly,
+            };
+            let tenant = req
+                .headers()
+                .get("x-client-cert-tenant")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            (Some(role), Some(cn.to_string()), tenant)
+        } else {
+            (None, None, None)
+        }
     } else {
         (None, None, None)
     };
@@ -257,6 +284,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/health", get(network_health))
         .route("/v1/network/ipcache", get(network_ipcache))
         .route("/v1/network/refresh-dns", post(network_refresh_dns))
+        .route("/v1/network/endpoints", get(list_endpoints))
+        .route("/v1/network/hubble/flows", get(hubble_flows))
+        .route("/v1/network/hubble/ui", get(hubble_ui))
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
@@ -1102,6 +1132,51 @@ async fn network_ipcache(
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_ipcache().await?})))
 }
+
+async fn list_endpoints(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.network_endpoints().await?})))
+}
+
+async fn hubble_flows(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.hubble_observe(64).await?})))
+}
+
+async fn hubble_ui() -> impl axum::response::IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/html; charset=utf-8",
+        )],
+        HUBBLE_UI_HTML,
+    )
+}
+
+const HUBBLE_UI_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>FluxVM Hubble-lite</title>
+<style>
+body{font-family:ui-sans-serif,system-ui;margin:24px;background:#0b1020;color:#e8eefc}
+h1{font-size:20px}table{border-collapse:collapse;width:100%}
+th,td{border-bottom:1px solid #243056;text-align:left;padding:6px 8px;font-size:13px}
+.ok{color:#6ee7b7}.drop{color:#fca5a5}
+</style></head><body>
+<h1>FluxVM Hubble-lite</h1>
+<p>CiliumEndpoint views and sampled flows. This is not Cilium Hubble gRPC.</p>
+<h2>Endpoints</h2><pre id="ep">loading…</pre>
+<h2>Flows</h2><pre id="fl">loading…</pre>
+<script>
+async function load(){
+  const e=await fetch('/v1/network/endpoints').then(r=>r.json()).catch(err=>({error:String(err)}));
+  const f=await fetch('/v1/network/hubble/flows').then(r=>r.json()).catch(err=>({error:String(err)}));
+  document.getElementById('ep').textContent=JSON.stringify(e,null,2);
+  document.getElementById('fl').textContent=JSON.stringify(f,null,2);
+}
+load(); setInterval(load,5000);
+</script></body></html>
+"#;
 
 async fn network_refresh_dns(
     State(m): State<Arc<VmManager>>,

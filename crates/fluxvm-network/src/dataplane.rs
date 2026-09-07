@@ -219,6 +219,17 @@ pub fn apply_sandbox_policy(
     policy.allow_cidrs.dedup();
     if let Some(cidr) = guest_cidr {
         let _ = crate::ipcache::upsert(cfg, cidr, crate::ebpf::identity_for(id), id);
+        let _ = crate::endpoint::upsert(
+            cfg,
+            &crate::endpoint::from_vm(
+                id,
+                &policy.labels,
+                crate::ebpf::identity_for(id),
+                Some(cidr),
+                policy.default_allow,
+                policy.audit_mode,
+            ),
+        );
     }
 
     match dp.mode {
@@ -304,6 +315,17 @@ pub fn reconfigure_sandbox_policy(
     policy.allow_cidrs.dedup();
     if let Some(cidr) = guest_cidr {
         let _ = crate::ipcache::upsert(cfg, cidr, crate::ebpf::identity_for(id), id);
+        let _ = crate::endpoint::upsert(
+            cfg,
+            &crate::endpoint::from_vm(
+                id,
+                &policy.labels,
+                crate::ebpf::identity_for(id),
+                Some(cidr),
+                policy.default_allow,
+                policy.audit_mode,
+            ),
+        );
     }
 
     match dp.mode {
@@ -449,6 +471,7 @@ pub fn reconcile_orphan_pins(cfg: &Config, live_ids: &[Uuid]) -> Result<usize> {
 pub fn remove_sandbox_policy(cfg: &Config, id: Uuid) -> Result<()> {
     remove_nftables(id);
     let _ = crate::ipcache::remove_vm(cfg, id);
+    let _ = crate::endpoint::remove(cfg, id);
     if let Err(e) = crate::ebpf::remove(&cfg.sandbox.dataplane, id) {
         warn!(%id, error = %e, "eBPF dataplane cleanup failed");
     }

@@ -1,0 +1,11 @@
+{
+  "name": "win-ch-qga",
+  "backend": "cloud-hypervisor",
+  "image": "/var/lib/fluxvm/images/windows.raw",
+  "firmware": "/usr/share/cloud-hypervisor/CLOUDHV.fd",
+  "hyperv": true,
+  "qga": { "enabled": true },
+  "vcpus": 2,
+  "memory_mib": 4096,
+  "network": { "mode": "tap", "netns": true }
+}

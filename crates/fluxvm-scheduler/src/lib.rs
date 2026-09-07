@@ -612,6 +612,57 @@ impl VmManager {
         Ok(n)
     }
 
+    pub async fn network_endpoints(
+        &self,
+    ) -> Result<Vec<fluxvm_network::endpoint::CiliumEndpointView>> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::endpoint::list(&cfg))
+            .await
+            .context("endpoint list panicked")?
+    }
+
+    pub async fn hubble_observe(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let endpoints = self.network_endpoints().await?;
+        let vms = self.list().await;
+        let mut flows = Vec::new();
+        for vm in vms {
+            if vm.status != VmStatus::Running {
+                continue;
+            }
+            let labels = endpoints
+                .iter()
+                .find(|e| e.uuid == vm.id)
+                .map(|e| e.identity_labels.clone())
+                .unwrap_or_default();
+            let identity = fluxvm_network::ebpf::identity_for(vm.id);
+            if let Ok(items) = self.network_flows(vm.id, limit.min(32)).await {
+                for item in items {
+                    let proto = match item.protocol {
+                        6 => "tcp",
+                        17 => "udp",
+                        1 => "icmp",
+                        _ => "any",
+                    };
+                    let verdict = if item.verdict.to_ascii_lowercase().contains("drop") {
+                        "DROPPED"
+                    } else {
+                        "FORWARDED"
+                    };
+                    let flow = fluxvm_network::endpoint::hubble_flow_from_tuple(
+                        identity,
+                        &item.destination,
+                        proto,
+                        verdict,
+                        &labels,
+                        Some(&vm.name),
+                    );
+                    flows.push(serde_json::to_value(flow)?);
+                }
+            }
+        }
+        Ok(flows)
+    }
+
     pub async fn network_observe(&self) -> Result<serde_json::Value> {
         let groups = self.list_network_groups().await?;
         let cnps = self.list_cnp().await?;

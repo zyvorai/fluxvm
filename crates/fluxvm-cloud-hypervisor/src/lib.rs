@@ -42,11 +42,25 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
         format!("size={}M", req.memory_mib),
         "--disk".into(),
         format!("path={}", path_arg(&ctx.disk)),
-        "--serial".into(),
-        format!("file={}", ctx.log_path.display()),
-        "--console".into(),
-        "off".into(),
     ];
+    // QGA on CH: serial unix socket at workspace/qga.sock (same path the
+    // scheduler already records). Console file keeps SAC/boot logs.
+    if req.qga.as_ref().is_some_and(|q| q.enabled) {
+        let qga = ctx.workspace.join("qga.sock");
+        a.extend([
+            "--serial".into(),
+            format!("socket={}", path_arg(&qga)),
+            "--console".into(),
+            format!("file={}", ctx.log_path.display()),
+        ]);
+    } else {
+        a.extend([
+            "--serial".into(),
+            format!("file={}", ctx.log_path.display()),
+            "--console".into(),
+            "off".into(),
+        ]);
+    }
     if let Some(seed) = &ctx.seed_disk {
         a.extend([
             "--disk".into(),
@@ -204,4 +218,17 @@ async fn ch_remote(cfg: &Config, vm: &VmRecord, subcommand: &str) -> Result<()> 
         CH_REMOTE_TIMEOUT,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qga_serial_socket_flag_shape() {
+        let sock = std::path::PathBuf::from("/tmp/ch-ws/qga.sock");
+        let flag = format!("socket={}", path_arg(&sock));
+        assert!(flag.contains("qga.sock"));
+        assert!(flag.starts_with("socket="));
+    }
 }
