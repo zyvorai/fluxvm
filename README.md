@@ -1665,6 +1665,8 @@ Kinds: `MicroVM`, `MicroVMJob`, `MicroVMPool`, `GuestImage` (`microvm.fluxvm.zyv
 may be a path or a same-namespace GuestImage name. Examples:
 [`examples/microvm/`](examples/microvm/). Controllers run in `fluxvm-system`.
 Tutorials: [docs/tutorials/microvm/](docs/tutorials/microvm/README.md) (incl. GuestImage).
+Lab numbers: [docs/benchmarks/README.md](docs/benchmarks/README.md)
+(`scripts/bench-sandbox.sh`, `scripts/bench-microvm.sh`).
 
 ## Using FluxVM through zyvor-fabric
 

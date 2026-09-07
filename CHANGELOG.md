@@ -11,6 +11,9 @@
 - **GuestImage Ready** — node reconciler marks Ready when `spec.source` is a
   host file; MicroVM `spec.image` can resolve a same-namespace GuestImage name
   (still no CDI pull). Docs/tutorials: [docs/tutorials/microvm/05-guestimage.md](docs/tutorials/microvm/05-guestimage.md).
+- **Lab performance publish** — `scripts/bench-microvm.sh` + refreshed
+  [docs/benchmarks/README.md](docs/benchmarks/README.md) (2026-09-08 sandbox
+  avg_create **5444** ms; MicroVM p50_running **2736** ms).
 
 ### Added
 - **MicroVM** (`fluxvm-microvm`) — Kubernetes-native disposable compute without

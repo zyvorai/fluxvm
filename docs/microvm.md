@@ -252,4 +252,5 @@ python3 scripts/test-microvm-policy.py
 
 Also: [kubernetes-deployment.md](user/kubernetes-deployment.md) ·
 [deploy/k8s/microvm/README.md](../deploy/k8s/microvm/README.md) ·
+[benchmarks/README.md](benchmarks/README.md) ·
 [PRODUCTION.md](PRODUCTION.md).
