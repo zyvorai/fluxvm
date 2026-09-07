@@ -164,6 +164,7 @@ impl KvmVm {
         rip: u64,
         rsp: u64,
         cr3: u64,
+        rsi: u64,
     ) -> Result<()> {
         const GDT: u64 = 0xB000;
         const TSS: u64 = 0xC000;
@@ -273,6 +274,7 @@ impl KvmVm {
         let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
         regs.rip = rip;
         regs.rsp = rsp;
+        regs.rsi = rsi;
         regs.rflags = 0x2;
         if unsafe {
             ffi::flux_ioctl(

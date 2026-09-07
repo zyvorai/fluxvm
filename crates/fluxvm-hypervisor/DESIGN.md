@@ -195,8 +195,8 @@ for agent sandboxes and functions.
 |---|---|
 | 0 | This repo: KVM VM + memory + vCPU + PIO/MMIO buses |
 | 1 | Serial + tiny 16-bit/64-bit test payload |
-| 2 | linux-loader + virtio-console, boot Alpine/Buildroot |
-| 3 | virtio-blk + virtio-net TAP |
+| 2 | linux-loader + boot_params + RSI; virtio-console next |
+| 3 | virtio-blk + virtio-net TAP (blk done; denser benches next) |
 | 4 | vhost-net + multi-queue + rate limit |
 | 5 | balloon, vsock, seccomp jailer |
 | 6 | ACPI + virtio-pci + OVMF + Windows |

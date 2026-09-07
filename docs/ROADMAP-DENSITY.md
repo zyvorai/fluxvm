@@ -28,7 +28,7 @@ QEMU + `examples/windows-qga.json` remains the GA QGA path.
 | Phase | Deliverable | Status |
 |-------|-------------|--------|
 | **1** | Published lab benches (FC vs kvm); docs: FC = prod density, kvm = lab | Phase-1 |
-| **2** | Real virtio-blk MMIO + rootfs attach (`cfg.disk`); cmdline virtio_mmio.device slots | **In progress** — blk I/O wired |
-| **3** | Snapshots / warm pools / density marketing numbers; linux-loader boot_params | Not started |
+| **2** | Real virtio-blk MMIO + rootfs attach (`cfg.disk`); cmdline virtio_mmio.device slots | **Done** |
+| **3** | linux-loader bzImage/ELF + `boot_params` + RSI; then snapshots / warm pools / density benches | **In progress** — loader+zero-page wired |
 
 Default `fluxvm_engine=firecracker` stays the production sandbox engine.

@@ -9,7 +9,10 @@
 ### Added
 - **In-tree KVM virtio-blk (Phase-2 start)** — attach `cfg.disk` / rootfs as
   virtio-mmio block at `0xFEB00200` with sector R/W; cmdline advertises both
-  MMIO slots. Full Linux root boot still needs linux-loader/`boot_params`.
+  MMIO slots.
+- **In-tree KVM linux-loader** — bzImage/ELF load via `linux-loader`, zero-page
+  `boot_params` (cmdline/initrd/e820), RSI set for 64-bit boot protocol;
+  raw-dump fallback if parse fails.
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
   `examples/windows-ch.json`; QGA remains QEMU-only ([ch-windows-qga.md](docs/ch-windows-qga.md)).
 - **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md) for Cilium CEP,

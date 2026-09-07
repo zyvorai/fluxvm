@@ -31,6 +31,8 @@ pub struct VirtualMachine {
     pub blk_backend: Option<Arc<BlockBackend>>,
     pub tap: Option<Tap>,
     pub boot_rip: u64,
+    /// Linux zero-page GPA for RSI (64-bit boot protocol). None for Windows / netboot.
+    pub boot_params_gpa: Option<u64>,
     pub notes: Vec<String>,
 }
 
@@ -82,6 +84,7 @@ impl VirtualMachine {
             blk_backend: None,
             tap,
             boot_rip: KERNEL_LOAD_ADDR,
+            boot_params_gpa: None,
             notes,
         })
     }
@@ -152,6 +155,7 @@ impl VirtualMachine {
             blk_backend,
             tap,
             boot_rip: boot_info.entry_rip,
+            boot_params_gpa: boot_info.boot_params_gpa,
             notes,
         })
     }
@@ -178,8 +182,12 @@ impl VirtualMachine {
     pub fn run_until(mut self, stop: Arc<AtomicBool>) -> Result<String> {
         let cr3 = 0x8000u64;
         let mut kvm = KvmVm::create(&self.mem)?;
-        kvm.setup_long_mode(&mut self.mem, self.boot_rip, GUEST_STACK, cr3)?;
-        eprintln!("[kvm] long mode rip={:#x} cr3={cr3:#x}", self.boot_rip);
+        let rsi = self.boot_params_gpa.unwrap_or(0);
+        kvm.setup_long_mode(&mut self.mem, self.boot_rip, GUEST_STACK, cr3, rsi)?;
+        eprintln!(
+            "[kvm] long mode rip={:#x} cr3={cr3:#x} rsi={rsi:#x}",
+            self.boot_rip
+        );
 
         let mut serial_log = String::new();
         let deadline = Instant::now() + Duration::from_secs(3600);
