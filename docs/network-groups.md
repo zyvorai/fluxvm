@@ -1,14 +1,14 @@
-# Security groups (Cilium-style identities)
+# Security groups (label identities)
 
-FluxVM Network Fabric v3 keeps per-VM TC pins. Security groups add the
-control-plane piece Cilium uses at scale: **label → numeric identity →
+FluxVM Network Fabric keeps per-VM TC pins. Security groups add the
+control-plane piece used at scale: **label → numeric identity →
 shared L3/L4 policy**, plus deny CIDRs, ICMP passthrough, and an
 established-flow table.
 
-Cilium private maps are still never written. Groups live under
-`$state_dir/network-groups/groups.json` and are folded into FluxVM-owned
-maps (`fluxvm_v4` / `fluxvm_v6` / `fluxvm_l4` / `fluxvm_deny4` /
-`fluxvm_deny6`) plus `fluxvm_gid` and `fluxvm_ct`.
+Groups live under `$state_dir/network-groups/groups.json` and are folded into
+FluxVM-owned maps (`fluxvm_v4` / `fluxvm_v6` / `fluxvm_l4` / `fluxvm_deny4` /
+`fluxvm_deny6`) plus `fluxvm_gid` and `fluxvm_ct`. Foreign CNI private maps
+are never written.
 
 ## Model
 
@@ -83,12 +83,6 @@ fluxvm group get web
 fluxvm group delete web
 ```
 
-## Why this is not writing Cilium maps
-
-Cilium identities are cluster-scoped and encoded in release-specific private
-maps. FluxVM VMs are not Cilium endpoints today. Shared **semantics** stay
-on `/sys/fs/bpf/fluxvm`.
-
 ## Validation
 
 Control-plane unit checks (no root / no Rust toolchain required for the
@@ -99,10 +93,7 @@ python3 scripts/test-security-groups.py
 cargo test -p fluxvm-network --lib
 ```
 
-Full privileged e2e on Linux/KVM (builds BPF, enables `mode=ebpf`, creates a
-FluxVm TAP+netns sandbox, exercises group CRUD, label/named membership,
-`/v1/vms/{id}/network/effective` merge rules, deny/L4 maps, `allow_icmp`,
-CLI delete → membership refresh, and teardown):
+Full privileged e2e on Linux/KVM:
 
 ```bash
 sudo -E ./scripts/test-security-groups-e2e.sh
@@ -117,4 +108,4 @@ sudo -E ./scripts/test-network-fabric.sh
 
 Example group: [examples/security-group-web.json](../examples/security-group-web.json).
 
-Hands-on Cilium-style walkthroughs: [tutorials/cilium/](tutorials/cilium/README.md).
+Hands-on walkthroughs: [tutorials/network-policy/](tutorials/network-policy/README.md).

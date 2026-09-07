@@ -87,22 +87,22 @@ enum Command {
         #[command(subcommand)]
         command: CatalogCommand,
     },
-    /// Cilium-style security groups for the VM-edge dataplane.
+    /// Security groups for the VM-edge dataplane.
     Group {
         #[command(subcommand)]
         command: GroupCommand,
     },
-    /// CiliumNetworkPolicy documents compiled onto FluxVM groups.
+    /// CNP documents compiled onto FluxVM security groups.
     Cnp {
         #[command(subcommand)]
         command: CnpCommand,
     },
-    /// Reserved + group identities (Cilium identity space).
+    /// Reserved + group numeric identities.
     Identity {
         #[command(subcommand)]
         command: IdentityCommand,
     },
-    /// Hubble-lite snapshot of identities, groups, CNPs, and labeled VMs.
+    /// Snapshot of identities, groups, CNPs, and labeled VMs.
     Observe,
 }
 

@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! CiliumNetworkPolicy-compatible documents compiled onto FluxVM groups.
+//! CNP-compatible documents compiled onto FluxVM security groups.
 //!
 //! Supported spec subset:
 //! endpointSelector.matchLabels, egress/egressDeny/ingress/ingressDeny,
@@ -344,7 +344,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compiles_cilium_subset() {
+    fn compiles_cnp_subset() {
         let raw = r#"{
           "apiVersion": "cilium.io/v2",
           "kind": "CiliumNetworkPolicy",

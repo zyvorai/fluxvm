@@ -1,8 +1,7 @@
-# 09 — Observe (Hubble-lite)
+# 09 — Observe snapshot
 
-**Goal:** Take a single snapshot of identities, groups, CNPs, and labeled
-VM endpoints — the FluxVM stand-in for a quick `hubble observe` / identity
-dashboard glance.
+**Goal:** Take a single observe snapshot of identities, groups, CNPs, and
+labeled VM endpoints — a quick fabric dashboard glance over policy state.
 
 ## CLI
 

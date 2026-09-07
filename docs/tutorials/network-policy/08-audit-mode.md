@@ -1,6 +1,6 @@
 # 08 — Audit mode
 
-**Goal:** Turn on Cilium-style **audit mode** so would-be drops are logged /
+**Goal:** Turn on CNP **audit mode** so would-be drops are logged /
 sampled while traffic still forwards — useful while migrating from
 permissive networking.
 
@@ -15,7 +15,7 @@ forwards the packet and records the audited drop path instead of
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \
-  --spec examples/cilium/cnp-audit-mode.json
+  --spec examples/cnp/cnp-audit-mode.json
 
 sudo fluxvm --config /etc/fluxvm.toml group get audit-web \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["policy"]["audit_mode"] is True; print("audit_mode ok")'

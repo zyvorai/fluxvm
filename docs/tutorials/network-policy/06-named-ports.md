@@ -1,6 +1,6 @@
 # 06 — Named ports
 
-**Goal:** Use Cilium-friendly port **names** (`https`, `dns`, …) in a CNP
+**Goal:** Use CNP port **names** (`https`, `dns`, …) in a policy document
 and confirm they expand to numeric `proto/port` rules.
 
 Supported names (case-insensitive): `http`→80, `https`→443, `dns`→53,
@@ -11,7 +11,7 @@ Supported names (case-insensitive): `http`→80, `https`→443, `dns`→53,
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \
-  --spec examples/cilium/cnp-named-ports.json
+  --spec examples/cnp/cnp-named-ports.json
 
 sudo fluxvm --config /etc/fluxvm.toml group get named-ports-demo \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);p=d["policy"]["allow_ports"];
@@ -22,7 +22,7 @@ assert "tcp/443" in p and "udp/53" in p, p; print("ok", p)'
 
 ```bash
 cargo test -p fluxvm-network named_ports_expand -- --nocapture
-python3 scripts/test-cilium-parity.py
+python3 scripts/test-network-policy.py
 ```
 
 ## Cleanup

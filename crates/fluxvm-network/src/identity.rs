@@ -1,11 +1,11 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cilium-compatible reserved numeric identities.
+//! Reserved numeric identities for entity expansion and observe.
 //!
-//! Values match Cilium's `pkg/identity` reserved space so Hubble-style
-//! flow export and policy `toEntities` share the same numbers. FluxVM
-//! still never writes Cilium-private maps.
+//! Values match the common reserved identity space (`world=2`, `host=1`, …)
+//! so `toEntities` and flow telemetry share stable numbers. FluxVM still
+//! never writes foreign CNI private maps.
 
 use serde::{Deserialize, Serialize};
 
@@ -102,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reserved_space_matches_cilium() {
+    fn reserved_space_matches_well_known() {
         assert_eq!(RESERVED_HOST, 1);
         assert_eq!(RESERVED_WORLD, 2);
         assert_eq!(RESERVED_KUBE_APISERVER, 7);

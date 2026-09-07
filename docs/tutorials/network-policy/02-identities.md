@@ -1,12 +1,12 @@
 # 02 — Identities
 
-**Goal:** Understand Cilium-compatible numeric identities on the FluxVM edge.
+**Goal:** Understand numeric identities on the FluxVM Network Fabric edge.
 
 ## Why identities matter
 
-Cilium (and Hubble) tag every endpoint and “special” destination with a
-stable integer. FluxVM mirrors the **reserved** space so `toEntities` and
-observability speak the same dialect:
+FluxVM tags every endpoint and “special” destination with a stable integer.
+The **reserved** space backs `toEntities` and observe so policy and
+telemetry share one dialect:
 
 | ID | Name | Typical use |
 |----|------|-------------|

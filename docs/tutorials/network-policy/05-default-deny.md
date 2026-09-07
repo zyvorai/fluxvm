@@ -1,6 +1,6 @@
 # 05 — Default deny and deny CIDRs
 
-**Goal:** Fail closed on egress, then punch holes — the usual Cilium
+**Goal:** Fail closed on egress, then punch holes — the usual Network Fabric
 zero-trust pattern — and confirm deny lists win over allow.
 
 ## Pattern
@@ -13,7 +13,7 @@ zero-trust pattern — and confirm deny lists win over allow.
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \
-  --spec examples/cilium/cnp-default-deny-dns.json
+  --spec examples/cnp/cnp-default-deny-dns.json
 
 sudo fluxvm --config /etc/fluxvm.toml group get dns-only | python3 -m json.tool
 ```

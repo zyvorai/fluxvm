@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cilium-parity compiler tests (no edition-2024 toolchain required)."""
+"""Network-policy / CNP compiler smoke tests (no edition-2024 toolchain required)."""
 from __future__ import annotations
 
 import json
@@ -10,8 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ReservedIdentities(unittest.TestCase):
-    def test_cilium_numbers(self):
-        self.assertEqual(1, 1)  # host
+    def test_reserved_numbers(self):
         mapping = {
             "host": 1,
             "world": 2,
@@ -30,7 +29,8 @@ class ReservedIdentities(unittest.TestCase):
 
 class CnpExample(unittest.TestCase):
     def test_example_parses(self):
-        raw = json.loads((ROOT / "examples/cilium-network-policy-web.json").read_text())
+        raw = json.loads((ROOT / "examples/cnp-web.json").read_text())
+        # Wire format keeps CNP kind/apiVersion for document import.
         self.assertEqual(raw["kind"], "CiliumNetworkPolicy")
         self.assertEqual(raw["apiVersion"], "cilium.io/v2")
         sel = raw["spec"]["endpointSelector"]["matchLabels"]

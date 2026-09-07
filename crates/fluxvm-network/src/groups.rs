@@ -1,13 +1,13 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cilium-style security groups for the FluxVM VM-edge dataplane.
+//! Security groups for the FluxVM VM-edge dataplane.
 //!
 //! A group is a named set of labels plus an L3/L4 egress policy. Membership is
 //! label-based (`app=web`) and/or explicit (`groups = ["web"]` on the VM
 //! policy). The control plane allocates a stable numeric identity from the
 //! sorted label set and folds group allow/deny lists into the VM's TC maps so
-//! the kernel path stays per-VM-pin and Cilium-private maps stay untouched.
+//! the kernel path stays per-VM-pin and foreign CNI private maps stay untouched.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::Config;
@@ -30,7 +30,7 @@ pub const MAX_GROUP_IDENTITIES_PER_VM: usize = 8;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityGroup {
     pub name: String,
-    /// Cilium-style `key=value` labels. Empty is allowed for name-only groups.
+    /// `key=value` labels. Empty is allowed for name-only groups.
     #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]

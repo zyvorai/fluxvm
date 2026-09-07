@@ -1,7 +1,7 @@
 # 10 — Multi-group merge
 
-**Goal:** Attach more than one group (named + label) and verify Cilium-like
-**union** semantics on the effective policy.
+**Goal:** Attach more than one group (named + label) and verify Network
+Fabric **union** semantics on the effective policy.
 
 ## Rules (FluxVM)
 
@@ -93,5 +93,5 @@ sudo fluxvm --config /etc/fluxvm.toml group delete egress-only
 
 ## Next
 
-Back to the [tutorial index](README.md) or the parity matrix in
-[cilium-parity.md](../../cilium-parity.md).
+Back to the [tutorial index](README.md) or the policy matrix in
+[network-policy.md](../../network-policy.md).

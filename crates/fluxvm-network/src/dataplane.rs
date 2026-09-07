@@ -43,19 +43,19 @@ pub struct VmNetworkPolicy {
     /// Allow ICMP / ICMPv6 echo and errors through L4 enforcement.
     #[serde(default)]
     pub allow_icmp: bool,
-    /// Explicit security-group names (Cilium-style). Combined with `labels`.
+    /// Explicit security-group names. Combined with `labels`.
     #[serde(default)]
     pub groups: Vec<String>,
     /// `key=value` labels. A group matches when every group label is present.
     #[serde(default)]
     pub labels: Vec<String>,
-    /// Cilium `toFQDNs` names/patterns; resolved at apply time.
+    /// FQDN names/patterns from CNP `toFQDNs`; resolved at apply time.
     #[serde(default)]
     pub allow_fqdns: Vec<String>,
-    /// Cilium entities (`world`, `host`, `cluster`, …).
+    /// Policy entities (`world`, `host`, `cluster`, …).
     #[serde(default)]
     pub entities: Vec<String>,
-    /// Log-and-allow instead of drop (Cilium audit mode).
+    /// Log-and-allow instead of drop (CNP audit mode).
     #[serde(default)]
     pub audit_mode: bool,
     /// Filled by group merge; not persisted as operator input.

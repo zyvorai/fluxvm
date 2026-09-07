@@ -1,7 +1,7 @@
-# 01 — Getting started (Cilium-style)
+# 01 — Getting started (Network Fabric)
 
 **Goal:** Turn on the Fabric eBPF edge, confirm schema **v4** parity bits, and
-take a first Hubble-style glance at identities and observe.
+take a first observe glance at identities and network status.
 
 **You will use:** `fluxvm identity list`, `fluxvm observe`, REST
 `/v1/network/status`.
@@ -23,8 +23,8 @@ curl -sf http://127.0.0.1:7788/v1/vms >/dev/null && echo API_OK
 
 ## 2. List reserved identities
 
-In Cilium, `cilium identity list` shows `reserved:world`, `reserved:host`, …
-FluxVM uses the **same numbers**:
+`fluxvm identity list` shows reserved destinations such as `reserved:world`,
+`reserved:host`, and related fabric identities:
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml identity list

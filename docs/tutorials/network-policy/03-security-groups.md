@@ -1,10 +1,10 @@
 # 03 — Security groups (label-based policy)
 
-**Goal:** Define a Cilium-style security group, attach it via labels, and
+**Goal:** Define a Network Fabric security group, attach it via labels, and
 inspect the **effective** policy.
 
-Cilium analogue: identity selectors + network policy without writing a full
-CNP YAML.
+FluxVM analogue: identity selectors + security groups without writing a full
+CNP JSON document.
 
 ## 1. Create a group
 

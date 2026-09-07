@@ -1,14 +1,13 @@
-# 04 — Network policy (CiliumNetworkPolicy)
+# 04 — Network policy (CNP)
 
-**Goal:** Apply a `CiliumNetworkPolicy`-shaped JSON the way you would
-`kubectl apply -f cnp.yaml`, then verify the compiled security group and
-effective VM policy.
+**Goal:** Apply a CNP JSON document the way you would apply a policy file,
+then verify the compiled security group and effective VM policy.
 
 ## 1. Apply the sample CNP
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \
-  --spec examples/cilium-network-policy-web.json
+  --spec examples/cnp-web.json
 
 sudo fluxvm --config /etc/fluxvm.toml cnp list
 sudo fluxvm --config /etc/fluxvm.toml cnp get web-egress
@@ -19,7 +18,7 @@ REST equivalent:
 ```bash
 curl -s -X POST http://127.0.0.1:7788/v1/network/cnp \
   -H 'Content-Type: application/json' \
-  --data @examples/cilium-network-policy-web.json | python3 -m json.tool
+  --data @examples/cnp-web.json | python3 -m json.tool
 ```
 
 **Expect:** a security group named `web-egress` with:
@@ -37,7 +36,7 @@ sudo fluxvm --config /etc/fluxvm.toml group get web-egress | python3 -m json.too
 
 ## 2. Select endpoints (VMs) with labels
 
-Cilium uses `endpointSelector`. On FluxVM, put the same labels on the VM
+CNP uses `endpointSelector`. On FluxVM, put the same labels on the VM
 network policy:
 
 ```bash
@@ -57,7 +56,7 @@ the group (no delete/recreate required):
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \
-  --spec examples/cilium-network-policy-web.json
+  --spec examples/cnp-web.json
 ```
 
 ## 4. Delete
@@ -70,7 +69,7 @@ sudo fluxvm --config /etc/fluxvm.toml group list
 
 ## Anatomy of the example
 
-See [`examples/cilium-network-policy-web.json`](../../../examples/cilium-network-policy-web.json):
+See [`examples/cnp-web.json`](../../../examples/cnp-web.json):
 
 | CNP field | FluxVM result |
 |-----------|---------------|

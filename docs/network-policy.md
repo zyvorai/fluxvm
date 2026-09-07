@@ -1,0 +1,60 @@
+# Network policy on the FluxVM VM-edge
+
+FluxVM is not a CNI. This document is the supported **CNP-shaped** policy
+subset that compiles onto Network Fabric v4 pins under `/sys/fs/bpf/fluxvm`.
+
+Coexistence with a node CNI (`mode=cilium`) is separate — see
+[ebpf-cilium.md](ebpf-cilium.md). That mode only *checks* the agent socket;
+FluxVM never writes foreign private BPF maps.
+
+## Mapped features
+
+| Concept | FluxVM |
+|---------|--------|
+| Numeric identities (`reserved:world=2`, local ≥256) | `identity.rs` + group FNV ≥ `0x10000` |
+| `endpointSelector.matchLabels` | Group labels `app=web` |
+| CNP document (`kind` NetworkPolicy / CNP JSON) | `POST /v1/network/cnp`, `fluxvm cnp apply` |
+| `toCIDR` / `toCIDRSet` / `except` | `allow_cidrs` / `deny_cidrs` |
+| `toEntities` world/host/cluster/remote-node | Entity → CIDR expansion |
+| `toFQDNs` | Stored on policy; resolve with existing domain allowlist |
+| `toPorts` + ranges + named ports | `tcp/443`, `tcp/8000-8003`, `https`→443 |
+| `egressDeny` / `ingressDeny` | `fluxvm_deny4/6` before allow |
+| `enableDefaultDeny` | `default_allow=false` |
+| `auditMode` | sample_rate bit 31; log drop, forward packet |
+| Conntrack | `fluxvm_ct` LRU learn/hit |
+| Identity list | `GET /v1/network/identities`, `fluxvm identity list` |
+| Group / identity policy | `fluxvm_gid` written at configure_maps |
+| Observe snapshot | `GET /v1/network/observe`, `fluxvm observe` |
+
+Not in scope: kube-proxy replacement, Maglev/DSR service LB, WireGuard/IPsec
+datapath, L7 Envoy/Kafka parsers, ClusterMesh, or a full flow UI.
+
+## Apply a CNP
+
+```bash
+fluxvm cnp apply --spec examples/cnp-web.json
+fluxvm cnp list
+fluxvm identity list
+fluxvm observe
+```
+
+Label the VM policy so the compiled group matches:
+
+```json
+{ "labels": ["app=web"], "default_allow": false }
+```
+
+## Tutorials
+
+Hands-on Network Fabric policy guides:
+
+**[docs/tutorials/network-policy/](tutorials/network-policy/README.md)** —
+getting started, identities, security groups, CNP, default deny, named ports,
+entities/FQDNs, audit mode, observe, multi-group merge.
+
+## Tests
+
+```bash
+python3 scripts/test-network-policy.py
+cargo test -p fluxvm-network --lib
+```

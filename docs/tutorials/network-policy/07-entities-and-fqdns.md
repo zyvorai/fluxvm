@@ -1,7 +1,7 @@
 # 07 — Entities and FQDNs
 
-**Goal:** Allow egress to Cilium **entities** (`world`, `host`, `cluster`, …)
-and record **FQDN** allow rules the same way a CNP would.
+**Goal:** Allow egress to Network Fabric **entities** (`world`, `host`,
+`cluster`, …) and record **FQDN** allow rules the same way a CNP would.
 
 ## Entities
 
@@ -10,7 +10,7 @@ into concrete CIDRs folded into the group allowlist.
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \
-  --spec examples/cilium/cnp-entities-world.json
+  --spec examples/cnp/cnp-entities-world.json
 
 sudo fluxvm --config /etc/fluxvm.toml group get talk-to-world | python3 -m json.tool
 ```
@@ -34,7 +34,7 @@ inline DNS proxy inside the TC program).
 
 ```bash
 sudo fluxvm --config /etc/fluxvm.toml cnp apply \
-  --spec examples/cilium-network-policy-web.json
+  --spec examples/cnp-web.json
 
 sudo fluxvm --config /etc/fluxvm.toml group get web-egress \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["policy"].get("allow_fqdns"))'

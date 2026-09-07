@@ -200,11 +200,11 @@ GET  /v1/vms/{id}/network/flows?limit=100
 FLUXVM_PRIVILEGED_SMOKE=1 ./scripts/validate-network-fabric.sh
 sudo -E ./scripts/test-network-fabric.sh
 sudo -E ./scripts/test-security-groups-e2e.sh   # groups + deny/ICMP maps
-python3 scripts/test-cilium-parity.py          # CNP / identity / audit unit
+python3 scripts/test-network-policy.py          # CNP / identity / audit unit
 ```
 
 Security-group control plane: [network-groups.md](network-groups.md).
-Cilium parity (CNP / identities / audit): [cilium-parity.md](cilium-parity.md).
+Network policy (CNP / identities / audit): [network-policy.md](network-policy.md).
 
 Privileged integration smoke (FluxVm + `NetworkSpec::Tap { netns: true }`):
 

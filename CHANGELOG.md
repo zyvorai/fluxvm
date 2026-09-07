@@ -3,16 +3,16 @@
 ## 0.4.0 (unreleased)
 
 ### Added
-- **Cilium parity (Network Fabric v4)** — CNP compiler (`toCIDR`,
-  `toCIDRSet`, `toEntities`, `toFQDNs`, `toPorts` ranges, deny,
-  `enableDefaultDeny`, `auditMode`), reserved identities matching
-  Cilium numbers, `fluxvm_gid` updates, conntrack learn/hit,
-  `fluxvm cnp` / `fluxvm identity` / `fluxvm observe`, REST
-  `/v1/network/cnp`, `/v1/network/identities`, `/v1/network/observe`.
-  Docs: [docs/cilium-parity.md](docs/cilium-parity.md).
-  Tutorials: [docs/tutorials/cilium/](docs/tutorials/cilium/README.md).
-  Tests: `scripts/test-cilium-parity.py`.
-- **Security groups** — Cilium-style label identities for the VM-edge
+- **Network policy (Fabric v4)** — CNP compiler (`toCIDR`,
+  `toCIDRSet`, `toEntities`, `toFQDNs`, `toPorts` ranges/named ports, deny,
+  `enableDefaultDeny`, `auditMode`), reserved identities, `fluxvm_gid`
+  updates, conntrack learn/hit, `fluxvm cnp` / `fluxvm identity` /
+  `fluxvm observe`, REST `/v1/network/cnp`, `/v1/network/identities`,
+  `/v1/network/observe`.
+  Docs: [docs/network-policy.md](docs/network-policy.md).
+  Tutorials: [docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
+  Tests: `scripts/test-network-policy.py`.
+- **Security groups** — label identities for the VM-edge
   dataplane. Named groups with `key=value` labels allocate a stable
   identity in the `0x10000+` range; VM policy `groups` / `labels` select
   membership; allow + deny CIDRs merge into the TC maps. REST
