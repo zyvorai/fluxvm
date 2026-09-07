@@ -83,14 +83,65 @@ PY
 }
 
 iface_value() {
-  # 6*u32 + 2*u64, matching struct iface_config exactly.
+  # 6*u32 + 2*u64, matching struct iface_config in bpf/fluxvm_tc.bpf.c:
+  # identity, default_allow, enforce_cidr, enforce_l4, sample_rate, allow_icmp,
+  # rate_bytes_per_sec, rate_packets_per_sec.
+  # Args: identity default_allow enforce_cidr enforce_l4 sample rate_bytes rate_pps
+  #       [allow_icmp=0]
   python3 - "$@" <<'PY'
 import struct, sys
 vals = [int(x) for x in sys.argv[1:]]
-identity, default_allow, enforce_cidr, enforce_l4, sample, rate_bytes, rate_pps = vals
-raw = struct.pack("=IIIIIIQQ", identity, default_allow, enforce_cidr, enforce_l4,
-                  sample, 0, rate_bytes, rate_pps)
+identity, default_allow, enforce_cidr, enforce_l4, sample, rate_bytes, rate_pps = vals[:7]
+allow_icmp = vals[7] if len(vals) > 7 else 0
+raw = struct.pack(
+    "=IIIIIIQQ",
+    identity,
+    default_allow,
+    enforce_cidr,
+    enforce_l4,
+    sample,
+    allow_icmp,
+    rate_bytes,
+    rate_pps,
+)
 print(" ".join(f"{b:02x}" for b in raw))
+PY
+}
+
+flush_ct() {
+  # Learned CT entries bypass deny/rate after an allow; clear between flips.
+  local pin="$PIN/tc/maps/fluxvm_ct"
+  [[ -e "$pin" ]] || return 0
+  python3 - "$pin" <<'PY'
+import json, subprocess, sys
+pin = sys.argv[1]
+try:
+    data = json.loads(
+        subprocess.check_output(["bpftool", "-j", "map", "dump", "pinned", pin], text=True)
+    )
+except Exception:
+    sys.exit(0)
+if not isinstance(data, list):
+    sys.exit(0)
+for ent in data:
+    key = ent.get("key")
+    if not key:
+        continue
+    if isinstance(key, dict):
+        # rare alternate encoding
+        continue
+    hex_bytes = []
+    for b in key:
+        if isinstance(b, str):
+            hex_bytes.append(b.removeprefix("0x").zfill(2))
+        else:
+            hex_bytes.append(f"{int(b):02x}")
+    subprocess.run(
+        ["bpftool", "map", "delete", "pinned", pin, "key", "hex", *hex_bytes],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 PY
 }
 
@@ -141,12 +192,14 @@ PY
 
 expect_ping4() { ip netns exec "$NSB" ping -q -c 1 -W 2 "$A4" >/dev/null; }
 expect_no_ping4() {
+  flush_ct
   if ip netns exec "$NSB" ping -q -c 1 -W 1 "$A4" >/dev/null; then
     echo "expected IPv4 ping to be blocked" >&2; exit 1
   fi
 }
 expect_ping6() { ip netns exec "$NSB" ping -6 -q -c 1 -W 2 "$A6" >/dev/null; }
 expect_no_ping6() {
+  flush_ct
   if ip netns exec "$NSB" ping -6 -q -c 1 -W 1 "$A6" >/dev/null; then
     echo "expected IPv6 ping to be blocked" >&2; exit 1
   fi
