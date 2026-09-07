@@ -10,7 +10,7 @@
   gates: `scripts/test-microvm-policy.py`.
 - **GuestImage Ready** — node reconciler marks Ready when `spec.source` is a
   host file; MicroVM `spec.image` can resolve a same-namespace GuestImage name
-  (still no CDI pull).
+  (still no CDI pull). Docs/tutorials: [docs/tutorials/microvm/05-guestimage.md](docs/tutorials/microvm/05-guestimage.md).
 
 ### Added
 - **MicroVM** (`fluxvm-microvm`) — Kubernetes-native disposable compute without

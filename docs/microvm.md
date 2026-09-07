@@ -228,6 +228,8 @@ Tests:
 ```bash
 cargo test -p fluxvm-microvm
 ./scripts/test-microvm.sh
+python3 scripts/test-microvm-policy.py
+./scripts/test-microvm-k8s-smoke.sh   # lab k3s
 ```
 
 ## Limitations (v1)
@@ -245,7 +247,8 @@ cargo test -p fluxvm-microvm
 | [01 — Getting started](tutorials/microvm/01-getting-started.md) | print-crd, deploy, create MicroVM, watch phase |
 | [02 — MicroVMJob](tutorials/microvm/02-job.md) | Run-to-completion jobs |
 | [03 — MicroVMPool](tutorials/microvm/03-pool.md) | Warm pools + claimFrom |
-| [04 — Convert DisposableVm](tutorials/microvm/04-convert-disposablevm.md) | `--convert` bridge |
+| [04 — Convert DisposableVm](tutorials/microvm/04-convert-disposablevm.md) | `--convert` bridge (opt-in) |
+| [05 — GuestImage](tutorials/microvm/05-guestimage.md) | Host-file Ready + catalog name |
 
 Also: [kubernetes-deployment.md](user/kubernetes-deployment.md) ·
 [deploy/k8s/microvm/README.md](../deploy/k8s/microvm/README.md) ·

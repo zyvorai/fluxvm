@@ -89,4 +89,5 @@ the shadow Pod is removed).
 
 - [02 — MicroVMJob](02-job.md)
 - [03 — MicroVMPool](03-pool.md)
+- [05 — GuestImage](05-guestimage.md)
 - Design: [microvm.md](../../microvm.md)

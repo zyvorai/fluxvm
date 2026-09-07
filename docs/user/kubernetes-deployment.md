@@ -64,7 +64,7 @@ VM is torn down, so a brief pause there is expected, not a hang.
 | API | `fluxvm.zyvor.io` | `microvm.fluxvm.zyvor.io` |
 | Placement | Explicit `spec.node` (optional placer) | kube-scheduler via shadow Pod |
 | Where the VMM runs | Host `fluxvm serve` | Host `fluxvm serve` (same DaemonSet) |
-| Extra kinds | — | `MicroVMJob`, `MicroVMPool`, `GuestImage` stub |
+| Extra kinds | — | `MicroVMJob`, `MicroVMPool`, `GuestImage` (host-file Ready) |
 
 Deploy MicroVM **after** this DaemonSet: `kubectl apply -f deploy/k8s/microvm/`.
 Full guide: [microvm.md](../microvm.md). Tutorials:

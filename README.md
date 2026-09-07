@@ -1656,12 +1656,15 @@ Pod. Full design: [docs/microvm.md](docs/microvm.md). Tutorials:
 ```bash
 fluxvm-microvm --print-crd | kubectl apply -f -
 kubectl apply -f deploy/k8s/microvm/
-fluxvm-microvm controller --convert
+fluxvm-microvm controller   # add --convert only for DisposableVm bridge
 NODE_NAME=$(hostname) FLUXVM_URL=http://127.0.0.1:7788 fluxvm-microvm node-agent
 ```
 
 Kinds: `MicroVM`, `MicroVMJob`, `MicroVMPool`, `GuestImage` (`microvm.fluxvm.zyvor.io`).
-Examples: [`examples/microvm/`](examples/microvm/). Controllers run in `fluxvm-system`.
+`GuestImage` marks Ready when `spec.source` is a host file; MicroVM `spec.image`
+may be a path or a same-namespace GuestImage name. Examples:
+[`examples/microvm/`](examples/microvm/). Controllers run in `fluxvm-system`.
+Tutorials: [docs/tutorials/microvm/](docs/tutorials/microvm/README.md) (incl. GuestImage).
 
 ## Using FluxVM through zyvor-fabric
 
