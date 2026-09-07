@@ -3,6 +3,11 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- DevOps pack paired with Fabric: probe contract
+  (`docs/contracts/fabric-fluxvm-readyz.json`), `scripts/devops-gate.sh`,
+  `scripts/upgrade-snapshot.sh` for N→N+1 state_dir snapshots, kustomize
+  wrapper `deploy/k8s/gitops`, CI workflow `devops-gates.yml`, and
+  [docs/DEVOPS.md](docs/DEVOPS.md).
 - **Four-track production** — OIDC already shipped; mTLS header identity
   (`X-Client-Cert-*` when `[tls].client_ca` set); CiliumEndpoint views +
   Hubble-lite UI/flows; Cloud Hypervisor `qga.enabled` serial socket;

@@ -19,6 +19,7 @@ images — not only the dataplane.
 - [ ] JSON audit target `fluxvm_audit` shipped to your collector
 - [ ] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
 - [ ] Example: [examples/create-vm-prod.json](../examples/create-vm-prod.json)
+- [ ] DevOps gates: [DEVOPS.md](DEVOPS.md) + `scripts/devops-gate.sh` / `scripts/upgrade-snapshot.sh`
 
 ## 2. Compute
 
