@@ -136,6 +136,16 @@ pub struct HubbleFlow {
     #[serde(rename = "Type")]
     pub flow_type: String,
     pub node_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic_direction: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packets: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hops: Option<Vec<crate::packetflow::PacketHop>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -179,6 +189,11 @@ pub fn hubble_flow_from_tuple(
         },
         flow_type: "L3_L4".into(),
         node_name: hostname(),
+        traffic_direction: Some("EGRESS".into()),
+        summary: None,
+        packets: None,
+        bytes: None,
+        hops: None,
     }
 }
 

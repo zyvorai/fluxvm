@@ -185,7 +185,34 @@ enum DataplaneCommand {
 
 #[derive(Subcommand)]
 enum HubbleCommand {
-    Observe,
+    /// Packet flows (Hubble-style). Color by default; `--output plain` / `normal` for no ANSI.
+    Observe {
+        /// color | plain | normal | json
+        #[arg(long, default_value = "color")]
+        output: String,
+        /// One-line summaries vs full hop path.
+        #[arg(long, short = 'd')]
+        detailed: bool,
+        #[arg(long, default_value_t = 64)]
+        limit: usize,
+        /// FORWARDED | DROPPED | AUDIT | all
+        #[arg(long, default_value = "all")]
+        verdict: String,
+        /// tcp | udp | icmp | all
+        #[arg(long, default_value = "all")]
+        protocol: String,
+    },
+    /// Alias for `observe --detailed`.
+    Flow {
+        #[arg(long, default_value = "color")]
+        output: String,
+        #[arg(long, default_value_t = 64)]
+        limit: usize,
+        #[arg(long, default_value = "all")]
+        verdict: String,
+        #[arg(long, default_value = "all")]
+        protocol: String,
+    },
     Endpoints,
 }
 
@@ -502,11 +529,22 @@ async fn main() -> Result<()> {
             }
         },
         Command::Hubble { command } => match command {
-            HubbleCommand::Observe => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&m.hubble_observe(64).await?)?
-                );
+            HubbleCommand::Observe {
+                output,
+                detailed,
+                limit,
+                verdict,
+                protocol,
+            } => {
+                print_hubble_observe(&m, &output, detailed, limit, &verdict, &protocol).await?;
+            }
+            HubbleCommand::Flow {
+                output,
+                limit,
+                verdict,
+                protocol,
+            } => {
+                print_hubble_observe(&m, &output, true, limit, &verdict, &protocol).await?;
             }
             HubbleCommand::Endpoints => {
                 println!(
@@ -683,4 +721,26 @@ async fn build_mtls_config(
     Ok(axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
         config,
     )))
+}
+
+async fn print_hubble_observe(
+    m: &VmManager,
+    output: &str,
+    detailed: bool,
+    limit: usize,
+    verdict: &str,
+    protocol: &str,
+) -> Result<()> {
+    use fluxvm_network::packetflow::{filter_views, render_flows, FlowOutput};
+    let mut views = m.hubble_observe_views(limit).await?;
+    views = filter_views(views, Some(verdict), Some(protocol));
+    let mode = if std::env::var("NO_COLOR").map(|v| !v.is_empty()).unwrap_or(false)
+        && output.eq_ignore_ascii_case("color")
+    {
+        FlowOutput::Plain
+    } else {
+        FlowOutput::parse(output)
+    };
+    print!("{}", render_flows(&views, mode, detailed));
+    Ok(())
 }

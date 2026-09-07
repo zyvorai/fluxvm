@@ -13,6 +13,7 @@ pub mod identity;
 pub mod ipam;
 pub mod ipcache;
 pub mod netns;
+pub mod packetflow;
 pub mod xdp;
 
 use anyhow::{Context, Result, bail};

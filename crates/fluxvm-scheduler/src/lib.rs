@@ -621,9 +621,13 @@ impl VmManager {
             .context("endpoint list panicked")?
     }
 
-    pub async fn hubble_observe(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+    pub async fn hubble_observe_views(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<fluxvm_network::packetflow::PacketFlowView>> {
         let endpoints = self.network_endpoints().await?;
         let vms = self.list().await;
+        let mode = format!("{:?}", self.cfg.sandbox.dataplane.mode).to_ascii_lowercase();
         let mut flows = Vec::new();
         for vm in vms {
             if vm.status != VmStatus::Running {
@@ -634,33 +638,27 @@ impl VmManager {
                 .find(|e| e.uuid == vm.id)
                 .map(|e| e.identity_labels.clone())
                 .unwrap_or_default();
-            let identity = fluxvm_network::ebpf::identity_for(vm.id);
             if let Ok(items) = self.network_flows(vm.id, limit.min(32)).await {
                 for item in items {
-                    let proto = match item.protocol {
-                        6 => "tcp",
-                        17 => "udp",
-                        1 => "icmp",
-                        _ => "any",
-                    };
-                    let verdict = if item.verdict.to_ascii_lowercase().contains("drop") {
-                        "DROPPED"
-                    } else {
-                        "FORWARDED"
-                    };
-                    let flow = fluxvm_network::endpoint::hubble_flow_from_tuple(
-                        identity,
-                        &item.destination,
-                        proto,
-                        verdict,
+                    flows.push(fluxvm_network::packetflow::from_flow_record(
+                        &item,
                         &labels,
                         Some(&vm.name),
-                    );
-                    flows.push(serde_json::to_value(flow)?);
+                        vm.guest_ip.as_deref(),
+                        &mode,
+                    ));
                 }
             }
         }
         Ok(flows)
+    }
+
+    pub async fn hubble_observe(&self, limit: usize) -> Result<Vec<serde_json::Value>> {
+        let views = self.hubble_observe_views(limit).await?;
+        views
+            .iter()
+            .map(|v| serde_json::to_value(fluxvm_network::packetflow::to_hubble_flow(v)))
+            .collect()
     }
 
     pub async fn network_observe(&self) -> Result<serde_json::Value> {

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FluxVM packet flow · Hubble-lite</title>
+<style>
+:root {
+  --bg:#0b1020; --fg:#e8eefc; --muted:#8b9bb8; --line:#243056;
+  --fwd:#34d399; --drop:#f87171; --audit:#fbbf24; --accent:#60a5fa; --card:#121a30;
+}
+body.normal {
+  --bg:#f5f5f7; --fg:#1d1d1f; --muted:#6e6e73; --line:#d2d2d7;
+  --fwd:#0d7a4a; --drop:#b42318; --audit:#92640a; --accent:#155eef; --card:#ffffff;
+}
+* { box-sizing: border-box; }
+body {
+  margin:0; font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background:var(--bg); color:var(--fg);
+}
+header {
+  display:flex; flex-wrap:wrap; gap:12px; align-items:center;
+  padding:16px 20px; border-bottom:1px solid var(--line);
+}
+h1 { font-size:18px; margin:0; font-weight:650; }
+.sub { color:var(--muted); font-size:13px; }
+.tools { margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+button, select {
+  background:var(--card); color:var(--fg); border:1px solid var(--line);
+  border-radius:8px; padding:6px 10px; cursor:pointer; font:inherit;
+}
+main { padding:16px 20px 40px; display:grid; gap:20px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th,td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+th { color:var(--muted); font-weight:600; }
+.v-FORWARDED { color:var(--fwd); font-weight:650; }
+.v-DROPPED { color:var(--drop); font-weight:650; }
+.v-AUDIT { color:var(--audit); font-weight:650; }
+.path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; line-height:1.45; }
+.hop { color:var(--accent); }
+.empty { color:var(--muted); padding:24px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+code { font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>FluxVM packet flow</h1>
+    <div class="sub">Hubble-lite · VM-edge TC/eBPF · not Cilium Hubble gRPC</div>
+  </div>
+  <div class="tools">
+    <label>Theme
+      <select id="theme">
+        <option value="color">Colorful</option>
+        <option value="normal">Normal</option>
+      </select>
+    </label>
+    <label>Verdict
+      <select id="verdict">
+        <option value="all">all</option>
+        <option value="FORWARDED">FORWARDED</option>
+        <option value="DROPPED">DROPPED</option>
+        <option value="AUDIT">AUDIT</option>
+      </select>
+    </label>
+    <label>Detail
+      <select id="detail">
+        <option value="path">packet path</option>
+        <option value="table">table only</option>
+      </select>
+    </label>
+    <button id="reload" type="button">Reload</button>
+  </div>
+</header>
+<main>
+  <section class="card">
+    <h2 style="margin:0 0 8px;font-size:15px">Endpoints</h2>
+    <div id="endpoints" class="empty">loading…</div>
+  </section>
+  <section class="card">
+    <h2 style="margin:0 0 8px;font-size:15px">Flows</h2>
+    <div id="flows" class="empty">loading…</div>
+  </section>
+</main>
+<script>
+const themeEl = document.getElementById('theme');
+const verdictEl = document.getElementById('verdict');
+const detailEl = document.getElementById('detail');
+themeEl.value = localStorage.getItem('fluxvm-hubble-theme') || 'color';
+applyTheme();
+themeEl.onchange = () => { localStorage.setItem('fluxvm-hubble-theme', themeEl.value); applyTheme(); };
+function applyTheme() {
+  document.body.classList.toggle('normal', themeEl.value === 'normal');
+}
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function hopPath(flow) {
+  const hops = flow.hops || [];
+  if (!hops.length) return '<span class="sub">no hop map</span>';
+  return hops.map((h,i) => {
+    const pipe = i === hops.length - 1 ? '' : '<div class="hop">  │</div>';
+    const branch = i === hops.length - 1 ? '└─' : '├─';
+    return `<div class="hop">${branch} [${esc(h.index)}] <b>${esc(h.name)}</b> (${esc(h.role)}) ${esc(h.detail)}</div>${pipe}`;
+  }).join('');
+}
+async function load() {
+  const [ep, fl] = await Promise.all([
+    fetch('/v1/network/endpoints').then(r => r.json()).catch(e => ({error:String(e)})),
+    fetch('/v1/network/hubble/flows').then(r => r.json()).catch(e => ({error:String(e)})),
+  ]);
+  const items = Array.isArray(ep.items) ? ep.items : [];
+  document.getElementById('endpoints').innerHTML = items.length ? `<table>
+    <tr><th>id</th><th>uuid</th><th>identity</th><th>labels</th><th>IPv4</th><th>policy</th></tr>
+    ${items.map(e => `<tr>
+      <td>${esc(e.id)}</td><td><code>${esc(e.uuid)}</code></td>
+      <td>${esc(e.identity)}</td><td>${esc((e['identity-labels']||[]).join(' '))}</td>
+      <td>${esc(((e.networking||{}).addressing||[{}])[0].ipv4 || '')}</td>
+      <td>${esc((e.policy||{}).egress)}/${esc((e.policy||{}).ingress)}</td>
+    </tr>`).join('')}</table>` : '<div class="empty">No CiliumEndpoint views yet.</div>';
+
+  let flows = Array.isArray(fl.items) ? fl.items : [];
+  const want = verdictEl.value;
+  if (want !== 'all') flows = flows.filter(f => f.verdict === want);
+  if (!flows.length) {
+    document.getElementById('flows').innerHTML = '<div class="empty">(no flows)</div>';
+    return;
+  }
+  const showPath = detailEl.value === 'path';
+  document.getElementById('flows').innerHTML = `<table>
+    <tr><th>verdict</th><th>dir</th><th>tuple</th><th>identities</th><th>counters</th><th>source</th></tr>
+    ${flows.map(f => {
+      const ip = f.IP || {};
+      const l4 = f.l4 || {};
+      const src = `${ip.source||'?'}:${l4.source_port||0}`;
+      const dst = `${ip.destination||'?'}:${l4.destination_port||0}`;
+      const proto = l4.protocol || '?';
+      const path = showPath ? `<div class="path">${hopPath(f)}</div>` : '';
+      return `<tr>
+        <td class="v-${esc(f.verdict)}">${esc(f.verdict)}</td>
+        <td>${esc(f.traffic_direction||'')}</td>
+        <td><code>${esc(proto)} ${esc(src)} → ${esc(dst)}</code>${path}</td>
+        <td>${esc((f.source||{}).identity)}→${esc((f.destination||{}).identity)}</td>
+        <td>${esc(f.packets||0)}p / ${esc(f.bytes||0)}B</td>
+        <td>${esc((f.source||{}).pod_name||'')}<br><span class="sub">${esc(((f.source||{}).labels||[]).join(' '))}</span></td>
+      </tr>`;
+    }).join('')}</table>`;
+}
+document.getElementById('reload').onclick = load;
+verdictEl.onchange = load;
+detailEl.onchange = load;
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

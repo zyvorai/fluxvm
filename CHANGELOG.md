@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- Hubble-style **packet flow** renderer: hop path (guest → tap → tc/eBPF →
+  uplink → peer), `--output color|plain|json`, `fluxvm hubble flow` detailed
+  view, `/v1/network/hubble/flows/text`, and a Colorful/Normal Hubble-lite UI
+  ([docs/packet-flow.md](docs/packet-flow.md)).
 - DevOps pack paired with Fabric: probe contract
   (`docs/contracts/fabric-fluxvm-readyz.json`), `scripts/devops-gate.sh`,
   `scripts/upgrade-snapshot.sh` for N→N+1 state_dir snapshots, kustomize

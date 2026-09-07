@@ -42,6 +42,7 @@ images — not only the dataplane.
 - [ ] Merge `configs/network-fabric-prod.toml` when VMs have a host edge
 - [ ] `fluxvm dataplane health` ok
 - [ ] CNP/groups for tenant labels; `fluxvm observe`
+- [ ] Packet flow: `fluxvm hubble observe --output color` and `--output plain`; UI `/v1/network/hubble/ui` ([packet-flow.md](packet-flow.md))
 - [ ] Cilium coexistence (`mode=cilium`) only if sock/bpffs present — not Cilium-native endpoints
 - [ ] Cilium nodes: no FluxVM XDP on the shared datapath
 - [ ] See [production-dataplane.md](production-dataplane.md)

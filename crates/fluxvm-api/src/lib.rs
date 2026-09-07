@@ -286,6 +286,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/refresh-dns", post(network_refresh_dns))
         .route("/v1/network/endpoints", get(list_endpoints))
         .route("/v1/network/hubble/flows", get(hubble_flows))
+        .route("/v1/network/hubble/flows/text", get(hubble_flows_text))
         .route("/v1/network/hubble/ui", get(hubble_ui))
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
@@ -1139,10 +1140,66 @@ async fn list_endpoints(
     Ok(Json(json!({"items": m.network_endpoints().await?})))
 }
 
+#[derive(Debug, Deserialize)]
+struct HubbleFlowsQuery {
+    #[serde(default = "default_hubble_limit")]
+    limit: usize,
+    #[serde(default = "default_all")]
+    verdict: String,
+    #[serde(default = "default_all")]
+    protocol: String,
+    /// color | plain | normal | json
+    #[serde(default = "default_hubble_output")]
+    output: String,
+    #[serde(default)]
+    detailed: bool,
+}
+fn default_hubble_limit() -> usize {
+    64
+}
+fn default_all() -> String {
+    "all".into()
+}
+fn default_hubble_output() -> String {
+    "json".into()
+}
+
 async fn hubble_flows(
     State(m): State<Arc<VmManager>>,
+    Query(q): Query<HubbleFlowsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({"items": m.hubble_observe(64).await?})))
+    use fluxvm_network::packetflow::{filter_views, to_hubble_flow};
+    let views = filter_views(
+        m.hubble_observe_views(q.limit).await?,
+        Some(q.verdict.as_str()),
+        Some(q.protocol.as_str()),
+    );
+    let items: Vec<_> = views.iter().map(to_hubble_flow).collect();
+    Ok(Json(json!({"items": items})))
+}
+
+async fn hubble_flows_text(
+    State(m): State<Arc<VmManager>>,
+    Query(q): Query<HubbleFlowsQuery>,
+) -> impl axum::response::IntoResponse {
+    use fluxvm_network::packetflow::{filter_views, render_flows, FlowOutput};
+    let views = match m.hubble_observe_views(q.limit).await {
+        Ok(v) => filter_views(v, Some(q.verdict.as_str()), Some(q.protocol.as_str())),
+        Err(e) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("error: {e:#}\n"),
+            )
+        }
+    };
+    let mode = FlowOutput::parse(&q.output);
+    let body = render_flows(&views, mode, q.detailed);
+    (
+        axum::http::StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        body,
+    )
 }
 
 async fn hubble_ui() -> impl axum::response::IntoResponse {
@@ -1155,28 +1212,7 @@ async fn hubble_ui() -> impl axum::response::IntoResponse {
     )
 }
 
-const HUBBLE_UI_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>FluxVM Hubble-lite</title>
-<style>
-body{font-family:ui-sans-serif,system-ui;margin:24px;background:#0b1020;color:#e8eefc}
-h1{font-size:20px}table{border-collapse:collapse;width:100%}
-th,td{border-bottom:1px solid #243056;text-align:left;padding:6px 8px;font-size:13px}
-.ok{color:#6ee7b7}.drop{color:#fca5a5}
-</style></head><body>
-<h1>FluxVM Hubble-lite</h1>
-<p>CiliumEndpoint views and sampled flows. This is not Cilium Hubble gRPC.</p>
-<h2>Endpoints</h2><pre id="ep">loading…</pre>
-<h2>Flows</h2><pre id="fl">loading…</pre>
-<script>
-async function load(){
-  const e=await fetch('/v1/network/endpoints').then(r=>r.json()).catch(err=>({error:String(err)}));
-  const f=await fetch('/v1/network/hubble/flows').then(r=>r.json()).catch(err=>({error:String(err)}));
-  document.getElementById('ep').textContent=JSON.stringify(e,null,2);
-  document.getElementById('fl').textContent=JSON.stringify(f,null,2);
-}
-load(); setInterval(load,5000);
-</script></body></html>
-"#;
+const HUBBLE_UI_HTML: &str = include_str!("hubble_ui.html");
 
 async fn network_refresh_dns(
     State(m): State<Arc<VmManager>>,
