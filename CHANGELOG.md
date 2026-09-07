@@ -31,6 +31,9 @@
   one-shot after userspace; smoke checks `FLUXVM_STDIN_OK:ping`.
 - **In-tree KVM pause/resume** — park vCPU (no `KVM_RUN` while paused);
   `scripts/test-kvm-pause-smoke.sh`. Memory snapshots remain Firecracker-only.
+- **Lab verify scripts** — `scripts/test-lab-four-tracks-e2e.sh`,
+  `scripts/test-lab-regression.sh`, `scripts/test-lab-verify.sh` for post-deploy
+  four-track + regression gates on a KVM host.
 - **Sandbox bench image paths** — `scripts/bench-sandbox.sh` honors `IMAGE` /
   `FLUXVM_BENCH_IMAGE` with lab fallbacks (`bionic-fabric-rootfs.ext4`, etc.).
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
