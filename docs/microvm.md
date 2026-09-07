@@ -63,7 +63,7 @@ is set.
 | `MicroVM` | `mvm` | Guest. Default `persist: false` — TTL expiry is success. |
 | `MicroVMJob` | `mvmj` | Run-to-completion: child MicroVMs + optional vsock `command`. |
 | `MicroVMPool` | `mvmp` | Node-local warm pool via FluxVM `POST /v1/pools`. |
-| `GuestImage` | `gimg` | **Catalog stub.** Images are still host-staged / GuestKit. |
+| `GuestImage` | `gimg` | Catalog: node agent marks Ready when `spec.source` is a host file; MicroVM `spec.image` may name a GuestImage. |
 
 All kinds: `apiVersion: microvm.fluxvm.zyvor.io/v1alpha1`.
 
@@ -173,12 +173,27 @@ kubectl get mvmp ci-warm -w
 
 Tutorial: [tutorials/microvm/03-pool.md](tutorials/microvm/03-pool.md).
 
-## GuestImage (stub)
+## GuestImage
 
-`GuestImage` is a catalog placeholder (`spec.source`, optional `sha256` /
-`backend` / `kernel`). **v1 does not pull or distribute images.** Stage disks
-under `/var/lib/fluxvm/images` (or your `state_dir`) with GuestKit the same way
-you do for DisposableVm.
+`GuestImage` catalogs a disk (`spec.source`, optional `sha256` / `backend` /
+`kernel`). **No CDI / importer Pod** — GuestKit (or ops) stages the file on the
+node. The node-agent reconciler sets `status.ready` + `status.path` when
+`spec.source` is an absolute path that exists on that host.
+
+`MicroVM.spec.image` may be:
+
+- a direct path / URL / `*.qcow2|raw|ext4|img` name (used as-is), or
+- a GuestImage name in the same namespace (resolved to `status.path` once Ready)
+
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: GuestImage
+metadata: {name: ubuntu-lab}
+spec: {source: /var/lib/fluxvm/images/ubuntu.qcow2}
+EOF
+# MicroVM.spec.image: ubuntu-lab
+```
 
 ## DisposableVm bridge (`--convert`, opt-in)
 
@@ -219,7 +234,7 @@ cargo test -p fluxvm-microvm
 
 - No virt-launcher, virtctl, CDI, or live migration.
 - No second privileged VMM DaemonSet — reuse `fluxvm-kube` / host `fluxvm serve`.
-- No k8s-native image pull — host-staged paths only (`GuestImage` is a stub).
+- No k8s-native image pull — host-staged paths only (`GuestImage` Ready when the file exists on the node).
 - Shadow Pod is capacity accounting, not the VMM process.
 - Images and TAP/bridges must exist on the scheduled node before Running.
 

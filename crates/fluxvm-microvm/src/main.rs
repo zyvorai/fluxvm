@@ -7,7 +7,7 @@ use fluxvm_microvm::{
     capacity, controller, convert,
     crd::{GuestImage, MicroVM, MicroVMJob, MicroVMPool},
     fluxvm_client::FluxVMClient,
-    jobs, node_agent, pools,
+    guest_images, jobs, node_agent, pools,
 };
 use kube::CustomResourceExt;
 
@@ -75,8 +75,10 @@ async fn main() -> Result<()> {
             let f1 = fluxvm.clone();
             let n1 = node_name.clone();
             let agent = tokio::spawn(async move { node_agent::run(c1, f1, n1).await });
+            let c2 = client.clone();
+            let images = tokio::spawn(async move { guest_images::run(c2).await });
             let pools_h = tokio::spawn(async move { pools::run(client, fluxvm, node_name).await });
-            let _ = tokio::join!(agent, pools_h);
+            let _ = tokio::join!(agent, images, pools_h);
         }
     }
     Ok(())

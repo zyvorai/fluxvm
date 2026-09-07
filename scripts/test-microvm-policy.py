@@ -31,6 +31,15 @@ class PolicySource(unittest.TestCase):
         self.assertIn('SHADOW_MEMORY: &str = "32Mi"', src)
         self.assertIn("microvm.fluxvm.zyvor.io/driven-by", src)
 
+    def test_guest_image_modules(self):
+        self.assertTrue((ROOT / "crates/fluxvm-microvm/src/images.rs").is_file())
+        self.assertTrue((ROOT / "crates/fluxvm-microvm/src/guest_images.rs").is_file())
+        main = (ROOT / "crates/fluxvm-microvm/src/main.rs").read_text()
+        self.assertIn("guest_images::run", main)
+        agent = (ROOT / "crates/fluxvm-microvm/src/node_agent.rs").read_text()
+        self.assertIn("resolve_image", agent)
+        self.assertIn("looks_like_direct_image", agent)
+
 
 class Manifests(unittest.TestCase):
     def test_controller_convert_off(self):

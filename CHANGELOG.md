@@ -8,6 +8,9 @@
   `microvm.fluxvm.zyvor.io/driven-by=fluxvm-kube` so the node agent skips
   `POST /v1/vms`; deploy controller leaves `--convert` off (opt-in). Policy
   gates: `scripts/test-microvm-policy.py`.
+- **GuestImage Ready** — node reconciler marks Ready when `spec.source` is a
+  host file; MicroVM `spec.image` can resolve a same-namespace GuestImage name
+  (still no CDI pull).
 
 ### Added
 - **MicroVM** (`fluxvm-microvm`) — Kubernetes-native disposable compute without

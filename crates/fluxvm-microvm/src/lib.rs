@@ -10,6 +10,8 @@ pub mod controller;
 pub mod convert;
 pub mod crd;
 pub mod fluxvm_client;
+pub mod guest_images;
+pub mod images;
 pub mod jobs;
 pub mod node_agent;
 pub mod policy;

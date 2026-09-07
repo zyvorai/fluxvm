@@ -3,8 +3,9 @@
 
 //! Node agent: the only process that talks to local `fluxvm serve`.
 
-use crate::crd::{MicroVM, MicroVMStatus};
+use crate::crd::{GuestImage, MicroVM, MicroVMStatus};
 use crate::fluxvm_client::{FluxVMClient, record_guest_ip, record_id, record_pid, record_status};
+use crate::images::{guest_image_host_path, looks_like_direct_image};
 use futures::StreamExt;
 use kube::{
     Api, Client, Resource, ResourceExt,
@@ -103,7 +104,9 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
         ctx.fluxvm.claim_pool(&pool_name, &name, obj.spec.ttl_seconds).await?
     } else {
         status.phase = "Provisioning".into();
-        ctx.fluxvm.create_vm(&name, &obj.spec).await?
+        let mut spec = obj.spec.clone();
+        spec.image = resolve_image(&ctx.client, obj.namespace().as_deref(), &spec.image).await?;
+        ctx.fluxvm.create_vm(&name, &spec).await?
     };
     let id = record_id(&record).ok_or_else(|| Error::Flux("create/claim returned no id".into()))?;
     status.runtime.uuid = Some(id.clone());
@@ -143,6 +146,22 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
     }
     patch_status(api, &name, status).await?;
     Ok(Action::requeue(STEADY))
+}
+
+async fn resolve_image(client: &Client, ns: Option<&str>, image: &str) -> Result<String, Error> {
+    if looks_like_direct_image(image) {
+        return Ok(image.to_string());
+    }
+    let namespace = ns.unwrap_or("default");
+    let api: Api<GuestImage> = Api::namespaced(client.clone(), namespace);
+    let img = api.get(image).await.map_err(|e| {
+        Error::Flux(format!("GuestImage {namespace}/{image}: {e}"))
+    })?;
+    guest_image_host_path(&img).ok_or_else(|| {
+        Error::Flux(format!(
+            "GuestImage {namespace}/{image} is not Ready on this node (stage with GuestKit)"
+        ))
+    })
 }
 
 async fn patch_status(api: &Api<MicroVM>, name: &str, status: MicroVMStatus) -> Result<(), kube::Error> {

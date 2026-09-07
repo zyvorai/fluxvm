@@ -135,14 +135,68 @@ echo "converted_uuid=$CUUID"
 echo DRIVEN_BY_SKIP_OK
 echo CONVERTED_NO_UUID_OK
 
+# GuestImage Ready + catalog name resolution
+sudo kubectl delete gimg lab-ubuntu --ignore-not-found --wait=false || true
+sudo kubectl delete mvm lab-from-gimg --ignore-not-found --wait=false || true
+sleep 1
+cat >/tmp/gimg-lab.yaml <<YAML
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: GuestImage
+metadata:
+  name: lab-ubuntu
+  namespace: default
+spec:
+  source: ${IMG}
+YAML
+sudo kubectl apply -f /tmp/gimg-lab.yaml
+READY=false
+for i in $(seq 1 30); do
+  R="$(sudo kubectl get gimg lab-ubuntu -o jsonpath='{.status.ready}' 2>/dev/null || true)"
+  P="$(sudo kubectl get gimg lab-ubuntu -o jsonpath='{.status.path}' 2>/dev/null || true)"
+  echo "t=$i gimg ready=$R path=$P"
+  if [[ "$R" == "true" && -n "$P" ]]; then READY=true; break; fi
+  sleep 2
+done
+[[ "$READY" == "true" ]] || { echo FAIL_GIMG_NOT_READY; sudo kubectl describe gimg lab-ubuntu | tail -30; exit 1; }
+echo GUESTIMAGE_READY_OK
+
+cat >/tmp/mvm-from-gimg.yaml <<YAML
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: MicroVM
+metadata:
+  name: lab-from-gimg
+  namespace: default
+spec:
+  backend: qemu
+  image: lab-ubuntu
+  vcpus: 1
+  memoryMib: 1024
+  networkMode: user
+  ttlSeconds: 300
+  persist: false
+YAML
+sudo kubectl apply -f /tmp/mvm-from-gimg.yaml
+GIMG_OK=false
+for i in $(seq 1 45); do
+  PHASE="$(sudo kubectl get mvm lab-from-gimg -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  UUID="$(sudo kubectl get mvm lab-from-gimg -o jsonpath='{.status.runtime.uuid}' 2>/dev/null || true)"
+  echo "t=$i from-gimg phase=$PHASE uuid=${UUID:0:8}"
+  if [[ "$PHASE" == "Running" && -n "$UUID" ]]; then GIMG_OK=true; break; fi
+  if [[ "$PHASE" == "Failed" ]]; then break; fi
+  sleep 2
+done
+[[ "$GIMG_OK" == "true" ]] || { echo FAIL_GIMG_MVM; sudo kubectl describe mvm lab-from-gimg | tail -40; sudo tail -40 /tmp/microvm-lab/node-agent.log; exit 1; }
+echo GUESTIMAGE_RESOLVE_OK
+
 FINAL="$(sudo kubectl get mvm lab-smoke -o jsonpath='{.status.phase}' 2>/dev/null || true)"
 MSG="$(sudo kubectl get mvm lab-smoke -o jsonpath='{.status.message}' 2>/dev/null || true)"
 UUID="$(sudo kubectl get mvm lab-smoke -o jsonpath='{.status.runtime.uuid}' 2>/dev/null || true)"
+UUID2="$(sudo kubectl get mvm lab-from-gimg -o jsonpath='{.status.runtime.uuid}' 2>/dev/null || true)"
 echo "lab_smoke_phase=$FINAL msg=$MSG uuid=$UUID"
 sudo kubectl get mvm -A -o wide || true
+sudo kubectl get gimg -A || true
 
-if [[ -n "$UUID" ]]; then
-  TOKEN="$(python3 - <<'PY'
+TOKEN="$(python3 - <<'PY'
 from pathlib import Path
 text = Path("/etc/fluxvm.toml").read_text()
 tok = ""
@@ -159,10 +213,13 @@ for line in text.splitlines():
 print(tok)
 PY
 )"
-  curl -sf -H "Authorization: Bearer $TOKEN" -X DELETE "http://127.0.0.1:7788/v1/vms/$UUID" || true
-fi
+for id in "$UUID" "$UUID2"; do
+  [[ -n "$id" ]] || continue
+  curl -sf -H "Authorization: Bearer $TOKEN" -X DELETE "http://127.0.0.1:7788/v1/vms/$id" || true
+done
 
-sudo kubectl delete mvm lab-smoke lab-converted-skip --ignore-not-found --wait=false || true
+sudo kubectl delete mvm lab-smoke lab-converted-skip lab-from-gimg --ignore-not-found --wait=false || true
+sudo kubectl delete gimg lab-ubuntu --ignore-not-found --wait=false || true
 sudo kill "$(sudo cat /tmp/microvm-lab/controller.pid)" 2>/dev/null || true
 sudo kill "$(sudo cat /tmp/microvm-lab/agent.pid)" 2>/dev/null || true
 sudo pkill -f 'fluxvm-microvm controller' 2>/dev/null || true
