@@ -50,12 +50,10 @@
   `ping -I` fails and `/sys` remounts drop bpffs pins across separate execs.
 
 ### Changed
-- Docs refreshed for Network Fabric **schema v4** + production dataplane runbook
-  (groups/CNP/health/ipcache/refresh-dns links, e2e scripts).
-- Docs/README refreshed for Network Fabric v1–v3 (architecture diagrams, L4 ports,
-  IPv6, rate limits, REST status/schema, XDP meta paths, `LimitMEMLOCK`, dual-netns
-  smoke, e2e) plus a **vs traditional networking** comparison table (lab policy
-  update ~100–120 ms p50).
+- Docs/README refreshed for Network Fabric **schema v4** (groups, CNP, observe,
+  health/ipcache/FQDN refresh, production runbook, tutorials) while keeping
+  historical v1–v3 notes; architecture, L4/IPv6/rate limits, REST status/schema,
+  XDP, `LimitMEMLOCK`, dual-netns smoke/e2e, and vs-traditional comparison remain.
 - **Network Fabric v3 GA ship** — `configs/network-fabric-ga.toml` +
   `scripts/enable-network-fabric-ga.sh`; `required=true` fail-closes only when a
   host-visible VM edge exists (user NAT / `mode=none` soft-skip).
