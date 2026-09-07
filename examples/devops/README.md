@@ -16,8 +16,11 @@ bash scripts/test-upgrade-snapshot.sh
 sudo ./scripts/bootstrap-host.sh
 # fluxvm serve --config /etc/fluxvm.toml
 export FLUXVM_URL=http://127.0.0.1:7788
-export FABRIC_URL=http://127.0.0.1:9095   # optional sibling
+unset FABRIC_URL   # auto-picks https://127.0.0.1:9095 then http (curl -k)
 ZYVOR_CHECK_FLUXVM=1 bash scripts/devops-gate.sh
+
+# Full post-deploy pack (four-tracks + regression + devops + upgrade-snapshot):
+#   sudo -E ./scripts/test-lab-verify.sh
 ```
 
 Create a guest from the production spec:

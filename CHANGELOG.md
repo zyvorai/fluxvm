@@ -38,7 +38,10 @@
   `scripts/test-kvm-pause-smoke.sh`. Memory snapshots remain Firecracker-only.
 - **Lab verify scripts** — `scripts/test-lab-four-tracks-e2e.sh`,
   `scripts/test-lab-regression.sh`, `scripts/test-lab-verify.sh` for post-deploy
-  four-track + regression gates on a KVM host.
+  four-track + regression gates on a KVM host (also runs devops units, live
+  `devops-gate`, and `upgrade-snapshot`; stdin closed for SSH-safe serial smokes).
+- **DevOps gate TLS** — `scripts/devops-gate.sh` uses `curl -k` and auto-picks
+  Fabric HTTPS then HTTP when `FABRIC_URL` is unset.
 - **Sandbox bench image paths** — `scripts/bench-sandbox.sh` honors `IMAGE` /
   `FLUXVM_BENCH_IMAGE` with lab fallbacks (`bionic-fabric-rootfs.ext4`, etc.).
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;

@@ -24,6 +24,19 @@ See [contracts/fabric-fluxvm-readyz.json](contracts/fabric-fluxvm-readyz.json).
 - Image customize jobs already live in `.github/workflows/ci.yml`.
 - Live KVM smoke stays on self-hosted runners (`scripts/test-boot-smoke.sh`, dataplane e2e).
 
+## Lab verify
+
+Post-deploy on a KVM host (pairs with Fabric HTTPS `:9095`):
+
+```bash
+sudo -E ./scripts/test-lab-verify.sh
+# covers: devops units + live devops-gate + upgrade-snapshot +
+#         four-tracks e2e + regression (readyz / KVM boot / sandbox / eBPF)
+```
+
+`scripts/devops-gate.sh` uses `curl -k` for Fabric self-signed TLS and auto-picks
+`https://127.0.0.1:9095` when `FABRIC_URL` is unset.
+
 ## Kubernetes
 
 DaemonSet in `deploy/k8s/` uses hostNetwork so Fabric on the same node can reach `127.0.0.1:7788`. GitOps wrapper: `deploy/k8s/gitops`.
