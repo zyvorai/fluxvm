@@ -27,6 +27,7 @@ pub struct VirtualMachine {
     pub cfg: VmConfig,
     pub mem: GuestMemory,
     pub bus: Arc<Bus>,
+    pub serial: Arc<Serial16550>,
     pub net: Option<Arc<VirtioMmio>>,
     pub blk: Option<Arc<VirtioMmio>>,
     pub blk_backend: Option<Arc<BlockBackend>>,
@@ -56,7 +57,8 @@ impl VirtualMachine {
         ];
 
         let mut bus = Bus::new();
-        bus.add_pio(Arc::new(Serial16550::com1()));
+        let serial = Arc::new(Serial16550::com1());
+        bus.add_pio(serial.clone());
         bus.add_pio(Arc::new(CmosRtc::new()));
 
         let mac = VirtioNetConfig::parse_mac(&cfg.mac).unwrap_or([0x02, 0, 0, 0, 0, 2]);
@@ -81,6 +83,7 @@ impl VirtualMachine {
             cfg,
             mem,
             bus: Arc::new(bus),
+            serial,
             net: Some(net),
             blk: None,
             blk_backend: None,
@@ -109,7 +112,8 @@ impl VirtualMachine {
         }
 
         let mut bus = Bus::new();
-        bus.add_pio(Arc::new(Serial16550::com1()));
+        let serial = Arc::new(Serial16550::com1());
+        bus.add_pio(serial.clone());
         bus.add_pio(Arc::new(CmosRtc::new()));
 
         let mac = VirtioNetConfig::parse_mac(&cfg.mac).unwrap_or([0x02, 0, 0, 0, 0, 2]);
@@ -162,6 +166,7 @@ impl VirtualMachine {
             cfg,
             mem,
             bus: Arc::new(bus),
+            serial,
             net: Some(net),
             blk,
             blk_backend,
@@ -232,6 +237,9 @@ impl VirtualMachine {
                         let mut buf = vec![0u8; n];
                         this.bus.pio_read(port, &mut buf)?;
                         kvm.io_data_mut(off, n).copy_from_slice(&buf);
+                    }
+                    if this.serial.irq_pending() {
+                        let _ = kvm.pulse_irq(this.serial.irq);
                     }
                 }
                 ffi::KVM_EXIT_MMIO => {
@@ -309,9 +317,10 @@ impl VirtualMachine {
             }
             if serial_log.contains("NETWORK IS UP")
                 || serial_log.contains("NET TIMEOUT")
-                // Userspace reached (PID1 shell without ctty is a clear signal).
+                // Userspace / console markers (exact OK token — avoid prefix match).
+                || serial_log.contains("FLUXVM_USERSPACE_OK")
+                || serial_log.contains("FLUXVM_PROMPT_READY")
                 || serial_log.contains("can't access tty")
-                || serial_log.contains("FLUXVM_USERSPACE")
                 || serial_log.contains("login:")
                 || serial_log.contains("Run /sbin/init")
                 || serial_log.contains("Kernel panic")

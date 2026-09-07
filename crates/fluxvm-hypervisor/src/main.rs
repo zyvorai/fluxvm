@@ -97,8 +97,9 @@ async fn real_main() -> anyhow::Result<()> {
     if log.contains("NETWORK IS UP") {
         eprintln!("[ok] guest reported NETWORK IS UP");
         Ok(())
-    } else if log.contains("can't access tty")
-        || log.contains("FLUXVM_USERSPACE")
+    } else if log.contains("FLUXVM_USERSPACE_OK")
+        || log.contains("FLUXVM_PROMPT_READY")
+        || log.contains("can't access tty")
         || log.contains("login:")
         || log.contains("Run /sbin/init")
     {

@@ -19,7 +19,10 @@
 - **In-tree KVM root mount** — Firecracker-style e820, MP table, CMOS RTC,
   PIT2, virtio IRQ pulse; lab reaches `EXT4-fs (vda)` / `VFS: Mounted root`.
 - **In-tree KVM userspace** — do not stop the VMM at root mount; smoke uses
-  `init=/bin/sh` and passes on the dash `can't access tty` userspace marker.
+  a ttyS0 probe init and passes on `FLUXVM_USERSPACE_OK` /
+  `FLUXVM_PROMPT_READY`.
+- **In-tree KVM serial console** — 16550 RX queue, IIR/LSR, COM1 IRQ 4 pulse
+  for interactive UART; smoke injects `/userspace-probe.sh` onto a temp rootfs.
 - **CH Windows boot (Phase-1)** — `hyperv: true` → `kvm_hyperv=on`;
   `examples/windows-ch.json`; QGA remains QEMU-only ([ch-windows-qga.md](docs/ch-windows-qga.md)).
 - **Density roadmap** — [ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md) for Cilium CEP,
