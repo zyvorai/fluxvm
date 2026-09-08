@@ -436,6 +436,29 @@ impl VmBackend for QemuBackend {
     }
 }
 
+// ZYVOR_RUNTIME_BOUNDARY_V1: node-local live-migration primitives.
+pub async fn migration_start(
+    _cfg: &Config,
+    vm: &VmRecord,
+    request: &fluxvm_core::model::MigrationStartRequest,
+) -> Result<fluxvm_core::model::MigrationStatus> {
+    qmp::migration_start(&vm.workspace.join("qmp.sock"), request, QMP_SAVEVM_TIMEOUT).await
+}
+
+pub async fn migration_status(
+    _cfg: &Config,
+    vm: &VmRecord,
+) -> Result<fluxvm_core::model::MigrationStatus> {
+    qmp::migration_status(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
+}
+
+pub async fn migration_cancel(
+    _cfg: &Config,
+    vm: &VmRecord,
+) -> Result<fluxvm_core::model::MigrationStatus> {
+    qmp::migration_cancel(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
+}
+
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was
 /// running. Pairs with `-loadvm` / [`VmManager::start_from_snapshot`].
 pub async fn snapshot_save(_cfg: &Config, vm: &VmRecord, name: &str) -> Result<()> {

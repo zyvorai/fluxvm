@@ -234,6 +234,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
         .route("/v1/vms", post(create_vm).get(list_vms))
         .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
         .route("/v1/vms/{id}/start", post(start_vm))
@@ -242,6 +243,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             post(start_vm_from_snapshot),
         )
         .route("/v1/vms/{id}/snapshot", post(snapshot_vm))
+        .route("/v1/vms/{id}/migration/start", post(start_migration))
+        .route("/v1/vms/{id}/migration/status", get(migration_status))
+        .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
         .route("/v1/vms/{id}/stop", post(stop_vm))
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
@@ -840,6 +844,79 @@ load().catch(() => {});
 </script>
 </body>
 </html>"#;
+
+// ZYVOR_RUNTIME_BOUNDARY_V1: stable node-runtime feature discovery for Fabric.
+async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities> {
+    use fluxvm_core::model::{
+        BackendKind, RuntimeCapabilities, RuntimeMigrationCapability, RuntimeSnapshotCapability,
+    };
+    Json(RuntimeCapabilities {
+        api_version: "runtime.fluxvm.zyvor.io/v1".into(),
+        scope: "node-local".into(),
+        orchestration_owner: "zyvor-fabric".into(),
+        migration: vec![RuntimeMigrationCapability {
+            backend: BackendKind::Qemu,
+            live: true,
+            pre_copy: true,
+            post_copy: true,
+            multifd: true,
+            requires_shared_storage: true,
+            transports: vec!["tcp".into(), "unix".into()],
+        }],
+        snapshot: vec![
+            RuntimeSnapshotCapability {
+                backend: BackendKind::Qemu,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::CloudHypervisor,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::Firecracker,
+                memory: false,
+                disk: false,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::FluxVm,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+        ],
+    })
+}
+
+async fn start_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationStartRequest>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.start_migration(id, &req).await?))
+}
+
+async fn migration_status(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    Ok(Json(m.migration_status(id).await?))
+}
+
+async fn cancel_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.cancel_migration(id).await?))
+}
 
 #[derive(Deserialize)]
 struct ListVmsQuery {

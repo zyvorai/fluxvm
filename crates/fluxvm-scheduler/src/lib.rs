@@ -437,9 +437,7 @@ impl VmManager {
         })
     }
 
-    pub async fn list_network_groups(
-        &self,
-    ) -> Result<Vec<fluxvm_network::groups::SecurityGroup>> {
+    pub async fn list_network_groups(&self) -> Result<Vec<fluxvm_network::groups::SecurityGroup>> {
         let cfg = self.cfg.clone();
         tokio::task::spawn_blocking(move || fluxvm_network::groups::list_groups(&cfg))
             .await
@@ -488,10 +486,7 @@ impl VmManager {
             .context("cnp list panicked")?
     }
 
-    pub async fn get_cnp(
-        &self,
-        name: &str,
-    ) -> Result<fluxvm_network::cnp::CiliumNetworkPolicy> {
+    pub async fn get_cnp(&self, name: &str) -> Result<fluxvm_network::cnp::CiliumNetworkPolicy> {
         let cfg = self.cfg.clone();
         let name = name.to_string();
         tokio::task::spawn_blocking(move || fluxvm_network::cnp::get_cnp(&cfg, &name))
@@ -504,9 +499,10 @@ impl VmManager {
         policy: fluxvm_network::cnp::CiliumNetworkPolicy,
     ) -> Result<fluxvm_network::groups::SecurityGroup> {
         let cfg = self.cfg.clone();
-        let group = tokio::task::spawn_blocking(move || fluxvm_network::cnp::apply_cnp(&cfg, policy))
-            .await
-            .context("cnp apply panicked")??;
+        let group =
+            tokio::task::spawn_blocking(move || fluxvm_network::cnp::apply_cnp(&cfg, policy))
+                .await
+                .context("cnp apply panicked")??;
         self.reconcile_group_members(&group.name).await?;
         Ok(group)
     }
@@ -657,7 +653,9 @@ impl VmManager {
         let views = self.hubble_observe_views(limit).await?;
         let mut out = Vec::with_capacity(views.len());
         for v in &views {
-            out.push(serde_json::to_value(fluxvm_network::packetflow::to_hubble_flow(v))?);
+            out.push(serde_json::to_value(
+                fluxvm_network::packetflow::to_hubble_flow(v),
+            )?);
         }
         Ok(out)
     }
@@ -717,10 +715,7 @@ impl VmManager {
         .context("identity list panicked")?
     }
 
-    pub async fn network_effective(
-        &self,
-        id: Uuid,
-    ) -> Result<serde_json::Value> {
+    pub async fn network_effective(&self, id: Uuid) -> Result<serde_json::Value> {
         self.get(id).await?;
         let cfg = self.cfg.clone();
         tokio::task::spawn_blocking(move || {
@@ -762,7 +757,6 @@ impl VmManager {
         fluxvm_network::dataplane::save_policy(&self.cfg, id, &policy)?;
 
         if vm.status == VmStatus::Running || vm.status == VmStatus::Paused {
-
             let guest_cidr = vm.guest_ip.as_deref().map(|ip| format!("{ip}/32"));
             let iface = fluxvm_network::dataplane_interface_name(
                 id,
@@ -1154,6 +1148,41 @@ impl VmManager {
     /// snapshot. Added for zyvor-fabric's hibernate/resume feature.
     pub async fn start_from_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
         self.start_impl(id, Some(tag)).await
+    }
+
+    // ZYVOR_RUNTIME_BOUNDARY_V1: FluxVM performs the VMM transport; Fabric chooses hosts/policy.
+    pub async fn start_migration(
+        &self,
+        id: Uuid,
+        request: &fluxvm_core::model::MigrationStartRequest,
+    ) -> Result<fluxvm_core::model::MigrationStatus> {
+        let vm = self.get(id).await?;
+        if vm.status != VmStatus::Running {
+            bail!(
+                "live migration requires a running VM (status={:?})",
+                vm.status
+            );
+        }
+        match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::migration_start(&self.cfg, &vm, request).await,
+            other => bail!("live migration contract v1 supports qemu only (backend={other:?})"),
+        }
+    }
+
+    pub async fn migration_status(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationStatus> {
+        let vm = self.get(id).await?;
+        match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::migration_status(&self.cfg, &vm).await,
+            other => bail!("migration status contract v1 supports qemu only (backend={other:?})"),
+        }
+    }
+
+    pub async fn cancel_migration(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationStatus> {
+        let vm = self.get(id).await?;
+        match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::migration_cancel(&self.cfg, &vm).await,
+            other => bail!("migration cancel contract v1 supports qemu only (backend={other:?})"),
+        }
     }
 
     /// Save full VM state so a later [`Self::start_from_snapshot`] can restore it.
@@ -1636,8 +1665,7 @@ impl VmManager {
 
                     // Daemon restart / package upgrades can leave a live VMM
                     // while TC pins/filters are missing or on an older schema.
-                    if self.cfg.sandbox.dataplane.mode
-                        != fluxvm_core::config::DataplaneMode::Legacy
+                    if self.cfg.sandbox.dataplane.mode != fluxvm_core::config::DataplaneMode::Legacy
                     {
                         let needs_repair = fluxvm_network::dataplane::status(&self.cfg, vm.id)
                             .map(|s| !s.attached || !s.schema_compatible || !s.policy_synced)
@@ -1693,7 +1721,13 @@ impl VmManager {
         }
 
         // Stale UUID pins are safe to collect only after the VM record is gone.
-        let live_ids: Vec<Uuid> = self.store.list().await.into_iter().map(|vm| vm.id).collect();
+        let live_ids: Vec<Uuid> = self
+            .store
+            .list()
+            .await
+            .into_iter()
+            .map(|vm| vm.id)
+            .collect();
         if let Err(e) = fluxvm_network::dataplane::reconcile_orphan_pins(&self.cfg, &live_ids) {
             tracing::warn!(error = %e, "failed to reconcile orphan FluxVM eBPF pins");
         }

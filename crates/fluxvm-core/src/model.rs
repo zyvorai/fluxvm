@@ -299,6 +299,95 @@ fn default_memory() -> u64 {
     2048
 }
 
+// ZYVOR_RUNTIME_BOUNDARY_V1: node-local migration contract consumed by Zyvor Fabric.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum MigrationMode {
+    #[default]
+    PreCopy,
+    PostCopy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationStartRequest {
+    /// QEMU migration URI. Contract v1 deliberately permits only `tcp:` and
+    /// `unix:` transports; shell-backed `exec:` URIs are rejected by FluxVM.
+    pub destination: String,
+    #[serde(default)]
+    pub mode: MigrationMode,
+    #[serde(default)]
+    pub bandwidth_mbps: Option<u64>,
+    #[serde(default)]
+    pub max_downtime_ms: Option<u64>,
+    #[serde(default)]
+    pub multifd_channels: Option<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MigrationPhase {
+    None,
+    Setup,
+    Active,
+    PostcopyActive,
+    Completed,
+    Failed,
+    Cancelled,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationStatus {
+    pub phase: MigrationPhase,
+    /// Raw VMM status for forward compatibility with newer QEMU states.
+    pub status: String,
+    #[serde(default)]
+    pub ram_transferred: Option<u64>,
+    #[serde(default)]
+    pub ram_remaining: Option<u64>,
+    #[serde(default)]
+    pub ram_total: Option<u64>,
+    #[serde(default)]
+    pub total_time_ms: Option<u64>,
+    #[serde(default)]
+    pub downtime_ms: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeMigrationCapability {
+    pub backend: BackendKind,
+    pub live: bool,
+    pub pre_copy: bool,
+    pub post_copy: bool,
+    pub multifd: bool,
+    /// Contract v1 does not copy VM disks. Fabric must place the VM on
+    /// shared storage (for example Ceph RBD) or prepare storage separately.
+    pub requires_shared_storage: bool,
+    pub transports: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSnapshotCapability {
+    pub backend: BackendKind,
+    pub memory: bool,
+    pub disk: bool,
+    pub portable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeCapabilities {
+    pub api_version: String,
+    pub scope: String,
+    pub orchestration_owner: String,
+    pub migration: Vec<RuntimeMigrationCapability>,
+    pub snapshot: Vec<RuntimeSnapshotCapability>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum VmStatus {
