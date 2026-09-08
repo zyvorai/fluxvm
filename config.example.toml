@@ -58,7 +58,7 @@ reaper_interval_secs = 5
 # block_cidrs = ["198.51.100.0/24", "2001:db8:bad::/48"]
 #
 #
-# VM Service Fabric v4. `north_south_interfaces` enables physical-uplink
+# VM Service Fabric v5 (BPF schema 4). `north_south_interfaces` enables physical-uplink
 # service VIP handling. XDP is optional and falls back to TC/host routing.
 # Do not enable service XDP with dataplane.mode = "cilium".
 # EDT pacing requires edt_enabled + edt_interfaces; FluxVM only manages fq

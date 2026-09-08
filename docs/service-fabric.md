@@ -1,8 +1,9 @@
-# FluxVM Service Fabric v4
+# FluxVM Service Fabric v5 (BPF schema 4)
 
 FluxVM is the **node-local** service dataplane. Zyvor Fabric is the **distributed**
-control plane (intent, edge leases, fan-out, BGP/ECMP policy). This document covers
-what FluxVM owns and exposes.
+control plane (intent, edge leases, fan-out, BGP/ECMP policy). **v5** is the current
+Maglev VIP plane; the TC/XDP **BPF ABI remains schema 4**. This document covers what
+FluxVM owns and exposes.
 
 Related: [Fabric contract](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md) ·
 [ownership boundary](https://github.com/zyvorai/fabric/blob/main/docs/FLUXVM-FABRIC-BOUNDARY.md) ·
@@ -12,7 +13,8 @@ Related: [Fabric contract](https://github.com/zyvorai/fabric/blob/main/docs/ebpf
 
 ## Dataplane
 
-Service Fabric **schema v4** builds on v3 lifecycle/HA and adds:
+Service Fabric **v5** (BPF **schema 4** ABI) builds on v3 lifecycle/HA and v4
+observability. The dataplane adds:
 
 - dual-stack TCP/UDP VIPs;
 - weighted Maglev;
@@ -110,15 +112,20 @@ FluxVM does **not** embed a BGP control plane. It publishes an atomic snapshot a
 consume this contract. A VIP is withdrawn if Fabric's node intent has
 `advertise=false` or if the node has no Ready backend.
 
-## HA state transfer
+## HA state transfer (v5)
 
-Export/import is restricted to these service-owned maps:
+Export/import and bounded **delta journal** replication are restricted to these
+service-owned maps:
 
 - `fluxvm_fct4`, `fluxvm_fct6` (forward affinity);
 - `fluxvm_nat4`, `fluxvm_nat6` (reverse NAT).
 
+Full snapshots use `conntrack/export` + `conntrack/import`. **v5** adds
+sequence/ack delta batches (`conntrack/delta`, `…/delta/import`, `…/delta/ack`)
+with gap detection, `reset_required`, and full-snapshot fallback on history gaps.
 Import verifies schema version, service name/id and a fixed map allowlist. Fabric
-decides if/when a standby edge should receive this state.
+decides if/when a standby edge should receive this state and advances source
+journal ack only to the minimum replicated target cursor.
 
 ## REST surface
 
