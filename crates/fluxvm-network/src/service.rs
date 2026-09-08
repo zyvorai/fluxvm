@@ -666,6 +666,22 @@ fn attach_service_filter(iface: &str, direction: &str, prog: &Path) -> Result<()
 }
 
 fn ensure_clsact(iface: &str) -> Result<()> {
+    let show = Command::new("tc")
+        .args(["qdisc", "show", "dev", iface])
+        .output()
+        .context("querying tc qdisc")?;
+    if !show.status.success() {
+        bail!(
+            "tc qdisc show dev {iface} failed: {}",
+            String::from_utf8_lossy(&show.stderr).trim()
+        );
+    }
+    if String::from_utf8_lossy(&show.stdout)
+        .split_whitespace()
+        .any(|token| token == "clsact")
+    {
+        return Ok(());
+    }
     let out = Command::new("tc")
         .args(["qdisc", "add", "dev", iface, "clsact"])
         .stdout(Stdio::null())
@@ -675,7 +691,8 @@ fn ensure_clsact(iface: &str) -> Result<()> {
         return Ok(());
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
-    if stderr.contains("File exists") {
+    // Race: clsact appeared between show and add (or older iproute2 wording).
+    if stderr.contains("File exists") || stderr.contains("Exclusivity flag on") {
         return Ok(());
     }
     bail!("tc qdisc add clsact on {iface} failed: {stderr}");
