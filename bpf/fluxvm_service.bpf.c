@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// FluxVM Service Fabric v3: dual-stack VM-edge + host-uplink TC dataplane.
+// FluxVM Service Fabric v4: dual-stack VM-edge + host-uplink TC dataplane.
 //
 // fvm_svc_vm is attached to ingress of every host-visible VM edge for
 // frontend selection. fvm_svc_host serves physical-uplink ingress. The
@@ -37,6 +37,19 @@
 #define FLUXVM_NAT_PORT_PROBES 16
 #define FLUXVM_AF_INET 2
 #define FLUXVM_AF_INET6 10
+#define FLUXVM_SVC_F_HOST_ROUTING 1u
+#define FLUXVM_FLOW_ALLOW 1u
+#define FLUXVM_FLOW_DROP 0u
+#define FLUXVM_REASON_NONE 0u
+#define FLUXVM_REASON_UPDATE_GUARD 1u
+#define FLUXVM_REASON_NO_MAGLEV 2u
+#define FLUXVM_REASON_NO_BACKEND 3u
+#define FLUXVM_REASON_BACKEND_UNHEALTHY 4u
+#define FLUXVM_REASON_NAT_EXHAUSTED 5u
+#define FLUXVM_REASON_REWRITE_FAILED 6u
+#define FLUXVM_REASON_FIB_FALLBACK 7u
+#define FLUXVM_REASON_BAD_MODE 8u
+#define FLUXVM_REASON_CT_STALE 9u
 
 struct svc4_key {
     __u32 address;
@@ -55,6 +68,8 @@ struct svc6_key {
 struct svc_value {
     __u32 service_id;
     __u32 table_size;
+    __u64 rate_bytes_per_sec;
+    __u32 flow_sample_rate;
     __u8 mode;
     __u8 flags;
     __u16 pad;
@@ -176,6 +191,35 @@ struct service_stat {
     __u64 conntrack_misses;
     __u64 conntrack_expired;
     __u64 passive_failures;
+    __u64 edt_packets;
+    __u64 host_routed_packets;
+    __u64 host_route_fallbacks;
+    __u64 flow_events;
+};
+
+struct svc_flow_key {
+    __u32 service_id;
+    __u32 backend_id;
+    __u8 src[16];
+    __u8 dst[16];
+    __u16 sport;
+    __u16 dport;
+    __u8 family;
+    __u8 protocol;
+    __u8 verdict;
+    __u8 reason;
+};
+
+struct svc_flow_value {
+    __u64 packets;
+    __u64 bytes;
+    __u64 last_seen_ns;
+};
+
+struct edt_state {
+    struct bpf_spin_lock lock;
+    __u32 pad;
+    __u64 next_ns;
 };
 
 struct {
@@ -276,6 +320,20 @@ struct {
     __type(value, struct backend_stat);
 } fluxvm_bstat SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __type(key, struct svc_flow_key);
+    __type(value, struct svc_flow_value);
+} fluxvm_sflows SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u32);
+    __type(value, struct edt_state);
+} fluxvm_edt SEC(".maps");
+
 static __always_inline int update_guard_enabled(void)
 {
     __u32 key = 0;
@@ -363,6 +421,114 @@ static __always_inline void backend_failure(__u32 sid, __u32 bid)
     struct service_stat *svc = stat_for(sid);
     if (svc)
         svc->passive_failures += 1;
+}
+
+static __always_inline void count_host_route(__u32 sid, int routed)
+{
+    struct service_stat *s = stat_for(sid);
+    if (!s) return;
+    if (routed) s->host_routed_packets += 1;
+    else s->host_route_fallbacks += 1;
+}
+
+static __always_inline void apply_edt(
+    struct __sk_buff *skb, __u32 sid, const struct svc_value *svc)
+{
+    if (!svc->rate_bytes_per_sec) return;
+    struct edt_state *state = bpf_map_lookup_elem(&fluxvm_edt, &sid);
+    if (!state) {
+        struct edt_state zero = {};
+        bpf_map_update_elem(&fluxvm_edt, &sid, &zero, BPF_NOEXIST);
+        state = bpf_map_lookup_elem(&fluxvm_edt, &sid);
+        if (!state) return;
+    }
+    __u64 now = bpf_ktime_get_ns();
+    __u64 delta = ((__u64)skb->len * 1000000000ULL) / svc->rate_bytes_per_sec;
+    if (!delta) delta = 1;
+    __u64 depart;
+    bpf_spin_lock(&state->lock);
+    depart = state->next_ns > now ? state->next_ns : now;
+    state->next_ns = depart + delta;
+    bpf_spin_unlock(&state->lock);
+    skb->tstamp = depart;
+    struct service_stat *stat = stat_for(sid);
+    if (stat) stat->edt_packets += 1;
+}
+
+static __always_inline int should_record(__u8 verdict, __u32 sample_rate)
+{
+    if (verdict == FLUXVM_FLOW_DROP) return 1;
+    if (!sample_rate) return 0;
+    return (bpf_get_prandom_u32() % sample_rate) == 0;
+}
+
+static __always_inline void record_flow4_raw(
+    struct __sk_buff *skb, const struct svc_value *svc, __u32 bid,
+    __u32 src, __u32 dst, __u16 sport, __u16 dport, __u8 protocol,
+    __u8 verdict, __u8 reason)
+{
+    if (!should_record(verdict, svc->flow_sample_rate)) return;
+    struct svc_flow_key key = {
+        .service_id = svc->service_id, .backend_id = bid,
+        .sport = sport, .dport = dport, .family = 4, .protocol = protocol,
+        .verdict = verdict, .reason = reason,
+    };
+    __builtin_memcpy(key.src, &src, 4);
+    __builtin_memcpy(key.dst, &dst, 4);
+    struct svc_flow_value *v = bpf_map_lookup_elem(&fluxvm_sflows, &key);
+    if (v) {
+        __sync_fetch_and_add(&v->packets, 1);
+        __sync_fetch_and_add(&v->bytes, skb->len);
+        v->last_seen_ns = bpf_ktime_get_ns();
+    } else {
+        struct svc_flow_value first = {.packets=1, .bytes=skb->len, .last_seen_ns=bpf_ktime_get_ns()};
+        bpf_map_update_elem(&fluxvm_sflows, &key, &first, BPF_NOEXIST);
+    }
+    struct service_stat *stat = stat_for(svc->service_id);
+    if (stat) stat->flow_events += 1;
+}
+
+static __always_inline void record_flow4(
+    struct __sk_buff *skb, const struct svc_value *svc, __u32 bid,
+    struct iphdr *iph, __u16 sport, __u16 dport, __u8 verdict, __u8 reason)
+{
+    record_flow4_raw(skb, svc, bid, iph->saddr, iph->daddr, sport, dport,
+                     iph->protocol, verdict, reason);
+}
+
+static __always_inline void record_flow6_raw(
+    struct __sk_buff *skb, const struct svc_value *svc, __u32 bid,
+    const __u8 *src, const __u8 *dst, __u16 sport, __u16 dport, __u8 protocol,
+    __u8 verdict, __u8 reason)
+{
+    if (!should_record(verdict, svc->flow_sample_rate)) return;
+    struct svc_flow_key key = {
+        .service_id = svc->service_id, .backend_id = bid,
+        .sport = sport, .dport = dport, .family = 6, .protocol = protocol,
+        .verdict = verdict, .reason = reason,
+    };
+    __builtin_memcpy(key.src, src, 16);
+    __builtin_memcpy(key.dst, dst, 16);
+    struct svc_flow_value *v = bpf_map_lookup_elem(&fluxvm_sflows, &key);
+    if (v) {
+        __sync_fetch_and_add(&v->packets, 1);
+        __sync_fetch_and_add(&v->bytes, skb->len);
+        v->last_seen_ns = bpf_ktime_get_ns();
+    } else {
+        struct svc_flow_value first = {.packets=1, .bytes=skb->len, .last_seen_ns=bpf_ktime_get_ns()};
+        bpf_map_update_elem(&fluxvm_sflows, &key, &first, BPF_NOEXIST);
+    }
+    struct service_stat *stat = stat_for(svc->service_id);
+    if (stat) stat->flow_events += 1;
+}
+
+static __always_inline void record_flow6(
+    struct __sk_buff *skb, const struct svc_value *svc, __u32 bid,
+    struct ipv6hdr *ip6, __u16 sport, __u16 dport, __u8 verdict, __u8 reason)
+{
+    record_flow6_raw(skb, svc, bid, ip6->saddr.in6_u.u6_addr8,
+                     ip6->daddr.in6_u.u6_addr8, sport, dport, ip6->nexthdr,
+                     verdict, reason);
 }
 
 static __always_inline __u64 timeout4(struct iphdr *iph, void *data_end)
@@ -902,6 +1068,38 @@ static __always_inline int fib_redirect6(
     return bpf_redirect(fib.ifindex, 0);
 }
 
+static __always_inline int fib_redirect4_soft(
+    struct __sk_buff *skb, __u32 route_dst, __u32 src,
+    __u8 protocol, __u16 sport, __u16 dport)
+{
+    struct bpf_fib_lookup fib = {};
+    fib.family = FLUXVM_AF_INET; fib.ifindex = skb->ifindex;
+    fib.ipv4_src = src; fib.ipv4_dst = route_dst; fib.l4_protocol = protocol;
+    fib.sport = bpf_htons(sport); fib.dport = bpf_htons(dport);
+    int rc = bpf_fib_lookup(skb, &fib, sizeof(fib), 0);
+    if (rc != BPF_FIB_LKUP_RET_SUCCESS) return TC_ACT_UNSPEC;
+    if (bpf_skb_store_bytes(skb, 0, fib.dmac, ETH_ALEN, 0) < 0 ||
+        bpf_skb_store_bytes(skb, ETH_ALEN, fib.smac, ETH_ALEN, 0) < 0)
+        return TC_ACT_SHOT;
+    return bpf_redirect(fib.ifindex, 0);
+}
+
+static __always_inline int fib_redirect6_soft(
+    struct __sk_buff *skb, const __u8 *route_dst, const __u8 *src,
+    __u8 protocol, __u16 sport, __u16 dport)
+{
+    struct bpf_fib_lookup fib = {};
+    fib.family = FLUXVM_AF_INET6; fib.ifindex = skb->ifindex;
+    __builtin_memcpy(fib.ipv6_src, src, 16); __builtin_memcpy(fib.ipv6_dst, route_dst, 16);
+    fib.l4_protocol = protocol; fib.sport = bpf_htons(sport); fib.dport = bpf_htons(dport);
+    int rc = bpf_fib_lookup(skb, &fib, sizeof(fib), 0);
+    if (rc != BPF_FIB_LKUP_RET_SUCCESS) return TC_ACT_UNSPEC;
+    if (bpf_skb_store_bytes(skb, 0, fib.dmac, ETH_ALEN, 0) < 0 ||
+        bpf_skb_store_bytes(skb, ETH_ALEN, fib.smac, ETH_ALEN, 0) < 0)
+        return TC_ACT_SHOT;
+    return bpf_redirect(fib.ifindex, 0);
+}
+
 static __always_inline int reverse4(
     struct __sk_buff *skb, struct iphdr *iph, void *data_end)
 {
@@ -1033,18 +1231,20 @@ static __always_inline int forward4(
     if (!svc)
         return TC_ACT_UNSPEC;
     __u32 sid = svc->service_id;
+    __u32 original_src = iph->saddr, original_dst = iph->daddr;
+    __u8 original_protocol = iph->protocol;
     __u32 bid = 0;
     int pinned = affinity4(sid, iph, data_end, sport, dport, &bid);
     __u32 h = flow_hash4(iph->saddr, iph->daddr, sport, dport, iph->protocol);
     if (!pinned) {
         if (svc->table_size == 0) {
-            count_miss(sid);
+            count_miss(sid); record_flow4(skb, svc, 0xffffffffu, iph, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_NO_MAGLEV);
             return TC_ACT_SHOT;
         }
         struct maglev_key mkey = {.service_id = sid, .slot = h % svc->table_size};
         __u32 *backend_id = bpf_map_lookup_elem(&fluxvm_maglev, &mkey);
         if (!backend_id) {
-            count_miss(sid);
+            count_miss(sid); record_flow4(skb, svc, 0xffffffffu, iph, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_NO_MAGLEV);
             return TC_ACT_SHOT;
         }
         bid = *backend_id;
@@ -1056,6 +1256,7 @@ static __always_inline int forward4(
         (!pinned && !(backend->flags & FLUXVM_SVC_BACKEND_READY))) {
         count_miss(sid);
         backend_failure(sid, bid);
+        record_flow4(skb, svc, bid, iph, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_BACKEND_UNHEALTHY);
         return TC_ACT_SHOT;
     }
 
@@ -1068,17 +1269,18 @@ static __always_inline int forward4(
         int action = fib_redirect4(
             skb, backend->address, src4, proto4, sport, dport);
         if (action == TC_ACT_SHOT) {
-            /* Do not touch iph after fib_redirect; orphaned affinity expires via GC. */
-            count_miss(sid);
-            backend_failure(sid, bid);
+            count_miss(sid); backend_failure(sid, bid);
+            record_flow4_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_DROP, FLUXVM_REASON_NO_BACKEND);
         } else {
             backend_success(sid, bid);
+            apply_edt(skb, sid, svc);
+            record_flow4_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_ALLOW, FLUXVM_REASON_NONE);
             count_forward(sid, skb->len, 1, 0);
         }
         return action;
     }
     if (svc->mode != FLUXVM_SVC_MODE_NAT) {
-        count_miss(sid);
+        count_miss(sid); record_flow4(skb, svc, bid, iph, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_BAD_MODE);
         return TC_ACT_SHOT;
     }
 
@@ -1095,7 +1297,7 @@ static __always_inline int forward4(
         backend->address, new_src, backend->port, proto4,
         old_src, sport, old_dst, dport, sid, bid, h);
     if (!reply_port) {
-        count_miss(sid);
+        count_miss(sid); record_flow4(skb, svc, bid, iph, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_NAT_EXHAUSTED);
         return TC_ACT_SHOT;
     }
     if (!pinned)
@@ -1106,11 +1308,19 @@ static __always_inline int forward4(
             sport, reply_port, dport, backend->port) < 0) {
         if (!pinned)
             delete_affinity4(old_src, old_dst, sport, dport, proto4);
-        count_miss(sid);
+        count_miss(sid); record_flow4_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_DROP, FLUXVM_REASON_REWRITE_FAILED);
         return TC_ACT_SHOT;
     }
     backend_success(sid, bid);
+    apply_edt(skb, sid, svc);
+    record_flow4_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_ALLOW, FLUXVM_REASON_NONE);
     count_forward(sid, skb->len, 0, flags != 0);
+    if (svc->flags & FLUXVM_SVC_F_HOST_ROUTING) {
+        int action = fib_redirect4_soft(skb, backend->address, new_src, original_protocol, reply_port, backend->port);
+        if (action == TC_ACT_UNSPEC) { count_host_route(sid, 0); return TC_ACT_UNSPEC; }
+        if (action == TC_ACT_SHOT) { count_miss(sid); return TC_ACT_SHOT; }
+        count_host_route(sid, 1); return action;
+    }
     return TC_ACT_UNSPEC;
 }
 
@@ -1130,6 +1340,10 @@ static __always_inline int forward6(
     if (!svc)
         return TC_ACT_UNSPEC;
     __u32 sid = svc->service_id;
+    __u8 original_src[16], original_dst[16];
+    __builtin_memcpy(original_src, ip6->saddr.in6_u.u6_addr8, 16);
+    __builtin_memcpy(original_dst, ip6->daddr.in6_u.u6_addr8, 16);
+    __u8 original_protocol = ip6->nexthdr;
     __u32 bid = 0;
     int pinned = affinity6(sid, ip6, data_end, sport, dport, &bid);
     __u32 h = hash_words6(
@@ -1137,13 +1351,13 @@ static __always_inline int forward6(
         sport, dport, ip6->nexthdr);
     if (!pinned) {
         if (svc->table_size == 0) {
-            count_miss(sid);
+            count_miss(sid); record_flow6(skb, svc, 0xffffffffu, ip6, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_NO_MAGLEV);
             return TC_ACT_SHOT;
         }
         struct maglev_key mkey = {.service_id = sid, .slot = h % svc->table_size};
         __u32 *backend_id = bpf_map_lookup_elem(&fluxvm_maglev, &mkey);
         if (!backend_id) {
-            count_miss(sid);
+            count_miss(sid); record_flow6(skb, svc, 0xffffffffu, ip6, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_NO_MAGLEV);
             return TC_ACT_SHOT;
         }
         bid = *backend_id;
@@ -1155,6 +1369,7 @@ static __always_inline int forward6(
         (!pinned && !(backend->flags & FLUXVM_SVC_BACKEND_READY))) {
         count_miss(sid);
         backend_failure(sid, bid);
+        record_flow6(skb, svc, bid, ip6, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_BACKEND_UNHEALTHY);
         return TC_ACT_SHOT;
     }
 
@@ -1167,23 +1382,25 @@ static __always_inline int forward6(
         int action = fib_redirect6(
             skb, backend->address, src6, proto6, sport, dport);
         if (action == TC_ACT_SHOT) {
-            count_miss(sid);
-            backend_failure(sid, bid);
+            count_miss(sid); backend_failure(sid, bid);
+            record_flow6_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_DROP, FLUXVM_REASON_NO_BACKEND);
         } else {
             backend_success(sid, bid);
+            apply_edt(skb, sid, svc);
+            record_flow6_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_ALLOW, FLUXVM_REASON_NONE);
             count_forward(sid, skb->len, 1, 0);
         }
         return action;
     }
     if (svc->mode != FLUXVM_SVC_MODE_NAT) {
-        count_miss(sid);
+        count_miss(sid); record_flow6(skb, svc, bid, ip6, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_BAD_MODE);
         return TC_ACT_SHOT;
     }
 
     __u8 old_src[16], old_dst[16], new_src[16];
     __u8 proto6 = ip6->nexthdr;
-    __builtin_memcpy(old_src, ip6->saddr.in6_u.u6_addr8, 16);
-    __builtin_memcpy(old_dst, ip6->daddr.in6_u.u6_addr8, 16);
+    __builtin_memcpy(old_src, original_src, 16);
+    __builtin_memcpy(old_dst, original_dst, 16);
     __builtin_memcpy(new_src, old_src, 16);
     __u16 flags = 0;
     struct snat6_value *snat = bpf_map_lookup_elem(&fluxvm_snat6, &sid);
@@ -1195,7 +1412,7 @@ static __always_inline int forward6(
         backend->address, new_src, backend->port, proto6,
         old_src, sport, old_dst, dport, sid, bid, h);
     if (!reply_port) {
-        count_miss(sid);
+        count_miss(sid); record_flow6(skb, svc, bid, ip6, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_NAT_EXHAUSTED);
         return TC_ACT_SHOT;
     }
     if (!pinned)
@@ -1206,11 +1423,19 @@ static __always_inline int forward6(
             sport, reply_port, dport, backend->port) < 0) {
         if (!pinned)
             delete_affinity6(old_src, old_dst, sport, dport, proto6);
-        count_miss(sid);
+        count_miss(sid); record_flow6_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_DROP, FLUXVM_REASON_REWRITE_FAILED);
         return TC_ACT_SHOT;
     }
     backend_success(sid, bid);
+    apply_edt(skb, sid, svc);
+    record_flow6_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_ALLOW, FLUXVM_REASON_NONE);
     count_forward(sid, skb->len, 0, flags != 0);
+    if (svc->flags & FLUXVM_SVC_F_HOST_ROUTING) {
+        int action = fib_redirect6_soft(skb, backend->address, new_src, original_protocol, reply_port, backend->port);
+        if (action == TC_ACT_UNSPEC) { count_host_route(sid, 0); return TC_ACT_UNSPEC; }
+        if (action == TC_ACT_SHOT) { count_miss(sid); return TC_ACT_SHOT; }
+        count_host_route(sid, 1); return action;
+    }
     return TC_ACT_UNSPEC;
 }
 

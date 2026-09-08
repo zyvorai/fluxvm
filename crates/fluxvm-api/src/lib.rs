@@ -284,6 +284,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/services/health/reconcile", post(reconcile_network_service_health))
         .route("/v1/network/services/conntrack/gc", post(gc_network_service_conntrack))
         .route("/v1/network/services/advertisements", get(network_service_advertisements))
+        .route("/v1/network/services/flows", get(network_service_flows))
+        .route("/v1/network/services/telemetry/export", post(export_network_service_telemetry))
         .route("/v1/network/services/{name}/conntrack/export", get(export_network_service_conntrack))
         .route("/v1/network/services/{name}/conntrack/import", post(import_network_service_conntrack))
         .route(
@@ -1183,6 +1185,36 @@ async fn network_service_advertisements(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(fluxvm_network::service::advertisement_snapshot(&m.cfg)?)))
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceFlowsQuery {
+    #[serde(default = "default_service_flow_limit")]
+    limit: usize,
+}
+
+fn default_service_flow_limit() -> usize {
+    256
+}
+
+async fn network_service_flows(
+    State(m): State<Arc<VmManager>>,
+    Query(q): Query<ServiceFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({
+        "items": fluxvm_network::service::service_flows(&m.cfg, q.limit)?
+    })))
+}
+
+async fn export_network_service_telemetry(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Query(q): Query<ServiceFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(
+        fluxvm_network::service::export_otlp(&m.cfg, q.limit).await?
+    )))
 }
 
 async fn export_network_service_conntrack(

@@ -1,0 +1,37 @@
+{
+  "name": "sf-v3-east-west",
+  "vip": "10.250.0.50",
+  "port": 8080,
+  "protocol": "tcp",
+  "algorithm": "maglev",
+  "mode": "nat",
+  "exposure": "east-west",
+  "backends": [
+    {
+      "address": "10.250.1.10",
+      "port": 8080,
+      "weight": 1,
+      "enabled": true,
+      "state": "ready"
+    },
+    {
+      "address": "10.250.1.11",
+      "port": 8080,
+      "weight": 1,
+      "enabled": true,
+      "state": "draining",
+      "drain_until_unix_ms": 1893456000000
+    }
+  ],
+  "maglev_table_size": 251,
+  "health_check": {
+    "kind": "tcp",
+    "timeout_ms": 500,
+    "unhealthy_threshold": 3,
+    "healthy_threshold": 2
+  },
+  "advertise": false,
+  "max_egress_mbps": null,
+  "flow_sample_rate": 0,
+  "host_routing": false
+}

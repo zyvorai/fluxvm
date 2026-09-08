@@ -1,4 +1,4 @@
-# FluxVM Service Fabric v3
+# FluxVM Service Fabric v4
 
 FluxVM is the **node-local** service dataplane. Zyvor Fabric is the **distributed**
 control plane (intent, edge leases, fan-out, BGP/ECMP policy). This document covers
@@ -6,11 +6,12 @@ what FluxVM owns and exposes.
 
 Related: [Fabric contract](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md) ·
 [ownership boundary](https://github.com/zyvorai/fabric/blob/main/docs/FLUXVM-FABRIC-BOUNDARY.md) ·
-[phase 4 candidates](service-fabric-phase4.md).
+[phase 4 (shipped)](service-fabric-phase4.md) ·
+[phase 5 candidates](service-fabric-phase5.md).
 
 ## Dataplane
 
-Service Fabric **schema v3** supports:
+Service Fabric **schema v4** builds on v3 lifecycle/HA and adds:
 
 - dual-stack TCP/UDP VIPs;
 - weighted Maglev;
@@ -18,7 +19,10 @@ Service Fabric **schema v3** supports:
 - collision-safe SNAT with symmetric reverse NAT;
 - VM-edge TC and north-south TC;
 - optional XDP acceleration sharing TC maps;
-- **forward conntrack** affinity across Maglev/backend membership changes.
+- **forward conntrack** affinity across Maglev/backend membership changes;
+- **per-service EDT** pacing (`max_egress_mbps`) when `edt_enabled` is set;
+- **FluxScope** service flows (`fluxvm_sflows`) + optional OTLP export;
+- opt-in **host_routing** FIB fast path after NAT (miss → host stack).
 
 New flows select a **Ready** backend through Maglev and pin that backend. Existing
 flows keep their backend when weights or Maglev membership change. A **Draining**
@@ -67,6 +71,32 @@ intent. UDP/application health belongs in an application-aware control-plane pro
 Reconcile: `POST /v1/network/services/health/reconcile`. Report:
 `GET /v1/network/services/health`.
 
+## EDT pacing (v4)
+
+Set `max_egress_mbps` on a service only when `[sandbox.dataplane.service]` has
+`edt_enabled = true`. FluxVM compiles a byte rate into the TC service map and
+schedules `skb->tstamp` via `fluxvm_edt`. Optional `edt_manage_fq` applies only to
+explicitly listed `edt_interfaces`. XDP is never paced (EDT needs TC/qdisc).
+
+## FluxScope flows (v4)
+
+TC and XDP share `fluxvm_sflows`. Records carry service/backend id, addresses,
+ports, allow/drop, reason codes, packets/bytes. Export:
+
+```text
+GET  /v1/network/services/flows?limit=256
+POST /v1/network/services/telemetry/export?limit=1024
+```
+
+OTLP/HTTP JSON is off until `otlp_endpoint` is configured. Sampling uses
+`flow_sample_rate` (`0` disables).
+
+## Host routing (v4)
+
+For NAT services with `host_routing=true`, FluxVM may `bpf_fib_lookup()` + redirect
+after translation. A miss returns to the host stack (not drop). Counters:
+`host_routed_packets`, `host_route_fallbacks`.
+
 ## VIP advertisement boundary
 
 FluxVM does **not** embed a BGP control plane. It publishes an atomic snapshot at:
@@ -75,9 +105,8 @@ FluxVM does **not** embed a BGP control plane. It publishes an atomic snapshot a
 /run/fluxvm/service-advertisements.json
 ```
 
-(also `GET /v1/network/services/advertisements`). The snapshot contains VIP/prefix,
-generation and advertise/withdraw decision. An FRR/BIRD/Fabric routing adapter
-consumes this contract. A VIP is withdrawn if Fabric's node intent has
+(also `GET /v1/network/services/advertisements`). Fabric FRR/BIRD/File adapters
+consume this contract. A VIP is withdrawn if Fabric's node intent has
 `advertise=false` or if the node has no Ready backend.
 
 ## HA state transfer
@@ -101,6 +130,8 @@ GET    /v1/network/services/health
 POST   /v1/network/services/health/reconcile
 POST   /v1/network/services/conntrack/gc
 GET    /v1/network/services/advertisements
+GET    /v1/network/services/flows
+POST   /v1/network/services/telemetry/export
 GET    /v1/network/services/{name}
 DELETE /v1/network/services/{name}
 GET    /v1/network/services/{name}/conntrack/export
@@ -112,7 +143,7 @@ East-west Maglev example:
 
 ```bash
 curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d @docs/examples/service-fabric-v3-east-west.json \
+  -d @docs/examples/service-fabric-v4-east-west.json \
   http://127.0.0.1:7788/v1/network/services
 ```
 
@@ -120,8 +151,8 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
 
 | Object | Role |
 |--------|------|
-| `fluxvm_service.bpf.o` | TC Maglev / NAT / DSR / affinity |
-| `fluxvm_service_xdp.bpf.o` | Optional north-south XDP (reuses TC pinmaps) |
+| `fluxvm_service.bpf.o` | TC Maglev / NAT / DSR / affinity / EDT / flows |
+| `fluxvm_service_xdp.bpf.o` | Optional north-south XDP (reuses TC pinmaps + `fluxvm_sflows`) |
 
 Build: `./scripts/build-ebpf.sh`. Install under `/usr/lib/fluxvm/bpf/`. Schema bumps
 rebuild owned pin roots instead of reusing incompatible maps. Service-catalog
@@ -131,7 +162,9 @@ updates preserve lifecycle state maps (`fct*`, `nat*`).
 
 - frontend hit with no eligible backend: drop;
 - map update: fail closed with the service guard;
+- `max_egress_mbps` without `edt_enabled`: reject apply;
 - XDP FIB miss: untouched packet falls through to TC;
+- host-routing FIB miss: fallback to host stack;
 - foreign/Cilium XDP: FluxVM refuses replacement;
 - never write Cilium/CNI private maps;
 - learn affinity **before** `fib_redirect` / `bpf_skb_store_bytes` (packet pointers invalidate after helpers).
@@ -142,5 +175,6 @@ updates preserve lifecycle state maps (`fct*`, `nat*`).
 |-------|--------|-----|
 | v1 east-west Maglev | shipped | — |
 | v2 dual-stack DSR/SNAT/XDP | shipped | [phase-2 archive](service-fabric-phase-2.md) |
-| v3 affinity/health/drain/HA ads | **current** | this page |
-| Phase 4 (perf / BGP adapter / OTLP) | candidates | [service-fabric-phase4.md](service-fabric-phase4.md) |
+| v3 affinity/health/drain/HA ads | shipped | — |
+| v4 EDT / FluxScope / host-routing | **current** | this page · [phase4](service-fabric-phase4.md) |
+| Phase 5 | candidates | [service-fabric-phase5.md](service-fabric-phase5.md) |

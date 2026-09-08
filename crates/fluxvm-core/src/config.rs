@@ -203,6 +203,16 @@ pub struct ServiceFabricConfig {
     pub xdp_acceleration: bool,
     /// XDP service object. It reuses maps from the host TC service instance.
     pub xdp_object: PathBuf,
+    /// Enable per-service EDT pacing when services set `max_egress_mbps`.
+    pub edt_enabled: bool,
+    /// Interfaces where FluxVM may install/manage `fq` for EDT (never silent).
+    pub edt_interfaces: Vec<String>,
+    /// When true, run `tc qdisc replace … fq` on `edt_interfaces`.
+    pub edt_manage_fq: bool,
+    /// OTLP/HTTP JSON endpoint for FluxScope service flow export (optional).
+    pub otlp_endpoint: Option<String>,
+    /// Timeout for OTLP export requests in milliseconds.
+    pub otlp_timeout_ms: u64,
 }
 
 impl Default for ServiceFabricConfig {
@@ -211,6 +221,11 @@ impl Default for ServiceFabricConfig {
             north_south_interfaces: Vec::new(),
             xdp_acceleration: false,
             xdp_object: "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o".into(),
+            edt_enabled: false,
+            edt_interfaces: Vec::new(),
+            edt_manage_fq: false,
+            otlp_endpoint: None,
+            otlp_timeout_ms: 5_000,
         }
     }
 }
