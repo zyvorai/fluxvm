@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Service Fabric gen7 ops tranche** — opt-in cgroup/connect4 (`fluxvm_service_connect.bpf.o`),
+  map pressure controller (`POST /v1/network/services/pressure/reconcile`), XDP
+  native→generic attach + ethtool offload/channels in `services/status`, perf lab
+  `scripts/test-service-fabric-perf.sh`; program generation **7** (schema 4 unchanged).
 - **Service Fabric v6** — identity/L7 service policy maps (`fluxvm_spol`/`sid4`/`sid6`),
   Envoy transparent-proxy redirect contract, HA mutation queue drain (`fluxvm_haq`);
   ABI stays schema **4**, program generation **6**. See `docs/service-fabric-v6-phase6.md`.

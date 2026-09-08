@@ -1,9 +1,9 @@
-# FluxVM Service Fabric v6 (BPF schema 4)
+# FluxVM Service Fabric v6+ (BPF schema 4)
 
 FluxVM is the **node-local** service dataplane. Zyvor Fabric is the **distributed**
-control plane (intent, edge leases, fan-out, BGP/ECMP policy). **v6** is the current
-Maglev VIP plane; the TC/XDP **BPF value ABI remains schema 4** with **program
-generation 6** (additive maps / reload guard — not a `svc_value` layout bump).
+control plane (intent, edge leases, fan-out, BGP/ECMP policy). **v6** is the Maglev
+VIP + identity/L7 plane; **program generation 7** adds opt-in cgroup/connect,
+map pressure control, and offload/XDP mode status (still schema **4** value ABI).
 
 Related: [Fabric contract](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md) ·
 [ownership boundary](https://github.com/zyvorai/fabric/blob/main/docs/FLUXVM-FABRIC-BOUNDARY.md) ·
@@ -185,6 +185,7 @@ GET    /v1/network/services/stats
 GET    /v1/network/services/health
 POST   /v1/network/services/health/reconcile
 POST   /v1/network/services/conntrack/gc
+POST   /v1/network/services/pressure/reconcile   # map pressure controller
 GET    /v1/network/services/advertisements
 GET    /v1/network/services/flows
 POST   /v1/network/services/telemetry/export
@@ -226,13 +227,18 @@ East-west VIP smoke (operator):
 | Object | Role |
 |--------|------|
 | `fluxvm_service.bpf.o` | TC Maglev / NAT / DSR / affinity / EDT / flows / v6 policy + HA queue |
-| `fluxvm_service_xdp.bpf.o` | Optional north-south XDP (reuses TC pinmaps + `fluxvm_sflows`) |
+| `fluxvm_service_xdp.bpf.o` | Optional north-south XDP (reuses TC pinmaps; native then generic attach) |
+| `fluxvm_service_connect.bpf.o` | Opt-in cgroup/connect4 VIP rewrite (shares host maps; fail-open) |
 | `fluxvm_service_v6.bpf.h` | Shared v6 map/event layouts (compile-time size assertions) |
 
 Build: `./scripts/build-ebpf.sh`. Install under `/usr/lib/fluxvm/bpf/`. Schema bumps
-rebuild owned pin roots instead of reusing incompatible maps. **Program generation 6**
+rebuild owned pin roots instead of reusing incompatible maps. **Program generation 7**
 forces a reload of older pins before policy reconcile can succeed. Service-catalog
 updates preserve lifecycle state maps (`fct*`, `nat*`).
+
+Config (`[sandbox.dataplane.service]`): `cgroup_connect`, `map_tier` (`S`/`M`/`L`
+label), `pressure_soft_percent` / `pressure_hard_percent`. Perf lab:
+`scripts/test-service-fabric-perf.sh`.
 
 ## Safety
 
@@ -246,8 +252,10 @@ updates preserve lifecycle state maps (`fct*`, `nat*`).
 - never write Cilium/CNI private maps;
 - learn affinity **before** `fib_redirect` / `bpf_skb_store_bytes` (packet pointers invalidate after helpers);
 - v6 policy inputs are bounded; L7 enforce is TCP+NAT only and needs a nonzero proxy ifindex;
-- generation-6 reload stays fail-closed until additive policy maps restore;
-- HA queue overflow is counted (`fluxvm_hadrop`); snapshot-diff remains the backstop.
+- generation reload stays fail-closed until additive policy maps restore;
+- HA queue overflow is counted (`fluxvm_hadrop`); snapshot-diff remains the backstop;
+- cgroup/connect4 is fail-open (miss → unchanged connect; TC/XDP remain canonical);
+- map pressure hard threshold clears generation markers and reloads pins.
 
 ## Roadmap history
 
@@ -258,5 +266,6 @@ updates preserve lifecycle state maps (`fct*`, `nat*`).
 | v3 affinity/health/drain/HA ads | shipped | — |
 | v4 EDT / FluxScope / host-routing | shipped | [phase4](service-fabric-phase4.md) |
 | v5 HA deltas / durable leases / incremental reconcile | shipped | [phase5](service-fabric-phase5.md) |
-| v6 identity policy / Envoy L7 / HA mutation queue | **current** | [phase6](service-fabric-phase6.md) · [v6 notes](service-fabric-v6-phase6.md) |
+| v6 identity policy / Envoy L7 / HA mutation queue | shipped | [phase6](service-fabric-phase6.md) · [v6 notes](service-fabric-v6-phase6.md) |
+| gen7 connect / pressure / offload / site fencing | **current** | [phase6](service-fabric-phase6.md) |
 | Later | candidates | remaining bullets in [phase6](service-fabric-phase6.md) |

@@ -203,6 +203,18 @@ pub struct ServiceFabricConfig {
     pub xdp_acceleration: bool,
     /// XDP service object. It reuses maps from the host TC service instance.
     pub xdp_object: PathBuf,
+    /// Opt-in cgroup/connect4 acceleration for node-local host sockets.
+    /// Fail-open: TC/XDP remains the canonical path if attach fails.
+    pub cgroup_connect: bool,
+    /// BPF object for cgroup/connect4 (shares host TC pinmaps when attached).
+    pub connect_object: PathBuf,
+    /// Compiled map capacity tier label (`S`/`M`/`L`). Informational + pressure
+    /// controller; resizing requires rebuilding the ELF (`max_entries` is ABI).
+    pub map_tier: String,
+    /// Soft pressure percent (conntrack) that triggers aggressive GC.
+    pub pressure_soft_percent: u8,
+    /// Hard pressure percent that closes the service guard and forces reload.
+    pub pressure_hard_percent: u8,
     /// Enable per-service EDT pacing when services set `max_egress_mbps`.
     pub edt_enabled: bool,
     /// Interfaces where FluxVM may install/manage `fq` for EDT (never silent).
@@ -221,6 +233,11 @@ impl Default for ServiceFabricConfig {
             north_south_interfaces: Vec::new(),
             xdp_acceleration: false,
             xdp_object: "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o".into(),
+            cgroup_connect: false,
+            connect_object: "/usr/lib/fluxvm/bpf/fluxvm_service_connect.bpf.o".into(),
+            map_tier: "M".into(),
+            pressure_soft_percent: 70,
+            pressure_hard_percent: 90,
             edt_enabled: false,
             edt_interfaces: Vec::new(),
             edt_manage_fq: false,

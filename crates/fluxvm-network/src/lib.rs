@@ -17,6 +17,7 @@ pub mod packetflow;
 pub mod service;
 pub mod service_ha;
 pub mod service_policy;
+pub mod service_pressure;
 pub mod xdp;
 
 use anyhow::{Context, Result, bail};

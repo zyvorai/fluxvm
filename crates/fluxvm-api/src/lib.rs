@@ -283,6 +283,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/services/health", get(network_service_health))
         .route("/v1/network/services/health/reconcile", post(reconcile_network_service_health))
         .route("/v1/network/services/conntrack/gc", post(gc_network_service_conntrack))
+        .route("/v1/network/services/pressure/reconcile", post(reconcile_network_service_pressure))
         .route("/v1/network/services/advertisements", get(network_service_advertisements))
         .route("/v1/network/services/flows", get(network_service_flows))
         .route("/v1/network/services/telemetry/export", post(export_network_service_telemetry))
@@ -1186,6 +1187,16 @@ async fn gc_network_service_conntrack(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(fluxvm_network::service::gc_conntrack(&m.cfg)?)))
+}
+
+async fn reconcile_network_service_pressure(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service_pressure::reconcile(
+        &m.cfg
+    )?)))
 }
 
 async fn network_service_advertisements(

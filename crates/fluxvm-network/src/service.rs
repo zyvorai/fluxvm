@@ -1,17 +1,12 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! FluxVM Service Fabric v5.
+//! FluxVM Service Fabric (BPF schema 4 / program generation 7).
 //!
 //! Fabric owns distributed service intent; FluxVM owns the node-local
-//! dataplane. v5 is cumulative with v1-v4 and adds state-plane scale/HA:
-//! - bounded sequence/ack conntrack delta journals with replay/gap protection,
-//! - incremental service-intent map reconciliation under the existing fail-closed guard,
-//! - idempotent delta import cursors for warm standbys,
-//! - v4 EDT, host-routing and FluxScope behavior unchanged.
-//!
-//! The service BPF program remains separate from `fluxvm_tc.bpf.c`, keeping
-//! the security-policy schema independent from the load-balancer schema.
+//! dataplane. Cumulative features: Maglev VIP, NAT/DSR, HA deltas, identity/L7
+//! policy, HA mutation queue, opt-in cgroup/connect4, map pressure controller,
+//! and XDP native→generic attach with offload status.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::{Config, DataplaneMode};
@@ -30,7 +25,7 @@ use uuid::Uuid;
 
 pub const SERVICE_SCHEMA_VERSION: u32 = 4;
 /// BPF value ABI stays schema 4; program generation forces v5 pins to reload.
-pub const SERVICE_PROGRAM_GENERATION: u32 = 6;
+pub const SERVICE_PROGRAM_GENERATION: u32 = 7;
 const SERVICE_TC_PRIORITY: &str = "49140";
 const SERVICE_TC_HANDLE: &str = "40";
 const DEFAULT_MAGLEV_TABLE_SIZE: u32 = 4093;
@@ -296,14 +291,40 @@ pub struct HostInterfaceStatus {
     pub tc_program_pinned: bool,
     pub xdp_requested: bool,
     pub xdp_program_pinned: bool,
+    /// `driver`, `generic`, `off`, or `unknown` from `ip -d link` / bpftool.
+    #[serde(default)]
+    pub xdp_mode: String,
+    /// Combined ethtool features snippet (GRO/GSO/rx/tx-checksum/channels).
+    #[serde(default)]
+    pub offload: InterfaceOffloadStatus,
     pub pin_dir: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InterfaceOffloadStatus {
+    pub gro: Option<bool>,
+    pub gso: Option<bool>,
+    pub rx_checksumming: Option<bool>,
+    pub tx_checksumming: Option<bool>,
+    pub combined_channels: Option<u32>,
+    pub rx_channels: Option<u32>,
+    pub tx_channels: Option<u32>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostServiceStatus {
     pub schema_version: u32,
+    #[serde(default)]
+    pub program_generation: u32,
     pub north_south_interfaces: Vec<String>,
     pub xdp_acceleration: bool,
+    #[serde(default)]
+    pub cgroup_connect: bool,
+    #[serde(default)]
+    pub cgroup_connect_attached: bool,
+    #[serde(default)]
+    pub map_tier: String,
     pub interfaces: Vec<HostInterfaceStatus>,
 }
 
@@ -1925,7 +1946,189 @@ fn sync_host(cfg: &Config) -> Result<()> {
             detach_owned_xdp(cfg, iface, &root)?;
         }
     }
+    // Attach connect4 once, sharing maps from the first north-south (or skip).
+    if svc_cfg.cgroup_connect {
+        if let Some(iface) = svc_cfg.north_south_interfaces.first() {
+            let root = host_pin_dir(cfg, iface);
+            let map_dir = root.join("maps");
+            if let Err(err) = ensure_cgroup_connect(cfg, &root, &map_dir) {
+                tracing::warn!(%err, "cgroup/connect4 attach failed; TC/XDP remain canonical");
+            }
+        } else {
+            tracing::warn!(
+                "cgroup_connect=true but no north_south_interfaces; skipping connect attach"
+            );
+        }
+    } else {
+        detach_cgroup_connect(cfg);
+    }
     Ok(())
+}
+
+fn connect_pin_dir(cfg: &Config) -> PathBuf {
+    cfg.sandbox
+        .dataplane
+        .pin_root
+        .join("service-connect")
+}
+
+fn ensure_cgroup_connect(cfg: &Config, _root: &Path, map_dir: &Path) -> Result<()> {
+    require_bpftool()?;
+    let object = &cfg.sandbox.dataplane.service.connect_object;
+    if !object.exists() {
+        bail!(
+            "FluxVM service connect object does not exist at {}",
+            object.display()
+        );
+    }
+    let pin_root = connect_pin_dir(cfg);
+    let prog_dir = pin_root.join("progs");
+    fs::create_dir_all(&prog_dir)?;
+    let prog = prog_dir.join("fvm_svc_connect4");
+    if !prog.exists() {
+        let mut args = vec![
+            "prog".into(),
+            "load".into(),
+            object.display().to_string(),
+            prog.display().to_string(),
+            "type".into(),
+            "cgroup/connect4".into(),
+        ];
+        for name in ["fluxvm_svc4", "fluxvm_backend4", "fluxvm_maglev", "fluxvm_sguard"] {
+            let pinned = map_dir.join(name);
+            if !pinned.exists() {
+                bail!("missing shared map {} for connect attach", pinned.display());
+            }
+            args.extend([
+                "map".into(),
+                "name".into(),
+                name.into(),
+                "pinned".into(),
+                pinned.display().to_string(),
+            ]);
+        }
+        run("bpftool", &args).context("loading FluxVM cgroup/connect4 program")?;
+    }
+    // Attach to root cgroup v2 when available.
+    let cgroup = PathBuf::from("/sys/fs/cgroup");
+    if cgroup.join("cgroup.controllers").exists() {
+        run(
+            "bpftool",
+            &[
+                "cgroup".into(),
+                "attach".into(),
+                cgroup.display().to_string(),
+                "connect4".into(),
+                "pinned".into(),
+                prog.display().to_string(),
+            ],
+        )
+        .context("attaching FluxVM cgroup/connect4")?;
+    } else {
+        bail!("cgroup v2 not mounted at /sys/fs/cgroup");
+    }
+    Ok(())
+}
+
+fn detach_cgroup_connect(cfg: &Config) {
+    let pin_root = connect_pin_dir(cfg);
+    let prog = pin_root.join("progs/fvm_svc_connect4");
+    if prog.exists() {
+        let _ = run(
+            "bpftool",
+            &[
+                "cgroup".into(),
+                "detach".into(),
+                "/sys/fs/cgroup".into(),
+                "connect4".into(),
+                "pinned".into(),
+                prog.display().to_string(),
+            ],
+        );
+    }
+    let _ = fs::remove_dir_all(pin_root);
+}
+
+fn probe_xdp_mode(iface: &str) -> String {
+    // Prefer ip -details link show; fall back to unknown.
+    let out = std::process::Command::new("ip")
+        .args(["-details", "link", "show", "dev", iface])
+        .output()
+        .ok();
+    let Some(out) = out else {
+        return "unknown".into();
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    if text.contains("xdpgeneric") || text.contains("xdpgeneric ") {
+        "generic".into()
+    } else if text.contains("xdpoffload") {
+        "offload".into()
+    } else if text.contains(" mode xdp ") || text.contains("xdp ") {
+        "driver".into()
+    } else {
+        "off".into()
+    }
+}
+
+fn probe_offload(iface: &str) -> InterfaceOffloadStatus {
+    let mut status = InterfaceOffloadStatus::default();
+    let features = std::process::Command::new("ethtool")
+        .args(["-k", iface])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok());
+    if let Some(text) = features.as_deref() {
+        status.gro = Some(text.contains("generic-receive-offload: on"));
+        status.gso = Some(text.contains("generic-segmentation-offload: on"));
+        status.rx_checksumming = Some(text.contains("rx-checksumming: on"));
+        status.tx_checksumming = Some(text.contains("tx-checksumming: on"));
+    } else {
+        status.notes.push("ethtool -k unavailable".into());
+    }
+    let channels = std::process::Command::new("ethtool")
+        .args(["-l", iface])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok());
+    if let Some(text) = channels.as_deref() {
+        // Parse "Current hardware settings:" block Prefer Combined/RX/TX lines.
+        let mut in_current = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with("Current hardware settings:") {
+                in_current = true;
+                continue;
+            }
+            if line.starts_with("Pre-set") {
+                in_current = false;
+            }
+            if !in_current {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("Combined:") {
+                status.combined_channels = rest.trim().parse().ok();
+            } else if let Some(rest) = line.strip_prefix("RX:") {
+                status.rx_channels = rest.trim().parse().ok();
+            } else if let Some(rest) = line.strip_prefix("TX:") {
+                status.tx_channels = rest.trim().parse().ok();
+            }
+        }
+    } else {
+        status.notes.push("ethtool -l unavailable".into());
+    }
+    if let Some(hint) = status.xdp_safe_hint() {
+        status.notes.push(hint.to_string());
+    }
+    status
+}
+
+impl InterfaceOffloadStatus {
+    fn xdp_safe_hint(&self) -> Option<&'static str> {
+        match (self.gro, self.rx_checksumming) {
+            (Some(true), Some(false)) => Some("GRO on with rx-checksumming off can surprise XDP L4"),
+            _ => None,
+        }
+    }
 }
 
 fn ensure_host_xdp(cfg: &Config, iface: &str, root: &Path, map_dir: &Path) -> Result<()> {
@@ -1986,18 +2189,30 @@ fn ensure_host_xdp(cfg: &Config, iface: &str, root: &Path, map_dir: &Path) -> Re
         Some(current) => bail!(
             "interface {iface} already has XDP program id {current}; refusing to replace it with FluxVM id {owned}"
         ),
-        None => run(
-            "bpftool",
-            &[
-                "net".into(),
-                "attach".into(),
-                "xdp".into(),
-                "pinned".into(),
-                xdp_pin.display().to_string(),
-                "dev".into(),
-                iface.into(),
-            ],
-        ),
+        None => {
+            // Prefer native/driver XDP; fall back to generic (skb).
+            let attach = |mode: &str| {
+                run(
+                    "bpftool",
+                    &[
+                        "net".into(),
+                        "attach".into(),
+                        mode.into(),
+                        "pinned".into(),
+                        xdp_pin.display().to_string(),
+                        "dev".into(),
+                        iface.into(),
+                    ],
+                )
+            };
+            match attach("xdp") {
+                Ok(()) => Ok(()),
+                Err(driver_err) => {
+                    tracing::warn!(%driver_err, iface, "native XDP attach failed; trying xdpgeneric");
+                    attach("xdpgeneric").context("attaching FluxVM XDP (generic fallback)")
+                }
+            }
+        }
     }
 }
 
@@ -2032,19 +2247,33 @@ pub fn host_status(cfg: &Config) -> Result<HostServiceStatus> {
         .iter()
         .map(|iface| {
             let root = host_pin_dir(cfg, iface);
+            let xdp_pinned = root.join("xdp/fvm_svc_xdp").exists();
             HostInterfaceStatus {
                 interface: iface.clone(),
                 tc_program_pinned: root.join("progs/fvm_svc_host").exists(),
                 xdp_requested: svc.xdp_acceleration,
-                xdp_program_pinned: root.join("xdp/fvm_svc_xdp").exists(),
+                xdp_program_pinned: xdp_pinned,
+                xdp_mode: if xdp_pinned {
+                    probe_xdp_mode(iface)
+                } else {
+                    "off".into()
+                },
+                offload: probe_offload(iface),
                 pin_dir: root.display().to_string(),
             }
         })
         .collect();
+    let connect_attached = connect_pin_dir(cfg)
+        .join("progs/fvm_svc_connect4")
+        .exists();
     Ok(HostServiceStatus {
         schema_version: SERVICE_SCHEMA_VERSION,
+        program_generation: SERVICE_PROGRAM_GENERATION,
         north_south_interfaces: svc.north_south_interfaces.clone(),
         xdp_acceleration: svc.xdp_acceleration,
+        cgroup_connect: svc.cgroup_connect,
+        cgroup_connect_attached: connect_attached,
+        map_tier: svc.map_tier.clone(),
         interfaces,
     })
 }

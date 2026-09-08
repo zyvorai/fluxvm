@@ -8,8 +8,9 @@ dataplane (v3 maps plus CT learn/hit, audit-mode bit on `sample_rate`,
 |------|------|
 | `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allow/deny, group identities, CT learn/hit, audit forward, ICMP, Mbps/PPS, stats, flows, events |
 | `fluxvm_xdp.bpf.c` | Optional node-ingress XDP IPv4/IPv6 source-CIDR blocklist (disabled by default; refused in `cilium` mode) |
-| `fluxvm_service.bpf.c` | Service Fabric v6 TC (BPF schema 4 / gen 6): Maglev VIP, NAT/DSR, SNAT, affinity, EDT, flows, identity/L7 policy, HA queue |
+| `fluxvm_service.bpf.c` | Service Fabric TC (BPF schema 4 / gen 7): Maglev VIP, NAT/DSR, SNAT, affinity, EDT, flows, identity/L7 policy, HA queue |
 | `fluxvm_service_xdp.bpf.c` | Optional north-south XDP service acceleration (reuses TC service pinmaps) |
+| `fluxvm_service_connect.bpf.c` | Opt-in cgroup/connect4 VIP rewrite (shares host maps; fail-open to TC/XDP) |
 
 Service Fabric operator docs: [docs/service-fabric.md](../docs/service-fabric.md).
 
