@@ -1675,10 +1675,8 @@ direct of the two integrations: unlike Ragnarok's Kubernetes CRD approach (see b
 talks straight to a host's `fluxvm serve` REST API (`backend/crates/fluxvm-driver` +
 `fluxvm-client` hand-mirror FluxVM's own DTOs rather than depending on this crate directly —
 see zyvor-fabric's `docs/guides/vm-drivers/fluxvm.md`), the same API documented above under "REST
-API". Set `driver = "fluxvm"` in zyvor-fabricd's config to opt into it (the default is still
-`machinectl`/systemd-machined — CPU pinning, log streaming, and hotplug require `machinectl` until
-FluxVM gains resource-control and log-streaming endpoints of its own; see the systemd-removal
-migration plan).
+API". Fabric's VM lifecycle is FluxVM-only (`driver.fluxvm_url`); there is no
+`machinectl` / systemd-machined backend.
 
 **Getting zyvor-fabric**: zyvor-fabric's own repo is private, so its build is published here
 instead, as a self-contained Linux (x86_64) tarball — no cargo/npm required on the target
