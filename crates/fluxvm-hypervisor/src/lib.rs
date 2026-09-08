@@ -18,6 +18,7 @@ pub mod ffi;
 pub mod guest;
 pub mod hypervisor;
 pub mod kvm;
+pub mod kvm_snap;
 pub mod memory;
 pub mod mptable;
 pub mod net;

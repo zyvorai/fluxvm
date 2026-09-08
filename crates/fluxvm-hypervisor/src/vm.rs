@@ -12,11 +12,13 @@ use crate::devices::virtio_net::{self, VirtioNetConfig};
 use crate::error::{FluxError, Result};
 use crate::ffi;
 use crate::kvm::KvmVm;
+use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
 use crate::memory::{GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
 use crate::tap::Tap;
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
+    mpsc::Receiver,
     Arc,
 };
 use std::time::{Duration, Instant};
@@ -197,18 +199,35 @@ impl VirtualMachine {
         self.run_until(
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
+            None,
+            None,
         )
     }
 
-    pub fn run_until(mut self, stop: Arc<AtomicBool>, paused: Arc<AtomicBool>) -> Result<String> {
+    pub fn run_until(
+        mut self,
+        stop: Arc<AtomicBool>,
+        paused: Arc<AtomicBool>,
+        snap_rx: Option<Receiver<SnapCmd>>,
+        restore: Option<CpuSnapshot>,
+    ) -> Result<String> {
         let cr3 = 0x8000u64;
         let mut kvm = KvmVm::create(&self.mem)?;
-        let rsi = self.boot_params_gpa.unwrap_or(0);
-        kvm.setup_long_mode(&mut self.mem, self.boot_rip, GUEST_STACK, cr3, rsi)?;
-        eprintln!(
-            "[kvm] long mode rip={:#x} cr3={cr3:#x} rsi={rsi:#x}",
-            self.boot_rip
-        );
+        if let Some(cpu) = restore {
+            kvm.set_sregs(cpu.sregs)?;
+            kvm.set_regs(cpu.regs)?;
+            eprintln!(
+                "[kvm] restored FLUXKVM1 snapshot rip={:#x} cr3={:#x}",
+                cpu.regs.rip, cpu.sregs.cr3
+            );
+        } else {
+            let rsi = self.boot_params_gpa.unwrap_or(0);
+            kvm.setup_long_mode(&mut self.mem, self.boot_rip, GUEST_STACK, cr3, rsi)?;
+            eprintln!(
+                "[kvm] long mode rip={:#x} cr3={cr3:#x} rsi={rsi:#x}",
+                self.boot_rip
+            );
+        }
 
         let mut serial_log = String::new();
         let run_secs: u64 = std::env::var("FLUXVM_KVM_RUN_SECS")
@@ -224,6 +243,13 @@ impl VirtualMachine {
 
         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
             while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+                if let Some(rx) = snap_rx.as_ref() {
+                    while let Ok(cmd) = rx.try_recv() {
+                        let r = kvm_snap::dump(&kvm, &this.mem, &cmd.vmstate, &cmd.mem)
+                            .map_err(|e| e.to_string());
+                        let _ = cmd.reply.send(r);
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(2));
                 if Instant::now() >= deadline {
                     break;

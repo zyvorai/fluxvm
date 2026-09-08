@@ -53,6 +53,7 @@ async fn main() -> Result<()> {
     let client = kube::Client::try_default().await.context("connecting to Kubernetes")?;
     match cli.command.unwrap_or(Command::Controller { request_kvm: false, convert: false }) {
         Command::Controller { request_kvm, convert: do_convert } => {
+            spawn_metrics();
             let c1 = client.clone();
             let c2 = client.clone();
             let cluster = tokio::spawn(async move { controller::run(c1, request_kvm).await });
@@ -64,6 +65,7 @@ async fn main() -> Result<()> {
             let _ = tokio::join!(cluster, job);
         }
         Command::NodeAgent { kvm_slots } => {
+            spawn_metrics();
             let node_name = std::env::var("NODE_NAME").context("NODE_NAME is required")?;
             let base_url = std::env::var("FLUXVM_URL").unwrap_or_else(|_| "http://127.0.0.1:7788".into());
             let token = std::env::var("FLUXVM_TOKEN").ok();
@@ -84,4 +86,16 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn spawn_metrics() {
+    let addr = std::env::var("MICROVM_METRICS_ADDR").unwrap_or_else(|_| "127.0.0.1:9108".into());
+    if addr.is_empty() || addr == "off" {
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(e) = fluxvm_microvm::metrics::serve(&addr).await {
+            tracing::warn!(error = %e, "MicroVM metrics server stopped");
+        }
+    });
 }

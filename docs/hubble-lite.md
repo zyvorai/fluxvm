@@ -17,5 +17,12 @@ REST: `GET /v1/network/endpoints`, `GET /v1/network/hubble/flows`,
 
 Packet-path design and fields: [packet-flow.md](packet-flow.md).
 
-Identity numbers match FluxVM (`identity.rs` + groups). `reserved:world=2`.
-Point real Hubble UI at Cilium on the node; use this UI for VM-edge samples.
+Identity numbers default to the FluxVM UUID hash (`identity_source=fluxvm-hash`).
+When `sandbox.dataplane.mode = "cilium"` and the agent socket
+`/var/run/cilium/cilium.sock` is visible, FluxVM **reads** SecurityIdentity /
+endpoint metadata from the agent HTTP API and may set
+`identity_source=cilium-agent` on the CEP view. FluxVM still never writes
+Cilium private maps.
+
+`reserved:world=2`. Point real Hubble UI at Cilium on the node; use this UI
+for VM-edge samples.

@@ -23,7 +23,8 @@ FLUXVM_URL="${FLUXVM_URL:-http://127.0.0.1:7788}"
 export FABRIC_URL FLUXVM_URL
 
 chmod +x scripts/test-lab-four-tracks-e2e.sh scripts/test-lab-regression.sh \
-  scripts/test-kvm-pause-smoke.sh scripts/test-ebpf-smoke.sh \
+  scripts/test-kvm-pause-smoke.sh scripts/test-kvm-snapshot-smoke.sh \
+  scripts/test-ebpf-smoke.sh \
   scripts/test-kvm-linux-boot-smoke.sh scripts/devops-gate.sh \
   scripts/test-devops-gate.sh scripts/upgrade-snapshot.sh \
   scripts/test-upgrade-snapshot.sh 2>/dev/null || true

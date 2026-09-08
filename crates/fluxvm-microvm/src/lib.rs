@@ -13,6 +13,7 @@ pub mod fluxvm_client;
 pub mod guest_images;
 pub mod images;
 pub mod jobs;
+pub mod metrics;
 pub mod node_agent;
 pub mod policy;
 pub mod pools;

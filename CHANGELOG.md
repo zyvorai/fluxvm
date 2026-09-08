@@ -2,6 +2,18 @@
 
 ## 0.4.0 (unreleased)
 
+### Added
+- **In-tree KVM memory snapshots (Phase 3c)** — paused `FLUXKVM1` mmap dump +
+  GPRs/sregs; restore via control API. Lab-only (not Firecracker-compatible).
+  Smoke: `scripts/test-kvm-snapshot-smoke.sh`.
+- **Cilium agent CEP identity (Phase 2b)** — when `mode=cilium`, enrich
+  CiliumEndpoint views from agent HTTP (`identity_source=cilium-agent`); still
+  never writes Cilium private maps.
+- **Concurrent density bench** — `scripts/bench-density.sh` (parallel keep-alive
+  creates + p50/p95).
+- **MicroVM Prometheus histograms** — create→Scheduled / schedule→Running /
+  create→Running on `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`).
+
 ### Changed
 - **MicroVM dual-run hardening** — shadow Pods request `10m`/`32Mi` (not guest
   vCPU/RAM); converted MicroVMs annotate

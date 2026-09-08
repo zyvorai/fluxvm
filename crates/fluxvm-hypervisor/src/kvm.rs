@@ -42,6 +42,7 @@ pub struct KvmDtable {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct KvmSregs {
     pub cs: KvmSegment,
     pub ds: KvmSegment,
@@ -64,6 +65,7 @@ pub struct KvmSregs {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct KvmRegs {
     pub rax: u64,
     pub rbx: u64,
@@ -405,6 +407,49 @@ impl KvmVm {
             return Err(FluxError::Hypervisor("KVM_GET_REGS".into()));
         }
         Ok(regs)
+    }
+
+    pub fn set_regs(&self, mut regs: KvmRegs) -> Result<()> {
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpu_fd,
+                ffi::KVM_SET_REGS,
+                &mut regs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_REGS".into()));
+        }
+        Ok(())
+    }
+
+    pub fn get_sregs(&self) -> Result<KvmSregs> {
+        let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpu_fd,
+                ffi::KVM_GET_SREGS,
+                &mut sregs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_GET_SREGS".into()));
+        }
+        Ok(sregs)
+    }
+
+    pub fn set_sregs(&self, mut sregs: KvmSregs) -> Result<()> {
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpu_fd,
+                ffi::KVM_SET_SREGS,
+                &mut sregs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_SREGS".into()));
+        }
+        Ok(())
     }
 
     pub fn run_once(&mut self) -> Result<u32> {

@@ -1,8 +1,9 @@
 # Roadmap: Cilium endpoints, CH Windows+QGA, KVM density
 
 Three tracks deferred from the host-local production bar. Phase-1 foundations
-ship in-tree; real Cilium-agent CEP identity and KVM memory snapshots stay
-**Not started** / **FC-only** on purpose (no private-map fakes).
+ship in-tree; Phase 2b now enriches CEP views from the Cilium agent HTTP API
+(no private-map writes). In-tree KVM memory snapshots use the lab-only
+`FLUXKVM1` format (not Firecracker-compatible).
 
 ## 1. Cilium-native VM endpoints / Hubble
 
@@ -10,8 +11,8 @@ ship in-tree; real Cilium-agent CEP identity and KVM memory snapshots stay
 |-------|-------------|--------|
 | **1** | Coexistence `mode=cilium`; Fabric `network.hubble_ui_url` + Edge Dataplane **Open Hubble** link; FluxVM `/flows` observe | **Done** |
 | **2a** | CiliumEndpoint-*shaped* objects per VM + Hubble-lite JSON/UI (`/v1/network/endpoints`, `/hubble/*`) | **Done** (no Cilium private maps) — [hubble-lite.md](hubble-lite.md) |
-| **2b** | CiliumEndpoint + SecurityIdentity from Cilium agent — no private map hacks | **Not started** (multi-sprint CNI/agent work) |
-| **3** | Hubble SID attribution for VM traffic; optional flow export bridge | **Not started** (needs Phase-2b); Hubble-lite flows use Fabric CT samples only |
+| **2b** | CiliumEndpoint + SecurityIdentity from Cilium agent — no private map hacks | **Done** (agent HTTP GET enrich; soft-fail → fluxvm-hash) |
+| **3** | Hubble SID attribution for VM traffic; optional flow export bridge | **Not started** (Hubble-lite flows use Fabric CT samples; SID via 2b when agent matches) |
 
 Non-goals forever-as-fake: embedding Hubble UI inside Fabric; writing Cilium private maps from FluxVM.
 
@@ -33,9 +34,9 @@ QEMU + `examples/windows-qga.json` remains the GA QGA path.
 | **2** | Real virtio-blk MMIO + rootfs attach (`cfg.disk`); cmdline virtio_mmio.device slots | **Done** |
 | **3a** | linux-loader + platform + virtio-blk + console stdin; lab userspace / stdin smoke | **Done** (`FLUXVM_USERSPACE_OK` / `FLUXVM_STDIN_OK`) |
 | **3b** | Real in-tree KVM **pause/resume** (park vCPU; no `KVM_RUN` while paused) | **Done** (`scripts/test-kvm-pause-smoke.sh`) |
-| **3c** | Memory snapshot / restore + warm-pool density claims on kvm | **FC-only** — kvm still `bail!("memory snapshots require fluxvm_engine=firecracker")` |
+| **3c** | Memory snapshot / restore + warm-pool density claims on kvm | **Done** (lab `FLUXKVM1` mmap dump + regs/sregs; not FC-compatible) — `scripts/test-kvm-snapshot-smoke.sh` |
 | **3d** | `FLUXVM_KVM_LOCK_MEM=1` (MAP_POPULATE + mlock) | **Done** — [kvm-density.md](kvm-density.md) |
 
 Default `fluxvm_engine=firecracker` stays the production sandbox engine. In-tree
-KVM pause lets AutoPause / pools park CPU honestly on the lab engine; full
-memory snapshot restore remains Firecracker.
+KVM pause + `FLUXKVM1` memory snapshot restore support lab warm-pool packing;
+Firecracker remains the production snapshot format.

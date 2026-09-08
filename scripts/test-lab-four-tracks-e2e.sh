@@ -316,6 +316,12 @@ if FLUXVM_KVM_LOCK_MEM=1 ./scripts/test-kvm-pause-smoke.sh; then
 else
   bad "pause smoke"
 fi
+chmod +x scripts/test-kvm-snapshot-smoke.sh
+if ./scripts/test-kvm-snapshot-smoke.sh; then
+  ok "kvm FLUXKVM1 memory snapshot"
+else
+  bad "kvm snapshot smoke"
+fi
 TMP=$(mktemp -d)
 BOOT="$TMP/boot.json"
 cat >"$BOOT" <<JSON

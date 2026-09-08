@@ -1783,6 +1783,7 @@ name = "fluxvm-microvm"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "axum",
  "chrono",
  "clap",
  "fluxvm-kube",

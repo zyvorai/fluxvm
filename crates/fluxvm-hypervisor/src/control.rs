@@ -3,6 +3,7 @@
 
 use crate::api::{ApiRequest, ApiResponse, BootConfig};
 use crate::guest;
+use crate::kvm_snap;
 use crate::seccomp;
 use crate::snapshot;
 use crate::state::{VmLifecycle, VmState};
@@ -174,10 +175,19 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
             st.shutdown_guest().await;
             match snapshot::restore_meta(&mut st, &path).await {
                 Ok(spec) => {
-                    // Fast path: Firecracker memory snapshot load.
+                    // Fast path: Firecracker memory snapshot load, or in-tree
+                    // KVM FLUXKVM1 when the vmstate magic matches / engine=kvm.
                     if let (Some(vmstate), mem) = (spec.vmstate_path.as_ref(), &spec.memory_path) {
                         let vsock = spec.boot.vsock_uds.as_deref();
-                        match guest::start_from_snapshot(workspace, vmstate, mem, vsock).await {
+                        let kvm_fmt = kvm_snap::is_flux_kvm_vmstate(vmstate)
+                            || matches!(spec.boot.engine, crate::api::FluxVmEngine::Kvm);
+                        let loaded = if kvm_fmt {
+                            guest::start_kvm_from_snapshot(&spec.boot, workspace, vmstate, mem)
+                                .await
+                        } else {
+                            guest::start_from_snapshot(workspace, vmstate, mem, vsock).await
+                        };
+                        match loaded {
                             Ok(handle) => {
                                 st.guest = Some(handle);
                                 st.boot = Some(spec.boot);

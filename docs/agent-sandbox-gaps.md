@@ -59,12 +59,13 @@ plus [architecture](../README.md#network-fabric-architecture-how-it-works).
 
 ## Remaining (optional hardening)
 
-- Production-grade in-tree KVM guests (virtio-blk from rootfs, vsock, snapshots without Firecracker)
-- Concurrent density numbers (VMs/host); cold-start benches are published —
-  [benchmarks](benchmarks/README.md)
-- Cilium-native VM endpoints / identity-aware Hubble (beyond coexistence mode)
-- MicroVM-specific Prometheus histograms (schedule→Running); global create
-  counters on `fluxvm serve` already exist
+- Production-grade in-tree KVM guests (full virtio device live-state in snapshots)
+- Hubble SID attribution for VM traffic beyond agent CEP enrichment
+- Optional: scrape `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`) from Prometheus
+
+Shipped: concurrent density (`scripts/bench-density.sh`), Cilium-agent CEP
+identity enrich (no private maps), in-tree KVM `FLUXKVM1` memory snapshots,
+MicroVM schedule→Running histograms.
 
 ## Host config
 

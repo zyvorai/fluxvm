@@ -18,6 +18,9 @@ pub struct CiliumEndpointView {
     pub id: u32,
     pub uuid: Uuid,
     pub identity: u32,
+    /// `fluxvm-hash` (default) or `cilium-agent` when enriched from the agent API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_source: Option<String>,
     #[serde(rename = "identity-labels")]
     pub identity_labels: Vec<String>,
     pub networking: EndpointNetworking,
@@ -106,6 +109,7 @@ pub fn from_vm(
         id: identity,
         uuid: id,
         identity,
+        identity_source: Some("fluxvm-hash".into()),
         identity_labels: labels.to_vec(),
         networking: EndpointNetworking {
             addressing: vec![EndpointAddr { ipv4, ipv6 }],
@@ -116,6 +120,30 @@ pub fn from_vm(
             egress: if default_allow { "allow" } else { "deny" }.into(),
             audit,
         },
+    }
+}
+
+/// Prefer a Cilium-agent SecurityIdentity when one is known for this VM.
+/// Never writes Cilium private maps — agent HTTP GET only.
+pub fn enrich_from_cilium_agent(ep: &mut CiliumEndpointView) {
+    let guest_ip = ep
+        .networking
+        .addressing
+        .first()
+        .and_then(|a| a.ipv4.as_deref().or(a.ipv6.as_deref()));
+    match crate::cilium::resolve_identity(&ep.identity_labels, guest_ip) {
+        Ok(Some(agent)) => {
+            ep.identity = agent.id.max(1);
+            ep.id = ep.identity;
+            if !agent.labels.is_empty() {
+                ep.identity_labels = agent.labels;
+            }
+            ep.identity_source = Some("cilium-agent".into());
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!(error = %e, "Cilium agent identity lookup failed; keeping fluxvm-hash");
+        }
     }
 }
 

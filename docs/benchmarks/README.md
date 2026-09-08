@@ -37,6 +37,20 @@ fluxvm_engine = "firecracker"   # default — Firecracker child under fluxvm-hyp
 
 Restart `fluxvm serve` between runs and compare `avg_create_ms`.
 
+## Concurrent density (keep-alive)
+
+Creates N sandboxes **in parallel** and leaves them running until the end of
+the run (then deletes unless `DENSITY_CLEANUP=0`):
+
+```bash
+chmod +x scripts/bench-density.sh
+BENCH_N=8 IMAGE=… KERNEL=… FLUXVM_TOKEN=… ./scripts/bench-density.sh
+```
+
+Reports `concurrent_alive`, `wall_ms`, `p50_create_ms` / `p95_create_ms`, and
+`approx_guest_ram_mib`. This is the density signal; cold-start sequential
+benches above are not.
+
 ## MicroVM (Kubernetes create → Running)
 
 ```bash

@@ -16,8 +16,26 @@ export FLUXVM_KVM_LOCK_MEM=1
 Requires `LimitMEMLOCK=infinity` on the systemd unit. MAP_POPULATE avoids
 first-touch latency; mlock stops the host from reclaiming sandbox pages.
 
-Snapshots on this engine are still Firecracker-shaped when the child engine
-is Firecracker. Pure KVM snapshots dump guest RAM from the mmap and are
-lab-only (`crates/fluxvm-hypervisor/src/snapshot.rs` + memory clone).
+## Memory snapshots (lab)
+
+Pause the guest, then `snapshot_save` / `snapshot_restore` on the hypervisor
+control socket. The in-tree engine writes:
+
+- `*.mem` — raw guest RAM (mmap dump)
+- `*.vmstate` — `FLUXKVM1` header + GPRs + sregs (not Firecracker-compatible)
+
+```bash
+./scripts/test-kvm-snapshot-smoke.sh
+```
+
+Device (virtio) live state is not captured; restore re-attaches disks/TAP from
+boot config and reloads RAM + CPU state. Use Firecracker for production
+warm-pool snapshots.
+
+## Concurrent density
+
+```bash
+BENCH_N=8 ./scripts/bench-density.sh
+```
 
 See [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md) and [benchmarks](benchmarks/README.md).

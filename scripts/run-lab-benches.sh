@@ -25,6 +25,12 @@ FLUXVM_API=http://127.0.0.1:7788 BENCH_N=5 FLUXVM_TOKEN="$TOKEN" \
   KERNEL=/var/lib/fluxvm/kernels/vmlinux \
   bash ./scripts/bench-sandbox.sh | tee /tmp/bench-sandbox.out
 
+echo "########## density bench ##########"
+FLUXVM_API=http://127.0.0.1:7788 BENCH_N=8 FLUXVM_TOKEN="$TOKEN" \
+  IMAGE=/var/lib/fluxvm/images/bionic-fabric-rootfs.ext4 \
+  KERNEL=/var/lib/fluxvm/kernels/vmlinux \
+  bash ./scripts/bench-density.sh | tee /tmp/bench-density.out
+
 echo "########## ensure MicroVM controllers ##########"
 test -x ./target/release/fluxvm-microvm || cargo build -p fluxvm-microvm --release
 sudo kubectl create ns fluxvm-system --dry-run=client -o yaml | sudo kubectl apply -f -
@@ -54,5 +60,7 @@ sudo pkill -f 'fluxvm-microvm' 2>/dev/null || true
 echo "########## SUMMARY ##########"
 echo "=== sandbox ==="
 cat /tmp/bench-sandbox.out
+echo "=== density ==="
+cat /tmp/bench-density.out
 echo "=== microvm ==="
 cat /tmp/bench-microvm.out

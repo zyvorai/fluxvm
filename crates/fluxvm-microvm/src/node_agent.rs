@@ -77,6 +77,7 @@ async fn cleanup(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Act
 async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Action, Error> {
     let name = obj.name_any();
     let mut status = obj.status.clone().unwrap_or_default();
+    let prev_phase = status.phase.clone();
     status.runtime.node = Some(ctx.node_name.clone());
     let record = if let Some(id) = status.runtime.uuid.clone() {
         match ctx.fluxvm.get_vm(&id).await? {
@@ -141,6 +142,39 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
                     let _ = ctx.fluxvm.delete_vm(&id).await;
                     status.runtime.uuid = None;
                 }
+            }
+        }
+    }
+    if status.phase == "Failed" && prev_phase != "Failed" {
+        crate::metrics::inc_failed();
+    }
+    if status.phase == "Running" && prev_phase != "Running" {
+        if let Some(created) = obj.meta().creation_timestamp.as_ref() {
+            let age = chrono::Utc::now().signed_duration_since(created.0);
+            if let Ok(d) = age.to_std() {
+                crate::metrics::observe_create_to_running(d);
+            }
+        }
+        if let Some(sched_at) = obj
+            .meta()
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("microvm.fluxvm.zyvor.io/scheduled-at"))
+        {
+            if let Ok(secs) = sched_at.parse::<i64>() {
+                if let Some(then) = chrono::DateTime::from_timestamp(secs, 0) {
+                    if let Ok(sd) = chrono::Utc::now().signed_duration_since(then).to_std() {
+                        crate::metrics::observe_schedule_to_running(sd);
+                    }
+                }
+            }
+        } else if let Some(created) = obj.meta().creation_timestamp.as_ref() {
+            // Fallback when annotation missing (agent saw create before controller).
+            if let Ok(d) = chrono::Utc::now()
+                .signed_duration_since(created.0)
+                .to_std()
+            {
+                crate::metrics::observe_schedule_to_running(d);
             }
         }
     }

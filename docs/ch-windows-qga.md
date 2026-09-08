@@ -7,7 +7,7 @@
 | CH Windows **boot** (UEFI + `hyperv: true`) | **Done** (Phase-1) |
 | Live QGA (`fluxvm qga …`) on CH | **Host path shipped** — `--serial socket=qga.sock`; guest must speak QGA |
 | Named virtio-serial `org.qemu.guest_agent.0` | **QEMU-only** |
-| In-tree Hubble-lite / CEP-*shaped* views | **Done** — see [hubble-lite.md](hubble-lite.md); real Cilium-agent CEP still Not started |
+| In-tree Hubble-lite / CEP-*shaped* views | **Done** — see [hubble-lite.md](hubble-lite.md); agent identity enrich when `mode=cilium` |
 
 ## Boot Windows on Cloud Hypervisor
 

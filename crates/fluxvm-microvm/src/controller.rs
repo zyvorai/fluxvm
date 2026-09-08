@@ -84,6 +84,7 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
     let pod = pods.get_opt(&name).await?;
     let scheduled = pod.as_ref().and_then(bound_node);
     let mut status = obj.status.clone().unwrap_or_default();
+    let prev_phase = status.phase.clone();
     if let Some(node) = scheduled {
         if status.runtime.node.as_deref() != Some(node.as_str()) {
             status.runtime.node = Some(node);
@@ -106,6 +107,28 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
         if let Some(ip) = status.guest_ip.clone() {
             ensure_endpointslice(&ctx.client, obj, &ip).await?;
         }
+    }
+    if prev_phase != "Scheduled" && status.phase == "Scheduled" {
+        if let Some(created) = obj.meta().creation_timestamp.as_ref() {
+            let age = chrono::Utc::now().signed_duration_since(created.0);
+            if let Ok(d) = age.to_std() {
+                crate::metrics::observe_create_to_scheduled(d);
+            }
+        }
+        let now = chrono::Utc::now().timestamp().to_string();
+        let _ = api
+            .patch(
+                &obj.name_any(),
+                &PatchParams::default(),
+                &Patch::Merge(serde_json::json!({
+                    "metadata": {
+                        "annotations": {
+                            "microvm.fluxvm.zyvor.io/scheduled-at": now
+                        }
+                    }
+                })),
+            )
+            .await;
     }
     patch_status(api, &obj.name_any(), status).await?;
     Ok(Action::requeue(STEADY))

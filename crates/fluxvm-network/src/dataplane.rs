@@ -218,18 +218,20 @@ pub fn apply_sandbox_policy(
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
     if let Some(cidr) = guest_cidr {
-        let _ = crate::ipcache::upsert(cfg, cidr, crate::ebpf::identity_for(id), id);
-        let _ = crate::endpoint::upsert(
-            cfg,
-            &crate::endpoint::from_vm(
-                id,
-                &policy.labels,
-                crate::ebpf::identity_for(id),
-                Some(cidr),
-                policy.default_allow,
-                policy.audit_mode,
-            ),
+        let hash_id = crate::ebpf::identity_for(id);
+        let _ = crate::ipcache::upsert(cfg, cidr, hash_id, id);
+        let mut ep = crate::endpoint::from_vm(
+            id,
+            &policy.labels,
+            hash_id,
+            Some(cidr),
+            policy.default_allow,
+            policy.audit_mode,
         );
+        if dp.mode == DataplaneMode::Cilium {
+            crate::endpoint::enrich_from_cilium_agent(&mut ep);
+        }
+        let _ = crate::endpoint::upsert(cfg, &ep);
     }
 
     match dp.mode {
@@ -314,18 +316,20 @@ pub fn reconfigure_sandbox_policy(
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
     if let Some(cidr) = guest_cidr {
-        let _ = crate::ipcache::upsert(cfg, cidr, crate::ebpf::identity_for(id), id);
-        let _ = crate::endpoint::upsert(
-            cfg,
-            &crate::endpoint::from_vm(
-                id,
-                &policy.labels,
-                crate::ebpf::identity_for(id),
-                Some(cidr),
-                policy.default_allow,
-                policy.audit_mode,
-            ),
+        let hash_id = crate::ebpf::identity_for(id);
+        let _ = crate::ipcache::upsert(cfg, cidr, hash_id, id);
+        let mut ep = crate::endpoint::from_vm(
+            id,
+            &policy.labels,
+            hash_id,
+            Some(cidr),
+            policy.default_allow,
+            policy.audit_mode,
         );
+        if dp.mode == DataplaneMode::Cilium {
+            crate::endpoint::enrich_from_cilium_agent(&mut ep);
+        }
+        let _ = crate::endpoint::upsert(cfg, &ep);
     }
 
     match dp.mode {
