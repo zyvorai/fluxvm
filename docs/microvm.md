@@ -222,6 +222,8 @@ kubectl -n fluxvm-system logs ds/fluxvm-microvm-node --follow
 kubectl get crd | grep microvm.fluxvm.zyvor.io
 kubectl get mvm,mvmj,mvmp -A
 curl -sf http://127.0.0.1:7788/readyz | jq .
+# Schedule→Running histograms (default MICROVM_METRICS_ADDR=127.0.0.1:9108):
+curl -sf http://127.0.0.1:9108/metrics | head
 ```
 
 Tests:
