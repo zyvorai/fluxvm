@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// FluxVM Service Fabric v4: dual-stack VM-edge + host-uplink TC dataplane.
+// FluxVM Service Fabric v5 (v4 BPF ABI retained): dual-stack VM-edge + host-uplink TC dataplane.
 //
 // fvm_svc_vm is attached to ingress of every host-visible VM edge for
 // frontend selection. fvm_svc_host serves physical-uplink ingress. The
@@ -1377,6 +1377,7 @@ static __always_inline int forward6(
         __u8 src6[16];
         __u8 proto6 = ip6->nexthdr;
         __builtin_memcpy(src6, ip6->saddr.in6_u.u6_addr8, 16);
+        /* Learn before fib_redirect: skb helpers invalidate packet pointers. */
         if (!pinned)
             learn_affinity6(sid, bid, ip6, data_end, sport, dport);
         int action = fib_redirect6(

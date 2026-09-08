@@ -7,7 +7,8 @@ what FluxVM owns and exposes.
 Related: [Fabric contract](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md) ·
 [ownership boundary](https://github.com/zyvorai/fabric/blob/main/docs/FLUXVM-FABRIC-BOUNDARY.md) ·
 [phase 4 (shipped)](service-fabric-phase4.md) ·
-[phase 5 candidates](service-fabric-phase5.md).
+[phase 5 (shipped)](service-fabric-phase5.md) ·
+[phase 6 candidates](service-fabric-phase6.md).
 
 ## Dataplane
 
@@ -136,6 +137,9 @@ GET    /v1/network/services/{name}
 DELETE /v1/network/services/{name}
 GET    /v1/network/services/{name}/conntrack/export
 POST   /v1/network/services/{name}/conntrack/import
+GET    /v1/network/services/{name}/conntrack/delta
+POST   /v1/network/services/{name}/conntrack/delta/import
+POST   /v1/network/services/{name}/conntrack/delta/ack
 GET    /v1/vms/{id}/network/services/stats
 ```
 
@@ -176,5 +180,6 @@ updates preserve lifecycle state maps (`fct*`, `nat*`).
 | v1 east-west Maglev | shipped | — |
 | v2 dual-stack DSR/SNAT/XDP | shipped | [phase-2 archive](service-fabric-phase-2.md) |
 | v3 affinity/health/drain/HA ads | shipped | — |
-| v4 EDT / FluxScope / host-routing | **current** | this page · [phase4](service-fabric-phase4.md) |
-| Phase 5 | candidates | [service-fabric-phase5.md](service-fabric-phase5.md) |
+| v4 EDT / FluxScope / host-routing | shipped | [phase4](service-fabric-phase4.md) |
+| v5 HA deltas / durable leases / incremental reconcile | **current** | [phase5](service-fabric-phase5.md) |
+| Phase 6 | candidates | [service-fabric-phase6.md](service-fabric-phase6.md) |

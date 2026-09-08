@@ -288,6 +288,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/services/telemetry/export", post(export_network_service_telemetry))
         .route("/v1/network/services/{name}/conntrack/export", get(export_network_service_conntrack))
         .route("/v1/network/services/{name}/conntrack/import", post(import_network_service_conntrack))
+        .route("/v1/network/services/{name}/conntrack/delta", get(export_network_service_conntrack_delta))
+        .route("/v1/network/services/{name}/conntrack/delta/import", post(import_network_service_conntrack_delta))
+        .route("/v1/network/services/{name}/conntrack/delta/ack", post(ack_network_service_conntrack_delta))
         .route(
             "/v1/network/services/{name}",
             get(get_network_service).delete(delete_network_service),
@@ -1233,6 +1236,56 @@ async fn import_network_service_conntrack(
     require_admin(role)?;
     let written = fluxvm_network::service::import_conntrack(&m.cfg, &name, &snapshot)?;
     Ok(Json(json!({"written": written})))
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceDeltaQuery {
+    after_seq: Option<u64>,
+    max_entries: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServiceDeltaAck {
+    ack_seq: u64,
+}
+
+async fn export_network_service_conntrack_delta(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Query(q): Query<ServiceDeltaQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::export_conntrack_delta(
+        &m.cfg,
+        &name,
+        q.after_seq.unwrap_or(0),
+        q.max_entries.unwrap_or(1024),
+    )?)))
+}
+
+async fn import_network_service_conntrack_delta(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(batch): Json<fluxvm_network::service::ConntrackDeltaBatch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::import_conntrack_delta(
+        &m.cfg, &name, &batch
+    )?)))
+}
+
+async fn ack_network_service_conntrack_delta(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(req): Json<ServiceDeltaAck>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::ack_conntrack_delta(
+        &m.cfg, &name, req.ack_seq
+    )?)))
 }
 
 async fn list_network_services(

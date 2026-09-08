@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Optional north-south XDP accelerator for FluxVM Service Fabric v4.
+// Optional north-south XDP accelerator for FluxVM Service Fabric v5 (v4 BPF ABI retained).
 // Maps are reused from the host TC service instance so reverse NAT state
 // written here is consumed by the host TC ingress/egress reverse-NAT path.
 
