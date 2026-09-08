@@ -353,6 +353,7 @@ mod tests {
                 hugepages: None,
                 vfio_devices: vec![],
             },
+            guest_cid: None,
             jail_path: None,
             vsock_socket: None,
             qga_socket: None,
