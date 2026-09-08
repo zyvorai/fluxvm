@@ -42,8 +42,8 @@ REST: `GET /v1/network/health`, `/ipcache`, `/observe`; `POST /v1/network/refres
 FluxVM is not a cluster CNI or kube-proxy replacement. WireGuard datapath, L7
 Envoy parsers, and a full Hubble UI remain out of this runbook.
 
-**Service load balancing** is a separate plane: Service Fabric **schema v4**
-(Maglev / NAT / DSR / affinity / health / EDT / FluxScope / host-routing) — see
+**Service load balancing** is a separate plane: Service Fabric **v5 (BPF schema 4)**
+(Maglev / NAT / DSR / affinity / health / EDT / FluxScope / host-routing / HA deltas) — see
 [service-fabric.md](service-fabric.md). Do not conflate it with per-VM Network
 Fabric schema v4 policy.
 
