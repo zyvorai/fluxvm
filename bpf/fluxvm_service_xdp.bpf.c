@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: GPL-2.0-only
 //
-// Optional north-south XDP accelerator for FluxVM Service Fabric v2.
+// Optional north-south XDP accelerator for FluxVM Service Fabric v3.
 // Maps are reused from the host TC service instance so reverse NAT state
 // written here is consumed by the host TC ingress/egress reverse-NAT path.
 
@@ -15,7 +15,14 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 
-#define FLUXVM_SVC_BACKEND_ENABLED 1u
+#define FLUXVM_SVC_BACKEND_READY 1u
+#define FLUXVM_SVC_BACKEND_DRAINING 2u
+#define FLUXVM_SVC_BACKEND_UNHEALTHY 4u
+#define FLUXVM_CT_UDP_NS 60000000000ULL
+#define FLUXVM_CT_TCP_SYN_NS 30000000000ULL
+#define FLUXVM_CT_TCP_EST_NS 300000000000ULL
+#define FLUXVM_CT_TCP_FIN_NS 15000000000ULL
+#define FLUXVM_CT_TCP_RST_NS 2000000000ULL
 #define FLUXVM_SVC_MODE_NAT 1u
 #define FLUXVM_SVC_MODE_DSR 2u
 #define FLUXVM_NAT_F_SNAT 1u
@@ -39,20 +46,31 @@ struct nat4_key {
     __u16 backend_port; __u16 reply_port; __u8 protocol; __u8 pad[3];
 };
 struct nat4_value {
-    __u32 client_address; __u32 vip_address; __u32 service_id;
-    __u16 vip_port; __u16 client_port; __u64 last_seen_ns;
+    __u32 service_id; __u32 backend_id; __u32 client_address; __u32 vip_address;
+    __u64 last_seen_ns; __u16 vip_port; __u16 client_port; __u32 pad;
 };
 struct nat6_key {
     __u8 backend_address[16]; __u8 reply_address[16];
     __u16 backend_port; __u16 reply_port; __u8 protocol; __u8 pad[3];
 };
 struct nat6_value {
-    __u8 client_address[16]; __u8 vip_address[16]; __u64 last_seen_ns;
-    __u32 service_id; __u16 vip_port; __u16 client_port;
+    __u32 service_id; __u32 backend_id; __u8 client_address[16]; __u8 vip_address[16];
+    __u64 last_seen_ns; __u16 vip_port; __u16 client_port; __u32 pad;
 };
+struct fct4_key {
+    __u32 client_address; __u32 vip_address; __u16 client_port; __u16 vip_port;
+    __u8 protocol; __u8 pad[3];
+};
+struct fct6_key {
+    __u8 client_address[16]; __u8 vip_address[16]; __u16 client_port; __u16 vip_port;
+    __u8 protocol; __u8 pad[3];
+};
+struct fct_value { __u32 service_id; __u32 backend_id; __u64 last_seen_ns; __u64 expires_at_ns; };
+struct backend_stat { __u64 forwarded; __u64 failures; __u64 last_success_ns; __u64 last_failure_ns; };
 struct service_stat {
     __u64 forward_packets; __u64 forward_bytes; __u64 reverse_packets;
     __u64 backend_misses; __u64 dsr_packets; __u64 snat_packets; __u64 xdp_packets;
+    __u64 conntrack_hits; __u64 conntrack_misses; __u64 conntrack_expired; __u64 passive_failures;
 };
 
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 4096); __type(key, struct svc4_key); __type(value, struct svc_value); } fluxvm_svc4 SEC(".maps");
@@ -61,13 +79,15 @@ struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, 1); __type(key, _
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 16384); __type(key, struct backend_key); __type(value, struct backend4_value); } fluxvm_backend4 SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 16384); __type(key, struct backend_key); __type(value, struct backend6_value); } fluxvm_backend6 SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 262144); __type(key, struct maglev_key); __type(value, __u32); } fluxvm_maglev SEC(".maps");
+struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 131072); __type(key, struct fct4_key); __type(value, struct fct_value); } fluxvm_fct4 SEC(".maps");
+struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 131072); __type(key, struct fct6_key); __type(value, struct fct_value); } fluxvm_fct6 SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 131072); __type(key, struct nat4_key); __type(value, struct nat4_value); } fluxvm_nat4 SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 131072); __type(key, struct nat6_key); __type(value, struct nat6_value); } fluxvm_nat6 SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 4096); __type(key, __u32); __type(value, struct snat4_value); } fluxvm_snat4 SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 4096); __type(key, __u32); __type(value, struct snat6_value); } fluxvm_snat6 SEC(".maps");
 struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH); __uint(max_entries, 4096); __type(key, __u32); __type(value, struct service_stat); } fluxvm_sstats SEC(".maps");
-/* XDP-private scratch so fib_lookup does not blow the 512B BPF stack when
- * NAT/DSR frames are live. Not shared with the TC object. */
+struct { __uint(type, BPF_MAP_TYPE_PERCPU_HASH); __uint(max_entries, 16384); __type(key, struct backend_key); __type(value, struct backend_stat); } fluxvm_bstat SEC(".maps");
+/* XDP-private scratch so bpf_fib_lookup fits the kernel 512B stack. */
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(max_entries, 1);
@@ -80,6 +100,7 @@ static __always_inline struct bpf_fib_lookup *fib_scratch(void)
 	__u32 zero = 0;
 	return bpf_map_lookup_elem(&fluxvm_fib_scratch, &zero);
 }
+
 
 static __always_inline int guard(void)
 {
@@ -117,6 +138,131 @@ static __always_inline void count_miss(__u32 sid)
     struct service_stat *s = stat_for(sid);
     if (s)
         s->backend_misses += 1;
+}
+
+static __always_inline void count_ct(__u32 sid, int hit, int expired)
+{
+    struct service_stat *s = stat_for(sid);
+    if (!s) return;
+    if (hit) s->conntrack_hits += 1; else s->conntrack_misses += 1;
+    if (expired) s->conntrack_expired += 1;
+}
+
+static __always_inline struct backend_stat *backend_stat_for(__u32 sid, __u32 bid)
+{
+    struct backend_key key = {.service_id = sid, .backend_id = bid};
+    struct backend_stat *s = bpf_map_lookup_elem(&fluxvm_bstat, &key);
+    if (s) return s;
+    struct backend_stat zero = {};
+    bpf_map_update_elem(&fluxvm_bstat, &key, &zero, BPF_NOEXIST);
+    return bpf_map_lookup_elem(&fluxvm_bstat, &key);
+}
+
+static __always_inline void backend_success(__u32 sid, __u32 bid)
+{
+    struct backend_stat *s = backend_stat_for(sid, bid);
+    if (!s) return;
+    s->forwarded += 1;
+    s->last_success_ns = bpf_ktime_get_ns();
+}
+
+static __always_inline void backend_failure(__u32 sid, __u32 bid)
+{
+    struct backend_stat *s = backend_stat_for(sid, bid);
+    if (s) { s->failures += 1; s->last_failure_ns = bpf_ktime_get_ns(); }
+    struct service_stat *svc = stat_for(sid);
+    if (svc) svc->passive_failures += 1;
+}
+
+static __always_inline __u64 timeout4(struct iphdr *iph, void *end)
+{
+    if (iph->protocol == IPPROTO_UDP) return FLUXVM_CT_UDP_NS;
+    if (iph->protocol != IPPROTO_TCP) return FLUXVM_CT_TCP_EST_NS;
+    struct tcphdr *tcp = (void *)iph + iph->ihl * 4;
+    if ((void *)(tcp + 1) > end) return FLUXVM_CT_TCP_SYN_NS;
+    if (tcp->rst) return FLUXVM_CT_TCP_RST_NS;
+    if (tcp->fin) return FLUXVM_CT_TCP_FIN_NS;
+    if (tcp->syn && !tcp->ack) return FLUXVM_CT_TCP_SYN_NS;
+    return FLUXVM_CT_TCP_EST_NS;
+}
+
+static __always_inline __u64 timeout6(struct ipv6hdr *ip6, void *end)
+{
+    if (ip6->nexthdr == IPPROTO_UDP) return FLUXVM_CT_UDP_NS;
+    if (ip6->nexthdr != IPPROTO_TCP) return FLUXVM_CT_TCP_EST_NS;
+    struct tcphdr *tcp = (void *)(ip6 + 1);
+    if ((void *)(tcp + 1) > end) return FLUXVM_CT_TCP_SYN_NS;
+    if (tcp->rst) return FLUXVM_CT_TCP_RST_NS;
+    if (tcp->fin) return FLUXVM_CT_TCP_FIN_NS;
+    if (tcp->syn && !tcp->ack) return FLUXVM_CT_TCP_SYN_NS;
+    return FLUXVM_CT_TCP_EST_NS;
+}
+
+static __always_inline int affinity4(
+    __u32 sid, struct iphdr *iph, void *end, __u16 sport, __u16 dport, __u32 *bid)
+{
+    struct fct4_key key = {
+        .client_address = iph->saddr, .vip_address = iph->daddr,
+        .client_port = sport, .vip_port = dport, .protocol = iph->protocol,
+        .pad = {0,0,0},
+    };
+    struct fct_value *ct = bpf_map_lookup_elem(&fluxvm_fct4, &key);
+    __u64 now = bpf_ktime_get_ns();
+    if (!ct || ct->service_id != sid) { count_ct(sid, 0, 0); return 0; }
+    if (ct->expires_at_ns <= now) {
+        bpf_map_delete_elem(&fluxvm_fct4, &key); count_ct(sid, 0, 1); return 0;
+    }
+    struct backend_key bk = {.service_id = sid, .backend_id = ct->backend_id};
+    struct backend4_value *be = bpf_map_lookup_elem(&fluxvm_backend4, &bk);
+    if (!be || (be->flags & FLUXVM_SVC_BACKEND_UNHEALTHY) ||
+        !(be->flags & (FLUXVM_SVC_BACKEND_READY | FLUXVM_SVC_BACKEND_DRAINING))) {
+        bpf_map_delete_elem(&fluxvm_fct4, &key); count_ct(sid, 0, 0); return 0;
+    }
+    ct->last_seen_ns = now; ct->expires_at_ns = now + timeout4(iph, end);
+    *bid = ct->backend_id; count_ct(sid, 1, 0); return 1;
+}
+
+static __always_inline void learn4(
+    __u32 sid, __u32 bid, struct iphdr *iph, void *end, __u16 sport, __u16 dport)
+{
+    __u64 now = bpf_ktime_get_ns();
+    struct fct4_key key = {
+        .client_address = iph->saddr, .vip_address = iph->daddr,
+        .client_port = sport, .vip_port = dport, .protocol = iph->protocol,
+        .pad = {0,0,0},
+    };
+    struct fct_value v = {.service_id=sid,.backend_id=bid,.last_seen_ns=now,.expires_at_ns=now+timeout4(iph,end)};
+    bpf_map_update_elem(&fluxvm_fct4, &key, &v, BPF_ANY);
+}
+
+static __always_inline int affinity6(
+    __u32 sid, struct ipv6hdr *ip6, void *end, __u16 sport, __u16 dport, __u32 *bid)
+{
+    struct fct6_key key = {.client_port=sport,.vip_port=dport,.protocol=ip6->nexthdr,.pad={0,0,0}};
+    __builtin_memcpy(key.client_address, ip6->saddr.in6_u.u6_addr8, 16);
+    __builtin_memcpy(key.vip_address, ip6->daddr.in6_u.u6_addr8, 16);
+    struct fct_value *ct = bpf_map_lookup_elem(&fluxvm_fct6, &key);
+    __u64 now = bpf_ktime_get_ns();
+    if (!ct || ct->service_id != sid) { count_ct(sid,0,0); return 0; }
+    if (ct->expires_at_ns <= now) { bpf_map_delete_elem(&fluxvm_fct6,&key); count_ct(sid,0,1); return 0; }
+    struct backend_key bk = {.service_id=sid,.backend_id=ct->backend_id};
+    struct backend6_value *be = bpf_map_lookup_elem(&fluxvm_backend6,&bk);
+    if (!be || (be->flags & FLUXVM_SVC_BACKEND_UNHEALTHY) ||
+        !(be->flags & (FLUXVM_SVC_BACKEND_READY | FLUXVM_SVC_BACKEND_DRAINING))) {
+        bpf_map_delete_elem(&fluxvm_fct6,&key); count_ct(sid,0,0); return 0;
+    }
+    ct->last_seen_ns=now; ct->expires_at_ns=now+timeout6(ip6,end); *bid=ct->backend_id; count_ct(sid,1,0); return 1;
+}
+
+static __always_inline void learn6(
+    __u32 sid, __u32 bid, struct ipv6hdr *ip6, void *end, __u16 sport, __u16 dport)
+{
+    __u64 now=bpf_ktime_get_ns();
+    struct fct6_key key={.client_port=sport,.vip_port=dport,.protocol=ip6->nexthdr,.pad={0,0,0}};
+    __builtin_memcpy(key.client_address,ip6->saddr.in6_u.u6_addr8,16);
+    __builtin_memcpy(key.vip_address,ip6->daddr.in6_u.u6_addr8,16);
+    struct fct_value v={.service_id=sid,.backend_id=bid,.last_seen_ns=now,.expires_at_ns=now+timeout6(ip6,end)};
+    bpf_map_update_elem(&fluxvm_fct6,&key,&v,BPF_ANY);
 }
 
 static __always_inline __u32 mix32(__u32 x)
@@ -158,25 +304,26 @@ static __always_inline int addr6_equal(const __u8 *a, const __u8 *b)
 
 static __always_inline int nat4_same(
     const struct nat4_value *v, __u32 client, __u16 client_port,
-    __u32 vip, __u16 vip_port, __u32 sid)
+    __u32 vip, __u16 vip_port, __u32 sid, __u32 bid)
 {
     return v->client_address == client && v->client_port == client_port &&
-           v->vip_address == vip && v->vip_port == vip_port && v->service_id == sid;
+           v->vip_address == vip && v->vip_port == vip_port &&
+           v->service_id == sid && v->backend_id == bid;
 }
 
 static __always_inline int nat6_same(
     const struct nat6_value *v, const __u8 *client, __u16 client_port,
-    const __u8 *vip, __u16 vip_port, __u32 sid)
+    const __u8 *vip, __u16 vip_port, __u32 sid, __u32 bid)
 {
     return v->client_port == client_port && v->vip_port == vip_port &&
-           v->service_id == sid && addr6_equal(v->client_address, client) &&
-           addr6_equal(v->vip_address, vip);
+           v->service_id == sid && v->backend_id == bid &&
+           addr6_equal(v->client_address, client) && addr6_equal(v->vip_address, vip);
 }
 
 static __always_inline __u16 reserve_nat4(
     __u32 backend, __u32 reply_addr, __u16 backend_port, __u8 protocol,
     __u32 client, __u16 client_port, __u32 vip, __u16 vip_port,
-    __u32 sid, __u32 hash)
+    __u32 sid, __u32 bid, __u32 hash)
 {
 #pragma unroll
     for (int i = 0; i < FLUXVM_NAT_PORT_PROBES; i++) {
@@ -189,20 +336,18 @@ static __always_inline __u16 reserve_nat4(
         };
         struct nat4_value *hit = bpf_map_lookup_elem(&fluxvm_nat4, &key);
         if (hit) {
-            if (nat4_same(hit, client, client_port, vip, vip_port, sid)) {
-                hit->last_seen_ns = bpf_ktime_get_ns();
-                return port;
+            if (nat4_same(hit, client, client_port, vip, vip_port, sid, bid)) {
+                hit->last_seen_ns = bpf_ktime_get_ns(); return port;
             }
             continue;
         }
         struct nat4_value value = {
-            .client_address = client, .vip_address = vip, .service_id = sid,
-            .vip_port = vip_port, .client_port = client_port,
-            .last_seen_ns = bpf_ktime_get_ns(),
+            .service_id=sid,.backend_id=bid,.client_address=client,.vip_address=vip,
+            .last_seen_ns=bpf_ktime_get_ns(),.vip_port=vip_port,.client_port=client_port,.pad=0,
         };
         if (bpf_map_update_elem(&fluxvm_nat4, &key, &value, BPF_NOEXIST) == 0) return port;
         hit = bpf_map_lookup_elem(&fluxvm_nat4, &key);
-        if (hit && nat4_same(hit, client, client_port, vip, vip_port, sid)) return port;
+        if (hit && nat4_same(hit, client, client_port, vip, vip_port, sid, bid)) return port;
     }
     return 0;
 }
@@ -210,35 +355,31 @@ static __always_inline __u16 reserve_nat4(
 static __always_inline __u16 reserve_nat6(
     const __u8 *backend, const __u8 *reply_addr, __u16 backend_port, __u8 protocol,
     const __u8 *client, __u16 client_port, const __u8 *vip, __u16 vip_port,
-    __u32 sid, __u32 hash)
+    __u32 sid, __u32 bid, __u32 hash)
 {
 #pragma unroll
     for (int i = 0; i < FLUXVM_NAT_PORT_PROBES; i++) {
         __u16 port = i == 0 ? client_port :
             (__u16)(FLUXVM_NAT_PORT_MIN + ((hash + (__u32)i * 7919u) % FLUXVM_NAT_PORT_SPAN));
-        struct nat6_key key = {
-            .backend_port = backend_port, .reply_port = port,
-            .protocol = protocol, .pad = {0,0,0},
-        };
+        struct nat6_key key = {.backend_port=backend_port,.reply_port=port,.protocol=protocol,.pad={0,0,0}};
         __builtin_memcpy(key.backend_address, backend, 16);
         __builtin_memcpy(key.reply_address, reply_addr, 16);
         struct nat6_value *hit = bpf_map_lookup_elem(&fluxvm_nat6, &key);
         if (hit) {
-            if (nat6_same(hit, client, client_port, vip, vip_port, sid)) {
-                hit->last_seen_ns = bpf_ktime_get_ns();
-                return port;
+            if (nat6_same(hit, client, client_port, vip, vip_port, sid, bid)) {
+                hit->last_seen_ns=bpf_ktime_get_ns(); return port;
             }
             continue;
         }
         struct nat6_value value = {
-            .last_seen_ns = bpf_ktime_get_ns(), .service_id = sid,
-            .vip_port = vip_port, .client_port = client_port,
+            .service_id=sid,.backend_id=bid,.last_seen_ns=bpf_ktime_get_ns(),
+            .vip_port=vip_port,.client_port=client_port,.pad=0,
         };
-        __builtin_memcpy(value.client_address, client, 16);
-        __builtin_memcpy(value.vip_address, vip, 16);
-        if (bpf_map_update_elem(&fluxvm_nat6, &key, &value, BPF_NOEXIST) == 0) return port;
-        hit = bpf_map_lookup_elem(&fluxvm_nat6, &key);
-        if (hit && nat6_same(hit, client, client_port, vip, vip_port, sid)) return port;
+        __builtin_memcpy(value.client_address,client,16);
+        __builtin_memcpy(value.vip_address,vip,16);
+        if (bpf_map_update_elem(&fluxvm_nat6,&key,&value,BPF_NOEXIST)==0) return port;
+        hit=bpf_map_lookup_elem(&fluxvm_nat6,&key);
+        if (hit && nat6_same(hit,client,client_port,vip,vip_port,sid,bid)) return port;
     }
     return 0;
 }
@@ -335,13 +476,23 @@ static __noinline int xdp4(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr 
     struct svc_value *svc = bpf_map_lookup_elem(&fluxvm_svc4, &key);
     if (!svc) return XDP_PASS;
     __u32 sid = svc->service_id;
-    if (!svc->table_size) { count_miss(sid); return XDP_DROP; }
-    struct maglev_key mk = {.service_id = sid, .slot = hash4(iph->saddr, iph->daddr, sport, dport, iph->protocol) % svc->table_size};
-    __u32 *bid = bpf_map_lookup_elem(&fluxvm_maglev, &mk);
-    if (!bid) { count_miss(sid); return XDP_DROP; }
-    struct backend_key bk = {.service_id = sid, .backend_id = *bid};
+    __u32 bid = 0;
+    int pinned = affinity4(sid, iph, end, sport, dport, &bid);
+    __u32 h = hash4(iph->saddr, iph->daddr, sport, dport, iph->protocol);
+    if (!pinned) {
+        if (!svc->table_size) { count_miss(sid); return XDP_DROP; }
+        struct maglev_key mk = {.service_id = sid, .slot = h % svc->table_size};
+        __u32 *selected = bpf_map_lookup_elem(&fluxvm_maglev, &mk);
+        if (!selected) { count_miss(sid); return XDP_DROP; }
+        bid = *selected;
+    }
+    struct backend_key bk = {.service_id = sid, .backend_id = bid};
     struct backend4_value *be = bpf_map_lookup_elem(&fluxvm_backend4, &bk);
-    if (!be || !(be->flags & FLUXVM_SVC_BACKEND_ENABLED)) { count_miss(sid); return XDP_DROP; }
+    if (!be || (be->flags & FLUXVM_SVC_BACKEND_UNHEALTHY) ||
+        (pinned && !(be->flags & (FLUXVM_SVC_BACKEND_READY | FLUXVM_SVC_BACKEND_DRAINING))) ||
+        (!pinned && !(be->flags & FLUXVM_SVC_BACKEND_READY))) {
+        count_miss(sid); backend_failure(sid, bid); return XDP_DROP;
+    }
 
     if (svc->mode == FLUXVM_SVC_MODE_DSR) {
         struct bpf_fib_lookup *fib = fib_scratch();
@@ -349,8 +500,10 @@ static __noinline int xdp4(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr 
         int rc = fib4(ctx, iph->saddr, be->address, iph->protocol, sport, dport,
                       bpf_ntohs(iph->tot_len), fib);
         if (rc != BPF_FIB_LKUP_RET_SUCCESS) return XDP_PASS;
+        if (!pinned) learn4(sid, bid, iph, end, sport, dport);
         __builtin_memcpy(eth->h_dest, fib->dmac, ETH_ALEN);
         __builtin_memcpy(eth->h_source, fib->smac, ETH_ALEN);
+        backend_success(sid, bid);
         count_xdp(sid, (__u32)((long)end - (long)eth), 1, 0);
         return bpf_redirect(fib->ifindex, 0);
     }
@@ -365,11 +518,11 @@ static __noinline int xdp4(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr 
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) return XDP_PASS;
 
     __u32 old_src = iph->saddr, old_dst = iph->daddr;
-    __u32 h = hash4(old_src, old_dst, sport, dport, iph->protocol);
     __u16 reply_port = reserve_nat4(
         be->address, snat->address, be->port, iph->protocol,
-        old_src, sport, old_dst, dport, sid, h);
+        old_src, sport, old_dst, dport, sid, bid, h);
     if (!reply_port) { count_miss(sid); return XDP_DROP; }
+    if (!pinned) learn4(sid, bid, iph, end, sport, dport);
 
     iph->check = csum_addr4(iph->check, old_src, snat->address);
     iph->check = csum_addr4(iph->check, old_dst, be->address);
@@ -392,6 +545,7 @@ static __noinline int xdp4(struct xdp_md *ctx, struct ethhdr *eth, struct iphdr 
     }
     __builtin_memcpy(eth->h_dest, fib->dmac, ETH_ALEN);
     __builtin_memcpy(eth->h_source, fib->smac, ETH_ALEN);
+    backend_success(sid, bid);
     count_xdp(sid, (__u32)((long)end - (long)eth), 0, 1);
     return bpf_redirect(fib->ifindex, 0);
 }
@@ -417,13 +571,23 @@ static __noinline int xdp6(struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hd
     struct svc_value *svc = bpf_map_lookup_elem(&fluxvm_svc6, &key);
     if (!svc) return XDP_PASS;
     __u32 sid = svc->service_id;
-    if (!svc->table_size) { count_miss(sid); return XDP_DROP; }
-    struct maglev_key mk = {.service_id = sid, .slot = hash6(ip6->saddr.in6_u.u6_addr8, ip6->daddr.in6_u.u6_addr8, sport, dport, ip6->nexthdr) % svc->table_size};
-    __u32 *bid = bpf_map_lookup_elem(&fluxvm_maglev, &mk);
-    if (!bid) { count_miss(sid); return XDP_DROP; }
-    struct backend_key bk = {.service_id = sid, .backend_id = *bid};
+    __u32 bid = 0;
+    int pinned = affinity6(sid, ip6, end, sport, dport, &bid);
+    __u32 h = hash6(ip6->saddr.in6_u.u6_addr8, ip6->daddr.in6_u.u6_addr8, sport, dport, ip6->nexthdr);
+    if (!pinned) {
+        if (!svc->table_size) { count_miss(sid); return XDP_DROP; }
+        struct maglev_key mk = {.service_id = sid, .slot = h % svc->table_size};
+        __u32 *selected = bpf_map_lookup_elem(&fluxvm_maglev, &mk);
+        if (!selected) { count_miss(sid); return XDP_DROP; }
+        bid = *selected;
+    }
+    struct backend_key bk = {.service_id = sid, .backend_id = bid};
     struct backend6_value *be = bpf_map_lookup_elem(&fluxvm_backend6, &bk);
-    if (!be || !(be->flags & FLUXVM_SVC_BACKEND_ENABLED)) { count_miss(sid); return XDP_DROP; }
+    if (!be || (be->flags & FLUXVM_SVC_BACKEND_UNHEALTHY) ||
+        (pinned && !(be->flags & (FLUXVM_SVC_BACKEND_READY | FLUXVM_SVC_BACKEND_DRAINING))) ||
+        (!pinned && !(be->flags & FLUXVM_SVC_BACKEND_READY))) {
+        count_miss(sid); backend_failure(sid, bid); return XDP_DROP;
+    }
 
     __u16 tot_len = bpf_ntohs(ip6->payload_len) + sizeof(*ip6);
     if (svc->mode == FLUXVM_SVC_MODE_DSR) {
@@ -432,8 +596,10 @@ static __noinline int xdp6(struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hd
         int rc = fib6(ctx, ip6->saddr.in6_u.u6_addr8, be->address, ip6->nexthdr,
                       sport, dport, tot_len, fib);
         if (rc != BPF_FIB_LKUP_RET_SUCCESS) return XDP_PASS;
+        if (!pinned) learn6(sid, bid, ip6, end, sport, dport);
         __builtin_memcpy(eth->h_dest, fib->dmac, ETH_ALEN);
         __builtin_memcpy(eth->h_source, fib->smac, ETH_ALEN);
+        backend_success(sid, bid);
         count_xdp(sid, (__u32)((long)end - (long)eth), 1, 0);
         return bpf_redirect(fib->ifindex, 0);
     }
@@ -450,11 +616,11 @@ static __noinline int xdp6(struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hd
     __u8 old_src[16], old_dst[16];
     __builtin_memcpy(old_src, ip6->saddr.in6_u.u6_addr8, 16);
     __builtin_memcpy(old_dst, ip6->daddr.in6_u.u6_addr8, 16);
-    __u32 h = hash6(old_src, old_dst, sport, dport, ip6->nexthdr);
     __u16 reply_port = reserve_nat6(
         be->address, snat->address, be->port, ip6->nexthdr,
-        old_src, sport, old_dst, dport, sid, h);
+        old_src, sport, old_dst, dport, sid, bid, h);
     if (!reply_port) { count_miss(sid); return XDP_DROP; }
+    if (!pinned) learn6(sid, bid, ip6, end, sport, dport);
 
     *l4_check = csum_addr6(*l4_check, old_src, snat->address);
     *l4_check = csum_addr6(*l4_check, old_dst, be->address);
@@ -473,6 +639,7 @@ static __noinline int xdp6(struct xdp_md *ctx, struct ethhdr *eth, struct ipv6hd
     }
     __builtin_memcpy(eth->h_dest, fib->dmac, ETH_ALEN);
     __builtin_memcpy(eth->h_source, fib->smac, ETH_ALEN);
+    backend_success(sid, bid);
     count_xdp(sid, (__u32)((long)end - (long)eth), 0, 1);
     return bpf_redirect(fib->ifindex, 0);
 }

@@ -280,6 +280,12 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/network/services/status", get(network_service_status))
         .route("/v1/network/services/stats", get(network_service_stats))
+        .route("/v1/network/services/health", get(network_service_health))
+        .route("/v1/network/services/health/reconcile", post(reconcile_network_service_health))
+        .route("/v1/network/services/conntrack/gc", post(gc_network_service_conntrack))
+        .route("/v1/network/services/advertisements", get(network_service_advertisements))
+        .route("/v1/network/services/{name}/conntrack/export", get(export_network_service_conntrack))
+        .route("/v1/network/services/{name}/conntrack/import", post(import_network_service_conntrack))
         .route(
             "/v1/network/services/{name}",
             get(get_network_service).delete(delete_network_service),
@@ -1149,6 +1155,52 @@ async fn network_service_stats(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"interfaces": fluxvm_network::service::host_stats(&m.cfg)?})))
+}
+
+async fn network_service_health(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(fluxvm_network::service::health_report(&m.cfg)?)))
+}
+
+async fn reconcile_network_service_health(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::reconcile_health(&m.cfg).await?)))
+}
+
+async fn gc_network_service_conntrack(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::gc_conntrack(&m.cfg)?)))
+}
+
+async fn network_service_advertisements(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(fluxvm_network::service::advertisement_snapshot(&m.cfg)?)))
+}
+
+async fn export_network_service_conntrack(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(fluxvm_network::service::export_conntrack(&m.cfg, &name)?)))
+}
+
+async fn import_network_service_conntrack(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    Json(snapshot): Json<fluxvm_network::service::ConntrackSnapshot>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let written = fluxvm_network::service::import_conntrack(&m.cfg, &name, &snapshot)?;
+    Ok(Json(json!({"written": written})))
 }
 
 async fn list_network_services(

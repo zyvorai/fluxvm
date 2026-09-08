@@ -1,76 +1,76 @@
-# FluxVM Service Fabric v2
+# FluxVM Service Fabric v3
 
-FluxVM owns node-local VM service mechanics; Zyvor Fabric owns distributed intent and rollout.
+FluxVM is the node-local service dataplane. Zyvor Fabric is the distributed control plane.
 
-## v2 dataplane
+## Dataplane
 
-- IPv4 and IPv6 TCP/UDP VIPs.
-- Weighted Maglev backend selection.
-- NAT with stateful reverse NAT.
-- Optional per-service SNAT for non-routable client networks.
-- Routed DSR: the packet keeps VIP:port and client source; FluxVM performs a FIB lookup using the selected backend address as the forwarding next hop, rewrites L2, and redirects. The backend must accept the VIP locally and return directly to the client.
-- East-west VM-edge TC ingress for service selection plus a same-map TC egress reverse-NAT hook.
-- North-south physical-uplink TC ingress plus TC egress reverse-NAT for local-backend return traffic.
-- Optional north-south XDP accelerator. XDP shares the host TC maps; reverse traffic falls through to the shared TC ingress/egress return path. The XDP object keeps a private per-CPU `fluxvm_fib_scratch` map so `bpf_fib_lookup` fits the kernel’s 512-byte BPF stack.
-- Fail-closed update guard while service/backend/Maglev/NAT maps are replaced.
+Service Fabric v3 supports dual-stack TCP/UDP VIPs, weighted Maglev, NAT, routed DSR, SNAT, VM-edge TC, north-south TC and optional XDP acceleration.
 
-## Scope ownership
+The v3 lifecycle maps add **forward conntrack**. New flows select a Ready backend through Maglev and pin that backend. Existing flows keep their backend when weights or Maglev membership change. A Draining backend is removed from new-flow selection while established flows remain pinned. Unhealthy backends are not retained.
 
-Fabric sends `ServiceSpec` through the FluxVM REST API. Fabric never edits BPF maps. FluxVM validates, persists and compiles the catalog into BPF maps.
+Timeouts are protocol/state aware: TCP SYN, established, FIN and RST use separate deadlines; UDP uses its own deadline. Userspace GC removes expired entries and entries whose drain deadline passed.
 
-## Service model
+## Backend state
 
 ```json
 {
-  "name": "payments",
-  "vip": "203.0.113.20",
-  "port": 443,
-  "protocol": "tcp",
-  "algorithm": "maglev",
-  "mode": "nat",
-  "exposure": "both",
-  "snat_address": "192.0.2.10",
-  "maglev_table_size": 4093,
-  "backends": [
-    {"address":"10.40.1.21","port":8443,"weight":2,"enabled":true},
-    {"address":"10.40.2.21","port":8443,"weight":1,"enabled":true}
-  ]
+  "address": "10.40.1.21",
+  "port": 8443,
+  "weight": 2,
+  "enabled": true,
+  "state": "draining",
+  "drain_until_unix_ms": 1788850000000
 }
 ```
 
-`north-south` NAT requires `snat_address`. DSR forbids SNAT and requires backend port == service port because the destination tuple is preserved.
+States:
 
-## Host configuration
+- `ready`: eligible for new and established flows;
+- `draining`: existing pinned flows only;
+- `unhealthy`: excluded and existing affinity is allowed to fail over.
 
-```toml
-[sandbox.dataplane]
-mode = "ebpf"
-required = true
+## Active health
 
-[sandbox.dataplane.service]
-north_south_interfaces = ["eno1"]
-xdp_acceleration = true
-xdp_object = "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o"
+A service can request node-local TCP connect health checks:
+
+```json
+"health_check": {
+  "kind": "tcp",
+  "timeout_ms": 500,
+  "unhealthy_threshold": 3,
+  "healthy_threshold": 2
+}
 ```
 
-Do not enable FluxVM service XDP in `mode = "cilium"`; Cilium may already own the physical-NIC XDP hook. TC service handling remains available.
+Health is runtime overlay state. FluxVM never rewrites Fabric's durable backend state. UDP/application health belongs in an application-aware control-plane probe rather than a generic UDP packet test.
 
-## APIs
+## VIP advertisement boundary
 
-- `GET/POST /v1/network/services`
-- `GET/DELETE /v1/network/services/{name}`
-- `GET /v1/network/services/status`
-- `GET /v1/network/services/stats`
-- `GET /v1/vms/{id}/network/services/stats`
+FluxVM does not embed a BGP control plane. It publishes an atomic snapshot at:
 
-## DSR backend requirement
+```text
+/run/fluxvm/service-advertisements.json
+```
 
-The chosen backend address is used only as the routing next hop. The packet itself retains the VIP. Each backend path must therefore deliver the VIP packet to the backend and the guest/workload must own the VIP (for example on loopback) and avoid ARP/NDP conflicts for that VIP. Fabric should configure this as part of backend admission.
+The snapshot contains VIP/prefix, generation and advertise/withdraw decision. An FRR/BIRD/Fabric routing adapter consumes this contract. A VIP is withdrawn if Fabric's node intent has `advertise=false` or if the node has no Ready backend.
 
-## Symmetric NAT return path
+This keeps BGP session ownership and edge election in Fabric while keeping local readiness enforcement in FluxVM.
 
-NAT state is created in the map instance attached to the client/uplink edge. Replies are restored on that same interface's TC egress hook (`fvm_svc_rev`). Remote-backend replies that re-enter a north-south uplink can also be restored on TC ingress. This keeps east-west, local north-south, and XDP-accelerated NAT symmetric without a global userspace conntrack service.
+## HA state transfer
 
-## Failure behavior
+The REST contract can export/import only these service-owned maps:
 
-A service frontend hit never silently bypasses on a missing Maglev/backend entry. During catalog replacement `fluxvm_sguard=1`; TCP/UDP service traffic is over-denied until the full map transaction succeeds. XDP falls back to TC when FIB lookup cannot accelerate a route, without modifying the packet first.
+- `fluxvm_fct4`, `fluxvm_fct6`;
+- `fluxvm_nat4`, `fluxvm_nat6`.
+
+Import verifies schema, service name/id and a fixed map allowlist. Fabric decides if/when a standby edge should receive this state.
+
+## Safety
+
+- frontend hit with no eligible backend: drop;
+- map update: fail closed with the service guard;
+- XDP FIB miss: untouched packet falls through to TC;
+- foreign/Cilium XDP: FluxVM refuses replacement;
+- service schema changes rebuild owned pin roots instead of reusing incompatible maps;
+- service-catalog updates preserve lifecycle state maps;
+- imported HA state cannot target arbitrary BPF maps.
