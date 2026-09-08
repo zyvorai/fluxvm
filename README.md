@@ -1162,16 +1162,24 @@ walkthrough per distro family (Debian/Ubuntu, RHEL-family, Arch Linux), includin
 Arch specifically needs (empty keyring, missing `/etc/mtab`) that `build-image` handles for you
 automatically.
 
-### Windows images (GuestKit offline + QGA live)
+### Windows images (Kryton golden → GuestKit offline + QGA live)
 
 Linux fields (`packages`, `commands`, `enable_services`, `ssh_key`, top-level `hostname`) cannot be
 combined with a `windows{}` block. Offline customize uses GuestKit registry plans +
 `inject_windows_agent` (needs host `libhivex` / `hivex-devel`, and the sibling guestkit checkout
 built with `registry-write` + `agent` — already enabled by `fluxvm-image`).
 
+**Golden disks** come from sibling [Kryton](https://github.com/zyvorai/kryton)
+(`scripts/build-golden-image.sh`); FluxVM does not vendor Windows media. See
+[`docs/windows-golden.md`](docs/windows-golden.md). Tiny11 labs:
+[`docs/tiny-windows.md`](docs/tiny-windows.md).
+
 ```bash
-# Edit paths in examples/build-image-windows.json, then:
-sudo fluxvm --config /etc/fluxvm.toml build-image --spec examples/build-image-windows.json
+# Build/install a Kryton golden (11e / tiny11 / …) into /var/lib/fluxvm/images/:
+./scripts/prepare-windows-golden.sh --build --version 11e
+
+# Edit agent paths in examples/build-image-kryton-golden.json, then:
+sudo fluxvm --config /etc/fluxvm.toml build-image --spec examples/build-image-kryton-golden.json
 
 # Boot with QEMU virtio-serial QGA (Zyvor/GuestKit Windows agent):
 sudo fluxvm --config /etc/fluxvm.toml create --spec examples/windows-qga.json
@@ -1184,7 +1192,9 @@ fluxvm qga firewall-close <id> --name ZyvorApp
 ```
 
 REST mirrors the CLI: `POST /v1/vms/{id}/qga/ping|exec|firewall/open|firewall/close`.
-Gated offline smoke: `WINDOWS_IMAGE=… sudo -E ./scripts/test-windows-customize.sh`.
+Gated offline smoke: `WINDOWS_IMAGE=…` or `KRYTON_WINDOWS_IMAGE=…`
+`sudo -E ./scripts/test-windows-customize.sh`. Boot+QGA smoke:
+`./scripts/test-tiny11-windows.sh`.
 
 ## Image catalog & signing
 

@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-# Gated Windows offline-customize smoke test. Skips unless WINDOWS_IMAGE is set
-# to a Windows qcow2/raw disk. Does not boot the guest.
+# Gated Windows offline-customize smoke test. Skips unless WINDOWS_IMAGE or
+# KRYTON_WINDOWS_IMAGE is set to a Windows qcow2/raw disk. Does not boot the guest.
+# Prefer Kryton goldens: docs/windows-golden.md / scripts/prepare-windows-golden.sh
 #
 # Usage:
 #   WINDOWS_IMAGE=/path/to/win.qcow2 \
 #   WINDOWS_AGENT_EXE=/path/to/guestkitd.exe \
 #   [VIRTIO_SERIAL_DIR=/usr/share/virtio-win/vioserial/w10/amd64] \
 #   sudo -E ./scripts/test-windows-customize.sh
+#   KRYTON_WINDOWS_IMAGE=../kryton/out/windows-11e-golden.qcow2 \
+#     sudo -E ./scripts/test-windows-customize.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,8 +19,10 @@ FLUXVM_BIN="${FLUXVM_BIN:-$ROOT/target/release/fluxvm}"
 OUT_DIR="${OUT_DIR:-/tmp/fluxvm-windows-customize}"
 mkdir -p "$OUT_DIR"
 
-if [[ -z "${WINDOWS_IMAGE:-}" ]]; then
-  echo "SKIP: set WINDOWS_IMAGE to a Windows disk image to run this test"
+WINDOWS_IMAGE="${WINDOWS_IMAGE:-${KRYTON_WINDOWS_IMAGE:-}}"
+
+if [[ -z "${WINDOWS_IMAGE}" ]]; then
+  echo "SKIP: set WINDOWS_IMAGE or KRYTON_WINDOWS_IMAGE to a Windows disk image"
   exit 0
 fi
 

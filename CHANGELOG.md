@@ -3,6 +3,11 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Windows Kryton golden path** — sibling [Kryton](https://github.com/zyvorai/kryton)
+  builds sysprepped qcow2; `scripts/prepare-windows-golden.sh` installs under
+  `/var/lib/fluxvm/images/`; docs [`windows-golden.md`](docs/windows-golden.md) /
+  [`tiny-windows.md`](docs/tiny-windows.md); examples `build-image-kryton-golden.json`,
+  Tiny11 QGA/TAP; gated smokes accept `KRYTON_WINDOWS_IMAGE`.
 - **In-tree KVM memory snapshots (Phase 3c)** — paused `FLUXKVM1` mmap dump +
   GPRs/sregs; restore via control API. Lab-only (not Firecracker-compatible).
   Smoke: `scripts/test-kvm-snapshot-smoke.sh`.
