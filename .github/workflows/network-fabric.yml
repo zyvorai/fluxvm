@@ -56,8 +56,9 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             libsystemd-dev libhivex-dev \
-            clang llvm libbpf-dev bpftool iproute2 nftables iputils-ping
-
+            clang llvm libbpf-dev linux-tools-common linux-tools-generic \
+            iproute2 nftables iputils-ping
+          # Ubuntu runners ship bpftool via linux-tools-*; bare `bpftool` apt name is often missing.
       - name: Flow exporter unit tests
         working-directory: fluxvm
         run: python3 scripts/test_flow_exporter.py
