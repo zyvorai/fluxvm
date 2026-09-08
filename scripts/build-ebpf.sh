@@ -36,7 +36,7 @@ if command -v gcc >/dev/null 2>&1; then
   fi
 fi
 
-for src in fluxvm_tc fluxvm_xdp; do
+for src in fluxvm_tc fluxvm_xdp fluxvm_service; do
   "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
 done
 
@@ -47,3 +47,4 @@ done
 echo "built:"
 echo "  $OUT_DIR/fluxvm_tc.bpf.o"
 echo "  $OUT_DIR/fluxvm_xdp.bpf.o"
+echo "  $OUT_DIR/fluxvm_service.bpf.o"

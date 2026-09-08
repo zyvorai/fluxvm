@@ -64,11 +64,7 @@ type ApiResult<T> = Result<T, ApiError>;
 /// one carry their resolved `Role` (and optional token name) onward.
 /// Fail-closed when `auth.must_authenticate(listen)` is true.
 /// Static `[[auth.tokens]]` are tried first; OIDC JWTs when configured.
-async fn auth_middleware(
-    State(auth): State<AuthState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: Next) -> Response {
     let m = &auth.manager;
     let path = req.uri().path().to_string();
     let method = req.method().clone();
@@ -259,6 +255,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/network/flows", get(vm_network_flows))
         .route("/v1/vms/{id}/network/status", get(vm_network_status))
         .route(
+            "/v1/vms/{id}/network/services/stats",
+            get(vm_network_service_stats),
+        )
+        .route(
             "/v1/vms/{id}/network/policy",
             get(get_vm_network_policy).post(set_vm_network_policy),
         )
@@ -271,13 +271,18 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(list_network_groups).post(upsert_network_group),
         )
         .route(
+            "/v1/network/services",
+            get(list_network_services).post(upsert_network_service),
+        )
+        .route(
+            "/v1/network/services/{name}",
+            get(get_network_service).delete(delete_network_service),
+        )
+        .route(
             "/v1/network/groups/{name}",
             get(get_network_group).delete(delete_network_group),
         )
-        .route(
-            "/v1/network/cnp",
-            get(list_cnp).post(apply_cnp),
-        )
+        .route("/v1/network/cnp", get(list_cnp).post(apply_cnp))
         .route("/v1/network/cnp/{name}", get(get_cnp).delete(delete_cnp))
         .route("/v1/network/identities", get(list_identities))
         .route("/v1/network/observe", get(network_observe))
@@ -1046,6 +1051,63 @@ async fn get_vm_network_policy(
     Ok(Json(json!(m.network_policy(id).await?)))
 }
 
+async fn vm_network_service_stats(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"items": fluxvm_network::service::stats_for_vm(&m.cfg, id)?}),
+    ))
+}
+
+async fn list_network_services(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"items": fluxvm_network::service::list(&m.cfg)?}),
+    ))
+}
+
+async fn get_network_service(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    match fluxvm_network::service::get(&m.cfg, &name)? {
+        Some(service) => Ok(Json(json!(service))),
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service '{name}' not found"),
+        }),
+    }
+}
+
+async fn upsert_network_service(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(service): Json<fluxvm_network::service::ServiceSpec>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::service::upsert(
+        &m.cfg, service
+    )?)))
+}
+
+async fn delete_network_service(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let deleted = fluxvm_network::service::delete(&m.cfg, &name)?;
+    if !deleted {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service '{name}' not found"),
+        });
+    }
+    Ok(Json(json!({"deleted": name})))
+}
+
 async fn list_network_groups(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -1078,9 +1140,7 @@ async fn delete_network_group(
     Ok(Json(json!({"deleted": name})))
 }
 
-async fn list_cnp(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn list_cnp(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.list_cnp().await?})))
 }
 
@@ -1110,33 +1170,23 @@ async fn delete_cnp(
     Ok(Json(json!({"deleted": name})))
 }
 
-async fn list_identities(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn list_identities(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.list_identities().await?})))
 }
 
-async fn network_observe(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn network_observe(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(m.network_observe().await?)))
 }
 
-async fn network_health(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn network_health(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(m.network_health().await?)))
 }
 
-async fn network_ipcache(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn network_ipcache(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_ipcache().await?})))
 }
 
-async fn list_endpoints(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn list_endpoints(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_endpoints().await?})))
 }
 
@@ -1182,7 +1232,7 @@ async fn hubble_flows_text(
     State(m): State<Arc<VmManager>>,
     Query(q): Query<HubbleFlowsQuery>,
 ) -> impl axum::response::IntoResponse {
-    use fluxvm_network::packetflow::{filter_views, render_flows, FlowOutput};
+    use fluxvm_network::packetflow::{FlowOutput, filter_views, render_flows};
     let views = match m.hubble_observe_views(q.limit).await {
         Ok(v) => filter_views(v, Some(q.verdict.as_str()), Some(q.protocol.as_str())),
         Err(e) => {
@@ -1190,7 +1240,7 @@ async fn hubble_flows_text(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
                 format!("error: {e:#}\n"),
-            )
+            );
         }
     };
     let mode = FlowOutput::parse(&q.output);
@@ -1204,10 +1254,7 @@ async fn hubble_flows_text(
 
 async fn hubble_ui() -> impl axum::response::IntoResponse {
     (
-        [(
-            header::CONTENT_TYPE,
-            "text/html; charset=utf-8",
-        )],
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         HUBBLE_UI_HTML,
     )
 }
@@ -1761,7 +1808,7 @@ mod tests {
                     token: None,
                 }),
                 qga: None,
-            hyperv: false,
+                hyperv: false,
                 storage: Default::default(),
                 shared_folders: vec![],
                 numa_node: None,

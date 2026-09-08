@@ -261,6 +261,7 @@ pub fn apply_sandbox_policy(
             match native {
                 Ok(()) => {
                     crate::ebpf::commit_policy_fingerprint(id, base_fingerprint)?;
+                    crate::service::ensure_for_vm(cfg, id, iface)?;
                     Ok(())
                 }
                 Err(e) if dp.required || policy_uses_native_only_features(&policy) => Err(e),
@@ -334,25 +335,29 @@ pub fn reconfigure_sandbox_policy(
 
     match dp.mode {
         DataplaneMode::Legacy => {
-            let cidr = guest_cidr.context(
-                "legacy nftables policy update requires a FluxVM-known guest CIDR",
-            )?;
+            let cidr = guest_cidr
+                .context("legacy nftables policy update requires a FluxVM-known guest CIDR")?;
             apply_nftables(id, cidr, &policy)
-        },
+        }
         DataplaneMode::Ebpf | DataplaneMode::Cilium => {
             if dp.mode == DataplaneMode::Cilium {
                 crate::cilium::validate_host()?;
             }
             let status = crate::ebpf::attachment_status(dp, id)?;
+            // Service attach and (when needed) TC repair both need an iface:
+            // prefer the caller's edge, else the currently attached one.
+            let iface = iface
+                .or(status.interface.as_deref())
+                .context(
+                    "native policy update needs a host-visible VM interface to repair attachment",
+                )?;
             if status.attached {
                 crate::ebpf::reconfigure(dp, &policy, id)?;
             } else {
-                let iface = iface.context(
-                    "native policy update needs a host-visible VM interface to repair attachment",
-                )?;
                 crate::ebpf::apply(dp, &policy, id, iface)?;
             }
             crate::ebpf::commit_policy_fingerprint(id, base_fingerprint)?;
+            crate::service::ensure_for_vm(cfg, id, iface)?;
             Ok(())
         }
     }
@@ -453,15 +458,17 @@ pub fn ensure_sandbox_policy(
     policy.allow_cidrs.sort();
     policy.allow_cidrs.dedup();
 
+    let service_repaired = crate::service::ensure_for_vm(cfg, id, iface)?;
     let status = crate::ebpf::attachment_status(dp, id)?;
     if status.attached
         && status.interface.as_deref() == Some(iface)
         && status.policy_fingerprint == Some(desired_fingerprint)
     {
-        return Ok(false);
+        return Ok(service_repaired);
     }
     crate::ebpf::apply(dp, &policy, id, iface)?;
     crate::ebpf::commit_policy_fingerprint(id, desired_fingerprint)?;
+    crate::service::ensure_for_vm(cfg, id, iface)?;
     Ok(true)
 }
 
@@ -505,7 +512,9 @@ pub fn health(cfg: &Config) -> Result<DataplaneHealth> {
     let pin_root_present = dp.pin_root.exists();
     let bpffs_present = std::path::Path::new("/sys/fs/bpf").exists();
     let cilium_socket_present = std::path::Path::new("/var/run/cilium/cilium.sock").exists();
-    let groups = crate::groups::list_groups(cfg).map(|g| g.len()).unwrap_or(0);
+    let groups = crate::groups::list_groups(cfg)
+        .map(|g| g.len())
+        .unwrap_or(0);
     let policies = crate::cnp::list_cnp(cfg).map(|g| g.len()).unwrap_or(0);
     let ipcache_entries = crate::ipcache::list(cfg).map(|e| e.len()).unwrap_or(0);
     let mut notes = Vec::new();
@@ -515,7 +524,9 @@ pub fn health(cfg: &Config) -> Result<DataplaneHealth> {
     if dp.mode == DataplaneMode::Cilium && !cilium_socket_present {
         notes.push("mode=cilium but cilium.sock is not visible".into());
     }
-    if dp.required && matches!(dp.mode, DataplaneMode::Ebpf | DataplaneMode::Cilium) && !bpffs_present
+    if dp.required
+        && matches!(dp.mode, DataplaneMode::Ebpf | DataplaneMode::Cilium)
+        && !bpffs_present
     {
         notes.push("required native dataplane but /sys/fs/bpf is missing".into());
     }
@@ -568,11 +579,29 @@ pub fn apply_subnet_masquerade(table: &str, source_cidr: &str) -> Result<()> {
     let _ = run_nft(&["delete", "table", "inet", table]);
     run_nft(&["add", "table", "inet", table])?;
     run_nft(&[
-        "add", "chain", "inet", table, "postrouting", "{", "type", "nat", "hook",
-        "postrouting", "priority", "srcnat;", "}",
+        "add",
+        "chain",
+        "inet",
+        table,
+        "postrouting",
+        "{",
+        "type",
+        "nat",
+        "hook",
+        "postrouting",
+        "priority",
+        "srcnat;",
+        "}",
     ])?;
     run_nft(&[
-        "add", "rule", "inet", table, "postrouting", "ip", "saddr", source_cidr,
+        "add",
+        "rule",
+        "inet",
+        table,
+        "postrouting",
+        "ip",
+        "saddr",
+        source_cidr,
         "masquerade",
     ])?;
     Ok(())
@@ -612,8 +641,8 @@ fn apply_nftables(id: Uuid, guest_cidr: &str, policy: &VmNetworkPolicy) -> Resul
             (true, false) => {
                 for cidr in &policy.allow_cidrs {
                     run_nft(&[
-                        "add", "rule", "inet", &table, "forward", "ip", "saddr", guest_cidr,
-                        "ip", "daddr", cidr, "accept",
+                        "add", "rule", "inet", &table, "forward", "ip", "saddr", guest_cidr, "ip",
+                        "daddr", cidr, "accept",
                     ])?;
                 }
             }
@@ -622,8 +651,8 @@ fn apply_nftables(id: Uuid, guest_cidr: &str, policy: &VmNetworkPolicy) -> Resul
                     let (proto, port) = parse_nft_port_rule(rule)?;
                     let port = port.to_string();
                     run_nft(&[
-                        "add", "rule", "inet", &table, "forward", "ip", "saddr", guest_cidr,
-                        proto, "dport", &port, "accept",
+                        "add", "rule", "inet", &table, "forward", "ip", "saddr", guest_cidr, proto,
+                        "dport", &port, "accept",
                     ])?;
                 }
             }
@@ -632,8 +661,15 @@ fn apply_nftables(id: Uuid, guest_cidr: &str, policy: &VmNetworkPolicy) -> Resul
 
         if has_cidrs || has_ports {
             run_nft(&[
-                "add", "rule", "inet", &table, "forward", "ct", "state",
-                "established,related", "accept",
+                "add",
+                "rule",
+                "inet",
+                &table,
+                "forward",
+                "ct",
+                "state",
+                "established,related",
+                "accept",
             ])?;
         }
     }
@@ -757,8 +793,13 @@ mod tests {
         let base = VmNetworkPolicy::default();
         let mut changed = base.clone();
         changed.default_allow = false;
-        assert_ne!(policy_fingerprint(&base).unwrap(), policy_fingerprint(&changed).unwrap());
-        assert_eq!(policy_fingerprint(&base).unwrap(), policy_fingerprint(&base).unwrap());
+        assert_ne!(
+            policy_fingerprint(&base).unwrap(),
+            policy_fingerprint(&changed).unwrap()
+        );
+        assert_eq!(
+            policy_fingerprint(&base).unwrap(),
+            policy_fingerprint(&base).unwrap()
+        );
     }
-
 }
