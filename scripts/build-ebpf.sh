@@ -36,8 +36,16 @@ if command -v gcc >/dev/null 2>&1; then
   fi
 fi
 
-for src in fluxvm_tc fluxvm_xdp fluxvm_service fluxvm_service_xdp fluxvm_service_connect; do
+# Service programs exceed clang 18's default 512-byte BPF stack verifier view;
+# raise the compile-time stack size so Maglev/NAT/policy frames fit (runtime
+# verifier still enforces the kernel limit via per-CPU scratch where needed).
+SERVICE_CFLAGS=("${CFLAGS[@]}" -mllvm -bpf-stack-size=768)
+
+for src in fluxvm_tc fluxvm_xdp; do
   "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
+done
+for src in fluxvm_service fluxvm_service_xdp fluxvm_service_connect; do
+  "$CLANG" "${SERVICE_CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
 done
 
 # Keep BTF sections intact. bpftool/libbpf uses the BTF-described map
