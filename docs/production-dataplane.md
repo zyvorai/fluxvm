@@ -46,8 +46,9 @@ the response returns the count refreshed and does not fail the whole host.
 FluxVM is not a cluster CNI or kube-proxy replacement. WireGuard datapath, L7
 Envoy parsers, and a full Hubble UI remain out of this runbook.
 
-**Service load balancing** is a separate plane: Service Fabric **v5 (BPF schema 4)**
-(Maglev / NAT / DSR / affinity / health / EDT / FluxScope / host-routing / HA deltas) — see
+**Service load balancing** is a separate plane: Service Fabric **v6 (BPF schema 4 /
+program generation 6)** (Maglev / NAT / DSR / affinity / health / EDT / FluxScope /
+host-routing / HA deltas + mutation queue / identity+L7 policy) — see
 [service-fabric.md](service-fabric.md). Do not conflate it with per-VM Network
 Fabric schema v4 policy.
 

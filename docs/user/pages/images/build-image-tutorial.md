@@ -147,6 +147,11 @@ enables `sshd` (which *is* preinstalled) instead — add `"cronie"` to
 
 ## Windows images
 
+Golden disks come from sibling **[Kryton](https://github.com/zyvorai/kryton)**
+(sysprepped qcow2) — see [windows-golden.md](../../../windows-golden.md) and
+`./scripts/prepare-windows-golden.sh`. Tiny11 labs:
+[tiny-windows.md](../../../tiny-windows.md).
+
 Use a `windows{}` block instead of Linux fields. Do **not** mix
 `windows{}` with `packages`, `commands`, `enable_services`, `ssh_key`,
 `copy_in`, or top-level `hostname`.

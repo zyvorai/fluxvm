@@ -11,7 +11,7 @@ A standalone, minimal-dependency disposable-VM control plane — QEMU/KVM, Cloud
 | Deploy, systemd, ports | [Admin basics](admin-basics.md) |
 | Run as a Kubernetes DaemonSet | [Kubernetes deployment](kubernetes-deployment.md) |
 | Use with Ragnarok (UI + SSO) | [Ragnarok integration](ragnarok-integration.md) |
-| Build a custom OS image | [Building custom OS images](build-image-tutorial.md) |
+| Build a custom OS image | [Building custom OS images](build-image-tutorial.md) · [Windows Kryton goldens](../windows-golden.md) |
 | See what it's actually used for | [Use cases](use-cases.md) |
 | Full topic index | [PAGE_INDEX.md](PAGE_INDEX.md) |
 

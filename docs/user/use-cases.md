@@ -45,7 +45,8 @@ hostname, SSH keys, a baked-in agent binary — and reuse it across every VM
 you create from it, instead of provisioning each VM from scratch at boot
 time. See [Building custom OS images](build-image-tutorial.md) for the full
 walkthrough across Debian/Ubuntu, RHEL-family, Arch, and Windows (`windows{}`
-+ Zyvor GuestKit agent).
++ Zyvor GuestKit agent; [Kryton goldens](../windows-golden.md) /
+[Tiny Windows](../tiny-windows.md)).
 
 Pair it with the image catalog (SHA-256 + optional Ed25519 signing) to give
 every VM a provenance guarantee — a tenant references an image by name, and

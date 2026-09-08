@@ -214,6 +214,10 @@ sudo TEST_SERVICE=crond ./scripts/test-image-customize.sh --image /path/to/rocky
 
 ## Windows images
 
+Golden disks come from sibling **[Kryton](https://github.com/zyvorai/kryton)** —
+[windows-golden.md](windows-golden.md), `./scripts/prepare-windows-golden.sh`.
+Tiny11: [tiny-windows.md](tiny-windows.md).
+
 Use a `windows{}` block instead of Linux fields. Host needs `libhivex-dev` /
 `hivex-devel` (see `scripts/bootstrap-host.sh`).
 

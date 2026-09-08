@@ -41,7 +41,7 @@ Regenerate: `node scripts/user-docs/generate-page-index.mjs`
 
 | Page | Route | Purpose | Guide |
 |------|-------|---------|-------|
-| Build Custom Images | `build-image-tutorial` | Build and customize Linux or Windows guest images (GuestKit). | [Open](pages/images/build-image-tutorial.md) |
+| Build Custom Images | `build-image-tutorial` | Build and customize Linux or Windows guest images (GuestKit; Kryton goldens for Windows). | [Open](pages/images/build-image-tutorial.md) |
 
 ## Integrations
 
