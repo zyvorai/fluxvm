@@ -334,6 +334,85 @@ struct {
     __type(value, struct edt_state);
 } fluxvm_edt SEC(".maps");
 
+/* TC-private per-CPU scratch so large locals fit the kernel 512B stack. */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct bpf_fib_lookup);
+} fluxvm_fib_scratch SEC(".maps");
+
+static __always_inline struct bpf_fib_lookup *fib_scratch(void)
+{
+    __u32 zero = 0;
+    return bpf_map_lookup_elem(&fluxvm_fib_scratch, &zero);
+}
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct svc_flow_key);
+} fluxvm_flow_scratch SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct svc_flow_value);
+} fluxvm_flow_val_scratch SEC(".maps");
+
+static __always_inline struct svc_flow_key *flow_key_scratch(void)
+{
+    __u32 zero = 0;
+    return bpf_map_lookup_elem(&fluxvm_flow_scratch, &zero);
+}
+
+static __always_inline struct svc_flow_value *flow_val_scratch(void)
+{
+    __u32 zero = 0;
+    return bpf_map_lookup_elem(&fluxvm_flow_val_scratch, &zero);
+}
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct nat6_key);
+} fluxvm_nat6_key_scratch SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct nat6_value);
+} fluxvm_nat6_val_scratch SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct fct6_key);
+} fluxvm_fct6_key_scratch SEC(".maps");
+
+static __always_inline struct nat6_key *nat6_key_scratch(void)
+{
+    __u32 zero = 0;
+    return bpf_map_lookup_elem(&fluxvm_nat6_key_scratch, &zero);
+}
+
+static __always_inline struct nat6_value *nat6_val_scratch(void)
+{
+    __u32 zero = 0;
+    return bpf_map_lookup_elem(&fluxvm_nat6_val_scratch, &zero);
+}
+
+static __always_inline struct fct6_key *fct6_key_scratch(void)
+{
+    __u32 zero = 0;
+    return bpf_map_lookup_elem(&fluxvm_fct6_key_scratch, &zero);
+}
+
 #include "fluxvm_service_v6.bpf.h"
 
 static __always_inline int update_guard_enabled(void)
@@ -470,21 +549,31 @@ static __always_inline void record_flow4_raw(
     __u8 verdict, __u8 reason)
 {
     if (!should_record(verdict, svc->flow_sample_rate)) return;
-    struct svc_flow_key key = {
-        .service_id = svc->service_id, .backend_id = bid,
-        .sport = sport, .dport = dport, .family = 4, .protocol = protocol,
-        .verdict = verdict, .reason = reason,
-    };
-    __builtin_memcpy(key.src, &src, 4);
-    __builtin_memcpy(key.dst, &dst, 4);
-    struct svc_flow_value *v = bpf_map_lookup_elem(&fluxvm_sflows, &key);
+    struct svc_flow_key *key = flow_key_scratch();
+    if (!key) return;
+    __builtin_memset(key, 0, sizeof(*key));
+    key->service_id = svc->service_id;
+    key->backend_id = bid;
+    key->sport = sport;
+    key->dport = dport;
+    key->family = 4;
+    key->protocol = protocol;
+    key->verdict = verdict;
+    key->reason = reason;
+    __builtin_memcpy(key->src, &src, 4);
+    __builtin_memcpy(key->dst, &dst, 4);
+    struct svc_flow_value *v = bpf_map_lookup_elem(&fluxvm_sflows, key);
     if (v) {
         __sync_fetch_and_add(&v->packets, 1);
         __sync_fetch_and_add(&v->bytes, skb->len);
         v->last_seen_ns = bpf_ktime_get_ns();
     } else {
-        struct svc_flow_value first = {.packets=1, .bytes=skb->len, .last_seen_ns=bpf_ktime_get_ns()};
-        bpf_map_update_elem(&fluxvm_sflows, &key, &first, BPF_NOEXIST);
+        struct svc_flow_value *first = flow_val_scratch();
+        if (!first) return;
+        first->packets = 1;
+        first->bytes = skb->len;
+        first->last_seen_ns = bpf_ktime_get_ns();
+        bpf_map_update_elem(&fluxvm_sflows, key, first, BPF_NOEXIST);
     }
     struct service_stat *stat = stat_for(svc->service_id);
     if (stat) stat->flow_events += 1;
@@ -504,21 +593,31 @@ static __always_inline void record_flow6_raw(
     __u8 verdict, __u8 reason)
 {
     if (!should_record(verdict, svc->flow_sample_rate)) return;
-    struct svc_flow_key key = {
-        .service_id = svc->service_id, .backend_id = bid,
-        .sport = sport, .dport = dport, .family = 6, .protocol = protocol,
-        .verdict = verdict, .reason = reason,
-    };
-    __builtin_memcpy(key.src, src, 16);
-    __builtin_memcpy(key.dst, dst, 16);
-    struct svc_flow_value *v = bpf_map_lookup_elem(&fluxvm_sflows, &key);
+    struct svc_flow_key *key = flow_key_scratch();
+    if (!key) return;
+    __builtin_memset(key, 0, sizeof(*key));
+    key->service_id = svc->service_id;
+    key->backend_id = bid;
+    key->sport = sport;
+    key->dport = dport;
+    key->family = 6;
+    key->protocol = protocol;
+    key->verdict = verdict;
+    key->reason = reason;
+    __builtin_memcpy(key->src, src, 16);
+    __builtin_memcpy(key->dst, dst, 16);
+    struct svc_flow_value *v = bpf_map_lookup_elem(&fluxvm_sflows, key);
     if (v) {
         __sync_fetch_and_add(&v->packets, 1);
         __sync_fetch_and_add(&v->bytes, skb->len);
         v->last_seen_ns = bpf_ktime_get_ns();
     } else {
-        struct svc_flow_value first = {.packets=1, .bytes=skb->len, .last_seen_ns=bpf_ktime_get_ns()};
-        bpf_map_update_elem(&fluxvm_sflows, &key, &first, BPF_NOEXIST);
+        struct svc_flow_value *first = flow_val_scratch();
+        if (!first) return;
+        first->packets = 1;
+        first->bytes = skb->len;
+        first->last_seen_ns = bpf_ktime_get_ns();
+        bpf_map_update_elem(&fluxvm_sflows, key, first, BPF_NOEXIST);
     }
     struct service_stat *stat = stat_for(svc->service_id);
     if (stat) stat->flow_events += 1;
@@ -647,22 +746,23 @@ static __always_inline int affinity6(
     __u32 sid, struct ipv6hdr *ip6, void *data_end, __u16 sport, __u16 dport,
     __u32 *backend_id)
 {
-    struct fct6_key key = {
-        .client_port = sport,
-        .vip_port = dport,
-        .protocol = ip6->nexthdr,
-        .pad = {0, 0, 0},
-    };
-    __builtin_memcpy(key.client_address, ip6->saddr.in6_u.u6_addr8, 16);
-    __builtin_memcpy(key.vip_address, ip6->daddr.in6_u.u6_addr8, 16);
-    struct fct_value *ct = bpf_map_lookup_elem(&fluxvm_fct6, &key);
+    struct fct6_key *key = fct6_key_scratch();
+    if (!key)
+        return 0;
+    __builtin_memset(key, 0, sizeof(*key));
+    key->client_port = sport;
+    key->vip_port = dport;
+    key->protocol = ip6->nexthdr;
+    __builtin_memcpy(key->client_address, ip6->saddr.in6_u.u6_addr8, 16);
+    __builtin_memcpy(key->vip_address, ip6->daddr.in6_u.u6_addr8, 16);
+    struct fct_value *ct = bpf_map_lookup_elem(&fluxvm_fct6, key);
     __u64 now = bpf_ktime_get_ns();
     if (!ct || ct->service_id != sid) {
         count_ct(sid, 0, 0);
         return 0;
     }
     if (ct->expires_at_ns <= now) {
-        bpf_map_delete_elem(&fluxvm_fct6, &key);
+        bpf_map_delete_elem(&fluxvm_fct6, key);
         count_ct(sid, 0, 1);
         return 0;
     }
@@ -670,7 +770,7 @@ static __always_inline int affinity6(
     struct backend6_value *be = bpf_map_lookup_elem(&fluxvm_backend6, &bk);
     if (!be || !(be->flags & (FLUXVM_SVC_BACKEND_READY | FLUXVM_SVC_BACKEND_DRAINING)) ||
         (be->flags & FLUXVM_SVC_BACKEND_UNHEALTHY)) {
-        bpf_map_delete_elem(&fluxvm_fct6, &key);
+        bpf_map_delete_elem(&fluxvm_fct6, key);
         count_ct(sid, 0, 0);
         return 0;
     }
@@ -685,36 +785,38 @@ static __always_inline void learn_affinity6(
     __u32 sid, __u32 bid, struct ipv6hdr *ip6, void *data_end, __u16 sport, __u16 dport)
 {
     __u64 now = bpf_ktime_get_ns();
-    struct fct6_key key = {
-        .client_port = sport,
-        .vip_port = dport,
-        .protocol = ip6->nexthdr,
-        .pad = {0, 0, 0},
-    };
-    __builtin_memcpy(key.client_address, ip6->saddr.in6_u.u6_addr8, 16);
-    __builtin_memcpy(key.vip_address, ip6->daddr.in6_u.u6_addr8, 16);
+    struct fct6_key *key = fct6_key_scratch();
+    if (!key)
+        return;
+    __builtin_memset(key, 0, sizeof(*key));
+    key->client_port = sport;
+    key->vip_port = dport;
+    key->protocol = ip6->nexthdr;
+    __builtin_memcpy(key->client_address, ip6->saddr.in6_u.u6_addr8, 16);
+    __builtin_memcpy(key->vip_address, ip6->daddr.in6_u.u6_addr8, 16);
     struct fct_value value = {
         .service_id = sid,
         .backend_id = bid,
         .last_seen_ns = now,
         .expires_at_ns = now + timeout6(ip6, data_end),
     };
-    if (bpf_map_update_elem(&fluxvm_fct6, &key, &value, BPF_ANY) == 0)
-        fluxvm_ha_fct6(sid, bid, FLUXVM_HA_OP_UPSERT, ip6->nexthdr, &key, &value);
+    if (bpf_map_update_elem(&fluxvm_fct6, key, &value, BPF_ANY) == 0)
+        fluxvm_ha_fct6(sid, bid, FLUXVM_HA_OP_UPSERT, ip6->nexthdr, key, &value);
 }
 
 static __always_inline void delete_affinity6(
     const __u8 *client, const __u8 *vip, __u16 sport, __u16 dport, __u8 protocol)
 {
-    struct fct6_key key = {
-        .client_port = sport,
-        .vip_port = dport,
-        .protocol = protocol,
-        .pad = {0, 0, 0},
-    };
-    __builtin_memcpy(key.client_address, client, 16);
-    __builtin_memcpy(key.vip_address, vip, 16);
-    bpf_map_delete_elem(&fluxvm_fct6, &key);
+    struct fct6_key *key = fct6_key_scratch();
+    if (!key)
+        return;
+    __builtin_memset(key, 0, sizeof(*key));
+    key->client_port = sport;
+    key->vip_port = dport;
+    key->protocol = protocol;
+    __builtin_memcpy(key->client_address, client, 16);
+    __builtin_memcpy(key->vip_address, vip, 16);
+    bpf_map_delete_elem(&fluxvm_fct6, key);
 }
 
 static __always_inline __u32 mix32(__u32 x)
@@ -837,6 +939,10 @@ static __always_inline __u16 reserve_nat6(
     const __u8 *client, __u16 client_port, const __u8 *vip, __u16 vip_port,
     __u32 sid, __u32 bid, __u32 hash)
 {
+    struct nat6_key *key = nat6_key_scratch();
+    struct nat6_value *value = nat6_val_scratch();
+    if (!key || !value)
+        return 0;
 #pragma unroll
     for (int i = 0; i < FLUXVM_NAT_PORT_PROBES; i++) {
         __u16 port = i == 0 ? client_port :
@@ -844,15 +950,13 @@ static __always_inline __u16 reserve_nat6(
                     ((hash + (__u32)i * 7919u) % FLUXVM_NAT_PORT_SPAN));
         if (port == 0)
             continue;
-        struct nat6_key key = {
-            .backend_port = backend_port,
-            .reply_port = port,
-            .protocol = protocol,
-            .pad = {0, 0, 0},
-        };
-        __builtin_memcpy(key.backend_address, backend, 16);
-        __builtin_memcpy(key.reply_address, reply_addr, 16);
-        struct nat6_value *hit = bpf_map_lookup_elem(&fluxvm_nat6, &key);
+        __builtin_memset(key, 0, sizeof(*key));
+        key->backend_port = backend_port;
+        key->reply_port = port;
+        key->protocol = protocol;
+        __builtin_memcpy(key->backend_address, backend, 16);
+        __builtin_memcpy(key->reply_address, reply_addr, 16);
+        struct nat6_value *hit = bpf_map_lookup_elem(&fluxvm_nat6, key);
         if (hit) {
             if (nat6_same(hit, client, client_port, vip, vip_port, sid, bid)) {
                 hit->last_seen_ns = bpf_ktime_get_ns();
@@ -860,21 +964,19 @@ static __always_inline __u16 reserve_nat6(
             }
             continue;
         }
-        struct nat6_value value = {
-            .service_id = sid,
-            .backend_id = bid,
-            .last_seen_ns = bpf_ktime_get_ns(),
-            .vip_port = vip_port,
-            .client_port = client_port,
-            .pad = 0,
-        };
-        __builtin_memcpy(value.client_address, client, 16);
-        __builtin_memcpy(value.vip_address, vip, 16);
-        if (bpf_map_update_elem(&fluxvm_nat6, &key, &value, BPF_NOEXIST) == 0) {
-            fluxvm_ha_nat6(sid, bid, FLUXVM_HA_OP_UPSERT, protocol, &key, &value);
+        __builtin_memset(value, 0, sizeof(*value));
+        value->service_id = sid;
+        value->backend_id = bid;
+        value->last_seen_ns = bpf_ktime_get_ns();
+        value->vip_port = vip_port;
+        value->client_port = client_port;
+        __builtin_memcpy(value->client_address, client, 16);
+        __builtin_memcpy(value->vip_address, vip, 16);
+        if (bpf_map_update_elem(&fluxvm_nat6, key, value, BPF_NOEXIST) == 0) {
+            fluxvm_ha_nat6(sid, bid, FLUXVM_HA_OP_UPSERT, protocol, key, value);
             return port;
         }
-        hit = bpf_map_lookup_elem(&fluxvm_nat6, &key);
+        hit = bpf_map_lookup_elem(&fluxvm_nat6, key);
         if (hit && nat6_same(hit, client, client_port, vip, vip_port, sid, bid))
             return port;
     }
@@ -1038,74 +1140,94 @@ static __always_inline int fib_redirect4(
     struct __sk_buff *skb, __u32 route_dst, __u32 src,
     __u8 protocol, __u16 sport, __u16 dport)
 {
-    struct bpf_fib_lookup fib = {};
-    fib.family = FLUXVM_AF_INET;
-    fib.ifindex = skb->ifindex;
-    fib.ipv4_src = src;
-    fib.ipv4_dst = route_dst;
-    fib.l4_protocol = protocol;
-    fib.sport = bpf_htons(sport);
-    fib.dport = bpf_htons(dport);
-    int rc = bpf_fib_lookup(skb, &fib, sizeof(fib), 0);
+    struct bpf_fib_lookup *fib = fib_scratch();
+    if (!fib)
+        return TC_ACT_SHOT;
+    __builtin_memset(fib, 0, sizeof(*fib));
+    fib->family = FLUXVM_AF_INET;
+    fib->ifindex = skb->ifindex;
+    fib->ipv4_src = src;
+    fib->ipv4_dst = route_dst;
+    fib->l4_protocol = protocol;
+    fib->sport = bpf_htons(sport);
+    fib->dport = bpf_htons(dport);
+    int rc = bpf_fib_lookup(skb, fib, sizeof(*fib), 0);
     if (rc != BPF_FIB_LKUP_RET_SUCCESS)
         return TC_ACT_SHOT;
-    if (bpf_skb_store_bytes(skb, 0, fib.dmac, ETH_ALEN, 0) < 0 ||
-        bpf_skb_store_bytes(skb, ETH_ALEN, fib.smac, ETH_ALEN, 0) < 0)
+    if (bpf_skb_store_bytes(skb, 0, fib->dmac, ETH_ALEN, 0) < 0 ||
+        bpf_skb_store_bytes(skb, ETH_ALEN, fib->smac, ETH_ALEN, 0) < 0)
         return TC_ACT_SHOT;
-    return bpf_redirect(fib.ifindex, 0);
+    return bpf_redirect(fib->ifindex, 0);
 }
 
 static __always_inline int fib_redirect6(
     struct __sk_buff *skb, const __u8 *route_dst, const __u8 *src,
     __u8 protocol, __u16 sport, __u16 dport)
 {
-    struct bpf_fib_lookup fib = {};
-    fib.family = FLUXVM_AF_INET6;
-    fib.ifindex = skb->ifindex;
-    __builtin_memcpy(fib.ipv6_src, src, 16);
-    __builtin_memcpy(fib.ipv6_dst, route_dst, 16);
-    fib.l4_protocol = protocol;
-    fib.sport = bpf_htons(sport);
-    fib.dport = bpf_htons(dport);
-    int rc = bpf_fib_lookup(skb, &fib, sizeof(fib), 0);
+    struct bpf_fib_lookup *fib = fib_scratch();
+    if (!fib)
+        return TC_ACT_SHOT;
+    __builtin_memset(fib, 0, sizeof(*fib));
+    fib->family = FLUXVM_AF_INET6;
+    fib->ifindex = skb->ifindex;
+    __builtin_memcpy(fib->ipv6_src, src, 16);
+    __builtin_memcpy(fib->ipv6_dst, route_dst, 16);
+    fib->l4_protocol = protocol;
+    fib->sport = bpf_htons(sport);
+    fib->dport = bpf_htons(dport);
+    int rc = bpf_fib_lookup(skb, fib, sizeof(*fib), 0);
     if (rc != BPF_FIB_LKUP_RET_SUCCESS)
         return TC_ACT_SHOT;
-    if (bpf_skb_store_bytes(skb, 0, fib.dmac, ETH_ALEN, 0) < 0 ||
-        bpf_skb_store_bytes(skb, ETH_ALEN, fib.smac, ETH_ALEN, 0) < 0)
+    if (bpf_skb_store_bytes(skb, 0, fib->dmac, ETH_ALEN, 0) < 0 ||
+        bpf_skb_store_bytes(skb, ETH_ALEN, fib->smac, ETH_ALEN, 0) < 0)
         return TC_ACT_SHOT;
-    return bpf_redirect(fib.ifindex, 0);
+    return bpf_redirect(fib->ifindex, 0);
 }
 
 static __always_inline int fib_redirect4_soft(
     struct __sk_buff *skb, __u32 route_dst, __u32 src,
     __u8 protocol, __u16 sport, __u16 dport)
 {
-    struct bpf_fib_lookup fib = {};
-    fib.family = FLUXVM_AF_INET; fib.ifindex = skb->ifindex;
-    fib.ipv4_src = src; fib.ipv4_dst = route_dst; fib.l4_protocol = protocol;
-    fib.sport = bpf_htons(sport); fib.dport = bpf_htons(dport);
-    int rc = bpf_fib_lookup(skb, &fib, sizeof(fib), 0);
+    struct bpf_fib_lookup *fib = fib_scratch();
+    if (!fib)
+        return TC_ACT_UNSPEC;
+    __builtin_memset(fib, 0, sizeof(*fib));
+    fib->family = FLUXVM_AF_INET;
+    fib->ifindex = skb->ifindex;
+    fib->ipv4_src = src;
+    fib->ipv4_dst = route_dst;
+    fib->l4_protocol = protocol;
+    fib->sport = bpf_htons(sport);
+    fib->dport = bpf_htons(dport);
+    int rc = bpf_fib_lookup(skb, fib, sizeof(*fib), 0);
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) return TC_ACT_UNSPEC;
-    if (bpf_skb_store_bytes(skb, 0, fib.dmac, ETH_ALEN, 0) < 0 ||
-        bpf_skb_store_bytes(skb, ETH_ALEN, fib.smac, ETH_ALEN, 0) < 0)
+    if (bpf_skb_store_bytes(skb, 0, fib->dmac, ETH_ALEN, 0) < 0 ||
+        bpf_skb_store_bytes(skb, ETH_ALEN, fib->smac, ETH_ALEN, 0) < 0)
         return TC_ACT_SHOT;
-    return bpf_redirect(fib.ifindex, 0);
+    return bpf_redirect(fib->ifindex, 0);
 }
 
 static __always_inline int fib_redirect6_soft(
     struct __sk_buff *skb, const __u8 *route_dst, const __u8 *src,
     __u8 protocol, __u16 sport, __u16 dport)
 {
-    struct bpf_fib_lookup fib = {};
-    fib.family = FLUXVM_AF_INET6; fib.ifindex = skb->ifindex;
-    __builtin_memcpy(fib.ipv6_src, src, 16); __builtin_memcpy(fib.ipv6_dst, route_dst, 16);
-    fib.l4_protocol = protocol; fib.sport = bpf_htons(sport); fib.dport = bpf_htons(dport);
-    int rc = bpf_fib_lookup(skb, &fib, sizeof(fib), 0);
+    struct bpf_fib_lookup *fib = fib_scratch();
+    if (!fib)
+        return TC_ACT_UNSPEC;
+    __builtin_memset(fib, 0, sizeof(*fib));
+    fib->family = FLUXVM_AF_INET6;
+    fib->ifindex = skb->ifindex;
+    __builtin_memcpy(fib->ipv6_src, src, 16);
+    __builtin_memcpy(fib->ipv6_dst, route_dst, 16);
+    fib->l4_protocol = protocol;
+    fib->sport = bpf_htons(sport);
+    fib->dport = bpf_htons(dport);
+    int rc = bpf_fib_lookup(skb, fib, sizeof(*fib), 0);
     if (rc != BPF_FIB_LKUP_RET_SUCCESS) return TC_ACT_UNSPEC;
-    if (bpf_skb_store_bytes(skb, 0, fib.dmac, ETH_ALEN, 0) < 0 ||
-        bpf_skb_store_bytes(skb, ETH_ALEN, fib.smac, ETH_ALEN, 0) < 0)
+    if (bpf_skb_store_bytes(skb, 0, fib->dmac, ETH_ALEN, 0) < 0 ||
+        bpf_skb_store_bytes(skb, ETH_ALEN, fib->smac, ETH_ALEN, 0) < 0)
         return TC_ACT_SHOT;
-    return bpf_redirect(fib.ifindex, 0);
+    return bpf_redirect(fib->ifindex, 0);
 }
 
 static __always_inline int reverse4(
@@ -1170,15 +1292,16 @@ static __always_inline int reverse6(
     int parsed = parse_ports6(ip6, data_end, &sport, &dport, &l4_off, &udp_csum);
     if (parsed <= 0)
         return 0;
-    struct nat6_key key = {
-        .backend_port = sport,
-        .reply_port = dport,
-        .protocol = ip6->nexthdr,
-        .pad = {0, 0, 0},
-    };
-    __builtin_memcpy(key.backend_address, ip6->saddr.in6_u.u6_addr8, 16);
-    __builtin_memcpy(key.reply_address, ip6->daddr.in6_u.u6_addr8, 16);
-    struct nat6_value *nat = bpf_map_lookup_elem(&fluxvm_nat6, &key);
+    struct nat6_key *key = nat6_key_scratch();
+    if (!key)
+        return 0;
+    __builtin_memset(key, 0, sizeof(*key));
+    key->backend_port = sport;
+    key->reply_port = dport;
+    key->protocol = ip6->nexthdr;
+    __builtin_memcpy(key->backend_address, ip6->saddr.in6_u.u6_addr8, 16);
+    __builtin_memcpy(key->reply_address, ip6->daddr.in6_u.u6_addr8, 16);
+    struct nat6_value *nat = bpf_map_lookup_elem(&fluxvm_nat6, key);
     if (!nat)
         return 0;
 
@@ -1186,21 +1309,22 @@ static __always_inline int reverse6(
     __u32 bid = nat->backend_id;
     __u64 now = bpf_ktime_get_ns();
     nat->last_seen_ns = now;
-    struct fct6_key fkey = {
-        .client_port = nat->client_port,
-        .vip_port = nat->vip_port,
-        .protocol = ip6->nexthdr,
-        .pad = {0, 0, 0},
-    };
-    __builtin_memcpy(fkey.client_address, nat->client_address, 16);
-    __builtin_memcpy(fkey.vip_address, nat->vip_address, 16);
+    struct fct6_key *fkey = fct6_key_scratch();
+    if (!fkey)
+        return -1;
+    __builtin_memset(fkey, 0, sizeof(*fkey));
+    fkey->client_port = nat->client_port;
+    fkey->vip_port = nat->vip_port;
+    fkey->protocol = ip6->nexthdr;
+    __builtin_memcpy(fkey->client_address, nat->client_address, 16);
+    __builtin_memcpy(fkey->vip_address, nat->vip_address, 16);
     struct fct_value fvalue = {
         .service_id = sid,
         .backend_id = bid,
         .last_seen_ns = now,
         .expires_at_ns = now + timeout6(ip6, data_end),
     };
-    bpf_map_update_elem(&fluxvm_fct6, &fkey, &fvalue, BPF_ANY);
+    bpf_map_update_elem(&fluxvm_fct6, fkey, &fvalue, BPF_ANY);
 
     __u8 old_src[16], old_dst[16], new_dst[16];
     __builtin_memcpy(old_src, ip6->saddr.in6_u.u6_addr8, 16);
@@ -1390,14 +1514,12 @@ static __always_inline int forward6(
     }
 
     if (svc->mode == FLUXVM_SVC_MODE_DSR) {
-        __u8 src6[16];
         __u8 proto6 = ip6->nexthdr;
-        __builtin_memcpy(src6, ip6->saddr.in6_u.u6_addr8, 16);
         /* Learn before fib_redirect: skb helpers invalidate packet pointers. */
         if (!pinned)
             learn_affinity6(sid, bid, ip6, data_end, sport, dport);
         int action = fib_redirect6(
-            skb, backend->address, src6, proto6, sport, dport);
+            skb, backend->address, original_src, proto6, sport, dport);
         if (action == TC_ACT_SHOT) {
             count_miss(sid); backend_failure(sid, bid);
             record_flow6_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_DROP, FLUXVM_REASON_NO_BACKEND);
@@ -1414,11 +1536,9 @@ static __always_inline int forward6(
         return TC_ACT_SHOT;
     }
 
-    __u8 old_src[16], old_dst[16], new_src[16];
+    __u8 new_src[16];
     __u8 proto6 = ip6->nexthdr;
-    __builtin_memcpy(old_src, original_src, 16);
-    __builtin_memcpy(old_dst, original_dst, 16);
-    __builtin_memcpy(new_src, old_src, 16);
+    __builtin_memcpy(new_src, original_src, 16);
     __u16 flags = 0;
     struct snat6_value *snat = bpf_map_lookup_elem(&fluxvm_snat6, &sid);
     if (snat && snat->enabled) {
@@ -1427,7 +1547,7 @@ static __always_inline int forward6(
     }
     __u16 reply_port = reserve_nat6(
         backend->address, new_src, backend->port, proto6,
-        old_src, sport, old_dst, dport, sid, bid, h);
+        original_src, sport, original_dst, dport, sid, bid, h);
     if (!reply_port) {
         count_miss(sid); record_flow6(skb, svc, bid, ip6, sport, dport, FLUXVM_FLOW_DROP, FLUXVM_REASON_NAT_EXHAUSTED);
         return TC_ACT_SHOT;
@@ -1436,10 +1556,10 @@ static __always_inline int forward6(
         learn_affinity6(sid, bid, ip6, data_end, sport, dport);
     if (rewrite6(
             skb, l4_off, proto6,
-            old_src, new_src, old_dst, backend->address,
+            original_src, new_src, original_dst, backend->address,
             sport, reply_port, dport, backend->port) < 0) {
         if (!pinned)
-            delete_affinity6(old_src, old_dst, sport, dport, proto6);
+            delete_affinity6(original_src, original_dst, sport, dport, proto6);
         count_miss(sid); record_flow6_raw(skb, svc, bid, original_src, original_dst, sport, dport, original_protocol, FLUXVM_FLOW_DROP, FLUXVM_REASON_REWRITE_FAILED);
         return TC_ACT_SHOT;
     }
