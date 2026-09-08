@@ -1,14 +1,16 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! FluxVM Service Fabric v2.
+//! FluxVM Service Fabric v3.
 //!
 //! Fabric owns distributed service intent; FluxVM owns the node-local
-//! dataplane.  v2 is cumulative with v1 and adds:
-//! - dual-stack IPv4/IPv6 VIPs and backends,
-//! - routed Direct Server Return (DSR),
-//! - optional per-service SNAT for non-routable client networks,
-//! - host/uplink service hooks plus optional XDP north-south acceleration.
+//! dataplane. v3 is cumulative with v1/v2 and adds connection lifecycle and
+//! service HA primitives:
+//! - forward conntrack/backend affinity across Maglev changes,
+//! - TCP/UDP timeout classes plus explicit userspace GC/pressure reporting,
+//! - ready/draining/unhealthy backend states and active TCP health probes,
+//! - node-local VIP advertisement snapshots for an external FRR/BIRD speaker,
+//! - raw conntrack checkpoint export/import for opt-in HA replication.
 //!
 //! The service BPF program remains separate from `fluxvm_tc.bpf.c`, keeping
 //! the security-policy schema independent from the load-balancer schema.
@@ -20,13 +22,15 @@ use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tokio::net::TcpStream;
 use uuid::Uuid;
 
-pub const SERVICE_SCHEMA_VERSION: u32 = 2;
+pub const SERVICE_SCHEMA_VERSION: u32 = 3;
 const SERVICE_TC_PRIORITY: &str = "49140";
 const SERVICE_TC_HANDLE: &str = "40";
 const DEFAULT_MAGLEV_TABLE_SIZE: u32 = 4093;
@@ -36,7 +40,10 @@ const MAX_SERVICES: usize = 4096;
 const MAX_BACKEND_MAP_ENTRIES: usize = 16384;
 const MAX_MAGLEV_MAP_ENTRIES: usize = 262144;
 const MAX_WEIGHT: u16 = 32;
-const BACKEND_ENABLED: u16 = 1;
+const BACKEND_READY: u16 = 1;
+const BACKEND_DRAINING: u16 = 2;
+const BACKEND_UNHEALTHY: u16 = 4;
+const CONNTRACK_MAP_MAX: usize = 131072;
 const MODE_NAT: u8 = 1;
 const MODE_DSR: u8 = 2;
 
@@ -99,6 +106,51 @@ impl ServiceExposure {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendState {
+    #[default]
+    Ready,
+    Draining,
+    Unhealthy,
+}
+
+impl BackendState {
+    fn wire_flags(self) -> u16 {
+        match self {
+            Self::Ready => BACKEND_READY,
+            Self::Draining => BACKEND_DRAINING,
+            Self::Unhealthy => BACKEND_UNHEALTHY,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum HealthCheckKind {
+    Tcp,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ServiceHealthCheck {
+    pub kind: HealthCheckKind,
+    pub timeout_ms: u64,
+    pub unhealthy_threshold: u32,
+    pub healthy_threshold: u32,
+}
+
+impl Default for ServiceHealthCheck {
+    fn default() -> Self {
+        Self {
+            kind: HealthCheckKind::Tcp,
+            timeout_ms: 500,
+            unhealthy_threshold: 3,
+            healthy_threshold: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceBackend {
     pub address: IpAddr,
@@ -107,6 +159,14 @@ pub struct ServiceBackend {
     pub weight: u16,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Ready receives new flows. Draining is retained for established pinned
+    /// flows but excluded from Maglev. Unhealthy forces failover.
+    #[serde(default)]
+    pub state: BackendState,
+    /// Optional absolute drain deadline. Userspace GC removes pinned flows
+    /// for this backend after the deadline; zero/new flows never select it.
+    #[serde(default)]
+    pub drain_until_unix_ms: Option<u64>,
 }
 
 fn default_weight() -> u16 {
@@ -137,6 +197,15 @@ pub struct ServiceSpec {
     /// guaranteed to return through a FluxVM node and hit reverse NAT.
     #[serde(default)]
     pub snat_address: Option<IpAddr>,
+    /// Optional node-local active health policy. Health is an execution-time
+    /// override and does not rewrite the durable Fabric-owned service spec.
+    #[serde(default)]
+    pub health_check: Option<ServiceHealthCheck>,
+    /// North-south VIP should be advertised by the selected service-edge
+    /// node. FluxVM publishes an atomic advertisement snapshot; it does not
+    /// run an embedded BGP speaker.
+    #[serde(default)]
+    pub advertise: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,8 +217,11 @@ pub struct ServiceStatus {
     pub mode: ServiceMode,
     pub exposure: ServiceExposure,
     pub active_backends: usize,
+    pub draining_backends: usize,
+    pub unhealthy_backends: usize,
     pub maglev_table_size: u32,
     pub snat_address: Option<IpAddr>,
+    pub advertise: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +235,10 @@ pub struct ServiceCounters {
     pub dsr_packets: u64,
     pub snat_packets: u64,
     pub xdp_packets: u64,
+    pub conntrack_hits: u64,
+    pub conntrack_misses: u64,
+    pub conntrack_expired: u64,
+    pub passive_failures: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,6 +256,66 @@ pub struct HostServiceStatus {
     pub north_south_interfaces: Vec<String>,
     pub xdp_acceleration: bool,
     pub interfaces: Vec<HostInterfaceStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackendHealthStatus {
+    pub service: String,
+    pub backend_index: usize,
+    pub address: IpAddr,
+    pub port: u16,
+    pub healthy: bool,
+    pub consecutive_successes: u32,
+    pub consecutive_failures: u32,
+    pub last_probe_unix_ms: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HealthReport {
+    pub backends: Vec<BackendHealthStatus>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConntrackGcReport {
+    pub maps_scanned: usize,
+    pub entries_scanned: usize,
+    pub expired_deleted: usize,
+    pub drain_deleted: usize,
+    pub entries_remaining: usize,
+    pub pressure_percent: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VipAdvertisement {
+    pub service: String,
+    pub vip: IpAddr,
+    pub prefix_len: u8,
+    pub advertise: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvertisementSnapshot {
+    pub schema_version: u32,
+    pub generation: u64,
+    pub items: Vec<VipAdvertisement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RawMapEntry {
+    pub map: String,
+    pub key_hex: String,
+    pub value_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConntrackSnapshot {
+    pub schema_version: u32,
+    pub service: String,
+    pub service_id: u32,
+    pub created_unix_ms: u64,
+    pub entries: Vec<RawMapEntry>,
 }
 
 pub fn validate(spec: &ServiceSpec) -> Result<()> {
@@ -202,8 +338,8 @@ pub fn validate(spec: &ServiceSpec) -> Result<()> {
             spec.backends.len()
         );
     }
-    let active = spec.backends.iter().filter(|b| b.enabled).count();
-    if active == 0 {
+    let enabled = spec.backends.iter().filter(|b| b.enabled).count();
+    if enabled == 0 {
         bail!("service must have at least one enabled backend");
     }
 
@@ -223,6 +359,13 @@ pub fn validate(spec: &ServiceSpec) -> Result<()> {
         if backend.weight == 0 || backend.weight > MAX_WEIGHT {
             bail!(
                 "backend {}:{} weight must be in 1..={MAX_WEIGHT}",
+                backend.address,
+                backend.port
+            );
+        }
+        if backend.state != BackendState::Draining && backend.drain_until_unix_ms.is_some() {
+            bail!(
+                "backend {}:{} drain_until_unix_ms is valid only while state=draining",
                 backend.address,
                 backend.port
             );
@@ -255,6 +398,18 @@ pub fn validate(spec: &ServiceSpec) -> Result<()> {
         bail!(
             "north-south NAT requires snat_address so backend replies return through FluxVM"
         );
+    }
+
+    if let Some(health) = &spec.health_check {
+        if health.timeout_ms == 0 || health.timeout_ms > 30_000 {
+            bail!("health timeout_ms must be in 1..=30000");
+        }
+        if health.unhealthy_threshold == 0 || health.healthy_threshold == 0 {
+            bail!("health thresholds must be greater than zero");
+        }
+    }
+    if spec.advertise && !spec.exposure.north_south() {
+        bail!("advertise=true requires north-south or both exposure");
     }
 
     let table = spec.maglev_table_size.unwrap_or(DEFAULT_MAGLEV_TABLE_SIZE);
@@ -297,7 +452,7 @@ pub fn maglev_table(spec: &ServiceSpec) -> Result<Vec<u32>> {
     let m = spec.maglev_table_size.unwrap_or(DEFAULT_MAGLEV_TABLE_SIZE) as usize;
     let mut virtuals: Vec<(usize, String)> = Vec::new();
     for (idx, backend) in spec.backends.iter().enumerate() {
-        if !backend.enabled {
+        if !backend.enabled || backend.state != BackendState::Ready {
             continue;
         }
         for replica in 0..backend.weight {
@@ -309,6 +464,11 @@ pub fn maglev_table(spec: &ServiceSpec) -> Result<Vec<u32>> {
     }
 
     let n = virtuals.len();
+    if n == 0 {
+        // Draining/unhealthy services intentionally fail closed for new flows
+        // while established forward-conntrack entries can still complete.
+        return Ok(Vec::new());
+    }
     let mut offset = vec![0usize; n];
     let mut skip = vec![0usize; n];
     let mut next = vec![0usize; n];
@@ -410,9 +570,12 @@ pub fn status_for(spec: &ServiceSpec) -> Result<ServiceStatus> {
         family: if spec.vip.is_ipv4() { "ipv4" } else { "ipv6" }.into(),
         mode: spec.mode,
         exposure: spec.exposure,
-        active_backends: spec.backends.iter().filter(|b| b.enabled).count(),
+        active_backends: spec.backends.iter().filter(|b| b.enabled && b.state == BackendState::Ready).count(),
+        draining_backends: spec.backends.iter().filter(|b| b.enabled && b.state == BackendState::Draining).count(),
+        unhealthy_backends: spec.backends.iter().filter(|b| b.enabled && b.state == BackendState::Unhealthy).count(),
         maglev_table_size: spec.maglev_table_size.unwrap_or(DEFAULT_MAGLEV_TABLE_SIZE),
         snat_address: spec.snat_address,
+        advertise: spec.advertise,
     })
 }
 
@@ -442,7 +605,9 @@ fn validate_catalog(specs: &[ServiceSpec]) -> Result<()> {
             );
         }
         backend_entries += spec.backends.iter().filter(|b| b.enabled).count();
-        maglev_entries += spec.maglev_table_size.unwrap_or(DEFAULT_MAGLEV_TABLE_SIZE) as usize;
+        if spec.backends.iter().any(|b| b.enabled && b.state == BackendState::Ready) {
+            maglev_entries += spec.maglev_table_size.unwrap_or(DEFAULT_MAGLEV_TABLE_SIZE) as usize;
+        }
         let id = service_id(&spec.name);
         if let Some(other) = ids.insert(id, &spec.name) {
             bail!(
@@ -479,6 +644,368 @@ fn save_catalog(cfg: &Config, specs: &[ServiceSpec]) -> Result<()> {
     fs::rename(&tmp, &path)?;
     fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn health_path(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("network-service-health.json")
+}
+
+fn load_health(cfg: &Config) -> Result<HealthReport> {
+    let path = health_path(cfg);
+    if !path.exists() {
+        return Ok(HealthReport::default());
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("reading service health {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing service health {}", path.display()))
+}
+
+fn save_health(cfg: &Config, report: &HealthReport) -> Result<()> {
+    let path = health_path(cfg);
+    let parent = path.parent().context("service health path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(report)?)?;
+    fs::File::open(&tmp)?.sync_all()?;
+    fs::rename(&tmp, &path)?;
+    fs::File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+/// Merge runtime health into Fabric-owned durable intent. Manual draining or
+/// unhealthy state always wins; health can only demote a Ready backend.
+fn effective_catalog(cfg: &Config) -> Result<Vec<ServiceSpec>> {
+    let mut specs = list(cfg)?;
+    let health = load_health(cfg)?;
+    let unhealthy: HashSet<(String, usize)> = health
+        .backends
+        .into_iter()
+        .filter(|h| !h.healthy)
+        .map(|h| (h.service, h.backend_index))
+        .collect();
+    for spec in &mut specs {
+        for (idx, backend) in spec.backends.iter_mut().enumerate() {
+            if backend.enabled
+                && backend.state == BackendState::Ready
+                && unhealthy.contains(&(spec.name.clone(), idx))
+            {
+                backend.state = BackendState::Unhealthy;
+            }
+        }
+    }
+    Ok(specs)
+}
+
+pub fn health_report(cfg: &Config) -> Result<HealthReport> {
+    load_health(cfg)
+}
+
+/// Run one node-local active health sweep. Generic L4 health checking is
+/// deliberately TCP-connect only; UDP applications need an application-aware
+/// probe outside FluxVM. A sweep updates runtime state and recompiles maps.
+pub async fn reconcile_health(cfg: &Config) -> Result<HealthReport> {
+    let specs = list(cfg)?;
+    let existing = load_health(cfg)?;
+    let mut state: HashMap<(String, usize), BackendHealthStatus> = existing
+        .backends
+        .into_iter()
+        .map(|h| ((h.service.clone(), h.backend_index), h))
+        .collect();
+    let mut wanted = HashSet::new();
+
+    for spec in &specs {
+        let Some(policy) = spec.health_check.clone() else { continue };
+        for (idx, backend) in spec.backends.iter().enumerate() {
+            if !backend.enabled || backend.state != BackendState::Ready {
+                continue;
+            }
+            let key = (spec.name.clone(), idx);
+            wanted.insert(key.clone());
+            let mut record = state.remove(&key).unwrap_or(BackendHealthStatus {
+                service: spec.name.clone(),
+                backend_index: idx,
+                address: backend.address,
+                port: backend.port,
+                healthy: true,
+                consecutive_successes: 0,
+                consecutive_failures: 0,
+                last_probe_unix_ms: 0,
+                last_error: None,
+            });
+            record.address = backend.address;
+            record.port = backend.port;
+            let target = SocketAddr::new(backend.address, backend.port);
+            let result = match policy.kind {
+                HealthCheckKind::Tcp => tokio::time::timeout(
+                    Duration::from_millis(policy.timeout_ms),
+                    TcpStream::connect(target),
+                )
+                .await,
+            };
+            match result {
+                Ok(Ok(_)) => {
+                    record.consecutive_successes = record.consecutive_successes.saturating_add(1);
+                    record.consecutive_failures = 0;
+                    record.last_error = None;
+                    if record.consecutive_successes >= policy.healthy_threshold {
+                        record.healthy = true;
+                    }
+                }
+                Ok(Err(error)) => {
+                    record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+                    record.consecutive_successes = 0;
+                    record.last_error = Some(error.to_string());
+                    if record.consecutive_failures >= policy.unhealthy_threshold {
+                        record.healthy = false;
+                    }
+                }
+                Err(_) => {
+                    record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+                    record.consecutive_successes = 0;
+                    record.last_error = Some(format!("health probe timed out after {}ms", policy.timeout_ms));
+                    if record.consecutive_failures >= policy.unhealthy_threshold {
+                        record.healthy = false;
+                    }
+                }
+            }
+            record.last_probe_unix_ms = now_unix_ms();
+            state.insert(key, record);
+        }
+    }
+    state.retain(|key, _| wanted.contains(key));
+    let mut backends: Vec<_> = state.into_values().collect();
+    backends.sort_by(|a, b| (&a.service, a.backend_index).cmp(&(&b.service, b.backend_index)));
+    let report = HealthReport { backends };
+    save_health(cfg, &report)?;
+    sync_all(cfg)?;
+    Ok(report)
+}
+
+pub fn advertisement_snapshot(cfg: &Config) -> Result<AdvertisementSnapshot> {
+    let specs = effective_catalog(cfg)?;
+    let mut items = Vec::new();
+    for spec in &specs {
+        if !spec.exposure.north_south() {
+            continue;
+        }
+        let ready = spec
+            .backends
+            .iter()
+            .any(|b| b.enabled && b.state == BackendState::Ready);
+        let advertise = spec.advertise && ready;
+        let reason = if !spec.advertise {
+            "withdrawn: Fabric edge lease not active".to_string()
+        } else if !ready {
+            "withdrawn: no ready backend".to_string()
+        } else {
+            "advertise: active Fabric edge lease and ready backend".to_string()
+        };
+        items.push(VipAdvertisement {
+            service: spec.name.clone(),
+            vip: spec.vip,
+            prefix_len: if spec.vip.is_ipv4() { 32 } else { 128 },
+            advertise,
+            reason,
+        });
+    }
+    items.sort_by(|a, b| a.service.cmp(&b.service));
+    Ok(AdvertisementSnapshot {
+        schema_version: SERVICE_SCHEMA_VERSION,
+        generation: catalog_fingerprint(&specs)?,
+        items,
+    })
+}
+
+fn publish_advertisements(cfg: &Config) -> Result<AdvertisementSnapshot> {
+    let snapshot = advertisement_snapshot(cfg)?;
+    fs::create_dir_all(&cfg.run_dir)?;
+    let path = cfg.run_dir.join("service-advertisements.json");
+    let tmp = cfg.run_dir.join("service-advertisements.json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&snapshot)?)?;
+    fs::rename(&tmp, &path)?;
+    Ok(snapshot)
+}
+
+fn boottime_ns() -> Result<u64> {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    // SAFETY: ts is valid writable storage for clock_gettime.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("reading CLOCK_BOOTTIME");
+    }
+    let sec = u64::try_from(ts.tv_sec).context("negative CLOCK_BOOTTIME seconds")?;
+    let nsec = u64::try_from(ts.tv_nsec).context("negative CLOCK_BOOTTIME nanoseconds")?;
+    Ok(sec.saturating_mul(1_000_000_000).saturating_add(nsec))
+}
+
+fn service_map_dirs(cfg: &Config) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let vm_root = cfg.sandbox.dataplane.pin_root.join("vms");
+    if vm_root.exists() {
+        for ent in fs::read_dir(&vm_root)? {
+            let ent = ent?;
+            let maps = ent.path().join("service/maps");
+            if maps.exists() {
+                out.push(maps);
+            }
+        }
+    }
+    for iface in &cfg.sandbox.dataplane.service.north_south_interfaces {
+        let maps = host_pin_dir(cfg, iface).join("maps");
+        if maps.exists() {
+            out.push(maps);
+        }
+    }
+    Ok(out)
+}
+
+fn map_delete(map: &Path, key: &[u8]) -> Result<()> {
+    let mut args = vec![
+        "map".into(), "delete".into(), "pinned".into(), map.display().to_string(),
+        "key".into(), "hex".into(),
+    ];
+    args.extend(hex_args(key));
+    run("bpftool", &args)
+}
+
+pub fn gc_conntrack(cfg: &Config) -> Result<ConntrackGcReport> {
+    require_bpftool()?;
+    let boot_now = boottime_ns()?;
+    let unix_now = now_unix_ms();
+    let mut draining = HashMap::<(u32, u32), u64>::new();
+    for spec in list(cfg)? {
+        let sid = service_id(&spec.name);
+        for (idx, backend) in spec.backends.iter().enumerate() {
+            if backend.enabled && backend.state == BackendState::Draining {
+                if let Some(deadline) = backend.drain_until_unix_ms {
+                    draining.insert((sid, idx as u32), deadline);
+                }
+            }
+        }
+    }
+
+    let mut report = ConntrackGcReport::default();
+    for dir in service_map_dirs(cfg)? {
+        for name in ["fluxvm_fct4", "fluxvm_fct6"] {
+            let map = dir.join(name);
+            if !map.exists() { continue; }
+            report.maps_scanned += 1;
+            let root = bpftool_json_dump(&map)?;
+            let Some(entries) = root.as_array() else { continue };
+            for entry in entries {
+                let key = json_bytes(&entry["key"])?;
+                let value = json_bytes(&entry["value"])?;
+                if value.len() < 24 { continue; }
+                report.entries_scanned += 1;
+                let sid = u32::from_ne_bytes(value[0..4].try_into().unwrap());
+                let bid = u32::from_ne_bytes(value[4..8].try_into().unwrap());
+                let expires = u64::from_ne_bytes(value[16..24].try_into().unwrap());
+                let expired = expires <= boot_now;
+                let drain = draining.get(&(sid, bid)).is_some_and(|d| *d <= unix_now);
+                if expired || drain {
+                    map_delete(&map, &key)?;
+                    if expired { report.expired_deleted += 1; }
+                    if drain { report.drain_deleted += 1; }
+                } else {
+                    report.entries_remaining += 1;
+                }
+            }
+        }
+    }
+    let capacity = report.maps_scanned.saturating_mul(CONNTRACK_MAP_MAX);
+    report.pressure_percent = if capacity == 0 { 0 } else {
+        ((report.entries_remaining.saturating_mul(100) / capacity).min(100)) as u8
+    };
+    Ok(report)
+}
+
+fn bytes_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn decode_hex(raw: &str) -> Result<Vec<u8>> {
+    if raw.len() % 2 != 0 { bail!("hex data must have even length"); }
+    (0..raw.len()).step_by(2)
+        .map(|i| u8::from_str_radix(&raw[i..i + 2], 16).context("invalid hex byte"))
+        .collect()
+}
+
+pub fn export_conntrack(cfg: &Config, name: &str) -> Result<ConntrackSnapshot> {
+    let spec = get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
+    let sid = service_id(name);
+    let iface = cfg.sandbox.dataplane.service.north_south_interfaces.first()
+        .context("conntrack HA export requires a configured north-south service edge")?;
+    let dir = host_pin_dir(cfg, iface).join("maps");
+    let mut entries = Vec::new();
+    for map_name in ["fluxvm_fct4", "fluxvm_fct6", "fluxvm_nat4", "fluxvm_nat6"] {
+        let map = dir.join(map_name);
+        if !map.exists() { continue; }
+        let root = bpftool_json_dump(&map)?;
+        let Some(rows) = root.as_array() else { continue };
+        for row in rows {
+            let key = json_bytes(&row["key"])?;
+            let value = json_bytes(&row["value"])?;
+            if value.len() < 4 || u32::from_ne_bytes(value[0..4].try_into().unwrap()) != sid {
+                continue;
+            }
+            entries.push(RawMapEntry {
+                map: map_name.into(),
+                key_hex: bytes_hex(&key),
+                value_hex: bytes_hex(&value),
+            });
+        }
+    }
+    Ok(ConntrackSnapshot {
+        schema_version: SERVICE_SCHEMA_VERSION,
+        service: spec.name,
+        service_id: sid,
+        created_unix_ms: now_unix_ms(),
+        entries,
+    })
+}
+
+pub fn import_conntrack(cfg: &Config, name: &str, snapshot: &ConntrackSnapshot) -> Result<usize> {
+    let spec = get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
+    let sid = service_id(&spec.name);
+    if snapshot.schema_version != SERVICE_SCHEMA_VERSION || snapshot.service_id != sid || snapshot.service != name {
+        bail!("conntrack snapshot schema/service does not match local service");
+    }
+    let allowed: HashSet<&str> = ["fluxvm_fct4", "fluxvm_fct6", "fluxvm_nat4", "fluxvm_nat6"]
+        .into_iter().collect();
+    let dirs: Vec<PathBuf> = cfg.sandbox.dataplane.service.north_south_interfaces.iter()
+        .map(|iface| host_pin_dir(cfg, iface).join("maps"))
+        .filter(|dir| dir.exists())
+        .collect();
+    if dirs.is_empty() {
+        bail!("conntrack HA import requires a configured north-south service edge");
+    }
+    let mut written = 0usize;
+    for entry in &snapshot.entries {
+        if !allowed.contains(entry.map.as_str()) {
+            bail!("snapshot contains forbidden BPF map {}", entry.map);
+        }
+        let key = decode_hex(&entry.key_hex)?;
+        let value = decode_hex(&entry.value_hex)?;
+        if value.len() < 4 || u32::from_ne_bytes(value[0..4].try_into().unwrap()) != sid {
+            bail!("snapshot entry service id does not match local service");
+        }
+        for dir in &dirs {
+            let map = dir.join(&entry.map);
+            if map.exists() {
+                map_update(&map, &key, &value)?;
+                written += 1;
+            }
+        }
+    }
+    Ok(written)
 }
 
 pub fn stats_for_vm(cfg: &Config, id: Uuid) -> Result<Vec<ServiceCounters>> {
@@ -538,7 +1065,7 @@ fn stats_from_map(cfg: &Config, map: &Path) -> Result<Vec<ServiceCounters>> {
 }
 
 fn add_stat_value(out: &mut ServiceCounters, raw: &[u8]) {
-    if raw.len() < 56 {
+    if raw.len() < 88 {
         return;
     }
     out.forward_packets = out
@@ -562,11 +1089,23 @@ fn add_stat_value(out: &mut ServiceCounters, raw: &[u8]) {
     out.xdp_packets = out
         .xdp_packets
         .saturating_add(u64::from_ne_bytes(raw[48..56].try_into().unwrap()));
+    out.conntrack_hits = out
+        .conntrack_hits
+        .saturating_add(u64::from_ne_bytes(raw[56..64].try_into().unwrap()));
+    out.conntrack_misses = out
+        .conntrack_misses
+        .saturating_add(u64::from_ne_bytes(raw[64..72].try_into().unwrap()));
+    out.conntrack_expired = out
+        .conntrack_expired
+        .saturating_add(u64::from_ne_bytes(raw[72..80].try_into().unwrap()));
+    out.passive_failures = out
+        .passive_failures
+        .saturating_add(u64::from_ne_bytes(raw[80..88].try_into().unwrap()));
 }
 
 /// Ensure the east-west service program/maps exist on one VM edge.
 pub fn ensure_for_vm(cfg: &Config, id: Uuid, iface: &str) -> Result<bool> {
-    let specs: Vec<ServiceSpec> = list(cfg)?
+    let specs: Vec<ServiceSpec> = effective_catalog(cfg)?
         .into_iter()
         .filter(|s| s.exposure.east_west())
         .collect();
@@ -617,6 +1156,7 @@ pub fn sync_all(cfg: &Config) -> Result<usize> {
         }
     }
     sync_host(cfg)?;
+    let _ = publish_advertisements(cfg)?;
     Ok(synced)
 }
 
@@ -646,9 +1186,13 @@ fn ensure_tc_instance(
     let current_fingerprint = fs::read_to_string(marker)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok());
+    let schema_marker = marker.with_extension("schema");
+    let current_schema = fs::read_to_string(&schema_marker)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok());
 
     let mut rebuilt = false;
-    if !prog.exists() {
+    if !prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION) {
         let _ = fs::remove_dir_all(root);
         fs::create_dir_all(&prog_dir)?;
         fs::create_dir_all(&map_dir)?;
@@ -675,6 +1219,7 @@ fn ensure_tc_instance(
             fs::create_dir_all(parent)?;
         }
         fs::write(marker, desired_fingerprint.to_string())?;
+        fs::write(&schema_marker, SERVICE_SCHEMA_VERSION.to_string())?;
         rebuilt = true;
     }
 
@@ -685,7 +1230,7 @@ fn ensure_tc_instance(
 }
 
 fn sync_host(cfg: &Config) -> Result<()> {
-    let all = list(cfg)?;
+    let all = effective_catalog(cfg)?;
     let specs: Vec<ServiceSpec> = all
         .into_iter()
         .filter(|s| s.exposure.north_south())
@@ -718,8 +1263,13 @@ fn sync_host(cfg: &Config) -> Result<()> {
         let current = fs::read_to_string(&marker)
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok());
+        let schema_marker = marker.with_extension("schema");
+        let current_schema = fs::read_to_string(&schema_marker)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok());
 
-        if !host_prog.exists() {
+        if !host_prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION) {
+            let _ = detach_owned_xdp(cfg, iface, &root);
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&tc_prog_dir)?;
             fs::create_dir_all(&map_dir)?;
@@ -737,12 +1287,13 @@ fn sync_host(cfg: &Config) -> Result<()> {
                 ],
             )?;
         }
-        if current != Some(desired) {
+        if current != Some(desired) || current_schema != Some(SERVICE_SCHEMA_VERSION) {
             populate_maps(&map_dir, &specs)?;
             if let Some(parent) = marker.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::write(&marker, desired.to_string())?;
+            fs::write(&schema_marker, SERVICE_SCHEMA_VERSION.to_string())?;
         }
         let reverse_prog = tc_prog_dir.join("fvm_svc_rev");
         ensure_clsact(iface)?;
@@ -782,12 +1333,14 @@ fn ensure_host_xdp(cfg: &Config, iface: &str, root: &Path, map_dir: &Path) -> Re
             "fluxvm_backend4",
             "fluxvm_backend6",
             "fluxvm_maglev",
-            // Keep LRU reverse-NAT state across catalog updates so in-flight
-            // replies can still be restored. Frontend/backend/Maglev/SNAT
-            // intent is replaced under the fail-closed guard.
+            "fluxvm_fct4",
+            "fluxvm_fct6",
+            "fluxvm_nat4",
+            "fluxvm_nat6",
             "fluxvm_snat4",
             "fluxvm_snat6",
             "fluxvm_sstats",
+            "fluxvm_bstat",
         ] {
             args.extend([
                 "map".into(),
@@ -1050,9 +1603,8 @@ fn populate_maps(map_dir: &Path, specs: &[ServiceSpec]) -> Result<()> {
             "fluxvm_backend4",
             "fluxvm_backend6",
             "fluxvm_maglev",
-            // Keep LRU reverse-NAT state across catalog updates so in-flight
-            // replies can still be restored. Frontend/backend/Maglev/SNAT
-            // intent is replaced under the fail-closed guard.
+            // Forward conntrack, reverse NAT and backend telemetry survive
+            // catalog recompiles. They are lifecycle state, not service intent.
             "fluxvm_snat4",
             "fluxvm_snat6",
         ] {
@@ -1125,14 +1677,14 @@ fn write_backends(map_dir: &Path, spec: &ServiceSpec, sid: u32) -> Result<()> {
                 let mut value = Vec::with_capacity(8);
                 value.extend_from_slice(&ip.octets());
                 value.extend_from_slice(&backend.port.to_ne_bytes());
-                value.extend_from_slice(&BACKEND_ENABLED.to_ne_bytes());
+                value.extend_from_slice(&backend.state.wire_flags().to_ne_bytes());
                 map_update(&map_dir.join("fluxvm_backend4"), &key, &value)?;
             }
             IpAddr::V6(ip) => {
                 let mut value = Vec::with_capacity(20);
                 value.extend_from_slice(&ip.octets());
                 value.extend_from_slice(&backend.port.to_ne_bytes());
-                value.extend_from_slice(&BACKEND_ENABLED.to_ne_bytes());
+                value.extend_from_slice(&backend.state.wire_flags().to_ne_bytes());
                 map_update(&map_dir.join("fluxvm_backend6"), &key, &value)?;
             }
         }
@@ -1189,13 +1741,9 @@ fn attach_service_filters(iface: &str, ingress_prog: &Path, reverse_prog: &Path)
 }
 
 fn ensure_clsact(iface: &str) -> Result<()> {
-    let show = Command::new("tc")
-        .args(["qdisc", "show", "dev", iface])
-        .output()?;
+    let show = Command::new("tc").args(["qdisc", "show", "dev", iface]).output()?;
     if show.status.success()
-        && String::from_utf8_lossy(&show.stdout)
-            .split_whitespace()
-            .any(|token| token == "clsact")
+        && String::from_utf8_lossy(&show.stdout).split_whitespace().any(|t| t == "clsact")
     {
         return Ok(());
     }
@@ -1204,11 +1752,8 @@ fn ensure_clsact(iface: &str) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()?;
-    if out.status.success() {
-        return Ok(());
-    }
+    if out.status.success() { return Ok(()); }
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // Race: another FluxVM attach created clsact between show and add.
     if stderr.contains("File exists") || stderr.contains("Exclusivity flag on") {
         return Ok(());
     }
@@ -1413,22 +1958,30 @@ mod tests {
                     port: 8443,
                     weight: 1,
                     enabled: true,
+                    state: BackendState::Ready,
+                    drain_until_unix_ms: None,
                 },
                 ServiceBackend {
                     address: "10.40.1.22".parse().unwrap(),
                     port: 8443,
                     weight: 1,
                     enabled: true,
+                    state: BackendState::Ready,
+                    drain_until_unix_ms: None,
                 },
                 ServiceBackend {
                     address: "10.40.1.23".parse().unwrap(),
                     port: 8443,
                     weight: 1,
                     enabled: true,
+                    state: BackendState::Ready,
+                    drain_until_unix_ms: None,
                 },
             ],
             maglev_table_size: Some(251),
             snat_address: None,
+            health_check: None,
+            advertise: false,
         }
     }
 
