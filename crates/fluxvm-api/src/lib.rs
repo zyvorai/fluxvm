@@ -278,6 +278,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/network/services",
             get(list_network_services).post(upsert_network_service),
         )
+        .route("/v1/network/services/status", get(network_service_status))
+        .route("/v1/network/services/stats", get(network_service_stats))
         .route(
             "/v1/network/services/{name}",
             get(get_network_service).delete(delete_network_service),
@@ -1135,6 +1137,18 @@ async fn vm_network_service_stats(
     Ok(Json(
         json!({"items": fluxvm_network::service::stats_for_vm(&m.cfg, id)?}),
     ))
+}
+
+async fn network_service_status(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(fluxvm_network::service::host_status(&m.cfg)?)))
+}
+
+async fn network_service_stats(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"interfaces": fluxvm_network::service::host_stats(&m.cfg)?})))
 }
 
 async fn list_network_services(

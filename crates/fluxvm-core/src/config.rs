@@ -169,6 +169,8 @@ pub struct DataplaneConfig {
     pub sample_rate: u32,
     /// Optional standalone node-ingress XDP guard (disabled with Cilium).
     pub xdp: XdpConfig,
+    /// VM service load-balancing and optional north-south host/XDP hooks.
+    pub service: ServiceFabricConfig,
 }
 
 impl Default for DataplaneConfig {
@@ -185,6 +187,30 @@ impl Default for DataplaneConfig {
             max_egress_pps: None,
             sample_rate: 0,
             xdp: XdpConfig::default(),
+            service: ServiceFabricConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServiceFabricConfig {
+    /// Physical interfaces that act as north-south service edges. Empty means
+    /// service VIPs are east-west/VM-edge only.
+    pub north_south_interfaces: Vec<String>,
+    /// Attach the optional XDP accelerator on north-south interfaces. This is
+    /// rejected in dataplane.mode=cilium to avoid replacing Cilium's XDP hook.
+    pub xdp_acceleration: bool,
+    /// XDP service object. It reuses maps from the host TC service instance.
+    pub xdp_object: PathBuf,
+}
+
+impl Default for ServiceFabricConfig {
+    fn default() -> Self {
+        Self {
+            north_south_interfaces: Vec::new(),
+            xdp_acceleration: false,
+            xdp_object: "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o".into(),
         }
     }
 }
