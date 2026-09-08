@@ -12,6 +12,9 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-network-fabric.sh'
       - 'scripts/validate-network-fabric.sh'
+      - 'scripts/test-service-fabric-perf.sh'
+      - 'scripts/test-service-fabric-slo.sh'
+      - 'scripts/test-service-fabric-rss.sh'
       - 'scripts/export_network_flows.py'
       - 'scripts/test_flow_exporter.py'
       - 'deploy/k8s/**'
@@ -28,6 +31,9 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-network-fabric.sh'
       - 'scripts/validate-network-fabric.sh'
+      - 'scripts/test-service-fabric-perf.sh'
+      - 'scripts/test-service-fabric-slo.sh'
+      - 'scripts/test-service-fabric-rss.sh'
       - 'scripts/export_network_flows.py'
       - 'scripts/test_flow_exporter.py'
 
@@ -86,3 +92,15 @@ jobs:
       - name: Kernel TC/XDP smoke test
         working-directory: fluxvm
         run: sudo -E ./scripts/test-ebpf-smoke.sh
+
+      - name: Service Fabric SLO scripts (syntax)
+        working-directory: fluxvm
+        run: |
+          bash -n scripts/test-service-fabric-perf.sh
+          bash -n scripts/test-service-fabric-slo.sh
+          bash -n scripts/test-service-fabric-rss.sh
+
+      - name: Service Fabric SLO CI gates
+        working-directory: fluxvm
+        run: SLO_CI=1 ./scripts/test-service-fabric-slo.sh
+        # Shape / soft-skip without VIP or live API is OK on runners.

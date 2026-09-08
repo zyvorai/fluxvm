@@ -3,6 +3,9 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Service Fabric full mesh datapath (Fabric-side)** — remote backends merge into
+  existing Maglev `/v1/network/services` upserts (no new FluxVM tunnel APIs;
+  Geneve/VXLAN still N/A). See Fabric `service-lb::remote_backend`.
 - **Service Fabric gen8 connect** — cgroup/connect6 + Maglev affinity parity with TC
   (`fluxvm_fct4`/`fct6`); `cgroup_connect` attaches both v4 and v6; program generation **8**
   (schema 4 unchanged).
@@ -10,6 +13,9 @@
   (`fluxvm_service*_tier_{S,M,L}.bpf.o`); `map_tier` selects loader path + catalog limits.
 - **Service Fabric SLO harness** — `scripts/test-service-fabric-slo.sh` + optional
   `SLO_VIP_P99_MS` / `SLO_PRESSURE_IDLE` / `SLO_REQUIRE_CHANNELS` / `SLO_CI_SHAPE` gates.
+- **Service Fabric universal CI SLO defaults** — `SLO_CI=1` applies VIP p99 /
+  pressure / EDT fairness / HA failover RTT / Mpps floors; RSS under-load PPS via
+  `scripts/test-service-fabric-rss.sh` (`SLO_RSS_PPS_MIN`, soft-skip without VIP).
 - **Remote ipcache ingest** — `POST/DELETE /v1/network/ipcache/remote` for Fabric
   ClusterMesh-like identity fan-out (local VM rows preserved).
 - **Service Fabric gen7 ops tranche** — opt-in cgroup/connect4 (`fluxvm_service_connect.bpf.o`),
