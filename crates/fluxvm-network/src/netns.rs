@@ -25,8 +25,9 @@
 //! 169.254.0.0/16) rather than derived from the VM UUID hash.
 
 use crate::{dataplane, ipam::IpamStore};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use fluxvm_core::process::run_checked;
+use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -117,6 +118,10 @@ pub async fn prepare(state_dir: &Path, id: Uuid, mac: Option<&str>) -> Result<Ne
     let nft_table = nft_table_name(&short);
 
     let result: Result<()> = async {
+        // Clear leftover handles from a prior crash / dead named-netns bind so
+        // IPAM-backed addresses cannot collide with orphan host veths.
+        let _ = run_checked("ip", &["link".into(), "delete".into(), veth_host.clone()]).await;
+        let _ = run_checked("ip", &["netns".into(), "del".into(), netns.clone()]).await;
         run_checked("ip", &["netns".into(), "add".into(), netns.clone()])
             .await
             .context("creating network namespace")?;
@@ -401,6 +406,64 @@ pub async fn cleanup(state_dir: &Path, id: Uuid, netns: &str) -> Result<()> {
         .await
         .context("ipam release worker panicked")?;
     let _ = run_checked("ip", &["netns".into(), "del".into(), netns.into()]).await;
+    // If the named netns handle was already dead (common after a crash or a
+    // failed remount), `ip netns del` leaves the host veth behind and the
+    // next VM can collide on the same 169.254.x.0/28 L3 address.
+    let veth_host = host_veth_name(id);
+    let _ = run_checked("ip", &["link".into(), "delete".into(), veth_host]).await;
+    Ok(())
+}
+
+/// Re-bind `/var/run/netns/<name>` to `pid`'s network namespace when the named
+/// handle is missing or points at a dead mount (`ip netns exec` → EINVAL).
+/// QEMU keeps the live namespace open; the named path is only a convenience
+/// handle for operators and `ip netns exec`.
+pub async fn repair_named_netns(netns: &str, pid: u32) -> Result<()> {
+    let netns = netns.to_string();
+    let ok = run_checked(
+        "ip",
+        &[
+            "netns".into(),
+            "exec".into(),
+            netns.clone(),
+            "true".into(),
+        ],
+    )
+    .await
+    .is_ok();
+    if ok {
+        return Ok(());
+    }
+    let ns_path = format!("/var/run/netns/{netns}");
+    let proc_ns = format!("/proc/{pid}/ns/net");
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let _ = std::process::Command::new("umount").arg(&ns_path).status();
+        let _ = fs::remove_file(&ns_path);
+        fs::create_dir_all("/var/run/netns").context("creating /var/run/netns")?;
+        // `ip netns add` creates a bind-mount file; mimic with touch+mount.
+        fs::File::create(&ns_path).with_context(|| format!("creating {ns_path}"))?;
+        let status = std::process::Command::new("mount")
+            .args(["--bind", &proc_ns, &ns_path])
+            .status()
+            .context("mount --bind netns")?;
+        if !status.success() {
+            bail!("mount --bind {proc_ns} -> {ns_path} failed");
+        }
+        Ok(())
+    })
+    .await
+    .context("repair_named_netns worker panicked")??;
+    run_checked(
+        "ip",
+        &[
+            "netns".into(),
+            "exec".into(),
+            netns,
+            "true".into(),
+        ],
+    )
+    .await
+    .context("named netns still unusable after repair")?;
     Ok(())
 }
 

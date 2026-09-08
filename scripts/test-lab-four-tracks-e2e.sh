@@ -325,16 +325,26 @@ fi
 TMP=$(mktemp -d)
 BOOT="$TMP/boot.json"
 cat >"$BOOT" <<JSON
-{"kernel":"$KERN","rootfs":"$ROOTFS","vcpus":1,"memory_mib":256,"engine":"kvm","kernel_args":"console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep"}
+{"kernel":"$KERN","rootfs":"$ROOTFS","vcpus":1,"memory_mib":256,"engine":"kvm","kernel_args":"console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep -- 3600 virtio_mmio.device=0x200@0xfeb00000:5 virtio_mmio.device=0x200@0xfeb00200:6"}
 JSON
 HV="${FLUXVM_HYPERVISOR:-/usr/local/bin/fluxvm-hypervisor}"
 FLUXVM_KVM_LOCK_MEM=1 "$HV" --api-sock "$TMP/api.sock" --boot-config "$BOOT" >"$TMP/hv.log" 2>&1 &
 HPID=$!
-sleep 2
+# Guest must stay alive long enough for VmLck to settle; timer/virtio MMIO
+# args above match the pause smoke so the kernel does not panic immediately.
+for _ in $(seq 1 20); do
+  kill -0 "$HPID" 2>/dev/null || break
+  VMLCK=$(awk '/VmLck:/{print $2}' /proc/$HPID/status 2>/dev/null || echo 0)
+  [[ "${VMLCK:-0}" != "0" ]] && break
+  sleep 0.5
+done
 VMLCK=$(awk '/VmLck:/{print $2}' /proc/$HPID/status 2>/dev/null || echo 0)
-[[ "${VMLCK:-0}" != "0" ]] && ok "VmLck=$VMLCK kB" || bad "VmLck=$VMLCK"
+[[ "${VMLCK:-0}" != "0" ]] && ok "VmLck=$VMLCK kB" || bad "VmLck=$VMLCK (hv alive=$(kill -0 $HPID 2>/dev/null && echo yes || echo no))"
 kill "$HPID" 2>/dev/null || true
 wait "$HPID" 2>/dev/null || true
+if [[ "${VMLCK:-0}" == "0" ]]; then
+  tail -30 "$TMP/hv.log" >&2 || true
+fi
 rm -rf "$TMP"
 
 echo

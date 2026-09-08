@@ -47,7 +47,7 @@ cat >"$BOOT" <<JSON
   "vcpus": 1,
   "memory_mib": 256,
   "engine": "kvm",
-  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep virtio_mmio.device=0x200@0xfeb00000:5 virtio_mmio.device=0x200@0xfeb00200:6"
+  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep -- 3600 virtio_mmio.device=0x200@0xfeb00000:5 virtio_mmio.device=0x200@0xfeb00200:6"
 }
 JSON
 

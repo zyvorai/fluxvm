@@ -585,25 +585,53 @@ impl VmManager {
                 continue;
             }
             let guest_cidr = vm.guest_ip.as_deref().map(|ip| format!("{ip}/32"));
-            let iface = fluxvm_network::dataplane_interface_name(
+            let mut iface = fluxvm_network::dataplane_interface_name(
                 vm.id,
                 vm.netns.is_some(),
                 vm.tap_name.as_deref(),
             );
+            // Fall back to the currently attached edge when the prepared
+            // device name is missing (common for paused/stale records).
+            if iface.is_none() {
+                if let Ok(status) =
+                    fluxvm_network::ebpf::attachment_status(&self.cfg.sandbox.dataplane, vm.id)
+                {
+                    iface = status.interface;
+                }
+            }
+            if iface.is_none() {
+                tracing::debug!(
+                    vm = %vm.name,
+                    id = %vm.id,
+                    "skipping FQDN refresh: no host-visible dataplane interface"
+                );
+                continue;
+            }
             let extra = if self.cfg.sandbox.egress_allow_domains.is_empty() {
                 vec![]
             } else {
                 fluxvm_network::egress::resolve_allow_cidrs(&self.cfg.sandbox.egress_allow_domains)
                     .await
             };
-            fluxvm_network::dataplane::reconfigure_sandbox_policy(
+            match fluxvm_network::dataplane::reconfigure_sandbox_policy(
                 &self.cfg,
                 vm.id,
                 iface.as_deref(),
                 guest_cidr.as_deref(),
                 &extra,
-            )?;
-            n += 1;
+            ) {
+                Ok(()) => n += 1,
+                Err(err) => {
+                    // Host-wide refresh is best-effort across the fleet: one
+                    // VM without a repairable edge must not fail the call.
+                    tracing::warn!(
+                        vm = %vm.name,
+                        id = %vm.id,
+                        error = %err,
+                        "FQDN policy refresh skipped for VM"
+                    );
+                }
+            }
         }
         Ok(n)
     }
@@ -1308,6 +1336,18 @@ impl VmManager {
             Self::attach_cgroup(id, launch.pid, &mut vm);
             vm.status = VmStatus::Running;
             vm.error = None;
+            if let Some(ref ns) = vm.netns {
+                if let Err(e) =
+                    fluxvm_network::netns::repair_named_netns(ns, launch.pid).await
+                {
+                    tracing::warn!(
+                        vm = %id,
+                        netns = %ns,
+                        error = %e,
+                        "named netns handle repair failed; qemu ns is still live"
+                    );
+                }
+            }
             Ok(())
         }
         .await;

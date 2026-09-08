@@ -1317,11 +1317,13 @@ static __always_inline int forward4(
     count_forward(sid, skb->len, 0, flags != 0);
     if (svc->flags & FLUXVM_SVC_F_HOST_ROUTING) {
         int action = fib_redirect4_soft(skb, backend->address, new_src, original_protocol, reply_port, backend->port);
-        if (action == TC_ACT_UNSPEC) { count_host_route(sid, 0); return TC_ACT_UNSPEC; }
+        /* After DNAT, stop the clsact chain so sandbox policy does not
+         * re-filter the rewritten backend port/address. */
+        if (action == TC_ACT_UNSPEC) { count_host_route(sid, 0); return TC_ACT_OK; }
         if (action == TC_ACT_SHOT) { count_miss(sid); return TC_ACT_SHOT; }
         count_host_route(sid, 1); return action;
     }
-    return TC_ACT_UNSPEC;
+    return TC_ACT_OK;
 }
 
 static __always_inline int forward6(
@@ -1433,11 +1435,13 @@ static __always_inline int forward6(
     count_forward(sid, skb->len, 0, flags != 0);
     if (svc->flags & FLUXVM_SVC_F_HOST_ROUTING) {
         int action = fib_redirect6_soft(skb, backend->address, new_src, original_protocol, reply_port, backend->port);
-        if (action == TC_ACT_UNSPEC) { count_host_route(sid, 0); return TC_ACT_UNSPEC; }
+        /* After DNAT, stop the clsact chain so sandbox policy does not
+         * re-filter the rewritten backend port/address. */
+        if (action == TC_ACT_UNSPEC) { count_host_route(sid, 0); return TC_ACT_OK; }
         if (action == TC_ACT_SHOT) { count_miss(sid); return TC_ACT_SHOT; }
         count_host_route(sid, 1); return action;
     }
-    return TC_ACT_UNSPEC;
+    return TC_ACT_OK;
 }
 
 static __always_inline int service_tc(struct __sk_buff *skb)
@@ -1463,7 +1467,7 @@ static __always_inline int service_tc(struct __sk_buff *skb)
         if (rev < 0)
             return TC_ACT_SHOT;
         if (rev > 0)
-            return TC_ACT_UNSPEC;
+            return TC_ACT_OK;
         return forward4(skb, iph, data_end);
     }
 
@@ -1477,7 +1481,7 @@ static __always_inline int service_tc(struct __sk_buff *skb)
         if (rev < 0)
             return TC_ACT_SHOT;
         if (rev > 0)
-            return TC_ACT_UNSPEC;
+            return TC_ACT_OK;
         return forward6(skb, ip6, data_end);
     }
     return TC_ACT_UNSPEC;
@@ -1503,7 +1507,11 @@ static __always_inline int service_reverse_tc(struct __sk_buff *skb)
         if (iph->protocol != IPPROTO_TCP && iph->protocol != IPPROTO_UDP)
             return TC_ACT_UNSPEC;
         int rev = reverse4(skb, iph, data_end);
-        return rev < 0 ? TC_ACT_SHOT : TC_ACT_UNSPEC;
+        if (rev < 0)
+            return TC_ACT_SHOT;
+        if (rev > 0)
+            return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     }
 
     if (proto == ETH_P_IPV6) {
@@ -1513,7 +1521,11 @@ static __always_inline int service_reverse_tc(struct __sk_buff *skb)
         if (ip6->nexthdr != IPPROTO_TCP && ip6->nexthdr != IPPROTO_UDP)
             return TC_ACT_UNSPEC;
         int rev = reverse6(skb, ip6, data_end);
-        return rev < 0 ? TC_ACT_SHOT : TC_ACT_UNSPEC;
+        if (rev < 0)
+            return TC_ACT_SHOT;
+        if (rev > 0)
+            return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
     }
     return TC_ACT_UNSPEC;
 }

@@ -39,7 +39,8 @@ trap cleanup EXIT
 
 SOCK="${TMP}/api.sock"
 BOOT="${TMP}/boot.json"
-SNAP="${TMP}/snap.json"
+# Path without extension: hypervisor uses Path::with_extension("mem"|"vmstate"|"rootfs").
+SNAP="${TMP}/snap"
 cat >"$BOOT" <<JSON
 {
   "kernel": "$KERNEL",
@@ -47,7 +48,7 @@ cat >"$BOOT" <<JSON
   "vcpus": 1,
   "memory_mib": 256,
   "engine": "kvm",
-  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep virtio_mmio.device=0x200@0xfeb00000:5 virtio_mmio.device=0x200@0xfeb00200:6"
+  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep -- 3600 virtio_mmio.device=0x200@0xfeb00000:5 virtio_mmio.device=0x200@0xfeb00200:6"
 }
 JSON
 
@@ -55,15 +56,17 @@ JSON
 HPID=$!
 
 req() {
-  python3 - "$SOCK" "$1" <<'PY'
+  python3 - "$SOCK" "$1" "${2:-20}" <<'PY'
 import json, socket, sys, time
 sock_path, payload = sys.argv[1], sys.argv[2]
-deadline = time.time() + 20
+timeout = float(sys.argv[3]) if len(sys.argv) > 3 else 20.0
+deadline = time.time() + timeout
 last = None
 while time.time() < deadline:
     try:
         s = socket.socket(socket.AF_UNIX)
-        s.settimeout(3)
+        # Memory snapshots can take tens of seconds for a 256MiB guest.
+        s.settimeout(max(5.0, timeout))
         s.connect(sock_path)
         s.sendall((payload + "\n").encode())
         data = s.recv(8192).decode()
@@ -91,8 +94,9 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
-# Let the guest run briefly so RAM is dirty, then pause + snapshot.
-sleep 2
+# Pause + snapshot promptly. Guests that cannot mount root still keep a live
+# vCPU for a short window; waiting several seconds lets a panic tear it down.
+sleep 0.3
 echo "=== Pause ==="
 RESP=$(req '{"action":"pause"}')
 echo "$RESP" | grep -q '"lifecycle":"paused"' || {
@@ -102,7 +106,7 @@ echo "$RESP" | grep -q '"lifecycle":"paused"' || {
 }
 
 echo "=== SnapshotSave ==="
-RESP=$(req "{\"action\":\"snapshot_save\",\"path\":\"${SNAP}\"}")
+RESP=$(req "{\"action\":\"snapshot_save\",\"path\":\"${SNAP}\"}" 120)
 echo "$RESP"
 echo "$RESP" | grep -q '"status":"ok"' || {
   echo "snapshot_save failed: $RESP" >&2
@@ -120,7 +124,7 @@ print("vmstate magic OK", magic)
 PY
 
 echo "=== SnapshotRestore ==="
-RESP=$(req "{\"action\":\"snapshot_restore\",\"path\":\"${SNAP}\"}")
+RESP=$(req "{\"action\":\"snapshot_restore\",\"path\":\"${SNAP}\"}" 120)
 echo "$RESP"
 echo "$RESP" | grep -q '"status":"ok"' || {
   echo "snapshot_restore failed: $RESP" >&2
