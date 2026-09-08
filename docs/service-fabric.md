@@ -1,71 +1,76 @@
-# FluxVM eBPF Service Fabric v1
+# FluxVM Service Fabric v2
 
-FluxVM Service Fabric v1 is an east-west VM-edge L4 service load balancer for native `ebpf`
-and Cilium-coexistence dataplane modes. It is intentionally separate from the
-existing security-policy BPF ABI.
+FluxVM owns node-local VM service mechanics; Zyvor Fabric owns distributed intent and rollout.
 
-## Architecture
+## v2 dataplane
 
-```text
-VM packet -> service TC ingress (pref 49140) -> security TC ingress (49152)
-          -> Linux routing
-return    -> service TC egress -> VM
+- IPv4 and IPv6 TCP/UDP VIPs.
+- Weighted Maglev backend selection.
+- NAT with stateful reverse NAT.
+- Optional per-service SNAT for non-routable client networks.
+- Routed DSR: the packet keeps VIP:port and client source; FluxVM performs a FIB lookup using the selected backend address as the forwarding next hop, rewrites L2, and redirects. The backend must accept the VIP locally and return directly to the client.
+- East-west VM-edge TC ingress for service selection plus a same-map TC egress reverse-NAT hook.
+- North-south physical-uplink TC ingress plus TC egress reverse-NAT for local-backend return traffic.
+- Optional north-south XDP accelerator. XDP shares the host TC maps; reverse traffic falls through to the shared TC ingress/egress return path. The XDP object keeps a private per-CPU `fluxvm_fib_scratch` map so `bpf_fib_lookup` fits the kernel’s 512-byte BPF stack.
+- Fail-closed update guard while service/backend/Maglev/NAT maps are replaced.
+
+## Scope ownership
+
+Fabric sends `ServiceSpec` through the FluxVM REST API. Fabric never edits BPF maps. FluxVM validates, persists and compiles the catalog into BPF maps.
+
+## Service model
+
+```json
+{
+  "name": "payments",
+  "vip": "203.0.113.20",
+  "port": 443,
+  "protocol": "tcp",
+  "algorithm": "maglev",
+  "mode": "nat",
+  "exposure": "both",
+  "snat_address": "192.0.2.10",
+  "maglev_table_size": 4093,
+  "backends": [
+    {"address":"10.40.1.21","port":8443,"weight":2,"enabled":true},
+    {"address":"10.40.2.21","port":8443,"weight":1,"enabled":true}
+  ]
+}
 ```
 
-The control plane writes a service catalog. FluxVM compiles every service to a
-Maglev lookup table and programs private BPF maps under the VM's FluxVM pin
-root. Cilium-owned maps are never modified.
+`north-south` NAT requires `snat_address`. DSR forbids SNAT and requires backend port == service port because the destination tuple is preserved.
 
-## API
+## Host configuration
 
-Create/update:
+```toml
+[sandbox.dataplane]
+mode = "ebpf"
+required = true
 
-```bash
-curl -X POST http://127.0.0.1:7788/v1/network/services \
-  -H 'content-type: application/json' \
-  -d '{
-    "name":"payments",
-    "vip":"10.40.0.100",
-    "port":443,
-    "protocol":"tcp",
-    "algorithm":"maglev",
-    "mode":"nat",
-    "maglev_table_size":4093,
-    "backends":[
-      {"address":"10.40.1.21","port":8443,"weight":1,"enabled":true},
-      {"address":"10.40.1.22","port":8443,"weight":1,"enabled":true}
-    ]
-  }'
+[sandbox.dataplane.service]
+north_south_interfaces = ["eno1"]
+xdp_acceleration = true
+xdp_object = "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o"
 ```
 
-List/get/delete:
+Do not enable FluxVM service XDP in `mode = "cilium"`; Cilium may already own the physical-NIC XDP hook. TC service handling remains available.
 
-```bash
-curl http://127.0.0.1:7788/v1/network/services
-curl http://127.0.0.1:7788/v1/network/services/payments
-curl -X DELETE http://127.0.0.1:7788/v1/network/services/payments
-```
+## APIs
 
-## v1 semantics
+- `GET/POST /v1/network/services`
+- `GET/DELETE /v1/network/services/{name}`
+- `GET /v1/network/services/status`
+- `GET /v1/network/services/stats`
+- `GET /v1/vms/{id}/network/services/stats`
 
-- IPv4 TCP and UDP.
-- NAT mode with stateful reverse NAT.
-- Maglev consistent hashing.
-- Backend weights use deterministic virtual backends.
-- Disabled backends receive no Maglev slots.
-- A configured service with a missing backend/table entry fails closed.
-- DSR is reserved in the schema but rejected in v1.
-- The security policy runs after service DNAT and therefore sees the selected
-  backend destination. Permit backend CIDRs/L4 ports accordingly.
+## DSR backend requirement
 
-## Build
+The chosen backend address is used only as the routing next hop. The packet itself retains the VIP. Each backend path must therefore deliver the VIP packet to the backend and the guest/workload must own the VIP (for example on loopback) and avoid ARP/NDP conflicts for that VIP. Fabric should configure this as part of backend admission.
 
-`make bpf` now builds `fluxvm_service.bpf.o` alongside the existing TC and XDP
-objects. Install all three under `/usr/lib/fluxvm/bpf/`, or override the service
-object with `FLUXVM_SERVICE_BPF_OBJECT`.
+## Symmetric NAT return path
 
-## Fabric boundary
+NAT state is created in the map instance attached to the client/uplink edge. Replies are restored on that same interface's TC egress hook (`fvm_svc_rev`). Remote-backend replies that re-enter a north-south uplink can also be restored on TC ingress. This keeps east-west, local north-south, and XDP-accelerated NAT symmetric without a global userspace conntrack service.
 
-FluxVM owns packet mechanics, BPF programs/maps, Maglev and reverse NAT. Zyvor
-Fabric owns distributed VIP/service intent, backend membership, node fan-out,
-HA/DR decisions and audit policy.
+## Failure behavior
+
+A service frontend hit never silently bypasses on a missing Maglev/backend entry. During catalog replacement `fluxvm_sguard=1`; TCP/UDP service traffic is over-denied until the full map transaction succeeds. XDP falls back to TC when FIB lookup cannot accelerate a route, without modifying the packet first.

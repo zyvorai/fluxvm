@@ -57,6 +57,15 @@ reaper_interval_secs = 5
 # required = true
 # block_cidrs = ["198.51.100.0/24", "2001:db8:bad::/48"]
 #
+#
+# VM Service Fabric v2. `north_south_interfaces` enables physical-uplink
+# service VIP handling. XDP is optional and falls back to TC/host routing.
+# Do not enable service XDP with dataplane.mode = "cilium".
+# [sandbox.dataplane.service]
+# north_south_interfaces = ["eno1", "eno2"]
+# xdp_acceleration = true
+# xdp_object = "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o"
+#
 # [[sandbox.credential_vault]]
 # host = "api.openai.com"
 # authorization = "Bearer REPLACE_ME"

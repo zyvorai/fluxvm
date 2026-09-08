@@ -259,6 +259,9 @@ pub async fn cleanup(
     // Config-aware scheduler paths already remove native pins. This fallback
     // catches default-path state after partial failures/crashes.
     let _ = dataplane::remove_sandbox_policy_best_effort(id);
+    if let Some(iface) = dataplane_interface_name(id, netns_name.is_some(), Some(tap_name)) {
+        service::remove_for_vm_best_effort(id, &iface);
+    }
 
     // Deleting the namespace tears down everything inside it (the tap
     // included) — no separate tap cleanup needed, and calling
