@@ -1,0 +1,26 @@
+{
+  "source": "/var/lib/fluxvm/images/windows-tiny11-golden.qcow2",
+  "output": "/var/lib/fluxvm/images/tiny11-custom.qcow2",
+  "_comment": "Build source via ./scripts/prepare-windows-golden.sh --build --version tiny11 (Kryton). BYO: convert VHDX to tiny11-base.qcow2 and point source there.",
+  "format": "qcow2",
+  "windows": {
+    "hostname": "tiny-flux",
+    "enable_rdp": true,
+    "enable_winrm": false,
+    "firewall_open": [
+      { "name": "RDP", "port": 3389, "protocol": "tcp" },
+      { "name": "ZyvorApp", "port": 8080, "protocol": "tcp" }
+    ],
+    "scripts": [
+      {
+        "name": "ready-marker",
+        "powershell": true,
+        "content": "New-Item -Path C:\\fluxvm-ready.txt -ItemType File -Force | Out-Null\r\nSet-Content -Path C:\\fluxvm-ready.txt -Value 'tiny11-guestkit-ok'\r\n"
+      }
+    ],
+    "agent": {
+      "binary": "/usr/lib/guestkit/guestkitd.exe",
+      "virtio_serial_driver": "/usr/share/virtio-win/vioserial/w10/amd64"
+    }
+  }
+}

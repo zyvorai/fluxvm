@@ -1,0 +1,19 @@
+{
+  "name": "tiny-win",
+  "backend": "qemu",
+  "image": "/var/lib/fluxvm/images/tiny11-custom.qcow2",
+  "_comment": "Image from build-image-tiny11.json after Kryton golden or BYO base",
+  "vcpus": 2,
+  "memory_mib": 4096,
+  "disk_size_gib": 40,
+  "firmware": "/usr/share/OVMF/OVMF_CODE.fd",
+  "network": {
+    "mode": "user",
+    "forwards": [
+      { "host_port": 3389, "guest_port": 3389, "protocol": "tcp" },
+      { "host_port": 8080, "guest_port": 8080, "protocol": "tcp" }
+    ]
+  },
+  "qga": { "enabled": true },
+  "ttl_seconds": 7200
+}
