@@ -36,7 +36,7 @@ Security groups: [network-groups.md](network-groups.md).
 Not in scope for **this** policy plane: kube-proxy replacement, WireGuard/IPsec
 datapath, L7 Envoy/Kafka parsers, ClusterMesh, or a full flow UI.
 
-Maglev / DSR / SNAT service LB lives in **Service Fabric schema v3**
+Maglev / DSR / SNAT service LB lives in **Service Fabric schema v4**
 ([service-fabric.md](service-fabric.md)), not in CNP/group compilers.
 
 ## Apply a CNP

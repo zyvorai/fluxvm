@@ -386,14 +386,15 @@ has been verified end-to-end against attached schema v4 VMs.
 Network Fabric **schema v4** (per-VM TC/eBPF policy) is GA. Adjacent work lives
 in independent docs/PRs:
 
-1. **Service Fabric schema v3** — Maglev VIP LB, dual-stack NAT/DSR/SNAT, forward
-   conntrack, health/drain, VIP advertisement snapshot, restricted HA export —
-   [service-fabric.md](service-fabric.md).
-2. **BGP speaker** — Fabric/FRR/BIRD consume FluxVM ads; not embedded in FluxVM
-   ([service-fabric-phase4.md](service-fabric-phase4.md)).
+1. **Service Fabric schema v4** — Maglev VIP LB, dual-stack NAT/DSR/SNAT, forward
+   conntrack, health/drain, VIP advertisement snapshot, restricted HA export,
+   per-service EDT, FluxScope flows/OTLP, optional host-routing —
+   [service-fabric.md](service-fabric.md) · [phase 4](service-fabric-phase4.md).
+2. **BGP speaker** — Fabric FRR/BIRD/File adapters consume FluxVM ads; not embedded
+   in FluxVM ([service-fabric-phase4.md](service-fabric-phase4.md)).
 3. WireGuard host-to-host VM encryption.
 4. First-class Cilium CNI/launcher identities and Hubble attribution.
 5. Migration transfer of connection/NAT state (partially enabled for service maps
-   via conntrack export/import; full VM CT migration still separate).
+   via conntrack export/import; streaming HA deltas remain phase 5).
 6. Dedicated libbpf ring-buffer/SSE streaming daemon if sub-second events are
    required at scale.

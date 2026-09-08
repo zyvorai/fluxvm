@@ -1,23 +1,22 @@
 # Service Fabric phase 2 — archive (shipped)
 
 This page is historical. Dual-stack DSR/SNAT/north-south XDP and the items below
-shipped in Service Fabric **v2**, then were carried into **v3**.
+shipped in Service Fabric **v2**, then were carried into later schemas.
 
-**Current docs:** [service-fabric.md](service-fabric.md) · [phase 4](service-fabric-phase4.md)
+**Current docs:** [service-fabric.md](service-fabric.md) (v4) ·
+[phase 4](service-fabric-phase4.md) · [phase 5 candidates](service-fabric-phase5.md)
 
-## Originally planned (now done)
+## Originally planned (now done unless noted)
 
-1. **North-south XDP service ingress** — node/physical NIC VIP lookup with the
-   same Maglev contract; XDP/TC ownership rules preserved.
-2. **DSR** — routed DSR with source-IP preservation (`mode: dsr`).
-3. **SNAT** — collision-safe SNAT for non-routable VM sources; symmetric reverse NAT.
-4. **IPv6 services** — dual-stack VIPs and backends.
-5. **Active health** — landed in **v3** as node-local TCP probes (Fabric still owns durable intent).
-6. **Identity-aware service policy** — still open (see phase 4 / Fabric identity work).
-7. **EDT bandwidth manager** — still open (phase 4).
-8. **Hubble-grade service events** — still open (phase 4).
-9. **Local redirect** — still open.
-10. **L7 redirect contract** — still open (phase 4).
+1. **North-south XDP service ingress** — **done** (v2).
+2. **DSR** — **done** (v2).
+3. **SNAT** — **done** (v2).
+4. **IPv6 services** — **done** (v2).
+5. **Active health** — **done** (v3 TCP probes; Fabric owns durable intent).
+6. **Identity-aware service policy** — still open ([phase 5](service-fabric-phase5.md)).
+7. **EDT bandwidth manager** — **done** (v4).
+8. **Hubble-grade / FluxScope service events** — **done** (v4).
+9. **Local redirect / cgroup connect** — still open ([phase 5](service-fabric-phase5.md)).
+10. **L7 redirect contract** — still open ([phase 5](service-fabric-phase5.md)).
 
-Items 5–10 that remain open are tracked under [service-fabric-phase4.md](service-fabric-phase4.md)
-and Fabric's phase-4 note; do not treat this file as an active backlog.
+Do not treat this file as an active backlog.
