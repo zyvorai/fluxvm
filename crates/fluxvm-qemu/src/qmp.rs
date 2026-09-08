@@ -9,6 +9,7 @@
 //! process could hang the caller forever.
 
 use anyhow::{Context, Result, bail};
+use fluxvm_core::model::{MigrationMode, MigrationPhase, MigrationStartRequest, MigrationStatus};
 use serde_json::{Value, json};
 use std::{io::ErrorKind, path::Path, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
@@ -117,6 +118,156 @@ async fn try_handshake(socket: &Path) -> std::io::Result<QmpHalves> {
     }
 
     Ok((reader, write_half))
+}
+
+// ZYVOR_RUNTIME_BOUNDARY_V1: QEMU owns migration mechanics; Fabric owns placement/orchestration.
+fn migration_phase(raw: &str) -> MigrationPhase {
+    match raw {
+        "none" => MigrationPhase::None,
+        "setup" => MigrationPhase::Setup,
+        "active" => MigrationPhase::Active,
+        "postcopy-active" | "postcopy-paused" | "postcopy-recover" => {
+            MigrationPhase::PostcopyActive
+        }
+        "completed" => MigrationPhase::Completed,
+        "failed" => MigrationPhase::Failed,
+        "cancelled" | "cancelling" => MigrationPhase::Cancelled,
+        _ => MigrationPhase::Unknown,
+    }
+}
+
+fn parse_migration_status(v: &Value) -> MigrationStatus {
+    let status = v
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let ram = v.get("ram");
+    MigrationStatus {
+        phase: migration_phase(&status),
+        status,
+        ram_transferred: ram
+            .and_then(|r| r.get("transferred"))
+            .and_then(Value::as_u64),
+        ram_remaining: ram.and_then(|r| r.get("remaining")).and_then(Value::as_u64),
+        ram_total: ram.and_then(|r| r.get("total")).and_then(Value::as_u64),
+        total_time_ms: v.get("total-time").and_then(Value::as_u64),
+        downtime_ms: v.get("downtime").and_then(Value::as_u64),
+        error: v
+            .get("error-desc")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+fn validate_migration_uri(uri: &str) -> Result<()> {
+    if uri.starts_with("tcp:") || uri.starts_with("unix:") {
+        return Ok(());
+    }
+    bail!(
+        "unsupported migration URI '{uri}': FluxVM contract v1 permits only tcp: or unix: (exec: is intentionally forbidden)"
+    )
+}
+
+pub async fn migration_status(socket: &Path, timeout: Duration) -> Result<MigrationStatus> {
+    let value = execute(socket, "query-migrate", None, timeout).await?;
+    Ok(parse_migration_status(&value))
+}
+
+pub async fn migration_start(
+    socket: &Path,
+    request: &MigrationStartRequest,
+    timeout: Duration,
+) -> Result<MigrationStatus> {
+    validate_migration_uri(&request.destination)?;
+
+    if request.multifd_channels == Some(0) {
+        bail!("multifd_channels must be >= 1 when set");
+    }
+
+    let mut capabilities = Vec::new();
+    if request.multifd_channels.unwrap_or(1) > 1 {
+        capabilities.push(json!({"capability": "multifd", "state": true}));
+    }
+    if request.mode == MigrationMode::PostCopy {
+        capabilities.push(json!({"capability": "postcopy-ram", "state": true}));
+    }
+    if !capabilities.is_empty() {
+        execute(
+            socket,
+            "migrate-set-capabilities",
+            Some(json!({"capabilities": capabilities})),
+            timeout,
+        )
+        .await?;
+    }
+
+    let mut params = serde_json::Map::new();
+    if let Some(mbps) = request.bandwidth_mbps {
+        // QEMU max-bandwidth is bytes/second. Decimal Mbps is the operator-facing unit.
+        params.insert(
+            "max-bandwidth".into(),
+            Value::from(mbps.saturating_mul(1_000_000) / 8),
+        );
+    }
+    if let Some(ms) = request.max_downtime_ms {
+        params.insert("downtime-limit".into(), Value::from(ms));
+    }
+    if let Some(channels) = request.multifd_channels.filter(|c| *c > 1) {
+        params.insert("multifd-channels".into(), Value::from(channels));
+    }
+    if !params.is_empty() {
+        execute(
+            socket,
+            "migrate-set-parameters",
+            Some(Value::Object(params)),
+            timeout,
+        )
+        .await?;
+    }
+
+    execute(
+        socket,
+        "migrate",
+        Some(json!({"uri": request.destination})),
+        timeout,
+    )
+    .await?;
+
+    if request.mode == MigrationMode::PostCopy {
+        // QEMU only accepts migrate-start-postcopy once pre-copy has entered
+        // active state. Keep this short: the API call is orchestration setup,
+        // not the long-running migration wait loop (Fabric polls status).
+        for _ in 0..50 {
+            let status = migration_status(socket, timeout).await?;
+            match status.phase {
+                MigrationPhase::Active => {
+                    execute(socket, "migrate-start-postcopy", None, timeout).await?;
+                    break;
+                }
+                MigrationPhase::Completed => return Ok(status),
+                MigrationPhase::Failed | MigrationPhase::Cancelled => {
+                    bail!(
+                        "migration became terminal before post-copy start: {}{}",
+                        status.status,
+                        status
+                            .error
+                            .as_deref()
+                            .map(|e| format!(": {e}"))
+                            .unwrap_or_default()
+                    );
+                }
+                _ => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    }
+
+    migration_status(socket, timeout).await
+}
+
+pub async fn migration_cancel(socket: &Path, timeout: Duration) -> Result<MigrationStatus> {
+    execute(socket, "migrate_cancel", None, timeout).await?;
+    migration_status(socket, timeout).await
 }
 
 /// Save VM state to an internal snapshot tagged `name` on the VM's disk
@@ -295,5 +446,40 @@ mod tests {
             format!("{err:#}").contains("timed out"),
             "unexpected error: {err:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod migration_contract_tests {
+    use super::*;
+
+    #[test]
+    fn parses_qemu_migration_progress() {
+        let status = parse_migration_status(&json!({
+            "status": "active",
+            "ram": {"transferred": 75, "remaining": 25, "total": 100},
+            "total-time": 456,
+            "downtime": 7
+        }));
+        assert_eq!(status.phase, MigrationPhase::Active);
+        assert_eq!(status.ram_transferred, Some(75));
+        assert_eq!(status.ram_remaining, Some(25));
+        assert_eq!(status.ram_total, Some(100));
+        assert_eq!(status.total_time_ms, Some(456));
+        assert_eq!(status.downtime_ms, Some(7));
+    }
+
+    #[test]
+    fn rejects_shell_backed_migration_uri() {
+        assert!(validate_migration_uri("exec:ssh host nc 4444").is_err());
+        assert!(validate_migration_uri("tcp:10.0.0.4:4444").is_ok());
+        assert!(validate_migration_uri("unix:/run/fluxvm/incoming.sock").is_ok());
+    }
+
+    #[test]
+    fn maps_postcopy_states() {
+        for state in ["postcopy-active", "postcopy-paused", "postcopy-recover"] {
+            assert_eq!(migration_phase(state), MigrationPhase::PostcopyActive);
+        }
     }
 }

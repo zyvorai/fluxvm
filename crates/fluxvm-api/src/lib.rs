@@ -64,11 +64,7 @@ type ApiResult<T> = Result<T, ApiError>;
 /// one carry their resolved `Role` (and optional token name) onward.
 /// Fail-closed when `auth.must_authenticate(listen)` is true.
 /// Static `[[auth.tokens]]` are tried first; OIDC JWTs when configured.
-async fn auth_middleware(
-    State(auth): State<AuthState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: Next) -> Response {
     let m = &auth.manager;
     let path = req.uri().path().to_string();
     let method = req.method().clone();
@@ -238,6 +234,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
         .route("/v1/vms", post(create_vm).get(list_vms))
         .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
         .route("/v1/vms/{id}/start", post(start_vm))
@@ -246,6 +243,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             post(start_vm_from_snapshot),
         )
         .route("/v1/vms/{id}/snapshot", post(snapshot_vm))
+        .route("/v1/vms/{id}/migration/start", post(start_migration))
+        .route("/v1/vms/{id}/migration/status", get(migration_status))
+        .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
         .route("/v1/vms/{id}/stop", post(stop_vm))
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
@@ -274,10 +274,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/network/groups/{name}",
             get(get_network_group).delete(delete_network_group),
         )
-        .route(
-            "/v1/network/cnp",
-            get(list_cnp).post(apply_cnp),
-        )
+        .route("/v1/network/cnp", get(list_cnp).post(apply_cnp))
         .route("/v1/network/cnp/{name}", get(get_cnp).delete(delete_cnp))
         .route("/v1/network/identities", get(list_identities))
         .route("/v1/network/observe", get(network_observe))
@@ -836,6 +833,79 @@ load().catch(() => {});
 </body>
 </html>"#;
 
+// ZYVOR_RUNTIME_BOUNDARY_V1: stable node-runtime feature discovery for Fabric.
+async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities> {
+    use fluxvm_core::model::{
+        BackendKind, RuntimeCapabilities, RuntimeMigrationCapability, RuntimeSnapshotCapability,
+    };
+    Json(RuntimeCapabilities {
+        api_version: "runtime.fluxvm.zyvor.io/v1".into(),
+        scope: "node-local".into(),
+        orchestration_owner: "zyvor-fabric".into(),
+        migration: vec![RuntimeMigrationCapability {
+            backend: BackendKind::Qemu,
+            live: true,
+            pre_copy: true,
+            post_copy: true,
+            multifd: true,
+            requires_shared_storage: true,
+            transports: vec!["tcp".into(), "unix".into()],
+        }],
+        snapshot: vec![
+            RuntimeSnapshotCapability {
+                backend: BackendKind::Qemu,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::CloudHypervisor,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::Firecracker,
+                memory: false,
+                disk: false,
+                portable: false,
+            },
+            RuntimeSnapshotCapability {
+                backend: BackendKind::FluxVm,
+                memory: true,
+                disk: true,
+                portable: false,
+            },
+        ],
+    })
+}
+
+async fn start_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationStartRequest>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.start_migration(id, &req).await?))
+}
+
+async fn migration_status(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    Ok(Json(m.migration_status(id).await?))
+}
+
+async fn cancel_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
+    require_admin(role)?;
+    Ok(Json(m.cancel_migration(id).await?))
+}
+
 #[derive(Deserialize)]
 struct ListVmsQuery {
     /// Exact-match filter on `VmRecord.name`. Added for zyvor-fabric's
@@ -1078,9 +1148,7 @@ async fn delete_network_group(
     Ok(Json(json!({"deleted": name})))
 }
 
-async fn list_cnp(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn list_cnp(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.list_cnp().await?})))
 }
 
@@ -1110,33 +1178,23 @@ async fn delete_cnp(
     Ok(Json(json!({"deleted": name})))
 }
 
-async fn list_identities(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn list_identities(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.list_identities().await?})))
 }
 
-async fn network_observe(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn network_observe(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(m.network_observe().await?)))
 }
 
-async fn network_health(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn network_health(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!(m.network_health().await?)))
 }
 
-async fn network_ipcache(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn network_ipcache(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_ipcache().await?})))
 }
 
-async fn list_endpoints(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn list_endpoints(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_endpoints().await?})))
 }
 
@@ -1182,7 +1240,7 @@ async fn hubble_flows_text(
     State(m): State<Arc<VmManager>>,
     Query(q): Query<HubbleFlowsQuery>,
 ) -> impl axum::response::IntoResponse {
-    use fluxvm_network::packetflow::{filter_views, render_flows, FlowOutput};
+    use fluxvm_network::packetflow::{FlowOutput, filter_views, render_flows};
     let views = match m.hubble_observe_views(q.limit).await {
         Ok(v) => filter_views(v, Some(q.verdict.as_str()), Some(q.protocol.as_str())),
         Err(e) => {
@@ -1190,7 +1248,7 @@ async fn hubble_flows_text(
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
                 format!("error: {e:#}\n"),
-            )
+            );
         }
     };
     let mode = FlowOutput::parse(&q.output);
@@ -1204,10 +1262,7 @@ async fn hubble_flows_text(
 
 async fn hubble_ui() -> impl axum::response::IntoResponse {
     (
-        [(
-            header::CONTENT_TYPE,
-            "text/html; charset=utf-8",
-        )],
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         HUBBLE_UI_HTML,
     )
 }
@@ -1761,7 +1816,7 @@ mod tests {
                     token: None,
                 }),
                 qga: None,
-            hyperv: false,
+                hyperv: false,
                 storage: Default::default(),
                 shared_folders: vec![],
                 numa_node: None,
