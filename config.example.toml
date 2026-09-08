@@ -58,13 +58,20 @@ reaper_interval_secs = 5
 # block_cidrs = ["198.51.100.0/24", "2001:db8:bad::/48"]
 #
 #
-# VM Service Fabric v2. `north_south_interfaces` enables physical-uplink
+# VM Service Fabric v4. `north_south_interfaces` enables physical-uplink
 # service VIP handling. XDP is optional and falls back to TC/host routing.
 # Do not enable service XDP with dataplane.mode = "cilium".
+# EDT pacing requires edt_enabled + edt_interfaces; FluxVM only manages fq
+# when edt_manage_fq is true. OTLP export needs otlp_endpoint.
 # [sandbox.dataplane.service]
 # north_south_interfaces = ["eno1", "eno2"]
 # xdp_acceleration = true
 # xdp_object = "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o"
+# edt_enabled = true
+# edt_interfaces = ["eno1"]
+# edt_manage_fq = true
+# otlp_endpoint = "http://127.0.0.1:4318/v1/logs"
+# otlp_timeout_ms = 5000
 #
 # [[sandbox.credential_vault]]
 # host = "api.openai.com"

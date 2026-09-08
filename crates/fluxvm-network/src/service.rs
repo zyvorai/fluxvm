@@ -1,16 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! FluxVM Service Fabric v3.
+//! FluxVM Service Fabric v4.
 //!
 //! Fabric owns distributed service intent; FluxVM owns the node-local
-//! dataplane. v3 is cumulative with v1/v2 and adds connection lifecycle and
-//! service HA primitives:
-//! - forward conntrack/backend affinity across Maglev changes,
-//! - TCP/UDP timeout classes plus explicit userspace GC/pressure reporting,
-//! - ready/draining/unhealthy backend states and active TCP health probes,
-//! - node-local VIP advertisement snapshots for an external FRR/BIRD speaker,
-//! - raw conntrack checkpoint export/import for opt-in HA replication.
+//! dataplane. v4 is cumulative with v1-v3 and adds performance/observability:
+//! - per-service EDT pacing with explicit fq queue ownership,
+//! - optional NAT host-routing with safe stack fallback,
+//! - FluxScope service-flow aggregation with rich reasons and OTLP/HTTP export,
+//! - v3 lifecycle/health/HA and conntrack checkpoint semantics unchanged.
 //!
 //! The service BPF program remains separate from `fluxvm_tc.bpf.c`, keeping
 //! the security-policy schema independent from the load-balancer schema.
@@ -18,7 +16,7 @@
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::{Config, DataplaneMode};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -30,7 +28,7 @@ use std::{
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-pub const SERVICE_SCHEMA_VERSION: u32 = 3;
+pub const SERVICE_SCHEMA_VERSION: u32 = 4;
 const SERVICE_TC_PRIORITY: &str = "49140";
 const SERVICE_TC_HANDLE: &str = "40";
 const DEFAULT_MAGLEV_TABLE_SIZE: u32 = 4093;
@@ -46,6 +44,8 @@ const BACKEND_UNHEALTHY: u16 = 4;
 const CONNTRACK_MAP_MAX: usize = 131072;
 const MODE_NAT: u8 = 1;
 const MODE_DSR: u8 = 2;
+const SERVICE_F_HOST_ROUTING: u8 = 1;
+const FLOW_VERDICT_ALLOW: u8 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -206,6 +206,18 @@ pub struct ServiceSpec {
     /// run an embedded BGP speaker.
     #[serde(default)]
     pub advertise: bool,
+    /// Optional per-service EDT ceiling. The node must explicitly enable
+    /// service EDT and configure fq on the egress interfaces that carry it.
+    #[serde(default)]
+    pub max_egress_mbps: Option<u32>,
+    /// 0 disables allowed-flow sampling; N records roughly 1/N allowed
+    /// packets in FluxScope. Drops are always recorded.
+    #[serde(default)]
+    pub flow_sample_rate: u32,
+    /// After NAT rewrite, attempt FIB/neighbor redirect directly to backend.
+    /// Route/neighbor misses safely fall back to the host stack.
+    #[serde(default)]
+    pub host_routing: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +234,9 @@ pub struct ServiceStatus {
     pub maglev_table_size: u32,
     pub snat_address: Option<IpAddr>,
     pub advertise: bool,
+    pub max_egress_mbps: Option<u32>,
+    pub flow_sample_rate: u32,
+    pub host_routing: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +254,36 @@ pub struct ServiceCounters {
     pub conntrack_misses: u64,
     pub conntrack_expired: u64,
     pub passive_failures: u64,
+    pub edt_packets: u64,
+    pub host_routed_packets: u64,
+    pub host_route_fallbacks: u64,
+    pub flow_events: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceFlowRecord {
+    pub scope: String,
+    pub service_id: u32,
+    pub service: String,
+    pub backend_id: u32,
+    pub family: u8,
+    pub source: String,
+    pub destination: String,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub protocol: u8,
+    pub verdict: String,
+    pub reason: String,
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OtlpExportReport {
+    pub endpoint: String,
+    pub records: usize,
+    pub status: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -411,6 +456,15 @@ pub fn validate(spec: &ServiceSpec) -> Result<()> {
     if spec.advertise && !spec.exposure.north_south() {
         bail!("advertise=true requires north-south or both exposure");
     }
+    if spec.max_egress_mbps == Some(0) {
+        bail!("max_egress_mbps must be greater than zero when set");
+    }
+    if spec.max_egress_mbps.is_some_and(|v| v > 1_000_000) {
+        bail!("max_egress_mbps must be <= 1000000");
+    }
+    if spec.flow_sample_rate > 1_000_000_000 {
+        bail!("flow_sample_rate must be <= 1000000000");
+    }
 
     let table = spec.maglev_table_size.unwrap_or(DEFAULT_MAGLEV_TABLE_SIZE);
     if !ALLOWED_MAGLEV_TABLE_SIZES.contains(&table) {
@@ -576,6 +630,9 @@ pub fn status_for(spec: &ServiceSpec) -> Result<ServiceStatus> {
         maglev_table_size: spec.maglev_table_size.unwrap_or(DEFAULT_MAGLEV_TABLE_SIZE),
         snat_address: spec.snat_address,
         advertise: spec.advertise,
+        max_egress_mbps: spec.max_egress_mbps,
+        flow_sample_rate: spec.flow_sample_rate,
+        host_routing: spec.host_routing,
     })
 }
 
@@ -1101,6 +1158,176 @@ fn add_stat_value(out: &mut ServiceCounters, raw: &[u8]) {
     out.passive_failures = out
         .passive_failures
         .saturating_add(u64::from_ne_bytes(raw[80..88].try_into().unwrap()));
+    if raw.len() >= 120 {
+        out.edt_packets = out.edt_packets.saturating_add(u64::from_ne_bytes(raw[88..96].try_into().unwrap()));
+        out.host_routed_packets = out.host_routed_packets.saturating_add(u64::from_ne_bytes(raw[96..104].try_into().unwrap()));
+        out.host_route_fallbacks = out.host_route_fallbacks.saturating_add(u64::from_ne_bytes(raw[104..112].try_into().unwrap()));
+        out.flow_events = out.flow_events.saturating_add(u64::from_ne_bytes(raw[112..120].try_into().unwrap()));
+    }
+}
+
+fn flow_reason(code: u8) -> &'static str {
+    match code {
+        0 => "none",
+        1 => "update-guard",
+        2 => "no-maglev",
+        3 => "no-backend",
+        4 => "backend-unhealthy",
+        5 => "nat-exhausted",
+        6 => "rewrite-failed",
+        7 => "fib-fallback",
+        8 => "bad-mode",
+        9 => "conntrack-stale",
+        _ => "unknown",
+    }
+}
+
+fn parse_flow_map(
+    scope: &str,
+    map: &Path,
+    names: &HashMap<u32, String>,
+) -> Result<Vec<ServiceFlowRecord>> {
+    if !map.exists() { return Ok(Vec::new()); }
+    let root = bpftool_json_dump(map)?;
+    let entries = root.as_array().context("bpftool service flow dump must be an array")?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = json_bytes(&entry["key"])?;
+        let value = json_bytes(&entry["value"])?;
+        if key.len() < 48 || value.len() < 24 { continue; }
+        let sid = u32::from_ne_bytes(key[0..4].try_into().unwrap());
+        let bid = u32::from_ne_bytes(key[4..8].try_into().unwrap());
+        let family = key[44];
+        let source = match family {
+            4 => IpAddr::V4(std::net::Ipv4Addr::new(key[8], key[9], key[10], key[11])).to_string(),
+            6 => IpAddr::V6(std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&key[8..24]).unwrap())).to_string(),
+            _ => continue,
+        };
+        let destination = match family {
+            4 => IpAddr::V4(std::net::Ipv4Addr::new(key[24], key[25], key[26], key[27])).to_string(),
+            6 => IpAddr::V6(std::net::Ipv6Addr::from(<[u8; 16]>::try_from(&key[24..40]).unwrap())).to_string(),
+            _ => continue,
+        };
+        out.push(ServiceFlowRecord {
+            scope: scope.to_string(), service_id: sid,
+            service: names.get(&sid).cloned().unwrap_or_else(|| format!("service-{sid}")),
+            backend_id: bid, family, source, destination,
+            source_port: u16::from_ne_bytes(key[40..42].try_into().unwrap()),
+            destination_port: u16::from_ne_bytes(key[42..44].try_into().unwrap()),
+            protocol: key[45],
+            verdict: if key[46] == FLOW_VERDICT_ALLOW { "allow" } else { "drop" }.into(),
+            reason: flow_reason(key[47]).into(),
+            packets: u64::from_ne_bytes(value[0..8].try_into().unwrap()),
+            bytes: u64::from_ne_bytes(value[8..16].try_into().unwrap()),
+            last_seen_ns: u64::from_ne_bytes(value[16..24].try_into().unwrap()),
+        });
+    }
+    Ok(out)
+}
+
+pub fn service_flows(cfg: &Config, limit: usize) -> Result<Vec<ServiceFlowRecord>> {
+    let names: HashMap<u32, String> = list(cfg)?.into_iter()
+        .map(|s| (service_id(&s.name), s.name)).collect();
+    let mut out = Vec::new();
+    let root = meta_root();
+    if root.exists() {
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() { continue; }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if Uuid::parse_str(&name).is_err() { continue; }
+            let map = cfg.sandbox.dataplane.pin_root.join("vms").join(&name)
+                .join("service/maps/fluxvm_sflows");
+            out.extend(parse_flow_map(&format!("vm:{name}"), &map, &names)?);
+        }
+    }
+    for iface in &cfg.sandbox.dataplane.service.north_south_interfaces {
+        let map = host_pin_dir(cfg, iface).join("maps/fluxvm_sflows");
+        out.extend(parse_flow_map(&format!("host:{iface}"), &map, &names)?);
+    }
+    out.sort_by(|a, b| b.last_seen_ns.cmp(&a.last_seen_ns));
+    out.truncate(limit.clamp(1, 16_384));
+    Ok(out)
+}
+
+fn otlp_kv(key: &str, value: serde_json::Value) -> serde_json::Value {
+    let any = match value {
+        serde_json::Value::String(v) => json!({"stringValue": v}),
+        serde_json::Value::Number(v) => json!({"intValue": v.to_string()}),
+        serde_json::Value::Bool(v) => json!({"boolValue": v}),
+        v => json!({"stringValue": v.to_string()}),
+    };
+    json!({"key": key, "value": any})
+}
+
+pub async fn export_otlp(cfg: &Config, limit: usize) -> Result<OtlpExportReport> {
+    let endpoint = cfg.sandbox.dataplane.service.otlp_endpoint.clone()
+        .context("service OTLP export requires sandbox.dataplane.service.otlp_endpoint")?;
+    let flows = service_flows(cfg, limit)?;
+    let now_ns = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos().to_string();
+    let records: Vec<serde_json::Value> = flows.iter().map(|f| json!({
+        "timeUnixNano": now_ns,
+        "severityText": if f.verdict == "drop" { "WARN" } else { "INFO" },
+        "body": {"stringValue": format!("{} {}:{} -> {}:{}", f.service, f.source, f.source_port, f.destination, f.destination_port)},
+        "attributes": [
+            otlp_kv("zyvor.fluxvm.scope", json!(f.scope)),
+            otlp_kv("service.name", json!(f.service)),
+            otlp_kv("zyvor.service.id", json!(f.service_id)),
+            otlp_kv("zyvor.backend.id", json!(f.backend_id)),
+            otlp_kv("network.protocol.number", json!(f.protocol)),
+            otlp_kv("source.address", json!(f.source)),
+            otlp_kv("source.port", json!(f.source_port)),
+            otlp_kv("destination.address", json!(f.destination)),
+            otlp_kv("destination.port", json!(f.destination_port)),
+            otlp_kv("zyvor.verdict", json!(f.verdict)),
+            otlp_kv("zyvor.reason", json!(f.reason)),
+            otlp_kv("zyvor.packets", json!(f.packets)),
+            otlp_kv("zyvor.bytes", json!(f.bytes))
+        ]
+    })).collect();
+    let body = json!({"resourceLogs": [{
+        "resource": {"attributes": [otlp_kv("service.name", json!("fluxvm"))]},
+        "scopeLogs": [{"scope": {"name": "zyvor.fluxscope.service"}, "logRecords": records}]
+    }]});
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(cfg.sandbox.dataplane.service.otlp_timeout_ms)).build()?;
+    let resp = client.post(&endpoint).header("content-type", "application/json").json(&body)
+        .send().await.with_context(|| format!("posting service flow OTLP to {endpoint}"))?;
+    let status = resp.status().as_u16();
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        bail!("service OTLP export failed: HTTP {status}: {text}");
+    }
+    Ok(OtlpExportReport { endpoint, records: flows.len(), status })
+}
+
+fn validate_runtime_config(cfg: &Config, specs: &[ServiceSpec]) -> Result<()> {
+    let svc = &cfg.sandbox.dataplane.service;
+    if specs.iter().any(|s| s.max_egress_mbps.is_some()) && !svc.edt_enabled {
+        bail!("service max_egress_mbps requires sandbox.dataplane.service.edt_enabled=true");
+    }
+    if svc.edt_enabled && svc.edt_interfaces.is_empty() {
+        bail!("service EDT is enabled but edt_interfaces is empty");
+    }
+    if svc.otlp_timeout_ms == 0 || svc.otlp_timeout_ms > 60_000 {
+        bail!("service otlp_timeout_ms must be in 1..=60000");
+    }
+    Ok(())
+}
+
+fn ensure_edt_qdiscs(cfg: &Config) -> Result<()> {
+    let svc = &cfg.sandbox.dataplane.service;
+    if !svc.edt_enabled || !svc.edt_manage_fq { return Ok(()); }
+    require_tc()?;
+    for iface in &svc.edt_interfaces {
+        if iface.is_empty() || iface.len() > 15 {
+            bail!("EDT interface name {iface:?} must contain 1..=15 characters");
+        }
+        run("tc", &["qdisc".into(), "replace".into(), "dev".into(), iface.clone(),
+            "root".into(), "fq".into()])
+            .with_context(|| format!("installing fq for service EDT on {iface}"))?;
+    }
+    Ok(())
 }
 
 /// Ensure the east-west service program/maps exist on one VM edge.
@@ -1116,6 +1343,8 @@ pub fn ensure_for_vm(cfg: &Config, id: Uuid, iface: &str) -> Result<bool> {
     if cfg.sandbox.dataplane.mode == DataplaneMode::Legacy {
         bail!("FluxVM services require sandbox.dataplane.mode=ebpf or cilium");
     }
+    validate_runtime_config(cfg, &specs)?;
+    ensure_edt_qdiscs(cfg)?;
     ensure_tc_instance(
         cfg,
         &specs,
@@ -1236,6 +1465,8 @@ fn sync_host(cfg: &Config) -> Result<()> {
         .filter(|s| s.exposure.north_south())
         .collect();
     let svc_cfg = &cfg.sandbox.dataplane.service;
+    validate_runtime_config(cfg, &specs)?;
+    ensure_edt_qdiscs(cfg)?;
 
     if svc_cfg.xdp_acceleration && cfg.sandbox.dataplane.mode == DataplaneMode::Cilium {
         bail!(
@@ -1341,6 +1572,7 @@ fn ensure_host_xdp(cfg: &Config, iface: &str, root: &Path, map_dir: &Path) -> Re
             "fluxvm_snat6",
             "fluxvm_sstats",
             "fluxvm_bstat",
+            "fluxvm_sflows",
         ] {
             args.extend([
                 "map".into(),
@@ -1637,11 +1869,21 @@ fn populate_maps(map_dir: &Path, specs: &[ServiceSpec]) -> Result<()> {
 }
 
 fn write_service(map_dir: &Path, spec: &ServiceSpec, sid: u32, table_size: u32) -> Result<()> {
-    let mut value = Vec::with_capacity(12);
+    // Must match struct svc_value in both TC and XDP objects (24 bytes).
+    let mut value = Vec::with_capacity(24);
     value.extend_from_slice(&sid.to_ne_bytes());
     value.extend_from_slice(&table_size.to_ne_bytes());
+    let rate_bytes_per_sec = match spec.max_egress_mbps {
+        None => 0,
+        Some(mbps) => u64::from(mbps)
+            .checked_mul(1_000_000)
+            .map(|v| v / 8)
+            .context("max_egress_mbps is too large")?,
+    };
+    value.extend_from_slice(&rate_bytes_per_sec.to_ne_bytes());
+    value.extend_from_slice(&spec.flow_sample_rate.to_ne_bytes());
     value.push(spec.mode.wire());
-    value.push(0);
+    value.push(if spec.host_routing { SERVICE_F_HOST_ROUTING } else { 0 });
     value.extend_from_slice(&0u16.to_ne_bytes());
 
     match spec.vip {
@@ -1982,6 +2224,9 @@ mod tests {
             snat_address: None,
             health_check: None,
             advertise: false,
+            max_egress_mbps: None,
+            flow_sample_rate: 0,
+            host_routing: false,
         }
     }
 
