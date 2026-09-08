@@ -39,7 +39,12 @@ REST: `GET /v1/network/health`, `/ipcache`, `/observe`; `POST /v1/network/refres
 
 ## Still not a CNI
 
-No kube-proxy replacement, Maglev, WireGuard datapath, L7 Envoy, or full flow UI.
+FluxVM is not a cluster CNI or kube-proxy replacement. WireGuard datapath, L7
+Envoy parsers, and a full Hubble UI remain out of this runbook.
+
+**Service load balancing** is a separate plane: Service Fabric **schema v3**
+(Maglev / NAT / DSR / affinity / health) — see [service-fabric.md](service-fabric.md).
+Do not conflate it with per-VM Network Fabric schema v4 policy.
 
 ## Validation
 
@@ -57,4 +62,5 @@ Related: `python3 scripts/test-network-policy.py`,
 - [network-groups.md](network-groups.md)
 - [network-policy.md](network-policy.md)
 - [network-fabric.md](network-fabric.md)
+- [service-fabric.md](service-fabric.md)
 - [ebpf-cilium.md](ebpf-cilium.md)

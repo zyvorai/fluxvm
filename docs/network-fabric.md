@@ -381,15 +381,19 @@ TAP+netns. Known independent lab gaps (not dataplane ABI regressions):
 Fabric console UX (Status / Policy save / Stats / Flows + dashboard capability)
 has been verified end-to-end against attached schema v4 VMs.
 
-## What should be separate after v3
+## Related planes after Network Fabric v4
 
-The core dataplane is complete enough to freeze its v3 ABI and move feature
-work into independent PRs:
+Network Fabric **schema v4** (per-VM TC/eBPF policy) is GA. Adjacent work lives
+in independent docs/PRs:
 
-1. FluxLB / Maglev VM service load balancing.
-2. BGP advertisement of VM/service prefixes.
+1. **Service Fabric schema v3** — Maglev VIP LB, dual-stack NAT/DSR/SNAT, forward
+   conntrack, health/drain, VIP advertisement snapshot, restricted HA export —
+   [service-fabric.md](service-fabric.md).
+2. **BGP speaker** — Fabric/FRR/BIRD consume FluxVM ads; not embedded in FluxVM
+   ([service-fabric-phase4.md](service-fabric-phase4.md)).
 3. WireGuard host-to-host VM encryption.
 4. First-class Cilium CNI/launcher identities and Hubble attribution.
-5. Migration transfer of connection/NAT state.
+5. Migration transfer of connection/NAT state (partially enabled for service maps
+   via conntrack export/import; full VM CT migration still separate).
 6. Dedicated libbpf ring-buffer/SSE streaming daemon if sub-second events are
    required at scale.

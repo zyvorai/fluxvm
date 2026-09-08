@@ -33,8 +33,11 @@ Security groups: [network-groups.md](network-groups.md).
 | ipcache | Guest IP → identity (`GET /v1/network/ipcache`) |
 | Production health | `fluxvm dataplane health`, [production-dataplane.md](production-dataplane.md) |
 
-Not in scope: kube-proxy replacement, Maglev/DSR service LB, WireGuard/IPsec
+Not in scope for **this** policy plane: kube-proxy replacement, WireGuard/IPsec
 datapath, L7 Envoy/Kafka parsers, ClusterMesh, or a full flow UI.
+
+Maglev / DSR / SNAT service LB lives in **Service Fabric schema v3**
+([service-fabric.md](service-fabric.md)), not in CNP/group compilers.
 
 ## Apply a CNP
 

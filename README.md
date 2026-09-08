@@ -152,6 +152,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [AI-agent sandbox gaps](docs/agent-sandbox-gaps.md)
 - [eBPF / Cilium dataplane](docs/ebpf-cilium.md)
 - [Network Fabric](docs/network-fabric.md)
+- [Service Fabric (Maglev VIP LB schema v3)](docs/service-fabric.md)
 - [Security groups](docs/network-groups.md)
 - [Network policy (CNP)](docs/network-policy.md)
 - [Network policy tutorials](docs/tutorials/network-policy/README.md)
@@ -242,6 +243,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - QEMU user-mode networking + host port forwarding.
 - Static-IP network-namespace mode — the guest gets a real, deterministically-reserved DHCP-leased IP, not just host↔namespace NAT.
 - **Sandbox dataplane / Network Fabric** — default **legacy nftables**; optional **native TC/eBPF** (`ebpf`) and **Cilium coexistence** (`cilium`) with IPv4/IPv6 L3+L4, rate limits, schema **v4**, security groups, CNP, observe/health/ipcache/FQDN refresh, optional XDP, safe nftables fallback. See [eBPF / Cilium sandbox dataplane](#ebpf--cilium-sandbox-dataplane), [Network Fabric architecture](#network-fabric-architecture-how-it-works), [docs/network-fabric.md](docs/network-fabric.md), [docs/network-policy.md](docs/network-policy.md), and [docs/production-dataplane.md](docs/production-dataplane.md).
+- **Service Fabric** — node-local Maglev VIP load balancing (**schema v3**): dual-stack NAT/DSR/SNAT, forward conntrack affinity, Ready/Draining/Unhealthy + TCP health, VIP advertisement snapshot, restricted conntrack export/import. Fabric owns leases/fan-out. See [docs/service-fabric.md](docs/service-fabric.md).
 - **Security groups** — `key=value` labels and numeric identities (`0x10000+`), deny CIDRs, ICMP passthrough, `fluxvm group` CLI, `/v1/network/groups` + `/v1/vms/{id}/network/effective`. See [docs/network-groups.md](docs/network-groups.md).
 - **Network policy (CNP)** — CNP compiler, reserved identities, CT learn/hit, audit mode, `fluxvm cnp` / `fluxvm identity` / `fluxvm observe`. See [docs/network-policy.md](docs/network-policy.md). Hands-on: [docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
 - **Production dataplane** — FQDN resolve at apply, FluxVM ipcache, health/ipcache/refresh-dns API + CLI, fail-closed prod profile. See [docs/production-dataplane.md](docs/production-dataplane.md).
