@@ -86,14 +86,6 @@ trial tokens (`scripts/trial-tool.py` stays in the private Ragnarok repo only).
 
 See also the longer integration notes in the [root README — Using FluxVM through Ragnarok](../../../../README.md#using-fluxvm-through-ragnarok).
 
-## Operate from the console (UX)
-
-1. Open this route from the nav or command palette and wait for live API data.
-2. Use filters/search when present; drill into a row for detail.
-3. For mutating actions: confirm role gates and impact before applying.
-4. **Empty / fail:** Check service health, auth, and that required CRDs/backends for this domain are installed.
-5. **Success:** Live data loads; created/updated objects appear without error toasts.
-
 ## Related pages
 
 - [Getting Started](../../getting-started.md)

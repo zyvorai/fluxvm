@@ -39,7 +39,7 @@ Every route is also listed in the [complete page index](../PAGE_INDEX.md).
 
 | Page | What it covers |
 |------|----------------|
-| [Workflows](operations/workflows.md) | Day-to-day create / exec / pause / TTL / warm-pool jobs. |
+| [Workflows](operations/workflows.md) | Day-to-day create / exec / pause / TTL / warm-pool / Windows QGA / Service Fabric jobs. |
 
 ## Setup
 

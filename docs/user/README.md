@@ -5,13 +5,17 @@ A standalone, minimal-dependency disposable-VM control plane — QEMU/KVM, Cloud
 | You want to… | Open |
 |--------------|------|
 | Install and boot your first VM | [Getting Started](getting-started.md) |
+| Day-to-day recipes | [Workflows](workflows.md) |
 | Production readiness (`/readyz`, tenant) | [PRODUCTION.md](../PRODUCTION.md) · [tutorials](../tutorials/production/README.md) |
 | Configure backends, storage, auth | [Configuration](configuration.md) |
-| Run common jobs | [Workflows](workflows.md) |
 | Deploy, systemd, ports | [Admin basics](admin-basics.md) |
+| CLI & REST map | [Using the CLI & API](using-the-dashboard.md) |
 | Run as a Kubernetes DaemonSet | [Kubernetes deployment](kubernetes-deployment.md) |
 | Use with Ragnarok (UI + SSO) | [Ragnarok integration](ragnarok-integration.md) |
 | Build a custom OS image | [Building custom OS images](build-image-tutorial.md) · [Windows Kryton goldens](../windows-golden.md) |
+| Network Fabric policy labs | [network-policy tutorials](../tutorials/network-policy/README.md) |
+| Service Fabric Maglev VIP | [service-fabric tutorial](../tutorials/service-fabric/README.md) · [operator](../service-fabric.md) |
+| MicroVM CRDs | [microvm tutorials](../tutorials/microvm/README.md) |
 | See what it's actually used for | [Use cases](use-cases.md) |
 | Full topic index | [PAGE_INDEX.md](PAGE_INDEX.md) |
 

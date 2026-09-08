@@ -69,7 +69,7 @@ Lab one-shot (sandbox + MicroVM):
 ./scripts/run-lab-benches.sh
 ```
 
-## Lab results (2026-09-08 · `sus@80.79.5.173`)
+## Lab results (2026-09-08)
 
 Host: Ubuntu 24.04 · Xeon E-2336 (12 threads) · 31 GiB RAM · k3s + FluxVM
 `:7788`. `BENCH_N=5`. Numbers are wall-clock create latency, **not** steady-state

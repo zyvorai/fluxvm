@@ -1,23 +1,88 @@
 # Admin basics
 
-| Topic | Guidance |
-|-------|----------|
-| **Service** | Run `fluxvm serve` under the provided systemd unit; the TTL reaper and pool backfill only run while `serve` is up |
-| **Host deps** | `scripts/bootstrap-host.sh` / remote deploy install QEMU tooling, `nbd`, and `libhivex` (Windows offline customize). Load `nbd` before `build-image` |
-| **Logs** | `journalctl -u fluxvm -f`; each VM also has its own console log under `<state_dir>/instances/<uuid>/console.log` |
-| **State** | `<state_dir>/vms.json` is the source of truth, coordinated across concurrent `fluxvm` processes via an OS-level `flock` on `vms.lock` |
-| **Liveness / readiness** | `curl -sf http://127.0.0.1:7788/healthz` · `curl -sf http://127.0.0.1:7788/readyz` (auth-exempt; use `/readyz` when dataplane is required) |
-| **Security** | Bearer-token auth/RBAC is opt-in — configure `[[auth.tokens]]` (optional `tenant`) before exposing beyond localhost; filter with `GET /v1/vms?tenant=`; `extra_args` is an admin escape hatch |
-| **Production** | [PRODUCTION.md](../PRODUCTION.md) · `./scripts/release-checklist.sh` · [examples/create-vm-prod.json](../../examples/create-vm-prod.json) · [production tutorials](../tutorials/production/README.md) |
-| **Support** | [GitHub issues](https://github.com/zyvorai/fluxvm/issues) · [Contact Zyvor](/contact) for Enterprise |
+Operate FluxVM on a host: service, ports, auth, logs, and production gates.
 
-See also [Getting started](getting-started.md) and [Configuration](configuration.md).
+## Service
 
-## Operate from the console (UX)
+```bash
+sudo systemctl enable --now fluxvm    # if unit installed by deploy
+# or foreground:
+sudo fluxvm --config /etc/fluxvm.toml serve
+```
 
-1. Open this route from the nav or command palette and wait for live API data.
-2. Use filters/search when present; drill into a row for detail.
-3. For mutating actions: confirm role gates and impact before applying.
-4. **Empty / fail:** Check service health, auth, and that required CRDs/backends for this domain are installed.
-5. **Success:** Live data loads; created/updated objects appear without error toasts.
+TTL reaper and warm-pool backfill run only while `serve` is up.
 
+## Host dependencies
+
+```bash
+./scripts/bootstrap-host.sh
+# Windows offline customize needs libhivex + nbd:
+sudo modprobe nbd max_part=16
+```
+
+Remote: `./scripts/deploy-remote.sh USER@HOST`.
+
+## Ports
+
+| Port | Role |
+|------|------|
+| **7788** | FluxVM REST (`fluxvm serve`) |
+| **9108** | Optional MicroVM Prometheus (`MICROVM_METRICS_ADDR`) |
+
+Fabric (separate product) typically listens on **9095** and proxies FluxVM.
+
+## Health
+
+```bash
+curl -sf http://127.0.0.1:7788/healthz
+curl -sf http://127.0.0.1:7788/readyz | jq .
+```
+
+Both are auth-exempt. Use `/readyz` when dataplane must be ready before work.
+
+## Auth (opt-in)
+
+Default: open API (every request is admin). Before exposing beyond localhost:
+
+```toml
+[auth]
+require = true
+
+[[auth.tokens]]
+token = "replace-me"
+role = "admin"
+name = "ops"
+# tenant = "team-a"   # optional scope
+```
+
+```bash
+curl -sf -H "Authorization: Bearer replace-me" http://127.0.0.1:7788/v1/vms
+```
+
+List/filter: `GET /v1/vms?tenant=team-a`. See [PRODUCTION.md](../PRODUCTION.md)
+and [SECURITY.md](../../SECURITY.md).
+
+## State and logs
+
+| Path | Role |
+|------|------|
+| `<state_dir>/vms.json` | VM inventory (flock via `vms.lock`) |
+| `<state_dir>/instances/<uuid>/console.log` | Per-VM console |
+| `journalctl -u fluxvm -f` | Daemon journal |
+
+## Production checklist
+
+```bash
+./scripts/release-checklist.sh
+```
+
+- [PRODUCTION.md](../PRODUCTION.md)
+- [examples/create-vm-prod.json](../../examples/create-vm-prod.json)
+- [production tutorials](../tutorials/production/README.md)
+
+## Related
+
+- [Getting started](getting-started.md)
+- [Configuration](configuration.md)
+- [Common workflows](workflows.md)
+- [Kubernetes deployment](kubernetes-deployment.md)

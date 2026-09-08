@@ -1,38 +1,54 @@
-# Using FluxVM (CLI & API)
+# Using the CLI and REST API
 
-FluxVM is primarily a **CLI + REST** control plane (no first-party web console). Day-to-day work uses `fluxvm` on the host, or the HTTP API the same binary serves.
+FluxVM is primarily a **CLI + REST** control plane (port **7788**). Day-2
+orchestration UI lives in [Zyvor Fabric](https://github.com/zyvorai/fabric)
+(`:9095`). This page maps common jobs to both surfaces.
 
-## CLI essentials
+## CLI cheat sheet
+
+| Job | Command |
+|-----|---------|
+| Create | `fluxvm create --spec examples/qemu.json` |
+| List | `fluxvm list` |
+| Exec (Linux agent) | `fluxvm exec <id> -- cmd` |
+| QGA (Windows) | `fluxvm qga ping\|powershell\|firewall-open <id> …` |
+| Delete | `fluxvm delete <id>` |
+| Build image | `fluxvm build-image --spec examples/build-image.json` |
+| Pool | `fluxvm pool create\|claim\|list …` |
+| Serve API | `fluxvm serve` |
+
+Always pass `--config /etc/fluxvm.toml` when not using defaults.
+
+## REST basics
 
 ```bash
-fluxvm create --spec examples/qemu.json
-fluxvm list
-fluxvm exec <id> -- echo hello
-fluxvm qga ping <id>   # Windows / QEMU GuestKit agent (requires qga.enabled)
-fluxvm delete <id>
+export API=http://127.0.0.1:7788
+export AUTH=(-H "Authorization: Bearer $TOKEN")   # if auth.enabled
+
+curl -sf "$API/readyz" | jq .
+curl -sf "${AUTH[@]}" "$API/v1/vms" | jq .
+curl -sf "${AUTH[@]}" -H "Content-Type: application/json" \
+  -d @examples/qemu.json "$API/v1/vms"
 ```
 
-## REST surface
+Auth-exempt: `/healthz`, `/readyz`. Everything else needs a bearer token when
+`[auth] require = true`.
 
-The control plane exposes HTTP endpoints for create/list/get/delete/exec,
-QGA (`/v1/vms/{id}/qga/…`), and related lifecycle calls. Point clients
-(including Ragnarok and Zyvor Fabric) at the configured listen address.
+## When to use Fabric instead
 
-## Where to go next
+| Need | Use |
+|------|-----|
+| Browser console, fleet UX, DRS, backups UI | Fabric `/app/*` |
+| Maglev service CRUD with multi-node leases | Fabric Edge Dataplane → Services |
+| Per-VM eBPF policy from a console | Fabric VM → Dataplane tab |
+| Single-host lab / CI scripts | FluxVM CLI/REST directly |
 
-| Job | Doc |
-|-----|-----|
-| First VM | [Getting Started](getting-started.md) |
-| Backend & storage | [Configuration](configuration.md) |
-| Common jobs | [Workflows](workflows.md) |
-| Host / systemd | [Admin Basics](admin-basics.md) |
-| Full topic index | [PAGE_INDEX.md](PAGE_INDEX.md) |
+Fabric user guides: [fabric docs/user](https://github.com/zyvorai/fabric/tree/main/docs/user).
 
-## Operate from the console (UX)
+## Related tutorials
 
-1. Open this route from the nav or command palette and wait for live API data.
-2. Use filters/search when present; drill into a row for detail.
-3. For mutating actions: confirm role gates and impact before applying.
-4. **Empty / fail:** Check service health, auth, and that required CRDs/backends for this domain are installed.
-5. **Success:** Live data loads; created/updated objects appear without error toasts.
-
+- [Getting started](getting-started.md)
+- [Common workflows](workflows.md)
+- [Network policy](../tutorials/network-policy/README.md)
+- [MicroVM](../tutorials/microvm/README.md)
+- [Service Fabric operator](../service-fabric.md)

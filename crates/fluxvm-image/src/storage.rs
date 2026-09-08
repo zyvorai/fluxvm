@@ -256,8 +256,8 @@ pub async fn cleanup_nbd(pid: u32) -> Result<()> {
     terminate_pid(pid).await
 }
 
-/// Verified end to end on a real Rook Ceph cluster (`212.8.248.187`, the
-/// Atlas storage-control-plane lab's `rbd-nvme-prod` pool): imported a raw
+/// Verified end to end on a real Rook Ceph cluster (lab `rbd-nvme-prod` pool):
+/// imported a raw
 /// image as `rbd-nvme-prod/fluxvm-base`, protected an `fluxvm-base`
 /// snapshot on it, then created a VM with `storage=ceph-rbd` — `rbd clone`
 /// produced a real `eph-<id>` clone, QEMU booted a real guest straight off
