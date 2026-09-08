@@ -2,8 +2,9 @@
 
 FluxVM is the **node-local** service dataplane. Zyvor Fabric is the **distributed**
 control plane (intent, edge leases, fan-out, BGP/ECMP policy). **v6** is the Maglev
-VIP + identity/L7 plane; **program generation 7** adds opt-in cgroup/connect,
-map pressure control, and offload/XDP mode status (still schema **4** value ABI).
+VIP + identity/L7 plane; **program generation 8** adds connect{4,6}, map-tier
+ELF selection, map pressure control, and offload/XDP mode status (still schema
+**4** value ABI).
 
 Related: [Fabric contract](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md) ·
 [ownership boundary](https://github.com/zyvorai/fabric/blob/main/docs/FLUXVM-FABRIC-BOUNDARY.md) ·
@@ -226,19 +227,22 @@ East-west VIP smoke (operator):
 
 | Object | Role |
 |--------|------|
-| `fluxvm_service.bpf.o` | TC Maglev / NAT / DSR / affinity / EDT / flows / v6 policy + HA queue |
-| `fluxvm_service_xdp.bpf.o` | Optional north-south XDP (reuses TC pinmaps; native then generic attach) |
-| `fluxvm_service_connect.bpf.o` | Opt-in cgroup/connect4 VIP rewrite (shares host maps; fail-open) |
+| `fluxvm_service.bpf.o` | TC Maglev / NAT / DSR / affinity / EDT / flows / v6 policy + HA queue (default M) |
+| `fluxvm_service_tier_{S,M,L}.bpf.o` | Same TC program with compile-time map capacities (`-DFLUXVM_MAP_TIER`) |
+| `fluxvm_service_xdp.bpf.o` / `_tier_*` | Optional north-south XDP (reuses TC pinmaps; native then generic attach) |
+| `fluxvm_service_connect.bpf.o` / `_tier_*` | Opt-in cgroup/connect{4,6} VIP rewrite (shares host maps; affinity+Maglev; fail-open) |
+| `fluxvm_service_maps.bpf.h` | Shared S/M/L `max_entries` macros |
 | `fluxvm_service_v6.bpf.h` | Shared v6 map/event layouts (compile-time size assertions) |
 
 Build: `./scripts/build-ebpf.sh`. Install under `/usr/lib/fluxvm/bpf/`. Schema bumps
-rebuild owned pin roots instead of reusing incompatible maps. **Program generation 7**
-forces a reload of older pins before policy reconcile can succeed. Service-catalog
-updates preserve lifecycle state maps (`fct*`, `nat*`).
+rebuild owned pin roots instead of reusing incompatible maps. **Program generation 8**
+forces a reload of older pins before policy reconcile can succeed. `map_tier` selects
+the tiered ELF; changing tier also reloads pins. Service-catalog updates preserve
+lifecycle state maps (`fct*`, `nat*`).
 
-Config (`[sandbox.dataplane.service]`): `cgroup_connect`, `map_tier` (`S`/`M`/`L`
-label), `pressure_soft_percent` / `pressure_hard_percent`. Perf lab:
-`scripts/test-service-fabric-perf.sh`.
+Config (`[sandbox.dataplane.service]`): `cgroup_connect` (master switch for connect4+connect6),
+`map_tier` (`S`/`M`/`L` → object path), `pressure_soft_percent` / `pressure_hard_percent`.
+Perf / SLO lab: `scripts/test-service-fabric-perf.sh`, `scripts/test-service-fabric-slo.sh`.
 
 ## Safety
 
@@ -254,7 +258,8 @@ label), `pressure_soft_percent` / `pressure_hard_percent`. Perf lab:
 - v6 policy inputs are bounded; L7 enforce is TCP+NAT only and needs a nonzero proxy ifindex;
 - generation reload stays fail-closed until additive policy maps restore;
 - HA queue overflow is counted (`fluxvm_hadrop`); snapshot-diff remains the backstop;
-- cgroup/connect4 is fail-open (miss → unchanged connect; TC/XDP remain canonical);
+- cgroup/connect{4,6} is fail-open (miss → unchanged connect; TC/XDP remain canonical);
+  affinity hits use Ready|Draining like TC; Maglev selection requires Ready;
 - map pressure hard threshold clears generation markers and reloads pins.
 
 ## Roadmap history
@@ -267,5 +272,6 @@ label), `pressure_soft_percent` / `pressure_hard_percent`. Perf lab:
 | v4 EDT / FluxScope / host-routing | shipped | [phase4](service-fabric-phase4.md) |
 | v5 HA deltas / durable leases / incremental reconcile | shipped | [phase5](service-fabric-phase5.md) |
 | v6 identity policy / Envoy L7 / HA mutation queue | shipped | [phase6](service-fabric-phase6.md) · [v6 notes](service-fabric-v6-phase6.md) |
-| gen7 connect / pressure / offload / site fencing | **current** | [phase6](service-fabric-phase6.md) |
+| gen7 connect / pressure / offload / site fencing | shipped | [phase6](service-fabric-phase6.md) |
+| gen8 connect6 + map-tier ELFs + SLO gates | **current** | [phase6](service-fabric-phase6.md) |
 | Later | candidates | remaining bullets in [phase6](service-fabric-phase6.md) |

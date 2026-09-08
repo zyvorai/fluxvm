@@ -203,13 +203,15 @@ pub struct ServiceFabricConfig {
     pub xdp_acceleration: bool,
     /// XDP service object. It reuses maps from the host TC service instance.
     pub xdp_object: PathBuf,
-    /// Opt-in cgroup/connect4 acceleration for node-local host sockets.
-    /// Fail-open: TC/XDP remains the canonical path if attach fails.
+    /// Opt-in cgroup/connect{4,6} acceleration for node-local host sockets.
+    /// Master switch attaches both v4 and v6. Fail-open: TC/XDP remains the
+    /// canonical path if attach fails.
     pub cgroup_connect: bool,
-    /// BPF object for cgroup/connect4 (shares host TC pinmaps when attached).
+    /// BPF object for cgroup/connect{4,6} (shares host TC pinmaps when attached).
     pub connect_object: PathBuf,
-    /// Compiled map capacity tier label (`S`/`M`/`L`). Informational + pressure
-    /// controller; resizing requires rebuilding the ELF (`max_entries` is ABI).
+    /// Compiled map capacity tier (`S`/`M`/`L`). Selects tiered BPF objects
+    /// (`fluxvm_service_tier_{S,M,L}.bpf.o`; default `M` uses `fluxvm_service.bpf.o`)
+    /// and drives pressure-controller capacity. Changing tier forces a pin reload.
     pub map_tier: String,
     /// Soft pressure percent (conntrack) that triggers aggressive GC.
     pub pressure_soft_percent: u8,

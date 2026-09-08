@@ -5,7 +5,7 @@
 //!
 //! Fabric owns distributed service intent; FluxVM owns the node-local
 //! dataplane. Cumulative features: Maglev VIP, NAT/DSR, HA deltas, identity/L7
-//! policy, HA mutation queue, opt-in cgroup/connect4, map pressure controller,
+//! policy, HA mutation queue, opt-in cgroup/connect{4,6}, map pressure controller,
 //! and XDP native→generic attach with offload status.
 
 use anyhow::{Context, Result, bail};
@@ -25,20 +25,21 @@ use uuid::Uuid;
 
 pub const SERVICE_SCHEMA_VERSION: u32 = 4;
 /// BPF value ABI stays schema 4; program generation forces v5 pins to reload.
-pub const SERVICE_PROGRAM_GENERATION: u32 = 7;
+pub const SERVICE_PROGRAM_GENERATION: u32 = 8;
 const SERVICE_TC_PRIORITY: &str = "49140";
 const SERVICE_TC_HANDLE: &str = "40";
 const DEFAULT_MAGLEV_TABLE_SIZE: u32 = 4093;
 const ALLOWED_MAGLEV_TABLE_SIZES: &[u32] = &[251, 509, 1021, 2039, 4093, 8191, 16381];
 const MAX_BACKENDS: usize = 128;
-const MAX_SERVICES: usize = 4096;
-const MAX_BACKEND_MAP_ENTRIES: usize = 16384;
-const MAX_MAGLEV_MAP_ENTRIES: usize = 262144;
+/// Historical M-tier defaults; prefer `map_tier_*` helpers for live capacity.
+const MAX_SERVICES_M: usize = 4096;
+const MAX_BACKEND_MAP_ENTRIES_M: usize = 16384;
+const MAX_MAGLEV_MAP_ENTRIES_M: usize = 262144;
 const MAX_WEIGHT: u16 = 32;
 const BACKEND_READY: u16 = 1;
 const BACKEND_DRAINING: u16 = 2;
 const BACKEND_UNHEALTHY: u16 = 4;
-const CONNTRACK_MAP_MAX: usize = 131072;
+const CONNTRACK_MAP_MAX_M: usize = 131072;
 const MODE_NAT: u8 = 1;
 const MODE_DSR: u8 = 2;
 const SERVICE_F_HOST_ROUTING: u8 = 1;
@@ -667,7 +668,7 @@ pub fn list(cfg: &Config) -> Result<Vec<ServiceSpec>> {
         .with_context(|| format!("reading service catalog {}", path.display()))?;
     let mut specs: Vec<ServiceSpec> = serde_json::from_str(&raw)
         .with_context(|| format!("parsing service catalog {}", path.display()))?;
-    validate_catalog(&specs)?;
+    validate_catalog(&specs, &cfg.sandbox.dataplane.service.map_tier)?;
     specs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(specs)
 }
@@ -685,7 +686,7 @@ pub fn upsert(cfg: &Config, spec: ServiceSpec) -> Result<ServiceStatus> {
     } else {
         specs.push(spec.clone());
     }
-    validate_catalog(&specs)?;
+    validate_catalog(&specs, &cfg.sandbox.dataplane.service.map_tier)?;
     commit_catalog(cfg, &previous, &specs)?;
     status_for(&spec)
 }
@@ -744,11 +745,15 @@ pub fn status_for(spec: &ServiceSpec) -> Result<ServiceStatus> {
     })
 }
 
-fn validate_catalog(specs: &[ServiceSpec]) -> Result<()> {
-    if specs.len() > MAX_SERVICES {
+fn validate_catalog(specs: &[ServiceSpec], map_tier: &str) -> Result<()> {
+    let max_services = map_tier_max_services(map_tier);
+    let max_backends = map_tier_max_backends(map_tier);
+    let max_maglev = map_tier_max_maglev(map_tier);
+    if specs.len() > max_services {
         bail!(
-            "service catalog has {} entries; maximum is {MAX_SERVICES}",
-            specs.len()
+            "service catalog has {} entries; maximum is {max_services} for map_tier={}",
+            specs.len(),
+            normalize_map_tier(map_tier)
         );
     }
     let mut ids = HashMap::<u32, &str>::new();
@@ -782,14 +787,16 @@ fn validate_catalog(specs: &[ServiceSpec]) -> Result<()> {
             );
         }
     }
-    if backend_entries > MAX_BACKEND_MAP_ENTRIES {
+    if backend_entries > max_backends {
         bail!(
-            "service catalog needs {backend_entries} backend-map entries; maximum is {MAX_BACKEND_MAP_ENTRIES}"
+            "service catalog needs {backend_entries} backend-map entries; maximum is {max_backends} for map_tier={}",
+            normalize_map_tier(map_tier)
         );
     }
-    if maglev_entries > MAX_MAGLEV_MAP_ENTRIES {
+    if maglev_entries > max_maglev {
         bail!(
-            "service catalog needs {maglev_entries} Maglev entries; maximum is {MAX_MAGLEV_MAP_ENTRIES}"
+            "service catalog needs {maglev_entries} Maglev entries; maximum is {max_maglev} for map_tier={}",
+            normalize_map_tier(map_tier)
         );
     }
     Ok(())
@@ -1085,7 +1092,9 @@ pub fn gc_conntrack(cfg: &Config) -> Result<ConntrackGcReport> {
             }
         }
     }
-    let capacity = report.maps_scanned.saturating_mul(CONNTRACK_MAP_MAX);
+    let capacity = report
+        .maps_scanned
+        .saturating_mul(map_tier_conntrack_max(&cfg.sandbox.dataplane.service.map_tier));
     report.pressure_percent = if capacity == 0 { 0 } else {
         ((report.entries_remaining.saturating_mul(100) / capacity).min(100)) as u8
     };
@@ -1814,10 +1823,18 @@ fn ensure_tc_instance(
     let current_generation = fs::read_to_string(&generation_marker)
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok());
+    let tier = normalize_map_tier(&cfg.sandbox.dataplane.service.map_tier);
+    let tier_marker = marker.with_extension("map_tier");
+    let current_tier = fs::read_to_string(&tier_marker)
+        .ok()
+        .map(|v| normalize_map_tier(v.trim()).to_string());
 
     let mut rebuilt = false;
-    if !prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION)
-        || current_generation != Some(SERVICE_PROGRAM_GENERATION) {
+    if !prog.exists()
+        || current_schema != Some(SERVICE_SCHEMA_VERSION)
+        || current_generation != Some(SERVICE_PROGRAM_GENERATION)
+        || current_tier.as_deref() != Some(tier)
+    {
         let _ = fs::remove_dir_all(root);
         fs::create_dir_all(&prog_dir)?;
         fs::create_dir_all(&map_dir)?;
@@ -1849,6 +1866,7 @@ fn ensure_tc_instance(
         fs::write(marker, desired_fingerprint.to_string())?;
         fs::write(&schema_marker, SERVICE_SCHEMA_VERSION.to_string())?;
         fs::write(&generation_marker, SERVICE_PROGRAM_GENERATION.to_string())?;
+        fs::write(&tier_marker, tier)?;
         rebuilt = true;
     }
 
@@ -1902,9 +1920,17 @@ fn sync_host(cfg: &Config) -> Result<()> {
         let current_generation = fs::read_to_string(&generation_marker)
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok());
+        let tier = normalize_map_tier(&svc_cfg.map_tier);
+        let tier_marker = marker.with_extension("map_tier");
+        let current_tier = fs::read_to_string(&tier_marker)
+            .ok()
+            .map(|v| normalize_map_tier(v.trim()).to_string());
 
-        if !host_prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION)
-            || current_generation != Some(SERVICE_PROGRAM_GENERATION) {
+        if !host_prog.exists()
+            || current_schema != Some(SERVICE_SCHEMA_VERSION)
+            || current_generation != Some(SERVICE_PROGRAM_GENERATION)
+            || current_tier.as_deref() != Some(tier)
+        {
             let _ = detach_owned_xdp(cfg, iface, &root);
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&tc_prog_dir)?;
@@ -1923,8 +1949,11 @@ fn sync_host(cfg: &Config) -> Result<()> {
                 ],
             )?;
         }
-        if current != Some(desired) || current_schema != Some(SERVICE_SCHEMA_VERSION)
-            || current_generation != Some(SERVICE_PROGRAM_GENERATION) {
+        if current != Some(desired)
+            || current_schema != Some(SERVICE_SCHEMA_VERSION)
+            || current_generation != Some(SERVICE_PROGRAM_GENERATION)
+            || current_tier.as_deref() != Some(tier)
+        {
             populate_maps(&map_dir, &specs)?;
             if crate::service_policy::has_enabled_policies(cfg)? {
                 map_update(&map_dir.join("fluxvm_sguard"), &0u32.to_ne_bytes(), &1u32.to_ne_bytes())?;
@@ -1935,6 +1964,7 @@ fn sync_host(cfg: &Config) -> Result<()> {
             fs::write(&marker, desired.to_string())?;
             fs::write(&schema_marker, SERVICE_SCHEMA_VERSION.to_string())?;
             fs::write(&generation_marker, SERVICE_PROGRAM_GENERATION.to_string())?;
+            fs::write(&tier_marker, tier)?;
         }
         let reverse_prog = tc_prog_dir.join("fvm_svc_rev");
         ensure_clsact(iface)?;
@@ -1946,13 +1976,16 @@ fn sync_host(cfg: &Config) -> Result<()> {
             detach_owned_xdp(cfg, iface, &root)?;
         }
     }
-    // Attach connect4 once, sharing maps from the first north-south (or skip).
+    // Attach connect4+connect6 once, sharing maps from the first north-south.
     if svc_cfg.cgroup_connect {
         if let Some(iface) = svc_cfg.north_south_interfaces.first() {
             let root = host_pin_dir(cfg, iface);
             let map_dir = root.join("maps");
             if let Err(err) = ensure_cgroup_connect(cfg, &root, &map_dir) {
-                tracing::warn!(%err, "cgroup/connect4 attach failed; TC/XDP remain canonical");
+                tracing::warn!(
+                    %err,
+                    "cgroup/connect{{4,6}} attach failed; TC/XDP remain canonical"
+                );
             }
         } else {
             tracing::warn!(
@@ -1972,9 +2005,20 @@ fn connect_pin_dir(cfg: &Config) -> PathBuf {
         .join("service-connect")
 }
 
+const CONNECT_SHARED_MAPS: &[&str] = &[
+    "fluxvm_svc4",
+    "fluxvm_svc6",
+    "fluxvm_backend4",
+    "fluxvm_backend6",
+    "fluxvm_maglev",
+    "fluxvm_fct4",
+    "fluxvm_fct6",
+    "fluxvm_sguard",
+];
+
 fn ensure_cgroup_connect(cfg: &Config, _root: &Path, map_dir: &Path) -> Result<()> {
     require_bpftool()?;
-    let object = &cfg.sandbox.dataplane.service.connect_object;
+    let object = service_connect_object(cfg);
     if !object.exists() {
         bail!(
             "FluxVM service connect object does not exist at {}",
@@ -1983,18 +2027,31 @@ fn ensure_cgroup_connect(cfg: &Config, _root: &Path, map_dir: &Path) -> Result<(
     }
     let pin_root = connect_pin_dir(cfg);
     let prog_dir = pin_root.join("progs");
-    fs::create_dir_all(&prog_dir)?;
-    let prog = prog_dir.join("fvm_svc_connect4");
-    if !prog.exists() {
+    let gen_marker = pin_root.join("generation");
+    let tier_marker = pin_root.join("map_tier");
+    let tier = normalize_map_tier(&cfg.sandbox.dataplane.service.map_tier);
+    let connect4 = prog_dir.join("fvm_svc_connect4");
+    let connect6 = prog_dir.join("fvm_svc_connect6");
+    let current_generation = fs::read_to_string(&gen_marker)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok());
+    let current_tier = fs::read_to_string(&tier_marker)
+        .ok()
+        .map(|v| normalize_map_tier(v.trim()).to_string());
+    let needs_reload = current_generation != Some(SERVICE_PROGRAM_GENERATION)
+        || current_tier.as_deref() != Some(tier)
+        || !connect4.exists()
+        || !connect6.exists();
+    if needs_reload {
+        detach_cgroup_connect(cfg);
+        fs::create_dir_all(&prog_dir)?;
         let mut args = vec![
             "prog".into(),
-            "load".into(),
+            "loadall".into(),
             object.display().to_string(),
-            prog.display().to_string(),
-            "type".into(),
-            "cgroup/connect4".into(),
+            prog_dir.display().to_string(),
         ];
-        for name in ["fluxvm_svc4", "fluxvm_backend4", "fluxvm_maglev", "fluxvm_sguard"] {
+        for name in CONNECT_SHARED_MAPS {
             let pinned = map_dir.join(name);
             if !pinned.exists() {
                 bail!("missing shared map {} for connect attach", pinned.display());
@@ -2002,38 +2059,59 @@ fn ensure_cgroup_connect(cfg: &Config, _root: &Path, map_dir: &Path) -> Result<(
             args.extend([
                 "map".into(),
                 "name".into(),
-                name.into(),
+                (*name).into(),
                 "pinned".into(),
                 pinned.display().to_string(),
             ]);
         }
-        run("bpftool", &args).context("loading FluxVM cgroup/connect4 program")?;
+        run("bpftool", &args).context("loading FluxVM cgroup/connect{4,6} programs")?;
+        if !connect4.exists() || !connect6.exists() {
+            bail!(
+                "connect loadall did not pin fvm_svc_connect4 and fvm_svc_connect6 under {}",
+                prog_dir.display()
+            );
+        }
+        fs::write(&gen_marker, SERVICE_PROGRAM_GENERATION.to_string())?;
+        fs::write(&tier_marker, tier)?;
     }
     // Attach to root cgroup v2 when available.
     let cgroup = PathBuf::from("/sys/fs/cgroup");
-    if cgroup.join("cgroup.controllers").exists() {
-        run(
-            "bpftool",
-            &[
-                "cgroup".into(),
-                "attach".into(),
-                cgroup.display().to_string(),
-                "connect4".into(),
-                "pinned".into(),
-                prog.display().to_string(),
-            ],
-        )
-        .context("attaching FluxVM cgroup/connect4")?;
-    } else {
+    if !cgroup.join("cgroup.controllers").exists() {
         bail!("cgroup v2 not mounted at /sys/fs/cgroup");
     }
+    run(
+        "bpftool",
+        &[
+            "cgroup".into(),
+            "attach".into(),
+            cgroup.display().to_string(),
+            "connect4".into(),
+            "pinned".into(),
+            connect4.display().to_string(),
+        ],
+    )
+    .context("attaching FluxVM cgroup/connect4")?;
+    run(
+        "bpftool",
+        &[
+            "cgroup".into(),
+            "attach".into(),
+            cgroup.display().to_string(),
+            "connect6".into(),
+            "pinned".into(),
+            connect6.display().to_string(),
+        ],
+    )
+    .context("attaching FluxVM cgroup/connect6")?;
     Ok(())
 }
 
 fn detach_cgroup_connect(cfg: &Config) {
     let pin_root = connect_pin_dir(cfg);
-    let prog = pin_root.join("progs/fvm_svc_connect4");
-    if prog.exists() {
+    let prog_dir = pin_root.join("progs");
+    let connect4 = prog_dir.join("fvm_svc_connect4");
+    let connect6 = prog_dir.join("fvm_svc_connect6");
+    if connect4.exists() {
         let _ = run(
             "bpftool",
             &[
@@ -2042,7 +2120,20 @@ fn detach_cgroup_connect(cfg: &Config) {
                 "/sys/fs/cgroup".into(),
                 "connect4".into(),
                 "pinned".into(),
-                prog.display().to_string(),
+                connect4.display().to_string(),
+            ],
+        );
+    }
+    if connect6.exists() {
+        let _ = run(
+            "bpftool",
+            &[
+                "cgroup".into(),
+                "detach".into(),
+                "/sys/fs/cgroup".into(),
+                "connect6".into(),
+                "pinned".into(),
+                connect6.display().to_string(),
             ],
         );
     }
@@ -2133,7 +2224,7 @@ impl InterfaceOffloadStatus {
 
 fn ensure_host_xdp(cfg: &Config, iface: &str, root: &Path, map_dir: &Path) -> Result<()> {
     require_bpftool()?;
-    let object = &cfg.sandbox.dataplane.service.xdp_object;
+    let object = service_xdp_object(cfg);
     if !object.exists() {
         bail!("FluxVM service XDP object does not exist at {}", object.display());
     }
@@ -2263,9 +2354,9 @@ pub fn host_status(cfg: &Config) -> Result<HostServiceStatus> {
             }
         })
         .collect();
-    let connect_attached = connect_pin_dir(cfg)
-        .join("progs/fvm_svc_connect4")
-        .exists();
+    let connect_root = connect_pin_dir(cfg);
+    let connect_attached = connect_root.join("progs/fvm_svc_connect4").exists()
+        && connect_root.join("progs/fvm_svc_connect6").exists();
     Ok(HostServiceStatus {
         schema_version: SERVICE_SCHEMA_VERSION,
         program_generation: SERVICE_PROGRAM_GENERATION,
@@ -2395,16 +2486,121 @@ fn catalog_fingerprint(specs: &[ServiceSpec]) -> Result<u64> {
     Ok(hash)
 }
 
-fn service_bpf_object(cfg: &Config) -> PathBuf {
-    if let Ok(path) = std::env::var("FLUXVM_SERVICE_BPF_OBJECT") {
-        return PathBuf::from(path);
-    }
+fn service_bpf_dir(cfg: &Config) -> PathBuf {
     cfg.sandbox
         .dataplane
         .bpf_object
         .parent()
         .unwrap_or_else(|| Path::new("/usr/lib/fluxvm/bpf"))
-        .join("fluxvm_service.bpf.o")
+        .to_path_buf()
+}
+
+/// Normalize `map_tier` to `S`/`M`/`L` (unknown → `M`).
+pub fn normalize_map_tier(tier: &str) -> &'static str {
+    match tier.trim().to_ascii_uppercase().as_str() {
+        "S" => "S",
+        "L" => "L",
+        _ => "M",
+    }
+}
+
+fn map_tier_max_services(tier: &str) -> usize {
+    match normalize_map_tier(tier) {
+        "S" => 1024,
+        "L" => 8192,
+        _ => MAX_SERVICES_M,
+    }
+}
+
+fn map_tier_max_backends(tier: &str) -> usize {
+    match normalize_map_tier(tier) {
+        "S" => 4096,
+        "L" => 32768,
+        _ => MAX_BACKEND_MAP_ENTRIES_M,
+    }
+}
+
+fn map_tier_max_maglev(tier: &str) -> usize {
+    match normalize_map_tier(tier) {
+        "S" => 65536,
+        "L" => 524288,
+        _ => MAX_MAGLEV_MAP_ENTRIES_M,
+    }
+}
+
+fn map_tier_conntrack_max(tier: &str) -> usize {
+    match normalize_map_tier(tier) {
+        "S" => 32768,
+        "L" => 262144,
+        _ => CONNTRACK_MAP_MAX_M,
+    }
+}
+
+fn resolve_tiered_service_object(
+    cfg: &Config,
+    env_key: &str,
+    configured: &Path,
+    stem: &str,
+) -> PathBuf {
+    if let Ok(path) = std::env::var(env_key) {
+        return PathBuf::from(path);
+    }
+    let tier = normalize_map_tier(&cfg.sandbox.dataplane.service.map_tier);
+    let default_name = format!("{stem}.bpf.o");
+    let default_path = PathBuf::from("/usr/lib/fluxvm/bpf").join(&default_name);
+    // Custom operator path: respect as-is (no tier rewrite).
+    if configured != &default_path
+        && configured.file_name().and_then(|n| n.to_str()) != Some(default_name.as_str())
+    {
+        return configured.to_path_buf();
+    }
+    let dir = configured
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| service_bpf_dir(cfg));
+    if tier == "M" {
+        let primary = dir.join(&default_name);
+        if primary.exists() {
+            return primary;
+        }
+        return dir.join(format!("{stem}_tier_M.bpf.o"));
+    }
+    dir.join(format!("{stem}_tier_{tier}.bpf.o"))
+}
+
+fn service_bpf_object(cfg: &Config) -> PathBuf {
+    // TC service object has no dedicated config field; derive from dataplane dir.
+    if let Ok(path) = std::env::var("FLUXVM_SERVICE_BPF_OBJECT") {
+        return PathBuf::from(path);
+    }
+    let tier = normalize_map_tier(&cfg.sandbox.dataplane.service.map_tier);
+    let dir = service_bpf_dir(cfg);
+    if tier == "M" {
+        let primary = dir.join("fluxvm_service.bpf.o");
+        if primary.exists() {
+            return primary;
+        }
+        return dir.join("fluxvm_service_tier_M.bpf.o");
+    }
+    dir.join(format!("fluxvm_service_tier_{tier}.bpf.o"))
+}
+
+fn service_xdp_object(cfg: &Config) -> PathBuf {
+    resolve_tiered_service_object(
+        cfg,
+        "FLUXVM_SERVICE_XDP_OBJECT",
+        &cfg.sandbox.dataplane.service.xdp_object,
+        "fluxvm_service_xdp",
+    )
+}
+
+fn service_connect_object(cfg: &Config) -> PathBuf {
+    resolve_tiered_service_object(
+        cfg,
+        "FLUXVM_SERVICE_CONNECT_OBJECT",
+        &cfg.sandbox.dataplane.service.connect_object,
+        "fluxvm_service_connect",
+    )
 }
 
 fn service_pin_dir(cfg: &Config, id: Uuid) -> PathBuf {

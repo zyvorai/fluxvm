@@ -58,18 +58,22 @@ reaper_interval_secs = 5
 # block_cidrs = ["198.51.100.0/24", "2001:db8:bad::/48"]
 #
 #
-# VM Service Fabric (BPF schema 4 / program generation 7). `north_south_interfaces`
+# VM Service Fabric (BPF schema 4 / program generation 8). `north_south_interfaces`
 # enables physical-uplink service VIP handling. XDP is optional and falls back to
 # TC/host routing. Do not enable service XDP with dataplane.mode = "cilium".
 # EDT pacing requires edt_enabled + edt_interfaces; FluxVM only manages fq
 # when edt_manage_fq is true. OTLP export needs otlp_endpoint.
+# cgroup_connect attaches both connect4 and connect6 (VIP→affinity/Maglev rewrite;
+# fail-open to TC/XDP). Shares host TC pinmaps including fluxvm_fct4/fct6.
 # [sandbox.dataplane.service]
 # north_south_interfaces = ["eno1", "eno2"]
 # xdp_acceleration = true
 # xdp_object = "/usr/lib/fluxvm/bpf/fluxvm_service_xdp.bpf.o"
 # cgroup_connect = false
 # connect_object = "/usr/lib/fluxvm/bpf/fluxvm_service_connect.bpf.o"
-# map_tier = "M"                 # S/M/L label; resize needs ELF rebuild
+# map_tier = "M"                 # S/M/L — loads tier ELF under /usr/lib/fluxvm/bpf/
+#                                # M → fluxvm_service.bpf.o (or _tier_M); S/L → *_tier_{S,L}.bpf.o
+#                                # Build: ./scripts/build-ebpf.sh (-DFLUXVM_MAP_TIER=S|M|L)
 # pressure_soft_percent = 70
 # pressure_hard_percent = 90
 # edt_enabled = true

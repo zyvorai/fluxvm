@@ -20,6 +20,7 @@
 #include <stddef.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
+#include "fluxvm_service_maps.bpf.h"
 
 #define FLUXVM_SVC_BACKEND_READY 1u
 #define FLUXVM_SVC_BACKEND_DRAINING 2u
@@ -224,14 +225,14 @@ struct edt_state {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, struct svc4_key);
     __type(value, struct svc_value);
 } fluxvm_svc4 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, struct svc6_key);
     __type(value, struct svc_value);
 } fluxvm_svc6 SEC(".maps");
@@ -245,91 +246,91 @@ struct {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 16384);
+    __uint(max_entries, FLUXVM_MAX_BACKEND);
     __type(key, struct backend_key);
     __type(value, struct backend4_value);
 } fluxvm_backend4 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 16384);
+    __uint(max_entries, FLUXVM_MAX_BACKEND);
     __type(key, struct backend_key);
     __type(value, struct backend6_value);
 } fluxvm_backend6 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 262144);
+    __uint(max_entries, FLUXVM_MAX_MAGLEV);
     __type(key, struct maglev_key);
     __type(value, __u32);
 } fluxvm_maglev SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 131072);
+    __uint(max_entries, FLUXVM_MAX_CT);
     __type(key, struct fct4_key);
     __type(value, struct fct_value);
 } fluxvm_fct4 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 131072);
+    __uint(max_entries, FLUXVM_MAX_CT);
     __type(key, struct fct6_key);
     __type(value, struct fct_value);
 } fluxvm_fct6 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 131072);
+    __uint(max_entries, FLUXVM_MAX_NAT);
     __type(key, struct nat4_key);
     __type(value, struct nat4_value);
 } fluxvm_nat4 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 131072);
+    __uint(max_entries, FLUXVM_MAX_NAT);
     __type(key, struct nat6_key);
     __type(value, struct nat6_value);
 } fluxvm_nat6 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, __u32);
     __type(value, struct snat4_value);
 } fluxvm_snat4 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, __u32);
     __type(value, struct snat6_value);
 } fluxvm_snat6 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, __u32);
     __type(value, struct service_stat);
 } fluxvm_sstats SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-    __uint(max_entries, 16384);
+    __uint(max_entries, FLUXVM_MAX_BACKEND);
     __type(key, struct backend_key);
     __type(value, struct backend_stat);
 } fluxvm_bstat SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, 65536);
+    __uint(max_entries, FLUXVM_MAX_SFLOWS);
     __type(key, struct svc_flow_key);
     __type(value, struct svc_flow_value);
 } fluxvm_sflows SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, __u32);
     __type(value, struct edt_state);
 } fluxvm_edt SEC(".maps");

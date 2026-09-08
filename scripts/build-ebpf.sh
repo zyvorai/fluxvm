@@ -2,7 +2,9 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 # Build fluxvm_tc.bpf.o and fluxvm_xdp.bpf.o into dist/bpf/ (or OUT_DIR).
-# Docs: docs/network-fabric.md
+# Service Fabric objects are also emitted as map-tier variants
+# (fluxvm_service_tier_{S,M,L}.bpf.o and matching xdp/connect ELFs).
+# Docs: docs/network-fabric.md · docs/service-fabric-phase6.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,8 +46,20 @@ SERVICE_CFLAGS=("${CFLAGS[@]}" -mllvm -bpf-stack-size=768)
 for src in fluxvm_tc fluxvm_xdp; do
   "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
 done
+
+# Default M objects keep stable names (fluxvm_service.bpf.o, …).
 for src in fluxvm_service fluxvm_service_xdp fluxvm_service_connect; do
-  "$CLANG" "${SERVICE_CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
+  "$CLANG" "${SERVICE_CFLAGS[@]}" -DFLUXVM_MAP_TIER=M \
+    -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
+done
+
+# Explicit S/M/L tier ELFs for map_tier object selection.
+for tier in S M L; do
+  for src in fluxvm_service fluxvm_service_xdp fluxvm_service_connect; do
+    "$CLANG" "${SERVICE_CFLAGS[@]}" -DFLUXVM_MAP_TIER="${tier}" \
+      -c "$ROOT/bpf/${src}.bpf.c" \
+      -o "$OUT_DIR/${src}_tier_${tier}.bpf.o"
+  done
 done
 
 # Keep BTF sections intact. bpftool/libbpf uses the BTF-described map
@@ -55,6 +69,11 @@ done
 echo "built:"
 echo "  $OUT_DIR/fluxvm_tc.bpf.o"
 echo "  $OUT_DIR/fluxvm_xdp.bpf.o"
-echo "  $OUT_DIR/fluxvm_service.bpf.o"
-echo "  $OUT_DIR/fluxvm_service_xdp.bpf.o"
-echo "  $OUT_DIR/fluxvm_service_connect.bpf.o"
+echo "  $OUT_DIR/fluxvm_service.bpf.o  (default M)"
+echo "  $OUT_DIR/fluxvm_service_xdp.bpf.o  (default M)"
+echo "  $OUT_DIR/fluxvm_service_connect.bpf.o  (default M)"
+for tier in S M L; do
+  echo "  $OUT_DIR/fluxvm_service_tier_${tier}.bpf.o"
+  echo "  $OUT_DIR/fluxvm_service_xdp_tier_${tier}.bpf.o"
+  echo "  $OUT_DIR/fluxvm_service_connect_tier_${tier}.bpf.o"
+done

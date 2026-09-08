@@ -577,6 +577,25 @@ impl VmManager {
             .context("ipcache list panicked")?
     }
 
+    /// Fabric ClusterMesh-like remote identity fan-out into local ipcache.
+    pub async fn upsert_remote_ipcache(&self, identity: u32, cidrs: Vec<String>) -> Result<usize> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            fluxvm_network::ipcache::upsert_remote(&cfg, identity, &cidrs)
+        })
+        .await
+        .context("remote ipcache upsert panicked")?
+    }
+
+    pub async fn delete_remote_ipcache(&self, identity: u32) -> Result<usize> {
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            fluxvm_network::ipcache::remove_remote_identity(&cfg, identity)
+        })
+        .await
+        .context("remote ipcache delete panicked")?
+    }
+
     pub async fn refresh_fqdn_policies(&self) -> Result<usize> {
         let vms = self.list().await;
         let mut n = 0usize;

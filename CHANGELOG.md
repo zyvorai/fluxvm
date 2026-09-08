@@ -3,6 +3,15 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Service Fabric gen8 connect** — cgroup/connect6 + Maglev affinity parity with TC
+  (`fluxvm_fct4`/`fct6`); `cgroup_connect` attaches both v4 and v6; program generation **8**
+  (schema 4 unchanged).
+- **Service Fabric map-tier ELFs** — `-DFLUXVM_MAP_TIER=S|M|L` objects
+  (`fluxvm_service*_tier_{S,M,L}.bpf.o`); `map_tier` selects loader path + catalog limits.
+- **Service Fabric SLO harness** — `scripts/test-service-fabric-slo.sh` + optional
+  `SLO_VIP_P99_MS` / `SLO_PRESSURE_IDLE` / `SLO_REQUIRE_CHANNELS` / `SLO_CI_SHAPE` gates.
+- **Remote ipcache ingest** — `POST/DELETE /v1/network/ipcache/remote` for Fabric
+  ClusterMesh-like identity fan-out (local VM rows preserved).
 - **Service Fabric gen7 ops tranche** — opt-in cgroup/connect4 (`fluxvm_service_connect.bpf.o`),
   map pressure controller (`POST /v1/network/services/pressure/reconcile`), XDP
   native→generic attach + ethtool offload/channels in `services/status`, perf lab

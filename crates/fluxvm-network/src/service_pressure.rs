@@ -64,7 +64,7 @@ pub fn reconcile(cfg: &Config) -> Result<PressureReport> {
     } else if gc.pressure_percent >= soft {
         action = PressureAction::SoftWarn;
         notes.push(format!(
-            "pressure {}% >= soft {}%; GC completed — consider map_tier upsize + ELF rebuild",
+            "pressure {}% >= soft {}%; GC completed — consider map_tier upsize (install tier ELF) + reload",
             gc.pressure_percent, soft
         ));
         info!(

@@ -310,6 +310,14 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/observe", get(network_observe))
         .route("/v1/network/health", get(network_health))
         .route("/v1/network/ipcache", get(network_ipcache))
+        .route(
+            "/v1/network/ipcache/remote",
+            post(upsert_remote_ipcache),
+        )
+        .route(
+            "/v1/network/ipcache/remote/{identity}",
+            delete(delete_remote_ipcache),
+        )
         .route("/v1/network/refresh-dns", post(network_refresh_dns))
         .route("/v1/network/endpoints", get(list_endpoints))
         .route("/v1/network/hubble/flows", get(hubble_flows))
@@ -1427,6 +1435,42 @@ async fn network_health(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde
 
 async fn network_ipcache(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_ipcache().await?})))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteIpcacheUpsert {
+    identity: u32,
+    #[serde(default)]
+    cidrs: Vec<String>,
+}
+
+/// Fabric ClusterMesh-like: upsert remote identity CIDRs into local ipcache
+/// (nil `vm_id` sentinel). Does not implement full mesh datapath.
+async fn upsert_remote_ipcache(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(body): Json<RemoteIpcacheUpsert>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let identity = body.identity;
+    let upserted = m.upsert_remote_ipcache(identity, body.cidrs).await?;
+    Ok(Json(json!({
+        "identity": identity,
+        "upserted": upserted,
+    })))
+}
+
+async fn delete_remote_ipcache(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(identity): Path<u32>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let deleted = m.delete_remote_ipcache(identity).await?;
+    Ok(Json(json!({
+        "identity": identity,
+        "deleted": deleted,
+    })))
 }
 
 async fn list_endpoints(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {

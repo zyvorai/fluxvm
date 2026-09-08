@@ -4,6 +4,7 @@
 #define FLUXVM_SERVICE_V6_BPF_H
 
 #include <linux/pkt_cls.h>
+#include "fluxvm_service_maps.bpf.h"
 
 #define FLUXVM_SPOL_ENABLED       (1u << 0)
 #define FLUXVM_SPOL_DEFAULT_DENY  (1u << 1)
@@ -68,41 +69,41 @@ _Static_assert(sizeof(struct fluxvm_ha_event) == 128, "HA event ABI");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, __u32);
     __type(value, struct fluxvm_service_policy);
 } fluxvm_spol SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 65536);
+    __uint(max_entries, FLUXVM_MAX_SID);
     __type(key, struct fluxvm_sid4_key);
     __type(value, __u32);
 } fluxvm_sid4 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 65536);
+    __uint(max_entries, FLUXVM_MAX_SID);
     __type(key, struct fluxvm_sid6_key);
     __type(value, __u32);
 } fluxvm_sid6 SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, __u32);
     __type(value, struct fluxvm_policy_stat);
 } fluxvm_pstat SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_QUEUE);
-    __uint(max_entries, 32768);
+    __uint(max_entries, FLUXVM_MAX_HAQ);
     __type(value, struct fluxvm_ha_event);
 } fluxvm_haq SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, FLUXVM_MAX_SVC);
     __type(key, __u32);
     __type(value, __u64);
 } fluxvm_hadrop SEC(".maps");
