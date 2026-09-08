@@ -49,6 +49,11 @@ POST /v1/network/services/{name}/conntrack/delta/ack
 
 Fabric proxies the same paths under `/api/dataplane/services/…`.
 
+HA conntrack export/import/delta/ack and `advertise=true` require configured
+`[sandbox.dataplane.service] north_south_interfaces` and north-south (or both)
+exposure. North-south NAT needs `snat_address`. See
+[service-fabric.md](service-fabric.md#ha-state-transfer-v5).
+
 ## See also
 
 - Operator: [service-fabric.md](service-fabric.md)

@@ -26,7 +26,14 @@ control socket. The in-tree engine writes:
 
 ```bash
 ./scripts/test-kvm-snapshot-smoke.sh
+./scripts/test-kvm-pause-smoke.sh
 ```
+
+In-tree smokes use `init=/bin/sleep -- 3600` so the guest stays alive without
+mounting root. Pass an **extensionless** snapshot path — the hypervisor appends
+`.mem`, `.vmstate`, and `.rootfs` via `with_extension`. Pause and snapshot
+promptly after boot (a delayed panic tears down the vCPU). VmLck / density checks
+need matching `virtio_mmio.device=…` kernel args (same as the pause smoke).
 
 Device (virtio) live state is not captured; restore re-attaches disks/TAP from
 boot config and reloads RAM + CPU state. Use Firecracker for production

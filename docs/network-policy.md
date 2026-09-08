@@ -29,7 +29,7 @@ Security groups: [network-groups.md](network-groups.md).
 | Identity list | `GET /v1/network/identities`, `fluxvm identity list` |
 | Group / identity policy | `fluxvm_gid` written at configure_maps |
 | Observe snapshot | `GET /v1/network/observe`, `fluxvm observe` |
-| toFQDNs live refresh | `POST /v1/network/refresh-dns`, `fluxvm dataplane refresh-dns` |
+| toFQDNs live refresh | `POST /v1/network/refresh-dns`, `fluxvm dataplane refresh-dns` (best-effort fleet-wide; skipped VMs logged, call returns refreshed count) |
 | ipcache | Guest IP → identity (`GET /v1/network/ipcache`) |
 | Production health | `fluxvm dataplane health`, [production-dataplane.md](production-dataplane.md) |
 

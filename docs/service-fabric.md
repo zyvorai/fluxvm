@@ -97,8 +97,19 @@ OTLP/HTTP JSON is off until `otlp_endpoint` is configured. Sampling uses
 ## Host routing (v4)
 
 For NAT services with `host_routing=true`, FluxVM may `bpf_fib_lookup()` + redirect
-after translation. A miss returns to the host stack (not drop). Counters:
-`host_routed_packets`, `host_route_fallbacks`.
+after translation. A soft FIB miss (`TC_ACT_UNSPEC`) falls through to the host
+stack with `TC_ACT_OK` (not drop). Counters: `host_routed_packets`,
+`host_route_fallbacks`.
+
+When backends live on the local host, enable `accept_local` on the VM-edge
+interface so DNAT'd flows can reach loopback/local listeners.
+
+## Maglev and VM-edge policy
+
+After a successful Maglev NAT rewrite, the service TC program returns `TC_ACT_OK`
+and stops the clsact chain. Sandbox Network Fabric policy therefore does **not**
+re-filter the rewritten backend address/port. Operators do **not** need backend
+service ports in the VM `allow_ports` list for Maglev-forwarded flows.
 
 ## VIP advertisement boundary
 
@@ -126,6 +137,11 @@ with gap detection, `reset_required`, and full-snapshot fallback on history gaps
 Import verifies schema version, service name/id and a fixed map allowlist. Fabric
 decides if/when a standby edge should receive this state and advances source
 journal ack only to the minimum replicated target cursor.
+
+**Prerequisites:** configure `[sandbox.dataplane.service] north_south_interfaces`
+so north-south TC pin maps exist. HA export/import/delta/ack require that edge.
+`advertise=true` requires `exposure` north-south or both. North-south NAT requires
+`snat_address` so backend replies return through FluxVM.
 
 ## REST surface
 
@@ -158,6 +174,13 @@ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   http://127.0.0.1:7788/v1/network/services
 ```
 
+East-west VIP smoke (operator):
+
+- A Maglev VIP is not on the same L2 as the client — do not expect gratuitous ARP.
+- Route the VIP via the guest default gateway (netns edge or host route).
+- Ensure no orphan host veths share the same `169.254.x.1/28` (see
+  [network-fabric.md](network-fabric.md#named-netns-and-orphan-edges)).
+
 ## BPF objects
 
 | Object | Role |
@@ -175,7 +198,8 @@ updates preserve lifecycle state maps (`fct*`, `nat*`).
 - map update: fail closed with the service guard;
 - `max_egress_mbps` without `edt_enabled`: reject apply;
 - XDP FIB miss: untouched packet falls through to TC;
-- host-routing FIB miss: fallback to host stack;
+- host-routing FIB miss: fallback to host stack with `TC_ACT_OK`;
+- after Maglev NAT rewrite: `TC_ACT_OK` stops clsact (VM policy does not see backend port);
 - foreign/Cilium XDP: FluxVM refuses replacement;
 - never write Cilium/CNI private maps;
 - learn affinity **before** `fib_redirect` / `bpf_skb_store_bytes` (packet pointers invalidate after helpers).

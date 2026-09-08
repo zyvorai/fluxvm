@@ -29,6 +29,10 @@ fluxvm dataplane refresh-dns   # after FQDN allowlist / DNS TTL change
 
 REST: `GET /v1/network/health`, `/ipcache`, `/observe`; `POST /v1/network/refresh-dns`.
 
+`POST /v1/network/refresh-dns` is **best-effort** across the fleet: VMs without a
+host-visible dataplane interface (or a failed reconfigure) are skipped with a warn;
+the response returns the count refreshed and does not fail the whole host.
+
 ## What production now does
 
 - Resolves CNP `toFQDNs` to IPv4 /32 and IPv6 /128 at apply/reconfigure

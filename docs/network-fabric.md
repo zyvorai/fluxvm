@@ -128,6 +128,18 @@ VM -> host TAP/macvtap [TC ingress] -> bridge/routing
 The eBPF loader only needs the host-visible interface. Legacy nftables policy
 still needs a known guest source CIDR.
 
+### Named netns and orphan edges
+
+Per-VM netns sandboxes use IPAM-backed `169.254.{third}.{base}/28` blocks on the
+host veth (`169.254.{third}.{base+1}/28`) and bridge side. After a crash or a
+dead named-netns bind (`/var/run/netns/eph-*` → `EINVAL` on `ip netns exec`),
+QEMU may still hold the live namespace. On VM start FluxVM remounts the named
+handle from the QEMU pid (`repair_named_netns`).
+
+Cleanup always deletes the host veth by name even when `ip netns del` fails, so
+orphan edges cannot collide on the same `/28` on the next VM. `prepare` also
+clears leftover veth/netns handles before create.
+
 ## Policy
 
 ```json
@@ -375,6 +387,8 @@ and Fabric HTTPS dataplane paths are green when `mode=ebpf` and VMs use
 TAP+netns. Known independent lab gaps (not dataplane ABI regressions):
 
 - Netns guest→host veth ping can fail under some eBPF↔NAT combinations.
+- Orphan host veths on the same `169.254.x.1/28` break east-west Maglev VIP
+  smokes — see [service-fabric.md](service-fabric.md) and named-netns repair above.
 - Cgroup freeze/stats may fail if cgroup setup was skipped at launch.
 - Warm-pool second `serve` can clash with systemd-bound FluxVM port.
 
