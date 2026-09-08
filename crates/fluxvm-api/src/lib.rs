@@ -286,6 +286,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/services/advertisements", get(network_service_advertisements))
         .route("/v1/network/services/flows", get(network_service_flows))
         .route("/v1/network/services/telemetry/export", post(export_network_service_telemetry))
+        .route("/v1/network/services/policies", get(list_network_service_policies).post(upsert_network_service_policy))
+        .route("/v1/network/services/policies/reconcile", post(reconcile_network_service_policies))
+        .route("/v1/network/services/{name}/policy", get(get_network_service_policy).delete(delete_network_service_policy))
+        .route("/v1/network/services/{name}/l7/envoy", get(network_service_envoy_contract))
         .route("/v1/network/services/{name}/conntrack/export", get(export_network_service_conntrack))
         .route("/v1/network/services/{name}/conntrack/import", post(import_network_service_conntrack))
         .route("/v1/network/services/{name}/conntrack/delta", get(export_network_service_conntrack_delta))
@@ -2258,4 +2262,57 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST);
         }
     }
+}
+
+// ZYVOR_SERVICE_FABRIC_V6_API
+async fn list_network_service_policies(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": fluxvm_network::service_policy::list(&m.cfg)?})))
+}
+
+async fn upsert_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(spec): Json<fluxvm_network::service_policy::ServicePolicySpec>,
+) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicyStatus>> {
+    require_admin(role)?;
+    Ok(Json(fluxvm_network::service_policy::upsert(&m.cfg, spec)?))
+}
+
+async fn reconcile_network_service_policies(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"items": fluxvm_network::service_policy::reconcile(&m.cfg)?})))
+}
+
+async fn get_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicySpec>> {
+    match fluxvm_network::service_policy::get(&m.cfg, &name)? {
+        Some(spec) => Ok(Json(spec)),
+        None => Err(ApiError { status: StatusCode::NOT_FOUND, message: format!("service policy '{name}' not found") }),
+    }
+}
+
+async fn delete_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    if !fluxvm_network::service_policy::delete(&m.cfg, &name)? {
+        return Err(ApiError { status: StatusCode::NOT_FOUND, message: format!("service policy '{name}' not found") });
+    }
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn network_service_envoy_contract(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_network::service_policy::EnvoyRedirectContract>> {
+    Ok(Json(fluxvm_network::service_policy::envoy_contract(&m.cfg, &name)?))
 }

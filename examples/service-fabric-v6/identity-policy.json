@@ -1,0 +1,9 @@
+{
+  "service": "payments-api",
+  "enabled": true,
+  "default_action": "deny",
+  "allow_identities": [1001, 1002],
+  "deny_identities": [2001],
+  "audit_only": false,
+  "l7": null
+}

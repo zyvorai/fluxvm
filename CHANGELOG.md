@@ -3,6 +3,9 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Service Fabric v6** — identity/L7 service policy maps (`fluxvm_spol`/`sid4`/`sid6`),
+  Envoy transparent-proxy redirect contract, HA mutation queue drain (`fluxvm_haq`);
+  ABI stays schema **4**, program generation **6**. See `docs/service-fabric-v6-phase6.md`.
 - **Windows Kryton golden path** — sibling [Kryton](https://github.com/zyvorai/kryton)
   builds sysprepped qcow2; `scripts/prepare-windows-golden.sh` installs under
   `/var/lib/fluxvm/images/`; docs [`windows-golden.md`](docs/windows-golden.md) /

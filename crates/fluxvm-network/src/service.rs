@@ -29,6 +29,8 @@ use tokio::net::TcpStream;
 use uuid::Uuid;
 
 pub const SERVICE_SCHEMA_VERSION: u32 = 4;
+/// BPF value ABI stays schema 4; program generation forces v5 pins to reload.
+pub const SERVICE_PROGRAM_GENERATION: u32 = 6;
 const SERVICE_TC_PRIORITY: &str = "49140";
 const SERVICE_TC_HANDLE: &str = "40";
 const DEFAULT_MAGLEV_TABLE_SIZE: u32 = 4093;
@@ -676,6 +678,7 @@ pub fn delete(cfg: &Config, name: &str) -> Result<bool> {
         return Ok(false);
     }
     commit_catalog(cfg, &previous, &specs)?;
+    crate::service_policy::delete_best_effort(cfg, name);
     Ok(true)
 }
 
@@ -1291,6 +1294,9 @@ pub fn export_conntrack_delta(
     after_seq: u64,
     max_entries: usize,
 ) -> Result<ConntrackDeltaBatch> {
+    if let Err(error) = crate::service_ha::drain_service_events(cfg, name, 4096) {
+        tracing::warn!(%error, service = name, "Service Fabric HA event drain failed; using snapshot-diff backstop");
+    }
     let state = refresh_ha_journal(cfg, name)?;
     let last_seq = state.next_seq.saturating_sub(1);
     if after_seq > last_seq {
@@ -1745,6 +1751,10 @@ pub fn sync_all(cfg: &Config) -> Result<usize> {
         }
     }
     sync_host(cfg)?;
+    // Restore additive identity/L7 maps before a generation-6 reload is
+    // considered fully synchronized. Newly loaded programs remain guarded
+    // until this succeeds.
+    crate::service_policy::reconcile_after_service_sync(cfg)?;
     let _ = publish_advertisements(cfg)?;
     Ok(synced)
 }
@@ -1779,9 +1789,14 @@ fn ensure_tc_instance(
     let current_schema = fs::read_to_string(&schema_marker)
         .ok()
         .and_then(|v| v.trim().parse::<u32>().ok());
+    let generation_marker = marker.with_extension("generation");
+    let current_generation = fs::read_to_string(&generation_marker)
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok());
 
     let mut rebuilt = false;
-    if !prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION) {
+    if !prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION)
+        || current_generation != Some(SERVICE_PROGRAM_GENERATION) {
         let _ = fs::remove_dir_all(root);
         fs::create_dir_all(&prog_dir)?;
         fs::create_dir_all(&map_dir)?;
@@ -1804,11 +1819,15 @@ fn ensure_tc_instance(
 
     if rebuilt || current_fingerprint != Some(desired_fingerprint) {
         populate_maps(&map_dir, specs)?;
+        if crate::service_policy::has_enabled_policies(cfg)? {
+            map_update(&map_dir.join("fluxvm_sguard"), &0u32.to_ne_bytes(), &1u32.to_ne_bytes())?;
+        }
         if let Some(parent) = marker.parent() {
             fs::create_dir_all(parent)?;
         }
         fs::write(marker, desired_fingerprint.to_string())?;
         fs::write(&schema_marker, SERVICE_SCHEMA_VERSION.to_string())?;
+        fs::write(&generation_marker, SERVICE_PROGRAM_GENERATION.to_string())?;
         rebuilt = true;
     }
 
@@ -1858,8 +1877,13 @@ fn sync_host(cfg: &Config) -> Result<()> {
         let current_schema = fs::read_to_string(&schema_marker)
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok());
+        let generation_marker = marker.with_extension("generation");
+        let current_generation = fs::read_to_string(&generation_marker)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok());
 
-        if !host_prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION) {
+        if !host_prog.exists() || current_schema != Some(SERVICE_SCHEMA_VERSION)
+            || current_generation != Some(SERVICE_PROGRAM_GENERATION) {
             let _ = detach_owned_xdp(cfg, iface, &root);
             let _ = fs::remove_dir_all(&root);
             fs::create_dir_all(&tc_prog_dir)?;
@@ -1878,13 +1902,18 @@ fn sync_host(cfg: &Config) -> Result<()> {
                 ],
             )?;
         }
-        if current != Some(desired) || current_schema != Some(SERVICE_SCHEMA_VERSION) {
+        if current != Some(desired) || current_schema != Some(SERVICE_SCHEMA_VERSION)
+            || current_generation != Some(SERVICE_PROGRAM_GENERATION) {
             populate_maps(&map_dir, &specs)?;
+            if crate::service_policy::has_enabled_policies(cfg)? {
+                map_update(&map_dir.join("fluxvm_sguard"), &0u32.to_ne_bytes(), &1u32.to_ne_bytes())?;
+            }
             if let Some(parent) = marker.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::write(&marker, desired.to_string())?;
             fs::write(&schema_marker, SERVICE_SCHEMA_VERSION.to_string())?;
+            fs::write(&generation_marker, SERVICE_PROGRAM_GENERATION.to_string())?;
         }
         let reverse_prog = tc_prog_dir.join("fvm_svc_rev");
         ensure_clsact(iface)?;
@@ -1933,6 +1962,12 @@ fn ensure_host_xdp(cfg: &Config, iface: &str, root: &Path, map_dir: &Path) -> Re
             "fluxvm_sstats",
             "fluxvm_bstat",
             "fluxvm_sflows",
+            "fluxvm_spol",
+            "fluxvm_sid4",
+            "fluxvm_sid6",
+            "fluxvm_pstat",
+            "fluxvm_haq",
+            "fluxvm_hadrop",
         ] {
             args.extend([
                 "map".into(),
@@ -2755,4 +2790,63 @@ mod tests {
         assert_eq!(maps.get("fluxvm_backend4").unwrap().len(), 3);
     }
 
+}
+
+// ZYVOR_SERVICE_FABRIC_V6_HA_INGEST
+/// Append one event-assisted mutation into the same durable v5 sequence/ack
+/// journal. `known` is updated simultaneously so the next snapshot refresh
+/// does not duplicate the same transition.
+pub fn append_ha_delta_event(
+    cfg: &Config,
+    name: &str,
+    operation: HaDeltaOperation,
+    map: &str,
+    key_hex: &str,
+    value_hex: Option<&str>,
+) -> Result<HaJournalStatus> {
+    if !matches!(map, "fluxvm_fct4" | "fluxvm_fct6" | "fluxvm_nat4" | "fluxvm_nat6") {
+        bail!("forbidden BPF map in event-assisted HA journal: {map}");
+    }
+    let spec = get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
+    let sid = service_id(&spec.name);
+    let mut state = load_ha_journal(cfg, name, sid)?;
+    let identity = format!("{map}|{key_hex}");
+    let changed = match operation {
+        HaDeltaOperation::Upsert => {
+            let value = value_hex.context("HA upsert event requires value_hex")?;
+            if state.known.get(&identity).map(String::as_str) == Some(value) {
+                false
+            } else {
+                append_delta(&mut state, HaDeltaOperation::Upsert, map.to_string(), key_hex.to_string(), Some(value.to_string()));
+                state.known.insert(identity, value.to_string());
+                true
+            }
+        }
+        HaDeltaOperation::Delete => {
+            if state.known.remove(&identity).is_some() {
+                append_delta(&mut state, HaDeltaOperation::Delete, map.to_string(), key_hex.to_string(), None);
+                true
+            } else {
+                false
+            }
+        }
+    };
+    if changed {
+        if state.journal.len() > HA_JOURNAL_MAX_ENTRIES {
+            let remove = state.journal.len() - HA_JOURNAL_MAX_ENTRIES;
+            state.journal.drain(0..remove);
+        }
+        let acked = state.acked_seq;
+        state.journal.retain(|entry| entry.seq > acked);
+        save_ha_journal(cfg, &state)?;
+    }
+    let last_seq = state.next_seq.saturating_sub(1);
+    Ok(HaJournalStatus {
+        service: name.to_string(),
+        service_id: sid,
+        last_seq,
+        acked_seq: state.acked_seq,
+        first_available_seq: state.journal.first().map(|e| e.seq).unwrap_or(last_seq.saturating_add(1)),
+        retained_entries: state.journal.len(),
+    })
 }

@@ -1,0 +1,16 @@
+{
+  "service": "checkout-http",
+  "enabled": true,
+  "default_action": "deny",
+  "allow_identities": [1001, 1002],
+  "deny_identities": [],
+  "audit_only": false,
+  "l7": {
+    "protocol": "http",
+    "mode": "enforce",
+    "proxy_ifindex": 42,
+    "bypass_mark": 45825,
+    "authorities": ["checkout.internal"],
+    "path_prefixes": ["/api/", "/healthz"]
+  }
+}
