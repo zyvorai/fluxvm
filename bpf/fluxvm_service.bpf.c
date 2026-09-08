@@ -334,6 +334,8 @@ struct {
     __type(value, struct edt_state);
 } fluxvm_edt SEC(".maps");
 
+#include "fluxvm_service_v6.bpf.h"
+
 static __always_inline int update_guard_enabled(void)
 {
     __u32 key = 0;
@@ -623,7 +625,8 @@ static __always_inline void learn_affinity4(
         .last_seen_ns = now,
         .expires_at_ns = now + timeout4(iph, data_end),
     };
-    bpf_map_update_elem(&fluxvm_fct4, &key, &value, BPF_ANY);
+    if (bpf_map_update_elem(&fluxvm_fct4, &key, &value, BPF_ANY) == 0)
+        fluxvm_ha_fct4(sid, bid, FLUXVM_HA_OP_UPSERT, iph->protocol, &key, &value);
 }
 
 static __always_inline void delete_affinity4(
@@ -696,7 +699,8 @@ static __always_inline void learn_affinity6(
         .last_seen_ns = now,
         .expires_at_ns = now + timeout6(ip6, data_end),
     };
-    bpf_map_update_elem(&fluxvm_fct6, &key, &value, BPF_ANY);
+    if (bpf_map_update_elem(&fluxvm_fct6, &key, &value, BPF_ANY) == 0)
+        fluxvm_ha_fct6(sid, bid, FLUXVM_HA_OP_UPSERT, ip6->nexthdr, &key, &value);
 }
 
 static __always_inline void delete_affinity6(
@@ -817,8 +821,10 @@ static __always_inline __u16 reserve_nat4(
             .client_port = client_port,
             .pad = 0,
         };
-        if (bpf_map_update_elem(&fluxvm_nat4, &key, &value, BPF_NOEXIST) == 0)
+        if (bpf_map_update_elem(&fluxvm_nat4, &key, &value, BPF_NOEXIST) == 0) {
+            fluxvm_ha_nat4(sid, bid, FLUXVM_HA_OP_UPSERT, protocol, &key, &value);
             return port;
+        }
         hit = bpf_map_lookup_elem(&fluxvm_nat4, &key);
         if (hit && nat4_same(hit, client, client_port, vip, vip_port, sid, bid))
             return port;
@@ -864,8 +870,10 @@ static __always_inline __u16 reserve_nat6(
         };
         __builtin_memcpy(value.client_address, client, 16);
         __builtin_memcpy(value.vip_address, vip, 16);
-        if (bpf_map_update_elem(&fluxvm_nat6, &key, &value, BPF_NOEXIST) == 0)
+        if (bpf_map_update_elem(&fluxvm_nat6, &key, &value, BPF_NOEXIST) == 0) {
+            fluxvm_ha_nat6(sid, bid, FLUXVM_HA_OP_UPSERT, protocol, &key, &value);
             return port;
+        }
         hit = bpf_map_lookup_elem(&fluxvm_nat6, &key);
         if (hit && nat6_same(hit, client, client_port, vip, vip_port, sid, bid))
             return port;
@@ -1231,6 +1239,9 @@ static __always_inline int forward4(
     if (!svc)
         return TC_ACT_UNSPEC;
     __u32 sid = svc->service_id;
+    int policy_action = fluxvm_policy4_tc(skb, sid, iph->saddr, iph->protocol);
+    if (policy_action != TC_ACT_UNSPEC)
+        return policy_action;
     __u32 original_src = iph->saddr, original_dst = iph->daddr;
     __u8 original_protocol = iph->protocol;
     __u32 bid = 0;
@@ -1342,6 +1353,9 @@ static __always_inline int forward6(
     if (!svc)
         return TC_ACT_UNSPEC;
     __u32 sid = svc->service_id;
+    int policy_action = fluxvm_policy6_tc(skb, sid, ip6->saddr.in6_u.u6_addr8, ip6->nexthdr);
+    if (policy_action != TC_ACT_UNSPEC)
+        return policy_action;
     __u8 original_src[16], original_dst[16];
     __builtin_memcpy(original_src, ip6->saddr.in6_u.u6_addr8, 16);
     __builtin_memcpy(original_dst, ip6->daddr.in6_u.u6_addr8, 16);
