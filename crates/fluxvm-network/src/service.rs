@@ -1,14 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! FluxVM Service Fabric v4.
+//! FluxVM Service Fabric v5.
 //!
 //! Fabric owns distributed service intent; FluxVM owns the node-local
-//! dataplane. v4 is cumulative with v1-v3 and adds performance/observability:
-//! - per-service EDT pacing with explicit fq queue ownership,
-//! - optional NAT host-routing with safe stack fallback,
-//! - FluxScope service-flow aggregation with rich reasons and OTLP/HTTP export,
-//! - v3 lifecycle/health/HA and conntrack checkpoint semantics unchanged.
+//! dataplane. v5 is cumulative with v1-v4 and adds state-plane scale/HA:
+//! - bounded sequence/ack conntrack delta journals with replay/gap protection,
+//! - incremental service-intent map reconciliation under the existing fail-closed guard,
+//! - idempotent delta import cursors for warm standbys,
+//! - v4 EDT, host-routing and FluxScope behavior unchanged.
 //!
 //! The service BPF program remains separate from `fluxvm_tc.bpf.c`, keeping
 //! the security-policy schema independent from the load-balancer schema.
@@ -18,7 +18,7 @@ use fluxvm_core::config::{Config, DataplaneMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fs,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -46,6 +46,8 @@ const MODE_NAT: u8 = 1;
 const MODE_DSR: u8 = 2;
 const SERVICE_F_HOST_ROUTING: u8 = 1;
 const FLOW_VERDICT_ALLOW: u8 = 1;
+const HA_JOURNAL_MAX_ENTRIES: usize = 32768;
+const HA_DELTA_MAX_BATCH: usize = 8192;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -361,6 +363,88 @@ pub struct ConntrackSnapshot {
     pub service_id: u32,
     pub created_unix_ms: u64,
     pub entries: Vec<RawMapEntry>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum HaDeltaOperation {
+    Upsert,
+    Delete,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConntrackDeltaEntry {
+    pub seq: u64,
+    pub operation: HaDeltaOperation,
+    pub map: String,
+    pub key_hex: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_hex: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConntrackDeltaBatch {
+    pub schema_version: u32,
+    pub service: String,
+    pub service_id: u32,
+    pub after_seq: u64,
+    pub last_seq: u64,
+    pub acked_seq: u64,
+    pub reset_required: bool,
+    /// Fabric sets this only after a full snapshot import. It advances the
+    /// standby replay cursor without applying journal entries.
+    #[serde(default)]
+    pub snapshot_barrier: bool,
+    pub truncated: bool,
+    pub entries: Vec<ConntrackDeltaEntry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HaJournalStatus {
+    pub service: String,
+    pub service_id: u32,
+    pub last_seq: u64,
+    pub acked_seq: u64,
+    pub first_available_seq: u64,
+    pub retained_entries: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HaDeltaApplyReport {
+    pub service: String,
+    pub applied_entries: usize,
+    pub deleted_entries: usize,
+    pub last_applied_seq: u64,
+    pub snapshot_barrier: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct HaJournalState {
+    schema_version: u32,
+    service: String,
+    service_id: u32,
+    next_seq: u64,
+    acked_seq: u64,
+    #[serde(default)]
+    known: BTreeMap<String, String>,
+    #[serde(default)]
+    journal: Vec<ConntrackDeltaEntry>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct HaImportCursor {
+    schema_version: u32,
+    service: String,
+    service_id: u32,
+    last_applied_seq: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MapReconcileReport {
+    pub maps: usize,
+    pub updated: usize,
+    pub deleted: usize,
+    pub unchanged: usize,
 }
 
 pub fn validate(spec: &ServiceSpec) -> Result<()> {
@@ -1063,6 +1147,282 @@ pub fn import_conntrack(cfg: &Config, name: &str, snapshot: &ConntrackSnapshot) 
         }
     }
     Ok(written)
+}
+
+
+fn ha_state_dir(cfg: &Config) -> PathBuf {
+    cfg.state_dir.join("network-service-ha")
+}
+
+fn ha_journal_path(cfg: &Config, name: &str) -> PathBuf {
+    ha_state_dir(cfg).join(format!("{name}.journal.json"))
+}
+
+fn ha_cursor_path(cfg: &Config, name: &str) -> PathBuf {
+    ha_state_dir(cfg).join(format!("{name}.cursor.json"))
+}
+
+fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path.parent().context("state path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(value)?)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+fn load_ha_journal(cfg: &Config, name: &str, sid: u32) -> Result<HaJournalState> {
+    let path = ha_journal_path(cfg, name);
+    if !path.exists() {
+        return Ok(HaJournalState {
+            schema_version: SERVICE_SCHEMA_VERSION,
+            service: name.to_string(),
+            service_id: sid,
+            next_seq: 1,
+            ..HaJournalState::default()
+        });
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("reading HA journal {}", path.display()))?;
+    let state: HaJournalState = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing HA journal {}", path.display()))?;
+    if state.schema_version != SERVICE_SCHEMA_VERSION
+        || state.service != name
+        || state.service_id != sid
+    {
+        bail!("HA journal schema/service identity does not match local service");
+    }
+    Ok(state)
+}
+
+fn save_ha_journal(cfg: &Config, state: &HaJournalState) -> Result<()> {
+    atomic_json(&ha_journal_path(cfg, &state.service), state)
+}
+
+fn load_import_cursor(cfg: &Config, name: &str, sid: u32) -> Result<HaImportCursor> {
+    let path = ha_cursor_path(cfg, name);
+    if !path.exists() {
+        return Ok(HaImportCursor {
+            schema_version: SERVICE_SCHEMA_VERSION,
+            service: name.to_string(),
+            service_id: sid,
+            last_applied_seq: 0,
+        });
+    }
+    let raw = fs::read_to_string(&path)?;
+    let cursor: HaImportCursor = serde_json::from_str(&raw)?;
+    if cursor.schema_version != SERVICE_SCHEMA_VERSION
+        || cursor.service != name
+        || cursor.service_id != sid
+    {
+        bail!("HA import cursor schema/service identity does not match local service");
+    }
+    Ok(cursor)
+}
+
+fn save_import_cursor(cfg: &Config, cursor: &HaImportCursor) -> Result<()> {
+    atomic_json(&ha_cursor_path(cfg, &cursor.service), cursor)
+}
+
+fn snapshot_index(snapshot: &ConntrackSnapshot) -> BTreeMap<String, String> {
+    snapshot.entries.iter().map(|entry| {
+        (format!("{}|{}", entry.map, entry.key_hex), entry.value_hex.clone())
+    }).collect()
+}
+
+fn append_delta(
+    state: &mut HaJournalState,
+    operation: HaDeltaOperation,
+    map: String,
+    key_hex: String,
+    value_hex: Option<String>,
+) {
+    let seq = state.next_seq.max(1);
+    state.next_seq = seq.saturating_add(1);
+    state.journal.push(ConntrackDeltaEntry { seq, operation, map, key_hex, value_hex });
+}
+
+fn refresh_ha_journal(cfg: &Config, name: &str) -> Result<HaJournalState> {
+    let snapshot = export_conntrack(cfg, name)?;
+    let sid = snapshot.service_id;
+    let mut state = load_ha_journal(cfg, name, sid)?;
+    let current = snapshot_index(&snapshot);
+
+    for (identity, value) in &current {
+        if state.known.get(identity) == Some(value) { continue; }
+        let (map, key_hex) = identity.split_once('|').context("invalid HA journal identity")?;
+        append_delta(
+            &mut state,
+            HaDeltaOperation::Upsert,
+            map.to_string(),
+            key_hex.to_string(),
+            Some(value.clone()),
+        );
+    }
+    let removed: Vec<String> = state.known.keys()
+        .filter(|identity| !current.contains_key(*identity))
+        .cloned().collect();
+    for identity in removed {
+        let (map, key_hex) = identity.split_once('|').context("invalid HA journal identity")?;
+        append_delta(
+            &mut state,
+            HaDeltaOperation::Delete,
+            map.to_string(),
+            key_hex.to_string(),
+            None,
+        );
+    }
+    state.known = current;
+
+    if state.journal.len() > HA_JOURNAL_MAX_ENTRIES {
+        let remove = state.journal.len() - HA_JOURNAL_MAX_ENTRIES;
+        state.journal.drain(0..remove);
+    }
+    // Entries acknowledged by every standby no longer need replay storage.
+    let acked = state.acked_seq;
+    state.journal.retain(|entry| entry.seq > acked);
+    save_ha_journal(cfg, &state)?;
+    Ok(state)
+}
+
+pub fn export_conntrack_delta(
+    cfg: &Config,
+    name: &str,
+    after_seq: u64,
+    max_entries: usize,
+) -> Result<ConntrackDeltaBatch> {
+    let state = refresh_ha_journal(cfg, name)?;
+    let last_seq = state.next_seq.saturating_sub(1);
+    if after_seq > last_seq {
+        bail!("HA delta cursor {after_seq} is ahead of source sequence {last_seq}");
+    }
+    let first_available = state.journal.first().map(|e| e.seq).unwrap_or(last_seq.saturating_add(1));
+    let reset_required = after_seq.saturating_add(1) < first_available && after_seq < last_seq;
+    let limit = max_entries.clamp(1, HA_DELTA_MAX_BATCH);
+    let eligible = state.journal.iter().filter(|entry| entry.seq > after_seq);
+    let total = eligible.clone().count();
+    let entries: Vec<_> = if reset_required { Vec::new() } else { eligible.take(limit).cloned().collect() };
+    Ok(ConntrackDeltaBatch {
+        schema_version: SERVICE_SCHEMA_VERSION,
+        service: state.service,
+        service_id: state.service_id,
+        after_seq,
+        last_seq,
+        acked_seq: state.acked_seq,
+        reset_required,
+        snapshot_barrier: false,
+        truncated: !reset_required && total > entries.len(),
+        entries,
+    })
+}
+
+pub fn ack_conntrack_delta(cfg: &Config, name: &str, ack_seq: u64) -> Result<HaJournalStatus> {
+    let spec = get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
+    let sid = service_id(&spec.name);
+    let mut state = load_ha_journal(cfg, name, sid)?;
+    let last_seq = state.next_seq.saturating_sub(1);
+    if ack_seq > last_seq {
+        bail!("HA ack {ack_seq} is ahead of source sequence {last_seq}");
+    }
+    if ack_seq < state.acked_seq {
+        bail!("HA ack regression {} -> {} refused", state.acked_seq, ack_seq);
+    }
+    state.acked_seq = ack_seq;
+    state.journal.retain(|entry| entry.seq > ack_seq);
+    save_ha_journal(cfg, &state)?;
+    let first_available_seq = state.journal.first().map(|e| e.seq).unwrap_or(last_seq.saturating_add(1));
+    Ok(HaJournalStatus {
+        service: name.to_string(),
+        service_id: sid,
+        last_seq,
+        acked_seq: state.acked_seq,
+        first_available_seq,
+        retained_entries: state.journal.len(),
+    })
+}
+
+pub fn import_conntrack_delta(
+    cfg: &Config,
+    name: &str,
+    batch: &ConntrackDeltaBatch,
+) -> Result<HaDeltaApplyReport> {
+    let spec = get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
+    let sid = service_id(&spec.name);
+    if batch.schema_version != SERVICE_SCHEMA_VERSION || batch.service != name || batch.service_id != sid {
+        bail!("HA delta schema/service identity does not match local service");
+    }
+    if batch.reset_required && !batch.snapshot_barrier {
+        bail!("HA delta history gap requires a full conntrack snapshot resync");
+    }
+    let mut cursor = load_import_cursor(cfg, name, sid)?;
+    if batch.snapshot_barrier {
+        if !batch.entries.is_empty() {
+            bail!("snapshot_barrier delta batch must not contain entries");
+        }
+        if batch.last_seq < cursor.last_applied_seq {
+            bail!("snapshot barrier would regress HA replay cursor");
+        }
+        cursor.last_applied_seq = batch.last_seq;
+        save_import_cursor(cfg, &cursor)?;
+        return Ok(HaDeltaApplyReport {
+            service: name.to_string(),
+            last_applied_seq: cursor.last_applied_seq,
+            snapshot_barrier: true,
+            ..HaDeltaApplyReport::default()
+        });
+    }
+
+    let allowed: HashSet<&str> = ["fluxvm_fct4", "fluxvm_fct6", "fluxvm_nat4", "fluxvm_nat6"]
+        .into_iter().collect();
+    let dirs: Vec<PathBuf> = cfg.sandbox.dataplane.service.north_south_interfaces.iter()
+        .map(|iface| host_pin_dir(cfg, iface).join("maps"))
+        .filter(|dir| dir.exists()).collect();
+    if dirs.is_empty() { bail!("conntrack HA delta import requires a configured north-south service edge"); }
+
+    let mut applied_entries = 0usize;
+    let mut deleted_entries = 0usize;
+    for entry in &batch.entries {
+        if entry.seq <= cursor.last_applied_seq { continue; }
+        let expected = cursor.last_applied_seq.saturating_add(1);
+        if entry.seq != expected {
+            bail!("HA delta gap: expected sequence {expected}, received {}", entry.seq);
+        }
+        if !allowed.contains(entry.map.as_str()) {
+            bail!("HA delta contains forbidden BPF map {}", entry.map);
+        }
+        let key = decode_hex(&entry.key_hex)?;
+        match entry.operation {
+            HaDeltaOperation::Upsert => {
+                let raw = entry.value_hex.as_deref().context("upsert delta missing value")?;
+                let value = decode_hex(raw)?;
+                if value.len() < 4 || u32::from_ne_bytes(value[0..4].try_into().unwrap()) != sid {
+                    bail!("HA delta value service id does not match local service");
+                }
+                for dir in &dirs {
+                    let map = dir.join(&entry.map);
+                    if map.exists() { map_update(&map, &key, &value)?; }
+                }
+                applied_entries += 1;
+            }
+            HaDeltaOperation::Delete => {
+                if entry.value_hex.is_some() { bail!("delete delta must not contain a value"); }
+                for dir in &dirs {
+                    let map = dir.join(&entry.map);
+                    if map.exists() { let _ = map_delete(&map, &key); }
+                }
+                deleted_entries += 1;
+            }
+        }
+        cursor.last_applied_seq = entry.seq;
+    }
+    save_import_cursor(cfg, &cursor)?;
+    Ok(HaDeltaApplyReport {
+        service: name.to_string(),
+        applied_entries,
+        deleted_entries,
+        last_applied_seq: cursor.last_applied_seq,
+        snapshot_barrier: false,
+    })
 }
 
 pub fn stats_for_vm(cfg: &Config, id: Uuid) -> Result<Vec<ServiceCounters>> {
@@ -1824,45 +2184,137 @@ fn host_marker(iface: &str) -> PathBuf {
     service_meta_root().join(format!("host-{iface}.fingerprint"))
 }
 
+fn desired_service_value(spec: &ServiceSpec, sid: u32, table_size: u32) -> Result<Vec<u8>> {
+    // Must match struct svc_value in both TC and XDP objects (24 bytes).
+    let mut value = Vec::with_capacity(24);
+    value.extend_from_slice(&sid.to_ne_bytes());
+    value.extend_from_slice(&table_size.to_ne_bytes());
+    let rate_bytes_per_sec = match spec.max_egress_mbps {
+        Some(mbps) => u64::from(mbps)
+            .checked_mul(1_000_000)
+            .map(|v| v / 8)
+            .context("max_egress_mbps is too large")?,
+        None => 0,
+    };
+    value.extend_from_slice(&rate_bytes_per_sec.to_ne_bytes());
+    value.extend_from_slice(&spec.flow_sample_rate.to_ne_bytes());
+    value.push(spec.mode.wire());
+    value.push(if spec.host_routing { SERVICE_F_HOST_ROUTING } else { 0 });
+    value.extend_from_slice(&0u16.to_ne_bytes());
+    Ok(value)
+}
+
+type DesiredMap = BTreeMap<Vec<u8>, Vec<u8>>;
+type DesiredMaps = BTreeMap<&'static str, DesiredMap>;
+
+fn desired_intent_maps(specs: &[ServiceSpec]) -> Result<DesiredMaps> {
+    let mut maps: DesiredMaps = [
+        "fluxvm_svc4", "fluxvm_svc6", "fluxvm_backend4", "fluxvm_backend6",
+        "fluxvm_maglev", "fluxvm_snat4", "fluxvm_snat6",
+    ].into_iter().map(|name| (name, BTreeMap::new())).collect();
+
+    for spec in specs {
+        let sid = service_id(&spec.name);
+        let table = maglev_table(spec)?;
+        let value = desired_service_value(spec, sid, table.len() as u32)?;
+        match spec.vip {
+            IpAddr::V4(ip) => {
+                let mut key = Vec::with_capacity(8);
+                key.extend_from_slice(&ip.octets());
+                key.extend_from_slice(&spec.port.to_ne_bytes());
+                key.push(spec.protocol.ip_proto()); key.push(0);
+                maps.get_mut("fluxvm_svc4").unwrap().insert(key, value);
+            }
+            IpAddr::V6(ip) => {
+                let mut key = Vec::with_capacity(20);
+                key.extend_from_slice(&ip.octets());
+                key.extend_from_slice(&spec.port.to_ne_bytes());
+                key.push(spec.protocol.ip_proto()); key.push(0);
+                maps.get_mut("fluxvm_svc6").unwrap().insert(key, value);
+            }
+        }
+        for (idx, backend) in spec.backends.iter().enumerate() {
+            if !backend.enabled { continue; }
+            let mut key = Vec::with_capacity(8);
+            key.extend_from_slice(&sid.to_ne_bytes());
+            key.extend_from_slice(&(idx as u32).to_ne_bytes());
+            match backend.address {
+                IpAddr::V4(ip) => {
+                    let mut v = Vec::with_capacity(8);
+                    v.extend_from_slice(&ip.octets());
+                    v.extend_from_slice(&backend.port.to_ne_bytes());
+                    v.extend_from_slice(&backend.state.wire_flags().to_ne_bytes());
+                    maps.get_mut("fluxvm_backend4").unwrap().insert(key, v);
+                }
+                IpAddr::V6(ip) => {
+                    let mut v = Vec::with_capacity(20);
+                    v.extend_from_slice(&ip.octets());
+                    v.extend_from_slice(&backend.port.to_ne_bytes());
+                    v.extend_from_slice(&backend.state.wire_flags().to_ne_bytes());
+                    maps.get_mut("fluxvm_backend6").unwrap().insert(key, v);
+                }
+            }
+        }
+        if let Some(snat) = spec.snat_address {
+            let key = sid.to_ne_bytes().to_vec();
+            match snat {
+                IpAddr::V4(ip) => {
+                    let mut v = Vec::with_capacity(8);
+                    v.extend_from_slice(&ip.octets()); v.extend_from_slice(&1u32.to_ne_bytes());
+                    maps.get_mut("fluxvm_snat4").unwrap().insert(key, v);
+                }
+                IpAddr::V6(ip) => {
+                    let mut v = Vec::with_capacity(20);
+                    v.extend_from_slice(&ip.octets()); v.extend_from_slice(&1u32.to_ne_bytes());
+                    maps.get_mut("fluxvm_snat6").unwrap().insert(key, v);
+                }
+            }
+        }
+        for (slot, backend_id) in table.into_iter().enumerate() {
+            let mut key = Vec::with_capacity(8);
+            key.extend_from_slice(&sid.to_ne_bytes());
+            key.extend_from_slice(&(slot as u32).to_ne_bytes());
+            maps.get_mut("fluxvm_maglev").unwrap().insert(key, backend_id.to_ne_bytes().to_vec());
+        }
+    }
+    Ok(maps)
+}
+
+fn reconcile_one_map(map: &Path, desired: &DesiredMap) -> Result<MapReconcileReport> {
+    let root = bpftool_json_dump(map)?;
+    let rows = root.as_array().context("bpftool map dump must be an array")?;
+    let mut existing = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+    for row in rows {
+        existing.insert(json_bytes(&row["key"])?, json_bytes(&row["value"])?);
+    }
+    let mut report = MapReconcileReport { maps: 1, ..MapReconcileReport::default() };
+    for key in existing.keys().filter(|key| !desired.contains_key(*key)) {
+        map_delete(map, key)?;
+        report.deleted += 1;
+    }
+    for (key, value) in desired {
+        match existing.get(key) {
+            Some(old) if old == value => report.unchanged += 1,
+            _ => {
+                map_update(map, key, value)?;
+                report.updated += 1;
+            }
+        }
+    }
+    Ok(report)
+}
+
 fn populate_maps(map_dir: &Path, specs: &[ServiceSpec]) -> Result<()> {
     let guard = map_dir.join("fluxvm_sguard");
     map_update(&guard, &0u32.to_ne_bytes(), &1u32.to_ne_bytes())?;
-
     let update = (|| -> Result<()> {
-        for map in [
-            "fluxvm_svc4",
-            "fluxvm_svc6",
-            "fluxvm_backend4",
-            "fluxvm_backend6",
-            "fluxvm_maglev",
-            // Forward conntrack, reverse NAT and backend telemetry survive
-            // catalog recompiles. They are lifecycle state, not service intent.
-            "fluxvm_snat4",
-            "fluxvm_snat6",
-        ] {
-            clear_map(&map_dir.join(map))?;
-        }
-
-        for spec in specs {
-            let sid = service_id(&spec.name);
-            let table = maglev_table(spec)?;
-            write_service(map_dir, spec, sid, table.len() as u32)?;
-            write_backends(map_dir, spec, sid)?;
-            write_snat(map_dir, spec, sid)?;
-            for (slot, backend_id) in table.into_iter().enumerate() {
-                let mut key = Vec::with_capacity(8);
-                key.extend_from_slice(&sid.to_ne_bytes());
-                key.extend_from_slice(&(slot as u32).to_ne_bytes());
-                map_update(
-                    &map_dir.join("fluxvm_maglev"),
-                    &key,
-                    &backend_id.to_ne_bytes(),
-                )?;
-            }
+        let desired = desired_intent_maps(specs)?;
+        for (name, entries) in &desired {
+            let _ = reconcile_one_map(&map_dir.join(name), entries)?;
         }
         Ok(())
     })();
-
+    // Deliberately leave the guard closed if reconciliation fails.
     update?;
     map_update(&guard, &0u32.to_ne_bytes(), &0u32.to_ne_bytes())?;
     Ok(())
@@ -1874,11 +2326,11 @@ fn write_service(map_dir: &Path, spec: &ServiceSpec, sid: u32, table_size: u32) 
     value.extend_from_slice(&sid.to_ne_bytes());
     value.extend_from_slice(&table_size.to_ne_bytes());
     let rate_bytes_per_sec = match spec.max_egress_mbps {
-        None => 0,
         Some(mbps) => u64::from(mbps)
             .checked_mul(1_000_000)
             .map(|v| v / 8)
             .context("max_egress_mbps is too large")?,
+        None => 0,
     };
     value.extend_from_slice(&rate_bytes_per_sec.to_ne_bytes());
     value.extend_from_slice(&spec.flow_sample_rate.to_ne_bytes());
@@ -2281,4 +2733,26 @@ mod tests {
         s.snat_address = Some("192.0.2.10".parse().unwrap());
         assert!(validate(&s).is_err());
     }
+
+    #[test]
+    fn v5_delta_batch_is_replay_ordered() {
+        let entries = vec![
+            ConntrackDeltaEntry { seq: 11, operation: HaDeltaOperation::Upsert, map: "fluxvm_fct4".into(), key_hex: "00".into(), value_hex: Some("00".into()) },
+            ConntrackDeltaEntry { seq: 12, operation: HaDeltaOperation::Delete, map: "fluxvm_fct4".into(), key_hex: "01".into(), value_hex: None },
+        ];
+        assert!(entries.windows(2).all(|w| w[0].seq + 1 == w[1].seq));
+        assert!(matches!(entries[1].operation, HaDeltaOperation::Delete));
+    }
+
+    #[test]
+    fn v5_desired_maps_exclude_disabled_backends() {
+        let mut s = v4_spec();
+        s.backends.push(ServiceBackend {
+            address: "10.0.0.99".parse().unwrap(), port: s.port, weight: 1,
+            enabled: false, state: BackendState::Ready, drain_until_unix_ms: None,
+        });
+        let maps = desired_intent_maps(&[s]).unwrap();
+        assert_eq!(maps.get("fluxvm_backend4").unwrap().len(), 3);
+    }
+
 }
