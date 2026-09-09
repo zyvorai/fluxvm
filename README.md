@@ -282,7 +282,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - End-to-end lifecycle smoke test (vsock exec, pause/resume, graceful shutdown, and vsock-CID uniqueness under concurrent creates, all verified against real VMs).
 - Kubernetes `DisposableVm` CRD + node-local operator (`fluxvm-kube`), verified against a real k3s cluster — see "Kubernetes CRD/operator" below.
 - Distributed node-agent (`fluxvm-agent`): central fleet registry + per-host heartbeat client with load-aware placement, verified across two real physically separate hosts — see "Distributed node-agent" below.
-- **Secure Containers v0.1** (developer preview) — containerd runtime `io.containerd.fluxvm.v2` / shim `containerd-shim-fluxvm-v2`: one Pod/task group → one QEMU FluxVM with virtiofs rootfs staging and a dedicated container agent on VSOCK :17778. QEMU-only; Kubernetes CNI/PVC write-through and TTY are explicit follow-ups. See [docs/secure-containers.md](docs/secure-containers.md) and [Secure Containers](#secure-containers).
+- **Secure Containers v0.1+Set2** (developer preview) — containerd runtime `io.containerd.fluxvm.v2` / shim `containerd-shim-fluxvm-v2`: one Pod/task group → one QEMU FluxVM with virtiofs rootfs staging, guest cgroup-v2 stats/resources, optional CNI L2 Pod IP, and a dedicated container agent on VSOCK :17778. QEMU-only; PVC write-through and TTY are explicit follow-ups. See [docs/secure-containers.md](docs/secure-containers.md) and [Secure Containers](#secure-containers).
 
 ## Host requirements
 
@@ -1717,6 +1717,10 @@ one QEMU FluxVM. The shim (`containerd-shim-fluxvm-v2`) creates the VM via the F
 stages the OCI rootfs into a virtiofs share, and drives processes through `fluxvm-container-agent`
 on VSOCK port 17778 (bootstrapped via the existing guest agent on 17777).
 
+**Set 2** adds optional CNI L2 attachment (guest gets the real Pod IP when a CRI netns is present)
+and guest cgroup-v2 stats/resource updates. Plain `ctr` without a netns still uses user-mode
+networking.
+
 | Piece | Value |
 |-------|--------|
 | Runtime id | `io.containerd.fluxvm.v2` |
@@ -1732,8 +1736,8 @@ sudo ./scripts/install-secure-containers.sh
 # FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/test-secure-containers.sh  # needs KVM + guest image
 ```
 
-This is a different surface from `DisposableVm` / MicroVM CRDs (those bypass CRI). v0.1 is QEMU-only
-and does **not** yet claim CNI Pod networking, PVC write-through, or TTY parity with Kata.
+This is a different surface from `DisposableVm` / MicroVM CRDs (those bypass CRI). Still QEMU-only;
+PVC write-through, TTY, and FIFO-over-virtiofs stdio remain follow-ups.
 
 ## Using FluxVM through zyvor-fabric
 
@@ -1956,7 +1960,7 @@ assigned the same vsock CID.
 - The API is localhost-only by default. Off-loopback binds fail closed without `[[auth.tokens]]`; set `auth.require = true` to always require tokens. Audit lines go to the `fluxvm_audit` tracing target.
 - The vsock guest agent is authenticated by default for any VM created with `agent.enabled: true` (see "Pause, resume, and exec"), but this doesn't extend to mTLS/OIDC-style identity — it's one shared secret per VM, good enough to stop an unrelated host process, not a multi-tenant authorization model.
 - `guestkit`'s `inspect_os()` (used by `copy_in`) only recognizes partitioned disks and LVM volumes as OS roots by default; support for a bare, unpartitioned whole-disk filesystem (the shape Firecracker rootfs images are typically built in) was added as part of this project's testing and needs to make it into a real guestkit release — until then, building against a `guestkit` checkout without that fix will fail `copy_in` on such images with "no operating system found in image".
-- **Secure Containers v0.1** is developer-preview: QEMU/virtiofs only; Kubernetes CNI → guest netns, PVC write-through, TTY, and full OCI hardening inside the guest are follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent networking yet.
+- **Secure Containers** is developer-preview: QEMU/virtiofs only; Set 2 adds CNI L2 Pod IP + guest cgroup stats/resources, but PVC write-through, TTY, and FIFO-over-virtiofs stdio remain follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent yet.
 
 ## License
 

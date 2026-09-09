@@ -4,17 +4,18 @@
 //! Minimal in-guest OCI process supervisor for FluxVM's containerd runtime.
 //!
 //! Security boundary: the entire Kubernetes Pod/container sandbox runs inside
-//! a hardware VM. This agent intentionally does not pretend to be a complete
-//! runc replacement yet; it implements process lifecycle, chroot, uid/gid,
-//! environment, cwd, signals and stdio inside the guest. OCI namespace,
-//! capability, seccomp, device and cgroup parity are tracked as follow-up
-//! hardening items in docs/secure-containers.md.
+//! a hardware VM. This agent implements process lifecycle, chroot, uid/gid,
+//! environment, cwd, signals, stdio, and a portable guest cgroup-v2 resource
+//! layer (`/sys/fs/cgroup/fluxvm-containers`). OCI namespace, capability,
+//! seccomp and device parity are tracked as follow-up hardening items in
+//! docs/secure-containers.md.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fluxvm_container_protocol::{
-    ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStatus,
-    DEFAULT_CONTAINER_AGENT_PORT, MAX_MESSAGE_BYTES, decode_line, encode_line,
+    ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStats,
+    ContainerStatus, ResourceLimits, DEFAULT_CONTAINER_AGENT_PORT, MAX_MESSAGE_BYTES, decode_line,
+    encode_line,
 };
 use serde_json::Value;
 use std::{
@@ -30,6 +31,7 @@ use std::{
 };
 
 const TOKEN_FILE_PATH: &str = "/etc/fluxvm-guest-agent.token";
+const CGROUP_ROOT: &str = "/sys/fs/cgroup/fluxvm-containers";
 
 #[derive(Parser, Debug)]
 #[command(name = "fluxvm-container-agent", version)]
@@ -149,6 +151,7 @@ impl ProcHandle {
 struct ContainerEntry {
     rootfs: PathBuf,
     mounts: Vec<PathBuf>,
+    cgroup_path: PathBuf,
     init: Arc<ProcHandle>,
     execs: HashMap<String, Arc<ProcHandle>>,
 }
@@ -258,6 +261,10 @@ fn write_response(writer: &mut File, response: ContainerResponse) -> Result<()> 
 fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
     match request {
         ContainerRequest::Ping => Ok(ContainerResponse::Pong),
+        ContainerRequest::ConfigureSandboxResources { resources } => {
+            configure_sandbox_resources(&resources)?;
+            Ok(ContainerResponse::SandboxResourcesConfigured)
+        }
         ContainerRequest::Create { id, config_json, io } => create_container(id, &config_json, io),
         ContainerRequest::Start { id, exec_id } => start_process(&id, exec_id.as_deref()),
         ContainerRequest::State { id, exec_id } => state_process(&id, exec_id.as_deref()),
@@ -265,20 +272,22 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
             create_exec(&id, exec_id, &process_json, io)
         }
         ContainerRequest::Kill { id, exec_id, signal, all } => {
-            let handle = find_process(&id, exec_id.as_deref())?;
-            handle.signal(signal, all)?;
+            if all && exec_id.is_none() {
+                signal_container_cgroup(&id, signal)?;
+            } else {
+                let handle = find_process(&id, exec_id.as_deref())?;
+                handle.signal(signal, all)?;
+            }
             Ok(ContainerResponse::Killed)
         }
         ContainerRequest::Pause { id } => {
-            let handle = find_process(&id, None)?;
-            handle.signal(libc::SIGSTOP, true)?;
-            handle.set_status(ContainerStatus::Paused);
+            freeze_container(&id, true)?;
+            find_process(&id, None)?.set_status(ContainerStatus::Paused);
             Ok(ContainerResponse::Paused)
         }
         ContainerRequest::Resume { id } => {
-            let handle = find_process(&id, None)?;
-            handle.signal(libc::SIGCONT, true)?;
-            handle.set_status(ContainerStatus::Running);
+            freeze_container(&id, false)?;
+            find_process(&id, None)?.set_status(ContainerStatus::Running);
             Ok(ContainerResponse::Resumed)
         }
         ContainerRequest::Wait { id, exec_id } => {
@@ -288,6 +297,12 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
                 exited_at_unix_nano: state.exited_at_unix_nano.unwrap_or_else(now_unix_nanos),
             })
         }
+        ContainerRequest::Pids { id } => Ok(ContainerResponse::Pids { pids: container_pids(&id)? }),
+        ContainerRequest::Stats { id } => Ok(ContainerResponse::Stats { stats: container_stats(&id)? }),
+        ContainerRequest::UpdateResources { id, resources } => {
+            update_container_resources(&id, &resources)?;
+            Ok(ContainerResponse::ResourcesUpdated)
+        }
         ContainerRequest::Delete { id, exec_id, force } => delete_process(&id, exec_id.as_deref(), force),
     }
 }
@@ -296,18 +311,38 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
     if io.terminal {
         bail!("TTY containers are not supported by FluxVM secure-containers v0.1");
     }
-    let (spec, mounts) = parse_oci_config(config_json)?;
+    let (spec, mounts, resources) = parse_oci_config(config_json)?;
+    {
+        let reg = registry().lock().expect("registry poisoned");
+        if reg.contains_key(&id) {
+            bail!("container {id:?} already exists");
+        }
+    }
+    let cgroup_path = create_container_cgroup(&id, &resources)?;
     let mut reg = registry().lock().expect("registry poisoned");
     if reg.contains_key(&id) {
+        cleanup_container_cgroup(&cgroup_path);
         bail!("container {id:?} already exists");
     }
-    let init = spawn_gated(&id, None, &spec, &io)?;
+    let init = match spawn_gated(&id, None, &spec, &io) {
+        Ok(handle) => handle,
+        Err(e) => {
+            let _ = std::fs::remove_dir(&cgroup_path);
+            return Err(e);
+        }
+    };
     let pid = init.snapshot().pid;
+    if let Err(e) = add_pid_to_cgroup(&cgroup_path, pid) {
+        let _ = init.signal(libc::SIGKILL, true);
+        let _ = std::fs::remove_dir(&cgroup_path);
+        return Err(e);
+    }
     reg.insert(
         id,
         ContainerEntry {
             rootfs: spec.rootfs.clone(),
             mounts,
+            cgroup_path,
             init,
             execs: HashMap::new(),
         },
@@ -328,6 +363,10 @@ fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -
     spec.rootfs = container.rootfs.clone();
     let handle = spawn_gated(id, Some(&exec_id), &spec, &io)?;
     let pid = handle.snapshot().pid;
+    if let Err(e) = add_pid_to_cgroup(&container.cgroup_path, pid) {
+        let _ = handle.signal(libc::SIGKILL, true);
+        return Err(e);
+    }
     container.execs.insert(exec_id, handle);
     Ok(ContainerResponse::ExecStarted { pid })
 }
@@ -375,8 +414,12 @@ fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<Contai
             }
             container.init.signal(libc::SIGKILL, true)?;
         }
+        if force {
+            let _ = signal_cgroup_path(&container.cgroup_path, libc::SIGKILL);
+        }
         if let Some(entry) = reg.remove(id) {
             cleanup_mounts(&entry.mounts);
+            cleanup_container_cgroup(&entry.cgroup_path);
         }
     }
     Ok(ContainerResponse::Deleted)
@@ -395,7 +438,7 @@ fn find_process(id: &str, exec_id: Option<&str>) -> Result<Arc<ProcHandle>> {
     }
 }
 
-fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>)> {
+fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>, ResourceLimits)> {
     let v: Value = serde_json::from_str(json).context("parsing OCI config.json")?;
     let root = v
         .pointer("/root/path")
@@ -404,7 +447,8 @@ fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>)> {
     let rootfs = PathBuf::from(root);
     let mounts = apply_oci_mounts(&v, &rootfs)?;
     let process = v.get("process").context("OCI process is required")?;
-    Ok((parse_process_value(process, rootfs)?, mounts))
+    let resources = resource_limits_from_oci(&v);
+    Ok((parse_process_value(process, rootfs)?, mounts, resources))
 }
 
 
@@ -552,6 +596,204 @@ fn cleanup_mounts(mounts: &[PathBuf]) {
     for target in mounts.iter().rev() {
         if let Ok(c) = CString::new(target.as_os_str().as_bytes()) {
             unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH); }
+        }
+    }
+}
+
+
+fn resource_limits_from_oci(config: &Value) -> ResourceLimits {
+    ResourceLimits {
+        cpu_quota: config.pointer("/linux/resources/cpu/quota").and_then(Value::as_i64),
+        cpu_period: config.pointer("/linux/resources/cpu/period").and_then(Value::as_u64),
+        cpu_shares: config.pointer("/linux/resources/cpu/shares").and_then(Value::as_u64),
+        cpuset_cpus: config.pointer("/linux/resources/cpu/cpus").and_then(Value::as_str).map(str::to_string),
+        cpuset_mems: config.pointer("/linux/resources/cpu/mems").and_then(Value::as_str).map(str::to_string),
+        memory_limit_bytes: config.pointer("/linux/resources/memory/limit").and_then(Value::as_i64),
+        pids_limit: config.pointer("/linux/resources/pids/limit").and_then(Value::as_i64),
+    }
+}
+
+fn cgroup_root() -> PathBuf {
+    PathBuf::from(CGROUP_ROOT)
+}
+
+fn enable_controllers(parent: &std::path::Path) -> Result<()> {
+    let controllers_path = parent.join("cgroup.controllers");
+    if !controllers_path.exists() {
+        bail!("cgroup v2 is required ({} is missing)", controllers_path.display());
+    }
+    let controllers = std::fs::read_to_string(&controllers_path)?;
+    let wanted: Vec<String> = ["cpu", "memory", "pids", "cpuset"]
+        .into_iter()
+        .filter(|name| controllers.split_whitespace().any(|available| available == *name))
+        .map(|name| format!("+{name}"))
+        .collect();
+    if !wanted.is_empty() {
+        std::fs::write(parent.join("cgroup.subtree_control"), wanted.join(" "))
+            .with_context(|| format!("enabling cgroup controllers under {}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn ensure_cgroup_root() -> Result<PathBuf> {
+    let sys = PathBuf::from("/sys/fs/cgroup");
+    enable_controllers(&sys)?;
+    let root = cgroup_root();
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    enable_controllers(&root)?;
+    Ok(root)
+}
+
+fn cgroup_component(id: &str) -> String {
+    let mut out: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .collect();
+    if out.len() > 96 { out.truncate(96); }
+    if out.is_empty() { "container".into() } else { out }
+}
+
+fn configure_sandbox_resources(resources: &ResourceLimits) -> Result<()> {
+    let root = ensure_cgroup_root()?;
+    apply_resource_limits(&root, resources)
+}
+
+fn create_container_cgroup(id: &str, resources: &ResourceLimits) -> Result<PathBuf> {
+    let root = ensure_cgroup_root()?;
+    let path = root.join(cgroup_component(id));
+    std::fs::create_dir_all(&path).with_context(|| format!("creating container cgroup {}", path.display()))?;
+    apply_resource_limits(&path, resources)?;
+    Ok(path)
+}
+
+fn container_cgroup(id: &str) -> Result<PathBuf> {
+    let reg = registry().lock().expect("registry poisoned");
+    reg.get(id)
+        .map(|entry| entry.cgroup_path.clone())
+        .with_context(|| format!("container {id:?} not found"))
+}
+
+fn add_pid_to_cgroup(path: &std::path::Path, pid: u32) -> Result<()> {
+    std::fs::write(path.join("cgroup.procs"), pid.to_string())
+        .with_context(|| format!("moving pid {pid} into {}", path.display()))
+}
+
+fn apply_resource_limits(path: &std::path::Path, resources: &ResourceLimits) -> Result<()> {
+    if resources.cpu_quota.is_some() || resources.cpu_period.is_some() {
+        let current = std::fs::read_to_string(path.join("cpu.max")).unwrap_or_else(|_| "max 100000".into());
+        let mut parts = current.split_whitespace();
+        let current_quota = parts.next().unwrap_or("max");
+        let current_period = parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(100_000);
+        let quota = match resources.cpu_quota {
+            Some(v) if v > 0 => v.to_string(),
+            Some(_) => "max".into(),
+            None => current_quota.to_string(),
+        };
+        let period = resources.cpu_period.filter(|v| *v > 0).unwrap_or(current_period);
+        std::fs::write(path.join("cpu.max"), format!("{quota} {period}"))?;
+    }
+    if let Some(shares) = resources.cpu_shares {
+        if shares > 0 {
+            let clamped = shares.clamp(2, 262_144);
+            let weight = 1 + ((clamped - 2) * 9_999 / 262_142);
+            std::fs::write(path.join("cpu.weight"), weight.to_string())?;
+        }
+    }
+    if let Some(limit) = resources.memory_limit_bytes {
+        let value = if limit > 0 { limit.to_string() } else { "max".into() };
+        std::fs::write(path.join("memory.max"), value)?;
+    }
+    if let Some(limit) = resources.pids_limit {
+        let value = if limit > 0 { limit.to_string() } else { "max".into() };
+        std::fs::write(path.join("pids.max"), value)?;
+    }
+    if let Some(mems) = resources.cpuset_mems.as_deref().filter(|v| !v.is_empty()) {
+        std::fs::write(path.join("cpuset.mems"), mems)?;
+    } else if path.join("cpuset.mems").exists() {
+        let parent = path.parent().unwrap_or(path);
+        let effective = std::fs::read_to_string(parent.join("cpuset.mems.effective")).unwrap_or_default();
+        if !effective.trim().is_empty() {
+            let _ = std::fs::write(path.join("cpuset.mems"), effective.trim());
+        }
+    }
+    if let Some(cpus) = resources.cpuset_cpus.as_deref().filter(|v| !v.is_empty()) {
+        std::fs::write(path.join("cpuset.cpus"), cpus)?;
+    }
+    Ok(())
+}
+
+fn update_container_resources(id: &str, resources: &ResourceLimits) -> Result<()> {
+    apply_resource_limits(&container_cgroup(id)?, resources)
+}
+
+fn container_pids(id: &str) -> Result<Vec<u32>> {
+    pids_from_cgroup(&container_cgroup(id)?)
+}
+
+fn pids_from_cgroup(path: &std::path::Path) -> Result<Vec<u32>> {
+    let procs = path.join("cgroup.procs");
+    let text = std::fs::read_to_string(&procs).with_context(|| format!("reading {}", procs.display()))?;
+    Ok(text.lines().filter_map(|line| line.trim().parse::<u32>().ok()).collect())
+}
+
+fn signal_cgroup_path(path: &std::path::Path, signal: i32) -> Result<()> {
+    for pid in pids_from_cgroup(path)? {
+        let rc = unsafe { libc::kill(pid as i32, signal) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) { return Err(err.into()); }
+        }
+    }
+    Ok(())
+}
+
+fn signal_container_cgroup(id: &str, signal: i32) -> Result<()> {
+    signal_cgroup_path(&container_cgroup(id)?, signal)
+}
+
+fn freeze_container(id: &str, freeze: bool) -> Result<()> {
+    let path = container_cgroup(id)?;
+    let freeze_file = path.join("cgroup.freeze");
+    if freeze_file.exists() {
+        std::fs::write(&freeze_file, if freeze { "1" } else { "0" })
+            .with_context(|| format!("writing {}", freeze_file.display()))?;
+        return Ok(());
+    }
+    signal_container_cgroup(id, if freeze { libc::SIGSTOP } else { libc::SIGCONT })
+}
+
+fn parse_u64_field(path: &std::path::Path, key: &str) -> u64 {
+    std::fs::read_to_string(path).ok().and_then(|text| {
+        text.lines().find_map(|line| {
+            let (name, value) = line.split_once(' ')?;
+            (name == key).then(|| value.trim().parse::<u64>().ok()).flatten()
+        })
+    }).unwrap_or(0)
+}
+
+fn container_stats(id: &str) -> Result<ContainerStats> {
+    let path = container_cgroup(id)?;
+    let pids_max = std::fs::read_to_string(path.join("pids.max")).unwrap_or_default();
+    Ok(ContainerStats {
+        cpu_usage_usec: parse_u64_field(&path.join("cpu.stat"), "usage_usec"),
+        cpu_user_usec: parse_u64_field(&path.join("cpu.stat"), "user_usec"),
+        cpu_system_usec: parse_u64_field(&path.join("cpu.stat"), "system_usec"),
+        memory_usage_bytes: std::fs::read_to_string(path.join("memory.current")).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+        memory_total_inactive_file_bytes: parse_u64_field(&path.join("memory.stat"), "inactive_file"),
+        pids_current: std::fs::read_to_string(path.join("pids.current")).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+        pids_limit: if pids_max.trim() == "max" { 0 } else { pids_max.trim().parse().unwrap_or(0) },
+    })
+}
+
+fn cleanup_container_cgroup(path: &std::path::Path) {
+    let _ = std::fs::write(path.join("cgroup.kill"), "1");
+    for _ in 0..20 {
+        match std::fs::remove_dir(path) {
+            Ok(()) => return,
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) || e.raw_os_error() == Some(libc::ENOTEMPTY) => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => return,
         }
     }
 }
@@ -737,11 +979,12 @@ mod tests {
 
     #[test]
     fn parses_minimal_oci_config() {
-        let (spec, mounts) = parse_oci_config(r#"{
+        let (spec, mounts, resources) = parse_oci_config(r#"{
           "root":{"path":"/run/rootfs"},
           "process":{"args":["/bin/echo","hi"],"cwd":"/","env":["A=B"],"user":{"uid":1000,"gid":1001}}
         }"#).unwrap();
         assert!(mounts.is_empty());
+        assert_eq!(resources, ResourceLimits::default());
         assert_eq!(spec.rootfs, PathBuf::from("/run/rootfs"));
         assert_eq!(spec.args[0], "/bin/echo");
         assert_eq!(spec.uid, 1000);

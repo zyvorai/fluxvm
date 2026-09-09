@@ -110,9 +110,9 @@ For workloads that still look like containers to Kubernetes/`ctr`, but need a
 Containers maps a containerd task group onto one QEMU FluxVM
 (runtime `io.containerd.fluxvm.v2`, RuntimeClass handler `fluxvm`).
 
-This is a **developer preview**: QEMU/virtiofs process isolation works;
-Kubernetes CNI → guest networking, PVC write-through, and TTY are not
-production-ready yet. Full design, install, and limits:
+Set 2 adds optional CNI L2 (guest gets the real Pod IP when a CRI netns exists)
+and guest cgroup-v2 stats/resource updates. This remains a **developer
+preview**: PVC write-through and TTY are not production-ready yet. Full design:
 [docs/secure-containers.md](secure-containers.md). Deploy fragment:
 [`deploy/containerd/`](../deploy/containerd/).
 
