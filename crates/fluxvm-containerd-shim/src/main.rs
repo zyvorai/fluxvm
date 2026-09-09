@@ -349,6 +349,10 @@ impl Service {
                 self.configure_guest_cni(&vm, cni).await?;
             }
 
+            // Cloud-init mounts virtiofs asynchronously; don't wait on it.
+            // Explicitly mount the Pod share before staging rootfs/stdio paths.
+            self.ensure_guest_share_mounted(&vm).await?;
+
             self.bootstrap_container_agent(&vm).await?;
             match self
                 .call_agent_direct(
@@ -410,6 +414,51 @@ impl Service {
                 bail!("configuring guest CNI network: {message}")
             }
             other => bail!("unexpected guest network response: {other:?}"),
+        }
+    }
+
+    /// Mount tag `fs0` at `GUEST_SHARE` if cloud-init has not done it yet.
+    async fn ensure_guest_share_mounted(&self, vm: &VmRecord) -> AnyResult<()> {
+        let probe = format!(
+            "bash -lc 'mkdir -p {GUEST_SHARE}; \
+             if ! mountpoint -q {GUEST_SHARE}; then \
+               mount -t virtiofs fs0 {GUEST_SHARE} || mount {GUEST_SHARE}; \
+             fi; \
+             mountpoint -q {GUEST_SHARE} && touch {GUEST_SHARE}/.fluxvm-share-ok'"
+        );
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            match fluxvm_vsock_client::call(
+                vm,
+                AgentRequest::Exec {
+                    command: probe.clone(),
+                    timeout_seconds: Some(10),
+                },
+                Duration::from_secs(15),
+            )
+            .await?
+            {
+                AgentResponse::Exec { exit_code: 0, .. } => return Ok(()),
+                AgentResponse::Exec {
+                    exit_code,
+                    stdout,
+                    stderr,
+                } => {
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!(
+                            "guest virtiofs share {GUEST_SHARE} not mounted after retries \
+                             (exit={exit_code} stdout={stdout:?} stderr={stderr:?})"
+                        );
+                    }
+                }
+                AgentResponse::Error { message } => {
+                    if tokio::time::Instant::now() >= deadline {
+                        bail!("guest virtiofs share mount: {message}");
+                    }
+                }
+                other => bail!("unexpected guest share mount response: {other:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
