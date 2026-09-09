@@ -24,7 +24,7 @@ status (value ABI still schema 4).
 | **RSS under-load PPS gate** (`scripts/test-service-fabric-rss.sh`) | shipped |
 | Fabric **site_id / route_domain** anycast + policy fencing | shipped (minimal) |
 | **Remote ipcache write APIs** (`POST/DELETE /v1/network/ipcache/remote`) for Fabric ClusterMesh-like directory fan-out | shipped (minimal) |
-| **Full mesh datapath (remote backends)** via Fabric Maglev service upsert merge | shipped (v1; Fabric-owned) |
+| **Full mesh datapath (remote backends)** via Fabric Maglev service upsert merge | shipped (lifecycle v2; Fabric-owned) |
 | Geneve / VXLAN service tunnels | N/A (L3/anycast + remote backends) |
 
 ### Map tier objects
@@ -79,7 +79,8 @@ Still open after this tranche:
 2. **CPU / higher Mpps lab ceilings** beyond the universal CI floor (`SLO_MPPS_MIN=0.01`).
 
 **Full mesh datapath** (remote backends / endpoint mesh) is owned by Fabric:
-catalog + reconcile merges peer Ready backends into existing Maglev service
-upserts. FluxVM needs no new tunnel APIs; Geneve/VXLAN remain N/A.
+catalog + reconcile merges peer Ready and active Draining backends into existing
+Maglev service upserts (weighted drain handoff + optional VIP match; lifecycle
+v2). FluxVM needs no new tunnel APIs; Geneve/VXLAN remain N/A.
 
 Ownership remains unchanged: FluxVM owns local packet/runtime mechanics; Fabric owns distributed leases, routing, service discovery, multi-site policy and HA coordination, remote identity directory, and remote backend mesh.

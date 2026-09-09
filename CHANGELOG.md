@@ -4,8 +4,9 @@
 
 ### Added
 - **Service Fabric full mesh datapath (Fabric-side)** — remote backends merge into
-  existing Maglev `/v1/network/services` upserts (no new FluxVM tunnel APIs;
-  Geneve/VXLAN still N/A). See Fabric `service-lb::remote_backend`.
+  existing Maglev `/v1/network/services` upserts (lifecycle v2: weighted drain +
+  optional VIP match; no new FluxVM tunnel APIs; Geneve/VXLAN still N/A). See
+  Fabric `service-lb::remote_backend`.
 - **Service Fabric gen8 connect** — cgroup/connect6 + Maglev affinity parity with TC
   (`fluxvm_fct4`/`fct6`); `cgroup_connect` attaches both v4 and v6; program generation **8**
   (schema 4 unchanged).
