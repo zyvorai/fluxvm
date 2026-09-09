@@ -28,8 +28,9 @@
   `io.containerd.fluxvm.v2`); virtiofs Pod share + VSOCK lifecycle on :17778;
   `deploy/containerd/`, install/test/e2e scripts, CI workflow
   `.github/workflows/secure-containers.yml`. Docs:
-  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; PVC/TTY
-  and FIFO-over-virtiofs stdio remain follow-up gates.
+  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; TTY
+  and hostPath hotplug remain follow-up gates (Set 4 covers Pod-UID
+  write-through volumes).
 - **Service Fabric full mesh datapath (Fabric-side)** — remote backends merge into
   existing Maglev `/v1/network/services` upserts (lifecycle v2: weighted drain +
   optional VIP match; no new FluxVM tunnel APIs; Geneve/VXLAN still N/A). See

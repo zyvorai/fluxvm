@@ -97,8 +97,10 @@ For workloads that still look like containers to Kubernetes/`ctr`, but need a
 per-Pod guest kernel, FluxVM Secure Containers maps a containerd task group onto
 one QEMU FluxVM (runtime `io.containerd.fluxvm.v2`, RuntimeClass `fluxvm`).
 Set 2 adds optional CNI L2 Pod IP + guest cgroup stats; Set 3 adds task events +
-OCI process hardening. Developer preview — see
-[secure-containers.md](../../../secure-containers.md).
+OCI process hardening; Set 4 adds Pod-UID write-through volumes + guest
+RO/masked paths/devices/sysctls/libseccomp. Developer preview — see
+[secure-containers.md](../../../secure-containers.md),
+[Set 4](../../../secure-containers-set4.md).
 
 ## Multi-host fleets without Kubernetes
 

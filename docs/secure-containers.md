@@ -90,6 +90,17 @@ the VM's existing per-instance authentication token.
   capabilities (unsupported names rejected).
 - Detail: [secure-containers-set3.md](secure-containers-set3.md).
 
+### Set 4 — write-through Pod volumes + OCI security
+
+- Pod-UID-scoped virtiofs exports for kubelet `volumes/` and `volume-subpaths/`
+  with OCI bind-source rewrite (PVC/CSI/emptyDir write-through).
+- Guest OCI security: read-only rootfs, masked/read-only paths, device nodes,
+  Pod-VM sysctls, and libseccomp syscall-name rules (unsupported comparators
+  fail closed). Guest images need `libseccomp.so.2` for seccomp profiles.
+- Rollback of partial mounts when OCI/security setup fails.
+- Volume smoke: `scripts/e2e-secure-containers-volume.sh`.
+- Detail: [secure-containers-set4.md](secure-containers-set4.md).
+
 ## Explicit limitations
 
 This remains a **developer-preview** runtime, not a claim of full Kata
@@ -190,18 +201,14 @@ FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`, which
 pulls BusyBox and executes it with `io.containerd.fluxvm.v2`. Plain `ctr` has
 no Pod netns, so CNI L2 stays inactive for that smoke.
 
+### Level 3 — Kubernetes volume write-through
+
+Once a StorageClass and secure-container guest image are available:
+
+```bash
+sudo ./scripts/e2e-secure-containers-volume.sh <namespace> fluxvm
+```
+
 The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
 because ordinary hosted runners do not provide the nested virtualization and
 node configuration needed for an honest containerd+FluxVM test.
-
-## Set 4 addendum — write-through Pod volumes + OCI security
-
-Set 4 adds Pod-UID-scoped virtiofs exports for kubelet `volumes/` and
-`volume-subpaths/`, so matching Kubernetes volume bind mounts are write-through
-instead of copied. Arbitrary host binds remain snapshot-based by default.
-
-The guest agent also enforces read-only rootfs, masked/read-only paths, OCI
-device nodes, Pod-VM sysctls and libseccomp syscall-name rules. Seccomp profiles
-using unsupported argument comparators fail closed. See
-[secure-containers-set4.md](secure-containers-set4.md) for the exact support
-boundary and test gates.

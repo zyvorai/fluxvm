@@ -30,11 +30,16 @@ timestamps).
 ## Still explicit follow-ups
 
 This remains a developer-preview runtime until the real-node conformance gate
-is complete. The following are not claimed as finished:
+is complete. The following are not claimed as finished by Set 3 alone:
 
 1. TTY/PTY and resize semantics.
-2. CSI/PVC write-through and dynamic volume hotplug.
-3. Full OCI namespace, seccomp, masked/readonly-path and device parity.
+2. CSI/PVC write-through and dynamic volume hotplug — **partially addressed in
+   [Set 4](secure-containers-set4.md)** (Pod-UID kubelet volumes/subpaths);
+   hostPath allowlist and late CSI hotplug remain open.
+3. Full OCI namespace, seccomp, masked/readonly-path and device parity —
+   **partially addressed in Set 4** (RO rootfs, masked/RO paths, devices,
+   sysctls, name-based libseccomp); namespace parity and seccomp arg
+   comparators remain open.
 4. IPv6/multi-interface CNI conformance and high-churn teardown validation.
 5. Cloud Hypervisor/Firecracker secure-container backends.
 6. Broader Kubernetes conformance beyond lab `ctr` / RuntimeClass smoke.
