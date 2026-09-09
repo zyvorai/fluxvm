@@ -17,4 +17,7 @@ if [[ "${FLUXVM_SECURE_CONTAINERS_E2E:-0}" == "1" ]]; then
   test -S /run/containerd/containerd.sock
   curl -fsS "${FLUXVM_API_URL:-http://127.0.0.1:7788}/healthz" >/dev/null
   ./scripts/e2e-secure-containers-ctr.sh
+  if [[ "${FLUXVM_SECURE_CONTAINERS_TTY_E2E:-0}" == "1" ]]; then
+    ./scripts/e2e-secure-containers-tty.sh
+  fi
 fi

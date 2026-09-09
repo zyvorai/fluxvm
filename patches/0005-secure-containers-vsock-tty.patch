@@ -1,0 +1,1385 @@
+diff --git a/crates/fluxvm-container-agent/src/main.rs b/crates/fluxvm-container-agent/src/main.rs
+index ca99afd..63fc11c 100644
+--- a/crates/fluxvm-container-agent/src/main.rs
++++ b/crates/fluxvm-container-agent/src/main.rs
+@@ -9,14 +9,16 @@
+ //! environment, cwd, signals and stdio inside the guest. Set 3 additionally
+ //! enforces supplementary groups, umask, rlimits and noNewPrivileges. OCI
+ //! Set 4 adds read-only/masked paths, read-only rootfs, OCI devices, Pod-scoped
+-//! sysctls and seccomp filters. Namespace creation and full device-cgroup parity
+-//! remain explicit follow-up hardening items in docs/secure-containers.md.
++//! sysctls and seccomp filters. Set 5 adds dedicated VSOCK stdio streams plus guest PTY/resize support.
++//! Namespace creation and full device-cgroup parity remain explicit follow-up
++//! hardening items in docs/secure-containers.md.
+ 
+ use anyhow::{Context, Result, bail};
+ use clap::Parser;
+ use fluxvm_container_protocol::{
+     ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStats,
+-    ContainerStatus, ResourceLimits, DEFAULT_CONTAINER_AGENT_PORT, MAX_MESSAGE_BYTES, decode_line,
++    ContainerStatus, ResourceLimits, IoStreamAck, IoStreamAttach, IoStreamKind,
++    DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, MAX_MESSAGE_BYTES, decode_line,
+     encode_line,
+ };
+ use serde_json::Value;
+@@ -86,6 +88,41 @@ struct ProcessSpec {
+     seccomp: Option<SeccompProfile>,
+ }
+ 
++#[derive(Debug)]
++enum ProcIo {
++    Legacy,
++    Pipes {
++        stdin_write: Option<RawFd>,
++        stdin_attached: bool,
++        stdout_read: Option<RawFd>,
++        stderr_read: Option<RawFd>,
++    },
++    Pty {
++        master_fd: RawFd,
++        stdin_attached: bool,
++        stdout_attached: bool,
++    },
++}
++
++impl Drop for ProcIo {
++    fn drop(&mut self) {
++        unsafe {
++            match self {
++                ProcIo::Legacy => {}
++                ProcIo::Pipes { stdin_write, stdout_read, stderr_read, .. } => {
++                    for fd in [stdin_write.take(), stdout_read.take(), stderr_read.take()].into_iter().flatten() {
++                        libc::close(fd);
++                    }
++                }
++                ProcIo::Pty { master_fd, .. } => {
++                    if *master_fd >= 0 { libc::close(*master_fd); }
++                    *master_fd = -1;
++                }
++            }
++        }
++    }
++}
++
+ #[derive(Clone, Debug)]
+ struct ProcSnapshot {
+     status: ContainerStatus,
+@@ -99,10 +136,11 @@ struct ProcSnapshot {
+ struct ProcHandle {
+     inner: Mutex<ProcSnapshot>,
+     changed: Condvar,
++    io: Mutex<ProcIo>,
+ }
+ 
+ impl ProcHandle {
+-    fn new_created(pid: u32, gate_fd: RawFd) -> Self {
++    fn new_created(pid: u32, gate_fd: RawFd, io: ProcIo) -> Self {
+         Self {
+             inner: Mutex::new(ProcSnapshot {
+                 status: ContainerStatus::Created,
+@@ -112,6 +150,7 @@ impl ProcHandle {
+                 gate_fd: Some(gate_fd),
+             }),
+             changed: Condvar::new(),
++            io: Mutex::new(io),
+         }
+     }
+ 
+@@ -174,6 +213,77 @@ impl ProcHandle {
+         self.changed.notify_all();
+     }
+ 
++    fn attach_stream(&self, kind: IoStreamKind) -> Result<File> {
++        let mut io = self.io.lock().expect("process io poisoned");
++        match &mut *io {
++            ProcIo::Legacy => bail!("process uses legacy virtiofs stdio, not VSOCK streaming"),
++            ProcIo::Pipes { stdin_write, stdin_attached, stdout_read, stderr_read } => {
++                let fd = match kind {
++                    IoStreamKind::Stdin => {
++                        let source = stdin_write.as_ref().copied().context("stdin stream is absent")?;
++                        if *stdin_attached { bail!("stdin stream is already attached"); }
++                        *stdin_attached = true;
++                        let dup = unsafe { libc::dup(source) };
++                        if dup < 0 { bail!("dup(stdin pipe): {}", std::io::Error::last_os_error()); }
++                        set_cloexec(dup);
++                        dup
++                    }
++                    IoStreamKind::Stdout => stdout_read.take().context("stdout stream is absent or already attached")?,
++                    IoStreamKind::Stderr => stderr_read.take().context("stderr stream is absent or already attached")?,
++                };
++                Ok(unsafe { File::from_raw_fd(fd) })
++            }
++            ProcIo::Pty { master_fd, stdin_attached, stdout_attached } => {
++                match kind {
++                    IoStreamKind::Stdin => {
++                        if *stdin_attached { bail!("PTY stdin is already attached"); }
++                        *stdin_attached = true;
++                    }
++                    IoStreamKind::Stdout => {
++                        if *stdout_attached { bail!("PTY stdout is already attached"); }
++                        *stdout_attached = true;
++                    }
++                    IoStreamKind::Stderr => bail!("TTY processes have a single PTY output stream"),
++                }
++                let fd = unsafe { libc::dup(*master_fd) };
++                if fd < 0 { bail!("dup(pty master): {}", std::io::Error::last_os_error()); }
++                set_cloexec(fd);
++                Ok(unsafe { File::from_raw_fd(fd) })
++            }
++        }
++    }
++
++    fn resize_pty(&self, width: u32, height: u32) -> Result<()> {
++        if width == 0 || height == 0 || width > u16::MAX as u32 || height > u16::MAX as u32 {
++            bail!("invalid PTY size {width}x{height}");
++        }
++        let io = self.io.lock().expect("process io poisoned");
++        let ProcIo::Pty { master_fd, .. } = &*io else { bail!("process is not a TTY"); };
++        let ws = libc::winsize { ws_row: height as u16, ws_col: width as u16, ws_xpixel: 0, ws_ypixel: 0 };
++        if unsafe { libc::ioctl(*master_fd, libc::TIOCSWINSZ as libc::c_ulong, &ws) } != 0 {
++            bail!("TIOCSWINSZ: {}", std::io::Error::last_os_error());
++        }
++        Ok(())
++    }
++
++    fn close_stdin(&self) -> Result<()> {
++        let mut io = self.io.lock().expect("process io poisoned");
++        match &mut *io {
++            ProcIo::Legacy => Ok(()),
++            ProcIo::Pipes { stdin_write, .. } => {
++                if let Some(fd) = stdin_write.take() { unsafe { libc::close(fd) }; }
++                Ok(())
++            }
++            ProcIo::Pty { master_fd, .. } => {
++                // Canonical terminals interpret ^D as EOF when the input line is empty.
++                let eof = [0x04u8; 1];
++                let rc = unsafe { libc::write(*master_fd, eof.as_ptr().cast(), 1) };
++                if rc < 0 { bail!("writing PTY EOF: {}", std::io::Error::last_os_error()); }
++                Ok(())
++            }
++        }
++    }
++
+     fn wait(&self) -> ProcSnapshot {
+         let mut state = self.inner.lock().expect("process state poisoned");
+         while state.status != ContainerStatus::Stopped {
+@@ -211,11 +321,36 @@ fn run_server(port: u32) -> Result<()> {
+         .map(|s| s.trim().to_string())
+         .filter(|s| !s.is_empty());
+ 
+-    let listener_fd = unsafe {
+-        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
++    let stream_port = DEFAULT_CONTAINER_STREAM_PORT;
++    let stream_token = expected_token.clone();
++    std::thread::spawn(move || {
++        if let Err(e) = run_stream_server(stream_port, stream_token) {
++            eprintln!("container stream server failed: {e:#}");
++        }
++    });
++
++    let listener_fd = create_vsock_listener(port)?;
++    eprintln!("fluxvm-container-agent lifecycle listening on vsock port {port}");
++    loop {
++        let fd = unsafe { libc::accept(listener_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+         if fd < 0 {
+-            bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
++            eprintln!("accept failed: {}", std::io::Error::last_os_error());
++            continue;
+         }
++        let token = expected_token.clone();
++        std::thread::spawn(move || {
++            let file = unsafe { File::from_raw_fd(fd) };
++            if let Err(e) = handle_connection(file, token.as_deref()) {
++                eprintln!("container-agent request failed: {e:#}");
++            }
++        });
++    }
++}
++
++fn create_vsock_listener(port: u32) -> Result<RawFd> {
++    unsafe {
++        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
++        if fd < 0 { bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error()); }
+         let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+         addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+         addr.svm_cid = libc::VMADDR_CID_ANY;
+@@ -224,36 +359,98 @@ fn run_server(port: u32) -> Result<()> {
+             fd,
+             (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
+             std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+-        ) != 0
+-        {
++        ) != 0 {
++            let e = std::io::Error::last_os_error();
+             libc::close(fd);
+-            bail!("bind(vsock:{port}): {}", std::io::Error::last_os_error());
++            bail!("bind(vsock:{port}): {e}");
+         }
+         if libc::listen(fd, 128) != 0 {
++            let e = std::io::Error::last_os_error();
+             libc::close(fd);
+-            bail!("listen(vsock:{port}): {}", std::io::Error::last_os_error());
++            bail!("listen(vsock:{port}): {e}");
+         }
+         set_cloexec(fd);
+-        fd
+-    };
++        Ok(fd)
++    }
++}
+ 
+-    eprintln!("fluxvm-container-agent listening on vsock port {port}");
++fn run_stream_server(port: u32, expected_token: Option<String>) -> Result<()> {
++    let listener_fd = create_vsock_listener(port)?;
++    eprintln!("fluxvm-container-agent stdio listening on vsock port {port}");
+     loop {
+         let fd = unsafe { libc::accept(listener_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+         if fd < 0 {
+-            eprintln!("accept failed: {}", std::io::Error::last_os_error());
++            eprintln!("stdio accept failed: {}", std::io::Error::last_os_error());
+             continue;
+         }
+         let token = expected_token.clone();
+         std::thread::spawn(move || {
+             let file = unsafe { File::from_raw_fd(fd) };
+-            if let Err(e) = handle_connection(file, token.as_deref()) {
+-                eprintln!("container-agent request failed: {e:#}");
++            if let Err(e) = handle_stream_connection(file, token.as_deref()) {
++                eprintln!("container stdio stream failed: {e:#}");
+             }
+         });
+     }
+ }
+ 
++fn handle_stream_connection(mut socket: File, expected_token: Option<&str>) -> Result<()> {
++    let mut line = String::new();
++    {
++        let mut reader = BufReader::new(socket.try_clone()?);
++        let n = reader.read_line(&mut line).context("reading stdio attach request")?;
++        if n == 0 { return Ok(()); }
++    }
++    if line.len() > 64 * 1024 {
++        socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some("attach request too large".into()) })?.as_bytes())?;
++        socket.flush()?;
++        return Ok(());
++    }
++    let attach: IoStreamAttach = decode_line(&line).context("decoding stdio attach request")?;
++    if let Some(expected) = expected_token {
++        let ok = attach.token.as_deref().is_some_and(|actual| constant_time_eq(expected, actual));
++        if !ok {
++            socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some("unauthorized".into()) })?.as_bytes())?;
++            socket.flush()?;
++            return Ok(());
++        }
++    }
++    let process = match find_process(&attach.id, attach.exec_id.as_deref()) {
++        Ok(process) => process,
++        Err(e) => {
++            socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some(format!("{e:#}")) })?.as_bytes())?;
++            socket.flush()?;
++            return Ok(());
++        }
++    };
++    let mut endpoint = match process.attach_stream(attach.stream) {
++        Ok(endpoint) => endpoint,
++        Err(e) => {
++            socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some(format!("{e:#}")) })?.as_bytes())?;
++            socket.flush()?;
++            return Ok(());
++        }
++    };
++    socket.write_all(encode_line(&IoStreamAck { ok: true, message: None })?.as_bytes())?;
++    socket.flush()?;
++    match attach.stream {
++        IoStreamKind::Stdin => {
++            let copied = std::io::copy(&mut socket, &mut endpoint);
++            let _ = endpoint.flush();
++            let _ = process.close_stdin();
++            copied?;
++        }
++        IoStreamKind::Stdout | IoStreamKind::Stderr => {
++            match std::io::copy(&mut endpoint, &mut socket) {
++                Ok(_) => {}
++                Err(e) if e.raw_os_error() == Some(libc::EIO) => {} // PTY slave closed
++                Err(e) => return Err(e).context("streaming guest output"),
++            }
++            socket.flush()?;
++        }
++    }
++    Ok(())
++}
++
+ fn handle_connection(file: File, expected_token: Option<&str>) -> Result<()> {
+     let mut writer = file.try_clone()?;
+     let mut reader = BufReader::new(file);
+@@ -340,14 +537,19 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
+             update_container_resources(&id, &resources)?;
+             Ok(ContainerResponse::ResourcesUpdated)
+         }
++        ContainerRequest::ResizePty { id, exec_id, width, height } => {
++            find_process(&id, exec_id.as_deref())?.resize_pty(width, height)?;
++            Ok(ContainerResponse::PtyResized)
++        }
++        ContainerRequest::CloseIo { id, exec_id } => {
++            find_process(&id, exec_id.as_deref())?.close_stdin()?;
++            Ok(ContainerResponse::IoClosed)
++        }
+         ContainerRequest::Delete { id, exec_id, force } => delete_process(&id, exec_id.as_deref(), force),
+     }
+ }
+ 
+ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
+-    if io.terminal {
+-        bail!("TTY containers are not supported by FluxVM secure-containers v0.1");
+-    }
+     let (spec, mounts, resources) = parse_oci_config(config_json)?;
+     {
+         let reg = registry().lock().expect("registry poisoned");
+@@ -394,9 +596,6 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
+ }
+ 
+ fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
+-    if io.terminal {
+-        bail!("TTY exec is not supported by FluxVM secure-containers v0.1");
+-    }
+     let mut reg = registry().lock().expect("registry poisoned");
+     let container = reg.get_mut(id).with_context(|| format!("container {id:?} not found"))?;
+     if container.execs.contains_key(&exec_id) {
+@@ -1371,9 +1570,55 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+         .iter()
+         .map(|(k, v)| CString::new(format!("{k}={v}")).context("environment contains NUL"))
+         .collect::<Result<Vec<_>>>()?;
+-    let stdin = open_input(io.stdin.as_deref())?;
+-    let stdout = open_output(io.stdout.as_deref())?;
+-    let stderr = open_output(io.stderr.as_deref())?;
++
++    let mut parent_fds = Vec::new();
++    let mut pty_slave: Option<File> = None;
++    let (stdin, stdout, stderr, process_io) = if io.streaming && io.terminal {
++        let (master, slave) = open_pty_pair()?;
++        parent_fds.push(master);
++        pty_slave = Some(unsafe { File::from_raw_fd(slave) });
++        (
++            None,
++            None,
++            None,
++            ProcIo::Pty { master_fd: master, stdin_attached: false, stdout_attached: false },
++        )
++    } else if io.streaming {
++        let (stdin_file, stdin_write) = if io.stdin.is_some() {
++            let (read_fd, write_fd) = pipe_cloexec()?;
++            parent_fds.push(write_fd);
++            (Some(unsafe { File::from_raw_fd(read_fd) }), Some(write_fd))
++        } else {
++            (Some(OpenOptions::new().read(true).open("/dev/null")?), None)
++        };
++        let (stdout_file, stdout_read) = if io.stdout.is_some() {
++            let (read_fd, write_fd) = pipe_cloexec()?;
++            parent_fds.push(read_fd);
++            (Some(unsafe { File::from_raw_fd(write_fd) }), Some(read_fd))
++        } else {
++            (Some(OpenOptions::new().write(true).open("/dev/null")?), None)
++        };
++        let (stderr_file, stderr_read) = if io.stderr.is_some() {
++            let (read_fd, write_fd) = pipe_cloexec()?;
++            parent_fds.push(read_fd);
++            (Some(unsafe { File::from_raw_fd(write_fd) }), Some(read_fd))
++        } else {
++            (Some(OpenOptions::new().write(true).open("/dev/null")?), None)
++        };
++        (
++            stdin_file,
++            stdout_file,
++            stderr_file,
++            ProcIo::Pipes { stdin_write, stdin_attached: false, stdout_read, stderr_read },
++        )
++    } else {
++        (
++            open_input(io.stdin.as_deref())?,
++            open_output(io.stdout.as_deref())?,
++            open_output(io.stderr.as_deref())?,
++            ProcIo::Legacy,
++        )
++    };
+ 
+     let mut gate = [0; 2];
+     if unsafe { libc::pipe2(gate.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+@@ -1390,10 +1635,21 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+     if pid == 0 {
+         unsafe {
+             libc::close(gate[1]);
+-            libc::setpgid(0, 0);
+-            if let Some(ref file) = stdin { libc::dup2(file.as_raw_fd(), libc::STDIN_FILENO); }
+-            if let Some(ref file) = stdout { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO); }
+-            if let Some(ref file) = stderr { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO); }
++            for fd in &parent_fds { libc::close(*fd); }
++
++            if let Some(ref slave) = pty_slave {
++                if libc::setsid() < 0 { libc::_exit(126); }
++                if libc::ioctl(slave.as_raw_fd(), libc::TIOCSCTTY as libc::c_ulong, 0) != 0 { libc::_exit(126); }
++                libc::dup2(slave.as_raw_fd(), libc::STDIN_FILENO);
++                libc::dup2(slave.as_raw_fd(), libc::STDOUT_FILENO);
++                libc::dup2(slave.as_raw_fd(), libc::STDERR_FILENO);
++            } else {
++                libc::setpgid(0, 0);
++                if let Some(ref file) = stdin { libc::dup2(file.as_raw_fd(), libc::STDIN_FILENO); }
++                if let Some(ref file) = stdout { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO); }
++                if let Some(ref file) = stderr { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO); }
++            }
++
+             let mut byte = [0u8; 1];
+             if libc::read(gate[0], byte.as_mut_ptr().cast(), 1) != 1 { libc::_exit(126); }
+             libc::close(gate[0]);
+@@ -1411,16 +1667,11 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+                 if libc::setrlimit(limit.resource as _, &value) != 0 { libc::_exit(126); }
+             }
+ 
+-            // Supplementary groups and the capability bounding set must be
+-            // configured while the child still has privilege.
+             let groups: Vec<libc::gid_t> = spec.additional_gids.iter().map(|v| *v as libc::gid_t).collect();
+             let group_ptr = if groups.is_empty() { std::ptr::null() } else { groups.as_ptr() };
+             if libc::setgroups(groups.len(), group_ptr) != 0 { libc::_exit(126); }
+             if let Some(caps) = spec.capabilities.as_ref() {
+                 if drop_bounding_capabilities(caps).is_err() { libc::_exit(126); }
+-                // Preserve the requested permitted set across a non-root UID
+-                // transition, then immediately replace it with OCI's exact
+-                // sets below.
+                 if spec.uid != 0 && (caps.permitted != 0 || caps.effective != 0 || caps.ambient != 0)
+                     && libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0
+                 {
+@@ -1439,8 +1690,6 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+                 libc::_exit(126);
+             }
+             if let Some(profile) = spec.seccomp.as_ref() {
+-                // A seccomp filter must never be silently skipped. Force
+-                // no-new-privileges before loading the guest-local filter.
+                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                     || apply_seccomp(profile).is_err()
+                 {
+@@ -1461,7 +1710,8 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+     drop(stdin);
+     drop(stdout);
+     drop(stderr);
+-    let handle = Arc::new(ProcHandle::new_created(pid as u32, gate[1]));
++    drop(pty_slave);
++    let handle = Arc::new(ProcHandle::new_created(pid as u32, gate[1], process_io));
+     let waiter = handle.clone();
+     let label = format!("{container_id}/{}", exec_id.unwrap_or("init"));
+     std::thread::spawn(move || {
+@@ -1482,6 +1732,41 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+     Ok(handle)
+ }
+ 
++fn pipe_cloexec() -> Result<(RawFd, RawFd)> {
++    let mut fds = [0; 2];
++    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
++        bail!("pipe2: {}", std::io::Error::last_os_error());
++    }
++    Ok((fds[0], fds[1]))
++}
++
++fn open_pty_pair() -> Result<(RawFd, RawFd)> {
++    unsafe {
++        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
++        if master < 0 { bail!("posix_openpt: {}", std::io::Error::last_os_error()); }
++        if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
++            let e = std::io::Error::last_os_error();
++            libc::close(master);
++            bail!("initializing PTY: {e}");
++        }
++        let mut name = [0 as libc::c_char; 128];
++        if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
++            let e = std::io::Error::last_os_error();
++            libc::close(master);
++            bail!("ptsname_r: {e}");
++        }
++        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
++        if slave < 0 {
++            let e = std::io::Error::last_os_error();
++            libc::close(master);
++            bail!("opening PTY slave: {e}");
++        }
++        let ws = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
++        let _ = libc::ioctl(master, libc::TIOCSWINSZ as libc::c_ulong, &ws);
++        Ok((master, slave))
++    }
++}
++
+ fn open_input(path: Option<&str>) -> Result<Option<File>> {
+     path.filter(|p| !p.is_empty())
+         .map(|p| {
+@@ -1636,4 +1921,31 @@ mod tests {
+         assert!(!constant_time_eq("same", "diff"));
+         assert!(!constant_time_eq("same", "same2"));
+     }
++
++    #[test]
++    fn pty_pair_has_default_size_and_can_resize() {
++        let (master, slave) = open_pty_pair().unwrap();
++        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
++        let rc = unsafe { libc::ioctl(master, libc::TIOCGWINSZ as libc::c_ulong, &mut ws) };
++        assert_eq!(rc, 0);
++        assert_eq!((ws.ws_col, ws.ws_row), (80, 24));
++        let new_ws = libc::winsize { ws_row: 33, ws_col: 101, ws_xpixel: 0, ws_ypixel: 0 };
++        let rc = unsafe { libc::ioctl(master, libc::TIOCSWINSZ as libc::c_ulong, &new_ws) };
++        assert_eq!(rc, 0);
++        let mut read_back: libc::winsize = unsafe { std::mem::zeroed() };
++        let rc = unsafe { libc::ioctl(master, libc::TIOCGWINSZ as libc::c_ulong, &mut read_back) };
++        assert_eq!(rc, 0);
++        assert_eq!((read_back.ws_col, read_back.ws_row), (101, 33));
++        unsafe { libc::close(master); libc::close(slave); }
++    }
++
++    #[test]
++    fn stream_pipe_is_cloexec() {
++        let (read_fd, write_fd) = pipe_cloexec().unwrap();
++        let r = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
++        let w = unsafe { libc::fcntl(write_fd, libc::F_GETFD) };
++        assert_ne!(r & libc::FD_CLOEXEC, 0);
++        assert_ne!(w & libc::FD_CLOEXEC, 0);
++        unsafe { libc::close(read_fd); libc::close(write_fd); }
++    }
+ }
+diff --git a/crates/fluxvm-container-client/src/lib.rs b/crates/fluxvm-container-client/src/lib.rs
+index 9db08e0..1130291 100644
+--- a/crates/fluxvm-container-client/src/lib.rs
++++ b/crates/fluxvm-container-client/src/lib.rs
+@@ -3,11 +3,11 @@
+ 
+ use anyhow::{Context, Result, bail};
+ use fluxvm_container_protocol::{
+-    ContainerEnvelope, ContainerRequest, ContainerResponse, DEFAULT_CONTAINER_AGENT_PORT,
+-    decode_line, encode_line,
++    ContainerEnvelope, ContainerRequest, ContainerResponse, IoStreamAck, IoStreamAttach,
++    DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, decode_line, encode_line,
+ };
+ use fluxvm_core::model::{BackendKind, VmRecord};
+-use std::time::Duration;
++use std::{io::{Read, Write}, time::Duration};
+ use tokio::{
+     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+     net::UnixStream,
+@@ -15,6 +15,147 @@ use tokio::{
+ 
+ pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+ 
++pub trait ReadWrite: Read + Write + Send {}
++impl<T: Read + Write + Send> ReadWrite for T {}
++
++/// Blocking byte stream attached to one guest process stdio channel. The
++/// lifecycle RPC remains newline-delimited JSON on port 17778; Set 5 uses the
++/// dedicated port 17779 for long-lived stdin/stdout/stderr transfer.
++pub struct ContainerStream {
++    inner: Box<dyn ReadWrite>,
++}
++
++impl Read for ContainerStream {
++    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> { self.inner.read(buf) }
++}
++impl Write for ContainerStream {
++    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.write(buf) }
++    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
++}
++
++pub async fn open_stream(
++    vm: &VmRecord,
++    attach: IoStreamAttach,
++    timeout: Duration,
++) -> Result<ContainerStream> {
++    let agent = vm
++        .request
++        .agent
++        .as_ref()
++        .filter(|a| a.enabled)
++        .context("FluxVM guest agent must be enabled for secure containers")?;
++    let mut attach = attach;
++    attach.token = agent.token.clone();
++    let deadline = tokio::time::Instant::now() + timeout;
++    loop {
++        let vm = vm.clone();
++        let attempt = attach.clone();
++        let error = match tokio::task::spawn_blocking(move || open_stream_blocking(&vm, &attempt)).await {
++            Ok(Ok(stream)) => return Ok(stream),
++            Ok(Err(error)) => error,
++            Err(error) => bail!("container stream worker panicked: {error}"),
++        };
++        if tokio::time::Instant::now() >= deadline {
++            return Err(error);
++        }
++        tokio::time::sleep(Duration::from_millis(25)).await;
++    }
++}
++
++fn open_stream_blocking(vm: &VmRecord, attach: &IoStreamAttach) -> Result<ContainerStream> {
++    let cid = vm.guest_cid.context("VM has no vsock CID assigned")?;
++    match vm.backend {
++        BackendKind::Qemu => native_vsock_stream_blocking(cid, DEFAULT_CONTAINER_STREAM_PORT, attach),
++        BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm => {
++            let socket = vm.vsock_socket.as_deref().context("VM has no vsock proxy socket recorded")?;
++            uds_proxy_stream_blocking(socket, DEFAULT_CONTAINER_STREAM_PORT, attach)
++        }
++        BackendKind::Auto => bail!("unresolved FluxVM backend"),
++    }
++}
++
++fn read_line_blocking(stream: &mut dyn Read) -> Result<String> {
++    let mut bytes = Vec::new();
++    let mut b = [0u8; 1];
++    while bytes.len() <= 64 * 1024 {
++        let n = stream.read(&mut b)?;
++        if n == 0 || b[0] == b'\n' { break; }
++        bytes.push(b[0]);
++    }
++    if bytes.len() > 64 * 1024 { bail!("stream handshake line too large"); }
++    Ok(String::from_utf8(bytes).context("stream handshake is not UTF-8")?)
++}
++
++fn validate_stream_ack(line: &str) -> Result<()> {
++    let ack: IoStreamAck = decode_line(line).context("decoding stream attach ack")?;
++    if !ack.ok {
++        bail!("container stream attach failed: {}", ack.message.unwrap_or_else(|| "unknown error".into()));
++    }
++    Ok(())
++}
++
++fn uds_proxy_stream_blocking(
++    socket: &std::path::Path,
++    guest_port: u32,
++    attach: &IoStreamAttach,
++) -> Result<ContainerStream> {
++    let mut stream = std::os::unix::net::UnixStream::connect(socket)
++        .with_context(|| format!("connecting to vsock proxy {}", socket.display()))?;
++    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
++    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
++    stream.write_all(format!("CONNECT {guest_port}\n").as_bytes())?;
++    stream.flush()?;
++    let ack = read_line_blocking(&mut stream)?;
++    if !ack.trim().to_ascii_uppercase().starts_with("OK") {
++        bail!("vsock proxy refused port {guest_port}: {:?}", ack.trim());
++    }
++    stream.write_all(encode_line(attach)?.as_bytes())?;
++    stream.flush()?;
++    let ack = read_line_blocking(&mut stream)?;
++    validate_stream_ack(&ack)?;
++    stream.set_read_timeout(None)?;
++    stream.set_write_timeout(None)?;
++    Ok(ContainerStream { inner: Box::new(stream) })
++}
++
++#[cfg(target_os = "linux")]
++fn native_vsock_stream_blocking(cid: u32, port: u32, attach: &IoStreamAttach) -> Result<ContainerStream> {
++    use std::os::fd::FromRawFd;
++    unsafe {
++        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
++        if fd < 0 { bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error()); }
++        let mut file = std::fs::File::from_raw_fd(fd);
++        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
++        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
++        addr.svm_cid = cid;
++        addr.svm_port = port;
++        if libc::connect(
++            fd,
++            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
++            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
++        ) != 0 {
++            bail!("connect(vsock cid={cid} port={port}): {}", std::io::Error::last_os_error());
++        }
++        let tv = libc::timeval { tv_sec: 5, tv_usec: 0 };
++        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
++        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
++        file.write_all(encode_line(attach)?.as_bytes())?;
++        file.flush()?;
++        let ack = read_line_blocking(&mut file)?;
++        validate_stream_ack(&ack)?;
++        let tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
++        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
++        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
++        Ok(ContainerStream { inner: Box::new(file) })
++    }
++}
++
++#[cfg(not(target_os = "linux"))]
++fn native_vsock_stream_blocking(_cid: u32, _port: u32, _attach: &IoStreamAttach) -> Result<ContainerStream> {
++    bail!("native AF_VSOCK is supported on Linux only")
++}
++
++
+ pub async fn call(
+     vm: &VmRecord,
+     request: ContainerRequest,
+diff --git a/crates/fluxvm-container-protocol/src/lib.rs b/crates/fluxvm-container-protocol/src/lib.rs
+index f3b03d6..df5d716 100644
+--- a/crates/fluxvm-container-protocol/src/lib.rs
++++ b/crates/fluxvm-container-protocol/src/lib.rs
+@@ -11,6 +11,7 @@
+ use serde::{Deserialize, Serialize};
+ 
+ pub const DEFAULT_CONTAINER_AGENT_PORT: u32 = 17778;
++pub const DEFAULT_CONTAINER_STREAM_PORT: u32 = 17779;
+ pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 30;
+ pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+ 
+@@ -33,6 +34,37 @@ pub struct ContainerIo {
+     pub stderr: Option<String>,
+     #[serde(default)]
+     pub terminal: bool,
++    /// Set 5: stdio is transported over the dedicated VSOCK stream port
++    /// instead of guest-visible virtiofs files. Path fields remain presence
++    /// markers for stdin/stdout/stderr so older agents can reject cleanly.
++    #[serde(default)]
++    pub streaming: bool,
++}
++
++
++#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "kebab-case")]
++pub enum IoStreamKind {
++    Stdin,
++    Stdout,
++    Stderr,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct IoStreamAttach {
++    #[serde(default)]
++    pub token: Option<String>,
++    pub id: String,
++    #[serde(default)]
++    pub exec_id: Option<String>,
++    pub stream: IoStreamKind,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct IoStreamAck {
++    pub ok: bool,
++    #[serde(default)]
++    pub message: Option<String>,
+ }
+ 
+ /// Portable subset of OCI LinuxResources used by the guest cgroup-v2 layer.
+@@ -124,6 +156,18 @@ pub enum ContainerRequest {
+         id: String,
+         resources: ResourceLimits,
+     },
++    ResizePty {
++        id: String,
++        #[serde(default)]
++        exec_id: Option<String>,
++        width: u32,
++        height: u32,
++    },
++    CloseIo {
++        id: String,
++        #[serde(default)]
++        exec_id: Option<String>,
++    },
+     Delete {
+         id: String,
+         #[serde(default)]
+@@ -167,6 +211,8 @@ pub enum ContainerResponse {
+     Pids { pids: Vec<u32> },
+     Stats { stats: ContainerStats },
+     ResourcesUpdated,
++    PtyResized,
++    IoClosed,
+     Killed,
+     Paused,
+     Resumed,
+@@ -204,6 +250,7 @@ mod tests {
+                     stdout: Some("/run/fluxvm/pod/io/c1.out".into()),
+                     stderr: Some("/run/fluxvm/pod/io/c1.err".into()),
+                     terminal: false,
++                    streaming: false,
+                 },
+             },
+         };
+@@ -274,4 +321,19 @@ mod tests {
+         assert!(matches!(back, ContainerResponse::Exited { exit_code: 0, .. }));
+     }
+ 
++    #[test]
++    fn stream_attach_round_trip() {
++        let attach = IoStreamAttach {
++            token: Some("secret".into()),
++            id: "c1".into(),
++            exec_id: Some("shell".into()),
++            stream: IoStreamKind::Stdout,
++        };
++        let line = encode_line(&attach).unwrap();
++        let back: IoStreamAttach = decode_line(&line).unwrap();
++        assert_eq!(back.id, "c1");
++        assert_eq!(back.exec_id.as_deref(), Some("shell"));
++        assert_eq!(back.stream, IoStreamKind::Stdout);
++    }
++
+ }
+diff --git a/crates/fluxvm-containerd-shim/src/main.rs b/crates/fluxvm-containerd-shim/src/main.rs
+index 23ea2b4..514d1a2 100644
+--- a/crates/fluxvm-containerd-shim/src/main.rs
++++ b/crates/fluxvm-containerd-shim/src/main.rs
+@@ -3,18 +3,20 @@
+ 
+ //! containerd runtime-v2 shim for FluxVM secure containers.
+ //!
+-//! v0.1 contract:
++//! Secure Containers contract through Set 5:
+ //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
+ //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
+ //! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
+ //! * other bind mounts (ConfigMap/Secret/host inputs) remain snapshotted by default;
+-//! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK;
++//! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK 17778;
++//! * stdin/stdout/stderr stream over authenticated VSOCK 17779;
++//! * terminal init/exec processes use a real guest PTY with ResizePty;
+ //! * no host kernel is shared with the workload.
+ //!
+ //! The copy/snapshot approach is intentionally conservative. It gives a
+-//! deterministic first implementation without requiring dynamic virtiofs
+-//! hotplug for ordinary bind inputs. TTY and broader hostPath passthrough remain
+-//! explicit follow-ups rather than silently pretending to work.
++//! deterministic implementation without requiring dynamic virtiofs hotplug for
++//! ordinary bind inputs. Broader hostPath passthrough and full OCI namespace
++//! parity remain explicit follow-ups rather than silently pretending to work.
+ 
+ use anyhow::{Context, Result as AnyResult, bail};
+ use async_trait::async_trait;
+@@ -45,6 +47,7 @@ use containerd_shim_protos::{
+ };
+ use fluxvm_container_protocol::{
+     ContainerIo, ContainerRequest, ContainerResponse, ContainerStats, ContainerStatus, ResourceLimits,
++    IoStreamAttach, IoStreamKind,
+ };
+ use fluxvm_core::model::{VmRecord, VmStatus};
+ use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
+@@ -57,7 +60,6 @@ use std::{
+     hash::{Hash, Hasher},
+     net::Ipv4Addr,
+     path::{Path, PathBuf},
+-    process::Stdio,
+     sync::Arc,
+     time::Duration,
+ };
+@@ -90,6 +92,7 @@ struct RuntimeConfig {
+     boot_timeout_secs: u64,
+     cni_interface: String,
+     cni_enabled: bool,
++    streaming_stdio: bool,
+ }
+ 
+ impl Default for RuntimeConfig {
+@@ -112,6 +115,7 @@ impl Default for RuntimeConfig {
+             boot_timeout_secs: std::env::var("FLUXVM_CONTAINER_BOOT_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
+             cni_interface: std::env::var("FLUXVM_CONTAINER_CNI_INTERFACE").unwrap_or_else(|_| "eth0".into()),
+             cni_enabled: std::env::var("FLUXVM_CONTAINER_CNI").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
++            streaming_stdio: std::env::var("FLUXVM_CONTAINER_STREAMING_STDIO").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+         }
+     }
+ }
+@@ -126,6 +130,7 @@ struct TaskMeta {
+     pid: u32,
+     /// Host-side virtiofs stdio directory for this init/exec process.
+     io_dir: Option<PathBuf>,
++    streaming: bool,
+ }
+ 
+ #[derive(Debug)]
+@@ -183,6 +188,7 @@ struct Service {
+     event_tx: EventSender,
+     event_rx: Arc<Mutex<Option<EventReceiver>>>,
+     exit_events: Arc<Mutex<HashSet<String>>>,
++    stream_pending: Arc<Mutex<HashMap<String, usize>>>,
+ }
+ 
+ #[async_trait]
+@@ -204,6 +210,7 @@ impl Shim for Service {
+             event_tx,
+             event_rx: Arc::new(Mutex::new(Some(event_rx))),
+             exit_events: Arc::new(Mutex::new(HashSet::new())),
++            stream_pending: Arc::new(Mutex::new(HashMap::new())),
+         }
+     }
+ 
+@@ -567,7 +574,7 @@ impl Service {
+         Ok((vm, host, guest))
+     }
+ 
+-    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, PathBuf)> {
++    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>)> {
+         let config_path = Path::new(&req.bundle).join("config.json");
+         let text = tokio::fs::read_to_string(&config_path)
+             .await
+@@ -599,12 +606,30 @@ impl Service {
+         Ok((vm, serde_json::to_string(&spec)?, io, io_dir))
+     }
+ 
+-    async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, PathBuf)> {
+-        if terminal { bail!("TTY containers are not supported by secure-containers v0.1"); }
+-        // Every init/exec process gets its own regular-file staging directory.
+-        // Virtiofs does not reliably expose host-created FIFOs to the guest,
+-        // so Set 3 preserves the current-main regular-file relay while also
+-        // preventing concurrent exec sessions from colliding with init stdio.
++    async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, Option<PathBuf>)> {
++        if self.cfg.streaming_stdio {
++            // Set 5: presence markers only. No stdio bytes traverse virtiofs;
++            // the guest agent binds real pipes/PTYs and the shim attaches to
++            // them over the dedicated VSOCK stream endpoint.
++            let mut guest = ContainerIo {
++                stdin: (!stdin.is_empty()).then(|| "vsock".into()),
++                stdout: None,
++                stderr: None,
++                terminal,
++                streaming: true,
++            };
++            if terminal {
++                if !stdout.is_empty() || !stderr.is_empty() {
++                    guest.stdout = Some("vsock".into());
++                }
++            } else {
++                guest.stdout = (!stdout.is_empty()).then(|| "vsock".into());
++                guest.stderr = (!stderr.is_empty()).then(|| "vsock".into());
++            }
++            return Ok((guest, None));
++        }
++
++        if terminal { bail!("TTY requires FLUXVM_CONTAINER_STREAMING_STDIO=1"); }
+         let io_key = safe_name(id);
+         let io_dir = host_ctr.join("io").join(&io_key);
+         let guest_io_dir = format!("{guest_ctr}/io/{io_key}");
+@@ -625,12 +650,123 @@ impl Service {
+             guest.stdin = Some(format!("{guest_io_dir}/stdin.log"));
+             spawn_stdio_relay(PathBuf::from(stdin), p, format!("{id}:stdin"), false);
+         }
+-        Ok((guest, io_dir))
++        Ok((guest, Some(io_dir)))
++    }
++
++    async fn attach_stream_relays(
++        &self,
++        vm: &VmRecord,
++        id: &str,
++        exec_id: Option<&str>,
++        stdin: &str,
++        stdout: &str,
++        stderr: &str,
++        terminal: bool,
++    ) -> AnyResult<()> {
++        if !self.cfg.streaming_stdio { return Ok(()); }
++
++        // Validate containerd-owned endpoints before consuming a one-shot guest
++        // stream attachment. Opening the guest side first and then discovering
++        // a missing FIFO/file would permanently consume stdout/stderr for the
++        // process and make a retry impossible.
++        for (name, path) in [("stdin", stdin), ("stdout", stdout), ("stderr", stderr)] {
++            if !path.is_empty() && !Path::new(path).exists() {
++                bail!("containerd {name} endpoint does not exist: {path}");
++            }
++        }
++
++        let mut relays = Vec::new();
++        let attach = |kind| IoStreamAttach {
++            token: None,
++            id: id.to_string(),
++            exec_id: exec_id.map(str::to_string),
++            stream: kind,
++        };
++
++        if !stdin.is_empty() {
++            let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stdin), Duration::from_secs(10)).await?;
++            relays.push((IoStreamKind::Stdin, stream, PathBuf::from(stdin)));
++        }
++        if terminal {
++            let output = if !stdout.is_empty() { stdout } else { stderr };
++            if !output.is_empty() {
++                let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stdout), Duration::from_secs(10)).await?;
++                relays.push((IoStreamKind::Stdout, stream, PathBuf::from(output)));
++            }
++        } else {
++            if !stdout.is_empty() {
++                let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stdout), Duration::from_secs(10)).await?;
++                relays.push((IoStreamKind::Stdout, stream, PathBuf::from(stdout)));
++            }
++            if !stderr.is_empty() {
++                let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stderr), Duration::from_secs(10)).await?;
++                relays.push((IoStreamKind::Stderr, stream, PathBuf::from(stderr)));
++            }
++        }
++
++        let key = process_key(id, exec_id);
++        let output_count = relays.iter().filter(|(kind, _, _)| *kind != IoStreamKind::Stdin).count();
++        if output_count > 0 {
++            self.stream_pending.lock().await.insert(key.clone(), output_count);
++        }
++        for (kind, mut stream, host_path) in relays {
++            let pending = self.stream_pending.clone();
++            let relay_key = key.clone();
++            tokio::spawn(async move {
++                let is_output = kind != IoStreamKind::Stdin;
++                let result = tokio::task::spawn_blocking(move || -> AnyResult<()> {
++                    match kind {
++                        IoStreamKind::Stdin => {
++                            let mut host = std::fs::OpenOptions::new().read(true).open(&host_path)
++                                .with_context(|| format!("opening containerd stdin {}", host_path.display()))?;
++                            std::io::copy(&mut host, &mut stream)?;
++                            use std::io::Write as _;
++                            stream.flush()?;
++                        }
++                        IoStreamKind::Stdout | IoStreamKind::Stderr => {
++                            let mut host = std::fs::OpenOptions::new().write(true).open(&host_path)
++                                .with_context(|| format!("opening containerd output {}", host_path.display()))?;
++                            std::io::copy(&mut stream, &mut host)?;
++                            use std::io::Write as _;
++                            host.flush()?;
++                        }
++                    }
++                    Ok(())
++                }).await;
++                if is_output {
++                    let mut map = pending.lock().await;
++                    if let Some(count) = map.get_mut(&relay_key) {
++                        *count = count.saturating_sub(1);
++                        if *count == 0 { map.remove(&relay_key); }
++                    }
++                }
++                match result {
++                    Ok(Ok(())) => {}
++                    Ok(Err(e)) => warn!("VSOCK stdio relay {relay_key:?}/{kind:?} stopped: {e:#}"),
++                    Err(e) => warn!("VSOCK stdio relay {relay_key:?}/{kind:?} panicked: {e}"),
++                }
++            });
++        }
++        Ok(())
+     }
+ 
+     /// Wait for the selected process's virtiofs stdout/stderr files to stop
+     /// growing, then give the host relay a final beat before publishing exit.
+     async fn flush_stdio_after_exit(&self, id: &str, exec_id: Option<&str>) {
++        let key = process_key(id, exec_id);
++        let streaming = if let Some(exec_id) = exec_id {
++            self.execs.read().await.get(&key).is_some_and(|m| m.streaming)
++        } else {
++            self.tasks.read().await.get(id).is_some_and(|m| m.streaming)
++        };
++        if streaming {
++            for _ in 0..200 {
++                if !self.stream_pending.lock().await.contains_key(&key) { return; }
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++            warn!("timed out waiting for VSOCK stdio drain for {key:?}");
++            return;
++        }
+         let io_dir = if let Some(exec_id) = exec_id {
+             self.execs
+                 .read()
+@@ -732,6 +868,7 @@ impl Service {
+     }
+ 
+     async fn cleanup_process_staging(&self, id: &str, exec_id: Option<&str>) {
++        self.stream_pending.lock().await.remove(&process_key(id, exec_id));
+         let share_dir = {
+             let guard = self.sandbox.lock().await;
+             guard.as_ref().map(|s| s.share_dir.clone())
+@@ -800,6 +937,15 @@ impl Task for Service {
+                 return Err(rpc_other(format!("unexpected create response: {other:?}")));
+             }
+         };
++        if let Err(e) = self.attach_stream_relays(
++            &vm, &req.id, None, &req.stdin, &req.stdout, &req.stderr, req.terminal
++        ).await {
++            let _ = self.call_agent(&vm, ContainerRequest::Delete {
++                id: req.id.clone(), exec_id: None, force: true
++            }).await;
++            self.cleanup_process_staging(&req.id, None).await;
++            return Err(rpc_other(format!("attaching VSOCK stdio: {e:#}")));
++        }
+         {
+             let mut exits = self.exit_events.lock().await;
+             let prefix = format!("{}\0", req.id);
+@@ -807,7 +953,8 @@ impl Task for Service {
+         }
+         self.tasks.write().await.insert(req.id.clone(), TaskMeta {
+             bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
+-            io_dir: Some(io_dir),
++            io_dir,
++            streaming: self.cfg.streaming_stdio,
+         });
+         self.send_event(TaskCreate {
+             container_id: req.id.clone(),
+@@ -976,14 +1123,13 @@ impl Task for Service {
+     }
+ 
+     async fn exec(&self, _ctx: &TtrpcContext, req: ExecProcessRequest) -> TtrpcResult<Empty> {
+-        if req.terminal { return Err(rpc_unimplemented("TTY exec is not supported by secure-containers v0.1")); }
+         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+         let bytes = req.spec.as_ref().map(|a| a.value.clone()).unwrap_or_default();
+         if bytes.is_empty() { return Err(rpc_invalid("ExecProcessRequest.spec is empty")); }
+         let process_json = String::from_utf8(bytes).map_err(|e| rpc_invalid(e.to_string()))?;
+         let (_, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, None).await.map_err(rpc_other)?;
+         let io_id = format!("{}-{}", req.id, req.exec_id);
+-        let (io, io_dir) = self.prepare_io(&io_id, &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
++        let (io, io_dir) = self.prepare_io(&io_id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
+         let response = self.call_agent(&vm, ContainerRequest::Exec {
+             id: req.id.clone(),
+             exec_id: req.exec_id.clone(),
+@@ -994,6 +1140,15 @@ impl Task for Service {
+             ContainerResponse::ExecStarted { pid } => pid,
+             other => return Err(rpc_other(format!("unexpected exec response: {other:?}"))),
+         };
++        if let Err(e) = self.attach_stream_relays(
++            &vm, &req.id, Some(&req.exec_id), &req.stdin, &req.stdout, &req.stderr, req.terminal
++        ).await {
++            let _ = self.call_agent(&vm, ContainerRequest::Delete {
++                id: req.id.clone(), exec_id: Some(req.exec_id.clone()), force: true
++            }).await;
++            self.cleanup_process_staging(&req.id, Some(&req.exec_id)).await;
++            return Err(rpc_other(format!("attaching exec VSOCK stdio: {e:#}")));
++        }
+         let bundle = self.tasks.read().await.get(&req.id).map(|m| m.bundle.clone()).unwrap_or_default();
+         self.exit_events.lock().await.remove(&process_key(&req.id, Some(&req.exec_id)));
+         self.execs.write().await.insert(process_key(&req.id, Some(&req.exec_id)), TaskMeta {
+@@ -1003,7 +1158,8 @@ impl Task for Service {
+             stderr: req.stderr.clone(),
+             terminal: req.terminal,
+             pid,
+-            io_dir: Some(io_dir),
++            io_dir,
++            streaming: self.cfg.streaming_stdio,
+         });
+         self.send_event(TaskExecAdded {
+             container_id: req.id,
+@@ -1026,10 +1182,24 @@ impl Task for Service {
+         Ok(Empty::new())
+     }
+ 
+-    async fn resize_pty(&self, _ctx: &TtrpcContext, _req: ResizePtyRequest) -> TtrpcResult<Empty> { Err(rpc_unimplemented("TTY is not supported")) }
++    async fn resize_pty(&self, _ctx: &TtrpcContext, req: ResizePtyRequest) -> TtrpcResult<Empty> {
++        let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
++        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id) };
++        match self.call_agent(&vm, ContainerRequest::ResizePty {
++            id: req.id, exec_id, width: req.width, height: req.height
++        }).await.map_err(rpc_other)? {
++            ContainerResponse::PtyResized => Ok(Empty::new()),
++            other => Err(rpc_other(format!("unexpected resize response: {other:?}"))),
++        }
++    }
+ 
+-    async fn close_io(&self, _ctx: &TtrpcContext, _req: CloseIORequest) -> TtrpcResult<Empty> {
+-        Ok(Empty::new())
++    async fn close_io(&self, _ctx: &TtrpcContext, req: CloseIORequest) -> TtrpcResult<Empty> {
++        let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
++        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id) };
++        match self.call_agent(&vm, ContainerRequest::CloseIo { id: req.id, exec_id }).await.map_err(rpc_other)? {
++            ContainerResponse::IoClosed => Ok(Empty::new()),
++            other => Err(rpc_other(format!("unexpected close-io response: {other:?}"))),
++        }
+     }
+ 
+     async fn pids(&self, _ctx: &TtrpcContext, req: PidsRequest) -> TtrpcResult<PidsResponse> {
+@@ -1630,7 +1800,6 @@ fn rpc_status(code: ttrpc::Code, message: impl Into<String>) -> ttrpc::Error {
+ }
+ fn rpc_other(e: impl std::fmt::Display) -> ttrpc::Error { rpc_status(ttrpc::Code::UNKNOWN, e.to_string()) }
+ fn rpc_invalid(e: impl Into<String>) -> ttrpc::Error { rpc_status(ttrpc::Code::INVALID_ARGUMENT, e) }
+-fn rpc_unimplemented(e: impl Into<String>) -> ttrpc::Error { rpc_status(ttrpc::Code::UNIMPLEMENTED, e) }
+ 
+ async fn pod_group_from_bundle(bundle: &str) -> Option<String> {
+     if bundle.is_empty() { return None; }
+diff --git a/deploy/containerd/README.md b/deploy/containerd/README.md
+index 08d7d2e..1ef860f 100644
+--- a/deploy/containerd/README.md
++++ b/deploy/containerd/README.md
+@@ -5,16 +5,20 @@ Shim binary: `containerd-shim-fluxvm-v2`
+ Kubernetes RuntimeClass handler: `fluxvm`
+ 
+ `fluxvm-runtime.toml` is a merge fragment, not a complete containerd config.
+-Use `scripts/install-secure-containers.sh` to install the host binaries, then
+-merge the runtime fragment and restart containerd.
++Use `scripts/install-secure-containers.sh` to install the host binaries, merge
++the runtime fragment, then restart containerd.
+ 
+-> v0.1 is a developer-preview runtime. QEMU/virtiofs process isolation works;
+-> Kubernetes CNI/PVC write-through and TTY are explicit follow-up gates. Do
+-> not advertise this RuntimeClass as Kata-compatible production networking yet.
++## Set 5 runtime behavior
+ 
+-## Set 4
++- lifecycle RPC: VSOCK 17778
++- streaming stdin/stdout/stderr: VSOCK 17779
++- `FLUXVM_CONTAINER_STREAMING_STDIO=1` by default
++- set `FLUXVM_CONTAINER_STREAMING_STDIO=0` only for legacy non-TTY regular-file
++  virtiofs stdio debugging
++- terminal containers/execs use a real guest PTY and support ResizePty
++- Pod-scoped kubelet volumes from Set 4 remain write-through
++- arbitrary hostPath stays snapshot-based by default
++- guest seccomp profiles still require `libseccomp.so.2`
+ 
+-Kubernetes Pod volumes under the current sandbox UID are exported write-through
+-into the guest. Keep arbitrary hostPath passthrough disabled unless a later
+-allowlisted broker/hotplug implementation is installed. Guest images using OCI
+-seccomp profiles must include `libseccomp.so.2`.
++> Developer preview. Validate VSOCK stdio/TTY, CNI and PVC behavior on the same
++> KVM/containerd/Kubernetes node image you plan to operate before production.
+diff --git a/docs/secure-containers.md b/docs/secure-containers.md
+index d75815e..e52d32b 100644
+--- a/docs/secure-containers.md
++++ b/docs/secure-containers.md
+@@ -42,72 +42,74 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
+ That makes the feature removable and independently versionable while reusing
+ the VM's existing per-instance authentication token.
+ 
+-## Implemented in v0.1
++## Implemented through Set 5
+ 
+ - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
+-- one shim group -> one FluxVM QEMU VM
+-- Kubernetes Pod grouping annotation recognition
+-- authenticated VSOCK container protocol
+-- OCI process lifecycle: create, start, state, wait, kill, pause, resume, delete
+-- exec lifecycle (non-TTY)
+-- uid/gid, cwd, argv, PATH resolution and environment inside a chrooted container rootfs
+-- guest-side OCI bind/proc/tmpfs/sysfs/devpts/mqueue/cgroup mount application and cleanup
++- one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
++- CNI L2 Pod IP/MAC handoff into the guest
++- Pod/sandbox and per-container guest cgroup-v2 limits, stats, pids and updates
++- containerd task events + asynchronous exit publication
++- OCI create/start/state/wait/kill/pause/resume/delete and exec lifecycle
++- uid/gid, supplementary groups, cwd, argv, PATH, environment, umask and rlimits
++- Linux capability sets, noNewPrivileges, seccomp syscall-name rules
++- read-only rootfs, masked/read-only paths, device nodes and Pod-VM sysctls
+ - containerd snapshot rootfs staging into the VM-visible virtiofs share
+-- bind-mount snapshot staging for ConfigMap/Secret-style inputs
+-- stdin/stdout/stderr FIFO relay
+-- FluxVM guest-agent bootstrap of the dedicated container agent
+-- RuntimeClass and containerd configuration examples
+-- unit tests for protocol, OCI parsing, grouping and mount staging
+-- a dedicated GitHub Actions build/test/clippy gate
++- Pod-UID-scoped write-through Kubernetes `volumes` / `volume-subpaths`
++- authenticated VSOCK lifecycle RPC on port 17778
++- authenticated raw stdin/stdout/stderr streaming on port 17779
++- real guest PTY for terminal init/exec processes
++- containerd `ResizePty` and `CloseIO` forwarding
++- legacy regular-file virtiofs stdio fallback for non-TTY debugging
++- RuntimeClass/containerd examples, source/unit gates and KVM smoke scripts
+ 
+-## Explicit v0.1 limitations
++## Current limitations
+ 
+-This PR is a **developer-preview foundation**, not a claim of full Kata
++This remains a **developer-preview runtime**, not a claim of full Kata
+ Containers compatibility.
+ 
+-1. **QEMU only.** FluxVM currently implements `SharedFolder`/virtiofs on QEMU.
+-   Cloud Hypervisor and Firecracker need equivalent shared-rootfs plumbing
+-   before they can be enabled safely.
+-2. **Kubernetes CNI is not yet wired into the guest.** The VM currently uses
+-   FluxVM user-mode networking. A RuntimeClass manifest is included to lock the
+-   intended API, but production Kubernetes Pod networking is a follow-up gate.
+-3. **PVC writes are not write-through.** Bind mounts are snapshotted into the
+-   Pod share. This is correct for read-mostly ConfigMaps/Secrets but is not a
+-   persistent-volume implementation.
+-4. **TTY/resize is rejected**, not silently emulated.
+-5. **OCI namespace/capability/seccomp/device/cgroup parity inside the guest is
+-   incomplete.** The VM is the primary isolation boundary in v0.1.
+-6. **Stats and live resource updates are not implemented** in the shim yet.
+-
+-These constraints are intentional: unsupported behavior returns an explicit
+-error instead of appearing to work while weakening isolation or data
+-correctness.
++1. **QEMU is the supported Secure Containers VMM.** Cloud Hypervisor and
++   Firecracker still need equivalent shared-rootfs/volume plumbing.
++2. **CNI coverage is not yet broad conformance.** The current L2 handoff is
++   IPv4/primary-interface oriented; dual-stack, Multus and unusual CNI layouts
++   need dedicated validation.
++3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
++   Pod volume roots are scoped by sandbox UID; other binds remain copied unless
++   an explicit broker/hotplug model is added.
++4. **OCI namespace/device-cgroup parity is incomplete.** The VM remains the
++   primary host isolation boundary.
++5. **Seccomp argument comparators / notify are not implemented.** Unsupported
++   profiles fail closed instead of silently dropping policy.
++6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
++   resize testing on self-hosted nodes before production claims.**
+ 
+ ## Next gates to production Kata-style Kubernetes support
+ 
+-### P0 — Kubernetes networking
++### P0 — OCI namespace + device-cgroup parity
+ 
+-Add a FluxVM external-netns/CNI network mode so the VMM TAP is launched into
+-the CRI-created Pod network namespace, preserving the Pod IP and existing CNI
+-(Cilium/Calico/etc.) semantics. This is the single most important next step.
++Add PID/mount/IPC/UTS/user namespace handling inside the Pod VM where OCI
++semantics require it, plus device-cgroup enforcement and broader conformance
++fixtures.
+ 
+-### P0 — volume model
++### P0 — CNI conformance
+ 
+-Add virtiofs hotplug or a stable shared-fs broker so CSI/PVC mounts can be
+-passed through without copying. Enforce read-only/read-write semantics and
+-propagation explicitly.
++Exercise Cilium/Calico bridge/veth paths under churn, then add IPv6, dual-stack
++and multi-interface/Multus coverage.
+ 
+-### P0 — OCI hardening inside guest
++### P0 — volume broker / explicit hostPath
+ 
+-Implement namespaces, capabilities, seccomp, masked/readonly paths, rlimits,
+-NoNewPrivileges, devices and guest cgroup v2. Add conformance fixtures from the
+-OCI runtime spec.
++Keep Pod-scoped kubelet volume exports as the safe default. Add a narrowly
++allowlisted broker/hotplug path for operators that intentionally need arbitrary
++hostPath or non-kubelet mounts.
+ 
+-### P1 — observability and resources
++### P1 — seccomp completeness
+ 
+-Map containerd stats to guest cgroup metrics, translate Kubernetes resource
+-updates, and export per-sandbox eBPF flow identity through FluxVM Network
+-Fabric.
++Add argument comparators and notification handling while retaining fail-closed
++behavior for profiles the guest cannot enforce.
++
++### P1 — streaming/TTY conformance
++
++Run repeated init + exec terminal resize, stdin close, high-volume stdout/stderr
++and abrupt-exit tests on self-hosted KVM/containerd nodes.
+ 
+ ### P1 — performance
+ 
+@@ -150,9 +152,9 @@ This builds both binaries and runs all new unit tests.
+ ### Level 2 — KVM/containerd host
+ 
+ Set `FLUXVM_SECURE_CONTAINERS_E2E=1`; the script validates KVM, containerd and
+-FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`, which
+-pulls BusyBox and executes it with `io.containerd.fluxvm.v2`. The Kubernetes
+-Pod manifest remains a development-only API fixture until the CNI gate lands.
++FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`. Run
++`scripts/e2e-secure-containers-volume.sh` for write-through PVC coverage and
++`scripts/e2e-secure-containers-tty.sh` for VSOCK stdio + init/exec PTY/resize.
+ 
+ The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
+ because ordinary hosted runners do not provide the nested virtualization and
+@@ -168,3 +170,12 @@ The guest agent also enforces read-only rootfs, masked/read-only paths, OCI
+ device nodes, Pod-VM sysctls and libseccomp syscall-name rules. Seccomp profiles
+ using unsupported argument comparators fail closed. See
+ `docs/secure-containers-set4.md` for the exact support boundary and test gates.
++
++
++## Set 5 addendum — VSOCK stdio + TTY/PTY
++
++Set 5 moves normal runtime stdio off virtiofs polling files. Lifecycle RPC stays
++on port 17778 while raw process streams attach on authenticated VSOCK port
++17779. Non-TTY tasks use guest pipes; terminal tasks use a real guest PTY and
++containerd `ResizePty` maps to `TIOCSWINSZ`. See
++`docs/secure-containers-set5.md` for protocol, fallback and test details.
+diff --git a/scripts/test-secure-containers.sh b/scripts/test-secure-containers.sh
+index 64b0982..b816b68 100755
+--- a/scripts/test-secure-containers.sh
++++ b/scripts/test-secure-containers.sh
+@@ -17,4 +17,7 @@ if [[ "${FLUXVM_SECURE_CONTAINERS_E2E:-0}" == "1" ]]; then
+   test -S /run/containerd/containerd.sock
+   curl -fsS "${FLUXVM_API_URL:-http://127.0.0.1:7788}/healthz" >/dev/null
+   ./scripts/e2e-secure-containers-ctr.sh
++  if [[ "${FLUXVM_SECURE_CONTAINERS_TTY_E2E:-0}" == "1" ]]; then
++    ./scripts/e2e-secure-containers-tty.sh
++  fi
+ fi

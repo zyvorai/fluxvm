@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CONTAINER_AGENT_PORT: u32 = 17778;
+pub const DEFAULT_CONTAINER_STREAM_PORT: u32 = 17779;
 pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 30;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -33,6 +34,37 @@ pub struct ContainerIo {
     pub stderr: Option<String>,
     #[serde(default)]
     pub terminal: bool,
+    /// Set 5: stdio is transported over the dedicated VSOCK stream port
+    /// instead of guest-visible virtiofs files. Path fields remain presence
+    /// markers for stdin/stdout/stderr so older agents can reject cleanly.
+    #[serde(default)]
+    pub streaming: bool,
+}
+
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum IoStreamKind {
+    Stdin,
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoStreamAttach {
+    #[serde(default)]
+    pub token: Option<String>,
+    pub id: String,
+    #[serde(default)]
+    pub exec_id: Option<String>,
+    pub stream: IoStreamKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IoStreamAck {
+    pub ok: bool,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// Portable subset of OCI LinuxResources used by the guest cgroup-v2 layer.
@@ -124,6 +156,18 @@ pub enum ContainerRequest {
         id: String,
         resources: ResourceLimits,
     },
+    ResizePty {
+        id: String,
+        #[serde(default)]
+        exec_id: Option<String>,
+        width: u32,
+        height: u32,
+    },
+    CloseIo {
+        id: String,
+        #[serde(default)]
+        exec_id: Option<String>,
+    },
     Delete {
         id: String,
         #[serde(default)]
@@ -167,6 +211,8 @@ pub enum ContainerResponse {
     Pids { pids: Vec<u32> },
     Stats { stats: ContainerStats },
     ResourcesUpdated,
+    PtyResized,
+    IoClosed,
     Killed,
     Paused,
     Resumed,
@@ -204,6 +250,7 @@ mod tests {
                     stdout: Some("/run/fluxvm/pod/io/c1.out".into()),
                     stderr: Some("/run/fluxvm/pod/io/c1.err".into()),
                     terminal: false,
+                    streaming: false,
                 },
             },
         };
@@ -272,6 +319,21 @@ mod tests {
         let line = encode_line(&response).unwrap();
         let back: ContainerResponse = decode_line(&line).unwrap();
         assert!(matches!(back, ContainerResponse::Exited { exit_code: 0, .. }));
+    }
+
+    #[test]
+    fn stream_attach_round_trip() {
+        let attach = IoStreamAttach {
+            token: Some("secret".into()),
+            id: "c1".into(),
+            exec_id: Some("shell".into()),
+            stream: IoStreamKind::Stdout,
+        };
+        let line = encode_line(&attach).unwrap();
+        let back: IoStreamAttach = decode_line(&line).unwrap();
+        assert_eq!(back.id, "c1");
+        assert_eq!(back.exec_id.as_deref(), Some("shell"));
+        assert_eq!(back.stream, IoStreamKind::Stdout);
     }
 
 }

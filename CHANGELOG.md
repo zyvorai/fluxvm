@@ -3,6 +3,13 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Secure Containers Set 5** — authenticated VSOCK stdio streaming on port
+  17779 (lifecycle stays on 17778); guest pipes for non-TTY I/O; real guest
+  PTY for `terminal=true` init/exec with `ResizePty`/`CloseIO`; output drain
+  before TaskExit/Wait/Delete; legacy virtiofs stdio via
+  `FLUXVM_CONTAINER_STREAMING_STDIO=0`; `scripts/e2e-secure-containers-tty.sh`.
+  Docs: [docs/secure-containers.md](docs/secure-containers.md),
+  [docs/secure-containers-set5.md](docs/secure-containers-set5.md).
 - **Secure Containers Set 4** — Pod-UID-scoped write-through kubelet `volumes/` /
   `volume-subpaths/` virtiofs exports with bind-source rewrite; guest OCI
   security (read-only rootfs, masked/RO paths, device nodes, sysctls,
@@ -28,9 +35,9 @@
   `io.containerd.fluxvm.v2`); virtiofs Pod share + VSOCK lifecycle on :17778;
   `deploy/containerd/`, install/test/e2e scripts, CI workflow
   `.github/workflows/secure-containers.yml`. Docs:
-  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; TTY
-  and hostPath hotplug remain follow-up gates (Set 4 covers Pod-UID
-  write-through volumes).
+  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; hostPath
+  hotplug and broader CNI/OCI namespace parity remain follow-up gates
+  (Sets 4–5 cover Pod-UID volumes and VSOCK stdio/TTY).
 - **Service Fabric full mesh datapath (Fabric-side)** — remote backends merge into
   existing Maglev `/v1/network/services` upserts (lifecycle v2: weighted drain +
   optional VIP match; no new FluxVM tunnel APIs; Geneve/VXLAN still N/A). See

@@ -113,11 +113,13 @@ Containers maps a containerd task group onto one QEMU FluxVM
 Set 2 adds optional CNI L2 (guest gets the real Pod IP when a CRI netns exists)
 and guest cgroup-v2 stats/resource updates. Set 3 adds containerd task events and
 guest OCI process hardening. Set 4 adds Pod-UID write-through volumes and guest
-RO/masked paths/devices/sysctls/libseccomp. This remains a **developer preview**:
-TTY and hostPath hotplug are not production-ready yet. Full design:
+RO/masked paths/devices/sysctls/libseccomp. Set 5 adds VSOCK stdio streaming and
+real guest PTY/`ResizePty`. This remains a **developer preview**: hostPath
+hotplug is not production-ready yet. Full design:
 [docs/secure-containers.md](secure-containers.md),
 [Set 3](secure-containers-set3.md),
-[Set 4](secure-containers-set4.md). Deploy fragment:
+[Set 4](secure-containers-set4.md),
+[Set 5](secure-containers-set5.md). Deploy fragment:
 [`deploy/containerd/`](../deploy/containerd/).
 
 ```bash

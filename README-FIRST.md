@@ -1,38 +1,36 @@
-# FluxVM Secure Containers — Set 4 handoff
+# FluxVM Secure Containers — Set 5 handoff
 
 ## Base
 
-Reviewed against `zyvorai/fluxvm` commit:
+This is a **Set 5 delta on top of Set 4**. Current public `zyvorai/fluxvm` main
+was rechecked at `33be3ffb56c958253bc0a449a62d4ff6f871c5e7`; Set 4 itself was built
+from the earlier Set 3 runtime line. Apply Set 4 first if it is not already in
+your branch, then apply `patches/0005-secure-containers-vsock-tty.patch`.
 
-`d77c1afb9364b02e897079b7325470e9a2bf361e`
+## Set 5 adds
 
-Set 4 assumes Set 3 behavior is already present: task events, async exit
-monitoring, definitive delete metadata, regular-file virtiofs stdio with drain,
-OCI capabilities/rlimits/noNewPrivileges, CNI L2, and guest cgroup v2.
-
-## Set 4 adds
-
-1. Pod-UID-scoped write-through kubelet `volumes` / `volume-subpaths` exports.
-2. Bind-source rewriting so PVC/CSI/emptyDir volume writes reach the host mount.
-3. Read-only rootfs, masked/read-only paths, OCI device nodes and sysctls.
-4. Guest libseccomp enforcement for syscall-name rules; unsupported comparator
-   profiles fail closed.
-5. Rollback of partial mounts when OCI/security setup fails.
+1. Dedicated authenticated VSOCK stdio endpoint on port 17779.
+2. Raw stdin/stdout/stderr streaming without virtiofs polling files.
+3. Real guest PTY for `terminal=true` containers and execs.
+4. containerd `ResizePty` -> guest `TIOCSWINSZ`.
+5. `CloseIO` forwarding and stdin EOF handling.
+6. Per-process VSOCK output drain before exit publication/Wait/Delete.
+7. TTY + interactive-exec KVM smoke script.
+8. Legacy regular-file stdio fallback via `FLUXVM_CONTAINER_STREAMING_STDIO=0`.
 
 ## Apply
 
-Prefer the patch:
-
 ```bash
-git checkout <branch-based-on-d77c1afb>
-git apply --check patches/0004-secure-containers-volumes-security.patch
-git apply patches/0004-secure-containers-volumes-security.patch
+git checkout <branch-with-set4>
+git apply --check patches/0005-secure-containers-vsock-tty.patch
+git apply patches/0005-secure-containers-vsock-tty.patch
 ```
 
-The ZIP also carries the replacement files for manual review.
+The ZIP also carries complete replacement files for manual review.
 
 ## Validation status
 
-Static/source checks and patch apply-check are included in `TEST_REPORT.md`.
-This artifact environment does not have a Rust toolchain, `/dev/kvm`, QEMU or
-containerd, so it does not claim cargo/KVM E2E execution.
+Static/source checks, `git diff --check`, and patch apply-check are recorded in
+`TEST_REPORT.md`. This artifact environment has no Rust toolchain (including
+`rustfmt`), `/dev/kvm`, QEMU, or running containerd, so it does **not** claim
+cargo compilation, formatting/clippy execution, or KVM E2E execution.

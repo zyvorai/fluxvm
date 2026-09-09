@@ -3,18 +3,20 @@
 
 //! containerd runtime-v2 shim for FluxVM secure containers.
 //!
-//! v0.1 contract:
+//! Secure Containers contract through Set 5:
 //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
 //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
 //! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
 //! * other bind mounts (ConfigMap/Secret/host inputs) remain snapshotted by default;
-//! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK;
+//! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK 17778;
+//! * stdin/stdout/stderr stream over authenticated VSOCK 17779;
+//! * terminal init/exec processes use a real guest PTY with ResizePty;
 //! * no host kernel is shared with the workload.
 //!
 //! The copy/snapshot approach is intentionally conservative. It gives a
-//! deterministic first implementation without requiring dynamic virtiofs
-//! hotplug for ordinary bind inputs. TTY and broader hostPath passthrough remain
-//! explicit follow-ups rather than silently pretending to work.
+//! deterministic implementation without requiring dynamic virtiofs hotplug for
+//! ordinary bind inputs. Broader hostPath passthrough and full OCI namespace
+//! parity remain explicit follow-ups rather than silently pretending to work.
 
 use anyhow::{Context, Result as AnyResult, bail};
 use async_trait::async_trait;
@@ -45,6 +47,7 @@ use containerd_shim_protos::{
 };
 use fluxvm_container_protocol::{
     ContainerIo, ContainerRequest, ContainerResponse, ContainerStats, ContainerStatus, ResourceLimits,
+    IoStreamAttach, IoStreamKind,
 };
 use fluxvm_core::model::{VmRecord, VmStatus};
 use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
@@ -57,7 +60,6 @@ use std::{
     hash::{Hash, Hasher},
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::Arc,
     time::Duration,
 };
@@ -90,6 +92,7 @@ struct RuntimeConfig {
     boot_timeout_secs: u64,
     cni_interface: String,
     cni_enabled: bool,
+    streaming_stdio: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -112,6 +115,7 @@ impl Default for RuntimeConfig {
             boot_timeout_secs: std::env::var("FLUXVM_CONTAINER_BOOT_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
             cni_interface: std::env::var("FLUXVM_CONTAINER_CNI_INTERFACE").unwrap_or_else(|_| "eth0".into()),
             cni_enabled: std::env::var("FLUXVM_CONTAINER_CNI").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            streaming_stdio: std::env::var("FLUXVM_CONTAINER_STREAMING_STDIO").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
         }
     }
 }
@@ -126,6 +130,7 @@ struct TaskMeta {
     pid: u32,
     /// Host-side virtiofs stdio directory for this init/exec process.
     io_dir: Option<PathBuf>,
+    streaming: bool,
 }
 
 #[derive(Debug)]
@@ -183,6 +188,7 @@ struct Service {
     event_tx: EventSender,
     event_rx: Arc<Mutex<Option<EventReceiver>>>,
     exit_events: Arc<Mutex<HashSet<String>>>,
+    stream_pending: Arc<Mutex<HashMap<String, usize>>>,
 }
 
 #[async_trait]
@@ -204,6 +210,7 @@ impl Shim for Service {
             event_tx,
             event_rx: Arc::new(Mutex::new(Some(event_rx))),
             exit_events: Arc::new(Mutex::new(HashSet::new())),
+            stream_pending: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -567,7 +574,7 @@ impl Service {
         Ok((vm, host, guest))
     }
 
-    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, PathBuf)> {
+    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>)> {
         let config_path = Path::new(&req.bundle).join("config.json");
         let text = tokio::fs::read_to_string(&config_path)
             .await
@@ -599,12 +606,30 @@ impl Service {
         Ok((vm, serde_json::to_string(&spec)?, io, io_dir))
     }
 
-    async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, PathBuf)> {
-        if terminal { bail!("TTY containers are not supported by secure-containers v0.1"); }
-        // Every init/exec process gets its own regular-file staging directory.
-        // Virtiofs does not reliably expose host-created FIFOs to the guest,
-        // so Set 3 preserves the current-main regular-file relay while also
-        // preventing concurrent exec sessions from colliding with init stdio.
+    async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, Option<PathBuf>)> {
+        if self.cfg.streaming_stdio {
+            // Set 5: presence markers only. No stdio bytes traverse virtiofs;
+            // the guest agent binds real pipes/PTYs and the shim attaches to
+            // them over the dedicated VSOCK stream endpoint.
+            let mut guest = ContainerIo {
+                stdin: (!stdin.is_empty()).then(|| "vsock".into()),
+                stdout: None,
+                stderr: None,
+                terminal,
+                streaming: true,
+            };
+            if terminal {
+                if !stdout.is_empty() || !stderr.is_empty() {
+                    guest.stdout = Some("vsock".into());
+                }
+            } else {
+                guest.stdout = (!stdout.is_empty()).then(|| "vsock".into());
+                guest.stderr = (!stderr.is_empty()).then(|| "vsock".into());
+            }
+            return Ok((guest, None));
+        }
+
+        if terminal { bail!("TTY requires FLUXVM_CONTAINER_STREAMING_STDIO=1"); }
         let io_key = safe_name(id);
         let io_dir = host_ctr.join("io").join(&io_key);
         let guest_io_dir = format!("{guest_ctr}/io/{io_key}");
@@ -625,12 +650,123 @@ impl Service {
             guest.stdin = Some(format!("{guest_io_dir}/stdin.log"));
             spawn_stdio_relay(PathBuf::from(stdin), p, format!("{id}:stdin"), false);
         }
-        Ok((guest, io_dir))
+        Ok((guest, Some(io_dir)))
+    }
+
+    async fn attach_stream_relays(
+        &self,
+        vm: &VmRecord,
+        id: &str,
+        exec_id: Option<&str>,
+        stdin: &str,
+        stdout: &str,
+        stderr: &str,
+        terminal: bool,
+    ) -> AnyResult<()> {
+        if !self.cfg.streaming_stdio { return Ok(()); }
+
+        // Validate containerd-owned endpoints before consuming a one-shot guest
+        // stream attachment. Opening the guest side first and then discovering
+        // a missing FIFO/file would permanently consume stdout/stderr for the
+        // process and make a retry impossible.
+        for (name, path) in [("stdin", stdin), ("stdout", stdout), ("stderr", stderr)] {
+            if !path.is_empty() && !Path::new(path).exists() {
+                bail!("containerd {name} endpoint does not exist: {path}");
+            }
+        }
+
+        let mut relays = Vec::new();
+        let attach = |kind| IoStreamAttach {
+            token: None,
+            id: id.to_string(),
+            exec_id: exec_id.map(str::to_string),
+            stream: kind,
+        };
+
+        if !stdin.is_empty() {
+            let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stdin), Duration::from_secs(10)).await?;
+            relays.push((IoStreamKind::Stdin, stream, PathBuf::from(stdin)));
+        }
+        if terminal {
+            let output = if !stdout.is_empty() { stdout } else { stderr };
+            if !output.is_empty() {
+                let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stdout), Duration::from_secs(10)).await?;
+                relays.push((IoStreamKind::Stdout, stream, PathBuf::from(output)));
+            }
+        } else {
+            if !stdout.is_empty() {
+                let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stdout), Duration::from_secs(10)).await?;
+                relays.push((IoStreamKind::Stdout, stream, PathBuf::from(stdout)));
+            }
+            if !stderr.is_empty() {
+                let stream = fluxvm_container_client::open_stream(vm, attach(IoStreamKind::Stderr), Duration::from_secs(10)).await?;
+                relays.push((IoStreamKind::Stderr, stream, PathBuf::from(stderr)));
+            }
+        }
+
+        let key = process_key(id, exec_id);
+        let output_count = relays.iter().filter(|(kind, _, _)| *kind != IoStreamKind::Stdin).count();
+        if output_count > 0 {
+            self.stream_pending.lock().await.insert(key.clone(), output_count);
+        }
+        for (kind, mut stream, host_path) in relays {
+            let pending = self.stream_pending.clone();
+            let relay_key = key.clone();
+            tokio::spawn(async move {
+                let is_output = kind != IoStreamKind::Stdin;
+                let result = tokio::task::spawn_blocking(move || -> AnyResult<()> {
+                    match kind {
+                        IoStreamKind::Stdin => {
+                            let mut host = std::fs::OpenOptions::new().read(true).open(&host_path)
+                                .with_context(|| format!("opening containerd stdin {}", host_path.display()))?;
+                            std::io::copy(&mut host, &mut stream)?;
+                            use std::io::Write as _;
+                            stream.flush()?;
+                        }
+                        IoStreamKind::Stdout | IoStreamKind::Stderr => {
+                            let mut host = std::fs::OpenOptions::new().write(true).open(&host_path)
+                                .with_context(|| format!("opening containerd output {}", host_path.display()))?;
+                            std::io::copy(&mut stream, &mut host)?;
+                            use std::io::Write as _;
+                            host.flush()?;
+                        }
+                    }
+                    Ok(())
+                }).await;
+                if is_output {
+                    let mut map = pending.lock().await;
+                    if let Some(count) = map.get_mut(&relay_key) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 { map.remove(&relay_key); }
+                    }
+                }
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => warn!("VSOCK stdio relay {relay_key:?}/{kind:?} stopped: {e:#}"),
+                    Err(e) => warn!("VSOCK stdio relay {relay_key:?}/{kind:?} panicked: {e}"),
+                }
+            });
+        }
+        Ok(())
     }
 
     /// Wait for the selected process's virtiofs stdout/stderr files to stop
     /// growing, then give the host relay a final beat before publishing exit.
     async fn flush_stdio_after_exit(&self, id: &str, exec_id: Option<&str>) {
+        let key = process_key(id, exec_id);
+        let streaming = if let Some(exec_id) = exec_id {
+            self.execs.read().await.get(&key).is_some_and(|m| m.streaming)
+        } else {
+            self.tasks.read().await.get(id).is_some_and(|m| m.streaming)
+        };
+        if streaming {
+            for _ in 0..200 {
+                if !self.stream_pending.lock().await.contains_key(&key) { return; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            warn!("timed out waiting for VSOCK stdio drain for {key:?}");
+            return;
+        }
         let io_dir = if let Some(exec_id) = exec_id {
             self.execs
                 .read()
@@ -732,6 +868,7 @@ impl Service {
     }
 
     async fn cleanup_process_staging(&self, id: &str, exec_id: Option<&str>) {
+        self.stream_pending.lock().await.remove(&process_key(id, exec_id));
         let share_dir = {
             let guard = self.sandbox.lock().await;
             guard.as_ref().map(|s| s.share_dir.clone())
@@ -800,6 +937,15 @@ impl Task for Service {
                 return Err(rpc_other(format!("unexpected create response: {other:?}")));
             }
         };
+        if let Err(e) = self.attach_stream_relays(
+            &vm, &req.id, None, &req.stdin, &req.stdout, &req.stderr, req.terminal
+        ).await {
+            let _ = self.call_agent(&vm, ContainerRequest::Delete {
+                id: req.id.clone(), exec_id: None, force: true
+            }).await;
+            self.cleanup_process_staging(&req.id, None).await;
+            return Err(rpc_other(format!("attaching VSOCK stdio: {e:#}")));
+        }
         {
             let mut exits = self.exit_events.lock().await;
             let prefix = format!("{}\0", req.id);
@@ -807,7 +953,8 @@ impl Task for Service {
         }
         self.tasks.write().await.insert(req.id.clone(), TaskMeta {
             bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
-            io_dir: Some(io_dir),
+            io_dir,
+            streaming: self.cfg.streaming_stdio,
         });
         self.send_event(TaskCreate {
             container_id: req.id.clone(),
@@ -976,14 +1123,13 @@ impl Task for Service {
     }
 
     async fn exec(&self, _ctx: &TtrpcContext, req: ExecProcessRequest) -> TtrpcResult<Empty> {
-        if req.terminal { return Err(rpc_unimplemented("TTY exec is not supported by secure-containers v0.1")); }
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let bytes = req.spec.as_ref().map(|a| a.value.clone()).unwrap_or_default();
         if bytes.is_empty() { return Err(rpc_invalid("ExecProcessRequest.spec is empty")); }
         let process_json = String::from_utf8(bytes).map_err(|e| rpc_invalid(e.to_string()))?;
         let (_, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, None).await.map_err(rpc_other)?;
         let io_id = format!("{}-{}", req.id, req.exec_id);
-        let (io, io_dir) = self.prepare_io(&io_id, &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
+        let (io, io_dir) = self.prepare_io(&io_id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
         let response = self.call_agent(&vm, ContainerRequest::Exec {
             id: req.id.clone(),
             exec_id: req.exec_id.clone(),
@@ -994,6 +1140,15 @@ impl Task for Service {
             ContainerResponse::ExecStarted { pid } => pid,
             other => return Err(rpc_other(format!("unexpected exec response: {other:?}"))),
         };
+        if let Err(e) = self.attach_stream_relays(
+            &vm, &req.id, Some(&req.exec_id), &req.stdin, &req.stdout, &req.stderr, req.terminal
+        ).await {
+            let _ = self.call_agent(&vm, ContainerRequest::Delete {
+                id: req.id.clone(), exec_id: Some(req.exec_id.clone()), force: true
+            }).await;
+            self.cleanup_process_staging(&req.id, Some(&req.exec_id)).await;
+            return Err(rpc_other(format!("attaching exec VSOCK stdio: {e:#}")));
+        }
         let bundle = self.tasks.read().await.get(&req.id).map(|m| m.bundle.clone()).unwrap_or_default();
         self.exit_events.lock().await.remove(&process_key(&req.id, Some(&req.exec_id)));
         self.execs.write().await.insert(process_key(&req.id, Some(&req.exec_id)), TaskMeta {
@@ -1003,7 +1158,8 @@ impl Task for Service {
             stderr: req.stderr.clone(),
             terminal: req.terminal,
             pid,
-            io_dir: Some(io_dir),
+            io_dir,
+            streaming: self.cfg.streaming_stdio,
         });
         self.send_event(TaskExecAdded {
             container_id: req.id,
@@ -1026,10 +1182,24 @@ impl Task for Service {
         Ok(Empty::new())
     }
 
-    async fn resize_pty(&self, _ctx: &TtrpcContext, _req: ResizePtyRequest) -> TtrpcResult<Empty> { Err(rpc_unimplemented("TTY is not supported")) }
+    async fn resize_pty(&self, _ctx: &TtrpcContext, req: ResizePtyRequest) -> TtrpcResult<Empty> {
+        let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id) };
+        match self.call_agent(&vm, ContainerRequest::ResizePty {
+            id: req.id, exec_id, width: req.width, height: req.height
+        }).await.map_err(rpc_other)? {
+            ContainerResponse::PtyResized => Ok(Empty::new()),
+            other => Err(rpc_other(format!("unexpected resize response: {other:?}"))),
+        }
+    }
 
-    async fn close_io(&self, _ctx: &TtrpcContext, _req: CloseIORequest) -> TtrpcResult<Empty> {
-        Ok(Empty::new())
+    async fn close_io(&self, _ctx: &TtrpcContext, req: CloseIORequest) -> TtrpcResult<Empty> {
+        let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id) };
+        match self.call_agent(&vm, ContainerRequest::CloseIo { id: req.id, exec_id }).await.map_err(rpc_other)? {
+            ContainerResponse::IoClosed => Ok(Empty::new()),
+            other => Err(rpc_other(format!("unexpected close-io response: {other:?}"))),
+        }
     }
 
     async fn pids(&self, _ctx: &TtrpcContext, req: PidsRequest) -> TtrpcResult<PidsResponse> {
@@ -1630,7 +1800,6 @@ fn rpc_status(code: ttrpc::Code, message: impl Into<String>) -> ttrpc::Error {
 }
 fn rpc_other(e: impl std::fmt::Display) -> ttrpc::Error { rpc_status(ttrpc::Code::UNKNOWN, e.to_string()) }
 fn rpc_invalid(e: impl Into<String>) -> ttrpc::Error { rpc_status(ttrpc::Code::INVALID_ARGUMENT, e) }
-fn rpc_unimplemented(e: impl Into<String>) -> ttrpc::Error { rpc_status(ttrpc::Code::UNIMPLEMENTED, e) }
 
 async fn pod_group_from_bundle(bundle: &str) -> Option<String> {
     if bundle.is_empty() { return None; }
