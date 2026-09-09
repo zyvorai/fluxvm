@@ -1,0 +1,16 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-container-client"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Host-side AF_VSOCK client for FluxVM secure containers"
+
+[dependencies]
+anyhow = "1"
+libc = "0.2"
+tokio = { version = "1", features = ["net", "io-util", "rt", "time"] }
+fluxvm-core = { path = "../fluxvm-core" }
+fluxvm-container-protocol = { path = "../fluxvm-container-protocol" }

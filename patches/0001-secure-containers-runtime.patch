@@ -1,0 +1,2154 @@
+diff --git a/.github/workflows/secure-containers.yml b/.github/workflows/secure-containers.yml
+new file mode 100644
+index 0000000..d6f8391
+--- /dev/null
++++ b/.github/workflows/secure-containers.yml
+@@ -0,0 +1,47 @@
++name: Secure Containers
++
++on:
++  pull_request:
++    paths:
++      - 'crates/fluxvm-container-*/**'
++      - 'crates/fluxvm-containerd-shim/**'
++      - 'deploy/containerd/**'
++      - 'scripts/*secure-containers*'
++      - 'Cargo.toml'
++  push:
++    branches: [main]
++    paths:
++      - 'crates/fluxvm-container-*/**'
++      - 'crates/fluxvm-containerd-shim/**'
++      - 'deploy/containerd/**'
++      - 'scripts/*secure-containers*'
++      - 'Cargo.toml'
++
++jobs:
++  build-test:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          path: fluxvm
++      - uses: actions/checkout@v4
++        with:
++          repository: zyvorai/guestkit
++          path: guestkit
++      - uses: dtolnay/rust-toolchain@stable
++        with:
++          components: clippy,rustfmt
++      - name: System dependencies
++        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev
++      - uses: Swatinem/rust-cache@v2
++        with:
++          workspaces: fluxvm
++      - name: Format
++        working-directory: fluxvm
++        run: cargo fmt --all -- --check
++      - name: Secure-container unit tests
++        working-directory: fluxvm
++        run: ./scripts/test-secure-containers.sh
++      - name: Clippy new crates
++        working-directory: fluxvm
++        run: cargo clippy -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-container-client -p fluxvm-containerd-shim --all-targets -- -D warnings
+diff --git a/Cargo.toml b/Cargo.toml
+index d467b30..0f56170 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -22,4 +22,8 @@ members = [
+     "crates/fluxvm-agent",
+     "crates/fluxvm-kube",
+     "crates/fluxvm-microvm",
++    "crates/fluxvm-container-protocol",
++    "crates/fluxvm-container-agent",
++    "crates/fluxvm-container-client",
++    "crates/fluxvm-containerd-shim",
+ ]
+diff --git a/crates/fluxvm-container-agent/Cargo.toml b/crates/fluxvm-container-agent/Cargo.toml
+new file mode 100644
+index 0000000..1fb5623
+--- /dev/null
++++ b/crates/fluxvm-container-agent/Cargo.toml
+@@ -0,0 +1,20 @@
++# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++# SPDX-License-Identifier: Apache-2.0
++
++[package]
++name = "fluxvm-container-agent"
++version = "0.1.0"
++edition = "2024"
++license = "Apache-2.0"
++description = "In-guest OCI process supervisor for FluxVM secure containers"
++
++[[bin]]
++name = "fluxvm-container-agent"
++path = "src/main.rs"
++
++[dependencies]
++anyhow = "1"
++clap = { version = "4", features = ["derive"] }
++libc = "0.2"
++serde_json = "1"
++fluxvm-container-protocol = { path = "../fluxvm-container-protocol" }
+diff --git a/crates/fluxvm-container-agent/src/main.rs b/crates/fluxvm-container-agent/src/main.rs
+new file mode 100644
+index 0000000..1474879
+--- /dev/null
++++ b/crates/fluxvm-container-agent/src/main.rs
+@@ -0,0 +1,729 @@
++// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++// SPDX-License-Identifier: Apache-2.0
++
++//! Minimal in-guest OCI process supervisor for FluxVM's containerd runtime.
++//!
++//! Security boundary: the entire Kubernetes Pod/container sandbox runs inside
++//! a hardware VM. This agent intentionally does not pretend to be a complete
++//! runc replacement yet; it implements process lifecycle, chroot, uid/gid,
++//! environment, cwd, signals and stdio inside the guest. OCI namespace,
++//! capability, seccomp, device and cgroup parity are tracked as follow-up
++//! hardening items in docs/secure-containers.md.
++
++use anyhow::{Context, Result, bail};
++use clap::Parser;
++use fluxvm_container_protocol::{
++    ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStatus,
++    DEFAULT_CONTAINER_AGENT_PORT, MAX_MESSAGE_BYTES, decode_line, encode_line,
++};
++use serde_json::Value;
++use std::{
++    collections::HashMap,
++    ffi::CString,
++    fs::{File, OpenOptions},
++    io::{BufRead, BufReader, Write},
++    os::fd::{AsRawFd, FromRawFd, RawFd},
++    os::unix::ffi::OsStrExt,
++    path::PathBuf,
++    sync::{Arc, Condvar, Mutex, OnceLock},
++    time::{SystemTime, UNIX_EPOCH},
++};
++
++const TOKEN_FILE_PATH: &str = "/etc/fluxvm-guest-agent.token";
++
++#[derive(Parser, Debug)]
++#[command(name = "fluxvm-container-agent", version)]
++struct Cli {
++    #[arg(long, default_value_t = DEFAULT_CONTAINER_AGENT_PORT)]
++    port: u32,
++}
++
++#[derive(Clone, Debug)]
++struct ProcessSpec {
++    rootfs: PathBuf,
++    args: Vec<String>,
++    env: Vec<(String, String)>,
++    cwd: String,
++    uid: u32,
++    gid: u32,
++}
++
++#[derive(Clone, Debug)]
++struct ProcSnapshot {
++    status: ContainerStatus,
++    pid: u32,
++    exit_code: Option<i32>,
++    exited_at_unix_nano: Option<i128>,
++    gate_fd: Option<RawFd>,
++}
++
++#[derive(Debug)]
++struct ProcHandle {
++    inner: Mutex<ProcSnapshot>,
++    changed: Condvar,
++}
++
++impl ProcHandle {
++    fn new_created(pid: u32, gate_fd: RawFd) -> Self {
++        Self {
++            inner: Mutex::new(ProcSnapshot {
++                status: ContainerStatus::Created,
++                pid,
++                exit_code: None,
++                exited_at_unix_nano: None,
++                gate_fd: Some(gate_fd),
++            }),
++            changed: Condvar::new(),
++        }
++    }
++
++    fn snapshot(&self) -> ProcSnapshot {
++        self.inner.lock().expect("process state poisoned").clone()
++    }
++
++    fn start(&self) -> Result<u32> {
++        let mut state = self.inner.lock().expect("process state poisoned");
++        if state.status == ContainerStatus::Stopped {
++            bail!("process already exited");
++        }
++        if state.status == ContainerStatus::Running || state.status == ContainerStatus::Paused {
++            return Ok(state.pid);
++        }
++        let gate = state.gate_fd.take().context("process start gate is missing")?;
++        let one = [1u8; 1];
++        let rc = unsafe { libc::write(gate, one.as_ptr().cast(), one.len()) };
++        unsafe { libc::close(gate) };
++        if rc != 1 {
++            bail!("releasing process start gate failed: {}", std::io::Error::last_os_error());
++        }
++        state.status = ContainerStatus::Running;
++        self.changed.notify_all();
++        Ok(state.pid)
++    }
++
++    fn signal(&self, signal: i32, process_group: bool) -> Result<()> {
++        let state = self.inner.lock().expect("process state poisoned");
++        if state.status == ContainerStatus::Stopped {
++            return Ok(());
++        }
++        let target = if process_group { -(state.pid as i32) } else { state.pid as i32 };
++        let rc = unsafe { libc::kill(target, signal) };
++        if rc != 0 {
++            let e = std::io::Error::last_os_error();
++            if e.raw_os_error() != Some(libc::ESRCH) {
++                return Err(e).context("sending signal to container process");
++            }
++        }
++        Ok(())
++    }
++
++    fn set_status(&self, status: ContainerStatus) {
++        let mut state = self.inner.lock().expect("process state poisoned");
++        if state.status != ContainerStatus::Stopped {
++            state.status = status;
++            self.changed.notify_all();
++        }
++    }
++
++    fn mark_exited(&self, code: i32) {
++        let mut state = self.inner.lock().expect("process state poisoned");
++        if let Some(fd) = state.gate_fd.take() {
++            unsafe { libc::close(fd) };
++        }
++        state.status = ContainerStatus::Stopped;
++        state.exit_code = Some(code);
++        state.exited_at_unix_nano = Some(now_unix_nanos());
++        self.changed.notify_all();
++    }
++
++    fn wait(&self) -> ProcSnapshot {
++        let mut state = self.inner.lock().expect("process state poisoned");
++        while state.status != ContainerStatus::Stopped {
++            state = self.changed.wait(state).expect("process state poisoned");
++        }
++        state.clone()
++    }
++}
++
++#[derive(Debug)]
++struct ContainerEntry {
++    rootfs: PathBuf,
++    mounts: Vec<PathBuf>,
++    init: Arc<ProcHandle>,
++    execs: HashMap<String, Arc<ProcHandle>>,
++}
++
++type Registry = Arc<Mutex<HashMap<String, ContainerEntry>>>;
++static REGISTRY: OnceLock<Registry> = OnceLock::new();
++
++fn registry() -> &'static Registry {
++    REGISTRY.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
++}
++
++fn main() -> Result<()> {
++    let cli = Cli::parse();
++    run_server(cli.port)
++}
++
++fn run_server(port: u32) -> Result<()> {
++    let expected_token = std::fs::read_to_string(TOKEN_FILE_PATH)
++        .ok()
++        .map(|s| s.trim().to_string())
++        .filter(|s| !s.is_empty());
++
++    let listener_fd = unsafe {
++        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
++        if fd < 0 {
++            bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
++        }
++        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
++        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
++        addr.svm_cid = libc::VMADDR_CID_ANY;
++        addr.svm_port = port;
++        if libc::bind(
++            fd,
++            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
++            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
++        ) != 0
++        {
++            libc::close(fd);
++            bail!("bind(vsock:{port}): {}", std::io::Error::last_os_error());
++        }
++        if libc::listen(fd, 128) != 0 {
++            libc::close(fd);
++            bail!("listen(vsock:{port}): {}", std::io::Error::last_os_error());
++        }
++        set_cloexec(fd);
++        fd
++    };
++
++    eprintln!("fluxvm-container-agent listening on vsock port {port}");
++    loop {
++        let fd = unsafe { libc::accept(listener_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
++        if fd < 0 {
++            eprintln!("accept failed: {}", std::io::Error::last_os_error());
++            continue;
++        }
++        let token = expected_token.clone();
++        std::thread::spawn(move || {
++            let file = unsafe { File::from_raw_fd(fd) };
++            if let Err(e) = handle_connection(file, token.as_deref()) {
++                eprintln!("container-agent request failed: {e:#}");
++            }
++        });
++    }
++}
++
++fn handle_connection(file: File, expected_token: Option<&str>) -> Result<()> {
++    let mut writer = file.try_clone()?;
++    let mut reader = BufReader::new(file);
++    let mut line = String::new();
++    let n = reader
++        .read_line(&mut line)
++        .context("reading container request")?;
++    if n == 0 {
++        return Ok(());
++    }
++    if line.len() > MAX_MESSAGE_BYTES {
++        write_response(&mut writer, ContainerResponse::Error {
++            message: format!("request exceeds {MAX_MESSAGE_BYTES} bytes"),
++        })?;
++        return Ok(());
++    }
++    let envelope: ContainerEnvelope = decode_line(&line).context("decoding container request")?;
++    if let Some(expected) = expected_token {
++        let ok = envelope
++            .token
++            .as_deref()
++            .is_some_and(|actual| constant_time_eq(expected, actual));
++        if !ok {
++            write_response(&mut writer, ContainerResponse::Error {
++                message: "unauthorized: missing or incorrect VM token".into(),
++            })?;
++            return Ok(());
++        }
++    }
++    let response = dispatch(envelope.request).unwrap_or_else(|e| ContainerResponse::Error {
++        message: format!("{e:#}"),
++    });
++    write_response(&mut writer, response)
++}
++
++fn write_response(writer: &mut File, response: ContainerResponse) -> Result<()> {
++    writer.write_all(encode_line(&response)?.as_bytes())?;
++    writer.flush()?;
++    Ok(())
++}
++
++fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
++    match request {
++        ContainerRequest::Ping => Ok(ContainerResponse::Pong),
++        ContainerRequest::Create { id, config_json, io } => create_container(id, &config_json, io),
++        ContainerRequest::Start { id, exec_id } => start_process(&id, exec_id.as_deref()),
++        ContainerRequest::State { id, exec_id } => state_process(&id, exec_id.as_deref()),
++        ContainerRequest::Exec { id, exec_id, process_json, io } => {
++            create_exec(&id, exec_id, &process_json, io)
++        }
++        ContainerRequest::Kill { id, exec_id, signal, all } => {
++            let handle = find_process(&id, exec_id.as_deref())?;
++            handle.signal(signal, all)?;
++            Ok(ContainerResponse::Killed)
++        }
++        ContainerRequest::Pause { id } => {
++            let handle = find_process(&id, None)?;
++            handle.signal(libc::SIGSTOP, true)?;
++            handle.set_status(ContainerStatus::Paused);
++            Ok(ContainerResponse::Paused)
++        }
++        ContainerRequest::Resume { id } => {
++            let handle = find_process(&id, None)?;
++            handle.signal(libc::SIGCONT, true)?;
++            handle.set_status(ContainerStatus::Running);
++            Ok(ContainerResponse::Resumed)
++        }
++        ContainerRequest::Wait { id, exec_id } => {
++            let state = find_process(&id, exec_id.as_deref())?.wait();
++            Ok(ContainerResponse::Exited {
++                exit_code: state.exit_code.unwrap_or(255),
++                exited_at_unix_nano: state.exited_at_unix_nano.unwrap_or_else(now_unix_nanos),
++            })
++        }
++        ContainerRequest::Delete { id, exec_id, force } => delete_process(&id, exec_id.as_deref(), force),
++    }
++}
++
++fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
++    if io.terminal {
++        bail!("TTY containers are not supported by FluxVM secure-containers v0.1");
++    }
++    let (spec, mounts) = parse_oci_config(config_json)?;
++    let mut reg = registry().lock().expect("registry poisoned");
++    if reg.contains_key(&id) {
++        bail!("container {id:?} already exists");
++    }
++    let init = spawn_gated(&id, None, &spec, &io)?;
++    let pid = init.snapshot().pid;
++    reg.insert(
++        id,
++        ContainerEntry {
++            rootfs: spec.rootfs.clone(),
++            mounts,
++            init,
++            execs: HashMap::new(),
++        },
++    );
++    Ok(ContainerResponse::Created { pid })
++}
++
++fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
++    if io.terminal {
++        bail!("TTY exec is not supported by FluxVM secure-containers v0.1");
++    }
++    let mut reg = registry().lock().expect("registry poisoned");
++    let container = reg.get_mut(id).with_context(|| format!("container {id:?} not found"))?;
++    if container.execs.contains_key(&exec_id) {
++        bail!("exec {exec_id:?} already exists in container {id:?}");
++    }
++    let mut spec = parse_oci_process(process_json, container.rootfs.clone())?;
++    spec.rootfs = container.rootfs.clone();
++    let handle = spawn_gated(id, Some(&exec_id), &spec, &io)?;
++    let pid = handle.snapshot().pid;
++    container.execs.insert(exec_id, handle);
++    Ok(ContainerResponse::ExecStarted { pid })
++}
++
++fn start_process(id: &str, exec_id: Option<&str>) -> Result<ContainerResponse> {
++    let handle = find_process(id, exec_id)?;
++    let pid = handle.start()?;
++    Ok(ContainerResponse::Started { pid })
++}
++
++fn state_process(id: &str, exec_id: Option<&str>) -> Result<ContainerResponse> {
++    let state = find_process(id, exec_id)?.snapshot();
++    Ok(ContainerResponse::State {
++        id: id.to_string(),
++        exec_id: exec_id.map(str::to_string),
++        status: state.status,
++        pid: state.pid,
++        exit_code: state.exit_code,
++        exited_at_unix_nano: state.exited_at_unix_nano,
++    })
++}
++
++fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<ContainerResponse> {
++    let mut reg = registry().lock().expect("registry poisoned");
++    let container = reg.get_mut(id).with_context(|| format!("container {id:?} not found"))?;
++    if let Some(exec_id) = exec_id {
++        let handle = container
++            .execs
++            .get(exec_id)
++            .with_context(|| format!("exec {exec_id:?} not found"))?
++            .clone();
++        let state = handle.snapshot();
++        if state.status != ContainerStatus::Stopped {
++            if !force {
++                bail!("exec {exec_id:?} is still running");
++            }
++            handle.signal(libc::SIGKILL, true)?;
++        }
++        container.execs.remove(exec_id);
++    } else {
++        let state = container.init.snapshot();
++        if state.status != ContainerStatus::Stopped {
++            if !force {
++                bail!("container {id:?} is still running");
++            }
++            container.init.signal(libc::SIGKILL, true)?;
++        }
++        if let Some(entry) = reg.remove(id) {
++            cleanup_mounts(&entry.mounts);
++        }
++    }
++    Ok(ContainerResponse::Deleted)
++}
++
++fn find_process(id: &str, exec_id: Option<&str>) -> Result<Arc<ProcHandle>> {
++    let reg = registry().lock().expect("registry poisoned");
++    let container = reg.get(id).with_context(|| format!("container {id:?} not found"))?;
++    match exec_id {
++        None => Ok(container.init.clone()),
++        Some(exec_id) => container
++            .execs
++            .get(exec_id)
++            .cloned()
++            .with_context(|| format!("exec {exec_id:?} not found in container {id:?}")),
++    }
++}
++
++fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>)> {
++    let v: Value = serde_json::from_str(json).context("parsing OCI config.json")?;
++    let root = v
++        .pointer("/root/path")
++        .and_then(Value::as_str)
++        .context("OCI root.path is required")?;
++    let rootfs = PathBuf::from(root);
++    let mounts = apply_oci_mounts(&v, &rootfs)?;
++    let process = v.get("process").context("OCI process is required")?;
++    Ok((parse_process_value(process, rootfs)?, mounts))
++}
++
++
++fn apply_oci_mounts(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
++    let mut mounted = Vec::new();
++    let Some(items) = config.get("mounts").and_then(Value::as_array) else {
++        return Ok(mounted);
++    };
++    for item in items {
++        let destination = item
++            .get("destination")
++            .and_then(Value::as_str)
++            .context("OCI mount destination is required")?;
++        let relative = safe_guest_destination(destination)?;
++        let target = rootfs.join(relative);
++        let fs_type = item.get("type").and_then(Value::as_str).unwrap_or("");
++        let source = item.get("source").and_then(Value::as_str).unwrap_or(fs_type);
++        let options: Vec<String> = item
++            .get("options")
++            .and_then(Value::as_array)
++            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
++            .unwrap_or_default();
++        let is_bind = fs_type == "bind" || options.iter().any(|o| o == "bind" || o == "rbind");
++
++        if is_bind {
++            let source_path = PathBuf::from(source);
++            if source_path.is_dir() {
++                std::fs::create_dir_all(&target)?;
++            } else {
++                if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
++                if !target.exists() { File::create(&target)?; }
++            }
++        } else {
++            std::fs::create_dir_all(&target)?;
++        }
++
++        let (flags, data) = mount_options(&options, is_bind);
++        mount_one(source, &target, if is_bind { None } else { Some(fs_type) }, flags, data.as_deref())
++            .with_context(|| format!("mounting {source:?} on {}", target.display()))?;
++
++        if is_bind && options.iter().any(|o| o == "ro") {
++            mount_one(
++                source,
++                &target,
++                None,
++                libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
++                None,
++            )
++            .with_context(|| format!("remounting bind read-only on {}", target.display()))?;
++        }
++
++        if destination == "/dev" && fs_type == "tmpfs" {
++            create_minimal_devices(&target);
++        }
++        mounted.push(target);
++    }
++    Ok(mounted)
++}
++
++fn safe_guest_destination(destination: &str) -> Result<PathBuf> {
++    let path = std::path::Path::new(destination);
++    if !path.is_absolute() { bail!("OCI mount destination must be absolute: {destination}"); }
++    let mut out = PathBuf::new();
++    for component in path.components() {
++        match component {
++            std::path::Component::RootDir => {}
++            std::path::Component::Normal(v) => out.push(v),
++            _ => bail!("unsafe OCI mount destination: {destination}"),
++        }
++    }
++    Ok(out)
++}
++
++fn mount_options(options: &[String], is_bind: bool) -> (libc::c_ulong, Option<String>) {
++    let mut flags = if is_bind { libc::MS_BIND } else { 0 };
++    let mut data = Vec::new();
++    for opt in options {
++        match opt.as_str() {
++            "bind" => flags |= libc::MS_BIND,
++            "rbind" => flags |= libc::MS_BIND | libc::MS_REC,
++            "ro" => flags |= libc::MS_RDONLY,
++            "rw" => flags &= !libc::MS_RDONLY,
++            "nosuid" => flags |= libc::MS_NOSUID,
++            "nodev" => flags |= libc::MS_NODEV,
++            "noexec" => flags |= libc::MS_NOEXEC,
++            "noatime" => flags |= libc::MS_NOATIME,
++            "nodiratime" => flags |= libc::MS_NODIRATIME,
++            "relatime" => flags |= libc::MS_RELATIME,
++            "strictatime" => flags |= libc::MS_STRICTATIME,
++            "rec" => flags |= libc::MS_REC,
++            other if !matches!(other, "remount" | "private" | "rprivate" | "slave" | "rslave" | "shared" | "rshared") => data.push(other.to_string()),
++            _ => {}
++        }
++    }
++    (flags, (!data.is_empty()).then(|| data.join(",")))
++}
++
++fn mount_one(source: &str, target: &PathBuf, fs_type: Option<&str>, flags: libc::c_ulong, data: Option<&str>) -> Result<()> {
++    let source = CString::new(source.as_bytes())?;
++    let target = CString::new(target.as_os_str().as_bytes())?;
++    let fs_type = fs_type.filter(|s| !s.is_empty()).map(|s| CString::new(s.as_bytes())).transpose()?;
++    let data = data.map(|s| CString::new(s.as_bytes())).transpose()?;
++    let rc = unsafe {
++        libc::mount(
++            source.as_ptr(),
++            target.as_ptr(),
++            fs_type.as_ref().map_or(std::ptr::null(), |v| v.as_ptr()),
++            flags,
++            data.as_ref().map_or(std::ptr::null(), |v| v.as_ptr().cast()),
++        )
++    };
++    if rc != 0 { bail!("mount: {}", std::io::Error::last_os_error()); }
++    Ok(())
++}
++
++fn create_minimal_devices(dev: &PathBuf) {
++    for (name, major, minor, mode) in [
++        ("null", 1, 3, 0o666), ("zero", 1, 5, 0o666), ("full", 1, 7, 0o666),
++        ("random", 1, 8, 0o666), ("urandom", 1, 9, 0o666), ("tty", 5, 0, 0o666),
++    ] {
++        let path = dev.join(name);
++        if let Ok(c) = CString::new(path.as_os_str().as_bytes()) {
++            unsafe { libc::mknod(c.as_ptr(), libc::S_IFCHR | mode, libc::makedev(major, minor)); }
++        }
++    }
++    let _ = std::fs::create_dir_all(dev.join("pts"));
++    let _ = std::fs::create_dir_all(dev.join("shm"));
++    let _ = std::fs::create_dir_all(dev.join("mqueue"));
++}
++
++fn cleanup_mounts(mounts: &[PathBuf]) {
++    for target in mounts.iter().rev() {
++        if let Ok(c) = CString::new(target.as_os_str().as_bytes()) {
++            unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH); }
++        }
++    }
++}
++
++fn parse_oci_process(json: &str, rootfs: PathBuf) -> Result<ProcessSpec> {
++    let v: Value = serde_json::from_str(json).context("parsing OCI Process")?;
++    parse_process_value(&v, rootfs)
++}
++
++fn parse_process_value(process: &Value, rootfs: PathBuf) -> Result<ProcessSpec> {
++    let args = process
++        .get("args")
++        .and_then(Value::as_array)
++        .context("OCI process.args is required")?
++        .iter()
++        .map(|v| v.as_str().map(str::to_string).context("process arg must be a string"))
++        .collect::<Result<Vec<_>>>()?;
++    if args.is_empty() {
++        bail!("OCI process.args must not be empty");
++    }
++    let env = process
++        .get("env")
++        .and_then(Value::as_array)
++        .map(|items| {
++            items
++                .iter()
++                .filter_map(Value::as_str)
++                .map(|entry| {
++                    let (k, v) = entry.split_once('=').unwrap_or((entry, ""));
++                    (k.to_string(), v.to_string())
++                })
++                .collect()
++        })
++        .unwrap_or_default();
++    let cwd = process.get("cwd").and_then(Value::as_str).unwrap_or("/").to_string();
++    let uid = process.pointer("/user/uid").and_then(Value::as_u64).unwrap_or(0) as u32;
++    let gid = process.pointer("/user/gid").and_then(Value::as_u64).unwrap_or(0) as u32;
++    Ok(ProcessSpec { rootfs, args, env, cwd, uid, gid })
++}
++
++fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io: &ContainerIo) -> Result<Arc<ProcHandle>> {
++    let rootfs = CString::new(spec.rootfs.as_os_str().as_bytes()).context("rootfs contains NUL")?;
++    let cwd = CString::new(spec.cwd.as_bytes()).context("cwd contains NUL")?;
++    let argv = spec
++        .args
++        .iter()
++        .map(|a| CString::new(a.as_bytes()).context("argv contains NUL"))
++        .collect::<Result<Vec<_>>>()?;
++    let envv = spec
++        .env
++        .iter()
++        .map(|(k, v)| CString::new(format!("{k}={v}")).context("environment contains NUL"))
++        .collect::<Result<Vec<_>>>()?;
++    let stdin = open_input(io.stdin.as_deref())?;
++    let stdout = open_output(io.stdout.as_deref())?;
++    let stderr = open_output(io.stderr.as_deref())?;
++
++    let mut gate = [0; 2];
++    if unsafe { libc::pipe2(gate.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
++        bail!("pipe2: {}", std::io::Error::last_os_error());
++    }
++    let pid = unsafe { libc::fork() };
++    if pid < 0 {
++        unsafe {
++            libc::close(gate[0]);
++            libc::close(gate[1]);
++        }
++        bail!("fork: {}", std::io::Error::last_os_error());
++    }
++    if pid == 0 {
++        unsafe {
++            libc::close(gate[1]);
++            libc::setpgid(0, 0);
++            if let Some(ref file) = stdin { libc::dup2(file.as_raw_fd(), libc::STDIN_FILENO); }
++            if let Some(ref file) = stdout { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO); }
++            if let Some(ref file) = stderr { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO); }
++            let mut byte = [0u8; 1];
++            if libc::read(gate[0], byte.as_mut_ptr().cast(), 1) != 1 { libc::_exit(126); }
++            libc::close(gate[0]);
++            if libc::chroot(rootfs.as_ptr()) != 0 { libc::_exit(126); }
++            if libc::chdir(cwd.as_ptr()) != 0 { libc::_exit(126); }
++            if libc::setgid(spec.gid) != 0 { libc::_exit(126); }
++            if libc::setuid(spec.uid) != 0 { libc::_exit(126); }
++
++            let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|v| v.as_ptr()).collect();
++            argv_ptrs.push(std::ptr::null());
++            let mut env_ptrs: Vec<*const libc::c_char> = envv.iter().map(|v| v.as_ptr()).collect();
++            env_ptrs.push(std::ptr::null());
++            libc::execve(argv[0].as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr());
++            libc::_exit(127);
++        }
++    }
++
++    unsafe { libc::close(gate[0]) };
++    drop(stdin);
++    drop(stdout);
++    drop(stderr);
++    let handle = Arc::new(ProcHandle::new_created(pid as u32, gate[1]));
++    let waiter = handle.clone();
++    let label = format!("{container_id}/{}", exec_id.unwrap_or("init"));
++    std::thread::spawn(move || {
++        let mut status = 0i32;
++        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
++        let code = if rc < 0 {
++            255
++        } else if libc::WIFEXITED(status) {
++            libc::WEXITSTATUS(status)
++        } else if libc::WIFSIGNALED(status) {
++            128 + libc::WTERMSIG(status)
++        } else {
++            255
++        };
++        eprintln!("container process {label} pid={pid} exited code={code}");
++        waiter.mark_exited(code);
++    });
++    Ok(handle)
++}
++
++fn open_input(path: Option<&str>) -> Result<Option<File>> {
++    path.filter(|p| !p.is_empty())
++        .map(|p| OpenOptions::new().read(true).open(p).with_context(|| format!("opening stdin {p}")))
++        .transpose()
++}
++
++fn open_output(path: Option<&str>) -> Result<Option<File>> {
++    path.filter(|p| !p.is_empty())
++        .map(|p| {
++            OpenOptions::new()
++                .write(true)
++                .create(false)
++                .open(p)
++                .with_context(|| format!("opening output {p}"))
++        })
++        .transpose()
++}
++
++fn set_cloexec(fd: RawFd) {
++    unsafe {
++        let flags = libc::fcntl(fd, libc::F_GETFD);
++        if flags >= 0 { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC); }
++    }
++}
++
++fn constant_time_eq(a: &str, b: &str) -> bool {
++    let (a, b) = (a.as_bytes(), b.as_bytes());
++    if a.len() != b.len() { return false; }
++    let mut diff = 0u8;
++    for (x, y) in a.iter().zip(b) { diff |= x ^ y; }
++    diff == 0
++}
++
++fn now_unix_nanos() -> i128 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_nanos() as i128
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parses_minimal_oci_config() {
++        let (spec, mounts) = parse_oci_config(r#"{
++          "root":{"path":"/run/rootfs"},
++          "process":{"args":["/bin/echo","hi"],"cwd":"/","env":["A=B"],"user":{"uid":1000,"gid":1001}}
++        }"#).unwrap();
++        assert!(mounts.is_empty());
++        assert_eq!(spec.rootfs, PathBuf::from("/run/rootfs"));
++        assert_eq!(spec.args[0], "/bin/echo");
++        assert_eq!(spec.uid, 1000);
++        assert_eq!(spec.gid, 1001);
++        assert_eq!(spec.env, vec![("A".into(), "B".into())]);
++    }
++
++    #[test]
++    fn rejects_empty_args() {
++        assert!(parse_oci_config(r#"{"root":{"path":"/r"},"process":{"args":[]}}"#).is_err());
++    }
++
++    #[test]
++    fn token_compare() {
++        assert!(constant_time_eq("same", "same"));
++        assert!(!constant_time_eq("same", "diff"));
++        assert!(!constant_time_eq("same", "same2"));
++    }
++}
+diff --git a/crates/fluxvm-container-client/Cargo.toml b/crates/fluxvm-container-client/Cargo.toml
+new file mode 100644
+index 0000000..302b0fe
+--- /dev/null
++++ b/crates/fluxvm-container-client/Cargo.toml
+@@ -0,0 +1,16 @@
++# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++# SPDX-License-Identifier: Apache-2.0
++
++[package]
++name = "fluxvm-container-client"
++version = "0.1.0"
++edition = "2024"
++license = "Apache-2.0"
++description = "Host-side AF_VSOCK client for FluxVM secure containers"
++
++[dependencies]
++anyhow = "1"
++libc = "0.2"
++tokio = { version = "1", features = ["net", "io-util", "rt", "time"] }
++fluxvm-core = { path = "../fluxvm-core" }
++fluxvm-container-protocol = { path = "../fluxvm-container-protocol" }
+diff --git a/crates/fluxvm-container-client/src/lib.rs b/crates/fluxvm-container-client/src/lib.rs
+new file mode 100644
+index 0000000..9db08e0
+--- /dev/null
++++ b/crates/fluxvm-container-client/src/lib.rs
+@@ -0,0 +1,183 @@
++// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++// SPDX-License-Identifier: Apache-2.0
++
++use anyhow::{Context, Result, bail};
++use fluxvm_container_protocol::{
++    ContainerEnvelope, ContainerRequest, ContainerResponse, DEFAULT_CONTAINER_AGENT_PORT,
++    decode_line, encode_line,
++};
++use fluxvm_core::model::{BackendKind, VmRecord};
++use std::time::Duration;
++use tokio::{
++    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
++    net::UnixStream,
++};
++
++pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
++
++pub async fn call(
++    vm: &VmRecord,
++    request: ContainerRequest,
++    timeout: Duration,
++) -> Result<ContainerResponse> {
++    let agent = vm
++        .request
++        .agent
++        .as_ref()
++        .filter(|a| a.enabled)
++        .context("FluxVM guest agent must be enabled for secure containers")?;
++    let envelope = ContainerEnvelope {
++        token: agent.token.clone(),
++        request,
++    };
++    let cid = vm.guest_cid.context("VM has no vsock CID assigned")?;
++
++    tokio::time::timeout(timeout, async {
++        match vm.backend {
++            BackendKind::Qemu => native_vsock_call(cid, DEFAULT_CONTAINER_AGENT_PORT, &envelope).await,
++            BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm => {
++                let socket = vm
++                    .vsock_socket
++                    .as_deref()
++                    .context("VM has no vsock proxy socket recorded")?;
++                uds_proxy_call(socket, DEFAULT_CONTAINER_AGENT_PORT, &envelope).await
++            }
++            BackendKind::Auto => bail!("unresolved FluxVM backend"),
++        }
++    })
++    .await
++    .context("FluxVM container-agent call timed out")?
++}
++
++pub async fn ping(vm: &VmRecord, timeout: Duration) -> Result<()> {
++    match call(vm, ContainerRequest::Ping, timeout).await? {
++        ContainerResponse::Pong => Ok(()),
++        ContainerResponse::Error { message } => bail!("container agent: {message}"),
++        other => bail!("unexpected ping response: {other:?}"),
++    }
++}
++
++async fn uds_proxy_call(
++    socket: &std::path::Path,
++    guest_port: u32,
++    envelope: &ContainerEnvelope,
++) -> Result<ContainerResponse> {
++    let stream = UnixStream::connect(socket)
++        .await
++        .with_context(|| format!("connecting to vsock proxy {}", socket.display()))?;
++    let (read_half, mut write_half) = stream.into_split();
++    let mut reader = BufReader::new(read_half);
++
++    write_half
++        .write_all(format!("CONNECT {guest_port}\n").as_bytes())
++        .await?;
++    let mut ack = String::new();
++    reader.read_line(&mut ack).await?;
++    if !ack.trim().to_ascii_uppercase().starts_with("OK") {
++        bail!("vsock proxy refused port {guest_port}: {:?}", ack.trim());
++    }
++    write_half.write_all(encode_line(envelope)?.as_bytes()).await?;
++    write_half.flush().await?;
++    let mut line = String::new();
++    reader.read_line(&mut line).await?;
++    if line.is_empty() {
++        bail!("container agent closed without a response");
++    }
++    decode_line(&line).context("decoding container-agent response")
++}
++
++#[cfg(target_os = "linux")]
++async fn native_vsock_call(
++    cid: u32,
++    port: u32,
++    envelope: &ContainerEnvelope,
++) -> Result<ContainerResponse> {
++    let envelope = envelope.clone();
++    tokio::task::spawn_blocking(move || native_vsock_call_blocking(cid, port, &envelope))
++        .await
++        .context("vsock worker panicked")?
++}
++
++#[cfg(target_os = "linux")]
++fn native_vsock_call_blocking(
++    cid: u32,
++    port: u32,
++    envelope: &ContainerEnvelope,
++) -> Result<ContainerResponse> {
++    use std::io::{Read, Write};
++    use std::os::fd::FromRawFd;
++
++    unsafe {
++        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
++        if fd < 0 {
++            bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
++        }
++        let mut file = std::fs::File::from_raw_fd(fd);
++        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
++        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
++        addr.svm_cid = cid;
++        addr.svm_port = port;
++        if libc::connect(
++            fd,
++            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
++            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
++        ) != 0
++        {
++            bail!("connect(vsock cid={cid} port={port}): {}", std::io::Error::last_os_error());
++        }
++        let tv = libc::timeval { tv_sec: 20, tv_usec: 0 };
++        libc::setsockopt(
++            fd,
++            libc::SOL_SOCKET,
++            libc::SO_RCVTIMEO,
++            (&tv as *const libc::timeval).cast(),
++            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
++        );
++        libc::setsockopt(
++            fd,
++            libc::SOL_SOCKET,
++            libc::SO_SNDTIMEO,
++            (&tv as *const libc::timeval).cast(),
++            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
++        );
++        file.write_all(encode_line(envelope)?.as_bytes())?;
++        file.flush()?;
++        let mut bytes = Vec::new();
++        let mut byte = [0u8; 1];
++        loop {
++            let n = file.read(&mut byte)?;
++            if n == 0 || byte[0] == b'\n' { break; }
++            bytes.push(byte[0]);
++        }
++        if bytes.is_empty() {
++            bail!("container agent closed without a response");
++        }
++        decode_line(&String::from_utf8_lossy(&bytes)).context("decoding container-agent response")
++    }
++}
++
++#[cfg(not(target_os = "linux"))]
++async fn native_vsock_call(
++    _cid: u32,
++    _port: u32,
++    _envelope: &ContainerEnvelope,
++) -> Result<ContainerResponse> {
++    bail!("native AF_VSOCK is supported on Linux only")
++}
++
++/// Small protocol-only helper used by unit tests and fuzzers without KVM.
++pub fn decode_response(line: &str) -> Result<ContainerResponse> {
++    decode_line(line).context("decoding container-agent response")
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn response_decode_is_strict() {
++        let r = decode_response("{\"result\":\"pong\"}\n").unwrap();
++        assert!(matches!(r, ContainerResponse::Pong));
++        assert!(decode_response("not-json").is_err());
++    }
++}
+diff --git a/crates/fluxvm-container-protocol/Cargo.toml b/crates/fluxvm-container-protocol/Cargo.toml
+new file mode 100644
+index 0000000..15ef8f6
+--- /dev/null
++++ b/crates/fluxvm-container-protocol/Cargo.toml
+@@ -0,0 +1,13 @@
++# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++# SPDX-License-Identifier: Apache-2.0
++
++[package]
++name = "fluxvm-container-protocol"
++version = "0.1.0"
++edition = "2024"
++license = "Apache-2.0"
++description = "Wire protocol for FluxVM VM-isolated container sandboxes"
++
++[dependencies]
++serde = { version = "1", features = ["derive"] }
++serde_json = "1"
+diff --git a/crates/fluxvm-container-protocol/src/lib.rs b/crates/fluxvm-container-protocol/src/lib.rs
+new file mode 100644
+index 0000000..0fdb9c7
+--- /dev/null
++++ b/crates/fluxvm-container-protocol/src/lib.rs
+@@ -0,0 +1,164 @@
++// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++// SPDX-License-Identifier: Apache-2.0
++
++//! Container lifecycle protocol spoken between `containerd-shim-fluxvm-v2`
++//! on the host and `fluxvm-container-agent` inside a FluxVM guest.
++//!
++//! The protocol is newline-delimited JSON over AF_VSOCK. Requests carry the
++//! same per-VM shared secret used by the existing FluxVM guest agent, but are
++//! served on a separate port so the stable guest-agent API remains unchanged.
++
++use serde::{Deserialize, Serialize};
++
++pub const DEFAULT_CONTAINER_AGENT_PORT: u32 = 17778;
++pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 30;
++pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
++#[serde(rename_all = "kebab-case")]
++pub enum ContainerStatus {
++    Created,
++    Running,
++    Paused,
++    Stopped,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, Default)]
++pub struct ContainerIo {
++    #[serde(default)]
++    pub stdin: Option<String>,
++    #[serde(default)]
++    pub stdout: Option<String>,
++    #[serde(default)]
++    pub stderr: Option<String>,
++    #[serde(default)]
++    pub terminal: bool,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(tag = "op", rename_all = "kebab-case")]
++pub enum ContainerRequest {
++    Ping,
++    Create {
++        id: String,
++        /// Complete OCI runtime config after host paths have been translated
++        /// into paths visible from inside the guest.
++        config_json: String,
++        io: ContainerIo,
++    },
++    Start { id: String, #[serde(default)] exec_id: Option<String> },
++    State { id: String, #[serde(default)] exec_id: Option<String> },
++    Exec {
++        id: String,
++        exec_id: String,
++        /// OCI Process JSON (not a full config.json).
++        process_json: String,
++        io: ContainerIo,
++    },
++    Kill {
++        id: String,
++        #[serde(default)]
++        exec_id: Option<String>,
++        signal: i32,
++        #[serde(default)]
++        all: bool,
++    },
++    Pause { id: String },
++    Resume { id: String },
++    Wait { id: String, #[serde(default)] exec_id: Option<String> },
++    Delete {
++        id: String,
++        #[serde(default)]
++        exec_id: Option<String>,
++        #[serde(default)]
++        force: bool,
++    },
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct ContainerEnvelope {
++    #[serde(default)]
++    pub token: Option<String>,
++    #[serde(flatten)]
++    pub request: ContainerRequest,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize)]
++#[serde(tag = "result", rename_all = "kebab-case")]
++pub enum ContainerResponse {
++    Pong,
++    Created { pid: u32 },
++    Started { pid: u32 },
++    ExecStarted { pid: u32 },
++    State {
++        id: String,
++        #[serde(default)]
++        exec_id: Option<String>,
++        status: ContainerStatus,
++        pid: u32,
++        #[serde(default)]
++        exit_code: Option<i32>,
++        #[serde(default)]
++        exited_at_unix_nano: Option<i128>,
++    },
++    Exited {
++        exit_code: i32,
++        exited_at_unix_nano: i128,
++    },
++    Killed,
++    Paused,
++    Resumed,
++    Deleted,
++    Error { message: String },
++}
++
++pub fn encode_line<T: Serialize>(value: &T) -> serde_json::Result<String> {
++    let mut out = serde_json::to_string(value)?;
++    out.push('\n');
++    Ok(out)
++}
++
++pub fn decode_line<T: for<'de> Deserialize<'de>>(line: &str) -> serde_json::Result<T> {
++    serde_json::from_str(line.trim_end())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn create_round_trip() {
++        let req = ContainerEnvelope {
++            token: Some("secret".into()),
++            request: ContainerRequest::Create {
++                id: "c1".into(),
++                config_json: "{\"ociVersion\":\"1.1.0\"}".into(),
++                io: ContainerIo {
++                    stdin: None,
++                    stdout: Some("/run/fluxvm/pod/io/c1.out".into()),
++                    stderr: Some("/run/fluxvm/pod/io/c1.err".into()),
++                    terminal: false,
++                },
++            },
++        };
++        let line = encode_line(&req).unwrap();
++        let back: ContainerEnvelope = decode_line(&line).unwrap();
++        assert_eq!(back.token.as_deref(), Some("secret"));
++        assert!(matches!(back.request, ContainerRequest::Create { .. }));
++    }
++
++    #[test]
++    fn state_response_round_trip() {
++        let resp = ContainerResponse::State {
++            id: "c1".into(),
++            exec_id: None,
++            status: ContainerStatus::Running,
++            pid: 42,
++            exit_code: None,
++            exited_at_unix_nano: None,
++        };
++        let line = encode_line(&resp).unwrap();
++        let back: ContainerResponse = decode_line(&line).unwrap();
++        assert!(matches!(back, ContainerResponse::State { pid: 42, .. }));
++    }
++}
+diff --git a/crates/fluxvm-containerd-shim/Cargo.toml b/crates/fluxvm-containerd-shim/Cargo.toml
+new file mode 100644
+index 0000000..1f4b94b
+--- /dev/null
++++ b/crates/fluxvm-containerd-shim/Cargo.toml
+@@ -0,0 +1,31 @@
++# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++# SPDX-License-Identifier: Apache-2.0
++
++[package]
++name = "fluxvm-containerd-shim"
++version = "0.1.0"
++edition = "2024"
++license = "Apache-2.0"
++description = "containerd runtime-v2 shim for FluxVM VM-isolated containers"
++
++[[bin]]
++name = "containerd-shim-fluxvm-v2"
++path = "src/main.rs"
++
++[dependencies]
++anyhow = "1"
++async-trait = "0.1"
++base64 = "0.22"
++containerd-shim = { version = "0.11", features = ["async"] }
++containerd-shim-protos = { version = "0.11", features = ["async"] }
++libc = "0.2"
++log = "0.4"
++reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
++serde = { version = "1", features = ["derive"] }
++serde_json = "1"
++tokio = { version = "1", features = ["full"] }
++fluxvm-core = { path = "../fluxvm-core" }
++fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
++fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
++fluxvm-container-protocol = { path = "../fluxvm-container-protocol" }
++fluxvm-container-client = { path = "../fluxvm-container-client" }
+diff --git a/crates/fluxvm-containerd-shim/src/main.rs b/crates/fluxvm-containerd-shim/src/main.rs
+new file mode 100644
+index 0000000..832eb56
+--- /dev/null
++++ b/crates/fluxvm-containerd-shim/src/main.rs
+@@ -0,0 +1,600 @@
++// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
++// SPDX-License-Identifier: Apache-2.0
++
++//! containerd runtime-v2 shim for FluxVM secure containers.
++//!
++//! v0.1 contract:
++//! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
++//! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
++//! * bind mounts (ConfigMap/Secret/etc.) are snapshotted into that share;
++//! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK;
++//! * no host kernel is shared with the workload.
++//!
++//! The copy/snapshot approach is intentionally conservative. It gives a
++//! deterministic first implementation without requiring dynamic virtiofs
++//! hotplug. PVC write-through, CNI plumbing, TTY and full OCI security parity
++//! are documented follow-ups rather than silently pretending to work.
++
++use anyhow::{Context, Result as AnyResult, bail};
++use async_trait::async_trait;
++use base64::{Engine, engine::general_purpose::STANDARD as B64};
++use containerd_shim::{
++    Config, Error, Flags, StartOpts, TtrpcResult,
++    api::{
++        CreateTaskRequest, CreateTaskResponse, DeleteRequest, Empty, ExecProcessRequest,
++        KillRequest, PauseRequest, ResumeRequest, ShutdownRequest, StartRequest, StartResponse,
++        StateRequest, StateResponse, Status, WaitRequest, WaitResponse,
++    },
++    asynchronous::{ExitSignal, Shim, run, spawn},
++    publisher::RemotePublisher,
++};
++use containerd_shim_protos::{
++    api::{CloseIORequest, ConnectRequest, ConnectResponse, DeleteResponse, PidsRequest, PidsResponse,
++          ResizePtyRequest, StatsRequest, StatsResponse, UpdateTaskRequest},
++    protobuf::EnumOrUnknown,
++    shim_async::Task,
++    ttrpc::{self, r#async::TtrpcContext},
++};
++use fluxvm_container_protocol::{ContainerIo, ContainerRequest, ContainerResponse, ContainerStatus};
++use fluxvm_core::model::{VmRecord, VmStatus};
++use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
++use log::warn;
++use reqwest::{Client, Method};
++use serde::Deserialize;
++use serde_json::{Value, json};
++use std::{
++    collections::HashMap,
++    path::{Path, PathBuf},
++    sync::Arc,
++    time::Duration,
++};
++use tokio::{io::{AsyncReadExt, AsyncWriteExt}, sync::{Mutex, RwLock}};
++
++const RUNTIME_ID: &str = "io.containerd.fluxvm.v2";
++const GUEST_SHARE: &str = "/run/fluxvm/pod";
++
++#[derive(Clone, Debug, Deserialize)]
++#[serde(default)]
++struct RuntimeConfig {
++    api_url: String,
++    api_token: Option<String>,
++    guest_image: PathBuf,
++    container_agent_binary: PathBuf,
++    state_dir: PathBuf,
++    vcpus: u8,
++    memory_mib: u64,
++    boot_timeout_secs: u64,
++}
++
++impl Default for RuntimeConfig {
++    fn default() -> Self {
++        Self {
++            api_url: std::env::var("FLUXVM_API_URL").unwrap_or_else(|_| "http://127.0.0.1:7788".into()),
++            api_token: std::env::var("FLUXVM_API_TOKEN").ok(),
++            guest_image: std::env::var_os("FLUXVM_CONTAINER_GUEST_IMAGE")
++                .map(PathBuf::from)
++                .unwrap_or_else(|| PathBuf::from("/var/lib/fluxvm/images/secure-container.qcow2")),
++            container_agent_binary: std::env::var_os("FLUXVM_CONTAINER_AGENT_BINARY")
++                .map(PathBuf::from)
++                .unwrap_or_else(|| PathBuf::from("/usr/local/libexec/fluxvm-container-agent")),
++            state_dir: std::env::var_os("FLUXVM_CONTAINERD_STATE_DIR")
++                .map(PathBuf::from)
++                .unwrap_or_else(|| PathBuf::from("/run/fluxvm/containerd")),
++            vcpus: std::env::var("FLUXVM_CONTAINER_VCPUS").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
++            memory_mib: std::env::var("FLUXVM_CONTAINER_MEMORY_MIB").ok().and_then(|v| v.parse().ok()).unwrap_or(1024),
++            boot_timeout_secs: std::env::var("FLUXVM_CONTAINER_BOOT_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
++        }
++    }
++}
++
++#[derive(Clone, Debug)]
++struct TaskMeta {
++    bundle: String,
++    stdin: String,
++    stdout: String,
++    stderr: String,
++    terminal: bool,
++    pid: u32,
++}
++
++#[derive(Debug)]
++struct Sandbox {
++    vm: VmRecord,
++    share_dir: PathBuf,
++}
++
++#[derive(Clone)]
++struct Service {
++    exit: Arc<ExitSignal>,
++    namespace: String,
++    group: String,
++    cfg: RuntimeConfig,
++    http: Client,
++    sandbox: Arc<Mutex<Option<Sandbox>>>,
++    tasks: Arc<RwLock<HashMap<String, TaskMeta>>>,
++}
++
++#[async_trait]
++impl Shim for Service {
++    type T = Service;
++
++    async fn new(_runtime_id: &str, args: &Flags, _config: &mut Config) -> Self {
++        let group = pod_group_from_bundle(&args.bundle).await.unwrap_or_else(|| args.id.clone());
++        Self {
++            exit: Arc::new(ExitSignal::default()),
++            namespace: args.namespace.clone(),
++            group,
++            cfg: RuntimeConfig::default(),
++            http: Client::new(),
++            sandbox: Arc::new(Mutex::new(None)),
++            tasks: Arc::new(RwLock::new(HashMap::new())),
++        }
++    }
++
++    async fn start_shim(&mut self, opts: StartOpts) -> Result<String, Error> {
++        let address = spawn(opts, &self.group, Vec::new()).await?;
++        Ok(address)
++    }
++
++    async fn delete_shim(&mut self) -> Result<DeleteResponse, Error> {
++        let _ = self.destroy_sandbox().await;
++        Ok(DeleteResponse::new())
++    }
++
++    async fn wait(&mut self) {
++        self.exit.wait().await;
++    }
++
++    async fn create_task_service(&self, _publisher: RemotePublisher) -> Self::T {
++        self.clone()
++    }
++}
++
++impl Service {
++    async fn api(&self, method: Method, path: &str, body: Option<Value>) -> AnyResult<reqwest::Response> {
++        let url = format!("{}{}", self.cfg.api_url.trim_end_matches('/'), path);
++        let mut req = self.http.request(method, &url);
++        if let Some(token) = &self.cfg.api_token { req = req.bearer_auth(token); }
++        if let Some(body) = body { req = req.json(&body); }
++        let resp = req.send().await.with_context(|| format!("calling FluxVM {url}"))?;
++        if !resp.status().is_success() {
++            let status = resp.status();
++            let text = resp.text().await.unwrap_or_default();
++            bail!("FluxVM API {url} returned {status}: {text}");
++        }
++        Ok(resp)
++    }
++
++    async fn ensure_sandbox(&self) -> AnyResult<VmRecord> {
++        let mut guard = self.sandbox.lock().await;
++        if let Some(s) = guard.as_ref() { return Ok(s.vm.clone()); }
++
++        if !self.cfg.guest_image.exists() {
++            bail!("secure-container guest image does not exist: {}", self.cfg.guest_image.display());
++        }
++        if !self.cfg.container_agent_binary.exists() {
++            bail!("fluxvm-container-agent binary does not exist: {}", self.cfg.container_agent_binary.display());
++        }
++        let share_dir = self.cfg.state_dir.join(&self.namespace).join(&self.group).join("share");
++        tokio::fs::create_dir_all(&share_dir).await?;
++        let create = json!({
++            "name": format!("ctr-{}", safe_name(&self.group)),
++            "backend": "qemu",
++            "image": self.cfg.guest_image,
++            "vcpus": self.cfg.vcpus,
++            "memory_mib": self.cfg.memory_mib,
++            "network": {"mode": "user", "forwards": []},
++            "cloud_init": {},
++            "agent": {"enabled": true},
++            "shared_folders": [{
++                "host_path": share_dir,
++                "guest_path": GUEST_SHARE,
++                "read_only": false
++            }]
++        });
++        let mut vm: VmRecord = self.api(Method::POST, "/v1/vms", Some(create)).await?.json().await?;
++        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.cfg.boot_timeout_secs);
++        loop {
++            if vm.status == VmStatus::Running && fluxvm_vsock_client::ping(&vm, Duration::from_secs(2)).await.is_ok() {
++                break;
++            }
++            if vm.status == VmStatus::Failed {
++                bail!("FluxVM sandbox failed: {}", vm.error.as_deref().unwrap_or("unknown error"));
++            }
++            if tokio::time::Instant::now() >= deadline {
++                bail!("timed out waiting for FluxVM sandbox {}", vm.id);
++            }
++            tokio::time::sleep(Duration::from_millis(250)).await;
++            vm = self.api(Method::GET, &format!("/v1/vms/{}", vm.id), None).await?.json().await?;
++        }
++        self.bootstrap_container_agent(&vm).await?;
++        *guard = Some(Sandbox { vm: vm.clone(), share_dir });
++        Ok(vm)
++    }
++
++    async fn bootstrap_container_agent(&self, vm: &VmRecord) -> AnyResult<()> {
++        if fluxvm_container_client::ping(vm, Duration::from_millis(300)).await.is_ok() {
++            return Ok(());
++        }
++        let bytes = tokio::fs::read(&self.cfg.container_agent_binary).await?;
++        if bytes.len() > fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES {
++            bail!("container-agent binary is larger than FluxVM guest-agent transfer limit");
++        }
++        match fluxvm_vsock_client::call(
++            vm,
++            AgentRequest::PutFile {
++                path: "/usr/local/bin/fluxvm-container-agent".into(),
++                content_base64: B64.encode(bytes),
++                mode: Some(0o755),
++            },
++            Duration::from_secs(20),
++        ).await? {
++            AgentResponse::FileWritten => {}
++            AgentResponse::Error { message } => bail!("installing container agent: {message}"),
++            other => bail!("unexpected guest-agent response: {other:?}"),
++        }
++        match fluxvm_vsock_client::call(
++            vm,
++            AgentRequest::Exec {
++                command: "nohup /usr/local/bin/fluxvm-container-agent >/var/log/fluxvm-container-agent.log 2>&1 </dev/null &".into(),
++                timeout_seconds: Some(5),
++            },
++            Duration::from_secs(10),
++        ).await? {
++            AgentResponse::Exec { exit_code: 0, .. } => {}
++            AgentResponse::Error { message } => bail!("starting container agent: {message}"),
++            other => bail!("starting container agent returned {other:?}"),
++        }
++        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
++        loop {
++            if fluxvm_container_client::ping(vm, Duration::from_millis(500)).await.is_ok() { return Ok(()); }
++            if tokio::time::Instant::now() >= deadline { bail!("container agent did not become ready"); }
++            tokio::time::sleep(Duration::from_millis(100)).await;
++        }
++    }
++
++    async fn sandbox_paths(&self, id: &str) -> AnyResult<(VmRecord, PathBuf, String)> {
++        let vm = self.ensure_sandbox().await?;
++        let guard = self.sandbox.lock().await;
++        let sandbox = guard.as_ref().context("sandbox disappeared")?;
++        let host = sandbox.share_dir.join("containers").join(safe_name(id));
++        let guest = format!("{GUEST_SHARE}/containers/{}", safe_name(id));
++        Ok((vm, host, guest))
++    }
++
++    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo)> {
++        let (vm, host_ctr, guest_ctr) = self.sandbox_paths(&req.id).await?;
++        let rootfs = host_ctr.join("rootfs");
++        let mountpoint = self.cfg.state_dir.join(&self.namespace).join(&self.group).join("mounts").join(safe_name(&req.id));
++        tokio::fs::create_dir_all(&rootfs).await?;
++        tokio::fs::create_dir_all(&mountpoint).await?;
++        for m in &req.rootfs {
++            containerd_shim::asynchronous::util::mount_rootfs(m, &mountpoint)
++                .await
++                .map_err(|e| anyhow::anyhow!("mounting containerd rootfs: {e}"))?;
++        }
++        let copy_result = copy_contents(&mountpoint, &rootfs).await;
++        let _ = tokio::process::Command::new("umount").args(["-l", mountpoint.to_string_lossy().as_ref()]).status().await;
++        copy_result?;
++
++        let config_path = Path::new(&req.bundle).join("config.json");
++        let text = tokio::fs::read_to_string(&config_path).await.with_context(|| format!("reading {}", config_path.display()))?;
++        let mut spec: Value = serde_json::from_str(&text)?;
++        spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
++        stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr).await?;
++        let io = self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await?;
++        Ok((vm, serde_json::to_string(&spec)?, io))
++    }
++
++    async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<ContainerIo> {
++        if terminal { bail!("TTY containers are not supported by secure-containers v0.1"); }
++        let io_dir = host_ctr.join("io");
++        tokio::fs::create_dir_all(&io_dir).await?;
++        let mut guest = ContainerIo::default();
++        if !stdout.is_empty() {
++            let p = io_dir.join("stdout.fifo"); mkfifo(&p)?;
++            guest.stdout = Some(format!("{guest_ctr}/io/stdout.fifo"));
++            spawn_fifo_to_fifo(p, PathBuf::from(stdout), format!("{id}:stdout"));
++        }
++        if !stderr.is_empty() {
++            let p = io_dir.join("stderr.fifo"); mkfifo(&p)?;
++            guest.stderr = Some(format!("{guest_ctr}/io/stderr.fifo"));
++            spawn_fifo_to_fifo(p, PathBuf::from(stderr), format!("{id}:stderr"));
++        }
++        if !stdin.is_empty() {
++            let p = io_dir.join("stdin.fifo"); mkfifo(&p)?;
++            guest.stdin = Some(format!("{guest_ctr}/io/stdin.fifo"));
++            spawn_fifo_to_fifo(PathBuf::from(stdin), p, format!("{id}:stdin"));
++        }
++        Ok(guest)
++    }
++
++    async fn call_agent(&self, vm: &VmRecord, req: ContainerRequest) -> AnyResult<ContainerResponse> {
++        match fluxvm_container_client::call(vm, req, Duration::from_secs(60)).await? {
++            ContainerResponse::Error { message } => bail!("guest container-agent: {message}"),
++            response => Ok(response),
++        }
++    }
++
++    async fn destroy_sandbox(&self) -> AnyResult<()> {
++        let mut guard = self.sandbox.lock().await;
++        if let Some(s) = guard.take() {
++            let _ = self.api(Method::DELETE, &format!("/v1/vms/{}", s.vm.id), None).await;
++            let root = self.cfg.state_dir.join(&self.namespace).join(&self.group);
++            let _ = tokio::fs::remove_dir_all(root).await;
++        }
++        Ok(())
++    }
++}
++
++#[async_trait]
++impl Task for Service {
++    async fn create(&self, _ctx: &TtrpcContext, req: CreateTaskRequest) -> TtrpcResult<CreateTaskResponse> {
++        let (vm, config_json, io) = self.stage_rootfs_and_config(&req).await.map_err(rpc_other)?;
++        let response = self.call_agent(&vm, ContainerRequest::Create { id: req.id.clone(), config_json, io }).await.map_err(rpc_other)?;
++        let pid = match response { ContainerResponse::Created { pid } => pid, other => return Err(rpc_other(format!("unexpected create response: {other:?}"))) };
++        self.tasks.write().await.insert(req.id.clone(), TaskMeta {
++            bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
++        });
++        Ok(CreateTaskResponse { pid, ..Default::default() })
++    }
++
++    async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> TtrpcResult<StartResponse> {
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
++        let response = self.call_agent(&vm, ContainerRequest::Start { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
++        let pid = match response { ContainerResponse::Started { pid } => pid, other => return Err(rpc_other(format!("unexpected start response: {other:?}"))) };
++        Ok(StartResponse { pid, ..Default::default() })
++    }
++
++    async fn state(&self, _ctx: &TtrpcContext, req: StateRequest) -> TtrpcResult<StateResponse> {
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
++        let response = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
++        let (status, pid, exit_code, exited_at) = match response {
++            ContainerResponse::State { status, pid, exit_code, exited_at_unix_nano, .. } => (status, pid, exit_code, exited_at_unix_nano),
++            other => return Err(rpc_other(format!("unexpected state response: {other:?}"))),
++        };
++        let meta = self.tasks.read().await.get(&req.id).cloned();
++        let mut out = StateResponse {
++            id: req.id,
++            bundle: meta.as_ref().map(|m| m.bundle.clone()).unwrap_or_default(),
++            pid,
++            status: EnumOrUnknown::new(map_status(status)),
++            stdin: meta.as_ref().map(|m| m.stdin.clone()).unwrap_or_default(),
++            stdout: meta.as_ref().map(|m| m.stdout.clone()).unwrap_or_default(),
++            stderr: meta.as_ref().map(|m| m.stderr.clone()).unwrap_or_default(),
++            terminal: meta.as_ref().is_some_and(|m| m.terminal),
++            exit_status: exit_code.unwrap_or_default() as u32,
++            ..Default::default()
++        };
++        if let Some(ns) = exited_at { out.exited_at = Some(timestamp_from_nanos(ns)).into(); }
++        Ok(out)
++    }
++
++    async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> TtrpcResult<WaitResponse> {
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
++        let response = self.call_agent(&vm, ContainerRequest::Wait { id: req.id, exec_id }).await.map_err(rpc_other)?;
++        match response {
++            ContainerResponse::Exited { exit_code, exited_at_unix_nano } => {
++                let mut out = WaitResponse::new();
++                out.exit_status = exit_code as u32;
++                out.exited_at = Some(timestamp_from_nanos(exited_at_unix_nano)).into();
++                Ok(out)
++            }
++            other => Err(rpc_other(format!("unexpected wait response: {other:?}"))),
++        }
++    }
++
++    async fn kill(&self, _ctx: &TtrpcContext, req: KillRequest) -> TtrpcResult<Empty> {
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id) };
++        self.call_agent(&vm, ContainerRequest::Kill { id: req.id, exec_id, signal: req.signal as i32, all: req.all }).await.map_err(rpc_other)?;
++        Ok(Empty::new())
++    }
++
++    async fn pause(&self, _ctx: &TtrpcContext, req: PauseRequest) -> TtrpcResult<Empty> {
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        self.call_agent(&vm, ContainerRequest::Pause { id: req.id }).await.map_err(rpc_other)?;
++        Ok(Empty::new())
++    }
++
++    async fn resume(&self, _ctx: &TtrpcContext, req: ResumeRequest) -> TtrpcResult<Empty> {
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        self.call_agent(&vm, ContainerRequest::Resume { id: req.id }).await.map_err(rpc_other)?;
++        Ok(Empty::new())
++    }
++
++    async fn delete(&self, _ctx: &TtrpcContext, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
++        let state = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id: exec_id.clone() }).await.ok();
++        let _ = self.call_agent(&vm, ContainerRequest::Delete { id: req.id.clone(), exec_id: exec_id.clone(), force: true }).await;
++        if exec_id.is_none() { self.tasks.write().await.remove(&req.id); }
++        let (pid, code, ns) = match state {
++            Some(ContainerResponse::State { pid, exit_code, exited_at_unix_nano, .. }) => (pid, exit_code.unwrap_or(0), exited_at_unix_nano.unwrap_or(0)),
++            _ => (0, 0, 0),
++        };
++        let mut out = DeleteResponse::new();
++        out.pid = pid;
++        out.exit_status = code as u32;
++        if ns > 0 { out.exited_at = Some(timestamp_from_nanos(ns)).into(); }
++        Ok(out)
++    }
++
++    async fn exec(&self, _ctx: &TtrpcContext, req: ExecProcessRequest) -> TtrpcResult<Empty> {
++        if req.terminal { return Err(rpc_unimplemented("TTY exec is not supported by secure-containers v0.1")); }
++        let vm = self.ensure_sandbox().await.map_err(rpc_other)?;
++        let bytes = req.spec.as_ref().map(|a| a.value.clone()).unwrap_or_default();
++        if bytes.is_empty() { return Err(rpc_invalid("ExecProcessRequest.spec is empty")); }
++        let process_json = String::from_utf8(bytes).map_err(|e| rpc_invalid(e.to_string()))?;
++        let (_, host_ctr, guest_ctr) = self.sandbox_paths(&req.id).await.map_err(rpc_other)?;
++        let io = self.prepare_io(&format!("{}-{}", req.id, req.exec_id), &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
++        self.call_agent(&vm, ContainerRequest::Exec { id: req.id, exec_id: req.exec_id, process_json, io }).await.map_err(rpc_other)?;
++        Ok(Empty::new())
++    }
++
++    async fn connect(&self, _ctx: &TtrpcContext, req: ConnectRequest) -> TtrpcResult<ConnectResponse> {
++        let pid = self.tasks.read().await.get(&req.id).map(|m| m.pid).unwrap_or(0);
++        Ok(ConnectResponse { shim_pid: std::process::id(), task_pid: pid, version: env!("CARGO_PKG_VERSION").into(), ..Default::default() })
++    }
++
++    async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> TtrpcResult<Empty> {
++        if self.tasks.read().await.is_empty() {
++            let _ = self.destroy_sandbox().await;
++            self.exit.signal();
++        }
++        Ok(Empty::new())
++    }
++
++    async fn resize_pty(&self, _ctx: &TtrpcContext, _req: ResizePtyRequest) -> TtrpcResult<Empty> { Err(rpc_unimplemented("TTY is not supported")) }
++    async fn close_io(&self, _ctx: &TtrpcContext, _req: CloseIORequest) -> TtrpcResult<Empty> { Ok(Empty::new()) }
++    async fn pids(&self, _ctx: &TtrpcContext, _req: PidsRequest) -> TtrpcResult<PidsResponse> { Ok(PidsResponse::new()) }
++    async fn stats(&self, _ctx: &TtrpcContext, _req: StatsRequest) -> TtrpcResult<StatsResponse> { Err(rpc_unimplemented("container stats are not implemented in v0.1")) }
++    async fn update(&self, _ctx: &TtrpcContext, _req: UpdateTaskRequest) -> TtrpcResult<Empty> { Err(rpc_unimplemented("live container resource updates are not implemented in v0.1")) }
++}
++
++fn map_status(status: ContainerStatus) -> Status {
++    match status {
++        ContainerStatus::Created => Status::CREATED,
++        ContainerStatus::Running => Status::RUNNING,
++        ContainerStatus::Paused => Status::PAUSED,
++        ContainerStatus::Stopped => Status::STOPPED,
++    }
++}
++
++fn timestamp_from_nanos(ns: i128) -> containerd_shim_protos::protobuf::well_known_types::timestamp::Timestamp {
++    let mut ts = containerd_shim_protos::protobuf::well_known_types::timestamp::Timestamp::new();
++    ts.seconds = ns.div_euclid(1_000_000_000) as i64;
++    ts.nanos = ns.rem_euclid(1_000_000_000) as i32;
++    ts
++}
++
++fn rpc_status(code: ttrpc::Code, message: impl Into<String>) -> ttrpc::Error {
++    ttrpc::Error::RpcStatus(ttrpc::get_status(code, message.into()))
++}
++fn rpc_other(e: impl std::fmt::Display) -> ttrpc::Error { rpc_status(ttrpc::Code::UNKNOWN, e.to_string()) }
++fn rpc_invalid(e: impl Into<String>) -> ttrpc::Error { rpc_status(ttrpc::Code::INVALID_ARGUMENT, e) }
++fn rpc_unimplemented(e: impl Into<String>) -> ttrpc::Error { rpc_status(ttrpc::Code::UNIMPLEMENTED, e) }
++
++async fn pod_group_from_bundle(bundle: &str) -> Option<String> {
++    if bundle.is_empty() { return None; }
++    let text = tokio::fs::read_to_string(Path::new(bundle).join("config.json")).await.ok()?;
++    let v: Value = serde_json::from_str(&text).ok()?;
++    let ann = v.get("annotations")?.as_object()?;
++    for key in ["io.containerd.runc.v2.group", "io.kubernetes.cri.sandbox-id"] {
++        if let Some(group) = ann.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()) {
++            return Some(group.to_string());
++        }
++    }
++    None
++}
++
++fn safe_name(s: &str) -> String {
++    let mut out: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' }).collect();
++    if out.len() > 63 { out.truncate(63); }
++    if out.is_empty() { "sandbox".into() } else { out }
++}
++
++async fn copy_contents(src: &Path, dst: &Path) -> AnyResult<()> {
++    let status = tokio::process::Command::new("cp")
++        .arg("-a")
++        .arg("--reflink=auto")
++        .arg(src.join("."))
++        .arg(dst)
++        .status().await.context("running cp for container rootfs")?;
++    if !status.success() { bail!("copying container rootfs failed with {status}"); }
++    Ok(())
++}
++
++async fn stage_bind_mounts(spec: &mut Value, host_ctr: &Path, guest_ctr: &str) -> AnyResult<()> {
++    let Some(mounts) = spec.get_mut("mounts").and_then(Value::as_array_mut) else { return Ok(()); };
++    for (idx, mount) in mounts.iter_mut().enumerate() {
++        let is_bind = mount.get("type").and_then(Value::as_str) == Some("bind")
++            || mount.get("options").and_then(Value::as_array).is_some_and(|o| o.iter().any(|v| v.as_str() == Some("bind") || v.as_str() == Some("rbind")));
++        if !is_bind { continue; }
++        let Some(source) = mount.get("source").and_then(Value::as_str).map(str::to_string) else { continue; };
++        let source_path = PathBuf::from(&source);
++        if !source_path.exists() { continue; }
++        let host = host_ctr.join("mounts").join(idx.to_string());
++        if source_path.is_dir() {
++            tokio::fs::create_dir_all(&host).await?;
++            copy_contents(&source_path, &host).await?;
++        } else {
++            if let Some(parent) = host.parent() { tokio::fs::create_dir_all(parent).await?; }
++            tokio::fs::copy(&source_path, &host).await?;
++        }
++        mount["source"] = Value::String(format!("{guest_ctr}/mounts/{idx}"));
++    }
++    Ok(())
++}
++
++fn mkfifo(path: &Path) -> AnyResult<()> {
++    if path.exists() { let _ = std::fs::remove_file(path); }
++    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?;
++    if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
++        bail!("mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
++    }
++    Ok(())
++}
++
++fn spawn_fifo_to_fifo(source: PathBuf, destination: PathBuf, label: String) {
++    tokio::spawn(async move {
++        let result: AnyResult<()> = async {
++            let mut src = tokio::fs::OpenOptions::new().read(true).open(&source).await
++                .with_context(|| format!("opening relay source {}", source.display()))?;
++            let mut dst = tokio::fs::OpenOptions::new().write(true).open(&destination).await
++                .with_context(|| format!("opening relay destination {}", destination.display()))?;
++            let mut buf = [0u8; 32 * 1024];
++            loop {
++                let n = src.read(&mut buf).await?;
++                if n == 0 { break; }
++                dst.write_all(&buf[..n]).await?;
++                dst.flush().await?;
++            }
++            Ok(())
++        }.await;
++        if let Err(e) = result { warn!("stdio relay {label} stopped: {e:#}"); }
++    });
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn safe_names_are_filesystem_safe() {
++        assert_eq!(safe_name("pod/one:abc"), "pod-one-abc");
++        assert_eq!(safe_name(""), "sandbox");
++    }
++
++    #[tokio::test]
++    async fn grouping_reads_kubernetes_sandbox_annotation() {
++        let td = std::env::temp_dir().join(format!("fluxvm-shim-test-{}", std::process::id()));
++        let _ = tokio::fs::remove_dir_all(&td).await;
++        tokio::fs::create_dir_all(&td).await.unwrap();
++        tokio::fs::write(td.join("config.json"), r#"{"annotations":{"io.kubernetes.cri.sandbox-id":"pod123"}}"#).await.unwrap();
++        assert_eq!(pod_group_from_bundle(td.to_str().unwrap()).await.as_deref(), Some("pod123"));
++        let _ = tokio::fs::remove_dir_all(td).await;
++    }
++
++    #[tokio::test]
++    async fn stages_bind_mount_source() {
++        let td = std::env::temp_dir().join(format!("fluxvm-bind-test-{}", std::process::id()));
++        let _ = tokio::fs::remove_dir_all(&td).await;
++        tokio::fs::create_dir_all(&td).await.unwrap();
++        let source = td.join("source");
++        tokio::fs::write(&source, "hello").await.unwrap();
++        let mut spec = json!({"mounts":[{"type":"bind","source":source,"destination":"/etc/x","options":["bind","ro"]}]});
++        stage_bind_mounts(&mut spec, &td.join("ctr"), "/run/fluxvm/pod/containers/c").await.unwrap();
++        assert_eq!(spec["mounts"][0]["source"], "/run/fluxvm/pod/containers/c/mounts/0");
++        assert_eq!(tokio::fs::read_to_string(td.join("ctr/mounts/0")).await.unwrap(), "hello");
++        let _ = tokio::fs::remove_dir_all(td).await;
++    }
++}
++
++#[tokio::main]
++async fn main() {
++    run::<Service>(RUNTIME_ID, None).await;
++}
+diff --git a/deploy/containerd/README.md b/deploy/containerd/README.md
+new file mode 100644
+index 0000000..7420c6b
+--- /dev/null
++++ b/deploy/containerd/README.md
+@@ -0,0 +1,13 @@
++# FluxVM containerd runtime v2
++
++Runtime id: `io.containerd.fluxvm.v2`  
++Shim binary: `containerd-shim-fluxvm-v2`  
++Kubernetes RuntimeClass handler: `fluxvm`
++
++`fluxvm-runtime.toml` is a merge fragment, not a complete containerd config.
++Use `scripts/install-secure-containers.sh` to install the host binaries, then
++merge the runtime fragment and restart containerd.
++
++> v0.1 is a developer-preview runtime. QEMU/virtiofs process isolation works;
++> Kubernetes CNI/PVC write-through and TTY are explicit follow-up gates. Do
++> not advertise this RuntimeClass as Kata-compatible production networking yet.
+diff --git a/deploy/containerd/fluxvm-runtime.toml b/deploy/containerd/fluxvm-runtime.toml
+new file mode 100644
+index 0000000..184d088
+--- /dev/null
++++ b/deploy/containerd/fluxvm-runtime.toml
+@@ -0,0 +1,9 @@
++# Merge into /etc/containerd/config.toml (containerd 1.x/CRI plugin layout).
++# Restart containerd after changing the configuration.
++
++[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm]
++  runtime_type = "io.containerd.fluxvm.v2"
++  privileged_without_host_devices = false
++
++[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm.options]
++  BinaryName = "containerd-shim-fluxvm-v2"
+diff --git a/deploy/containerd/runtimeclass.yaml b/deploy/containerd/runtimeclass.yaml
+new file mode 100644
+index 0000000..71e48a9
+--- /dev/null
++++ b/deploy/containerd/runtimeclass.yaml
+@@ -0,0 +1,5 @@
++apiVersion: node.k8s.io/v1
++kind: RuntimeClass
++metadata:
++  name: fluxvm
++handler: fluxvm
+diff --git a/deploy/containerd/smoke-pod.yaml b/deploy/containerd/smoke-pod.yaml
+new file mode 100644
+index 0000000..d78d5f3
+--- /dev/null
++++ b/deploy/containerd/smoke-pod.yaml
+@@ -0,0 +1,11 @@
++apiVersion: v1
++kind: Pod
++metadata:
++  name: fluxvm-secure-container-smoke
++spec:
++  runtimeClassName: fluxvm
++  restartPolicy: Never
++  containers:
++    - name: smoke
++      image: docker.io/library/busybox:1.36
++      command: ["/bin/sh", "-c", "echo secure-container-started; sleep 3; echo secure-container-done"]
+diff --git a/docs/secure-containers.md b/docs/secure-containers.md
+new file mode 100644
+index 0000000..1bf023d
+--- /dev/null
++++ b/docs/secure-containers.md
+@@ -0,0 +1,157 @@
++# FluxVM Secure Containers — containerd runtime v2
++
++FluxVM Secure Containers is the first container-runtime layer on top of the
++existing FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support.
++The goal is the same security shape users expect from Kata Containers: a Pod
++or container group gets its own guest kernel instead of sharing the node's
++host kernel.
++
++## Architecture
++
++```text
++Kubernetes / ctr
++      |
++ containerd CRI
++      |
++containerd-shim-fluxvm-v2
++      |
++      +---- FluxVM REST API ----> QEMU/KVM microVM
++      |                              |
++      |                              +-- virtiofs Pod share
++      |                              +-- fluxvm-guest-agent :17777
++      |                              +-- fluxvm-container-agent :17778
++      |                                         |
++      +---------------- VSOCK ------------------+
++                                                |
++                                      OCI processes in guest
++```
++
++The shim groups tasks using the same annotations containerd uses for a
++Kubernetes Pod (`io.containerd.runc.v2.group` first, then
++`io.kubernetes.cri.sandbox-id`). The first task creates one QEMU FluxVM with a
++Pod-scoped virtiofs directory. Later tasks in the group reuse the same VM.
++
++## Why a separate container agent?
++
++FluxVM's existing `fluxvm-guest-agent` is a stable VM-management interface for
++ping, command execution, file transfer, console and shutdown. Secure
++Containers does not expand that stable protocol. Instead the shim uploads a
++small `fluxvm-container-agent` into the guest through the existing authenticated
++agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
++
++That makes the feature removable and independently versionable while reusing
++the VM's existing per-instance authentication token.
++
++## Implemented in v0.1
++
++- containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
++- one shim group -> one FluxVM QEMU VM
++- Kubernetes Pod grouping annotation recognition
++- authenticated VSOCK container protocol
++- OCI process lifecycle: create, start, state, wait, kill, pause, resume, delete
++- exec lifecycle (non-TTY)
++- uid/gid, cwd, argv and environment inside a chrooted container rootfs
++- containerd snapshot rootfs staging into the VM-visible virtiofs share
++- bind-mount snapshot staging for ConfigMap/Secret-style inputs
++- stdin/stdout/stderr FIFO relay
++- FluxVM guest-agent bootstrap of the dedicated container agent
++- RuntimeClass and containerd configuration examples
++- unit tests for protocol, OCI parsing, grouping and mount staging
++- a dedicated GitHub Actions build/test/clippy gate
++
++## Explicit v0.1 limitations
++
++This PR is a **developer-preview foundation**, not a claim of full Kata
++Containers compatibility.
++
++1. **QEMU only.** FluxVM currently implements `SharedFolder`/virtiofs on QEMU.
++   Cloud Hypervisor and Firecracker need equivalent shared-rootfs plumbing
++   before they can be enabled safely.
++2. **Kubernetes CNI is not yet wired into the guest.** The VM currently uses
++   FluxVM user-mode networking. A RuntimeClass manifest is included to lock the
++   intended API, but production Kubernetes Pod networking is a follow-up gate.
++3. **PVC writes are not write-through.** Bind mounts are snapshotted into the
++   Pod share. This is correct for read-mostly ConfigMaps/Secrets but is not a
++   persistent-volume implementation.
++4. **TTY/resize is rejected**, not silently emulated.
++5. **OCI namespace/capability/seccomp/device/cgroup parity inside the guest is
++   incomplete.** The VM is the primary isolation boundary in v0.1.
++6. **Stats and live resource updates are not implemented** in the shim yet.
++
++These constraints are intentional: unsupported behavior returns an explicit
++error instead of appearing to work while weakening isolation or data
++correctness.
++
++## Next gates to production Kata-style Kubernetes support
++
++### P0 — Kubernetes networking
++
++Add a FluxVM external-netns/CNI network mode so the VMM TAP is launched into
++the CRI-created Pod network namespace, preserving the Pod IP and existing CNI
++(Cilium/Calico/etc.) semantics. This is the single most important next step.
++
++### P0 — volume model
++
++Add virtiofs hotplug or a stable shared-fs broker so CSI/PVC mounts can be
++passed through without copying. Enforce read-only/read-write semantics and
++propagation explicitly.
++
++### P0 — OCI hardening inside guest
++
++Implement namespaces, capabilities, seccomp, masked/readonly paths, rlimits,
++NoNewPrivileges, devices and guest cgroup v2. Add conformance fixtures from the
++OCI runtime spec.
++
++### P1 — observability and resources
++
++Map containerd stats to guest cgroup metrics, translate Kubernetes resource
++updates, and export per-sandbox eBPF flow identity through FluxVM Network
++Fabric.
++
++### P1 — performance
++
++Use FluxVM warm pools/snapshots so Pod VM startup can claim/resume a prepared
++sandbox instead of cold-booting every group.
++
++### P1 — additional VMMs
++
++Enable Cloud Hypervisor first, then a restricted Firecracker profile once their
++shared-rootfs and device models are integrated.
++
++## Installation
++
++```bash
++sudo ./scripts/install-secure-containers.sh
++```
++
++Set the guest image explicitly when needed:
++
++```bash
++export FLUXVM_CONTAINER_GUEST_IMAGE=/var/lib/fluxvm/images/secure-container.qcow2
++export FLUXVM_API_URL=http://127.0.0.1:7788
++# export FLUXVM_API_TOKEN=...   # if FluxVM API auth is enabled
++```
++
++Merge `deploy/containerd/fluxvm-runtime.toml` into containerd configuration,
++restart containerd, and install `deploy/containerd/runtimeclass.yaml` only on a
++development cluster until the CNI gate above lands.
++
++## Test levels
++
++### Level 1 — host-independent
++
++```bash
++./scripts/test-secure-containers.sh
++```
++
++This builds both binaries and runs all new unit tests.
++
++### Level 2 — KVM/containerd host
++
++Set `FLUXVM_SECURE_CONTAINERS_E2E=1`; the script validates KVM, containerd and
++FluxVM API prerequisites. A real smoke run then uses `ctr` or the provided Pod
++manifest after the runtime is installed.
++
++The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
++because ordinary hosted runners do not provide the nested virtualization and
++node configuration needed for an honest containerd+FluxVM test.
+diff --git a/scripts/install-secure-containers.sh b/scripts/install-secure-containers.sh
+new file mode 100755
+index 0000000..fbee568
+--- /dev/null
++++ b/scripts/install-secure-containers.sh
+@@ -0,0 +1,27 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++PREFIX="${PREFIX:-/usr/local}"
++CARGO="${CARGO:-cargo}"
++
++"$CARGO" build --release \
++  -p fluxvm-container-agent \
++  -p fluxvm-containerd-shim
++
++install -D -m 0755 target/release/containerd-shim-fluxvm-v2 \
++  "$PREFIX/bin/containerd-shim-fluxvm-v2"
++install -D -m 0755 target/release/fluxvm-container-agent \
++  "$PREFIX/libexec/fluxvm-container-agent"
++
++cat <<MSG
++Installed:
++  $PREFIX/bin/containerd-shim-fluxvm-v2
++  $PREFIX/libexec/fluxvm-container-agent
++
++Set FLUXVM_CONTAINER_GUEST_IMAGE to a bootable FluxVM QEMU image that contains
++and starts fluxvm-guest-agent, or place it at:
++  /var/lib/fluxvm/images/secure-container.qcow2
++
++FluxVM API default expected by the shim:
++  http://127.0.0.1:7788
++MSG
+diff --git a/scripts/test-secure-containers.sh b/scripts/test-secure-containers.sh
+new file mode 100755
+index 0000000..7022812
+--- /dev/null
++++ b/scripts/test-secure-containers.sh
+@@ -0,0 +1,20 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++cargo test -p fluxvm-container-protocol
++cargo test -p fluxvm-container-agent
++cargo test -p fluxvm-container-client
++cargo test -p fluxvm-containerd-shim
++cargo build --release -p fluxvm-container-agent -p fluxvm-containerd-shim
++
++# Optional host integration gate. It is intentionally opt-in because GitHub
++# hosted runners do not provide the KVM/containerd/FluxVM setup this needs.
++if [[ "${FLUXVM_SECURE_CONTAINERS_E2E:-0}" == "1" ]]; then
++  : "${FLUXVM_CONTAINER_GUEST_IMAGE:?set FLUXVM_CONTAINER_GUEST_IMAGE}"
++  command -v containerd >/dev/null
++  command -v ctr >/dev/null
++  test -e /dev/kvm
++  test -S /run/containerd/containerd.sock
++  curl -fsS "${FLUXVM_API_URL:-http://127.0.0.1:7788}/healthz" >/dev/null
++  echo "Host prerequisites are present. Run deploy/containerd/README.md smoke procedure."
++fi

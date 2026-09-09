@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fluxvm-secure-container-smoke
+spec:
+  runtimeClassName: fluxvm
+  restartPolicy: Never
+  containers:
+    - name: smoke
+      image: docker.io/library/busybox:1.36
+      command: ["/bin/sh", "-c", "echo secure-container-started; sleep 3; echo secure-container-done"]

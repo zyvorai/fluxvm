@@ -1,0 +1,9 @@
+# Merge into /etc/containerd/config.toml (containerd 1.x/CRI plugin layout).
+# Restart containerd after changing the configuration.
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm]
+  runtime_type = "io.containerd.fluxvm.v2"
+  privileged_without_host_devices = false
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm.options]
+  BinaryName = "containerd-shim-fluxvm-v2"
