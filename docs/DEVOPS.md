@@ -22,6 +22,9 @@ See [contracts/fabric-fluxvm-readyz.json](contracts/fabric-fluxvm-readyz.json).
 
 - PR: `.github/workflows/devops-gates.yml` (no KVM).
 - Image customize jobs already live in `.github/workflows/ci.yml`.
+- Secure Containers crates: `.github/workflows/secure-containers.yml`
+  (fmt, unit tests, release build, clippy) — see
+  [secure-containers.md](secure-containers.md).
 - Live KVM smoke stays on self-hosted runners (`scripts/test-boot-smoke.sh`, dataplane e2e).
 
 ## Lab verify

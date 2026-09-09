@@ -16,6 +16,7 @@ A standalone, minimal-dependency disposable-VM control plane — QEMU/KVM, Cloud
 | Network Fabric policy labs | [network-policy tutorials](../tutorials/network-policy/README.md) |
 | Service Fabric Maglev VIP | [service-fabric tutorial](../tutorials/service-fabric/README.md) · [operator](../service-fabric.md) |
 | MicroVM CRDs | [microvm tutorials](../tutorials/microvm/README.md) |
+| Secure Containers (containerd RuntimeClass, preview) | [secure-containers.md](../secure-containers.md) |
 | See what it's actually used for | [Use cases](use-cases.md) |
 | Full topic index | [PAGE_INDEX.md](PAGE_INDEX.md) |
 

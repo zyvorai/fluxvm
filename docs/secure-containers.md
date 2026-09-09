@@ -78,6 +78,10 @@ Containers compatibility.
 5. **OCI namespace/capability/seccomp/device/cgroup parity inside the guest is
    incomplete.** The VM is the primary isolation boundary in v0.1.
 6. **Stats and live resource updates are not implemented** in the shim yet.
+7. **Stdio FIFOs over virtiofs.** The shim stages named pipes on the Pod share
+   for stdin/stdout/stderr relay; virtiofs guests may not see those FIFOs
+   (`ENOENT` on open). A follow-up should use regular files or vsock stdio
+   instead of relying on FIFO special files through the share.
 
 These constraints are intentional: unsupported behavior returns an explicit
 error instead of appearing to work while weakening isolation or data
