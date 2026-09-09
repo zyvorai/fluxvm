@@ -97,9 +97,9 @@ Containers compatibility.
 5. **OCI namespace/capability/seccomp/device parity inside the guest is
    incomplete.** Guest cgroup v2 covers a portable resource subset; the VM is
    still the primary isolation boundary.
-6. **Stdio FIFOs over virtiofs.** The shim stages named pipes on the Pod share
-   for stdin/stdout/stderr relay; virtiofs guests may not see those FIFOs
-   (`ENOENT` on open). Prefer regular files or vsock stdio in a follow-up.
+6. **Stdio over virtiofs uses regular log files** (not FIFOs), with a polling
+   host relay. Interactive/blocking stdin semantics are weaker than true pipes;
+   vsock stdio remains a follow-up for production streaming.
 
 These constraints are intentional: unsupported behavior returns an explicit
 error instead of appearing to work while weakening isolation or data

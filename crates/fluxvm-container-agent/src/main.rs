@@ -935,7 +935,18 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
 
 fn open_input(path: Option<&str>) -> Result<Option<File>> {
     path.filter(|p| !p.is_empty())
-        .map(|p| OpenOptions::new().read(true).open(p).with_context(|| format!("opening stdin {p}")))
+        .map(|p| {
+            match OpenOptions::new().read(true).open(p) {
+                Ok(f) => Ok(f),
+                // Virtiofs may lag behind host-side create; fall back to /dev/null
+                // so non-interactive tasks (ctr run echo) still start.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    OpenOptions::new().read(true).open("/dev/null")
+                }
+                Err(e) => Err(e),
+            }
+            .with_context(|| format!("opening stdin {p}"))
+        })
         .transpose()
 }
 
@@ -944,7 +955,8 @@ fn open_output(path: Option<&str>) -> Result<Option<File>> {
         .map(|p| {
             OpenOptions::new()
                 .write(true)
-                .create(false)
+                .create(true)
+                .truncate(true)
                 .open(p)
                 .with_context(|| format!("opening output {p}"))
         })

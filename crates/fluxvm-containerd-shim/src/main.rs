@@ -495,20 +495,22 @@ impl Service {
         let io_dir = host_ctr.join("io");
         tokio::fs::create_dir_all(&io_dir).await?;
         let mut guest = ContainerIo::default();
+        // Regular files (not FIFOs): virtiofs guests often cannot see named pipes
+        // on the share (`ENOENT` on open). Polling relays copy growing files.
         if !stdout.is_empty() {
-            let p = io_dir.join("stdout.fifo"); mkfifo(&p)?;
-            guest.stdout = Some(format!("{guest_ctr}/io/stdout.fifo"));
-            spawn_fifo_to_fifo(p, PathBuf::from(stdout), format!("{id}:stdout"));
+            let p = io_dir.join("stdout.log"); create_stdio_file(&p)?;
+            guest.stdout = Some(format!("{guest_ctr}/io/stdout.log"));
+            spawn_stdio_relay(p, PathBuf::from(stdout), format!("{id}:stdout"), true);
         }
         if !stderr.is_empty() {
-            let p = io_dir.join("stderr.fifo"); mkfifo(&p)?;
-            guest.stderr = Some(format!("{guest_ctr}/io/stderr.fifo"));
-            spawn_fifo_to_fifo(p, PathBuf::from(stderr), format!("{id}:stderr"));
+            let p = io_dir.join("stderr.log"); create_stdio_file(&p)?;
+            guest.stderr = Some(format!("{guest_ctr}/io/stderr.log"));
+            spawn_stdio_relay(p, PathBuf::from(stderr), format!("{id}:stderr"), true);
         }
         if !stdin.is_empty() {
-            let p = io_dir.join("stdin.fifo"); mkfifo(&p)?;
-            guest.stdin = Some(format!("{guest_ctr}/io/stdin.fifo"));
-            spawn_fifo_to_fifo(PathBuf::from(stdin), p, format!("{id}:stdin"));
+            let p = io_dir.join("stdin.log"); create_stdio_file(&p)?;
+            guest.stdin = Some(format!("{guest_ctr}/io/stdin.log"));
+            spawn_stdio_relay(PathBuf::from(stdin), p, format!("{id}:stdin"), false);
         }
         Ok(guest)
     }
@@ -1289,32 +1291,65 @@ async fn stage_bind_mounts(spec: &mut Value, host_ctr: &Path, guest_ctr: &str) -
     Ok(())
 }
 
-fn mkfifo(path: &Path) -> AnyResult<()> {
-    if path.exists() { let _ = std::fs::remove_file(path); }
-    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?;
-    if unsafe { libc::mkfifo(c.as_ptr(), 0o600) } != 0 {
-        bail!("mkfifo {}: {}", path.display(), std::io::Error::last_os_error());
+fn create_stdio_file(path: &Path) -> AnyResult<()> {
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
     }
+    std::fs::File::create(path)
+        .with_context(|| format!("creating stdio file {}", path.display()))?;
     Ok(())
 }
 
-fn spawn_fifo_to_fifo(source: PathBuf, destination: PathBuf, label: String) {
+/// Copy bytes from `source` to `destination`.
+/// When `poll_eof` is true (guest log → containerd), treat short reads as
+/// "writer still open" and keep polling — virtiofs regular files return EOF
+/// between writes instead of blocking like FIFOs.
+fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_eof: bool) {
     tokio::spawn(async move {
         let result: AnyResult<()> = async {
-            let mut src = tokio::fs::OpenOptions::new().read(true).open(&source).await
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            while tokio::time::Instant::now() < deadline {
+                if source.exists() && destination.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let mut src = tokio::fs::OpenOptions::new()
+                .read(true)
+                .open(&source)
+                .await
                 .with_context(|| format!("opening relay source {}", source.display()))?;
-            let mut dst = tokio::fs::OpenOptions::new().write(true).open(&destination).await
+            let mut dst = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&destination)
+                .await
                 .with_context(|| format!("opening relay destination {}", destination.display()))?;
             let mut buf = [0u8; 32 * 1024];
+            let mut idle_rounds = 0u32;
             loop {
                 let n = src.read(&mut buf).await?;
-                if n == 0 { break; }
+                if n == 0 {
+                    if !poll_eof {
+                        break;
+                    }
+                    idle_rounds += 1;
+                    // ~5 minutes of idle after last byte before giving up.
+                    if idle_rounds > 6_000 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                idle_rounds = 0;
                 dst.write_all(&buf[..n]).await?;
                 dst.flush().await?;
             }
             Ok(())
-        }.await;
-        if let Err(e) = result { warn!("stdio relay {label} stopped: {e:#}"); }
+        }
+        .await;
+        if let Err(e) = result {
+            warn!("stdio relay {label} stopped: {e:#}");
+        }
     });
 }
 
