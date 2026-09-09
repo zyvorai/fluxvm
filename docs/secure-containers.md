@@ -1,9 +1,10 @@
 # FluxVM Secure Containers — containerd runtime v2
 
-FluxVM Secure Containers is the container-runtime layer on top of the existing
-FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support. The goal is
-the same security shape users expect from Kata Containers: a Pod or container
-group gets its own guest kernel instead of sharing the node's host kernel.
+FluxVM Secure Containers is the first container-runtime layer on top of the
+existing FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support.
+The goal is the same security shape users expect from Kata Containers: a Pod
+or container group gets its own guest kernel instead of sharing the node's
+host kernel.
 
 ## Architecture
 
@@ -17,10 +18,11 @@ containerd-shim-fluxvm-v2
       +---- (optional) CNI L2 bridge prep on Pod netns
       +---- FluxVM REST API ----> QEMU/KVM microVM
       |                              |
-      |                              +-- virtiofs Pod share
+      |                              +-- virtiofs Pod share (+ Pod-UID volumes)
       |                              +-- TAP on host CNI bridge (when netns present)
       |                              +-- fluxvm-guest-agent :17777
-      |                              +-- fluxvm-container-agent :17778
+      |                              +-- fluxvm-container-agent :17778 (lifecycle)
+      |                              +-- stdio streams :17779 (TTY/pipes)
       |                                         |
       +---------------- VSOCK ------------------+
                                                 |
@@ -43,117 +45,74 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented
-
-### v0.1 foundation
+## Implemented through Set 5
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
-- one shim group -> one FluxVM QEMU VM
-- Kubernetes Pod grouping annotation recognition
-- authenticated VSOCK container protocol
-- OCI process lifecycle: create, start, state, wait, kill, pause, resume, delete
-- exec lifecycle (non-TTY)
-- uid/gid, cwd, argv, PATH resolution and environment inside a chrooted container rootfs
-- guest-side OCI bind/proc/tmpfs/sysfs/devpts/mqueue/cgroup mount application and cleanup
+- one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
+- CNI L2 Pod IP/MAC handoff into the guest
+- Pod/sandbox and per-container guest cgroup-v2 limits, stats, pids and updates
+- containerd task events + asynchronous exit publication
+- OCI create/start/state/wait/kill/pause/resume/delete and exec lifecycle
+- uid/gid, supplementary groups, cwd, argv, PATH, environment, umask and rlimits
+- Linux capability sets, noNewPrivileges, seccomp syscall-name rules
+- read-only rootfs, masked/read-only paths, device nodes and Pod-VM sysctls
 - containerd snapshot rootfs staging into the VM-visible virtiofs share
-- bind-mount snapshot staging for ConfigMap/Secret-style inputs
-- stdin/stdout/stderr relay (virtiofs-safe regular files + host polling)
-- FluxVM guest-agent bootstrap of the dedicated container agent
-- RuntimeClass and containerd configuration examples
-- unit tests for protocol, OCI parsing, grouping and mount staging
-- a dedicated GitHub Actions build/test/clippy gate
+- Pod-UID-scoped write-through Kubernetes `volumes` / `volume-subpaths`
+- authenticated VSOCK lifecycle RPC on port 17778
+- authenticated raw stdin/stdout/stderr streaming on port 17779
+- real guest PTY for terminal init/exec processes
+- containerd `ResizePty` and `CloseIO` forwarding
+- legacy regular-file virtiofs stdio fallback for non-TTY debugging
+- RuntimeClass/containerd examples, source/unit gates and KVM smoke scripts
 
-### Set 2 — CNI L2 + guest cgroup resources
+## Current limitations
 
-- **CNI Pod IP in the guest (opt-in, default on).** When the CRI sandbox provides
-  a Pod network namespace path, the shim prepares a transparent L2 attachment:
-  the host bridge receives a FluxVM QEMU TAP, and the guest is configured with
-  the **actual CNI Pod IP + MAC + routes**. Without a netns path (plain `ctr`),
-  networking stays FluxVM user-mode. Disable with `FLUXVM_CONTAINER_CNI=0`.
-- **Guest cgroup v2** under `/sys/fs/cgroup/fluxvm-containers`:
-  per-container create/update for CPU quota/period/shares, cpuset, memory, pids;
-  Pod-wide `ConfigureSandboxResources`; freeze/thaw for pause/resume;
-  kill-all via cgroup; `Pids` / `Stats` / `UpdateResources` on the wire protocol.
-- Shim maps containerd `Stats` / `Update` / `Pids` to the guest agent.
-- VM shape (`vcpus` / `memory_mib`) derived from sandbox resource hints plus
-  `FLUXVM_CONTAINER_VM_OVERHEAD_MIB` (default 256).
-
-### Set 3 — lifecycle events + OCI process hardening
-
-- Publishes containerd task events: create, start, exec-added/started, paused,
-  resumed, exit, delete (with async Wait watchers and exit de-duplication).
-- Definitive delete status/timestamps from the guest; separate init/exec
-  metadata and per-process stdio staging.
-- Retry-safe rootfs/mount staging cleanup.
-- Guest OCI process controls: supplementary GIDs, umask, rlimits,
-  `noNewPrivileges`, and bounding/effective/inheritable/permitted/ambient
-  capabilities (unsupported names rejected).
-- Detail: [secure-containers-set3.md](secure-containers-set3.md).
-
-### Set 4 — write-through Pod volumes + OCI security
-
-- Pod-UID-scoped virtiofs exports for kubelet `volumes/` and `volume-subpaths/`
-  with OCI bind-source rewrite (PVC/CSI/emptyDir write-through).
-- Guest OCI security: read-only rootfs, masked/read-only paths, device nodes,
-  Pod-VM sysctls, and libseccomp syscall-name rules (unsupported comparators
-  fail closed). Guest images need `libseccomp.so.2` for seccomp profiles.
-- Rollback of partial mounts when OCI/security setup fails.
-- Volume smoke: `scripts/e2e-secure-containers-volume.sh`.
-- Detail: [secure-containers-set4.md](secure-containers-set4.md).
-
-## Explicit limitations
-
-This remains a **developer-preview** runtime, not a claim of full Kata
+This remains a **developer-preview runtime**, not a claim of full Kata
 Containers compatibility.
 
-1. **QEMU only.** FluxVM currently implements `SharedFolder`/virtiofs on QEMU.
-   Cloud Hypervisor and Firecracker need equivalent shared-rootfs plumbing
-   before they can be enabled safely.
-2. **CNI L2 is best-effort for common bridge/veth topologies.** Exotic CNI
-   setups, dual-stack-only paths, or plugins that do not leave a usable
-   interface/MAC/routes in the Pod netns may still fall back or fail closed.
-   Validate against your CNI (Cilium/Calico/etc.) before production.
-3. **Non-Pod-UID host binds stay snapshot-based.** Set 4 exports Pod-UID-scoped
-   kubelet `volumes/` and `volume-subpaths/` write-through; arbitrary hostPath
-   and other binds remain copied unless a later allowlisted broker/hotplug
-   lands.
-4. **TTY/resize is rejected**, not silently emulated.
-5. **OCI namespace/seccomp/device parity inside the guest is incomplete.** Set 3
-   covers common process hardening (caps/rlimits/umask/noNewPrivileges/gids);
-   Set 4 adds RO rootfs, masked/RO paths, device nodes, sysctls, and
-   libseccomp syscall-name rules (fail closed). Guest cgroup v2 covers a
-   portable resource subset. The VM remains the primary isolation boundary.
-6. **Stdio over virtiofs uses regular log files** (not FIFOs), with a polling
-   host relay (Wait drains before returning). Interactive/blocking stdin
-   semantics are weaker than true pipes; vsock stdio remains a follow-up.
+1. **QEMU is the supported Secure Containers VMM.** Cloud Hypervisor and
+   Firecracker still need equivalent shared-rootfs/volume plumbing.
+2. **CNI coverage is not yet broad conformance.** The current L2 handoff is
+   IPv4/primary-interface oriented; dual-stack, Multus and unusual CNI layouts
+   need dedicated validation.
+3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
+   Pod volume roots are scoped by sandbox UID; other binds remain copied unless
+   an explicit broker/hotplug model is added.
+4. **OCI namespace/device-cgroup parity is incomplete.** The VM remains the
+   primary host isolation boundary.
+5. **Seccomp argument comparators / notify are not implemented.** Unsupported
+   profiles fail closed instead of silently dropping policy.
+6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
+   resize testing on self-hosted nodes before production claims.**
 
-These constraints are intentional: unsupported behavior returns an explicit
-error instead of appearing to work while weakening isolation or data
-correctness.
+## Next gates to production Kata-style Kubernetes support
 
-## Next gates
+### P0 — OCI namespace + device-cgroup parity
 
-### P0 — volume model (partially Set 4)
+Add PID/mount/IPC/UTS/user namespace handling inside the Pod VM where OCI
+semantics require it, plus device-cgroup enforcement and broader conformance
+fixtures.
 
-Pod-UID write-through for kubelet volumes/subpaths is in Set 4. Remaining:
-hostPath allowlist/broker, hotplug for late-attached CSI, and fuller
-propagation semantics.
+### P0 — CNI conformance
 
-### P0 — remaining OCI / namespace parity (partially Set 4)
+Exercise Cilium/Calico bridge/veth paths under churn, then add IPv6, dual-stack
+and multi-interface/Multus coverage.
 
-Set 4 covers masked/RO paths, devices, sysctls, and name-based seccomp.
-Remaining: namespace parity, seccomp arg comparators/notify, device cgroup,
-and broader OCI conformance fixtures.
+### P0 — volume broker / explicit hostPath
 
-### P0 — production stdio
+Keep Pod-scoped kubelet volume exports as the safe default. Add a narrowly
+allowlisted broker/hotplug path for operators that intentionally need arbitrary
+hostPath or non-kubelet mounts.
 
-Move interactive streaming off virtiofs log polling onto VSOCK (or equivalent)
-for true pipe semantics.
+### P1 — seccomp completeness
 
-### P1 — CNI hardening
+Add argument comparators and notification handling while retaining fail-closed
+behavior for profiles the guest cannot enforce.
 
-Broader CNI conformance, IPv6, multi-interface, and teardown races under
-frequent Pod churn.
+### P1 — streaming/TTY conformance
+
+Run repeated init + exec terminal resize, stdin close, high-volume stdout/stderr
+and abrupt-exit tests on self-hosted KVM/containerd nodes.
 
 ### P1 — performance
 
@@ -177,12 +136,11 @@ Set the guest image explicitly when needed:
 export FLUXVM_CONTAINER_GUEST_IMAGE=/var/lib/fluxvm/images/secure-container.qcow2
 export FLUXVM_API_URL=http://127.0.0.1:7788
 # export FLUXVM_API_TOKEN=...   # if FluxVM API auth is enabled
-# export FLUXVM_CONTAINER_CNI=0 # disable CNI L2; force user-mode networking
 ```
 
 Merge `deploy/containerd/fluxvm-runtime.toml` into containerd configuration,
-restart containerd, and install `deploy/containerd/runtimeclass.yaml` on a
-lab cluster once guest-image + virtiofs + CNI L2 have been smoke-tested.
+restart containerd, and install `deploy/containerd/runtimeclass.yaml` only on a
+development cluster until the CNI gate above lands.
 
 ## Test levels
 
@@ -197,18 +155,30 @@ This builds both binaries and runs all new unit tests.
 ### Level 2 — KVM/containerd host
 
 Set `FLUXVM_SECURE_CONTAINERS_E2E=1`; the script validates KVM, containerd and
-FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`, which
-pulls BusyBox and executes it with `io.containerd.fluxvm.v2`. Plain `ctr` has
-no Pod netns, so CNI L2 stays inactive for that smoke.
-
-### Level 3 — Kubernetes volume write-through
-
-Once a StorageClass and secure-container guest image are available:
-
-```bash
-sudo ./scripts/e2e-secure-containers-volume.sh <namespace> fluxvm
-```
+FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`. Run
+`scripts/e2e-secure-containers-volume.sh` for write-through PVC coverage and
+`scripts/e2e-secure-containers-tty.sh` for VSOCK stdio + init/exec PTY/resize.
 
 The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
 because ordinary hosted runners do not provide the nested virtualization and
 node configuration needed for an honest containerd+FluxVM test.
+
+## Set 4 addendum — write-through Pod volumes + OCI security
+
+Set 4 adds Pod-UID-scoped virtiofs exports for kubelet `volumes/` and
+`volume-subpaths/`, so matching Kubernetes volume bind mounts are write-through
+instead of copied. Arbitrary host binds remain snapshot-based by default.
+
+The guest agent also enforces read-only rootfs, masked/read-only paths, OCI
+device nodes, Pod-VM sysctls and libseccomp syscall-name rules. Seccomp profiles
+using unsupported argument comparators fail closed. See
+`docs/secure-containers-set4.md` for the exact support boundary and test gates.
+
+
+## Set 5 addendum — VSOCK stdio + TTY/PTY
+
+Set 5 moves normal runtime stdio off virtiofs polling files. Lifecycle RPC stays
+on port 17778 while raw process streams attach on authenticated VSOCK port
+17779. Non-TTY tasks use guest pipes; terminal tasks use a real guest PTY and
+containerd `ResizePty` maps to `TIOCSWINSZ`. See
+`docs/secure-containers-set5.md` for protocol, fallback and test details.

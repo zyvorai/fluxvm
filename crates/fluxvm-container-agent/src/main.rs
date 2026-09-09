@@ -9,14 +9,16 @@
 //! environment, cwd, signals and stdio inside the guest. Set 3 additionally
 //! enforces supplementary groups, umask, rlimits and noNewPrivileges. OCI
 //! Set 4 adds read-only/masked paths, read-only rootfs, OCI devices, Pod-scoped
-//! sysctls and seccomp filters. Namespace creation and full device-cgroup parity
-//! remain explicit follow-up hardening items in docs/secure-containers.md.
+//! sysctls and seccomp filters. Set 5 adds dedicated VSOCK stdio streams plus guest PTY/resize support.
+//! Namespace creation and full device-cgroup parity remain explicit follow-up
+//! hardening items in docs/secure-containers.md.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fluxvm_container_protocol::{
     ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStats,
-    ContainerStatus, ResourceLimits, DEFAULT_CONTAINER_AGENT_PORT, MAX_MESSAGE_BYTES, decode_line,
+    ContainerStatus, ResourceLimits, IoStreamAck, IoStreamAttach, IoStreamKind,
+    DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, MAX_MESSAGE_BYTES, decode_line,
     encode_line,
 };
 use serde_json::Value;
@@ -86,6 +88,41 @@ struct ProcessSpec {
     seccomp: Option<SeccompProfile>,
 }
 
+#[derive(Debug)]
+enum ProcIo {
+    Legacy,
+    Pipes {
+        stdin_write: Option<RawFd>,
+        stdin_attached: bool,
+        stdout_read: Option<RawFd>,
+        stderr_read: Option<RawFd>,
+    },
+    Pty {
+        master_fd: RawFd,
+        stdin_attached: bool,
+        stdout_attached: bool,
+    },
+}
+
+impl Drop for ProcIo {
+    fn drop(&mut self) {
+        unsafe {
+            match self {
+                ProcIo::Legacy => {}
+                ProcIo::Pipes { stdin_write, stdout_read, stderr_read, .. } => {
+                    for fd in [stdin_write.take(), stdout_read.take(), stderr_read.take()].into_iter().flatten() {
+                        libc::close(fd);
+                    }
+                }
+                ProcIo::Pty { master_fd, .. } => {
+                    if *master_fd >= 0 { libc::close(*master_fd); }
+                    *master_fd = -1;
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ProcSnapshot {
     status: ContainerStatus,
@@ -99,10 +136,11 @@ struct ProcSnapshot {
 struct ProcHandle {
     inner: Mutex<ProcSnapshot>,
     changed: Condvar,
+    io: Mutex<ProcIo>,
 }
 
 impl ProcHandle {
-    fn new_created(pid: u32, gate_fd: RawFd) -> Self {
+    fn new_created(pid: u32, gate_fd: RawFd, io: ProcIo) -> Self {
         Self {
             inner: Mutex::new(ProcSnapshot {
                 status: ContainerStatus::Created,
@@ -112,6 +150,7 @@ impl ProcHandle {
                 gate_fd: Some(gate_fd),
             }),
             changed: Condvar::new(),
+            io: Mutex::new(io),
         }
     }
 
@@ -174,6 +213,77 @@ impl ProcHandle {
         self.changed.notify_all();
     }
 
+    fn attach_stream(&self, kind: IoStreamKind) -> Result<File> {
+        let mut io = self.io.lock().expect("process io poisoned");
+        match &mut *io {
+            ProcIo::Legacy => bail!("process uses legacy virtiofs stdio, not VSOCK streaming"),
+            ProcIo::Pipes { stdin_write, stdin_attached, stdout_read, stderr_read } => {
+                let fd = match kind {
+                    IoStreamKind::Stdin => {
+                        let source = stdin_write.as_ref().copied().context("stdin stream is absent")?;
+                        if *stdin_attached { bail!("stdin stream is already attached"); }
+                        *stdin_attached = true;
+                        let dup = unsafe { libc::dup(source) };
+                        if dup < 0 { bail!("dup(stdin pipe): {}", std::io::Error::last_os_error()); }
+                        set_cloexec(dup);
+                        dup
+                    }
+                    IoStreamKind::Stdout => stdout_read.take().context("stdout stream is absent or already attached")?,
+                    IoStreamKind::Stderr => stderr_read.take().context("stderr stream is absent or already attached")?,
+                };
+                Ok(unsafe { File::from_raw_fd(fd) })
+            }
+            ProcIo::Pty { master_fd, stdin_attached, stdout_attached } => {
+                match kind {
+                    IoStreamKind::Stdin => {
+                        if *stdin_attached { bail!("PTY stdin is already attached"); }
+                        *stdin_attached = true;
+                    }
+                    IoStreamKind::Stdout => {
+                        if *stdout_attached { bail!("PTY stdout is already attached"); }
+                        *stdout_attached = true;
+                    }
+                    IoStreamKind::Stderr => bail!("TTY processes have a single PTY output stream"),
+                }
+                let fd = unsafe { libc::dup(*master_fd) };
+                if fd < 0 { bail!("dup(pty master): {}", std::io::Error::last_os_error()); }
+                set_cloexec(fd);
+                Ok(unsafe { File::from_raw_fd(fd) })
+            }
+        }
+    }
+
+    fn resize_pty(&self, width: u32, height: u32) -> Result<()> {
+        if width == 0 || height == 0 || width > u16::MAX as u32 || height > u16::MAX as u32 {
+            bail!("invalid PTY size {width}x{height}");
+        }
+        let io = self.io.lock().expect("process io poisoned");
+        let ProcIo::Pty { master_fd, .. } = &*io else { bail!("process is not a TTY"); };
+        let ws = libc::winsize { ws_row: height as u16, ws_col: width as u16, ws_xpixel: 0, ws_ypixel: 0 };
+        if unsafe { libc::ioctl(*master_fd, libc::TIOCSWINSZ as libc::c_ulong, &ws) } != 0 {
+            bail!("TIOCSWINSZ: {}", std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn close_stdin(&self) -> Result<()> {
+        let mut io = self.io.lock().expect("process io poisoned");
+        match &mut *io {
+            ProcIo::Legacy => Ok(()),
+            ProcIo::Pipes { stdin_write, .. } => {
+                if let Some(fd) = stdin_write.take() { unsafe { libc::close(fd) }; }
+                Ok(())
+            }
+            ProcIo::Pty { master_fd, .. } => {
+                // Canonical terminals interpret ^D as EOF when the input line is empty.
+                let eof = [0x04u8; 1];
+                let rc = unsafe { libc::write(*master_fd, eof.as_ptr().cast(), 1) };
+                if rc < 0 { bail!("writing PTY EOF: {}", std::io::Error::last_os_error()); }
+                Ok(())
+            }
+        }
+    }
+
     fn wait(&self) -> ProcSnapshot {
         let mut state = self.inner.lock().expect("process state poisoned");
         while state.status != ContainerStatus::Stopped {
@@ -211,33 +321,16 @@ fn run_server(port: u32) -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let listener_fd = unsafe {
-        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
+    let stream_port = DEFAULT_CONTAINER_STREAM_PORT;
+    let stream_token = expected_token.clone();
+    std::thread::spawn(move || {
+        if let Err(e) = run_stream_server(stream_port, stream_token) {
+            eprintln!("container stream server failed: {e:#}");
         }
-        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
-        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
-        addr.svm_cid = libc::VMADDR_CID_ANY;
-        addr.svm_port = port;
-        if libc::bind(
-            fd,
-            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        ) != 0
-        {
-            libc::close(fd);
-            bail!("bind(vsock:{port}): {}", std::io::Error::last_os_error());
-        }
-        if libc::listen(fd, 128) != 0 {
-            libc::close(fd);
-            bail!("listen(vsock:{port}): {}", std::io::Error::last_os_error());
-        }
-        set_cloexec(fd);
-        fd
-    };
+    });
 
-    eprintln!("fluxvm-container-agent listening on vsock port {port}");
+    let listener_fd = create_vsock_listener(port)?;
+    eprintln!("fluxvm-container-agent lifecycle listening on vsock port {port}");
     loop {
         let fd = unsafe { libc::accept(listener_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
         if fd < 0 {
@@ -252,6 +345,110 @@ fn run_server(port: u32) -> Result<()> {
             }
         });
     }
+}
+
+fn create_vsock_listener(port: u32) -> Result<RawFd> {
+    unsafe {
+        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+        if fd < 0 { bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error()); }
+        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_cid = libc::VMADDR_CID_ANY;
+        addr.svm_port = port;
+        if libc::bind(
+            fd,
+            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+        ) != 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            bail!("bind(vsock:{port}): {e}");
+        }
+        if libc::listen(fd, 128) != 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            bail!("listen(vsock:{port}): {e}");
+        }
+        set_cloexec(fd);
+        Ok(fd)
+    }
+}
+
+fn run_stream_server(port: u32, expected_token: Option<String>) -> Result<()> {
+    let listener_fd = create_vsock_listener(port)?;
+    eprintln!("fluxvm-container-agent stdio listening on vsock port {port}");
+    loop {
+        let fd = unsafe { libc::accept(listener_fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        if fd < 0 {
+            eprintln!("stdio accept failed: {}", std::io::Error::last_os_error());
+            continue;
+        }
+        let token = expected_token.clone();
+        std::thread::spawn(move || {
+            let file = unsafe { File::from_raw_fd(fd) };
+            if let Err(e) = handle_stream_connection(file, token.as_deref()) {
+                eprintln!("container stdio stream failed: {e:#}");
+            }
+        });
+    }
+}
+
+fn handle_stream_connection(mut socket: File, expected_token: Option<&str>) -> Result<()> {
+    let mut line = String::new();
+    {
+        let mut reader = BufReader::new(socket.try_clone()?);
+        let n = reader.read_line(&mut line).context("reading stdio attach request")?;
+        if n == 0 { return Ok(()); }
+    }
+    if line.len() > 64 * 1024 {
+        socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some("attach request too large".into()) })?.as_bytes())?;
+        socket.flush()?;
+        return Ok(());
+    }
+    let attach: IoStreamAttach = decode_line(&line).context("decoding stdio attach request")?;
+    if let Some(expected) = expected_token {
+        let ok = attach.token.as_deref().is_some_and(|actual| constant_time_eq(expected, actual));
+        if !ok {
+            socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some("unauthorized".into()) })?.as_bytes())?;
+            socket.flush()?;
+            return Ok(());
+        }
+    }
+    let process = match find_process(&attach.id, attach.exec_id.as_deref()) {
+        Ok(process) => process,
+        Err(e) => {
+            socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some(format!("{e:#}")) })?.as_bytes())?;
+            socket.flush()?;
+            return Ok(());
+        }
+    };
+    let mut endpoint = match process.attach_stream(attach.stream) {
+        Ok(endpoint) => endpoint,
+        Err(e) => {
+            socket.write_all(encode_line(&IoStreamAck { ok: false, message: Some(format!("{e:#}")) })?.as_bytes())?;
+            socket.flush()?;
+            return Ok(());
+        }
+    };
+    socket.write_all(encode_line(&IoStreamAck { ok: true, message: None })?.as_bytes())?;
+    socket.flush()?;
+    match attach.stream {
+        IoStreamKind::Stdin => {
+            let copied = std::io::copy(&mut socket, &mut endpoint);
+            let _ = endpoint.flush();
+            let _ = process.close_stdin();
+            copied?;
+        }
+        IoStreamKind::Stdout | IoStreamKind::Stderr => {
+            match std::io::copy(&mut endpoint, &mut socket) {
+                Ok(_) => {}
+                Err(e) if e.raw_os_error() == Some(libc::EIO) => {} // PTY slave closed
+                Err(e) => return Err(e).context("streaming guest output"),
+            }
+            socket.flush()?;
+        }
+    }
+    Ok(())
 }
 
 fn handle_connection(file: File, expected_token: Option<&str>) -> Result<()> {
@@ -340,14 +537,19 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
             update_container_resources(&id, &resources)?;
             Ok(ContainerResponse::ResourcesUpdated)
         }
+        ContainerRequest::ResizePty { id, exec_id, width, height } => {
+            find_process(&id, exec_id.as_deref())?.resize_pty(width, height)?;
+            Ok(ContainerResponse::PtyResized)
+        }
+        ContainerRequest::CloseIo { id, exec_id } => {
+            find_process(&id, exec_id.as_deref())?.close_stdin()?;
+            Ok(ContainerResponse::IoClosed)
+        }
         ContainerRequest::Delete { id, exec_id, force } => delete_process(&id, exec_id.as_deref(), force),
     }
 }
 
 fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
-    if io.terminal {
-        bail!("TTY containers are not supported by FluxVM secure-containers v0.1");
-    }
     let (spec, mounts, resources) = parse_oci_config(config_json)?;
     {
         let reg = registry().lock().expect("registry poisoned");
@@ -394,9 +596,6 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
 }
 
 fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
-    if io.terminal {
-        bail!("TTY exec is not supported by FluxVM secure-containers v0.1");
-    }
     let mut reg = registry().lock().expect("registry poisoned");
     let container = reg.get_mut(id).with_context(|| format!("container {id:?} not found"))?;
     if container.execs.contains_key(&exec_id) {
@@ -1371,9 +1570,55 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
         .iter()
         .map(|(k, v)| CString::new(format!("{k}={v}")).context("environment contains NUL"))
         .collect::<Result<Vec<_>>>()?;
-    let stdin = open_input(io.stdin.as_deref())?;
-    let stdout = open_output(io.stdout.as_deref())?;
-    let stderr = open_output(io.stderr.as_deref())?;
+
+    let mut parent_fds = Vec::new();
+    let mut pty_slave: Option<File> = None;
+    let (stdin, stdout, stderr, process_io) = if io.streaming && io.terminal {
+        let (master, slave) = open_pty_pair()?;
+        parent_fds.push(master);
+        pty_slave = Some(unsafe { File::from_raw_fd(slave) });
+        (
+            None,
+            None,
+            None,
+            ProcIo::Pty { master_fd: master, stdin_attached: false, stdout_attached: false },
+        )
+    } else if io.streaming {
+        let (stdin_file, stdin_write) = if io.stdin.is_some() {
+            let (read_fd, write_fd) = pipe_cloexec()?;
+            parent_fds.push(write_fd);
+            (Some(unsafe { File::from_raw_fd(read_fd) }), Some(write_fd))
+        } else {
+            (Some(OpenOptions::new().read(true).open("/dev/null")?), None)
+        };
+        let (stdout_file, stdout_read) = if io.stdout.is_some() {
+            let (read_fd, write_fd) = pipe_cloexec()?;
+            parent_fds.push(read_fd);
+            (Some(unsafe { File::from_raw_fd(write_fd) }), Some(read_fd))
+        } else {
+            (Some(OpenOptions::new().write(true).open("/dev/null")?), None)
+        };
+        let (stderr_file, stderr_read) = if io.stderr.is_some() {
+            let (read_fd, write_fd) = pipe_cloexec()?;
+            parent_fds.push(read_fd);
+            (Some(unsafe { File::from_raw_fd(write_fd) }), Some(read_fd))
+        } else {
+            (Some(OpenOptions::new().write(true).open("/dev/null")?), None)
+        };
+        (
+            stdin_file,
+            stdout_file,
+            stderr_file,
+            ProcIo::Pipes { stdin_write, stdin_attached: false, stdout_read, stderr_read },
+        )
+    } else {
+        (
+            open_input(io.stdin.as_deref())?,
+            open_output(io.stdout.as_deref())?,
+            open_output(io.stderr.as_deref())?,
+            ProcIo::Legacy,
+        )
+    };
 
     let mut gate = [0; 2];
     if unsafe { libc::pipe2(gate.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -1390,10 +1635,21 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
     if pid == 0 {
         unsafe {
             libc::close(gate[1]);
-            libc::setpgid(0, 0);
-            if let Some(ref file) = stdin { libc::dup2(file.as_raw_fd(), libc::STDIN_FILENO); }
-            if let Some(ref file) = stdout { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO); }
-            if let Some(ref file) = stderr { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO); }
+            for fd in &parent_fds { libc::close(*fd); }
+
+            if let Some(ref slave) = pty_slave {
+                if libc::setsid() < 0 { libc::_exit(126); }
+                if libc::ioctl(slave.as_raw_fd(), libc::TIOCSCTTY as libc::c_ulong, 0) != 0 { libc::_exit(126); }
+                libc::dup2(slave.as_raw_fd(), libc::STDIN_FILENO);
+                libc::dup2(slave.as_raw_fd(), libc::STDOUT_FILENO);
+                libc::dup2(slave.as_raw_fd(), libc::STDERR_FILENO);
+            } else {
+                libc::setpgid(0, 0);
+                if let Some(ref file) = stdin { libc::dup2(file.as_raw_fd(), libc::STDIN_FILENO); }
+                if let Some(ref file) = stdout { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO); }
+                if let Some(ref file) = stderr { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO); }
+            }
+
             let mut byte = [0u8; 1];
             if libc::read(gate[0], byte.as_mut_ptr().cast(), 1) != 1 { libc::_exit(126); }
             libc::close(gate[0]);
@@ -1411,16 +1667,11 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
                 if libc::setrlimit(limit.resource as _, &value) != 0 { libc::_exit(126); }
             }
 
-            // Supplementary groups and the capability bounding set must be
-            // configured while the child still has privilege.
             let groups: Vec<libc::gid_t> = spec.additional_gids.iter().map(|v| *v as libc::gid_t).collect();
             let group_ptr = if groups.is_empty() { std::ptr::null() } else { groups.as_ptr() };
             if libc::setgroups(groups.len(), group_ptr) != 0 { libc::_exit(126); }
             if let Some(caps) = spec.capabilities.as_ref() {
                 if drop_bounding_capabilities(caps).is_err() { libc::_exit(126); }
-                // Preserve the requested permitted set across a non-root UID
-                // transition, then immediately replace it with OCI's exact
-                // sets below.
                 if spec.uid != 0 && (caps.permitted != 0 || caps.effective != 0 || caps.ambient != 0)
                     && libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0
                 {
@@ -1439,8 +1690,6 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
                 libc::_exit(126);
             }
             if let Some(profile) = spec.seccomp.as_ref() {
-                // A seccomp filter must never be silently skipped. Force
-                // no-new-privileges before loading the guest-local filter.
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
                     || apply_seccomp(profile).is_err()
                 {
@@ -1461,7 +1710,8 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
     drop(stdin);
     drop(stdout);
     drop(stderr);
-    let handle = Arc::new(ProcHandle::new_created(pid as u32, gate[1]));
+    drop(pty_slave);
+    let handle = Arc::new(ProcHandle::new_created(pid as u32, gate[1], process_io));
     let waiter = handle.clone();
     let label = format!("{container_id}/{}", exec_id.unwrap_or("init"));
     std::thread::spawn(move || {
@@ -1480,6 +1730,41 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
         waiter.mark_exited(code);
     });
     Ok(handle)
+}
+
+fn pipe_cloexec() -> Result<(RawFd, RawFd)> {
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        bail!("pipe2: {}", std::io::Error::last_os_error());
+    }
+    Ok((fds[0], fds[1]))
+}
+
+fn open_pty_pair() -> Result<(RawFd, RawFd)> {
+    unsafe {
+        let master = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        if master < 0 { bail!("posix_openpt: {}", std::io::Error::last_os_error()); }
+        if libc::grantpt(master) != 0 || libc::unlockpt(master) != 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(master);
+            bail!("initializing PTY: {e}");
+        }
+        let mut name = [0 as libc::c_char; 128];
+        if libc::ptsname_r(master, name.as_mut_ptr(), name.len()) != 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(master);
+            bail!("ptsname_r: {e}");
+        }
+        let slave = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC);
+        if slave < 0 {
+            let e = std::io::Error::last_os_error();
+            libc::close(master);
+            bail!("opening PTY slave: {e}");
+        }
+        let ws = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+        let _ = libc::ioctl(master, libc::TIOCSWINSZ as libc::c_ulong, &ws);
+        Ok((master, slave))
+    }
 }
 
 fn open_input(path: Option<&str>) -> Result<Option<File>> {
@@ -1635,5 +1920,32 @@ mod tests {
         assert!(constant_time_eq("same", "same"));
         assert!(!constant_time_eq("same", "diff"));
         assert!(!constant_time_eq("same", "same2"));
+    }
+
+    #[test]
+    fn pty_pair_has_default_size_and_can_resize() {
+        let (master, slave) = open_pty_pair().unwrap();
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::ioctl(master, libc::TIOCGWINSZ as libc::c_ulong, &mut ws) };
+        assert_eq!(rc, 0);
+        assert_eq!((ws.ws_col, ws.ws_row), (80, 24));
+        let new_ws = libc::winsize { ws_row: 33, ws_col: 101, ws_xpixel: 0, ws_ypixel: 0 };
+        let rc = unsafe { libc::ioctl(master, libc::TIOCSWINSZ as libc::c_ulong, &new_ws) };
+        assert_eq!(rc, 0);
+        let mut read_back: libc::winsize = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::ioctl(master, libc::TIOCGWINSZ as libc::c_ulong, &mut read_back) };
+        assert_eq!(rc, 0);
+        assert_eq!((read_back.ws_col, read_back.ws_row), (101, 33));
+        unsafe { libc::close(master); libc::close(slave); }
+    }
+
+    #[test]
+    fn stream_pipe_is_cloexec() {
+        let (read_fd, write_fd) = pipe_cloexec().unwrap();
+        let r = unsafe { libc::fcntl(read_fd, libc::F_GETFD) };
+        let w = unsafe { libc::fcntl(write_fd, libc::F_GETFD) };
+        assert_ne!(r & libc::FD_CLOEXEC, 0);
+        assert_ne!(w & libc::FD_CLOEXEC, 0);
+        unsafe { libc::close(read_fd); libc::close(write_fd); }
     }
 }

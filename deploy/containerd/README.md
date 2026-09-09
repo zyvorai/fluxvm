@@ -36,6 +36,16 @@ merge the runtime fragment and restart containerd.
   seccomp profiles must include `libseccomp.so.2`.
 - Detail: [docs/secure-containers-set4.md](../../docs/secure-containers-set4.md).
 
-> Developer-preview. TTY and production streaming stdio remain follow-ups. See
+## Set 5 notes
+
+- Lifecycle RPC remains on VSOCK **17778**; streaming stdin/stdout/stderr uses
+  authenticated VSOCK **17779** (default `FLUXVM_CONTAINER_STREAMING_STDIO=1`).
+- Set `FLUXVM_CONTAINER_STREAMING_STDIO=0` only for legacy non-TTY regular-file
+  virtiofs stdio debugging. TTY requires streaming mode.
+- Terminal containers/execs use a real guest PTY with `ResizePty` / `CloseIO`.
+- Detail: [docs/secure-containers-set5.md](../../docs/secure-containers-set5.md).
+
+> Developer-preview. Validate VSOCK stdio/TTY, CNI, and PVC behavior on your
+> KVM/containerd/Kubernetes node image before production. See
 > [docs/secure-containers.md](../../docs/secure-containers.md). Do not advertise
 > this RuntimeClass as full Kata-compatible production yet.

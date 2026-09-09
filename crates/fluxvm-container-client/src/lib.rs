@@ -3,17 +3,158 @@
 
 use anyhow::{Context, Result, bail};
 use fluxvm_container_protocol::{
-    ContainerEnvelope, ContainerRequest, ContainerResponse, DEFAULT_CONTAINER_AGENT_PORT,
-    decode_line, encode_line,
+    ContainerEnvelope, ContainerRequest, ContainerResponse, IoStreamAck, IoStreamAttach,
+    DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, decode_line, encode_line,
 };
 use fluxvm_core::model::{BackendKind, VmRecord};
-use std::time::Duration;
+use std::{io::{Read, Write}, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
 };
 
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub trait ReadWrite: Read + Write + Send {}
+impl<T: Read + Write + Send> ReadWrite for T {}
+
+/// Blocking byte stream attached to one guest process stdio channel. The
+/// lifecycle RPC remains newline-delimited JSON on port 17778; Set 5 uses the
+/// dedicated port 17779 for long-lived stdin/stdout/stderr transfer.
+pub struct ContainerStream {
+    inner: Box<dyn ReadWrite>,
+}
+
+impl Read for ContainerStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> { self.inner.read(buf) }
+}
+impl Write for ContainerStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> { self.inner.write(buf) }
+    fn flush(&mut self) -> std::io::Result<()> { self.inner.flush() }
+}
+
+pub async fn open_stream(
+    vm: &VmRecord,
+    attach: IoStreamAttach,
+    timeout: Duration,
+) -> Result<ContainerStream> {
+    let agent = vm
+        .request
+        .agent
+        .as_ref()
+        .filter(|a| a.enabled)
+        .context("FluxVM guest agent must be enabled for secure containers")?;
+    let mut attach = attach;
+    attach.token = agent.token.clone();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let vm = vm.clone();
+        let attempt = attach.clone();
+        let error = match tokio::task::spawn_blocking(move || open_stream_blocking(&vm, &attempt)).await {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(error)) => error,
+            Err(error) => bail!("container stream worker panicked: {error}"),
+        };
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn open_stream_blocking(vm: &VmRecord, attach: &IoStreamAttach) -> Result<ContainerStream> {
+    let cid = vm.guest_cid.context("VM has no vsock CID assigned")?;
+    match vm.backend {
+        BackendKind::Qemu => native_vsock_stream_blocking(cid, DEFAULT_CONTAINER_STREAM_PORT, attach),
+        BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm => {
+            let socket = vm.vsock_socket.as_deref().context("VM has no vsock proxy socket recorded")?;
+            uds_proxy_stream_blocking(socket, DEFAULT_CONTAINER_STREAM_PORT, attach)
+        }
+        BackendKind::Auto => bail!("unresolved FluxVM backend"),
+    }
+}
+
+fn read_line_blocking(stream: &mut dyn Read) -> Result<String> {
+    let mut bytes = Vec::new();
+    let mut b = [0u8; 1];
+    while bytes.len() <= 64 * 1024 {
+        let n = stream.read(&mut b)?;
+        if n == 0 || b[0] == b'\n' { break; }
+        bytes.push(b[0]);
+    }
+    if bytes.len() > 64 * 1024 { bail!("stream handshake line too large"); }
+    Ok(String::from_utf8(bytes).context("stream handshake is not UTF-8")?)
+}
+
+fn validate_stream_ack(line: &str) -> Result<()> {
+    let ack: IoStreamAck = decode_line(line).context("decoding stream attach ack")?;
+    if !ack.ok {
+        bail!("container stream attach failed: {}", ack.message.unwrap_or_else(|| "unknown error".into()));
+    }
+    Ok(())
+}
+
+fn uds_proxy_stream_blocking(
+    socket: &std::path::Path,
+    guest_port: u32,
+    attach: &IoStreamAttach,
+) -> Result<ContainerStream> {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket)
+        .with_context(|| format!("connecting to vsock proxy {}", socket.display()))?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(format!("CONNECT {guest_port}\n").as_bytes())?;
+    stream.flush()?;
+    let ack = read_line_blocking(&mut stream)?;
+    if !ack.trim().to_ascii_uppercase().starts_with("OK") {
+        bail!("vsock proxy refused port {guest_port}: {:?}", ack.trim());
+    }
+    stream.write_all(encode_line(attach)?.as_bytes())?;
+    stream.flush()?;
+    let ack = read_line_blocking(&mut stream)?;
+    validate_stream_ack(&ack)?;
+    stream.set_read_timeout(None)?;
+    stream.set_write_timeout(None)?;
+    Ok(ContainerStream { inner: Box::new(stream) })
+}
+
+#[cfg(target_os = "linux")]
+fn native_vsock_stream_blocking(cid: u32, port: u32, attach: &IoStreamAttach) -> Result<ContainerStream> {
+    use std::os::fd::FromRawFd;
+    unsafe {
+        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+        if fd < 0 { bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error()); }
+        let mut file = std::fs::File::from_raw_fd(fd);
+        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+        addr.svm_cid = cid;
+        addr.svm_port = port;
+        if libc::connect(
+            fd,
+            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+        ) != 0 {
+            bail!("connect(vsock cid={cid} port={port}): {}", std::io::Error::last_os_error());
+        }
+        let tv = libc::timeval { tv_sec: 5, tv_usec: 0 };
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
+        file.write_all(encode_line(attach)?.as_bytes())?;
+        file.flush()?;
+        let ack = read_line_blocking(&mut file)?;
+        validate_stream_ack(&ack)?;
+        let tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
+        libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_SNDTIMEO, (&tv as *const libc::timeval).cast(), std::mem::size_of::<libc::timeval>() as libc::socklen_t);
+        Ok(ContainerStream { inner: Box::new(file) })
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn native_vsock_stream_blocking(_cid: u32, _port: u32, _attach: &IoStreamAttach) -> Result<ContainerStream> {
+    bail!("native AF_VSOCK is supported on Linux only")
+}
+
 
 pub async fn call(
     vm: &VmRecord,

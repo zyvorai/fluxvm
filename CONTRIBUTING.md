@@ -32,5 +32,5 @@ See README “Project layout”. Network Fabric lives in `crates/fluxvm-network`
 Secure Containers (containerd runtime-v2) lives in `crates/fluxvm-container-*` /
 `crates/fluxvm-containerd-shim` + `deploy/containerd/` — see
 `docs/secure-containers.md`, `docs/secure-containers-set3.md` (events + OCI
-process hardening), and `docs/secure-containers-set4.md` (Pod-UID volumes +
-guest security).
+process hardening), `docs/secure-containers-set4.md` (Pod-UID volumes + guest
+security), and `docs/secure-containers-set5.md` (VSOCK stdio + TTY/PTY).
