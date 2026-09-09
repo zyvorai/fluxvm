@@ -15,8 +15,10 @@ This DaemonSet is a straight containerization of that model — one pod per
 
 A separate, developer-preview path — **Secure Containers** — does use containerd
 RuntimeClass `fluxvm` / `io.containerd.fluxvm.v2` for OCI workloads inside a
-FluxVM. That is not this DaemonSet; see
-[docs/secure-containers.md](../../docs/secure-containers.md) and
+FluxVM (Set 2 CNI L2 + cgroups; Set 3 task events + OCI process hardening). That
+is not this DaemonSet; see
+[docs/secure-containers.md](../../docs/secure-containers.md),
+[docs/secure-containers-set3.md](../../docs/secure-containers-set3.md), and
 [`deploy/containerd/`](../containerd/).
 
 ## Prerequisites, per node
