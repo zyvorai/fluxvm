@@ -187,7 +187,7 @@ base image -> SHA256 -> qemu-img -> customize -> reusable template
                                       |
 VM launch: template -> disposable clone -> cloud-init -> VMM -> TTL delete
 
-Secure Containers (developer preview):
+Secure Containers (developer preview; Set 2 CNI/cgroups, Set 3 events + OCI hardening):
 Kubernetes/ctr -> containerd -> containerd-shim-fluxvm-v2
   -> FluxVM REST -> QEMU + virtiofs Pod share
   -> fluxvm-guest-agent :17777 -> fluxvm-container-agent :17778
