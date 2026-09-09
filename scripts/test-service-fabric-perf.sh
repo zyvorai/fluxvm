@@ -42,6 +42,7 @@
 #   SLO_EDT_FAIRNESS=1        EDT pacing gate (see above)
 #   SLO_FAILOVER_LOSS_MS=N    HA delta fetch RTT ceiling
 #   SLO_MPPS_MIN=N            min estimated Mpps from connect burst
+#   SLO_MPPS_STRICT=1         enforce Mpps on null-channel/dummy NS ifaces
 #   SLO_PKT_MPPS_MIN=N        min packet Mpps from stats/ethtool during storm
 #   SLO_CPU_MAX_PERCENT=N     max fluxvm CPU% during Mpps/RSS storm
 #   SLO_RSS_LOAD=1            also run scripts/test-service-fabric-rss.sh
@@ -547,11 +548,27 @@ if failover:
 # --- Mpps (connect estimate) ---
 mpps_min = os.environ.get("SLO_MPPS_MIN", "").strip()
 mpps_est = os.environ.get("MPPS_EST", "").strip()
+mpps_strict = truthy("SLO_MPPS_STRICT")
+# Dummy / null-channel NS ifaces cannot sustain meaningful Mpps; soft-skip
+# unless SLO_MPPS_STRICT=1 (same spirit as SLO_RSS_STRICT).
+channels_null = False
+for iface in (status.get("interfaces") or []):
+    if not isinstance(iface, dict):
+        continue
+    off = iface.get("offload") or {}
+    if off.get("combined_channels") is None and off.get("rx_channels") is None:
+        channels_null = True
+        break
 if mpps_min:
     if not vip:
         notes.append("SLO_MPPS_MIN skipped (no VIP)")
     elif not mpps_est:
         fail.append("SLO_MPPS_MIN set but Mpps sample unavailable")
+    elif channels_null and not mpps_strict:
+        notes.append(
+            "SLO_MPPS_MIN soft-skip (NS iface channels null/dummy; "
+            "set SLO_MPPS_STRICT=1 to enforce)"
+        )
     else:
         try:
             est = float(mpps_est)

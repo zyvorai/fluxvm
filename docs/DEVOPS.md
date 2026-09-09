@@ -37,6 +37,21 @@ sudo -E ./scripts/test-lab-verify.sh
 `scripts/devops-gate.sh` uses `curl -k` for Fabric self-signed TLS and auto-picks
 `https://127.0.0.1:9095` when `FABRIC_URL` is unset.
 
+## Production readiness
+
+Read-only gate (Service Fabric schema/pins + Network Fabric health; optional VIP SLO):
+
+```bash
+FABRIC_URL=https://127.0.0.1:9095 FLUXVM_URL=http://127.0.0.1:7788 \
+  ./scripts/test-production-readiness.sh
+
+# with VIP latency / SLO
+VIP=10.96.0.10 VIP_PORT=80 SERVICE=payments \
+  ./scripts/test-production-readiness.sh
+```
+
+See [PRODUCTION.md](PRODUCTION.md) and [service-fabric-phase6.md](service-fabric-phase6.md).
+
 ## Kubernetes
 
 DaemonSet in `deploy/k8s/` uses hostNetwork so Fabric on the same node can reach `127.0.0.1:7788`. GitOps wrapper: `deploy/k8s/gitops`.

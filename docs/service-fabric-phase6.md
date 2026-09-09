@@ -67,12 +67,25 @@ SLO/lab wrappers):
 
 | Env | Default | Check |
 |-----|---------|--------|
+| `SLO_MPPS_MIN` | `0.01` (CI) / `0.05` (`SLO_LAB`) | connect-burst Mpps; soft-skips on null-channel/dummy NS unless `SLO_MPPS_STRICT=1` |
+| `SLO_MPPS_STRICT` | (unset) | enforce Mpps floor even on dummy/null-channel ifaces |
 | `SLO_RSS_PPS_MIN` | `1000` (CI) / `10000` (`SLO_LAB`) | measured iface/service PPS under short VIP storm |
 | `SLO_RSS_STRICT` | (unset) | fail when channels null on dummy ifaces; else soft-skip |
 | `RSS_IFACE` | from status | override north-south iface |
 
 CI without VIP/API soft-skips load gates; shape gates still run when status is reachable.
 Lab packet/CPU gates soft-skip when ethtool/stats/pid are unavailable.
+
+Harness scripts:
+
+- `scripts/test-service-fabric-slo.sh` — CI SLO wrapper
+- `scripts/test-service-fabric-lab.sh` — lab Mpps/CPU ceilings
+- `scripts/test-service-fabric-rss.sh` — under-load PPS
+- `scripts/test-service-fabric-rss-affinity.sh` — multi-queue affinity proof (pin flows)
+- `scripts/test-service-fabric-all.sh` — runs the battery above
+- `scripts/test-production-readiness.sh` — operator prod gate (control + NF health + SF pins; optional VIP SLO)
+
+Fabric WireGuard underlay e2e: `fabric/scripts/test-wireguard-service-fabric.sh`.
 
 Operator doc: [service-fabric.md](service-fabric.md) ·
 [v6 notes](service-fabric-v6-phase6.md) · Fabric:
@@ -82,7 +95,7 @@ Operator doc: [service-fabric.md](service-fabric.md) ·
 
 Still open after this tranche:
 
-1. **Stricter multi-queue RSS affinity** (pin flows, assert queue mapping) — under-load PPS + best-effort multi-queue RX shipped; full affinity proofs still lab-only.
+1. **Hardware RSS affinity on multi-queue NICs** — affinity script shipped; full proofs need channels≥2 + ethtool per-queue stats (soft-skips on dummy `sf-lab0`).
 **Full mesh datapath** (remote backends / endpoint mesh) is owned by Fabric:
 catalog + reconcile merges peer Ready and active Draining backends into existing
 Maglev service upserts (weighted drain handoff + optional VIP match; lifecycle

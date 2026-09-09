@@ -242,7 +242,12 @@ lifecycle state maps (`fct*`, `nat*`).
 
 Config (`[sandbox.dataplane.service]`): `cgroup_connect` (master switch for connect4+connect6),
 `map_tier` (`S`/`M`/`L` → object path), `pressure_soft_percent` / `pressure_hard_percent`.
-Perf / SLO lab: `scripts/test-service-fabric-perf.sh`, `scripts/test-service-fabric-slo.sh`.
+Perf / SLO lab: `scripts/test-service-fabric-perf.sh`, `scripts/test-service-fabric-slo.sh`,
+`scripts/test-service-fabric-lab.sh`, `scripts/test-service-fabric-rss.sh`,
+`scripts/test-service-fabric-rss-affinity.sh`, `scripts/test-service-fabric-all.sh`.
+
+Production readiness (control + Network Fabric health + Service Fabric pins; optional VIP):
+`scripts/test-production-readiness.sh`.
 
 ## Safety
 
