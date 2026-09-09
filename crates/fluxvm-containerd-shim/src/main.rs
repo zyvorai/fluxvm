@@ -110,6 +110,8 @@ struct TaskMeta {
     stderr: String,
     terminal: bool,
     pid: u32,
+    /// Host-side virtiofs io directory (`stdout.log` / `stderr.log`).
+    io_dir: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -512,7 +514,7 @@ impl Service {
         Ok((vm, host, guest))
     }
 
-    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo)> {
+    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, PathBuf)> {
         let config_path = Path::new(&req.bundle).join("config.json");
         let text = tokio::fs::read_to_string(&config_path)
             .await
@@ -535,11 +537,11 @@ impl Service {
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
         stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr).await?;
-        let io = self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await?;
-        Ok((vm, serde_json::to_string(&spec)?, io))
+        let (io, io_dir) = self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await?;
+        Ok((vm, serde_json::to_string(&spec)?, io, io_dir))
     }
 
-    async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<ContainerIo> {
+    async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, PathBuf)> {
         if terminal { bail!("TTY containers are not supported by secure-containers v0.1"); }
         let io_dir = host_ctr.join("io");
         tokio::fs::create_dir_all(&io_dir).await?;
@@ -561,7 +563,36 @@ impl Service {
             guest.stdin = Some(format!("{guest_ctr}/io/stdin.log"));
             spawn_stdio_relay(PathBuf::from(stdin), p, format!("{id}:stdin"), false);
         }
-        Ok(guest)
+        Ok((guest, io_dir))
+    }
+
+    /// Wait until host virtiofs stdio logs stop growing, then give the polling
+    /// relay a final beat so containerd sees output before Wait returns.
+    async fn flush_stdio_after_exit(&self, id: &str) {
+        let io_dir = self.tasks.read().await.get(id).and_then(|m| m.io_dir.clone());
+        let Some(io_dir) = io_dir else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            return;
+        };
+        for name in ["stdout.log", "stderr.log"] {
+            let path = io_dir.join(name);
+            let mut last = None;
+            let mut stable = 0u32;
+            for _ in 0..80 {
+                let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+                if Some(size) == last {
+                    stable += 1;
+                    if stable >= 4 {
+                        break;
+                    }
+                } else {
+                    stable = 0;
+                    last = Some(size);
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(75)).await;
     }
 
     async fn call_agent_direct(&self, vm: &VmRecord, req: ContainerRequest) -> AnyResult<ContainerResponse> {
@@ -592,11 +623,12 @@ impl Service {
 #[async_trait]
 impl Task for Service {
     async fn create(&self, _ctx: &TtrpcContext, req: CreateTaskRequest) -> TtrpcResult<CreateTaskResponse> {
-        let (vm, config_json, io) = self.stage_rootfs_and_config(&req).await.map_err(rpc_other)?;
+        let (vm, config_json, io, io_dir) = self.stage_rootfs_and_config(&req).await.map_err(rpc_other)?;
         let response = self.call_agent(&vm, ContainerRequest::Create { id: req.id.clone(), config_json, io }).await.map_err(rpc_other)?;
         let pid = match response { ContainerResponse::Created { pid } => pid, other => return Err(rpc_other(format!("unexpected create response: {other:?}"))) };
         self.tasks.write().await.insert(req.id.clone(), TaskMeta {
             bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
+            io_dir: Some(io_dir),
         });
         Ok(CreateTaskResponse { pid, ..Default::default() })
     }
@@ -637,9 +669,10 @@ impl Task for Service {
     async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> TtrpcResult<WaitResponse> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
-        let response = self.call_agent(&vm, ContainerRequest::Wait { id: req.id, exec_id }).await.map_err(rpc_other)?;
+        let response = self.call_agent(&vm, ContainerRequest::Wait { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
         match response {
             ContainerResponse::Exited { exit_code, exited_at_unix_nano } => {
+                self.flush_stdio_after_exit(&req.id).await;
                 let mut out = WaitResponse::new();
                 out.exit_status = exit_code as u32;
                 out.exited_at = Some(timestamp_from_nanos(exited_at_unix_nano)).into();
@@ -692,7 +725,7 @@ impl Task for Service {
         if bytes.is_empty() { return Err(rpc_invalid("ExecProcessRequest.spec is empty")); }
         let process_json = String::from_utf8(bytes).map_err(|e| rpc_invalid(e.to_string()))?;
         let (_, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, None).await.map_err(rpc_other)?;
-        let io = self.prepare_io(&format!("{}-{}", req.id, req.exec_id), &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
+        let (io, _) = self.prepare_io(&format!("{}-{}", req.id, req.exec_id), &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
         self.call_agent(&vm, ContainerRequest::Exec { id: req.id, exec_id: req.exec_id, process_json, io }).await.map_err(rpc_other)?;
         Ok(Empty::new())
     }
@@ -1382,11 +1415,11 @@ fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_
                         break;
                     }
                     idle_rounds += 1;
-                    // ~5 minutes of idle after last byte before giving up.
-                    if idle_rounds > 6_000 {
+                    // ~2 minutes of idle after last byte before giving up.
+                    if idle_rounds > 12_000 {
                         break;
                     }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                     continue;
                 }
                 idle_rounds = 0;
