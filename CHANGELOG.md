@@ -17,6 +17,10 @@
 - **Service Fabric universal CI SLO defaults** — `SLO_CI=1` applies VIP p99 /
   pressure / EDT fairness / HA failover RTT / Mpps floors; RSS under-load PPS via
   `scripts/test-service-fabric-rss.sh` (`SLO_RSS_PPS_MIN`, soft-skip without VIP).
+- **Service Fabric lab Mpps / CPU ceilings** — `SLO_LAB=1` /
+  `scripts/test-service-fabric-lab.sh` raises connect Mpps floor to `0.05`, adds
+  packet Mpps (`SLO_PKT_MPPS_MIN=0.10`) + fluxvm CPU ceiling (`SLO_CPU_MAX_PERCENT=85`)
+  during storm; CI floor unchanged at `0.01`.
 - **Remote ipcache ingest** — `POST/DELETE /v1/network/ipcache/remote` for Fabric
   ClusterMesh-like identity fan-out (local VM rows preserved).
 - **Service Fabric gen7 ops tranche** — opt-in cgroup/connect4 (`fluxvm_service_connect.bpf.o`),

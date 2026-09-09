@@ -25,7 +25,14 @@
 #   SLO_MPPS_MIN=0.01         synthetic connect-rate Mpps vs VIP; skip if no VIP
 #   SLO_CI_SHAPE=1
 #
-# Optional SLO gates (also usable without SLO_CI):
+# SLO_LAB=1 applies higher lab ceilings (on top of / instead of CI floor):
+#   SLO_MPPS_MIN=0.05         connect-burst floor (5× CI)
+#   SLO_PKT_MPPS_MIN=0.10     packet Mpps from service/iface stats during storm
+#   SLO_CPU_MAX_PERCENT=85    fluxvm process CPU% average during storm must be ≤
+#   SLO_RSS_PPS_MIN=10000     when RSS section also runs
+#   MPPS_DURATION=3 MPPS_WORKERS=64
+#
+# Optional SLO gates (also usable without SLO_CI/SLO_LAB):
 #   SLO_VIP_P99_MS=5          require VIP connect p99 ≤ N ms (needs VIP=)
 #   SLO_PRESSURE_IDLE=1       pressure action must not be hard_reload
 #   SLO_REQUIRE_CHANNELS=1    when north_south_interfaces present, require
@@ -35,6 +42,8 @@
 #   SLO_EDT_FAIRNESS=1        EDT pacing gate (see above)
 #   SLO_FAILOVER_LOSS_MS=N    HA delta fetch RTT ceiling
 #   SLO_MPPS_MIN=N            min estimated Mpps from connect burst
+#   SLO_PKT_MPPS_MIN=N        min packet Mpps from stats/ethtool during storm
+#   SLO_CPU_MAX_PERCENT=N     max fluxvm CPU% during Mpps/RSS storm
 #   SLO_RSS_LOAD=1            also run scripts/test-service-fabric-rss.sh
 set -euo pipefail
 
@@ -46,8 +55,15 @@ VIP="${VIP:-}"
 VIP_PORT="${VIP_PORT:-80}"
 SERVICE="${SERVICE:-}"
 
+truthy() {
+  case "${1:-}" in
+    1|true|yes|TRUE|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Universal CI defaults when SLO_CI=1 (operator env still wins).
-if [[ "${SLO_CI:-}" == "1" || "${SLO_CI:-}" == "true" || "${SLO_CI:-}" == "yes" ]]; then
+if truthy "${SLO_CI:-}"; then
   export SLO_CI_SHAPE="${SLO_CI_SHAPE:-1}"
   export SLO_PRESSURE_IDLE="${SLO_PRESSURE_IDLE:-1}"
   export SLO_EDT_FAIRNESS="${SLO_EDT_FAIRNESS:-1}"
@@ -55,6 +71,23 @@ if [[ "${SLO_CI:-}" == "1" || "${SLO_CI:-}" == "true" || "${SLO_CI:-}" == "yes" 
   export SLO_MPPS_MIN="${SLO_MPPS_MIN:-0.01}"
   if [[ -n "$VIP" ]]; then
     export SLO_VIP_P99_MS="${SLO_VIP_P99_MS:-25}"
+  fi
+fi
+
+# Higher lab ceilings when SLO_LAB=1 (overrides CI floor when both set unless
+# the operator already exported a stricter/explicit value — we only default).
+if truthy "${SLO_LAB:-}"; then
+  export SLO_CI_SHAPE="${SLO_CI_SHAPE:-1}"
+  export SLO_PRESSURE_IDLE="${SLO_PRESSURE_IDLE:-1}"
+  export SLO_EDT_FAIRNESS="${SLO_EDT_FAIRNESS:-1}"
+  export SLO_MPPS_MIN="${SLO_MPPS_MIN:-0.05}"
+  export SLO_PKT_MPPS_MIN="${SLO_PKT_MPPS_MIN:-0.10}"
+  export SLO_CPU_MAX_PERCENT="${SLO_CPU_MAX_PERCENT:-85}"
+  export SLO_RSS_PPS_MIN="${SLO_RSS_PPS_MIN:-10000}"
+  export MPPS_DURATION="${MPPS_DURATION:-3}"
+  export MPPS_WORKERS="${MPPS_WORKERS:-64}"
+  if [[ -n "$VIP" ]]; then
+    export SLO_VIP_P99_MS="${SLO_VIP_P99_MS:-50}"
   fi
 fi
 
@@ -71,8 +104,8 @@ trap 'rm -f "$STATUS_JSON" "$PRESSURE_JSON" "$SERVICES_JSON" "$STATS_JSON"' EXIT
 
 echo "== Service Fabric status =="
 if ! curl -sf "${auth[@]}" "$FLUXVM_URL/v1/network/services/status" >"$STATUS_JSON"; then
-  if [[ "${SLO_CI:-}" == "1" || "${SLO_CI:-}" == "true" || "${SLO_CI:-}" == "yes" ]]; then
-    echo "SKIP: FluxVM status unreachable at $FLUXVM_URL (SLO_CI soft-skip)"
+  if truthy "${SLO_CI:-}" || truthy "${SLO_LAB:-}"; then
+    echo "SKIP: FluxVM status unreachable at $FLUXVM_URL (SLO soft-skip)"
     exit 0
   fi
   echo "FAIL: cannot fetch $FLUXVM_URL/v1/network/services/status" >&2
@@ -121,26 +154,110 @@ PY
 fi
 
 MPPS_EST=""
-if [[ -n "$VIP" && -n "${SLO_MPPS_MIN:-}" ]]; then
-  echo "== Synthetic Mpps sample (connect burst vs VIP) =="
-  MPPS_EST="$(
-  VIP="$VIP" VIP_PORT="$VIP_PORT" python3 - <<'PY'
-import os, subprocess, sys, time, concurrent.futures
-vip=os.environ["VIP"]
-port=int(os.environ.get("VIP_PORT","80"))
-duration=1.5
-workers=32
+PKT_MPPS_EST=""
+CPU_AVG_PCT=""
+if [[ -n "$VIP" && ( -n "${SLO_MPPS_MIN:-}" || -n "${SLO_PKT_MPPS_MIN:-}" || -n "${SLO_CPU_MAX_PERCENT:-}" ) ]]; then
+  echo "== Lab Mpps / CPU sample (connect burst + stats) =="
+  # Pick optional iface from status for ethtool packet deltas.
+  RSS_IFACE_GUESS="$(python3 - <<PY
+import json
+try:
+  d=json.load(open("$STATUS_JSON"))
+  ns=d.get("north_south_interfaces") or []
+  print(ns[0] if ns else "")
+except Exception:
+  print("")
+PY
+)"
+  EVAL_OUT="$(
+  VIP="$VIP" VIP_PORT="$VIP_PORT" \
+  MPPS_DURATION="${MPPS_DURATION:-1.5}" MPPS_WORKERS="${MPPS_WORKERS:-32}" \
+  FLUXVM_URL="$FLUXVM_URL" TOKEN="${TOKEN:-}" \
+  RSS_IFACE="${RSS_IFACE:-$RSS_IFACE_GUESS}" \
+  STATS_JSON="$STATS_JSON" \
+  python3 - <<'PY'
+import json, os, subprocess, sys, time, concurrent.futures, re
+
+vip = os.environ["VIP"]
+port = int(os.environ.get("VIP_PORT", "80"))
+duration = float(os.environ.get("MPPS_DURATION", "1.5"))
+workers = int(os.environ.get("MPPS_WORKERS", "32"))
+iface = os.environ.get("RSS_IFACE", "").strip()
+fluxvm_url = os.environ.get("FLUXVM_URL", "http://127.0.0.1:7788").rstrip("/")
+token = os.environ.get("TOKEN", "").strip()
+stats_path = os.environ.get("STATS_JSON", "")
+
+def fluxvm_pid():
+    try:
+        out = subprocess.check_output(["pgrep", "-n", "-x", "fluxvm"], text=True).strip()
+        return int(out.splitlines()[0])
+    except Exception:
+        return None
+
+def read_proc_cpu(pid):
+    # returns (utime+stime jiffies, wall_ns)
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            parts = f.read().split()
+        # fields 14,15 are utime,stime (1-indexed → 13,14)
+        return int(parts[13]) + int(parts[14]), time.perf_counter_ns()
+    except Exception:
+        return None, None
+
+def ethtool_packets(dev):
+    if not dev:
+        return None
+    try:
+        out = subprocess.check_output(["ethtool", "-S", dev], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+    total = 0
+    matched = False
+    for line in out.splitlines():
+        m = re.search(r"(rx_packets|tx_packets|rx_pkts|tx_pkts|packets):\s*(\d+)", line, re.I)
+        if m:
+            total += int(m.group(2))
+            matched = True
+    return total if matched else None
+
+def service_packets(path):
+    try:
+        d = json.load(open(path))
+    except Exception:
+        return None
+    total = 0
+    found = False
+    def walk(obj):
+        nonlocal total, found
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                kl = str(k).lower()
+                if kl in ("packets", "rx_packets", "tx_packets", "forward_packets", "forward_pkts") and isinstance(v, (int, float)):
+                    total += int(v)
+                    found = True
+                else:
+                    walk(v)
+        elif isinstance(obj, list):
+            for i in obj:
+                walk(i)
+    walk(d)
+    return total if found else None
 
 def one():
-    r=subprocess.run(["bash","-lc", f"echo >/dev/tcp/{vip}/{port}"], capture_output=True)
-    return r.returncode==0
+    r = subprocess.run(["bash", "-lc", f"echo >/dev/tcp/{vip}/{port}"], capture_output=True)
+    return r.returncode == 0
 
-one()  # warm /dev/tcp path
-deadline=time.perf_counter()+duration
-t0=time.perf_counter()
-ok=fail=0
+one()
+pid = fluxvm_pid()
+cpu0, t0cpu = read_proc_cpu(pid) if pid else (None, None)
+eth0 = ethtool_packets(iface)
+svc0 = service_packets(stats_path)
+
+deadline = time.perf_counter() + duration
+t0 = time.perf_counter()
+ok = fail = 0
 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-    futs=[]
+    futs = []
     while time.perf_counter() < deadline:
         futs.append(ex.submit(one))
         if len(futs) >= workers * 4:
@@ -149,18 +266,67 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
                     ok += 1
                 else:
                     fail += 1
-            futs=[]
+            futs = []
     for f in concurrent.futures.as_completed(futs):
         if f.result():
             ok += 1
         else:
             fail += 1
-elapsed=max(1e-6, time.perf_counter()-t0)
-mpps=(ok/elapsed)/1_000_000.0
+elapsed = max(1e-6, time.perf_counter() - t0)
+
+# refresh stats after storm
+try:
+    auth = ["-H", f"Authorization: Bearer {token}"] if token else []
+    subprocess.run(
+        ["curl", "-sf", *auth, f"{fluxvm_url}/v1/network/services/stats"],
+        check=False,
+        stdout=open(stats_path, "w") if stats_path else subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+except Exception:
+    pass
+
+cpu1, t1cpu = read_proc_cpu(pid) if pid else (None, None)
+eth1 = ethtool_packets(iface)
+svc1 = service_packets(stats_path)
+
+mpps = (ok / elapsed) / 1_000_000.0
 print(f"connect_ok={ok} fail={fail} elapsed_s={elapsed:.3f} est_mpps={mpps:.6f}", file=sys.stderr)
+
+pkt_mpps = None
+if eth0 is not None and eth1 is not None and eth1 >= eth0:
+    pkt_mpps = ((eth1 - eth0) / elapsed) / 1_000_000.0
+    print(f"ethtool_pkt_delta={eth1-eth0} iface={iface} pkt_mpps={pkt_mpps:.6f}", file=sys.stderr)
+elif svc0 is not None and svc1 is not None and svc1 >= svc0:
+    pkt_mpps = ((svc1 - svc0) / elapsed) / 1_000_000.0
+    print(f"stats_pkt_delta={svc1-svc0} pkt_mpps={pkt_mpps:.6f}", file=sys.stderr)
+else:
+    print("pkt_mpps unavailable (no ethtool/stats counters)", file=sys.stderr)
+
+cpu_pct = None
+if cpu0 is not None and cpu1 is not None and t0cpu and t1cpu and t1cpu > t0cpu:
+    # jiffies → assume USER_HZ=100
+    hz = os.sysconf(os.sysconf_names.get("SC_CLK_TCK", "SC_CLK_TCK")) if hasattr(os, "sysconf_names") else 100
+    try:
+        hz = os.sysconf("SC_CLK_TCK")
+    except Exception:
+        hz = 100
+    dj = cpu1 - cpu0
+    dt = (t1cpu - t0cpu) / 1e9
+    cpu_pct = (dj / hz) / dt * 100.0
+    print(f"fluxvm_pid={pid} cpu_avg_pct={cpu_pct:.2f}", file=sys.stderr)
+else:
+    print("cpu sample unavailable (no fluxvm pid/stat)", file=sys.stderr)
+
+# machine-readable triple for the shell
 print(f"{mpps:.8f}")
+print(f"{'' if pkt_mpps is None else f'{pkt_mpps:.8f}'}")
+print(f"{'' if cpu_pct is None else f'{cpu_pct:.4f}'}")
 PY
   )"
+  MPPS_EST="$(printf '%s\n' "$EVAL_OUT" | sed -n '1p')"
+  PKT_MPPS_EST="$(printf '%s\n' "$EVAL_OUT" | sed -n '2p')"
+  CPU_AVG_PCT="$(printf '%s\n' "$EVAL_OUT" | sed -n '3p')"
 fi
 
 echo "== Stats snapshot =="
@@ -199,6 +365,9 @@ SLO_EDT_FAIRNESS="${SLO_EDT_FAIRNESS:-}" \
 SLO_FAILOVER_LOSS_MS="${SLO_FAILOVER_LOSS_MS:-}" \
 DELTA_FETCH_MS="${DELTA_FETCH_MS:-}" \
 SLO_MPPS_MIN="${SLO_MPPS_MIN:-}" MPPS_EST="${MPPS_EST:-}" \
+SLO_PKT_MPPS_MIN="${SLO_PKT_MPPS_MIN:-}" PKT_MPPS_EST="${PKT_MPPS_EST:-}" \
+SLO_CPU_MAX_PERCENT="${SLO_CPU_MAX_PERCENT:-}" CPU_AVG_PCT="${CPU_AVG_PCT:-}" \
+SLO_LAB="${SLO_LAB:-}" \
 VIP="${VIP:-}" FABRIC_URL="${FABRIC_URL:-}" SERVICE="${SERVICE:-}" \
 python3 - <<'PY'
 import json, os, sys
@@ -375,7 +544,7 @@ if failover:
         except ValueError:
             fail.append(f"bad DELTA_FETCH_MS/SLO_FAILOVER_LOSS_MS: {delta_raw!r} / {failover!r}")
 
-# --- Mpps ---
+# --- Mpps (connect estimate) ---
 mpps_min = os.environ.get("SLO_MPPS_MIN", "").strip()
 mpps_est = os.environ.get("MPPS_EST", "").strip()
 if mpps_min:
@@ -394,6 +563,51 @@ if mpps_min:
         except ValueError:
             fail.append(f"bad MPPS_EST/SLO_MPPS_MIN: {mpps_est!r} / {mpps_min!r}")
 
+# --- Packet Mpps (lab) ---
+pkt_min = os.environ.get("SLO_PKT_MPPS_MIN", "").strip()
+pkt_est = os.environ.get("PKT_MPPS_EST", "").strip()
+lab = os.environ.get("SLO_LAB", "").strip().lower() in ("1", "true", "yes")
+if pkt_min:
+    if not vip:
+        notes.append("SLO_PKT_MPPS_MIN skipped (no VIP)")
+    elif not pkt_est:
+        if lab:
+            notes.append("SLO_PKT_MPPS_MIN soft-skip (no ethtool/stats packet counters)")
+        else:
+            fail.append("SLO_PKT_MPPS_MIN set but packet Mpps sample unavailable")
+    else:
+        try:
+            est = float(pkt_est)
+            limit = float(pkt_min)
+            if est < limit:
+                fail.append(f"pkt Mpps {est:.6f} < SLO_PKT_MPPS_MIN {limit}")
+            else:
+                print(f"Pkt Mpps OK: {est:.6f} >= {limit}")
+        except ValueError:
+            fail.append(f"bad PKT_MPPS_EST/SLO_PKT_MPPS_MIN: {pkt_est!r} / {pkt_min!r}")
+
+# --- CPU ceiling during storm ---
+cpu_max = os.environ.get("SLO_CPU_MAX_PERCENT", "").strip()
+cpu_avg = os.environ.get("CPU_AVG_PCT", "").strip()
+if cpu_max:
+    if not vip:
+        notes.append("SLO_CPU_MAX_PERCENT skipped (no VIP / no storm)")
+    elif not cpu_avg:
+        if lab:
+            notes.append("SLO_CPU_MAX_PERCENT soft-skip (fluxvm pid/stat unavailable)")
+        else:
+            fail.append("SLO_CPU_MAX_PERCENT set but CPU sample unavailable")
+    else:
+        try:
+            avg = float(cpu_avg)
+            limit = float(cpu_max)
+            if avg > limit:
+                fail.append(f"fluxvm CPU {avg:.1f}% > SLO_CPU_MAX_PERCENT {limit}")
+            else:
+                print(f"CPU OK: {avg:.1f}% <= {limit}%")
+        except ValueError:
+            fail.append(f"bad CPU_AVG_PCT/SLO_CPU_MAX_PERCENT: {cpu_avg!r} / {cpu_max!r}")
+
 for n in notes:
     print(f"NOTE: {n}")
 
@@ -404,8 +618,8 @@ if fail:
 print("SLO gates: PASS")
 PY
 
-if [[ "${SLO_RSS_LOAD:-}" == "1" || "${SLO_RSS_LOAD:-}" == "true" || "${SLO_RSS_LOAD:-}" == "yes" ]]; then
-  echo "== RSS under-load (SLO_RSS_LOAD) =="
+if [[ "${SLO_RSS_LOAD:-}" == "1" || "${SLO_RSS_LOAD:-}" == "true" || "${SLO_RSS_LOAD:-}" == "yes" ]] || truthy "${SLO_LAB:-}"; then
+  echo "== RSS under-load (SLO_RSS_LOAD / SLO_LAB) =="
   "$ROOT/scripts/test-service-fabric-rss.sh"
 fi
 
