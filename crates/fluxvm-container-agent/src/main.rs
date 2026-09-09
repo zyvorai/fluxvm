@@ -55,7 +55,7 @@ struct ProcSnapshot {
     status: ContainerStatus,
     pid: u32,
     exit_code: Option<i32>,
-    exited_at_unix_nano: Option<i128>,
+    exited_at_unix_nano: Option<i64>,
     gate_fd: Option<RawFd>,
 }
 
@@ -978,11 +978,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-fn now_unix_nanos() -> i128 {
+fn now_unix_nanos() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos() as i128
+        .as_nanos() as i64
 }
 
 #[cfg(test)]

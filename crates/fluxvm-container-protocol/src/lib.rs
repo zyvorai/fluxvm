@@ -158,11 +158,11 @@ pub enum ContainerResponse {
         #[serde(default)]
         exit_code: Option<i32>,
         #[serde(default)]
-        exited_at_unix_nano: Option<i128>,
+        exited_at_unix_nano: Option<i64>,
     },
     Exited {
         exit_code: i32,
-        exited_at_unix_nano: i128,
+        exited_at_unix_nano: i64,
     },
     Pids { pids: Vec<u32> },
     Stats { stats: ContainerStats },
@@ -243,5 +243,16 @@ mod tests {
         let line = encode_line(&response).unwrap();
         let back: ContainerResponse = decode_line(&line).unwrap();
         assert!(matches!(back, ContainerResponse::Stats { .. }));
+    }
+
+    #[test]
+    fn exited_response_round_trip() {
+        let response = ContainerResponse::Exited {
+            exit_code: 0,
+            exited_at_unix_nano: 1_759_000_000_000_000_000,
+        };
+        let line = encode_line(&response).unwrap();
+        let back: ContainerResponse = decode_line(&line).unwrap();
+        assert!(matches!(back, ContainerResponse::Exited { exit_code: 0, .. }));
     }
 }

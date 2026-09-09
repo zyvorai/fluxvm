@@ -764,7 +764,7 @@ fn map_status(status: ContainerStatus) -> Status {
     }
 }
 
-fn timestamp_from_nanos(ns: i128) -> containerd_shim_protos::protobuf::well_known_types::timestamp::Timestamp {
+fn timestamp_from_nanos(ns: i64) -> containerd_shim_protos::protobuf::well_known_types::timestamp::Timestamp {
     let mut ts = containerd_shim_protos::protobuf::well_known_types::timestamp::Timestamp::new();
     ts.seconds = ns.div_euclid(1_000_000_000) as i64;
     ts.nanos = ns.rem_euclid(1_000_000_000) as i32;
