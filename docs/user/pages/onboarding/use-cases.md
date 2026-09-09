@@ -91,6 +91,13 @@ actually gone, and the operator self-heals — if the underlying VM
 disappears out-of-band, it gets replaced automatically without touching the
 CR. Verified against a real k3s cluster.
 
+## Secure Containers (OCI in a FluxVM)
+
+For workloads that still look like containers to Kubernetes/`ctr`, but need a
+per-Pod guest kernel, FluxVM Secure Containers maps a containerd task group onto
+one QEMU FluxVM (runtime `io.containerd.fluxvm.v2`, RuntimeClass `fluxvm`).
+Developer preview — see [secure-containers.md](../../../secure-containers.md).
+
 ## Multi-host fleets without Kubernetes
 
 Not every team wants a Kubernetes control plane just to spread disposable

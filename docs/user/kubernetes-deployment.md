@@ -9,6 +9,11 @@ RuntimeClass or a container runtime shim. Each object maps directly to a raw VM 
 whichever node its `spec.node` names, driven by that node's own `fluxvm-kube` instance talking
 to a *local* `fluxvm serve` REST API. There is no scheduler — placement is always explicit.
 
+For the separate **Secure Containers** path (containerd RuntimeClass `fluxvm` /
+`io.containerd.fluxvm.v2` for OCI workloads inside a FluxVM), see
+[Secure Containers](../secure-containers.md) and [`deploy/containerd/`](../../deploy/containerd/).
+That path is developer-preview and is not what this DaemonSet deploys.
+
 ## What gets deployed
 
 One pod per capable node, two containers sharing the pod's network namespace:

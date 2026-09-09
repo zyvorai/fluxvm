@@ -22,4 +22,8 @@ members = [
     "crates/fluxvm-agent",
     "crates/fluxvm-kube",
     "crates/fluxvm-microvm",
+    "crates/fluxvm-container-protocol",
+    "crates/fluxvm-container-agent",
+    "crates/fluxvm-container-client",
+    "crates/fluxvm-containerd-shim",
 ]

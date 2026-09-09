@@ -1,0 +1,31 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-containerd-shim"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "containerd runtime-v2 shim for FluxVM VM-isolated containers"
+
+[[bin]]
+name = "containerd-shim-fluxvm-v2"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
+containerd-shim = { version = "0.11", features = ["async"] }
+containerd-shim-protos = { version = "0.11", features = ["async"] }
+libc = "0.2"
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+fluxvm-core = { path = "../fluxvm-core" }
+fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
+fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
+fluxvm-container-protocol = { path = "../fluxvm-container-protocol" }
+fluxvm-container-client = { path = "../fluxvm-container-client" }

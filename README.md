@@ -27,9 +27,11 @@ control plane. Repository: [github.com/zyvorai/fluxvm](https://github.com/zyvora
 
 It also contains a small **virt-builder-style image pipeline**: use a local/HTTP base image, verify SHA-256, convert/resize it, and customize it before first boot.
 
-Beyond a single host: a `DisposableVm` Kubernetes CRD + node-local operator (`fluxvm-kube`), and a
+Beyond a single host: a `DisposableVm` Kubernetes CRD + node-local operator (`fluxvm-kube`), a
 non-Kubernetes distributed node-agent (`fluxvm-agent`) with a central fleet registry and load-aware
-placement across multiple hosts — see "Kubernetes CRD/operator" and "Distributed node-agent" below.
+placement across multiple hosts, and a **developer-preview** containerd runtime-v2 path
+([Secure Containers](docs/secure-containers.md)) that maps a Pod/task group onto one QEMU FluxVM —
+see "Kubernetes CRD/operator", "Distributed node-agent", and "Secure Containers" below.
 
 > This repository is a complete MVP/control-plane skeleton, not a finished multi-tenant security boundary. Authentication/RBAC, the Firecracker jailer (chroot + uid/gid isolation), cgroup v2 resource control, and per-VM network namespaces are already implemented (see "Auth / RBAC", "Firecracker jailer", "Resource control (cgroup v2)", and "Network namespaces" below) — before exposing it to untrusted tenants, still add seccomp/AppArmor/SELinux policy, quotas, audit logging and stronger image provenance.
 
@@ -142,6 +144,7 @@ Offline disk certify/repair stays in **[GuestKit](https://github.com/zyvorai/gue
 - [VM JSON contract](#vm-json-contract)
 - [Kubernetes CRD/operator](#kubernetes-crdoperator)
 - [MicroVM (Kubernetes without KubeVirt)](#microvm-kubernetes-without-kubevirt)
+- [Secure Containers](#secure-containers)
 - [Using FluxVM through zyvor-fabric](#using-fluxvm-through-zyvor-fabric)
 - [Using FluxVM through Ragnarok](#using-fluxvm-through-ragnarok)
 - [Distributed node-agent](#distributed-node-agent)
@@ -183,6 +186,11 @@ Image path:
 base image -> SHA256 -> qemu-img -> customize -> reusable template
                                       |
 VM launch: template -> disposable clone -> cloud-init -> VMM -> TTL delete
+
+Secure Containers (developer preview):
+Kubernetes/ctr -> containerd -> containerd-shim-fluxvm-v2
+  -> FluxVM REST -> QEMU + virtiofs Pod share
+  -> fluxvm-guest-agent :17777 -> fluxvm-container-agent :17778
 ```
 
 ## Project layout
@@ -210,8 +218,15 @@ crates/
 ├── fluxvm-cli                   `fluxvm` CLI binary (composition root)
 ├── fluxvm-agent                 fleet registry + per-host node-agent daemon (multi-node)
 ├── fluxvm-kube                  DisposableVm CRD + node-local Kubernetes operator
-└── fluxvm-microvm               MicroVM/Job/Pool/GuestImage, shadow-Pod scheduler, node agent
+├── fluxvm-microvm               MicroVM/Job/Pool/GuestImage, shadow-Pod scheduler, node agent
+├── fluxvm-container-protocol    Secure Containers lifecycle wire types (VSOCK :17778)
+├── fluxvm-container-agent       in-guest OCI process supervisor (`fluxvm-container-agent`)
+├── fluxvm-container-client      host-side VSOCK client for the container agent
+└── fluxvm-containerd-shim       containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`)
 ```
+
+Deploy fragments for the containerd RuntimeClass path live under `deploy/containerd/`
+(see [docs/secure-containers.md](docs/secure-containers.md)).
 
 `fluxvm-agent` (a distinct concept from `fluxvm-guest-agent` above — this one is the
 per-*host* node-agent for multi-node deployments) and `fluxvm-kube` are both implemented
@@ -267,6 +282,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - End-to-end lifecycle smoke test (vsock exec, pause/resume, graceful shutdown, and vsock-CID uniqueness under concurrent creates, all verified against real VMs).
 - Kubernetes `DisposableVm` CRD + node-local operator (`fluxvm-kube`), verified against a real k3s cluster — see "Kubernetes CRD/operator" below.
 - Distributed node-agent (`fluxvm-agent`): central fleet registry + per-host heartbeat client with load-aware placement, verified across two real physically separate hosts — see "Distributed node-agent" below.
+- **Secure Containers v0.1** (developer preview) — containerd runtime `io.containerd.fluxvm.v2` / shim `containerd-shim-fluxvm-v2`: one Pod/task group → one QEMU FluxVM with virtiofs rootfs staging and a dedicated container agent on VSOCK :17778. QEMU-only; Kubernetes CNI/PVC write-through and TTY are explicit follow-ups. See [docs/secure-containers.md](docs/secure-containers.md) and [Secure Containers](#secure-containers).
 
 ## Host requirements
 
@@ -345,9 +361,11 @@ sudo install -m 0644 config.example.toml /etc/fluxvm.toml
 ```
 
 `cargo build --release` also produces `target/release/fluxvm-kube` (the Kubernetes operator — see
-"Kubernetes CRD/operator") and `target/release/fluxvm-agent` (the fleet registry/node-agent — see
-"Distributed node-agent"); neither is installed by the two commands above, since not every deployment
-needs either.
+"Kubernetes CRD/operator"), `target/release/fluxvm-agent` (the fleet registry/node-agent — see
+"Distributed node-agent"), `target/release/containerd-shim-fluxvm-v2`, and
+`target/release/fluxvm-container-agent` (Secure Containers — see
+[docs/secure-containers.md](docs/secure-containers.md)). None of those are installed by the two
+commands above; use `scripts/install-secure-containers.sh` for the shim/agent pair when needed.
 
 ## Deploy to a remote host
 
@@ -1617,6 +1635,9 @@ reconcile into a real, running QEMU VM (confirmed via the local REST API, not ju
 fine"), delete the CR and confirm `kubectl delete` blocks on a finalizer until the real VM is
 actually gone — no leaked QEMU process.
 
+Related but separate: the [Secure Containers](#secure-containers) path uses containerd RuntimeClass
+`fluxvm` for OCI workloads inside a FluxVM; it does not replace `DisposableVm`.
+
 ```bash
 # Generate + install the CRD once.
 fluxvm-kube --print-crd | kubectl apply -f -
@@ -1688,6 +1709,31 @@ may be a path or a same-namespace GuestImage name. Examples:
 Tutorials: [docs/tutorials/microvm/](docs/tutorials/microvm/README.md) (incl. GuestImage).
 Lab numbers: [docs/benchmarks/README.md](docs/benchmarks/README.md)
 (`scripts/bench-sandbox.sh`, `scripts/bench-microvm.sh`).
+
+## Secure Containers
+
+Developer-preview **containerd runtime-v2** path: a Kubernetes Pod (or `ctr` task group) maps onto
+one QEMU FluxVM. The shim (`containerd-shim-fluxvm-v2`) creates the VM via the FluxVM REST API,
+stages the OCI rootfs into a virtiofs share, and drives processes through `fluxvm-container-agent`
+on VSOCK port 17778 (bootstrapped via the existing guest agent on 17777).
+
+| Piece | Value |
+|-------|--------|
+| Runtime id | `io.containerd.fluxvm.v2` |
+| Shim binary | `containerd-shim-fluxvm-v2` |
+| RuntimeClass handler | `fluxvm` |
+| Docs | [docs/secure-containers.md](docs/secure-containers.md) |
+| Deploy fragment | [`deploy/containerd/`](deploy/containerd/) |
+
+```bash
+sudo ./scripts/install-secure-containers.sh
+# merge deploy/containerd/fluxvm-runtime.toml into containerd, then:
+./scripts/test-secure-containers.sh          # unit + release build
+# FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/test-secure-containers.sh  # needs KVM + guest image
+```
+
+This is a different surface from `DisposableVm` / MicroVM CRDs (those bypass CRI). v0.1 is QEMU-only
+and does **not** yet claim CNI Pod networking, PVC write-through, or TTY parity with Kata.
 
 ## Using FluxVM through zyvor-fabric
 
@@ -1910,6 +1956,7 @@ assigned the same vsock CID.
 - The API is localhost-only by default. Off-loopback binds fail closed without `[[auth.tokens]]`; set `auth.require = true` to always require tokens. Audit lines go to the `fluxvm_audit` tracing target.
 - The vsock guest agent is authenticated by default for any VM created with `agent.enabled: true` (see "Pause, resume, and exec"), but this doesn't extend to mTLS/OIDC-style identity — it's one shared secret per VM, good enough to stop an unrelated host process, not a multi-tenant authorization model.
 - `guestkit`'s `inspect_os()` (used by `copy_in`) only recognizes partitioned disks and LVM volumes as OS roots by default; support for a bare, unpartitioned whole-disk filesystem (the shape Firecracker rootfs images are typically built in) was added as part of this project's testing and needs to make it into a real guestkit release — until then, building against a `guestkit` checkout without that fix will fail `copy_in` on such images with "no operating system found in image".
+- **Secure Containers v0.1** is developer-preview: QEMU/virtiofs only; Kubernetes CNI → guest netns, PVC write-through, TTY, and full OCI hardening inside the guest are follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent networking yet.
 
 ## License
 

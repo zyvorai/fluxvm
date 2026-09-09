@@ -1,0 +1,47 @@
+name: Secure Containers
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-container-*/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'deploy/containerd/**'
+      - 'scripts/*secure-containers*'
+      - 'Cargo.toml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-container-*/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'deploy/containerd/**'
+      - 'scripts/*secure-containers*'
+      - 'Cargo.toml'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: System dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+      - name: Format
+        working-directory: fluxvm
+        run: cargo fmt --all -- --check
+      - name: Secure-container unit tests
+        working-directory: fluxvm
+        run: ./scripts/test-secure-containers.sh
+      - name: Clippy new crates
+        working-directory: fluxvm
+        run: cargo clippy -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-container-client -p fluxvm-containerd-shim --all-targets -- -D warnings

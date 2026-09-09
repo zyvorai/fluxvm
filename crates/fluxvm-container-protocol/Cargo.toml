@@ -1,0 +1,13 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-container-protocol"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Wire protocol for FluxVM VM-isolated container sandboxes"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

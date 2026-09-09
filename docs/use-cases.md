@@ -103,6 +103,25 @@ automatically without touching the CR. This is verified against a real k3s
 cluster, not just unit-tested against a fake API server (see "Kubernetes
 CRD/operator" in the README).
 
+## Secure Containers (OCI in a FluxVM)
+
+For workloads that still look like containers to Kubernetes/`ctr`, but need a
+**per-Pod guest kernel** instead of sharing the node kernel, FluxVM Secure
+Containers maps a containerd task group onto one QEMU FluxVM
+(runtime `io.containerd.fluxvm.v2`, RuntimeClass handler `fluxvm`).
+
+This is a **developer preview**: QEMU/virtiofs process isolation works;
+Kubernetes CNI → guest networking, PVC write-through, and TTY are not
+production-ready yet. Full design, install, and limits:
+[docs/secure-containers.md](secure-containers.md). Deploy fragment:
+[`deploy/containerd/`](../deploy/containerd/).
+
+```bash
+sudo ./scripts/install-secure-containers.sh
+# merge deploy/containerd/fluxvm-runtime.toml into containerd config, then:
+ctr run --rm --runtime io.containerd.fluxvm.v2 docker.io/library/busybox:1.36 smoke /bin/echo ok
+```
+
 ## Multi-host fleets without Kubernetes
 
 Not every team wants a Kubernetes control plane just to spread disposable

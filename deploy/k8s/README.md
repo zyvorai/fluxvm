@@ -6,12 +6,18 @@ actual Kubernetes workload.
 
 ## What this is, and isn't
 
-`fluxvm-kube` never touches the Pod/CRI pipeline: no RuntimeClass, no
-containerd shim, no Pod objects created on your behalf. A `DisposableVm` CR
+`fluxvm-kube` never touches the Pod/CRI pipeline for `DisposableVm`: no RuntimeClass,
+no containerd shim, no Pod objects created on your behalf. A `DisposableVm` CR
 maps 1:1 to a raw VM process on the node named in `spec.node`, driven by a
 per-node operator instance talking to a *local* `fluxvm serve` REST API.
 This DaemonSet is a straight containerization of that model — one pod per
 `fluxvm-capable` node, two containers sharing the pod's network namespace.
+
+A separate, developer-preview path — **Secure Containers** — does use containerd
+RuntimeClass `fluxvm` / `io.containerd.fluxvm.v2` for OCI workloads inside a
+FluxVM. That is not this DaemonSet; see
+[docs/secure-containers.md](../../docs/secure-containers.md) and
+[`deploy/containerd/`](../containerd/).
 
 ## Prerequisites, per node
 

@@ -29,3 +29,6 @@ make preflight
 
 See README “Project layout”. Network Fabric lives in `crates/fluxvm-network`
 + `bpf/`. Kubernetes packaging is `deploy/k8s/` + `crates/fluxvm-kube`.
+Secure Containers (containerd runtime-v2) lives in `crates/fluxvm-container-*` /
+`crates/fluxvm-containerd-shim` + `deploy/containerd/` — see
+`docs/secure-containers.md`.
