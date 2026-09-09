@@ -56,5 +56,5 @@ Regenerate: `node scripts/user-docs/generate-page-index.mjs`
 - [Network policy tutorials](../tutorials/network-policy/README.md)
 - [Service Fabric Maglev tutorial](../tutorials/service-fabric/README.md)
 - [MicroVM tutorials](../tutorials/microvm/README.md)
-- [Secure Containers](../secure-containers.md) (containerd RuntimeClass, developer preview)
+- [Secure Containers](../secure-containers.md) (containerd RuntimeClass, developer preview; [Set 3](../secure-containers-set3.md))
 - [Production tutorials](../tutorials/production/README.md)

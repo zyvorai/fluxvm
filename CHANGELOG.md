@@ -3,6 +3,13 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Secure Containers Set 3** — containerd task lifecycle events (create/start/
+  exec/pause/resume/exit/delete) with async Wait watchers and exit
+  de-duplication; definitive delete metadata; init/exec process separation;
+  retry-safe staging cleanup; guest OCI process hardening (supplementary GIDs,
+  umask, rlimits, `noNewPrivileges`, capability sets). Docs:
+  [docs/secure-containers.md](docs/secure-containers.md),
+  [docs/secure-containers-set3.md](docs/secure-containers-set3.md).
 - **Secure Containers Set 2** — CNI L2 Pod-IP path (QEMU TAP on the prepared
   host bridge when a CRI netns is present; `FLUXVM_CONTAINER_CNI=0` disables),
   guest cgroup-v2 resource limits/stats/pids/update + sandbox resource config,

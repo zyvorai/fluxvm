@@ -17,6 +17,14 @@ merge the runtime fragment and restart containerd.
 - **Guest cgroup v2** stats / resource updates are wired through the container
   agent (`Stats`, `Update`, `Pids`).
 
-> Developer-preview. PVC write-through, TTY, and FIFO-over-virtiofs stdio remain
+## Set 3 notes
+
+- Publishes containerd task lifecycle events (create/start/exec/pause/resume/
+  exit/delete) with async exit watching.
+- Guest OCI process hardening: supplementary GIDs, umask, rlimits,
+  `noNewPrivileges`, and capability sets.
+- Detail: [docs/secure-containers-set3.md](../../docs/secure-containers-set3.md).
+
+> Developer-preview. PVC write-through, TTY, and production streaming stdio remain
 > follow-ups. See [docs/secure-containers.md](../../docs/secure-containers.md).
   Do not advertise this RuntimeClass as full Kata-compatible production yet.

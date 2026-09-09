@@ -57,7 +57,7 @@ the VM's existing per-instance authentication token.
 - guest-side OCI bind/proc/tmpfs/sysfs/devpts/mqueue/cgroup mount application and cleanup
 - containerd snapshot rootfs staging into the VM-visible virtiofs share
 - bind-mount snapshot staging for ConfigMap/Secret-style inputs
-- stdin/stdout/stderr FIFO relay
+- stdin/stdout/stderr relay (virtiofs-safe regular files + host polling)
 - FluxVM guest-agent bootstrap of the dedicated container agent
 - RuntimeClass and containerd configuration examples
 - unit tests for protocol, OCI parsing, grouping and mount staging
@@ -78,6 +78,18 @@ the VM's existing per-instance authentication token.
 - VM shape (`vcpus` / `memory_mib`) derived from sandbox resource hints plus
   `FLUXVM_CONTAINER_VM_OVERHEAD_MIB` (default 256).
 
+### Set 3 — lifecycle events + OCI process hardening
+
+- Publishes containerd task events: create, start, exec-added/started, paused,
+  resumed, exit, delete (with async Wait watchers and exit de-duplication).
+- Definitive delete status/timestamps from the guest; separate init/exec
+  metadata and per-process stdio staging.
+- Retry-safe rootfs/mount staging cleanup.
+- Guest OCI process controls: supplementary GIDs, umask, rlimits,
+  `noNewPrivileges`, and bounding/effective/inheritable/permitted/ambient
+  capabilities (unsupported names rejected).
+- Detail: [secure-containers-set3.md](secure-containers-set3.md).
+
 ## Explicit limitations
 
 This remains a **developer-preview** runtime, not a claim of full Kata
@@ -94,12 +106,13 @@ Containers compatibility.
    Pod share. This is correct for read-mostly ConfigMaps/Secrets but is not a
    persistent-volume implementation.
 4. **TTY/resize is rejected**, not silently emulated.
-5. **OCI namespace/capability/seccomp/device parity inside the guest is
-   incomplete.** Guest cgroup v2 covers a portable resource subset; the VM is
-   still the primary isolation boundary.
+5. **OCI namespace/seccomp/device parity inside the guest is incomplete.** Set 3
+   covers common process hardening (caps/rlimits/umask/noNewPrivileges/gids);
+   guest cgroup v2 covers a portable resource subset. The VM remains the
+   primary isolation boundary.
 6. **Stdio over virtiofs uses regular log files** (not FIFOs), with a polling
-   host relay. Interactive/blocking stdin semantics are weaker than true pipes;
-   vsock stdio remains a follow-up for production streaming.
+   host relay (Wait drains before returning). Interactive/blocking stdin
+   semantics are weaker than true pipes; vsock stdio remains a follow-up.
 
 These constraints are intentional: unsupported behavior returns an explicit
 error instead of appearing to work while weakening isolation or data
@@ -113,16 +126,15 @@ Add virtiofs hotplug or a stable shared-fs broker so CSI/PVC mounts can be
 passed through without copying. Enforce read-only/read-write semantics and
 propagation explicitly.
 
-### P0 — OCI hardening inside guest
+### P0 — remaining OCI / namespace parity
 
-Implement namespaces, capabilities, seccomp, masked/readonly paths, rlimits,
-NoNewPrivileges and devices. Add conformance fixtures from the OCI runtime
-spec.
+Namespaces, seccomp, masked/readonly paths and devices beyond Set 3 process
+hardening. Add conformance fixtures from the OCI runtime spec.
 
-### P0 — stdio without virtiofs FIFOs
+### P0 — production stdio
 
-Replace FIFO-over-virtiofs with a relay that works reliably through the share
-or over VSOCK.
+Move interactive streaming off virtiofs log polling onto VSOCK (or equivalent)
+for true pipe semantics.
 
 ### P1 — CNI hardening
 
