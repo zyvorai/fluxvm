@@ -8,6 +8,15 @@ Kubernetes RuntimeClass handler: `fluxvm`
 Use `scripts/install-secure-containers.sh` to install the host binaries, then
 merge the runtime fragment and restart containerd.
 
-> v0.1 is a developer-preview runtime. QEMU/virtiofs process isolation works;
-> Kubernetes CNI/PVC write-through and TTY are explicit follow-up gates. Do
-> not advertise this RuntimeClass as Kata-compatible production networking yet.
+## Set 2 notes
+
+- **CNI L2** (default on): when the CRI sandbox provides a Pod netns, the shim
+  attaches a QEMU TAP to a prepared host bridge and configures the guest with
+  the real CNI Pod IP/MAC/routes. Plain `ctr` has no netns → user-mode networking.
+  Disable with `FLUXVM_CONTAINER_CNI=0`.
+- **Guest cgroup v2** stats / resource updates are wired through the container
+  agent (`Stats`, `Update`, `Pids`).
+
+> Developer-preview. PVC write-through, TTY, and FIFO-over-virtiofs stdio remain
+> follow-ups. See [docs/secure-containers.md](../../docs/secure-containers.md).
+  Do not advertise this RuntimeClass as full Kata-compatible production yet.
