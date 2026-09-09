@@ -3,6 +3,13 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Secure Containers Set 4** — Pod-UID-scoped write-through kubelet `volumes/` /
+  `volume-subpaths/` virtiofs exports with bind-source rewrite; guest OCI
+  security (read-only rootfs, masked/RO paths, device nodes, sysctls,
+  libseccomp syscall-name rules fail-closed); mount rollback on create failure;
+  `scripts/e2e-secure-containers-volume.sh`. Docs:
+  [docs/secure-containers.md](docs/secure-containers.md),
+  [docs/secure-containers-set4.md](docs/secure-containers-set4.md).
 - **Secure Containers Set 3** — containerd task lifecycle events (create/start/
   exec/pause/resume/exit/delete) with async Wait watchers and exit
   de-duplication; definitive delete metadata; init/exec process separation;
@@ -21,8 +28,9 @@
   `io.containerd.fluxvm.v2`); virtiofs Pod share + VSOCK lifecycle on :17778;
   `deploy/containerd/`, install/test/e2e scripts, CI workflow
   `.github/workflows/secure-containers.yml`. Docs:
-  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; PVC/TTY
-  and FIFO-over-virtiofs stdio remain follow-up gates.
+  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; TTY
+  and hostPath hotplug remain follow-up gates (Set 4 covers Pod-UID
+  write-through volumes).
 - **Service Fabric full mesh datapath (Fabric-side)** — remote backends merge into
   existing Maglev `/v1/network/services` upserts (lifecycle v2: weighted drain +
   optional VIP match; no new FluxVM tunnel APIs; Geneve/VXLAN still N/A). See

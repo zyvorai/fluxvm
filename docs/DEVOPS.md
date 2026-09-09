@@ -25,7 +25,8 @@ See [contracts/fabric-fluxvm-readyz.json](contracts/fabric-fluxvm-readyz.json).
 - Secure Containers crates: `.github/workflows/secure-containers.yml`
   (fmt, unit tests, release build, clippy) — see
   [secure-containers.md](secure-containers.md) /
-  [secure-containers-set3.md](secure-containers-set3.md).
+  [secure-containers-set3.md](secure-containers-set3.md) /
+  [secure-containers-set4.md](secure-containers-set4.md).
 - Live KVM smoke stays on self-hosted runners (`scripts/test-boot-smoke.sh`, dataplane e2e).
 
 ## Lab verify

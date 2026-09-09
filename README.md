@@ -187,9 +187,9 @@ base image -> SHA256 -> qemu-img -> customize -> reusable template
                                       |
 VM launch: template -> disposable clone -> cloud-init -> VMM -> TTL delete
 
-Secure Containers (developer preview; Set 2 CNI/cgroups, Set 3 events + OCI hardening):
+Secure Containers (developer preview; Sets 2–4: CNI/cgroups, events/OCI, volumes/seccomp):
 Kubernetes/ctr -> containerd -> containerd-shim-fluxvm-v2
-  -> FluxVM REST -> QEMU + virtiofs Pod share
+  -> FluxVM REST -> QEMU + virtiofs Pod share (+ Pod-UID write-through volumes)
   -> fluxvm-guest-agent :17777 -> fluxvm-container-agent :17778
 ```
 
@@ -282,7 +282,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - End-to-end lifecycle smoke test (vsock exec, pause/resume, graceful shutdown, and vsock-CID uniqueness under concurrent creates, all verified against real VMs).
 - Kubernetes `DisposableVm` CRD + node-local operator (`fluxvm-kube`), verified against a real k3s cluster — see "Kubernetes CRD/operator" below.
 - Distributed node-agent (`fluxvm-agent`): central fleet registry + per-host heartbeat client with load-aware placement, verified across two real physically separate hosts — see "Distributed node-agent" below.
-- **Secure Containers v0.1+Set2+Set3** (developer preview) — containerd runtime `io.containerd.fluxvm.v2` / shim `containerd-shim-fluxvm-v2`: one Pod/task group → one QEMU FluxVM with virtiofs rootfs staging, guest cgroup-v2 stats/resources, optional CNI L2 Pod IP, task lifecycle events + OCI process hardening (Set 3), and a dedicated container agent on VSOCK :17778. QEMU-only; PVC write-through and TTY are explicit follow-ups. See [docs/secure-containers.md](docs/secure-containers.md) and [Secure Containers](#secure-containers).
+- **Secure Containers v0.1+Set2+Set3+Set4** (developer preview) — containerd runtime `io.containerd.fluxvm.v2` / shim `containerd-shim-fluxvm-v2`: one Pod/task group → one QEMU FluxVM with virtiofs rootfs staging, guest cgroup-v2 stats/resources, optional CNI L2 Pod IP, task lifecycle events + OCI process hardening (Set 3), Pod-UID write-through volumes + guest RO/masked paths/devices/sysctls/libseccomp (Set 4), and a dedicated container agent on VSOCK :17778. QEMU-only; TTY and hostPath hotplug remain follow-ups. See [docs/secure-containers.md](docs/secure-containers.md) and [Secure Containers](#secure-containers).
 
 ## Host requirements
 
@@ -1719,15 +1719,17 @@ on VSOCK port 17778 (bootstrapped via the existing guest agent on 17777).
 
 **Set 2** adds optional CNI L2 attachment (guest gets the real Pod IP when a CRI netns is present)
 and guest cgroup-v2 stats/resource updates. **Set 3** adds containerd task events, async exit
-watching, and guest OCI process hardening (caps/rlimits/umask/noNewPrivileges/gids). Plain `ctr`
-without a netns still uses user-mode networking.
+watching, and guest OCI process hardening (caps/rlimits/umask/noNewPrivileges/gids). **Set 4**
+adds Pod-UID-scoped write-through kubelet volumes/`volume-subpaths`, plus guest RO rootfs,
+masked/RO paths, devices, sysctls, and fail-closed libseccomp. Plain `ctr` without a netns still
+uses user-mode networking.
 
 | Piece | Value |
 |-------|--------|
 | Runtime id | `io.containerd.fluxvm.v2` |
 | Shim binary | `containerd-shim-fluxvm-v2` |
 | RuntimeClass handler | `fluxvm` |
-| Docs | [docs/secure-containers.md](docs/secure-containers.md), [Set 3](docs/secure-containers-set3.md) |
+| Docs | [docs/secure-containers.md](docs/secure-containers.md), [Set 3](docs/secure-containers-set3.md), [Set 4](docs/secure-containers-set4.md) |
 | Deploy fragment | [`deploy/containerd/`](deploy/containerd/) |
 
 ```bash
@@ -1735,10 +1737,11 @@ sudo ./scripts/install-secure-containers.sh
 # merge deploy/containerd/fluxvm-runtime.toml into containerd, then:
 ./scripts/test-secure-containers.sh          # unit + release build
 # FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/test-secure-containers.sh  # needs KVM + guest image
+# sudo ./scripts/e2e-secure-containers-volume.sh <ns> fluxvm  # needs StorageClass + guest image
 ```
 
 This is a different surface from `DisposableVm` / MicroVM CRDs (those bypass CRI). Still QEMU-only;
-PVC write-through, TTY, and FIFO-over-virtiofs stdio remain follow-ups.
+TTY, hostPath allowlist/hotplug, and production VSOCK streaming stdio remain follow-ups.
 
 ## Using FluxVM through zyvor-fabric
 
@@ -1961,7 +1964,7 @@ assigned the same vsock CID.
 - The API is localhost-only by default. Off-loopback binds fail closed without `[[auth.tokens]]`; set `auth.require = true` to always require tokens. Audit lines go to the `fluxvm_audit` tracing target.
 - The vsock guest agent is authenticated by default for any VM created with `agent.enabled: true` (see "Pause, resume, and exec"), but this doesn't extend to mTLS/OIDC-style identity — it's one shared secret per VM, good enough to stop an unrelated host process, not a multi-tenant authorization model.
 - `guestkit`'s `inspect_os()` (used by `copy_in`) only recognizes partitioned disks and LVM volumes as OS roots by default; support for a bare, unpartitioned whole-disk filesystem (the shape Firecracker rootfs images are typically built in) was added as part of this project's testing and needs to make it into a real guestkit release — until then, building against a `guestkit` checkout without that fix will fail `copy_in` on such images with "no operating system found in image".
-- **Secure Containers** is developer-preview: QEMU/virtiofs only; Set 2 adds CNI L2 Pod IP + guest cgroup stats/resources; Set 3 adds task events + OCI process hardening. PVC write-through, TTY, and production streaming stdio remain follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent yet.
+- **Secure Containers** is developer-preview: QEMU/virtiofs only; Set 2 adds CNI L2 Pod IP + guest cgroup stats/resources; Set 3 adds task events + OCI process hardening; Set 4 adds Pod-UID write-through volumes + guest RO/masked paths/devices/sysctls/libseccomp. TTY, hostPath hotplug, and production streaming stdio remain follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent yet.
 
 ## License
 

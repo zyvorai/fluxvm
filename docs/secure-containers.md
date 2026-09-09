@@ -90,6 +90,17 @@ the VM's existing per-instance authentication token.
   capabilities (unsupported names rejected).
 - Detail: [secure-containers-set3.md](secure-containers-set3.md).
 
+### Set 4 — write-through Pod volumes + OCI security
+
+- Pod-UID-scoped virtiofs exports for kubelet `volumes/` and `volume-subpaths/`
+  with OCI bind-source rewrite (PVC/CSI/emptyDir write-through).
+- Guest OCI security: read-only rootfs, masked/read-only paths, device nodes,
+  Pod-VM sysctls, and libseccomp syscall-name rules (unsupported comparators
+  fail closed). Guest images need `libseccomp.so.2` for seccomp profiles.
+- Rollback of partial mounts when OCI/security setup fails.
+- Volume smoke: `scripts/e2e-secure-containers-volume.sh`.
+- Detail: [secure-containers-set4.md](secure-containers-set4.md).
+
 ## Explicit limitations
 
 This remains a **developer-preview** runtime, not a claim of full Kata
@@ -102,14 +113,16 @@ Containers compatibility.
    setups, dual-stack-only paths, or plugins that do not leave a usable
    interface/MAC/routes in the Pod netns may still fall back or fail closed.
    Validate against your CNI (Cilium/Calico/etc.) before production.
-3. **PVC writes are not write-through.** Bind mounts are snapshotted into the
-   Pod share. This is correct for read-mostly ConfigMaps/Secrets but is not a
-   persistent-volume implementation.
+3. **Non-Pod-UID host binds stay snapshot-based.** Set 4 exports Pod-UID-scoped
+   kubelet `volumes/` and `volume-subpaths/` write-through; arbitrary hostPath
+   and other binds remain copied unless a later allowlisted broker/hotplug
+   lands.
 4. **TTY/resize is rejected**, not silently emulated.
 5. **OCI namespace/seccomp/device parity inside the guest is incomplete.** Set 3
    covers common process hardening (caps/rlimits/umask/noNewPrivileges/gids);
-   guest cgroup v2 covers a portable resource subset. The VM remains the
-   primary isolation boundary.
+   Set 4 adds RO rootfs, masked/RO paths, device nodes, sysctls, and
+   libseccomp syscall-name rules (fail closed). Guest cgroup v2 covers a
+   portable resource subset. The VM remains the primary isolation boundary.
 6. **Stdio over virtiofs uses regular log files** (not FIFOs), with a polling
    host relay (Wait drains before returning). Interactive/blocking stdin
    semantics are weaker than true pipes; vsock stdio remains a follow-up.
@@ -120,16 +133,17 @@ correctness.
 
 ## Next gates
 
-### P0 — volume model
+### P0 — volume model (partially Set 4)
 
-Add virtiofs hotplug or a stable shared-fs broker so CSI/PVC mounts can be
-passed through without copying. Enforce read-only/read-write semantics and
-propagation explicitly.
+Pod-UID write-through for kubelet volumes/subpaths is in Set 4. Remaining:
+hostPath allowlist/broker, hotplug for late-attached CSI, and fuller
+propagation semantics.
 
-### P0 — remaining OCI / namespace parity
+### P0 — remaining OCI / namespace parity (partially Set 4)
 
-Namespaces, seccomp, masked/readonly paths and devices beyond Set 3 process
-hardening. Add conformance fixtures from the OCI runtime spec.
+Set 4 covers masked/RO paths, devices, sysctls, and name-based seccomp.
+Remaining: namespace parity, seccomp arg comparators/notify, device cgroup,
+and broader OCI conformance fixtures.
 
 ### P0 — production stdio
 
@@ -186,6 +200,14 @@ Set `FLUXVM_SECURE_CONTAINERS_E2E=1`; the script validates KVM, containerd and
 FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`, which
 pulls BusyBox and executes it with `io.containerd.fluxvm.v2`. Plain `ctr` has
 no Pod netns, so CNI L2 stays inactive for that smoke.
+
+### Level 3 — Kubernetes volume write-through
+
+Once a StorageClass and secure-container guest image are available:
+
+```bash
+sudo ./scripts/e2e-secure-containers-volume.sh <namespace> fluxvm
+```
 
 The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
 because ordinary hosted runners do not provide the nested virtualization and

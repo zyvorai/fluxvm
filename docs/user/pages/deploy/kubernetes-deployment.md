@@ -21,10 +21,11 @@ whichever node its `spec.node` names, driven by that node's own `fluxvm-kube` in
 to a *local* `fluxvm serve` REST API. There is no scheduler — placement is always explicit.
 
 For the separate **Secure Containers** path (containerd RuntimeClass `fluxvm` /
-`io.containerd.fluxvm.v2` for OCI workloads inside a FluxVM; Set 2 CNI/cgroups,
-Set 3 events + OCI hardening), see
+`io.containerd.fluxvm.v2` for OCI workloads inside a FluxVM; Sets 2–4: CNI/cgroups,
+events/OCI hardening, Pod-UID volumes + guest seccomp/paths), see
 [Secure Containers](../../../secure-containers.md),
-[Set 3](../../../secure-containers-set3.md), and
+[Set 3](../../../secure-containers-set3.md),
+[Set 4](../../../secure-containers-set4.md), and
 [`deploy/containerd/`](../../../../deploy/containerd/).
 That path is developer-preview and is not what this DaemonSet deploys.
 

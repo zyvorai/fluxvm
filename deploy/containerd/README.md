@@ -25,6 +25,17 @@ merge the runtime fragment and restart containerd.
   `noNewPrivileges`, and capability sets.
 - Detail: [docs/secure-containers-set3.md](../../docs/secure-containers-set3.md).
 
-> Developer-preview. PVC write-through, TTY, and production streaming stdio remain
-> follow-ups. See [docs/secure-containers.md](../../docs/secure-containers.md).
-  Do not advertise this RuntimeClass as full Kata-compatible production yet.
+## Set 4 notes
+
+- Kubernetes Pod volumes under the current sandbox UID are exported write-through
+  into the guest (PVC/CSI/emptyDir/`volume-subpaths`). Keep arbitrary hostPath
+  passthrough disabled unless a later allowlisted broker/hotplug implementation
+  is installed.
+- Guest OCI security: read-only rootfs, masked/read-only paths, device nodes,
+  sysctls, and libseccomp by syscall name (fail closed). Guest images using OCI
+  seccomp profiles must include `libseccomp.so.2`.
+- Detail: [docs/secure-containers-set4.md](../../docs/secure-containers-set4.md).
+
+> Developer-preview. TTY and production streaming stdio remain follow-ups. See
+> [docs/secure-containers.md](../../docs/secure-containers.md). Do not advertise
+> this RuntimeClass as full Kata-compatible production yet.

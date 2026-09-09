@@ -1,0 +1,966 @@
+diff --git a/PR_BODY.md b/PR_BODY.md
+index 978e8fd..210e952 100644
+--- a/PR_BODY.md
++++ b/PR_BODY.md
+@@ -1,47 +1,36 @@
+-## Summary
+-
+-Add the first **FluxVM Secure Containers** runtime-v2 foundation: containerd can
+-map an isolated task group / Kubernetes Pod sandbox onto one FluxVM QEMU VM and
+-run OCI processes through a dedicated authenticated VSOCK container agent.
+-
+-### Added
+-
+-- `fluxvm-container-protocol` — authenticated lifecycle wire contract
+-- `fluxvm-container-agent` — in-guest OCI process supervisor
+-- `fluxvm-container-client` — QEMU native/CH-FC proxy VSOCK client
+-- `containerd-shim-fluxvm-v2` — containerd runtime-v2 shim
+-- Pod grouping via `io.kubernetes.cri.sandbox-id`
+-- rootfs + bind-input staging through FluxVM QEMU virtiofs
+-- guest-side common OCI mount application/cleanup (`bind`, `proc`, `tmpfs`, `sysfs`, `devpts`, `mqueue`, cgroup fallback)
+-- stdio FIFO relay
+-- RuntimeClass/containerd examples
+-- install/test scripts and dedicated CI
+-- architecture, limitations and next production gates
+-
+-## Why this shape
+-
+-FluxVM already owns VMM lifecycle, per-VM tokens, VSOCK, QEMU virtiofs, warm
+-pools and networking. This PR does not fork Kata or overload the existing guest
+-agent. It adds a separate container lifecycle plane on VSOCK port 17778 and
+-bootstraps it through the stable FluxVM guest agent on 17777.
+-
+-## Scope / non-goals for v0.1
+-
+-This is a developer-preview foundation. It does **not** claim production Kata
+-parity yet. Kubernetes CNI -> guest network namespace plumbing, PVC
+-write-through, TTY, full OCI security controls, stats/resource updates and
+-non-QEMU shared-rootfs backends remain explicit follow-up gates.
+-
+-## Test plan
+-
+-- `cargo test -p fluxvm-container-protocol`
+-- `cargo test -p fluxvm-container-agent`
+-- `cargo test -p fluxvm-container-client`
+-- `cargo test -p fluxvm-containerd-shim`
+-- release build of shim + guest agent
+-- `cargo fmt --check`
+-- clippy `-D warnings` for all new crates
+-- KVM/containerd smoke on a nested-virt or bare-metal runner before declaring
+-  the RuntimeClass production-ready
+-
+-See `docs/secure-containers.md` and `TEST_REPORT.md` in the handoff bundle.
++## Secure Containers Set 4 — write-through Pod volumes + OCI security
++
++### Summary
++
++Move FluxVM Secure Containers closer to production Kubernetes semantics by
++passing the current Pod's kubelet volume roots into the QEMU sandbox via
++virtiofs, while strengthening the in-guest OCI boundary.
++
++### Volumes
++
++- derive Pod UID from `io.kubernetes.cri.sandbox-uid`
++- export only that Pod's `volumes/` and `volume-subpaths/`
++- translate matching OCI bind sources to guest virtiofs paths
++- preserve read/write behavior for PVC/CSI/emptyDir/projected volumes
++- keep arbitrary/non-Pod bind sources snapshot-based
++
++### OCI hardening
++
++- read-only rootfs
++- masked + read-only paths
++- OCI device-node creation
++- Pod-VM sysctls
++- guest libseccomp syscall-name filters
++- fail closed on unsupported seccomp argument filters/actions/architectures
++- rollback partial mount state on create failures
++
++### Deliberately deferred
++
++TTY/PTY/VSOCK streaming, seccomp argument comparators/notify, namespace parity,
++device cgroup policy, hostPath hotplug, and non-QEMU shared-rootfs backends.
++
++### Required real-node gate
++
++Run repository CI plus KVM/containerd/Kubernetes tests covering PVC write/read
++across Pod recreation, emptyDir, projected volumes, read-only mounts, seccomp
++deny behavior, masked paths, teardown, and repeated Pod churn.
+diff --git a/README-FIRST.md b/README-FIRST.md
+index 064d593..ce7ffe9 100644
+--- a/README-FIRST.md
++++ b/README-FIRST.md
+@@ -1,43 +1,38 @@
+-# FluxVM Secure Containers — Set 3 handoff
++# FluxVM Secure Containers — Set 4 handoff
+ 
+-## Repository base
++## Base
+ 
+-This Set 3 bundle was reviewed against `zyvorai/fluxvm` main commit:
++Reviewed against `zyvorai/fluxvm` commit:
+ 
+ `d77c1afb9364b02e897079b7325470e9a2bf361e`
+ 
+-That base already contains the merged Set 2 CNI/cgroup work plus these runtime
+-hotfixes:
++Set 4 assumes Set 3 behavior is already present: task events, async exit
++monitoring, definitive delete metadata, regular-file virtiofs stdio with drain,
++OCI capabilities/rlimits/noNewPrivileges, CNI L2, and guest cgroup v2.
+ 
+-- virtiofs-safe regular-file stdio
+-- explicit `fs0` Pod-share mounting before container create
+-- `i64` exit timestamps for serde_json compatibility
+-- virtiofs stdio drain before Wait returns
++## Set 4 adds
+ 
+-Do **not** apply the older Set 1/Set 2 ZIP over a newer checkout. Set 3 is
+-cumulative for the secure-container files and incorporates those hotfixes.
++1. Pod-UID-scoped write-through kubelet `volumes` / `volume-subpaths` exports.
++2. Bind-source rewriting so PVC/CSI/emptyDir volume writes reach the host mount.
++3. Read-only rootfs, masked/read-only paths, OCI device nodes and sysctls.
++4. Guest libseccomp enforcement for syscall-name rules; unsupported comparator
++   profiles fail closed.
++5. Rollback of partial mounts when OCI/security setup fails.
+ 
+-## What Set 3 adds
++## Apply
+ 
+-- containerd task lifecycle event publication and async exit monitoring
+-- deterministic delete status/timestamps and exit-event de-duplication
+-- init/exec metadata separation and per-process stdio staging
+-- retry-safe staging cleanup
+-- OCI supplementary groups, umask, rlimits, noNewPrivileges and capabilities
+-
+-See `docs/secure-containers-set3.md` and `TEST_REPORT.md`.
+-
+-## Local integration
+-
+-From a checkout based on the commit above, review/apply the files in this
+-bundle, then run:
++Prefer the patch:
+ 
+ ```bash
+-cargo fmt --all -- --check
+-./scripts/test-secure-containers.sh
+-cargo clippy -p fluxvm-container-protocol -p fluxvm-container-agent \
+-  -p fluxvm-container-client -p fluxvm-containerd-shim --all-targets -- -D warnings
++git checkout <branch-based-on-d77c1afb>
++git apply --check patches/0004-secure-containers-volumes-security.patch
++git apply patches/0004-secure-containers-volumes-security.patch
+ ```
+ 
+-For the real runtime gate use a KVM/containerd host and enable the E2E test as
+-documented in `docs/secure-containers-set3.md`.
++The ZIP also carries the replacement files for manual review.
++
++## Validation status
++
++Static/source checks and patch apply-check are included in `TEST_REPORT.md`.
++This artifact environment does not have a Rust toolchain, `/dev/kvm`, QEMU or
++containerd, so it does not claim cargo/KVM E2E execution.
+diff --git a/crates/fluxvm-container-agent/src/main.rs b/crates/fluxvm-container-agent/src/main.rs
+index fa33c7c..ca99afd 100644
+--- a/crates/fluxvm-container-agent/src/main.rs
++++ b/crates/fluxvm-container-agent/src/main.rs
+@@ -8,9 +8,9 @@
+ //! runc replacement yet; it implements process lifecycle, chroot, uid/gid,
+ //! environment, cwd, signals and stdio inside the guest. Set 3 additionally
+ //! enforces supplementary groups, umask, rlimits and noNewPrivileges. OCI
+-//! namespace, seccomp and device parity remain explicit follow-up hardening
+-//! items in docs/secure-containers.md. Linux capability sets are applied
+-//! directly from OCI process.capabilities when present.
++//! Set 4 adds read-only/masked paths, read-only rootfs, OCI devices, Pod-scoped
++//! sysctls and seccomp filters. Namespace creation and full device-cgroup parity
++//! remain explicit follow-up hardening items in docs/secure-containers.md.
+ 
+ use anyhow::{Context, Result, bail};
+ use clap::Parser;
+@@ -58,6 +58,18 @@ struct CapabilitySets {
+     ambient: u64,
+ }
+ 
++#[derive(Clone, Debug)]
++struct SeccompRule {
++    action: u32,
++    names: Vec<String>,
++}
++
++#[derive(Clone, Debug)]
++struct SeccompProfile {
++    default_action: u32,
++    rules: Vec<SeccompRule>,
++}
++
+ #[derive(Clone, Debug)]
+ struct ProcessSpec {
+     rootfs: PathBuf,
+@@ -71,6 +83,7 @@ struct ProcessSpec {
+     umask: Option<u32>,
+     rlimits: Vec<ProcessRlimit>,
+     capabilities: Option<CapabilitySets>,
++    seccomp: Option<SeccompProfile>,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -175,6 +188,7 @@ struct ContainerEntry {
+     rootfs: PathBuf,
+     mounts: Vec<PathBuf>,
+     cgroup_path: PathBuf,
++    seccomp: Option<SeccompProfile>,
+     init: Arc<ProcHandle>,
+     execs: HashMap<String, Arc<ProcHandle>>,
+ }
+@@ -341,7 +355,10 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
+             bail!("container {id:?} already exists");
+         }
+     }
+-    let cgroup_path = create_container_cgroup(&id, &resources)?;
++    let cgroup_path = match create_container_cgroup(&id, &resources) {
++        Ok(path) => path,
++        Err(e) => { cleanup_mounts(&mounts); return Err(e); }
++    };
+     let mut reg = registry().lock().expect("registry poisoned");
+     if reg.contains_key(&id) {
+         cleanup_container_cgroup(&cgroup_path);
+@@ -350,6 +367,7 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
+     let init = match spawn_gated(&id, None, &spec, &io) {
+         Ok(handle) => handle,
+         Err(e) => {
++            cleanup_mounts(&mounts);
+             let _ = std::fs::remove_dir(&cgroup_path);
+             return Err(e);
+         }
+@@ -357,6 +375,7 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
+     let pid = init.snapshot().pid;
+     if let Err(e) = add_pid_to_cgroup(&cgroup_path, pid) {
+         let _ = init.signal(libc::SIGKILL, true);
++        cleanup_mounts(&mounts);
+         let _ = std::fs::remove_dir(&cgroup_path);
+         return Err(e);
+     }
+@@ -366,6 +385,7 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
+             rootfs: spec.rootfs.clone(),
+             mounts,
+             cgroup_path,
++            seccomp: spec.seccomp.clone(),
+             init,
+             execs: HashMap::new(),
+         },
+@@ -384,6 +404,7 @@ fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -
+     }
+     let mut spec = parse_oci_process(process_json, container.rootfs.clone())?;
+     spec.rootfs = container.rootfs.clone();
++    spec.seccomp = container.seccomp.clone();
+     let handle = spawn_gated(id, Some(&exec_id), &spec, &io)?;
+     let pid = handle.snapshot().pid;
+     if let Err(e) = add_pid_to_cgroup(&container.cgroup_path, pid) {
+@@ -480,10 +501,24 @@ fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>, ResourceLi
+         .and_then(Value::as_str)
+         .context("OCI root.path is required")?;
+     let rootfs = PathBuf::from(root);
+-    let mounts = apply_oci_mounts(&v, &rootfs)?;
+-    let process = v.get("process").context("OCI process is required")?;
+-    let resources = resource_limits_from_oci(&v);
+-    Ok((parse_process_value(process, rootfs)?, mounts, resources))
++    let mut mounts = apply_oci_mounts(&v, &rootfs)?;
++    let parsed = (|| -> Result<(ProcessSpec, ResourceLimits)> {
++        create_oci_devices(&v, &rootfs)?;
++        apply_oci_sysctls(&v)?;
++        apply_oci_path_security(&v, &rootfs, &mut mounts)?;
++        let process = v.get("process").context("OCI process is required")?;
++        let resources = resource_limits_from_oci(&v);
++        let mut spec = parse_process_value(process, rootfs.clone())?;
++        spec.seccomp = parse_seccomp_profile(&v)?;
++        Ok((spec, resources))
++    })();
++    match parsed {
++        Ok((spec, resources)) => Ok((spec, mounts, resources)),
++        Err(e) => {
++            cleanup_mounts(&mounts);
++            Err(e)
++        }
++    }
+ }
+ 
+ 
+@@ -556,6 +591,183 @@ fn apply_oci_mounts(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
+     Ok(mounted)
+ }
+ 
++fn apply_oci_path_security(config: &Value, rootfs: &PathBuf, mounted: &mut Vec<PathBuf>) -> Result<()> {
++    let masked = config
++        .pointer("/linux/maskedPaths")
++        .and_then(Value::as_array)
++        .into_iter()
++        .flatten()
++        .filter_map(Value::as_str);
++    for path in masked {
++        let target = rootfs.join(safe_guest_destination(path)?);
++        if !target.exists() { continue; }
++        if target.is_dir() {
++            mount_one("tmpfs", &target, Some("tmpfs"), libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, Some("size=0"))?;
++        } else {
++            mount_one("/dev/null", &target, None, libc::MS_BIND, None)?;
++            mount_one("/dev/null", &target, None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY, None)?;
++        }
++        mounted.push(target);
++    }
++
++    let readonly = config
++        .pointer("/linux/readonlyPaths")
++        .and_then(Value::as_array)
++        .into_iter()
++        .flatten()
++        .filter_map(Value::as_str);
++    for path in readonly {
++        let target = rootfs.join(safe_guest_destination(path)?);
++        if !target.exists() { continue; }
++        let source = target.to_string_lossy().into_owned();
++        mount_one(&source, &target, None, libc::MS_BIND | libc::MS_REC, None)?;
++        mount_one(&source, &target, None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_REC, None)?;
++        mounted.push(target);
++    }
++
++    if config.pointer("/root/readonly").and_then(Value::as_bool).unwrap_or(false) {
++        let source = rootfs.to_string_lossy().into_owned();
++        mount_one(&source, rootfs, None, libc::MS_BIND | libc::MS_REC, None)?;
++        mount_one(&source, rootfs, None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_REC, None)?;
++        mounted.push(rootfs.clone());
++    }
++    Ok(())
++}
++
++fn create_oci_devices(config: &Value, rootfs: &PathBuf) -> Result<()> {
++    let Some(devices) = config.pointer("/linux/devices").and_then(Value::as_array) else { return Ok(()); };
++    for dev in devices {
++        let path = dev.get("path").and_then(Value::as_str).context("OCI device.path is required")?;
++        let relative = safe_guest_destination(path)?;
++        let target = rootfs.join(relative);
++        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
++        let kind = dev.get("type").and_then(Value::as_str).context("OCI device.type is required")?;
++        let file_mode = dev.get("fileMode").and_then(Value::as_u64).unwrap_or(0o666) as libc::mode_t;
++        let mode = match kind {
++            "c" | "u" => libc::S_IFCHR | file_mode,
++            "b" => libc::S_IFBLK | file_mode,
++            "p" => libc::S_IFIFO | file_mode,
++            other => bail!("unsupported OCI device type {other:?}"),
++        };
++        let major = dev.get("major").and_then(Value::as_i64).unwrap_or(0) as u64;
++        let minor = dev.get("minor").and_then(Value::as_i64).unwrap_or(0) as u64;
++        let c = CString::new(target.as_os_str().as_bytes())?;
++        let _ = std::fs::remove_file(&target);
++        let rc = unsafe { libc::mknod(c.as_ptr(), mode, libc::makedev(major as _, minor as _)) };
++        if rc != 0 { return Err(std::io::Error::last_os_error()).with_context(|| format!("creating OCI device {}", target.display())); }
++        let uid = dev.get("uid").and_then(Value::as_u64).unwrap_or(0) as libc::uid_t;
++        let gid = dev.get("gid").and_then(Value::as_u64).unwrap_or(0) as libc::gid_t;
++        unsafe { libc::chown(c.as_ptr(), uid, gid); }
++    }
++    Ok(())
++}
++
++fn apply_oci_sysctls(config: &Value) -> Result<()> {
++    let Some(sysctls) = config.pointer("/linux/sysctl").and_then(Value::as_object) else { return Ok(()); };
++    for (key, value) in sysctls {
++        let value = value.as_str().context("OCI sysctl value must be a string")?;
++        if key.contains('/') || key.contains("..") { bail!("unsafe OCI sysctl key {key:?}"); }
++        let path = PathBuf::from("/proc/sys").join(key.replace('.', "/"));
++        std::fs::write(&path, value).with_context(|| format!("applying OCI sysctl {key}={value}"))?;
++    }
++    Ok(())
++}
++
++const SCMP_ACT_KILL_PROCESS: u32 = 0x8000_0000;
++const SCMP_ACT_KILL_THREAD: u32 = 0x0000_0000;
++const SCMP_ACT_TRAP: u32 = 0x0003_0000;
++const SCMP_ACT_ERRNO: u32 = 0x0005_0000;
++const SCMP_ACT_LOG: u32 = 0x7ffc_0000;
++const SCMP_ACT_ALLOW: u32 = 0x7fff_0000;
++
++fn seccomp_action(raw: &str, errno_ret: Option<u32>) -> Result<u32> {
++    Ok(match raw {
++        "SCMP_ACT_KILL" | "SCMP_ACT_KILL_THREAD" => SCMP_ACT_KILL_THREAD,
++        "SCMP_ACT_KILL_PROCESS" => SCMP_ACT_KILL_PROCESS,
++        "SCMP_ACT_TRAP" => SCMP_ACT_TRAP,
++        "SCMP_ACT_ERRNO" => SCMP_ACT_ERRNO | (errno_ret.unwrap_or(libc::EPERM as u32) & 0xffff),
++        "SCMP_ACT_LOG" => SCMP_ACT_LOG,
++        "SCMP_ACT_ALLOW" => SCMP_ACT_ALLOW,
++        other => bail!("unsupported OCI seccomp action {other:?}"),
++    })
++}
++
++fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
++    let Some(seccomp) = config.pointer("/linux/seccomp") else { return Ok(None); };
++    if let Some(arches) = seccomp.get("architectures").and_then(Value::as_array) {
++        for arch in arches.iter().filter_map(Value::as_str) {
++            if arch != "SCMP_ARCH_X86_64" {
++                bail!("unsupported OCI seccomp architecture {arch:?}; Set 4 enforces native x86_64 only");
++            }
++        }
++    }
++    let default_action = seccomp_action(
++        seccomp.get("defaultAction").and_then(Value::as_str).context("OCI seccomp.defaultAction is required")?,
++        seccomp.get("defaultErrnoRet").and_then(Value::as_u64).map(|v| v as u32),
++    )?;
++    let mut rules = Vec::new();
++    if let Some(items) = seccomp.get("syscalls").and_then(Value::as_array) {
++        for item in items {
++            if item.get("args").and_then(Value::as_array).is_some_and(|v| !v.is_empty()) {
++                bail!("OCI seccomp argument filters are not yet supported by FluxVM Set 4");
++            }
++            let action = seccomp_action(
++                item.get("action").and_then(Value::as_str).context("OCI seccomp syscall action is required")?,
++                item.get("errnoRet").and_then(Value::as_u64).map(|v| v as u32),
++            )?;
++            let names = item.get("names").and_then(Value::as_array).context("OCI seccomp syscall names are required")?
++                .iter().map(|v| v.as_str().map(str::to_string).context("seccomp syscall name must be a string"))
++                .collect::<Result<Vec<_>>>()?;
++            rules.push(SeccompRule { action, names });
++        }
++    }
++    Ok(Some(SeccompProfile { default_action, rules }))
++}
++
++unsafe fn dlsym_required<T: Copy>(handle: *mut libc::c_void, name: &[u8]) -> Result<T> {
++    let ptr = unsafe { libc::dlsym(handle, name.as_ptr().cast()) };
++    if ptr.is_null() { bail!("libseccomp symbol {} is missing", String::from_utf8_lossy(&name[..name.len()-1])); }
++    Ok(unsafe { std::mem::transmute_copy(&ptr) })
++}
++
++fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
++    type Init = unsafe extern "C" fn(u32) -> *mut libc::c_void;
++    type Release = unsafe extern "C" fn(*mut libc::c_void);
++    type Resolve = unsafe extern "C" fn(*const libc::c_char) -> libc::c_int;
++    type RuleAdd = unsafe extern "C" fn(*mut libc::c_void, u32, libc::c_int, u32, ...) -> libc::c_int;
++    type Load = unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int;
++    let name = CString::new("libseccomp.so.2")?;
++    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
++    if handle.is_null() { bail!("OCI seccomp requested but libseccomp.so.2 is not installed in the guest"); }
++    let result = (|| -> Result<()> {
++        let init: Init = unsafe { dlsym_required(handle, b"seccomp_init\0")? };
++        let release: Release = unsafe { dlsym_required(handle, b"seccomp_release\0")? };
++        let resolve: Resolve = unsafe { dlsym_required(handle, b"seccomp_syscall_resolve_name\0")? };
++        let rule_add: RuleAdd = unsafe { dlsym_required(handle, b"seccomp_rule_add\0")? };
++        let load: Load = unsafe { dlsym_required(handle, b"seccomp_load\0")? };
++        let ctx = unsafe { init(profile.default_action) };
++        if ctx.is_null() { bail!("seccomp_init failed"); }
++        let apply = (|| -> Result<()> {
++            for rule in &profile.rules {
++                for name in &rule.names {
++                    let c = CString::new(name.as_bytes())?;
++                    let nr = unsafe { resolve(c.as_ptr()) };
++                    if nr < 0 { bail!("unknown seccomp syscall {name:?}"); }
++                    let rc = unsafe { rule_add(ctx, rule.action, nr, 0) };
++                    if rc != 0 { bail!("seccomp_rule_add({name}) failed: {rc}"); }
++                }
++            }
++            let rc = unsafe { load(ctx) };
++            if rc != 0 { bail!("seccomp_load failed: {rc}"); }
++            Ok(())
++        })();
++        unsafe { release(ctx); }
++        apply
++    })();
++    unsafe { libc::dlclose(handle); }
++    result
++}
++
+ fn safe_guest_destination(destination: &str) -> Result<PathBuf> {
+     let path = std::path::Path::new(destination);
+     if !path.is_absolute() { bail!("OCI mount destination must be absolute: {destination}"); }
+@@ -893,6 +1105,7 @@ fn parse_process_value(process: &Value, rootfs: PathBuf) -> Result<ProcessSpec>
+         umask,
+         rlimits,
+         capabilities,
++        seccomp: None,
+     })
+ }
+ 
+@@ -1225,6 +1438,15 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+             {
+                 libc::_exit(126);
+             }
++            if let Some(profile) = spec.seccomp.as_ref() {
++                // A seccomp filter must never be silently skipped. Force
++                // no-new-privileges before loading the guest-local filter.
++                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
++                    || apply_seccomp(profile).is_err()
++                {
++                    libc::_exit(126);
++                }
++            }
+ 
+             let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|v| v.as_ptr()).collect();
+             argv_ptrs.push(std::ptr::null());
+@@ -1387,6 +1609,27 @@ mod tests {
+         assert!(parse_oci_config(r#"{"root":{"path":"/r"},"process":{"args":[]}}"#).is_err());
+     }
+ 
++    #[test]
++    fn parses_seccomp_without_argument_filters() {
++        let (spec, _, _) = parse_oci_config(r#"{
++          "root":{"path":"/run/rootfs"},
++          "process":{"args":["/bin/true"]},
++          "linux":{"seccomp":{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["ptrace"],"action":"SCMP_ACT_ERRNO","errnoRet":1}]}}
++        }"#).unwrap();
++        let seccomp = spec.seccomp.unwrap();
++        assert_eq!(seccomp.rules.len(), 1);
++        assert_eq!(seccomp.rules[0].names, vec!["ptrace"]);
++    }
++
++    #[test]
++    fn rejects_seccomp_argument_filters_instead_of_ignoring_them() {
++        assert!(parse_oci_config(r#"{
++          "root":{"path":"/run/rootfs"},
++          "process":{"args":["/bin/true"]},
++          "linux":{"seccomp":{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["clone"],"action":"SCMP_ACT_ERRNO","args":[{"index":0,"value":1,"op":"SCMP_CMP_EQ"}]}]}}
++        }"#).is_err());
++    }
++
+     #[test]
+     fn token_compare() {
+         assert!(constant_time_eq("same", "same"));
+diff --git a/crates/fluxvm-containerd-shim/src/main.rs b/crates/fluxvm-containerd-shim/src/main.rs
+index 17c4156..23ea2b4 100644
+--- a/crates/fluxvm-containerd-shim/src/main.rs
++++ b/crates/fluxvm-containerd-shim/src/main.rs
+@@ -6,14 +6,15 @@
+ //! v0.1 contract:
+ //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
+ //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
+-//! * bind mounts (ConfigMap/Secret/etc.) are snapshotted into that share;
++//! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
++//! * other bind mounts (ConfigMap/Secret/host inputs) remain snapshotted by default;
+ //! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK;
+ //! * no host kernel is shared with the workload.
+ //!
+ //! The copy/snapshot approach is intentionally conservative. It gives a
+ //! deterministic first implementation without requiring dynamic virtiofs
+-//! hotplug. PVC write-through, CNI plumbing, TTY and full OCI security parity
+-//! are documented follow-ups rather than silently pretending to work.
++//! hotplug for ordinary bind inputs. TTY and broader hostPath passthrough remain
++//! explicit follow-ups rather than silently pretending to work.
+ 
+ use anyhow::{Context, Result as AnyResult, bail};
+ use async_trait::async_trait;
+@@ -164,6 +165,9 @@ struct CniBridge {
+ struct SandboxHints {
+     resources: ResourceLimits,
+     netns_path: Option<PathBuf>,
++    /// Kubernetes Pod UID from CRI annotations. Used to scope write-through
++    /// virtiofs exports to this Pod only.
++    pod_uid: Option<String>,
+ }
+ 
+ #[derive(Clone)]
+@@ -308,6 +312,37 @@ impl Service {
+             json!({"mode": "user", "forwards": []})
+         };
+ 
++        // fs0 is always the Pod staging share. For Kubernetes Pods, add only
++        // the current Pod's kubelet volume roots as extra virtiofs exports.
++        // This preserves PVC/emptyDir writes without exposing other Pods.
++        let mut shared_folders = vec![json!({
++            "host_path": share_dir,
++            "guest_path": GUEST_SHARE,
++            "read_only": false
++        })];
++        let mut kubelet_mounts: Vec<(String, String)> = Vec::new();
++        if let Some(uid) = hints.pod_uid.as_deref() {
++            let pod_root = PathBuf::from("/var/lib/kubelet/pods").join(uid);
++            if pod_root.exists() {
++                // SubPath bind targets can be materialized later during the
++                // same SyncPod. Create only the two bounded Pod directories
++                // up front so the virtiofs tags remain stable (fs1/fs2).
++                for (host, guest) in [
++                    (pod_root.join("volumes"), "/run/fluxvm/kubelet/volumes"),
++                    (pod_root.join("volume-subpaths"), "/run/fluxvm/kubelet/volume-subpaths"),
++                ] {
++                    tokio::fs::create_dir_all(&host).await
++                        .with_context(|| format!("preparing Pod volume export {}", host.display()))?;
++                    shared_folders.push(json!({
++                        "host_path": host,
++                        "guest_path": guest,
++                        "read_only": false
++                    }));
++                    kubelet_mounts.push((format!("fs{}", shared_folders.len() - 1), guest.to_string()));
++                }
++            }
++        }
++
+         let create = json!({
+             "name": format!("ctr-{}", safe_name(&self.group)),
+             "backend": "qemu",
+@@ -316,11 +351,7 @@ impl Service {
+             "memory_mib": memory_mib,
+             "network": network,
+             "agent": {"enabled": true},
+-            "shared_folders": [{
+-                "host_path": share_dir,
+-                "guest_path": GUEST_SHARE,
+-                "read_only": false
+-            }]
++            "shared_folders": shared_folders
+         });
+ 
+         let mut vm: VmRecord = match self
+@@ -378,7 +409,7 @@ impl Service {
+ 
+             // Cloud-init mounts virtiofs asynchronously; explicitly ensure
+             // the Pod share is available before rootfs/stdio staging.
+-            self.ensure_guest_share_mounted(&vm).await?;
++            self.ensure_guest_shares_mounted(&vm, &kubelet_mounts).await?;
+ 
+             self.bootstrap_container_agent(&vm).await?;
+             match self
+@@ -444,15 +475,19 @@ impl Service {
+         }
+     }
+ 
+-    /// Ensure virtiofs tag fs0 is mounted at the Pod share before container create.
+-    async fn ensure_guest_share_mounted(&self, vm: &VmRecord) -> AnyResult<()> {
+-        let probe = format!(
+-            "bash -lc 'mkdir -p {GUEST_SHARE}; \
+-             if ! mountpoint -q {GUEST_SHARE}; then \
+-               mount -t virtiofs fs0 {GUEST_SHARE} || mount {GUEST_SHARE}; \
+-             fi; \
+-             mountpoint -q {GUEST_SHARE} && touch {GUEST_SHARE}/.fluxvm-share-ok'"
+-        );
++    /// Ensure fs0 and the optional Pod-scoped kubelet volume exports are
++    /// mounted before container create. Cloud-init is intentionally not a
++    /// correctness dependency for secure containers.
++    async fn ensure_guest_shares_mounted(&self, vm: &VmRecord, extras: &[(String, String)]) -> AnyResult<()> {
++        let mut commands = vec![format!(
++            "mkdir -p {GUEST_SHARE}; if ! mountpoint -q {GUEST_SHARE}; then mount -t virtiofs fs0 {GUEST_SHARE}; fi; mountpoint -q {GUEST_SHARE}"
++        )];
++        for (tag, guest) in extras {
++            commands.push(format!(
++                "mkdir -p {guest}; if ! mountpoint -q {guest}; then mount -t virtiofs {tag} {guest}; fi; mountpoint -q {guest}"
++            ));
++        }
++        let probe = format!("bash -lc '{}'", commands.join("; "));
+         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+         loop {
+             match fluxvm_vsock_client::call(
+@@ -466,7 +501,7 @@ impl Service {
+                 AgentResponse::Exec { exit_code, stdout, stderr } => {
+                     if tokio::time::Instant::now() >= deadline {
+                         bail!(
+-                            "guest virtiofs share {GUEST_SHARE} not mounted after retries \
++                            "guest virtiofs shares not mounted after retries \
+                              (exit={exit_code} stdout={stdout:?} stderr={stderr:?})"
+                         );
+                     }
+@@ -559,7 +594,7 @@ impl Service {
+         copy_result?;
+ 
+         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
+-        stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr).await?;
++        stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await?;
+         let (io, io_dir) = self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await?;
+         Ok((vm, serde_json::to_string(&spec)?, io, io_dir))
+     }
+@@ -1114,14 +1149,22 @@ fn sandbox_hints_from_spec(spec: &Value) -> SandboxHints {
+     let mut resources = resource_limits_from_linux_resources(
+         spec.pointer("/linux/resources").unwrap_or(&Value::Null),
+     );
+-    if let Some(annotations) = spec.get("annotations").and_then(Value::as_object) {
+-        let parse_i64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<i64>().ok());
+-        let parse_u64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<u64>().ok());
+-        if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-cpu-quota") { resources.cpu_quota = Some(v); }
+-        if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-period") { resources.cpu_period = Some(v); }
+-        if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-shares") { resources.cpu_shares = Some(v); }
+-        if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-memory") { resources.memory_limit_bytes = Some(v); }
+-    }
++    let pod_uid = spec
++        .get("annotations")
++        .and_then(Value::as_object)
++        .and_then(|annotations| {
++            let parse_i64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<i64>().ok());
++            let parse_u64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<u64>().ok());
++            if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-cpu-quota") { resources.cpu_quota = Some(v); }
++            if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-period") { resources.cpu_period = Some(v); }
++            if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-shares") { resources.cpu_shares = Some(v); }
++            if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-memory") { resources.memory_limit_bytes = Some(v); }
++            annotations
++                .get("io.kubernetes.cri.sandbox-uid")
++                .and_then(Value::as_str)
++                .filter(|uid| !uid.is_empty() && uid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
++                .map(str::to_string)
++        });
+     let netns_path = spec
+         .pointer("/linux/namespaces")
+         .and_then(Value::as_array)
+@@ -1135,7 +1178,7 @@ fn sandbox_hints_from_spec(spec: &Value) -> SandboxHints {
+                     .map(PathBuf::from)
+             })
+         });
+-    SandboxHints { resources, netns_path }
++    SandboxHints { resources, netns_path, pod_uid }
+ }
+ 
+ fn vm_shape(default_vcpus: u8, default_memory_mib: u64, overhead_mib: u64, resources: &ResourceLimits) -> (u8, u64) {
+@@ -1619,7 +1662,25 @@ async fn copy_contents(src: &Path, dst: &Path) -> AnyResult<()> {
+     Ok(())
+ }
+ 
+-async fn stage_bind_mounts(spec: &mut Value, host_ctr: &Path, guest_ctr: &str) -> AnyResult<()> {
++fn kubelet_guest_source(source: &Path, pod_uid: &str) -> Option<PathBuf> {
++    let root = PathBuf::from("/var/lib/kubelet/pods").join(pod_uid);
++    for (host_base, guest_base) in [
++        (root.join("volumes"), "/run/fluxvm/kubelet/volumes"),
++        (root.join("volume-subpaths"), "/run/fluxvm/kubelet/volume-subpaths"),
++    ] {
++        if let Ok(rel) = source.strip_prefix(host_base) {
++            return Some(Path::new(guest_base).join(rel));
++        }
++    }
++    None
++}
++
++async fn stage_bind_mounts(
++    spec: &mut Value,
++    host_ctr: &Path,
++    guest_ctr: &str,
++    pod_uid: Option<&str>,
++) -> AnyResult<()> {
+     let Some(mounts) = spec.get_mut("mounts").and_then(Value::as_array_mut) else { return Ok(()); };
+     for (idx, mount) in mounts.iter_mut().enumerate() {
+         let is_bind = mount.get("type").and_then(Value::as_str) == Some("bind")
+@@ -1628,6 +1689,19 @@ async fn stage_bind_mounts(spec: &mut Value, host_ctr: &Path, guest_ctr: &str) -
+         let Some(source) = mount.get("source").and_then(Value::as_str).map(str::to_string) else { continue; };
+         let source_path = PathBuf::from(&source);
+         if !source_path.exists() { continue; }
++
++        // Kubernetes PVC/CSI/emptyDir/projected volume sources are already
++        // mounted by kubelet before runtime SyncPod. Keep them write-through
++        // by translating only paths under this Pod's bounded volume roots.
++        if let Some(uid) = pod_uid {
++            if let Some(guest) = kubelet_guest_source(&source_path, uid) {
++                mount["source"] = Value::String(guest.to_string_lossy().into_owned());
++                continue;
++            }
++        }
++
++        // Non-Pod-scoped bind sources stay snapshot-based. This avoids
++        // exposing arbitrary hostPath content to the guest by accident.
+         let host = host_ctr.join("mounts").join(idx.to_string());
+         if source_path.is_dir() {
+             tokio::fs::create_dir_all(&host).await?;
+@@ -1712,6 +1786,18 @@ mod tests {
+         assert_ne!(process_key("c1", None), process_key("c1", Some("e1")));
+     }
+ 
++    #[test]
++    fn kubelet_volume_source_maps_only_current_pod() {
++        let uid = "11111111-2222-3333-4444-555555555555";
++        let src = Path::new("/var/lib/kubelet/pods/11111111-2222-3333-4444-555555555555/volumes/kubernetes.io~empty-dir/data/file");
++        assert_eq!(
++            kubelet_guest_source(src, uid).unwrap(),
++            PathBuf::from("/run/fluxvm/kubelet/volumes/kubernetes.io~empty-dir/data/file")
++        );
++        let other = Path::new("/var/lib/kubelet/pods/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/volumes/x");
++        assert!(kubelet_guest_source(other, uid).is_none());
++    }
++
+     #[test]
+     fn safe_names_are_filesystem_safe() {
+         assert_eq!(safe_name("pod/one:abc"), "pod-one-abc");
+@@ -1736,7 +1822,7 @@ mod tests {
+         let source = td.join("source");
+         tokio::fs::write(&source, "hello").await.unwrap();
+         let mut spec = json!({"mounts":[{"type":"bind","source":source,"destination":"/etc/x","options":["bind","ro"]}]});
+-        stage_bind_mounts(&mut spec, &td.join("ctr"), "/run/fluxvm/pod/containers/c").await.unwrap();
++        stage_bind_mounts(&mut spec, &td.join("ctr"), "/run/fluxvm/pod/containers/c", None).await.unwrap();
+         assert_eq!(spec["mounts"][0]["source"], "/run/fluxvm/pod/containers/c/mounts/0");
+         assert_eq!(tokio::fs::read_to_string(td.join("ctr/mounts/0")).await.unwrap(), "hello");
+         let _ = tokio::fs::remove_dir_all(td).await;
+diff --git a/deploy/containerd/README.md b/deploy/containerd/README.md
+index 7420c6b..08d7d2e 100644
+--- a/deploy/containerd/README.md
++++ b/deploy/containerd/README.md
+@@ -11,3 +11,10 @@ merge the runtime fragment and restart containerd.
+ > v0.1 is a developer-preview runtime. QEMU/virtiofs process isolation works;
+ > Kubernetes CNI/PVC write-through and TTY are explicit follow-up gates. Do
+ > not advertise this RuntimeClass as Kata-compatible production networking yet.
++
++## Set 4
++
++Kubernetes Pod volumes under the current sandbox UID are exported write-through
++into the guest. Keep arbitrary hostPath passthrough disabled unless a later
++allowlisted broker/hotplug implementation is installed. Guest images using OCI
++seccomp profiles must include `libseccomp.so.2`.
+diff --git a/docs/secure-containers-set4.md b/docs/secure-containers-set4.md
+new file mode 100644
+index 0000000..dabaa3f
+--- /dev/null
++++ b/docs/secure-containers-set4.md
+@@ -0,0 +1,71 @@
++# FluxVM Secure Containers — Set 4
++
++Base reviewed for this handoff: `d77c1afb9364b02e897079b7325470e9a2bf361e`.
++Set 4 layers on top of the Set 3 lifecycle/event/OCI work.
++
++## 1. Kubernetes write-through volumes
++
++The shim reads `io.kubernetes.cri.sandbox-uid` from the OCI annotations.  When
++present, the QEMU sandbox receives additional virtiofs exports for only this
++Pod's kubelet volume roots:
++
++- `/var/lib/kubelet/pods/<uid>/volumes` -> `/run/fluxvm/kubelet/volumes`
++- `/var/lib/kubelet/pods/<uid>/volume-subpaths` -> `/run/fluxvm/kubelet/volume-subpaths`
++
++Bind sources below those roots are rewritten to the corresponding guest path
++instead of copied. Reads and writes therefore hit the kubelet-mounted PVC,
++CSI, emptyDir, projected, Secret or ConfigMap volume directly.
++
++Other bind mounts remain snapshot-based. Set 4 intentionally does not expose
++arbitrary hostPath mounts. A future hotplug/broker path can add explicitly
++allowlisted hostPath exports without broadening the default trust boundary.
++
++## 2. Guest OCI hardening
++
++The guest container agent adds:
++
++- `root.readonly`
++- `linux.maskedPaths`
++- `linux.readonlyPaths`
++- OCI Linux device nodes
++- Pod-VM-scoped `linux.sysctl`
++- seccomp via guest `libseccomp.so.2`
++
++Seccomp rules are resolved by syscall name and loaded immediately before
++`execve`. Set 4 supports name/action rules without argument comparators.
++Profiles using argument filters fail closed with a clear error rather than
++silently losing enforcement. Unsupported architectures/actions also fail.
++
++Set 3 controls remain enforced: UID/GID, supplementary groups, umask, rlimits,
++noNewPrivileges and Linux capability sets.
++
++## Remaining gates
++
++- VSOCK-native stdio + TTY/PTY/resize (Set 5)
++- seccomp argument comparators / notify
++- Linux namespace creation parity and device-cgroup rules
++- explicitly allowlisted hostPath hotplug/broker
++- Cloud Hypervisor / Firecracker shared-rootfs parity
++- real Kubernetes/KVM conformance and churn tests
++
++## Required guest packages
++
++A guest using OCI seccomp profiles must provide `libseccomp.so.2`. If a profile
++is requested and libseccomp is absent, the container fails closed.
++
++## Test gates
++
++Host-independent source checks:
++
++```bash
++./scripts/test-secure-containers.sh
++```
++
++On a real Kubernetes + KVM node, additionally run:
++
++```bash
++sudo ./scripts/e2e-secure-containers-volume.sh <namespace> <runtime-class>
++```
++
++The volume test creates a PVC-backed Pod, writes from the FluxVM-isolated
++container, and verifies persistence after the Pod is recreated.
+diff --git a/docs/secure-containers.md b/docs/secure-containers.md
+index 48e7278..d75815e 100644
+--- a/docs/secure-containers.md
++++ b/docs/secure-containers.md
+@@ -157,3 +157,14 @@ Pod manifest remains a development-only API fixture until the CNI gate lands.
+ The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
+ because ordinary hosted runners do not provide the nested virtualization and
+ node configuration needed for an honest containerd+FluxVM test.
++
++## Set 4 addendum — write-through Pod volumes + OCI security
++
++Set 4 adds Pod-UID-scoped virtiofs exports for kubelet `volumes/` and
++`volume-subpaths/`, so matching Kubernetes volume bind mounts are write-through
++instead of copied. Arbitrary host binds remain snapshot-based by default.
++
++The guest agent also enforces read-only rootfs, masked/read-only paths, OCI
++device nodes, Pod-VM sysctls and libseccomp syscall-name rules. Seccomp profiles
++using unsupported argument comparators fail closed. See
++`docs/secure-containers-set4.md` for the exact support boundary and test gates.
+diff --git a/scripts/e2e-secure-containers-volume.sh b/scripts/e2e-secure-containers-volume.sh
+new file mode 100755
+index 0000000..5145330
+--- /dev/null
++++ b/scripts/e2e-secure-containers-volume.sh
+@@ -0,0 +1,72 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++NS="${1:-default}"
++RC="${2:-fluxvm}"
++NAME="fluxvm-volume-e2e"
++PVC="fluxvm-volume-e2e"
++
++cleanup() {
++  kubectl -n "$NS" delete pod "$NAME" --ignore-not-found --wait=true >/dev/null 2>&1 || true
++  kubectl -n "$NS" delete pvc "$PVC" --ignore-not-found --wait=true >/dev/null 2>&1 || true
++}
++trap cleanup EXIT
++
++cat <<YAML | kubectl -n "$NS" apply -f -
++apiVersion: v1
++kind: PersistentVolumeClaim
++metadata:
++  name: $PVC
++spec:
++  accessModes: [ReadWriteOnce]
++  resources:
++    requests:
++      storage: 64Mi
++---
++apiVersion: v1
++kind: Pod
++metadata:
++  name: $NAME
++spec:
++  runtimeClassName: $RC
++  restartPolicy: Never
++  containers:
++  - name: writer
++    image: busybox:1.36
++    command: ["sh","-c","echo fluxvm-set4-write-through > /data/probe; cat /data/probe"]
++    volumeMounts:
++    - name: data
++      mountPath: /data
++  volumes:
++  - name: data
++    persistentVolumeClaim:
++      claimName: $PVC
++YAML
++
++kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$NAME" --timeout=180s
++[[ "$(kubectl -n "$NS" logs "$NAME")" == *"fluxvm-set4-write-through"* ]]
++kubectl -n "$NS" delete pod "$NAME" --wait=true
++
++cat <<YAML | kubectl -n "$NS" apply -f -
++apiVersion: v1
++kind: Pod
++metadata:
++  name: $NAME
++spec:
++  runtimeClassName: $RC
++  restartPolicy: Never
++  containers:
++  - name: reader
++    image: busybox:1.36
++    command: ["cat","/data/probe"]
++    volumeMounts:
++    - name: data
++      mountPath: /data
++  volumes:
++  - name: data
++    persistentVolumeClaim:
++      claimName: $PVC
++YAML
++kubectl -n "$NS" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$NAME" --timeout=180s
++[[ "$(kubectl -n "$NS" logs "$NAME")" == *"fluxvm-set4-write-through"* ]]
++echo "FluxVM Set 4 PVC write-through E2E: PASS"
