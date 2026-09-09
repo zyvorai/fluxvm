@@ -3,14 +3,19 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Secure Containers Set 2** — CNI L2 Pod-IP path (QEMU TAP on the prepared
+  host bridge when a CRI netns is present; `FLUXVM_CONTAINER_CNI=0` disables),
+  guest cgroup-v2 resource limits/stats/pids/update + sandbox resource config,
+  shim `Stats`/`Update`/`Pids` wiring, VM shape from resource hints. Docs:
+  [docs/secure-containers.md](docs/secure-containers.md).
 - **Secure Containers (containerd runtime-v2)** — developer-preview foundation:
   `fluxvm-container-protocol` / `fluxvm-container-agent` / `fluxvm-container-client` /
   `fluxvm-containerd-shim` (`containerd-shim-fluxvm-v2`, runtime
   `io.containerd.fluxvm.v2`); virtiofs Pod share + VSOCK lifecycle on :17778;
   `deploy/containerd/`, install/test/e2e scripts, CI workflow
   `.github/workflows/secure-containers.yml`. Docs:
-  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; CNI/PVC/TTY
-  remain follow-up gates.
+  [docs/secure-containers.md](docs/secure-containers.md). QEMU-only; PVC/TTY
+  and FIFO-over-virtiofs stdio remain follow-up gates.
 - **Service Fabric full mesh datapath (Fabric-side)** — remote backends merge into
   existing Maglev `/v1/network/services` upserts (lifecycle v2: weighted drain +
   optional VIP match; no new FluxVM tunnel APIs; Geneve/VXLAN still N/A). See

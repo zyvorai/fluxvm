@@ -61,9 +61,9 @@ images — not only the dataplane.
       (`fluxvm-microvm` controller + node-agent; API
       `microvm.fluxvm.zyvor.io`) — [microvm.md](microvm.md),
       [tutorials/microvm/](tutorials/microvm/README.md)
-- [ ] Secure Containers RuntimeClass only on lab nodes until CNI/PVC gates
-      land — [secure-containers.md](secure-containers.md),
-      `deploy/containerd/`
+- [ ] Secure Containers RuntimeClass on lab nodes after guest-image + CNI L2
+      smoke — [secure-containers.md](secure-containers.md),
+      `deploy/containerd/` (`FLUXVM_CONTAINER_CNI=0` for user-mode only)
 
 ## 6. Fleet (non-k8s)
 
@@ -75,6 +75,6 @@ images — not only the dataplane.
 
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.
-Secure Containers RuntimeClass as Kata-equivalent Kubernetes networking
-(CNI → guest netns, PVC write-through, TTY) —
+Secure Containers RuntimeClass as full Kata-equivalent (PVC write-through,
+TTY, broad CNI conformance, FIFO-free stdio) —
 [secure-containers.md](secure-containers.md).

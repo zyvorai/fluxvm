@@ -35,10 +35,50 @@ pub struct ContainerIo {
     pub terminal: bool,
 }
 
+/// Portable subset of OCI LinuxResources used by the guest cgroup-v2 layer.
+/// Values keep OCI units/semantics (quota/period in microseconds, memory in
+/// bytes). Fields not present remain unchanged on live update.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ResourceLimits {
+    #[serde(default)]
+    pub cpu_quota: Option<i64>,
+    #[serde(default)]
+    pub cpu_period: Option<u64>,
+    #[serde(default)]
+    pub cpu_shares: Option<u64>,
+    #[serde(default)]
+    pub cpuset_cpus: Option<String>,
+    #[serde(default)]
+    pub cpuset_mems: Option<String>,
+    #[serde(default)]
+    pub memory_limit_bytes: Option<i64>,
+    #[serde(default)]
+    pub pids_limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ContainerStats {
+    pub cpu_usage_usec: u64,
+    pub cpu_user_usec: u64,
+    pub cpu_system_usec: u64,
+    pub memory_usage_bytes: u64,
+    pub memory_total_inactive_file_bytes: u64,
+    pub pids_current: u64,
+    /// `0` means unlimited, matching containerd's cgroup metrics convention.
+    pub pids_limit: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum ContainerRequest {
     Ping,
+    /// Configure the aggregate Pod/sandbox cgroup. This is intentionally
+    /// separate from per-container resources: Kubernetes puts Pod-wide limits
+    /// on CRI sandbox annotations, not always in the pause container's OCI
+    /// linux.resources block.
+    ConfigureSandboxResources {
+        resources: ResourceLimits,
+    },
     Create {
         id: String,
         /// Complete OCI runtime config after host paths have been translated
@@ -46,8 +86,16 @@ pub enum ContainerRequest {
         config_json: String,
         io: ContainerIo,
     },
-    Start { id: String, #[serde(default)] exec_id: Option<String> },
-    State { id: String, #[serde(default)] exec_id: Option<String> },
+    Start {
+        id: String,
+        #[serde(default)]
+        exec_id: Option<String>,
+    },
+    State {
+        id: String,
+        #[serde(default)]
+        exec_id: Option<String>,
+    },
     Exec {
         id: String,
         exec_id: String,
@@ -65,7 +113,17 @@ pub enum ContainerRequest {
     },
     Pause { id: String },
     Resume { id: String },
-    Wait { id: String, #[serde(default)] exec_id: Option<String> },
+    Wait {
+        id: String,
+        #[serde(default)]
+        exec_id: Option<String>,
+    },
+    Pids { id: String },
+    Stats { id: String },
+    UpdateResources {
+        id: String,
+        resources: ResourceLimits,
+    },
     Delete {
         id: String,
         #[serde(default)]
@@ -87,6 +145,7 @@ pub struct ContainerEnvelope {
 #[serde(tag = "result", rename_all = "kebab-case")]
 pub enum ContainerResponse {
     Pong,
+    SandboxResourcesConfigured,
     Created { pid: u32 },
     Started { pid: u32 },
     ExecStarted { pid: u32 },
@@ -105,6 +164,9 @@ pub enum ContainerResponse {
         exit_code: i32,
         exited_at_unix_nano: i128,
     },
+    Pids { pids: Vec<u32> },
+    Stats { stats: ContainerStats },
+    ResourcesUpdated,
     Killed,
     Paused,
     Resumed,
@@ -148,17 +210,38 @@ mod tests {
     }
 
     #[test]
-    fn state_response_round_trip() {
-        let resp = ContainerResponse::State {
-            id: "c1".into(),
-            exec_id: None,
-            status: ContainerStatus::Running,
-            pid: 42,
-            exit_code: None,
-            exited_at_unix_nano: None,
+    fn resource_update_round_trip() {
+        let req = ContainerEnvelope {
+            token: None,
+            request: ContainerRequest::UpdateResources {
+                id: "c1".into(),
+                resources: ResourceLimits {
+                    cpu_quota: Some(50_000),
+                    cpu_period: Some(100_000),
+                    memory_limit_bytes: Some(256 * 1024 * 1024),
+                    pids_limit: Some(128),
+                    ..Default::default()
+                },
+            },
         };
-        let line = encode_line(&resp).unwrap();
+        let line = encode_line(&req).unwrap();
+        let back: ContainerEnvelope = decode_line(&line).unwrap();
+        assert!(matches!(back.request, ContainerRequest::UpdateResources { .. }));
+    }
+
+    #[test]
+    fn stats_response_round_trip() {
+        let response = ContainerResponse::Stats {
+            stats: ContainerStats {
+                cpu_usage_usec: 100,
+                memory_usage_bytes: 4096,
+                pids_current: 3,
+                pids_limit: 64,
+                ..Default::default()
+            },
+        };
+        let line = encode_line(&response).unwrap();
         let back: ContainerResponse = decode_line(&line).unwrap();
-        assert!(matches!(back, ContainerResponse::State { pid: 42, .. }));
+        assert!(matches!(back, ContainerResponse::Stats { .. }));
     }
 }
