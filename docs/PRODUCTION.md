@@ -20,6 +20,7 @@ images — not only the dataplane.
 - [ ] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
 - [ ] Example: [examples/create-vm-prod.json](../examples/create-vm-prod.json)
 - [ ] DevOps gates: [DEVOPS.md](DEVOPS.md) + `scripts/devops-gate.sh` / `scripts/upgrade-snapshot.sh`
+- [ ] **Ship stack:** `./scripts/ship USER@HOST` (or from Fabric repo) then confirm done card
 - [ ] **Production readiness script:** `FABRIC_URL=… FLUXVM_URL=… ./scripts/test-production-readiness.sh`
   (control + Network Fabric health + Service Fabric schema/pins; optional `VIP=` SLO)
 

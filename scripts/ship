@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Thin pointer: stack ship lives in the Fabric repo.
+#
+#   ./scripts/ship sus@HOST
+#
+# Resolves sibling ../fabric (or FABRIC_ROOT) and execs scripts/ship.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FLUXVM_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+resolve_fabric() {
+  if [[ -n "${FABRIC_ROOT:-}" && -x "${FABRIC_ROOT}/scripts/ship" ]]; then
+    printf '%s' "$FABRIC_ROOT"
+    return
+  fi
+  local cand
+  for cand in \
+    "$(cd "$FLUXVM_ROOT/.." && pwd)/fabric" \
+    "$(cd "$FLUXVM_ROOT/.." && pwd)/zyvor-fabric"
+  do
+    if [[ -x "$cand/scripts/ship" ]]; then
+      printf '%s' "$cand"
+      return
+    fi
+  done
+  return 1
+}
+
+if ! FABRIC="$(resolve_fabric)"; then
+  cat >&2 <<EOF
+misconfig: Fabric sibling not found (tried ../fabric, ../zyvor-fabric).
+
+Clone Fabric next to FluxVM and run:
+  cd ../fabric && ./scripts/ship USER@HOST
+
+Or set FABRIC_ROOT=/path/to/fabric
+EOF
+  exit 2
+fi
+
+export FLUXVM_ROOT
+exec "$FABRIC/scripts/ship" "$@"

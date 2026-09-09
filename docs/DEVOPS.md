@@ -26,7 +26,13 @@ See [contracts/fabric-fluxvm-readyz.json](contracts/fabric-fluxvm-readyz.json).
 
 ## Lab verify
 
-Post-deploy on a KVM host (pairs with Fabric HTTPS `:9095`):
+**Easiest:** ship the stack from sibling Fabric (or `./scripts/ship` here):
+
+```bash
+./scripts/ship sus@HOST
+```
+
+Post-deploy lab pack on a KVM host (pairs with Fabric HTTPS `:9095`):
 
 ```bash
 sudo -E ./scripts/test-lab-verify.sh

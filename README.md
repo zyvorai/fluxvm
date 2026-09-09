@@ -351,6 +351,15 @@ needs either.
 
 ## Deploy to a remote host
 
+**Easiest (Fabric + FluxVM stack):** from this repo with sibling `../fabric`:
+
+```bash
+./scripts/ship sus@HOST           # quick redeploy + readiness
+./scripts/ship sus@HOST --full    # first install
+```
+
+FluxVM-only remote deploy:
+
 `scripts/deploy-remote.sh` does the above end-to-end over SSH: rsync the source, install system
 packages + Cloud Hypervisor/Firecracker, install a Rust toolchain if needed, build, and install the
 binary, config, and systemd unit.
