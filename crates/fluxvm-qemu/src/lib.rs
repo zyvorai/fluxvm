@@ -311,6 +311,14 @@ async fn spawn_virtiofsd_instances(
         let socket = ctx.workspace.join(format!("virtiofs-{i}.sock"));
         let tag = format!("fs{i}");
         let mut args = vec![
+            // Ubuntu/systemd hosts often fail virtiofsd's default namespace
+            // sandbox ("Error creating sandbox" / capability sync) when
+            // spawned under ProtectSystem/NoNewPrivileges. Fail-open to an
+            // explicit none sandbox so Secure Containers shared folders work.
+            "--sandbox".to_string(),
+            "none".to_string(),
+            "--seccomp".to_string(),
+            "none".to_string(),
             "--socket-path".to_string(),
             path_arg(&socket),
             "--shared-dir".to_string(),
