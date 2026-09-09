@@ -170,7 +170,11 @@ pub enum ContainerResponse {
     Killed,
     Paused,
     Resumed,
-    Deleted,
+    Deleted {
+        pid: u32,
+        exit_code: i32,
+        exited_at_unix_nano: i64,
+    },
     Error { message: String },
 }
 
@@ -230,6 +234,21 @@ mod tests {
     }
 
     #[test]
+    fn deleted_response_round_trip() {
+        let response = ContainerResponse::Deleted {
+            pid: 42,
+            exit_code: 137,
+            exited_at_unix_nano: 123456789,
+        };
+        let line = encode_line(&response).unwrap();
+        let back: ContainerResponse = decode_line(&line).unwrap();
+        assert!(matches!(
+            back,
+            ContainerResponse::Deleted { pid: 42, exit_code: 137, .. }
+        ));
+    }
+
+    #[test]
     fn stats_response_round_trip() {
         let response = ContainerResponse::Stats {
             stats: ContainerStats {
@@ -244,7 +263,6 @@ mod tests {
         let back: ContainerResponse = decode_line(&line).unwrap();
         assert!(matches!(back, ContainerResponse::Stats { .. }));
     }
-
     #[test]
     fn exited_response_round_trip() {
         let response = ContainerResponse::Exited {
@@ -255,4 +273,5 @@ mod tests {
         let back: ContainerResponse = decode_line(&line).unwrap();
         assert!(matches!(back, ContainerResponse::Exited { exit_code: 0, .. }));
     }
+
 }

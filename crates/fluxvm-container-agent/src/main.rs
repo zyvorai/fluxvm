@@ -4,11 +4,13 @@
 //! Minimal in-guest OCI process supervisor for FluxVM's containerd runtime.
 //!
 //! Security boundary: the entire Kubernetes Pod/container sandbox runs inside
-//! a hardware VM. This agent implements process lifecycle, chroot, uid/gid,
-//! environment, cwd, signals, stdio, and a portable guest cgroup-v2 resource
-//! layer (`/sys/fs/cgroup/fluxvm-containers`). OCI namespace, capability,
-//! seccomp and device parity are tracked as follow-up hardening items in
-//! docs/secure-containers.md.
+//! a hardware VM. This agent intentionally does not pretend to be a complete
+//! runc replacement yet; it implements process lifecycle, chroot, uid/gid,
+//! environment, cwd, signals and stdio inside the guest. Set 3 additionally
+//! enforces supplementary groups, umask, rlimits and noNewPrivileges. OCI
+//! namespace, seccomp and device parity remain explicit follow-up hardening
+//! items in docs/secure-containers.md. Linux capability sets are applied
+//! directly from OCI process.capabilities when present.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -41,6 +43,22 @@ struct Cli {
 }
 
 #[derive(Clone, Debug)]
+struct ProcessRlimit {
+    resource: u32,
+    soft: libc::rlim_t,
+    hard: libc::rlim_t,
+}
+
+#[derive(Clone, Debug, Default)]
+struct CapabilitySets {
+    bounding: u64,
+    effective: u64,
+    inheritable: u64,
+    permitted: u64,
+    ambient: u64,
+}
+
+#[derive(Clone, Debug)]
 struct ProcessSpec {
     rootfs: PathBuf,
     args: Vec<String>,
@@ -48,6 +66,11 @@ struct ProcessSpec {
     cwd: String,
     uid: u32,
     gid: u32,
+    additional_gids: Vec<u32>,
+    no_new_privileges: bool,
+    umask: Option<u32>,
+    rlimits: Vec<ProcessRlimit>,
+    capabilities: Option<CapabilitySets>,
 }
 
 #[derive(Clone, Debug)]
@@ -392,7 +415,8 @@ fn state_process(id: &str, exec_id: Option<&str>) -> Result<ContainerResponse> {
 fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<ContainerResponse> {
     let mut reg = registry().lock().expect("registry poisoned");
     let container = reg.get_mut(id).with_context(|| format!("container {id:?} not found"))?;
-    if let Some(exec_id) = exec_id {
+
+    let final_state = if let Some(exec_id) = exec_id {
         let handle = container
             .execs
             .get(exec_id)
@@ -405,24 +429,35 @@ fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<Contai
             }
             handle.signal(libc::SIGKILL, true)?;
         }
+        let final_state = handle.wait();
         container.execs.remove(exec_id);
+        final_state
     } else {
-        let state = container.init.snapshot();
+        let handle = container.init.clone();
+        let state = handle.snapshot();
         if state.status != ContainerStatus::Stopped {
             if !force {
                 bail!("container {id:?} is still running");
             }
-            container.init.signal(libc::SIGKILL, true)?;
-        }
-        if force {
+            // Kill every process in the container cgroup first, then wait for
+            // init so DeleteTask can return a definitive exit status instead
+            // of the pre-kill state.
             let _ = signal_cgroup_path(&container.cgroup_path, libc::SIGKILL);
+            handle.signal(libc::SIGKILL, true)?;
         }
+        let final_state = handle.wait();
         if let Some(entry) = reg.remove(id) {
             cleanup_mounts(&entry.mounts);
             cleanup_container_cgroup(&entry.cgroup_path);
         }
-    }
-    Ok(ContainerResponse::Deleted)
+        final_state
+    };
+
+    Ok(ContainerResponse::Deleted {
+        pid: final_state.pid,
+        exit_code: final_state.exit_code.unwrap_or_default(),
+        exited_at_unix_nano: final_state.exited_at_unix_nano.unwrap_or_else(now_unix_nanos),
+    })
 }
 
 fn find_process(id: &str, exec_id: Option<&str>) -> Result<Arc<ProcHandle>> {
@@ -831,7 +866,262 @@ fn parse_process_value(process: &Value, rootfs: PathBuf) -> Result<ProcessSpec> 
     let cwd = process.get("cwd").and_then(Value::as_str).unwrap_or("/").to_string();
     let uid = process.pointer("/user/uid").and_then(Value::as_u64).unwrap_or(0) as u32;
     let gid = process.pointer("/user/gid").and_then(Value::as_u64).unwrap_or(0) as u32;
-    Ok(ProcessSpec { rootfs, args, env, cwd, uid, gid })
+    let additional_gids = process
+        .pointer("/user/additionalGids")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_u64).map(|v| v as u32).collect())
+        .unwrap_or_default();
+    let no_new_privileges = process
+        .get("noNewPrivileges")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let umask = process
+        .pointer("/user/umask")
+        .and_then(Value::as_u64)
+        .map(|v| v as u32);
+    let rlimits = parse_process_rlimits(process)?;
+    let capabilities = parse_capability_sets(process)?;
+    Ok(ProcessSpec {
+        rootfs,
+        args,
+        env,
+        cwd,
+        uid,
+        gid,
+        additional_gids,
+        no_new_privileges,
+        umask,
+        rlimits,
+        capabilities,
+    })
+}
+
+fn parse_capability_sets(process: &Value) -> Result<Option<CapabilitySets>> {
+    let Some(caps) = process.get("capabilities") else {
+        return Ok(None);
+    };
+    let parse = |name: &str| -> Result<u64> {
+        let Some(items) = caps.get(name).and_then(Value::as_array) else {
+            return Ok(0);
+        };
+        let mut mask = 0u64;
+        for item in items {
+            let name = item.as_str().context("OCI capability must be a string")?;
+            let bit = capability_number(name)
+                .with_context(|| format!("unsupported Linux capability {name:?}"))?;
+            mask |= 1u64 << bit;
+        }
+        Ok(mask)
+    };
+    let sets = CapabilitySets {
+        bounding: parse("bounding")?,
+        effective: parse("effective")?,
+        inheritable: parse("inheritable")?,
+        permitted: parse("permitted")?,
+        ambient: parse("ambient")?,
+    };
+    if sets.effective & !sets.permitted != 0 {
+        bail!("OCI effective capabilities must be a subset of permitted");
+    }
+    if sets.ambient & !sets.permitted != 0 || sets.ambient & !sets.inheritable != 0 {
+        bail!("OCI ambient capabilities must be present in permitted and inheritable");
+    }
+    if sets.permitted & !sets.bounding != 0 {
+        bail!("OCI permitted capabilities must be a subset of bounding");
+    }
+    Ok(Some(sets))
+}
+
+fn capability_number(name: &str) -> Option<u32> {
+    let upper = name.to_ascii_uppercase();
+    Some(match upper.strip_prefix("CAP_").unwrap_or(&upper) {
+        "CHOWN" => 0,
+        "DAC_OVERRIDE" => 1,
+        "DAC_READ_SEARCH" => 2,
+        "FOWNER" => 3,
+        "FSETID" => 4,
+        "KILL" => 5,
+        "SETGID" => 6,
+        "SETUID" => 7,
+        "SETPCAP" => 8,
+        "LINUX_IMMUTABLE" => 9,
+        "NET_BIND_SERVICE" => 10,
+        "NET_BROADCAST" => 11,
+        "NET_ADMIN" => 12,
+        "NET_RAW" => 13,
+        "IPC_LOCK" => 14,
+        "IPC_OWNER" => 15,
+        "SYS_MODULE" => 16,
+        "SYS_RAWIO" => 17,
+        "SYS_CHROOT" => 18,
+        "SYS_PTRACE" => 19,
+        "SYS_PACCT" => 20,
+        "SYS_ADMIN" => 21,
+        "SYS_BOOT" => 22,
+        "SYS_NICE" => 23,
+        "SYS_RESOURCE" => 24,
+        "SYS_TIME" => 25,
+        "SYS_TTY_CONFIG" => 26,
+        "MKNOD" => 27,
+        "LEASE" => 28,
+        "AUDIT_WRITE" => 29,
+        "AUDIT_CONTROL" => 30,
+        "SETFCAP" => 31,
+        "MAC_OVERRIDE" => 32,
+        "MAC_ADMIN" => 33,
+        "SYSLOG" => 34,
+        "WAKE_ALARM" => 35,
+        "BLOCK_SUSPEND" => 36,
+        "AUDIT_READ" => 37,
+        "PERFMON" => 38,
+        "BPF" => 39,
+        "CHECKPOINT_RESTORE" => 40,
+        _ => return None,
+    })
+}
+
+#[repr(C)]
+struct LinuxCapHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct LinuxCapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+const PR_CAP_AMBIENT: libc::c_int = 47;
+const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
+const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
+
+fn drop_bounding_capabilities(caps: &CapabilitySets) -> Result<()> {
+    let last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(40)
+        .min(63);
+    for cap in 0..=last_cap {
+        if caps.bounding & (1u64 << cap) != 0 {
+            continue;
+        }
+        let rc = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("dropping capability {cap} from bounding set"));
+        }
+    }
+    Ok(())
+}
+
+fn set_process_capabilities(caps: &CapabilitySets) -> Result<()> {
+    let mut header = LinuxCapHeader { version: LINUX_CAPABILITY_VERSION_3, pid: 0 };
+    let data = [
+        LinuxCapData {
+            effective: caps.effective as u32,
+            permitted: caps.permitted as u32,
+            inheritable: caps.inheritable as u32,
+        },
+        LinuxCapData {
+            effective: (caps.effective >> 32) as u32,
+            permitted: (caps.permitted >> 32) as u32,
+            inheritable: (caps.inheritable >> 32) as u32,
+        },
+    ];
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_capset,
+            (&mut header as *mut LinuxCapHeader).cast::<libc::c_void>(),
+            data.as_ptr().cast::<libc::c_void>(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("capset");
+    }
+
+    let rc = unsafe { libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        // Linux < 4.3 does not implement ambient capabilities. An empty OCI
+        // ambient set remains representable there; a non-empty set must fail.
+        if err.raw_os_error() != Some(libc::EINVAL) || caps.ambient != 0 {
+            return Err(err).context("clearing ambient capabilities");
+        }
+    }
+    for cap in 0..64u32 {
+        if caps.ambient & (1u64 << cap) == 0 {
+            continue;
+        }
+        let rc = unsafe {
+            libc::prctl(
+                PR_CAP_AMBIENT,
+                PR_CAP_AMBIENT_RAISE,
+                cap as libc::c_ulong,
+                0,
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("raising ambient capability {cap}"));
+        }
+    }
+    Ok(())
+}
+
+fn parse_process_rlimits(process: &Value) -> Result<Vec<ProcessRlimit>> {
+    let Some(items) = process.get("rlimits").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let kind = item
+                .get("type")
+                .and_then(Value::as_str)
+                .context("OCI rlimit.type is required")?;
+            let resource = rlimit_resource(kind)
+                .with_context(|| format!("unsupported OCI rlimit type {kind:?}"))?;
+            let soft = item
+                .get("soft")
+                .and_then(Value::as_u64)
+                .context("OCI rlimit.soft is required")? as libc::rlim_t;
+            let hard = item
+                .get("hard")
+                .and_then(Value::as_u64)
+                .context("OCI rlimit.hard is required")? as libc::rlim_t;
+            if soft > hard {
+                bail!("OCI rlimit {kind} has soft > hard");
+            }
+            Ok(ProcessRlimit { resource, soft, hard })
+        })
+        .collect()
+}
+
+fn rlimit_resource(kind: &str) -> Option<u32> {
+    Some(match kind {
+        "RLIMIT_AS" => libc::RLIMIT_AS as u32,
+        "RLIMIT_CORE" => libc::RLIMIT_CORE as u32,
+        "RLIMIT_CPU" => libc::RLIMIT_CPU as u32,
+        "RLIMIT_DATA" => libc::RLIMIT_DATA as u32,
+        "RLIMIT_FSIZE" => libc::RLIMIT_FSIZE as u32,
+        "RLIMIT_LOCKS" => libc::RLIMIT_LOCKS as u32,
+        "RLIMIT_MEMLOCK" => libc::RLIMIT_MEMLOCK as u32,
+        "RLIMIT_MSGQUEUE" => libc::RLIMIT_MSGQUEUE as u32,
+        "RLIMIT_NICE" => libc::RLIMIT_NICE as u32,
+        "RLIMIT_NOFILE" => libc::RLIMIT_NOFILE as u32,
+        "RLIMIT_NPROC" => libc::RLIMIT_NPROC as u32,
+        "RLIMIT_RSS" => libc::RLIMIT_RSS as u32,
+        "RLIMIT_RTPRIO" => libc::RLIMIT_RTPRIO as u32,
+        "RLIMIT_RTTIME" => libc::RLIMIT_RTTIME as u32,
+        "RLIMIT_SIGPENDING" => libc::RLIMIT_SIGPENDING as u32,
+        "RLIMIT_STACK" => libc::RLIMIT_STACK as u32,
+        _ => return None,
+    })
 }
 
 fn resolve_executable(spec: &ProcessSpec) -> Result<String> {
@@ -896,8 +1186,45 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
             libc::close(gate[0]);
             if libc::chroot(rootfs.as_ptr()) != 0 { libc::_exit(126); }
             if libc::chdir(cwd.as_ptr()) != 0 { libc::_exit(126); }
+
+            if let Some(mask) = spec.umask {
+                libc::umask(mask as libc::mode_t);
+            }
+            for limit in &spec.rlimits {
+                let value = libc::rlimit {
+                    rlim_cur: limit.soft,
+                    rlim_max: limit.hard,
+                };
+                if libc::setrlimit(limit.resource as _, &value) != 0 { libc::_exit(126); }
+            }
+
+            // Supplementary groups and the capability bounding set must be
+            // configured while the child still has privilege.
+            let groups: Vec<libc::gid_t> = spec.additional_gids.iter().map(|v| *v as libc::gid_t).collect();
+            let group_ptr = if groups.is_empty() { std::ptr::null() } else { groups.as_ptr() };
+            if libc::setgroups(groups.len(), group_ptr) != 0 { libc::_exit(126); }
+            if let Some(caps) = spec.capabilities.as_ref() {
+                if drop_bounding_capabilities(caps).is_err() { libc::_exit(126); }
+                // Preserve the requested permitted set across a non-root UID
+                // transition, then immediately replace it with OCI's exact
+                // sets below.
+                if spec.uid != 0 && (caps.permitted != 0 || caps.effective != 0 || caps.ambient != 0)
+                    && libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0
+                {
+                    libc::_exit(126);
+                }
+            }
             if libc::setgid(spec.gid) != 0 { libc::_exit(126); }
             if libc::setuid(spec.uid) != 0 { libc::_exit(126); }
+            if let Some(caps) = spec.capabilities.as_ref() {
+                if set_process_capabilities(caps).is_err() { libc::_exit(126); }
+                let _ = libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0);
+            }
+            if spec.no_new_privileges
+                && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            {
+                libc::_exit(126);
+            }
 
             let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|v| v.as_ptr()).collect();
             argv_ptrs.push(std::ptr::null());
@@ -938,8 +1265,8 @@ fn open_input(path: Option<&str>) -> Result<Option<File>> {
         .map(|p| {
             match OpenOptions::new().read(true).open(p) {
                 Ok(f) => Ok(f),
-                // Virtiofs may lag behind host-side create; fall back to /dev/null
-                // so non-interactive tasks (ctr run echo) still start.
+                // Virtiofs metadata may lag host-side creation. Non-interactive
+                // tasks should still be able to start when stdin is absent.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     OpenOptions::new().read(true).open("/dev/null")
                 }
@@ -1002,6 +1329,57 @@ mod tests {
         assert_eq!(spec.uid, 1000);
         assert_eq!(spec.gid, 1001);
         assert_eq!(spec.env, vec![("A".into(), "B".into())]);
+    }
+
+    #[test]
+    fn parses_process_security_controls() {
+        let (spec, _, _) = parse_oci_config(r#"{
+          "root":{"path":"/run/rootfs"},
+          "process":{
+            "args":["/bin/sh"],
+            "cwd":"/",
+            "noNewPrivileges":true,
+            "user":{"uid":1000,"gid":1000,"additionalGids":[10,20],"umask":18},
+            "rlimits":[{"type":"RLIMIT_NOFILE","soft":1024,"hard":2048}],
+            "capabilities":{
+              "bounding":["CAP_CHOWN","CAP_NET_BIND_SERVICE"],
+              "effective":["CAP_NET_BIND_SERVICE"],
+              "inheritable":["CAP_NET_BIND_SERVICE"],
+              "permitted":["CAP_NET_BIND_SERVICE"],
+              "ambient":["CAP_NET_BIND_SERVICE"]
+            }
+          }
+        }"#).unwrap();
+        assert_eq!(spec.additional_gids, vec![10, 20]);
+        assert!(spec.no_new_privileges);
+        assert_eq!(spec.umask, Some(18));
+        assert_eq!(spec.rlimits.len(), 1);
+        assert_eq!(spec.rlimits[0].soft, 1024);
+        assert_eq!(spec.rlimits[0].hard, 2048);
+        let caps = spec.capabilities.unwrap();
+        assert_ne!(caps.bounding & (1 << 0), 0);
+        assert_ne!(caps.bounding & (1 << 10), 0);
+        assert_eq!(caps.effective, 1 << 10);
+        assert_eq!(caps.ambient, 1 << 10);
+    }
+
+    #[test]
+    fn rejects_unknown_capability() {
+        assert!(parse_oci_config(r#"{
+          "root":{"path":"/r"},
+          "process":{
+            "args":["/bin/true"],
+            "capabilities":{"effective":["CAP_NOT_REAL"]}
+          }
+        }"#).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_rlimit() {
+        assert!(parse_oci_config(r#"{
+          "root":{"path":"/r"},
+          "process":{"args":["/bin/true"],"rlimits":[{"type":"RLIMIT_FAKE","soft":1,"hard":1}]}
+        }"#).is_err());
     }
 
     #[test]

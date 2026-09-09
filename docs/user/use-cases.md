@@ -85,7 +85,8 @@ CR. Verified against a real k3s cluster.
 For workloads that still look like containers to Kubernetes/`ctr`, but need a
 per-Pod guest kernel, FluxVM Secure Containers maps a containerd task group onto
 one QEMU FluxVM (runtime `io.containerd.fluxvm.v2`, RuntimeClass `fluxvm`).
-Set 2 adds optional CNI L2 Pod IP + guest cgroup stats. Developer preview — see
+Set 2 adds optional CNI L2 Pod IP + guest cgroup stats; Set 3 adds task events +
+OCI process hardening. Developer preview — see
 [secure-containers.md](../secure-containers.md).
 
 ## Multi-host fleets without Kubernetes

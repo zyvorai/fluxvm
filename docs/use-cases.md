@@ -111,9 +111,11 @@ Containers maps a containerd task group onto one QEMU FluxVM
 (runtime `io.containerd.fluxvm.v2`, RuntimeClass handler `fluxvm`).
 
 Set 2 adds optional CNI L2 (guest gets the real Pod IP when a CRI netns exists)
-and guest cgroup-v2 stats/resource updates. This remains a **developer
-preview**: PVC write-through and TTY are not production-ready yet. Full design:
-[docs/secure-containers.md](secure-containers.md). Deploy fragment:
+and guest cgroup-v2 stats/resource updates. Set 3 adds containerd task events and
+guest OCI process hardening. This remains a **developer preview**: PVC
+write-through and TTY are not production-ready yet. Full design:
+[docs/secure-containers.md](secure-containers.md),
+[Set 3 notes](secure-containers-set3.md). Deploy fragment:
 [`deploy/containerd/`](../deploy/containerd/).
 
 ```bash

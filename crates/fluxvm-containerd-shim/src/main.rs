@@ -3,19 +3,17 @@
 
 //! containerd runtime-v2 shim for FluxVM secure containers.
 //!
-//! Contract:
+//! v0.1 contract:
 //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
 //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
 //! * bind mounts (ConfigMap/Secret/etc.) are snapshotted into that share;
-//! * process lifecycle + guest cgroup resources/stats via `fluxvm-container-agent`
-//!   over VSOCK;
-//! * optional CNI L2: when a Pod netns is present, the guest receives the CNI
-//!   Pod IP/MAC on a QEMU TAP attached to a prepared host bridge;
+//! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK;
 //! * no host kernel is shared with the workload.
 //!
-//! The copy/snapshot approach is intentionally conservative. PVC write-through,
-//! TTY and full OCI security parity are documented follow-ups rather than
-//! silently pretending to work.
+//! The copy/snapshot approach is intentionally conservative. It gives a
+//! deterministic first implementation without requiring dynamic virtiofs
+//! hotplug. PVC write-through, CNI plumbing, TTY and full OCI security parity
+//! are documented follow-ups rather than silently pretending to work.
 
 use anyhow::{Context, Result as AnyResult, bail};
 use async_trait::async_trait;
@@ -28,6 +26,7 @@ use containerd_shim::{
         StateRequest, StateResponse, Status, WaitRequest, WaitResponse,
     },
     asynchronous::{ExitSignal, Shim, run, spawn},
+    event::Event,
     publisher::RemotePublisher,
     util::convert_to_any,
 };
@@ -35,7 +34,11 @@ use containerd_shim_protos::{
     api::{CloseIORequest, ConnectRequest, ConnectResponse, DeleteResponse, PidsRequest, PidsResponse,
           ProcessInfo, ResizePtyRequest, StatsRequest, StatsResponse, UpdateTaskRequest},
     cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, PidsStat},
-    protobuf::EnumOrUnknown,
+    events::task::{
+        TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskExit, TaskIO, TaskPaused,
+        TaskResumed, TaskStart,
+    },
+    protobuf::{EnumOrUnknown, MessageDyn},
     shim_async::Task,
     ttrpc::{self, r#async::TtrpcContext},
 };
@@ -49,7 +52,7 @@ use reqwest::{Client, Method};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     net::Ipv4Addr,
     path::{Path, PathBuf},
@@ -57,10 +60,20 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, sync::{Mutex, RwLock}};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Mutex, RwLock,
+    },
+};
 
 const RUNTIME_ID: &str = "io.containerd.fluxvm.v2";
 const GUEST_SHARE: &str = "/run/fluxvm/pod";
+
+type EventMessage = (String, Box<dyn MessageDyn>);
+type EventSender = Sender<EventMessage>;
+type EventReceiver = Receiver<EventMessage>;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
@@ -110,7 +123,7 @@ struct TaskMeta {
     stderr: String,
     terminal: bool,
     pid: u32,
-    /// Host-side virtiofs io directory (`stdout.log` / `stderr.log`).
+    /// Host-side virtiofs stdio directory for this init/exec process.
     io_dir: Option<PathBuf>,
 }
 
@@ -162,6 +175,10 @@ struct Service {
     http: Client,
     sandbox: Arc<Mutex<Option<Sandbox>>>,
     tasks: Arc<RwLock<HashMap<String, TaskMeta>>>,
+    execs: Arc<RwLock<HashMap<String, TaskMeta>>>,
+    event_tx: EventSender,
+    event_rx: Arc<Mutex<Option<EventReceiver>>>,
+    exit_events: Arc<Mutex<HashSet<String>>>,
 }
 
 #[async_trait]
@@ -170,6 +187,7 @@ impl Shim for Service {
 
     async fn new(_runtime_id: &str, args: &Flags, _config: &mut Config) -> Self {
         let group = pod_group_from_bundle(&args.bundle).await.unwrap_or_else(|| args.id.clone());
+        let (event_tx, event_rx) = channel(128);
         Self {
             exit: Arc::new(ExitSignal::default()),
             namespace: args.namespace.clone(),
@@ -178,6 +196,10 @@ impl Shim for Service {
             http: Client::new(),
             sandbox: Arc::new(Mutex::new(None)),
             tasks: Arc::new(RwLock::new(HashMap::new())),
+            execs: Arc::new(RwLock::new(HashMap::new())),
+            event_tx,
+            event_rx: Arc::new(Mutex::new(Some(event_rx))),
+            exit_events: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -195,7 +217,10 @@ impl Shim for Service {
         self.exit.wait().await;
     }
 
-    async fn create_task_service(&self, _publisher: RemotePublisher) -> Self::T {
+    async fn create_task_service(&self, publisher: RemotePublisher) -> Self::T {
+        if let Some(rx) = self.event_rx.lock().await.take() {
+            forward_events(publisher, self.namespace.clone(), rx);
+        }
         self.clone()
     }
 }
@@ -351,8 +376,8 @@ impl Service {
                 self.configure_guest_cni(&vm, cni).await?;
             }
 
-            // Cloud-init mounts virtiofs asynchronously; don't wait on it.
-            // Explicitly mount the Pod share before staging rootfs/stdio paths.
+            // Cloud-init mounts virtiofs asynchronously; explicitly ensure
+            // the Pod share is available before rootfs/stdio staging.
             self.ensure_guest_share_mounted(&vm).await?;
 
             self.bootstrap_container_agent(&vm).await?;
@@ -419,7 +444,7 @@ impl Service {
         }
     }
 
-    /// Mount tag `fs0` at `GUEST_SHARE` if cloud-init has not done it yet.
+    /// Ensure virtiofs tag fs0 is mounted at the Pod share before container create.
     async fn ensure_guest_share_mounted(&self, vm: &VmRecord) -> AnyResult<()> {
         let probe = format!(
             "bash -lc 'mkdir -p {GUEST_SHARE}; \
@@ -432,20 +457,13 @@ impl Service {
         loop {
             match fluxvm_vsock_client::call(
                 vm,
-                AgentRequest::Exec {
-                    command: probe.clone(),
-                    timeout_seconds: Some(10),
-                },
+                AgentRequest::Exec { command: probe.clone(), timeout_seconds: Some(10) },
                 Duration::from_secs(15),
             )
             .await?
             {
                 AgentResponse::Exec { exit_code: 0, .. } => return Ok(()),
-                AgentResponse::Exec {
-                    exit_code,
-                    stdout,
-                    stderr,
-                } => {
+                AgentResponse::Exec { exit_code, stdout, stderr } => {
                     if tokio::time::Instant::now() >= deadline {
                         bail!(
                             "guest virtiofs share {GUEST_SHARE} not mounted after retries \
@@ -524,6 +542,10 @@ impl Service {
         let (vm, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, Some(&hints)).await?;
         let rootfs = host_ctr.join("rootfs");
         let mountpoint = self.cfg.state_dir.join(&self.namespace).join(&self.group).join("mounts").join(safe_name(&req.id));
+        // A failed/retried CreateTask must never inherit files or FIFOs from
+        // a previous attempt.
+        let _ = tokio::fs::remove_dir_all(&host_ctr).await;
+        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
         tokio::fs::create_dir_all(&rootfs).await?;
         tokio::fs::create_dir_all(&mountpoint).await?;
         for m in &req.rootfs {
@@ -533,6 +555,7 @@ impl Service {
         }
         let copy_result = copy_contents(&mountpoint, &rootfs).await;
         let _ = tokio::process::Command::new("umount").args(["-l", mountpoint.to_string_lossy().as_ref()]).status().await;
+        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
         copy_result?;
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
@@ -543,33 +566,45 @@ impl Service {
 
     async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, PathBuf)> {
         if terminal { bail!("TTY containers are not supported by secure-containers v0.1"); }
-        let io_dir = host_ctr.join("io");
+        // Every init/exec process gets its own regular-file staging directory.
+        // Virtiofs does not reliably expose host-created FIFOs to the guest,
+        // so Set 3 preserves the current-main regular-file relay while also
+        // preventing concurrent exec sessions from colliding with init stdio.
+        let io_key = safe_name(id);
+        let io_dir = host_ctr.join("io").join(&io_key);
+        let guest_io_dir = format!("{guest_ctr}/io/{io_key}");
         tokio::fs::create_dir_all(&io_dir).await?;
         let mut guest = ContainerIo::default();
-        // Regular files (not FIFOs): virtiofs guests often cannot see named pipes
-        // on the share (`ENOENT` on open). Polling relays copy growing files.
         if !stdout.is_empty() {
             let p = io_dir.join("stdout.log"); create_stdio_file(&p)?;
-            guest.stdout = Some(format!("{guest_ctr}/io/stdout.log"));
+            guest.stdout = Some(format!("{guest_io_dir}/stdout.log"));
             spawn_stdio_relay(p, PathBuf::from(stdout), format!("{id}:stdout"), true);
         }
         if !stderr.is_empty() {
             let p = io_dir.join("stderr.log"); create_stdio_file(&p)?;
-            guest.stderr = Some(format!("{guest_ctr}/io/stderr.log"));
+            guest.stderr = Some(format!("{guest_io_dir}/stderr.log"));
             spawn_stdio_relay(p, PathBuf::from(stderr), format!("{id}:stderr"), true);
         }
         if !stdin.is_empty() {
             let p = io_dir.join("stdin.log"); create_stdio_file(&p)?;
-            guest.stdin = Some(format!("{guest_ctr}/io/stdin.log"));
+            guest.stdin = Some(format!("{guest_io_dir}/stdin.log"));
             spawn_stdio_relay(PathBuf::from(stdin), p, format!("{id}:stdin"), false);
         }
         Ok((guest, io_dir))
     }
 
-    /// Wait until host virtiofs stdio logs stop growing, then give the polling
-    /// relay a final beat so containerd sees output before Wait returns.
-    async fn flush_stdio_after_exit(&self, id: &str) {
-        let io_dir = self.tasks.read().await.get(id).and_then(|m| m.io_dir.clone());
+    /// Wait for the selected process's virtiofs stdout/stderr files to stop
+    /// growing, then give the host relay a final beat before publishing exit.
+    async fn flush_stdio_after_exit(&self, id: &str, exec_id: Option<&str>) {
+        let io_dir = if let Some(exec_id) = exec_id {
+            self.execs
+                .read()
+                .await
+                .get(&process_key(id, Some(exec_id)))
+                .and_then(|m| m.io_dir.clone())
+        } else {
+            self.tasks.read().await.get(id).and_then(|m| m.io_dir.clone())
+        };
         let Some(io_dir) = io_dir else {
             tokio::time::sleep(Duration::from_millis(250)).await;
             return;
@@ -582,9 +617,7 @@ impl Service {
                 let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
                 if Some(size) == last {
                     stable += 1;
-                    if stable >= 4 {
-                        break;
-                    }
+                    if stable >= 4 { break; }
                 } else {
                     stable = 0;
                     last = Some(size);
@@ -606,6 +639,84 @@ impl Service {
         self.call_agent_direct(vm, req).await
     }
 
+    async fn send_event<E>(&self, event: E)
+    where
+        E: Event + 'static,
+    {
+        let topic = event.topic();
+        if let Err(e) = self.event_tx.send((topic.clone(), Box::new(event))).await {
+            warn!("sending {topic} event to publisher queue failed: {e}");
+        }
+    }
+
+    async fn publish_exit_once(
+        &self,
+        container_id: String,
+        exec_id: Option<String>,
+        pid: u32,
+        exit_code: i32,
+        exited_at_unix_nano: i64,
+    ) {
+        let key = process_key(&container_id, exec_id.as_deref());
+        let should_publish = {
+            let mut exits = self.exit_events.lock().await;
+            exits.insert(key)
+        };
+        if !should_publish {
+            return;
+        }
+        self.send_event(TaskExit {
+            container_id,
+            id: exec_id.unwrap_or_default(),
+            pid,
+            exit_status: exit_code as u32,
+            exited_at: Some(timestamp_from_nanos(exited_at_unix_nano)).into(),
+            ..Default::default()
+        })
+        .await;
+    }
+
+    fn spawn_exit_watch(&self, vm: VmRecord, container_id: String, exec_id: Option<String>, pid: u32) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let request = ContainerRequest::Wait {
+                id: container_id.clone(),
+                exec_id: exec_id.clone(),
+            };
+            match service.call_agent_direct(&vm, request).await {
+                Ok(ContainerResponse::Exited { exit_code, exited_at_unix_nano }) => {
+                    service.flush_stdio_after_exit(&container_id, exec_id.as_deref()).await;
+                    service
+                        .publish_exit_once(container_id, exec_id, pid, exit_code, exited_at_unix_nano)
+                        .await;
+                }
+                Ok(other) => warn!("unexpected background wait response: {other:?}"),
+                Err(e) => warn!("background FluxVM container wait failed: {e:#}"),
+            }
+        });
+    }
+
+    async fn cleanup_process_staging(&self, id: &str, exec_id: Option<&str>) {
+        let share_dir = {
+            let guard = self.sandbox.lock().await;
+            guard.as_ref().map(|s| s.share_dir.clone())
+        }
+        .unwrap_or_else(|| {
+            self.cfg
+                .state_dir
+                .join(&self.namespace)
+                .join(&self.group)
+                .join("share")
+        });
+        let host_ctr = share_dir.join("containers").join(safe_name(id));
+        if let Some(exec_id) = exec_id {
+            let key = safe_name(&format!("{id}-{exec_id}"));
+            let _ = tokio::fs::remove_dir_all(host_ctr.join("io").join(key)).await;
+        } else {
+            let _ = tokio::fs::remove_dir_all(host_ctr).await;
+        }
+    }
+
     async fn destroy_sandbox(&self) -> AnyResult<()> {
         let mut guard = self.sandbox.lock().await;
         if let Some(s) = guard.take() {
@@ -623,33 +734,103 @@ impl Service {
 #[async_trait]
 impl Task for Service {
     async fn create(&self, _ctx: &TtrpcContext, req: CreateTaskRequest) -> TtrpcResult<CreateTaskResponse> {
-        let (vm, config_json, io, io_dir) = self.stage_rootfs_and_config(&req).await.map_err(rpc_other)?;
-        let response = self.call_agent(&vm, ContainerRequest::Create { id: req.id.clone(), config_json, io }).await.map_err(rpc_other)?;
-        let pid = match response { ContainerResponse::Created { pid } => pid, other => return Err(rpc_other(format!("unexpected create response: {other:?}"))) };
+        let (vm, config_json, io, io_dir) = match self.stage_rootfs_and_config(&req).await {
+            Ok(staged) => staged,
+            Err(e) => {
+                self.cleanup_process_staging(&req.id, None).await;
+                return Err(rpc_other(e));
+            }
+        };
+        let response = match self
+            .call_agent(
+                &vm,
+                ContainerRequest::Create {
+                    id: req.id.clone(),
+                    config_json,
+                    io,
+                },
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                self.cleanup_process_staging(&req.id, None).await;
+                return Err(rpc_other(e));
+            }
+        };
+        let pid = match response {
+            ContainerResponse::Created { pid } => pid,
+            other => {
+                self.cleanup_process_staging(&req.id, None).await;
+                return Err(rpc_other(format!("unexpected create response: {other:?}")));
+            }
+        };
+        {
+            let mut exits = self.exit_events.lock().await;
+            let prefix = format!("{}\0", req.id);
+            exits.retain(|key| key != &req.id && !key.starts_with(&prefix));
+        }
         self.tasks.write().await.insert(req.id.clone(), TaskMeta {
             bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
             io_dir: Some(io_dir),
         });
+        self.send_event(TaskCreate {
+            container_id: req.id.clone(),
+            bundle: req.bundle.clone(),
+            rootfs: req.rootfs.clone(),
+            io: Some(TaskIO {
+                stdin: req.stdin.clone(),
+                stdout: req.stdout.clone(),
+                stderr: req.stderr.clone(),
+                terminal: req.terminal,
+                ..Default::default()
+            }).into(),
+            checkpoint: req.checkpoint.clone(),
+            pid,
+            ..Default::default()
+        }).await;
         Ok(CreateTaskResponse { pid, ..Default::default() })
     }
 
     async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> TtrpcResult<StartResponse> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
-        let response = self.call_agent(&vm, ContainerRequest::Start { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
-        let pid = match response { ContainerResponse::Started { pid } => pid, other => return Err(rpc_other(format!("unexpected start response: {other:?}"))) };
+        let response = self.call_agent(&vm, ContainerRequest::Start { id: req.id.clone(), exec_id: exec_id.clone() }).await.map_err(rpc_other)?;
+        let pid = match response {
+            ContainerResponse::Started { pid } => pid,
+            other => return Err(rpc_other(format!("unexpected start response: {other:?}"))),
+        };
+        if let Some(exec_id_value) = exec_id.as_ref() {
+            self.send_event(TaskExecStarted {
+                container_id: req.id.clone(),
+                exec_id: exec_id_value.clone(),
+                pid,
+                ..Default::default()
+            }).await;
+        } else {
+            self.send_event(TaskStart {
+                container_id: req.id.clone(),
+                pid,
+                ..Default::default()
+            }).await;
+        }
+        self.spawn_exit_watch(vm, req.id.clone(), exec_id, pid);
         Ok(StartResponse { pid, ..Default::default() })
     }
 
     async fn state(&self, _ctx: &TtrpcContext, req: StateRequest) -> TtrpcResult<StateResponse> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
-        let response = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
+        let response = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id: exec_id.clone() }).await.map_err(rpc_other)?;
         let (status, pid, exit_code, exited_at) = match response {
             ContainerResponse::State { status, pid, exit_code, exited_at_unix_nano, .. } => (status, pid, exit_code, exited_at_unix_nano),
             other => return Err(rpc_other(format!("unexpected state response: {other:?}"))),
         };
-        let meta = self.tasks.read().await.get(&req.id).cloned();
+        let meta = if let Some(exec_id) = exec_id.as_deref() {
+            self.execs.read().await.get(&process_key(&req.id, Some(exec_id))).cloned()
+        } else {
+            self.tasks.read().await.get(&req.id).cloned()
+        };
         let mut out = StateResponse {
             id: req.id,
             bundle: meta.as_ref().map(|m| m.bundle.clone()).unwrap_or_default(),
@@ -669,10 +850,16 @@ impl Task for Service {
     async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> TtrpcResult<WaitResponse> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
-        let response = self.call_agent(&vm, ContainerRequest::Wait { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
+        let response = self.call_agent(&vm, ContainerRequest::Wait { id: req.id.clone(), exec_id: exec_id.clone() }).await.map_err(rpc_other)?;
         match response {
             ContainerResponse::Exited { exit_code, exited_at_unix_nano } => {
-                self.flush_stdio_after_exit(&req.id).await;
+                self.flush_stdio_after_exit(&req.id, exec_id.as_deref()).await;
+                let pid = if let Some(exec) = exec_id.as_deref() {
+                    self.execs.read().await.get(&process_key(&req.id, Some(exec))).map(|m| m.pid).unwrap_or(0)
+                } else {
+                    self.tasks.read().await.get(&req.id).map(|m| m.pid).unwrap_or(0)
+                };
+                self.publish_exit_once(req.id.clone(), exec_id, pid, exit_code, exited_at_unix_nano).await;
                 let mut out = WaitResponse::new();
                 out.exit_status = exit_code as u32;
                 out.exited_at = Some(timestamp_from_nanos(exited_at_unix_nano)).into();
@@ -691,30 +878,65 @@ impl Task for Service {
 
     async fn pause(&self, _ctx: &TtrpcContext, req: PauseRequest) -> TtrpcResult<Empty> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
-        self.call_agent(&vm, ContainerRequest::Pause { id: req.id }).await.map_err(rpc_other)?;
+        self.call_agent(&vm, ContainerRequest::Pause { id: req.id.clone() }).await.map_err(rpc_other)?;
+        self.send_event(TaskPaused { container_id: req.id, ..Default::default() }).await;
         Ok(Empty::new())
     }
 
     async fn resume(&self, _ctx: &TtrpcContext, req: ResumeRequest) -> TtrpcResult<Empty> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
-        self.call_agent(&vm, ContainerRequest::Resume { id: req.id }).await.map_err(rpc_other)?;
+        self.call_agent(&vm, ContainerRequest::Resume { id: req.id.clone() }).await.map_err(rpc_other)?;
+        self.send_event(TaskResumed { container_id: req.id, ..Default::default() }).await;
         Ok(Empty::new())
     }
 
     async fn delete(&self, _ctx: &TtrpcContext, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
-        let state = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id: exec_id.clone() }).await.ok();
-        let _ = self.call_agent(&vm, ContainerRequest::Delete { id: req.id.clone(), exec_id: exec_id.clone(), force: true }).await;
-        if exec_id.is_none() { self.tasks.write().await.remove(&req.id); }
-        let (pid, code, ns) = match state {
-            Some(ContainerResponse::State { pid, exit_code, exited_at_unix_nano, .. }) => (pid, exit_code.unwrap_or(0), exited_at_unix_nano.unwrap_or(0)),
-            _ => (0, 0, 0),
+        let response = self
+            .call_agent(
+                &vm,
+                ContainerRequest::Delete {
+                    id: req.id.clone(),
+                    exec_id: exec_id.clone(),
+                    force: true,
+                },
+            )
+            .await
+            .map_err(rpc_other)?;
+        let (pid, code, ns) = match response {
+            ContainerResponse::Deleted { pid, exit_code, exited_at_unix_nano } => {
+                (pid, exit_code, exited_at_unix_nano)
+            }
+            other => return Err(rpc_other(format!("unexpected delete response: {other:?}"))),
         };
+
+        // containerd expects stdio to be drained and exit to precede delete.
+        // The background WaitTask watcher races with force-delete, so this
+        // path uses a de-duplicated publisher to avoid duplicate exit events.
+        self.flush_stdio_after_exit(&req.id, exec_id.as_deref()).await;
+        self.publish_exit_once(req.id.clone(), exec_id.clone(), pid, code, ns).await;
+        self.cleanup_process_staging(&req.id, exec_id.as_deref()).await;
+
+        if let Some(exec_id_value) = exec_id.as_deref() {
+            self.execs.write().await.remove(&process_key(&req.id, Some(exec_id_value)));
+        } else {
+            self.tasks.write().await.remove(&req.id);
+            self.execs.write().await.retain(|key, _| !key.starts_with(&format!("{}\0", req.id)));
+        }
+
+        self.send_event(TaskDelete {
+            container_id: req.id.clone(),
+            pid,
+            exit_status: code as u32,
+            exited_at: Some(timestamp_from_nanos(ns)).into(),
+            ..Default::default()
+        }).await;
+
         let mut out = DeleteResponse::new();
         out.pid = pid;
         out.exit_status = code as u32;
-        if ns > 0 { out.exited_at = Some(timestamp_from_nanos(ns)).into(); }
+        out.exited_at = Some(timestamp_from_nanos(ns)).into();
         Ok(out)
     }
 
@@ -725,8 +947,34 @@ impl Task for Service {
         if bytes.is_empty() { return Err(rpc_invalid("ExecProcessRequest.spec is empty")); }
         let process_json = String::from_utf8(bytes).map_err(|e| rpc_invalid(e.to_string()))?;
         let (_, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, None).await.map_err(rpc_other)?;
-        let (io, _) = self.prepare_io(&format!("{}-{}", req.id, req.exec_id), &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
-        self.call_agent(&vm, ContainerRequest::Exec { id: req.id, exec_id: req.exec_id, process_json, io }).await.map_err(rpc_other)?;
+        let io_id = format!("{}-{}", req.id, req.exec_id);
+        let (io, io_dir) = self.prepare_io(&io_id, &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
+        let response = self.call_agent(&vm, ContainerRequest::Exec {
+            id: req.id.clone(),
+            exec_id: req.exec_id.clone(),
+            process_json,
+            io,
+        }).await.map_err(rpc_other)?;
+        let pid = match response {
+            ContainerResponse::ExecStarted { pid } => pid,
+            other => return Err(rpc_other(format!("unexpected exec response: {other:?}"))),
+        };
+        let bundle = self.tasks.read().await.get(&req.id).map(|m| m.bundle.clone()).unwrap_or_default();
+        self.exit_events.lock().await.remove(&process_key(&req.id, Some(&req.exec_id)));
+        self.execs.write().await.insert(process_key(&req.id, Some(&req.exec_id)), TaskMeta {
+            bundle,
+            stdin: req.stdin.clone(),
+            stdout: req.stdout.clone(),
+            stderr: req.stderr.clone(),
+            terminal: req.terminal,
+            pid,
+            io_dir: Some(io_dir),
+        });
+        self.send_event(TaskExecAdded {
+            container_id: req.id,
+            exec_id: req.exec_id,
+            ..Default::default()
+        }).await;
         Ok(Empty::new())
     }
 
@@ -736,7 +984,7 @@ impl Task for Service {
     }
 
     async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> TtrpcResult<Empty> {
-        if self.tasks.read().await.is_empty() {
+        if self.tasks.read().await.is_empty() && self.execs.read().await.is_empty() {
             let _ = self.destroy_sandbox().await;
             self.exit.signal();
         }
@@ -785,6 +1033,26 @@ impl Task for Service {
             ContainerResponse::ResourcesUpdated => Ok(Empty::new()),
             other => Err(rpc_other(format!("unexpected update response: {other:?}"))),
         }
+    }
+}
+
+fn forward_events(publisher: RemotePublisher, namespace: String, mut rx: EventReceiver) {
+    tokio::spawn(async move {
+        while let Some((topic, event)) = rx.recv().await {
+            if let Err(e) = publisher
+                .publish(ttrpc::context::Context::default(), &topic, &namespace, event)
+                .await
+            {
+                warn!("publishing {topic} to containerd failed: {e}");
+            }
+        }
+    });
+}
+
+fn process_key(id: &str, exec_id: Option<&str>) -> String {
+    match exec_id {
+        Some(exec_id) => format!("{id}\0{exec_id}"),
+        None => id.to_string(),
     }
 }
 
@@ -1383,9 +1651,8 @@ fn create_stdio_file(path: &Path) -> AnyResult<()> {
 }
 
 /// Copy bytes from `source` to `destination`.
-/// When `poll_eof` is true (guest log → containerd), treat short reads as
-/// "writer still open" and keep polling — virtiofs regular files return EOF
-/// between writes instead of blocking like FIFOs.
+/// When `poll_eof` is true (guest log -> containerd), EOF is transient because
+/// a virtiofs regular file can grow after a short read.
 fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_eof: bool) {
     tokio::spawn(async move {
         let result: AnyResult<()> = async {
@@ -1415,7 +1682,6 @@ fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_
                         break;
                     }
                     idle_rounds += 1;
-                    // ~2 minutes of idle after last byte before giving up.
                     if idle_rounds > 12_000 {
                         break;
                     }
@@ -1438,6 +1704,13 @@ fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_keys_separate_init_and_exec() {
+        assert_eq!(process_key("c1", None), "c1");
+        assert_eq!(process_key("c1", Some("e1")), "c1\0e1");
+        assert_ne!(process_key("c1", None), process_key("c1", Some("e1")));
+    }
 
     #[test]
     fn safe_names_are_filesystem_safe() {
