@@ -1,0 +1,1372 @@
+diff --git a/PR_BODY_SET3.md b/PR_BODY_SET3.md
+new file mode 100644
+index 0000000..ea3f074
+--- /dev/null
++++ b/PR_BODY_SET3.md
+@@ -0,0 +1,32 @@
++## Secure Containers Set 3 — lifecycle events + OCI hardening
++
++### Summary
++
++This change completes the next containerd runtime-v2 lifecycle layer on top of
++Secure Containers Set 2. It publishes containerd task events, tracks init and
++exec exits independently, makes delete return definitive guest exit metadata,
++and strengthens the guest OCI process setup with supplementary groups, umask,
++rlimits, noNewPrivileges and Linux capability sets.
++
++### Runtime correctness
++
++- publishes TaskCreate/TaskStart/TaskExecAdded/TaskExecStarted
++- publishes TaskPaused/TaskResumed/TaskExit/TaskDelete
++- background Wait watcher emits asynchronous TaskExit
++- de-duplicates TaskExit against force-delete/explicit Wait races
++- keeps per-exec process metadata and stdio staging separate
++- preserves current-main virtiofs regular-file stdio behavior
++- cleans stale rootfs/mount staging on retry/failure
++
++### OCI hardening
++
++- additionalGids
++- umask
++- rlimits
++- noNewPrivileges
++- bounding/effective/inheritable/permitted/ambient capabilities
++
++### Remaining gates
++
++TTY, write-through PVC/CSI, full namespace/seccomp/device parity, additional
++VMMs, and real-node KVM/Kubernetes conformance remain follow-ups.
+diff --git a/TEST_REPORT_SET3.md b/TEST_REPORT_SET3.md
+new file mode 100644
+index 0000000..6b99586
+--- /dev/null
++++ b/TEST_REPORT_SET3.md
+@@ -0,0 +1,30 @@
++# Test report — FluxVM Secure Containers Set 3
++
++## Base verification
++
++GitHub main was re-checked during this handoff. The latest reviewed base was
++`d77c1afb9364b02e897079b7325470e9a2bf361e`, after the Set 2 merge and three
++runtime fixes for stdio, virtiofs share mounting, and i64 exit timestamps.
++
++## Checks executed in the artifact environment
++
++- shell syntax validation with `bash -n`
++- TOML parsing for every `Cargo.toml`
++- YAML parsing for deployment manifests
++- Rust delimiter/lexical balance checks for all new Rust sources
++- protocol/request/response consistency review
++- source-level comparison with current containerd `rust-extensions` task-event
++  and `RemotePublisher` APIs
++- archive integrity and SHA-256 verification
++
++## Not executable in this environment
++
++The artifact container does not provide `rustc`/`cargo`, `/dev/kvm`, QEMU or a
++running containerd. Therefore this report does **not** claim Rust compilation,
++clippy success, VM boot, ctr execution or Kubernetes E2E success here.
++
++## Required merge gate
++
++Before production use, run the repository CI plus a Linux KVM node test that
++covers create/start/wait/delete, exec, pause/resume, kill, TaskExit events,
++Stats/Pids/Update, Pod CNI connectivity, teardown, and repeated Pod churn.
+diff --git a/crates/fluxvm-container-agent/src/main.rs b/crates/fluxvm-container-agent/src/main.rs
+index ab19a29..fa33c7c 100644
+--- a/crates/fluxvm-container-agent/src/main.rs
++++ b/crates/fluxvm-container-agent/src/main.rs
+@@ -6,9 +6,11 @@
+ //! Security boundary: the entire Kubernetes Pod/container sandbox runs inside
+ //! a hardware VM. This agent intentionally does not pretend to be a complete
+ //! runc replacement yet; it implements process lifecycle, chroot, uid/gid,
+-//! environment, cwd, signals and stdio inside the guest. OCI namespace,
+-//! capability, seccomp, device and cgroup parity are tracked as follow-up
+-//! hardening items in docs/secure-containers.md.
++//! environment, cwd, signals and stdio inside the guest. Set 3 additionally
++//! enforces supplementary groups, umask, rlimits and noNewPrivileges. OCI
++//! namespace, seccomp and device parity remain explicit follow-up hardening
++//! items in docs/secure-containers.md. Linux capability sets are applied
++//! directly from OCI process.capabilities when present.
+ 
+ use anyhow::{Context, Result, bail};
+ use clap::Parser;
+@@ -40,6 +42,22 @@ struct Cli {
+     port: u32,
+ }
+ 
++#[derive(Clone, Debug)]
++struct ProcessRlimit {
++    resource: u32,
++    soft: libc::rlim_t,
++    hard: libc::rlim_t,
++}
++
++#[derive(Clone, Debug, Default)]
++struct CapabilitySets {
++    bounding: u64,
++    effective: u64,
++    inheritable: u64,
++    permitted: u64,
++    ambient: u64,
++}
++
+ #[derive(Clone, Debug)]
+ struct ProcessSpec {
+     rootfs: PathBuf,
+@@ -48,6 +66,11 @@ struct ProcessSpec {
+     cwd: String,
+     uid: u32,
+     gid: u32,
++    additional_gids: Vec<u32>,
++    no_new_privileges: bool,
++    umask: Option<u32>,
++    rlimits: Vec<ProcessRlimit>,
++    capabilities: Option<CapabilitySets>,
+ }
+ 
+ #[derive(Clone, Debug)]
+@@ -392,7 +415,8 @@ fn state_process(id: &str, exec_id: Option<&str>) -> Result<ContainerResponse> {
+ fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<ContainerResponse> {
+     let mut reg = registry().lock().expect("registry poisoned");
+     let container = reg.get_mut(id).with_context(|| format!("container {id:?} not found"))?;
+-    if let Some(exec_id) = exec_id {
++
++    let final_state = if let Some(exec_id) = exec_id {
+         let handle = container
+             .execs
+             .get(exec_id)
+@@ -405,24 +429,35 @@ fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<Contai
+             }
+             handle.signal(libc::SIGKILL, true)?;
+         }
++        let final_state = handle.wait();
+         container.execs.remove(exec_id);
++        final_state
+     } else {
+-        let state = container.init.snapshot();
++        let handle = container.init.clone();
++        let state = handle.snapshot();
+         if state.status != ContainerStatus::Stopped {
+             if !force {
+                 bail!("container {id:?} is still running");
+             }
+-            container.init.signal(libc::SIGKILL, true)?;
+-        }
+-        if force {
++            // Kill every process in the container cgroup first, then wait for
++            // init so DeleteTask can return a definitive exit status instead
++            // of the pre-kill state.
+             let _ = signal_cgroup_path(&container.cgroup_path, libc::SIGKILL);
++            handle.signal(libc::SIGKILL, true)?;
+         }
++        let final_state = handle.wait();
+         if let Some(entry) = reg.remove(id) {
+             cleanup_mounts(&entry.mounts);
+             cleanup_container_cgroup(&entry.cgroup_path);
+         }
+-    }
+-    Ok(ContainerResponse::Deleted)
++        final_state
++    };
++
++    Ok(ContainerResponse::Deleted {
++        pid: final_state.pid,
++        exit_code: final_state.exit_code.unwrap_or_default(),
++        exited_at_unix_nano: final_state.exited_at_unix_nano.unwrap_or_else(now_unix_nanos),
++    })
+ }
+ 
+ fn find_process(id: &str, exec_id: Option<&str>) -> Result<Arc<ProcHandle>> {
+@@ -831,7 +866,262 @@ fn parse_process_value(process: &Value, rootfs: PathBuf) -> Result<ProcessSpec>
+     let cwd = process.get("cwd").and_then(Value::as_str).unwrap_or("/").to_string();
+     let uid = process.pointer("/user/uid").and_then(Value::as_u64).unwrap_or(0) as u32;
+     let gid = process.pointer("/user/gid").and_then(Value::as_u64).unwrap_or(0) as u32;
+-    Ok(ProcessSpec { rootfs, args, env, cwd, uid, gid })
++    let additional_gids = process
++        .pointer("/user/additionalGids")
++        .and_then(Value::as_array)
++        .map(|items| items.iter().filter_map(Value::as_u64).map(|v| v as u32).collect())
++        .unwrap_or_default();
++    let no_new_privileges = process
++        .get("noNewPrivileges")
++        .and_then(Value::as_bool)
++        .unwrap_or(false);
++    let umask = process
++        .pointer("/user/umask")
++        .and_then(Value::as_u64)
++        .map(|v| v as u32);
++    let rlimits = parse_process_rlimits(process)?;
++    let capabilities = parse_capability_sets(process)?;
++    Ok(ProcessSpec {
++        rootfs,
++        args,
++        env,
++        cwd,
++        uid,
++        gid,
++        additional_gids,
++        no_new_privileges,
++        umask,
++        rlimits,
++        capabilities,
++    })
++}
++
++fn parse_capability_sets(process: &Value) -> Result<Option<CapabilitySets>> {
++    let Some(caps) = process.get("capabilities") else {
++        return Ok(None);
++    };
++    let parse = |name: &str| -> Result<u64> {
++        let Some(items) = caps.get(name).and_then(Value::as_array) else {
++            return Ok(0);
++        };
++        let mut mask = 0u64;
++        for item in items {
++            let name = item.as_str().context("OCI capability must be a string")?;
++            let bit = capability_number(name)
++                .with_context(|| format!("unsupported Linux capability {name:?}"))?;
++            mask |= 1u64 << bit;
++        }
++        Ok(mask)
++    };
++    let sets = CapabilitySets {
++        bounding: parse("bounding")?,
++        effective: parse("effective")?,
++        inheritable: parse("inheritable")?,
++        permitted: parse("permitted")?,
++        ambient: parse("ambient")?,
++    };
++    if sets.effective & !sets.permitted != 0 {
++        bail!("OCI effective capabilities must be a subset of permitted");
++    }
++    if sets.ambient & !sets.permitted != 0 || sets.ambient & !sets.inheritable != 0 {
++        bail!("OCI ambient capabilities must be present in permitted and inheritable");
++    }
++    if sets.permitted & !sets.bounding != 0 {
++        bail!("OCI permitted capabilities must be a subset of bounding");
++    }
++    Ok(Some(sets))
++}
++
++fn capability_number(name: &str) -> Option<u32> {
++    let upper = name.to_ascii_uppercase();
++    Some(match upper.strip_prefix("CAP_").unwrap_or(&upper) {
++        "CHOWN" => 0,
++        "DAC_OVERRIDE" => 1,
++        "DAC_READ_SEARCH" => 2,
++        "FOWNER" => 3,
++        "FSETID" => 4,
++        "KILL" => 5,
++        "SETGID" => 6,
++        "SETUID" => 7,
++        "SETPCAP" => 8,
++        "LINUX_IMMUTABLE" => 9,
++        "NET_BIND_SERVICE" => 10,
++        "NET_BROADCAST" => 11,
++        "NET_ADMIN" => 12,
++        "NET_RAW" => 13,
++        "IPC_LOCK" => 14,
++        "IPC_OWNER" => 15,
++        "SYS_MODULE" => 16,
++        "SYS_RAWIO" => 17,
++        "SYS_CHROOT" => 18,
++        "SYS_PTRACE" => 19,
++        "SYS_PACCT" => 20,
++        "SYS_ADMIN" => 21,
++        "SYS_BOOT" => 22,
++        "SYS_NICE" => 23,
++        "SYS_RESOURCE" => 24,
++        "SYS_TIME" => 25,
++        "SYS_TTY_CONFIG" => 26,
++        "MKNOD" => 27,
++        "LEASE" => 28,
++        "AUDIT_WRITE" => 29,
++        "AUDIT_CONTROL" => 30,
++        "SETFCAP" => 31,
++        "MAC_OVERRIDE" => 32,
++        "MAC_ADMIN" => 33,
++        "SYSLOG" => 34,
++        "WAKE_ALARM" => 35,
++        "BLOCK_SUSPEND" => 36,
++        "AUDIT_READ" => 37,
++        "PERFMON" => 38,
++        "BPF" => 39,
++        "CHECKPOINT_RESTORE" => 40,
++        _ => return None,
++    })
++}
++
++#[repr(C)]
++struct LinuxCapHeader {
++    version: u32,
++    pid: i32,
++}
++
++#[repr(C)]
++#[derive(Copy, Clone)]
++struct LinuxCapData {
++    effective: u32,
++    permitted: u32,
++    inheritable: u32,
++}
++
++const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
++const PR_CAP_AMBIENT: libc::c_int = 47;
++const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
++const PR_CAP_AMBIENT_CLEAR_ALL: libc::c_ulong = 4;
++
++fn drop_bounding_capabilities(caps: &CapabilitySets) -> Result<()> {
++    let last_cap = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
++        .ok()
++        .and_then(|v| v.trim().parse::<u32>().ok())
++        .unwrap_or(40)
++        .min(63);
++    for cap in 0..=last_cap {
++        if caps.bounding & (1u64 << cap) != 0 {
++            continue;
++        }
++        let rc = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0) };
++        if rc != 0 {
++            return Err(std::io::Error::last_os_error())
++                .with_context(|| format!("dropping capability {cap} from bounding set"));
++        }
++    }
++    Ok(())
++}
++
++fn set_process_capabilities(caps: &CapabilitySets) -> Result<()> {
++    let mut header = LinuxCapHeader { version: LINUX_CAPABILITY_VERSION_3, pid: 0 };
++    let data = [
++        LinuxCapData {
++            effective: caps.effective as u32,
++            permitted: caps.permitted as u32,
++            inheritable: caps.inheritable as u32,
++        },
++        LinuxCapData {
++            effective: (caps.effective >> 32) as u32,
++            permitted: (caps.permitted >> 32) as u32,
++            inheritable: (caps.inheritable >> 32) as u32,
++        },
++    ];
++    let rc = unsafe {
++        libc::syscall(
++            libc::SYS_capset,
++            (&mut header as *mut LinuxCapHeader).cast::<libc::c_void>(),
++            data.as_ptr().cast::<libc::c_void>(),
++        )
++    };
++    if rc != 0 {
++        return Err(std::io::Error::last_os_error()).context("capset");
++    }
++
++    let rc = unsafe { libc::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) };
++    if rc != 0 {
++        let err = std::io::Error::last_os_error();
++        // Linux < 4.3 does not implement ambient capabilities. An empty OCI
++        // ambient set remains representable there; a non-empty set must fail.
++        if err.raw_os_error() != Some(libc::EINVAL) || caps.ambient != 0 {
++            return Err(err).context("clearing ambient capabilities");
++        }
++    }
++    for cap in 0..64u32 {
++        if caps.ambient & (1u64 << cap) == 0 {
++            continue;
++        }
++        let rc = unsafe {
++            libc::prctl(
++                PR_CAP_AMBIENT,
++                PR_CAP_AMBIENT_RAISE,
++                cap as libc::c_ulong,
++                0,
++                0,
++            )
++        };
++        if rc != 0 {
++            return Err(std::io::Error::last_os_error())
++                .with_context(|| format!("raising ambient capability {cap}"));
++        }
++    }
++    Ok(())
++}
++
++fn parse_process_rlimits(process: &Value) -> Result<Vec<ProcessRlimit>> {
++    let Some(items) = process.get("rlimits").and_then(Value::as_array) else {
++        return Ok(Vec::new());
++    };
++    items
++        .iter()
++        .map(|item| {
++            let kind = item
++                .get("type")
++                .and_then(Value::as_str)
++                .context("OCI rlimit.type is required")?;
++            let resource = rlimit_resource(kind)
++                .with_context(|| format!("unsupported OCI rlimit type {kind:?}"))?;
++            let soft = item
++                .get("soft")
++                .and_then(Value::as_u64)
++                .context("OCI rlimit.soft is required")? as libc::rlim_t;
++            let hard = item
++                .get("hard")
++                .and_then(Value::as_u64)
++                .context("OCI rlimit.hard is required")? as libc::rlim_t;
++            if soft > hard {
++                bail!("OCI rlimit {kind} has soft > hard");
++            }
++            Ok(ProcessRlimit { resource, soft, hard })
++        })
++        .collect()
++}
++
++fn rlimit_resource(kind: &str) -> Option<u32> {
++    Some(match kind {
++        "RLIMIT_AS" => libc::RLIMIT_AS as u32,
++        "RLIMIT_CORE" => libc::RLIMIT_CORE as u32,
++        "RLIMIT_CPU" => libc::RLIMIT_CPU as u32,
++        "RLIMIT_DATA" => libc::RLIMIT_DATA as u32,
++        "RLIMIT_FSIZE" => libc::RLIMIT_FSIZE as u32,
++        "RLIMIT_LOCKS" => libc::RLIMIT_LOCKS as u32,
++        "RLIMIT_MEMLOCK" => libc::RLIMIT_MEMLOCK as u32,
++        "RLIMIT_MSGQUEUE" => libc::RLIMIT_MSGQUEUE as u32,
++        "RLIMIT_NICE" => libc::RLIMIT_NICE as u32,
++        "RLIMIT_NOFILE" => libc::RLIMIT_NOFILE as u32,
++        "RLIMIT_NPROC" => libc::RLIMIT_NPROC as u32,
++        "RLIMIT_RSS" => libc::RLIMIT_RSS as u32,
++        "RLIMIT_RTPRIO" => libc::RLIMIT_RTPRIO as u32,
++        "RLIMIT_RTTIME" => libc::RLIMIT_RTTIME as u32,
++        "RLIMIT_SIGPENDING" => libc::RLIMIT_SIGPENDING as u32,
++        "RLIMIT_STACK" => libc::RLIMIT_STACK as u32,
++        _ => return None,
++    })
+ }
+ 
+ fn resolve_executable(spec: &ProcessSpec) -> Result<String> {
+@@ -896,8 +1186,45 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
+             libc::close(gate[0]);
+             if libc::chroot(rootfs.as_ptr()) != 0 { libc::_exit(126); }
+             if libc::chdir(cwd.as_ptr()) != 0 { libc::_exit(126); }
++
++            if let Some(mask) = spec.umask {
++                libc::umask(mask as libc::mode_t);
++            }
++            for limit in &spec.rlimits {
++                let value = libc::rlimit {
++                    rlim_cur: limit.soft,
++                    rlim_max: limit.hard,
++                };
++                if libc::setrlimit(limit.resource as _, &value) != 0 { libc::_exit(126); }
++            }
++
++            // Supplementary groups and the capability bounding set must be
++            // configured while the child still has privilege.
++            let groups: Vec<libc::gid_t> = spec.additional_gids.iter().map(|v| *v as libc::gid_t).collect();
++            let group_ptr = if groups.is_empty() { std::ptr::null() } else { groups.as_ptr() };
++            if libc::setgroups(groups.len(), group_ptr) != 0 { libc::_exit(126); }
++            if let Some(caps) = spec.capabilities.as_ref() {
++                if drop_bounding_capabilities(caps).is_err() { libc::_exit(126); }
++                // Preserve the requested permitted set across a non-root UID
++                // transition, then immediately replace it with OCI's exact
++                // sets below.
++                if spec.uid != 0 && (caps.permitted != 0 || caps.effective != 0 || caps.ambient != 0)
++                    && libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0
++                {
++                    libc::_exit(126);
++                }
++            }
+             if libc::setgid(spec.gid) != 0 { libc::_exit(126); }
+             if libc::setuid(spec.uid) != 0 { libc::_exit(126); }
++            if let Some(caps) = spec.capabilities.as_ref() {
++                if set_process_capabilities(caps).is_err() { libc::_exit(126); }
++                let _ = libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0);
++            }
++            if spec.no_new_privileges
++                && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
++            {
++                libc::_exit(126);
++            }
+ 
+             let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|v| v.as_ptr()).collect();
+             argv_ptrs.push(std::ptr::null());
+@@ -938,7 +1265,11 @@ fn open_input(path: Option<&str>) -> Result<Option<File>> {
+         .map(|p| {
+             match OpenOptions::new().read(true).open(p) {
+                 Ok(f) => Ok(f),
+-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => OpenOptions::new().read(true).open("/dev/null"),
++                // Virtiofs metadata may lag host-side creation. Non-interactive
++                // tasks should still be able to start when stdin is absent.
++                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
++                    OpenOptions::new().read(true).open("/dev/null")
++                }
+                 Err(e) => Err(e),
+             }
+             .with_context(|| format!("opening stdin {p}"))
+@@ -1000,6 +1331,57 @@ mod tests {
+         assert_eq!(spec.env, vec![("A".into(), "B".into())]);
+     }
+ 
++    #[test]
++    fn parses_process_security_controls() {
++        let (spec, _, _) = parse_oci_config(r#"{
++          "root":{"path":"/run/rootfs"},
++          "process":{
++            "args":["/bin/sh"],
++            "cwd":"/",
++            "noNewPrivileges":true,
++            "user":{"uid":1000,"gid":1000,"additionalGids":[10,20],"umask":18},
++            "rlimits":[{"type":"RLIMIT_NOFILE","soft":1024,"hard":2048}],
++            "capabilities":{
++              "bounding":["CAP_CHOWN","CAP_NET_BIND_SERVICE"],
++              "effective":["CAP_NET_BIND_SERVICE"],
++              "inheritable":["CAP_NET_BIND_SERVICE"],
++              "permitted":["CAP_NET_BIND_SERVICE"],
++              "ambient":["CAP_NET_BIND_SERVICE"]
++            }
++          }
++        }"#).unwrap();
++        assert_eq!(spec.additional_gids, vec![10, 20]);
++        assert!(spec.no_new_privileges);
++        assert_eq!(spec.umask, Some(18));
++        assert_eq!(spec.rlimits.len(), 1);
++        assert_eq!(spec.rlimits[0].soft, 1024);
++        assert_eq!(spec.rlimits[0].hard, 2048);
++        let caps = spec.capabilities.unwrap();
++        assert_ne!(caps.bounding & (1 << 0), 0);
++        assert_ne!(caps.bounding & (1 << 10), 0);
++        assert_eq!(caps.effective, 1 << 10);
++        assert_eq!(caps.ambient, 1 << 10);
++    }
++
++    #[test]
++    fn rejects_unknown_capability() {
++        assert!(parse_oci_config(r#"{
++          "root":{"path":"/r"},
++          "process":{
++            "args":["/bin/true"],
++            "capabilities":{"effective":["CAP_NOT_REAL"]}
++          }
++        }"#).is_err());
++    }
++
++    #[test]
++    fn rejects_unknown_rlimit() {
++        assert!(parse_oci_config(r#"{
++          "root":{"path":"/r"},
++          "process":{"args":["/bin/true"],"rlimits":[{"type":"RLIMIT_FAKE","soft":1,"hard":1}]}
++        }"#).is_err());
++    }
++
+     #[test]
+     fn rejects_empty_args() {
+         assert!(parse_oci_config(r#"{"root":{"path":"/r"},"process":{"args":[]}}"#).is_err());
+diff --git a/crates/fluxvm-container-protocol/src/lib.rs b/crates/fluxvm-container-protocol/src/lib.rs
+index 0f04079..f3b03d6 100644
+--- a/crates/fluxvm-container-protocol/src/lib.rs
++++ b/crates/fluxvm-container-protocol/src/lib.rs
+@@ -170,7 +170,11 @@ pub enum ContainerResponse {
+     Killed,
+     Paused,
+     Resumed,
+-    Deleted,
++    Deleted {
++        pid: u32,
++        exit_code: i32,
++        exited_at_unix_nano: i64,
++    },
+     Error { message: String },
+ }
+ 
+@@ -229,6 +233,21 @@ mod tests {
+         assert!(matches!(back.request, ContainerRequest::UpdateResources { .. }));
+     }
+ 
++    #[test]
++    fn deleted_response_round_trip() {
++        let response = ContainerResponse::Deleted {
++            pid: 42,
++            exit_code: 137,
++            exited_at_unix_nano: 123456789,
++        };
++        let line = encode_line(&response).unwrap();
++        let back: ContainerResponse = decode_line(&line).unwrap();
++        assert!(matches!(
++            back,
++            ContainerResponse::Deleted { pid: 42, exit_code: 137, .. }
++        ));
++    }
++
+     #[test]
+     fn stats_response_round_trip() {
+         let response = ContainerResponse::Stats {
+@@ -246,7 +265,10 @@ mod tests {
+     }
+     #[test]
+     fn exited_response_round_trip() {
+-        let response = ContainerResponse::Exited { exit_code: 0, exited_at_unix_nano: 1_759_000_000_000_000_000 };
++        let response = ContainerResponse::Exited {
++            exit_code: 0,
++            exited_at_unix_nano: 1_759_000_000_000_000_000,
++        };
+         let line = encode_line(&response).unwrap();
+         let back: ContainerResponse = decode_line(&line).unwrap();
+         assert!(matches!(back, ContainerResponse::Exited { exit_code: 0, .. }));
+diff --git a/crates/fluxvm-containerd-shim/src/main.rs b/crates/fluxvm-containerd-shim/src/main.rs
+index 44db0a1..17c4156 100644
+--- a/crates/fluxvm-containerd-shim/src/main.rs
++++ b/crates/fluxvm-containerd-shim/src/main.rs
+@@ -26,6 +26,7 @@ use containerd_shim::{
+         StateRequest, StateResponse, Status, WaitRequest, WaitResponse,
+     },
+     asynchronous::{ExitSignal, Shim, run, spawn},
++    event::Event,
+     publisher::RemotePublisher,
+     util::convert_to_any,
+ };
+@@ -33,7 +34,11 @@ use containerd_shim_protos::{
+     api::{CloseIORequest, ConnectRequest, ConnectResponse, DeleteResponse, PidsRequest, PidsResponse,
+           ProcessInfo, ResizePtyRequest, StatsRequest, StatsResponse, UpdateTaskRequest},
+     cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, PidsStat},
+-    protobuf::EnumOrUnknown,
++    events::task::{
++        TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskExit, TaskIO, TaskPaused,
++        TaskResumed, TaskStart,
++    },
++    protobuf::{EnumOrUnknown, MessageDyn},
+     shim_async::Task,
+     ttrpc::{self, r#async::TtrpcContext},
+ };
+@@ -47,7 +52,7 @@ use reqwest::{Client, Method};
+ use serde::Deserialize;
+ use serde_json::{Value, json};
+ use std::{
+-    collections::HashMap,
++    collections::{HashMap, HashSet},
+     hash::{Hash, Hasher},
+     net::Ipv4Addr,
+     path::{Path, PathBuf},
+@@ -55,11 +60,21 @@ use std::{
+     sync::Arc,
+     time::Duration,
+ };
+-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, sync::{Mutex, RwLock}};
++use tokio::{
++    io::{AsyncReadExt, AsyncWriteExt},
++    sync::{
++        mpsc::{channel, Receiver, Sender},
++        Mutex, RwLock,
++    },
++};
+ 
+ const RUNTIME_ID: &str = "io.containerd.fluxvm.v2";
+ const GUEST_SHARE: &str = "/run/fluxvm/pod";
+ 
++type EventMessage = (String, Box<dyn MessageDyn>);
++type EventSender = Sender<EventMessage>;
++type EventReceiver = Receiver<EventMessage>;
++
+ #[derive(Clone, Debug, Deserialize)]
+ #[serde(default)]
+ struct RuntimeConfig {
+@@ -108,7 +123,7 @@ struct TaskMeta {
+     stderr: String,
+     terminal: bool,
+     pid: u32,
+-    /// Host-side virtiofs io directory (`stdout.log` / `stderr.log`).
++    /// Host-side virtiofs stdio directory for this init/exec process.
+     io_dir: Option<PathBuf>,
+ }
+ 
+@@ -160,6 +175,10 @@ struct Service {
+     http: Client,
+     sandbox: Arc<Mutex<Option<Sandbox>>>,
+     tasks: Arc<RwLock<HashMap<String, TaskMeta>>>,
++    execs: Arc<RwLock<HashMap<String, TaskMeta>>>,
++    event_tx: EventSender,
++    event_rx: Arc<Mutex<Option<EventReceiver>>>,
++    exit_events: Arc<Mutex<HashSet<String>>>,
+ }
+ 
+ #[async_trait]
+@@ -168,6 +187,7 @@ impl Shim for Service {
+ 
+     async fn new(_runtime_id: &str, args: &Flags, _config: &mut Config) -> Self {
+         let group = pod_group_from_bundle(&args.bundle).await.unwrap_or_else(|| args.id.clone());
++        let (event_tx, event_rx) = channel(128);
+         Self {
+             exit: Arc::new(ExitSignal::default()),
+             namespace: args.namespace.clone(),
+@@ -176,6 +196,10 @@ impl Shim for Service {
+             http: Client::new(),
+             sandbox: Arc::new(Mutex::new(None)),
+             tasks: Arc::new(RwLock::new(HashMap::new())),
++            execs: Arc::new(RwLock::new(HashMap::new())),
++            event_tx,
++            event_rx: Arc::new(Mutex::new(Some(event_rx))),
++            exit_events: Arc::new(Mutex::new(HashSet::new())),
+         }
+     }
+ 
+@@ -193,7 +217,10 @@ impl Shim for Service {
+         self.exit.wait().await;
+     }
+ 
+-    async fn create_task_service(&self, _publisher: RemotePublisher) -> Self::T {
++    async fn create_task_service(&self, publisher: RemotePublisher) -> Self::T {
++        if let Some(rx) = self.event_rx.lock().await.take() {
++            forward_events(publisher, self.namespace.clone(), rx);
++        }
+         self.clone()
+     }
+ }
+@@ -349,6 +376,8 @@ impl Service {
+                 self.configure_guest_cni(&vm, cni).await?;
+             }
+ 
++            // Cloud-init mounts virtiofs asynchronously; explicitly ensure
++            // the Pod share is available before rootfs/stdio staging.
+             self.ensure_guest_share_mounted(&vm).await?;
+ 
+             self.bootstrap_container_agent(&vm).await?;
+@@ -415,16 +444,38 @@ impl Service {
+         }
+     }
+ 
++    /// Ensure virtiofs tag fs0 is mounted at the Pod share before container create.
+     async fn ensure_guest_share_mounted(&self, vm: &VmRecord) -> AnyResult<()> {
+         let probe = format!(
+-            "bash -lc 'mkdir -p {GUEST_SHARE}; if ! mountpoint -q {GUEST_SHARE}; then mount -t virtiofs fs0 {GUEST_SHARE} || mount {GUEST_SHARE}; fi; mountpoint -q {GUEST_SHARE} && touch {GUEST_SHARE}/.fluxvm-share-ok'"
++            "bash -lc 'mkdir -p {GUEST_SHARE}; \
++             if ! mountpoint -q {GUEST_SHARE}; then \
++               mount -t virtiofs fs0 {GUEST_SHARE} || mount {GUEST_SHARE}; \
++             fi; \
++             mountpoint -q {GUEST_SHARE} && touch {GUEST_SHARE}/.fluxvm-share-ok'"
+         );
+         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+         loop {
+-            match fluxvm_vsock_client::call(vm, AgentRequest::Exec { command: probe.clone(), timeout_seconds: Some(10) }, Duration::from_secs(15)).await? {
++            match fluxvm_vsock_client::call(
++                vm,
++                AgentRequest::Exec { command: probe.clone(), timeout_seconds: Some(10) },
++                Duration::from_secs(15),
++            )
++            .await?
++            {
+                 AgentResponse::Exec { exit_code: 0, .. } => return Ok(()),
+-                AgentResponse::Exec { exit_code, stdout, stderr } => { if tokio::time::Instant::now() >= deadline { bail!("guest virtiofs share {GUEST_SHARE} not mounted after retries (exit={exit_code} stdout={stdout:?} stderr={stderr:?})"); } },
+-                AgentResponse::Error { message } => { if tokio::time::Instant::now() >= deadline { bail!("guest virtiofs share mount: {message}"); } },
++                AgentResponse::Exec { exit_code, stdout, stderr } => {
++                    if tokio::time::Instant::now() >= deadline {
++                        bail!(
++                            "guest virtiofs share {GUEST_SHARE} not mounted after retries \
++                             (exit={exit_code} stdout={stdout:?} stderr={stderr:?})"
++                        );
++                    }
++                }
++                AgentResponse::Error { message } => {
++                    if tokio::time::Instant::now() >= deadline {
++                        bail!("guest virtiofs share mount: {message}");
++                    }
++                }
+                 other => bail!("unexpected guest share mount response: {other:?}"),
+             }
+             tokio::time::sleep(Duration::from_millis(500)).await;
+@@ -491,6 +542,10 @@ impl Service {
+         let (vm, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, Some(&hints)).await?;
+         let rootfs = host_ctr.join("rootfs");
+         let mountpoint = self.cfg.state_dir.join(&self.namespace).join(&self.group).join("mounts").join(safe_name(&req.id));
++        // A failed/retried CreateTask must never inherit files or FIFOs from
++        // a previous attempt.
++        let _ = tokio::fs::remove_dir_all(&host_ctr).await;
++        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
+         tokio::fs::create_dir_all(&rootfs).await?;
+         tokio::fs::create_dir_all(&mountpoint).await?;
+         for m in &req.rootfs {
+@@ -500,6 +555,7 @@ impl Service {
+         }
+         let copy_result = copy_contents(&mountpoint, &rootfs).await;
+         let _ = tokio::process::Command::new("umount").args(["-l", mountpoint.to_string_lossy().as_ref()]).status().await;
++        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
+         copy_result?;
+ 
+         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
+@@ -510,39 +566,62 @@ impl Service {
+ 
+     async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, PathBuf)> {
+         if terminal { bail!("TTY containers are not supported by secure-containers v0.1"); }
+-        let io_dir = host_ctr.join("io");
++        // Every init/exec process gets its own regular-file staging directory.
++        // Virtiofs does not reliably expose host-created FIFOs to the guest,
++        // so Set 3 preserves the current-main regular-file relay while also
++        // preventing concurrent exec sessions from colliding with init stdio.
++        let io_key = safe_name(id);
++        let io_dir = host_ctr.join("io").join(&io_key);
++        let guest_io_dir = format!("{guest_ctr}/io/{io_key}");
+         tokio::fs::create_dir_all(&io_dir).await?;
+         let mut guest = ContainerIo::default();
+         if !stdout.is_empty() {
+             let p = io_dir.join("stdout.log"); create_stdio_file(&p)?;
+-            guest.stdout = Some(format!("{guest_ctr}/io/stdout.log"));
++            guest.stdout = Some(format!("{guest_io_dir}/stdout.log"));
+             spawn_stdio_relay(p, PathBuf::from(stdout), format!("{id}:stdout"), true);
+         }
+         if !stderr.is_empty() {
+             let p = io_dir.join("stderr.log"); create_stdio_file(&p)?;
+-            guest.stderr = Some(format!("{guest_ctr}/io/stderr.log"));
++            guest.stderr = Some(format!("{guest_io_dir}/stderr.log"));
+             spawn_stdio_relay(p, PathBuf::from(stderr), format!("{id}:stderr"), true);
+         }
+         if !stdin.is_empty() {
+             let p = io_dir.join("stdin.log"); create_stdio_file(&p)?;
+-            guest.stdin = Some(format!("{guest_ctr}/io/stdin.log"));
++            guest.stdin = Some(format!("{guest_io_dir}/stdin.log"));
+             spawn_stdio_relay(PathBuf::from(stdin), p, format!("{id}:stdin"), false);
+         }
+         Ok((guest, io_dir))
+     }
+ 
+-    /// Wait until host virtiofs stdio logs stop growing, then give the polling
+-    /// relay a final beat so containerd sees output before Wait returns.
+-    async fn flush_stdio_after_exit(&self, id: &str) {
+-        let io_dir = self.tasks.read().await.get(id).and_then(|m| m.io_dir.clone());
+-        let Some(io_dir) = io_dir else { tokio::time::sleep(Duration::from_millis(250)).await; return; };
++    /// Wait for the selected process's virtiofs stdout/stderr files to stop
++    /// growing, then give the host relay a final beat before publishing exit.
++    async fn flush_stdio_after_exit(&self, id: &str, exec_id: Option<&str>) {
++        let io_dir = if let Some(exec_id) = exec_id {
++            self.execs
++                .read()
++                .await
++                .get(&process_key(id, Some(exec_id)))
++                .and_then(|m| m.io_dir.clone())
++        } else {
++            self.tasks.read().await.get(id).and_then(|m| m.io_dir.clone())
++        };
++        let Some(io_dir) = io_dir else {
++            tokio::time::sleep(Duration::from_millis(250)).await;
++            return;
++        };
+         for name in ["stdout.log", "stderr.log"] {
+             let path = io_dir.join(name);
+             let mut last = None;
+             let mut stable = 0u32;
+             for _ in 0..80 {
+                 let size = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+-                if Some(size) == last { stable += 1; if stable >= 4 { break; } } else { stable = 0; last = Some(size); }
++                if Some(size) == last {
++                    stable += 1;
++                    if stable >= 4 { break; }
++                } else {
++                    stable = 0;
++                    last = Some(size);
++                }
+                 tokio::time::sleep(Duration::from_millis(25)).await;
+             }
+         }
+@@ -560,6 +639,84 @@ impl Service {
+         self.call_agent_direct(vm, req).await
+     }
+ 
++    async fn send_event<E>(&self, event: E)
++    where
++        E: Event + 'static,
++    {
++        let topic = event.topic();
++        if let Err(e) = self.event_tx.send((topic.clone(), Box::new(event))).await {
++            warn!("sending {topic} event to publisher queue failed: {e}");
++        }
++    }
++
++    async fn publish_exit_once(
++        &self,
++        container_id: String,
++        exec_id: Option<String>,
++        pid: u32,
++        exit_code: i32,
++        exited_at_unix_nano: i64,
++    ) {
++        let key = process_key(&container_id, exec_id.as_deref());
++        let should_publish = {
++            let mut exits = self.exit_events.lock().await;
++            exits.insert(key)
++        };
++        if !should_publish {
++            return;
++        }
++        self.send_event(TaskExit {
++            container_id,
++            id: exec_id.unwrap_or_default(),
++            pid,
++            exit_status: exit_code as u32,
++            exited_at: Some(timestamp_from_nanos(exited_at_unix_nano)).into(),
++            ..Default::default()
++        })
++        .await;
++    }
++
++    fn spawn_exit_watch(&self, vm: VmRecord, container_id: String, exec_id: Option<String>, pid: u32) {
++        let service = self.clone();
++        tokio::spawn(async move {
++            let request = ContainerRequest::Wait {
++                id: container_id.clone(),
++                exec_id: exec_id.clone(),
++            };
++            match service.call_agent_direct(&vm, request).await {
++                Ok(ContainerResponse::Exited { exit_code, exited_at_unix_nano }) => {
++                    service.flush_stdio_after_exit(&container_id, exec_id.as_deref()).await;
++                    service
++                        .publish_exit_once(container_id, exec_id, pid, exit_code, exited_at_unix_nano)
++                        .await;
++                }
++                Ok(other) => warn!("unexpected background wait response: {other:?}"),
++                Err(e) => warn!("background FluxVM container wait failed: {e:#}"),
++            }
++        });
++    }
++
++    async fn cleanup_process_staging(&self, id: &str, exec_id: Option<&str>) {
++        let share_dir = {
++            let guard = self.sandbox.lock().await;
++            guard.as_ref().map(|s| s.share_dir.clone())
++        }
++        .unwrap_or_else(|| {
++            self.cfg
++                .state_dir
++                .join(&self.namespace)
++                .join(&self.group)
++                .join("share")
++        });
++        let host_ctr = share_dir.join("containers").join(safe_name(id));
++        if let Some(exec_id) = exec_id {
++            let key = safe_name(&format!("{id}-{exec_id}"));
++            let _ = tokio::fs::remove_dir_all(host_ctr.join("io").join(key)).await;
++        } else {
++            let _ = tokio::fs::remove_dir_all(host_ctr).await;
++        }
++    }
++
+     async fn destroy_sandbox(&self) -> AnyResult<()> {
+         let mut guard = self.sandbox.lock().await;
+         if let Some(s) = guard.take() {
+@@ -577,33 +734,103 @@ impl Service {
+ #[async_trait]
+ impl Task for Service {
+     async fn create(&self, _ctx: &TtrpcContext, req: CreateTaskRequest) -> TtrpcResult<CreateTaskResponse> {
+-        let (vm, config_json, io, io_dir) = self.stage_rootfs_and_config(&req).await.map_err(rpc_other)?;
+-        let response = self.call_agent(&vm, ContainerRequest::Create { id: req.id.clone(), config_json, io }).await.map_err(rpc_other)?;
+-        let pid = match response { ContainerResponse::Created { pid } => pid, other => return Err(rpc_other(format!("unexpected create response: {other:?}"))) };
++        let (vm, config_json, io, io_dir) = match self.stage_rootfs_and_config(&req).await {
++            Ok(staged) => staged,
++            Err(e) => {
++                self.cleanup_process_staging(&req.id, None).await;
++                return Err(rpc_other(e));
++            }
++        };
++        let response = match self
++            .call_agent(
++                &vm,
++                ContainerRequest::Create {
++                    id: req.id.clone(),
++                    config_json,
++                    io,
++                },
++            )
++            .await
++        {
++            Ok(response) => response,
++            Err(e) => {
++                self.cleanup_process_staging(&req.id, None).await;
++                return Err(rpc_other(e));
++            }
++        };
++        let pid = match response {
++            ContainerResponse::Created { pid } => pid,
++            other => {
++                self.cleanup_process_staging(&req.id, None).await;
++                return Err(rpc_other(format!("unexpected create response: {other:?}")));
++            }
++        };
++        {
++            let mut exits = self.exit_events.lock().await;
++            let prefix = format!("{}\0", req.id);
++            exits.retain(|key| key != &req.id && !key.starts_with(&prefix));
++        }
+         self.tasks.write().await.insert(req.id.clone(), TaskMeta {
+             bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
+             io_dir: Some(io_dir),
+         });
++        self.send_event(TaskCreate {
++            container_id: req.id.clone(),
++            bundle: req.bundle.clone(),
++            rootfs: req.rootfs.clone(),
++            io: Some(TaskIO {
++                stdin: req.stdin.clone(),
++                stdout: req.stdout.clone(),
++                stderr: req.stderr.clone(),
++                terminal: req.terminal,
++                ..Default::default()
++            }).into(),
++            checkpoint: req.checkpoint.clone(),
++            pid,
++            ..Default::default()
++        }).await;
+         Ok(CreateTaskResponse { pid, ..Default::default() })
+     }
+ 
+     async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> TtrpcResult<StartResponse> {
+         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
+-        let response = self.call_agent(&vm, ContainerRequest::Start { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
+-        let pid = match response { ContainerResponse::Started { pid } => pid, other => return Err(rpc_other(format!("unexpected start response: {other:?}"))) };
++        let response = self.call_agent(&vm, ContainerRequest::Start { id: req.id.clone(), exec_id: exec_id.clone() }).await.map_err(rpc_other)?;
++        let pid = match response {
++            ContainerResponse::Started { pid } => pid,
++            other => return Err(rpc_other(format!("unexpected start response: {other:?}"))),
++        };
++        if let Some(exec_id_value) = exec_id.as_ref() {
++            self.send_event(TaskExecStarted {
++                container_id: req.id.clone(),
++                exec_id: exec_id_value.clone(),
++                pid,
++                ..Default::default()
++            }).await;
++        } else {
++            self.send_event(TaskStart {
++                container_id: req.id.clone(),
++                pid,
++                ..Default::default()
++            }).await;
++        }
++        self.spawn_exit_watch(vm, req.id.clone(), exec_id, pid);
+         Ok(StartResponse { pid, ..Default::default() })
+     }
+ 
+     async fn state(&self, _ctx: &TtrpcContext, req: StateRequest) -> TtrpcResult<StateResponse> {
+         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
+-        let response = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
++        let response = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id: exec_id.clone() }).await.map_err(rpc_other)?;
+         let (status, pid, exit_code, exited_at) = match response {
+             ContainerResponse::State { status, pid, exit_code, exited_at_unix_nano, .. } => (status, pid, exit_code, exited_at_unix_nano),
+             other => return Err(rpc_other(format!("unexpected state response: {other:?}"))),
+         };
+-        let meta = self.tasks.read().await.get(&req.id).cloned();
++        let meta = if let Some(exec_id) = exec_id.as_deref() {
++            self.execs.read().await.get(&process_key(&req.id, Some(exec_id))).cloned()
++        } else {
++            self.tasks.read().await.get(&req.id).cloned()
++        };
+         let mut out = StateResponse {
+             id: req.id,
+             bundle: meta.as_ref().map(|m| m.bundle.clone()).unwrap_or_default(),
+@@ -623,10 +850,16 @@ impl Task for Service {
+     async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> TtrpcResult<WaitResponse> {
+         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
+-        let response = self.call_agent(&vm, ContainerRequest::Wait { id: req.id.clone(), exec_id }).await.map_err(rpc_other)?;
++        let response = self.call_agent(&vm, ContainerRequest::Wait { id: req.id.clone(), exec_id: exec_id.clone() }).await.map_err(rpc_other)?;
+         match response {
+             ContainerResponse::Exited { exit_code, exited_at_unix_nano } => {
+-                self.flush_stdio_after_exit(&req.id).await;
++                self.flush_stdio_after_exit(&req.id, exec_id.as_deref()).await;
++                let pid = if let Some(exec) = exec_id.as_deref() {
++                    self.execs.read().await.get(&process_key(&req.id, Some(exec))).map(|m| m.pid).unwrap_or(0)
++                } else {
++                    self.tasks.read().await.get(&req.id).map(|m| m.pid).unwrap_or(0)
++                };
++                self.publish_exit_once(req.id.clone(), exec_id, pid, exit_code, exited_at_unix_nano).await;
+                 let mut out = WaitResponse::new();
+                 out.exit_status = exit_code as u32;
+                 out.exited_at = Some(timestamp_from_nanos(exited_at_unix_nano)).into();
+@@ -645,30 +878,65 @@ impl Task for Service {
+ 
+     async fn pause(&self, _ctx: &TtrpcContext, req: PauseRequest) -> TtrpcResult<Empty> {
+         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+-        self.call_agent(&vm, ContainerRequest::Pause { id: req.id }).await.map_err(rpc_other)?;
++        self.call_agent(&vm, ContainerRequest::Pause { id: req.id.clone() }).await.map_err(rpc_other)?;
++        self.send_event(TaskPaused { container_id: req.id, ..Default::default() }).await;
+         Ok(Empty::new())
+     }
+ 
+     async fn resume(&self, _ctx: &TtrpcContext, req: ResumeRequest) -> TtrpcResult<Empty> {
+         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+-        self.call_agent(&vm, ContainerRequest::Resume { id: req.id }).await.map_err(rpc_other)?;
++        self.call_agent(&vm, ContainerRequest::Resume { id: req.id.clone() }).await.map_err(rpc_other)?;
++        self.send_event(TaskResumed { container_id: req.id, ..Default::default() }).await;
+         Ok(Empty::new())
+     }
+ 
+     async fn delete(&self, _ctx: &TtrpcContext, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
+         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
+-        let state = self.call_agent(&vm, ContainerRequest::State { id: req.id.clone(), exec_id: exec_id.clone() }).await.ok();
+-        let _ = self.call_agent(&vm, ContainerRequest::Delete { id: req.id.clone(), exec_id: exec_id.clone(), force: true }).await;
+-        if exec_id.is_none() { self.tasks.write().await.remove(&req.id); }
+-        let (pid, code, ns) = match state {
+-            Some(ContainerResponse::State { pid, exit_code, exited_at_unix_nano, .. }) => (pid, exit_code.unwrap_or(0), exited_at_unix_nano.unwrap_or(0)),
+-            _ => (0, 0, 0),
++        let response = self
++            .call_agent(
++                &vm,
++                ContainerRequest::Delete {
++                    id: req.id.clone(),
++                    exec_id: exec_id.clone(),
++                    force: true,
++                },
++            )
++            .await
++            .map_err(rpc_other)?;
++        let (pid, code, ns) = match response {
++            ContainerResponse::Deleted { pid, exit_code, exited_at_unix_nano } => {
++                (pid, exit_code, exited_at_unix_nano)
++            }
++            other => return Err(rpc_other(format!("unexpected delete response: {other:?}"))),
+         };
++
++        // containerd expects stdio to be drained and exit to precede delete.
++        // The background WaitTask watcher races with force-delete, so this
++        // path uses a de-duplicated publisher to avoid duplicate exit events.
++        self.flush_stdio_after_exit(&req.id, exec_id.as_deref()).await;
++        self.publish_exit_once(req.id.clone(), exec_id.clone(), pid, code, ns).await;
++        self.cleanup_process_staging(&req.id, exec_id.as_deref()).await;
++
++        if let Some(exec_id_value) = exec_id.as_deref() {
++            self.execs.write().await.remove(&process_key(&req.id, Some(exec_id_value)));
++        } else {
++            self.tasks.write().await.remove(&req.id);
++            self.execs.write().await.retain(|key, _| !key.starts_with(&format!("{}\0", req.id)));
++        }
++
++        self.send_event(TaskDelete {
++            container_id: req.id.clone(),
++            pid,
++            exit_status: code as u32,
++            exited_at: Some(timestamp_from_nanos(ns)).into(),
++            ..Default::default()
++        }).await;
++
+         let mut out = DeleteResponse::new();
+         out.pid = pid;
+         out.exit_status = code as u32;
+-        if ns > 0 { out.exited_at = Some(timestamp_from_nanos(ns)).into(); }
++        out.exited_at = Some(timestamp_from_nanos(ns)).into();
+         Ok(out)
+     }
+ 
+@@ -679,8 +947,34 @@ impl Task for Service {
+         if bytes.is_empty() { return Err(rpc_invalid("ExecProcessRequest.spec is empty")); }
+         let process_json = String::from_utf8(bytes).map_err(|e| rpc_invalid(e.to_string()))?;
+         let (_, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, None).await.map_err(rpc_other)?;
+-        let (io, _) = self.prepare_io(&format!("{}-{}", req.id, req.exec_id), &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
+-        self.call_agent(&vm, ContainerRequest::Exec { id: req.id, exec_id: req.exec_id, process_json, io }).await.map_err(rpc_other)?;
++        let io_id = format!("{}-{}", req.id, req.exec_id);
++        let (io, io_dir) = self.prepare_io(&io_id, &req.stdin, &req.stdout, &req.stderr, false, &host_ctr, &guest_ctr).await.map_err(rpc_other)?;
++        let response = self.call_agent(&vm, ContainerRequest::Exec {
++            id: req.id.clone(),
++            exec_id: req.exec_id.clone(),
++            process_json,
++            io,
++        }).await.map_err(rpc_other)?;
++        let pid = match response {
++            ContainerResponse::ExecStarted { pid } => pid,
++            other => return Err(rpc_other(format!("unexpected exec response: {other:?}"))),
++        };
++        let bundle = self.tasks.read().await.get(&req.id).map(|m| m.bundle.clone()).unwrap_or_default();
++        self.exit_events.lock().await.remove(&process_key(&req.id, Some(&req.exec_id)));
++        self.execs.write().await.insert(process_key(&req.id, Some(&req.exec_id)), TaskMeta {
++            bundle,
++            stdin: req.stdin.clone(),
++            stdout: req.stdout.clone(),
++            stderr: req.stderr.clone(),
++            terminal: req.terminal,
++            pid,
++            io_dir: Some(io_dir),
++        });
++        self.send_event(TaskExecAdded {
++            container_id: req.id,
++            exec_id: req.exec_id,
++            ..Default::default()
++        }).await;
+         Ok(Empty::new())
+     }
+ 
+@@ -690,7 +984,7 @@ impl Task for Service {
+     }
+ 
+     async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> TtrpcResult<Empty> {
+-        if self.tasks.read().await.is_empty() {
++        if self.tasks.read().await.is_empty() && self.execs.read().await.is_empty() {
+             let _ = self.destroy_sandbox().await;
+             self.exit.signal();
+         }
+@@ -742,6 +1036,26 @@ impl Task for Service {
+     }
+ }
+ 
++fn forward_events(publisher: RemotePublisher, namespace: String, mut rx: EventReceiver) {
++    tokio::spawn(async move {
++        while let Some((topic, event)) = rx.recv().await {
++            if let Err(e) = publisher
++                .publish(ttrpc::context::Context::default(), &topic, &namespace, event)
++                .await
++            {
++                warn!("publishing {topic} to containerd failed: {e}");
++            }
++        }
++    });
++}
++
++fn process_key(id: &str, exec_id: Option<&str>) -> String {
++    match exec_id {
++        Some(exec_id) => format!("{id}\0{exec_id}"),
++        None => id.to_string(),
++    }
++}
++
+ fn map_status(status: ContainerStatus) -> Status {
+     match status {
+         ContainerStatus::Created => Status::CREATED,
+@@ -1328,31 +1642,49 @@ async fn stage_bind_mounts(spec: &mut Value, host_ctr: &Path, guest_ctr: &str) -
+ }
+ 
+ fn create_stdio_file(path: &Path) -> AnyResult<()> {
+-    if path.exists() { let _ = std::fs::remove_file(path); }
+-    std::fs::File::create(path).with_context(|| format!("creating stdio file {}", path.display()))?;
++    if path.exists() {
++        let _ = std::fs::remove_file(path);
++    }
++    std::fs::File::create(path)
++        .with_context(|| format!("creating stdio file {}", path.display()))?;
+     Ok(())
+ }
+ 
++/// Copy bytes from `source` to `destination`.
++/// When `poll_eof` is true (guest log -> containerd), EOF is transient because
++/// a virtiofs regular file can grow after a short read.
+ fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_eof: bool) {
+     tokio::spawn(async move {
+         let result: AnyResult<()> = async {
+             let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+             while tokio::time::Instant::now() < deadline {
+-                if source.exists() && destination.exists() { break; }
++                if source.exists() && destination.exists() {
++                    break;
++                }
+                 tokio::time::sleep(Duration::from_millis(20)).await;
+             }
+-            let mut src = tokio::fs::OpenOptions::new().read(true).open(&source).await
++            let mut src = tokio::fs::OpenOptions::new()
++                .read(true)
++                .open(&source)
++                .await
+                 .with_context(|| format!("opening relay source {}", source.display()))?;
+-            let mut dst = tokio::fs::OpenOptions::new().write(true).open(&destination).await
++            let mut dst = tokio::fs::OpenOptions::new()
++                .write(true)
++                .open(&destination)
++                .await
+                 .with_context(|| format!("opening relay destination {}", destination.display()))?;
+             let mut buf = [0u8; 32 * 1024];
+             let mut idle_rounds = 0u32;
+             loop {
+                 let n = src.read(&mut buf).await?;
+                 if n == 0 {
+-                    if !poll_eof { break; }
++                    if !poll_eof {
++                        break;
++                    }
+                     idle_rounds += 1;
+-                    if idle_rounds > 12_000 { break; }
++                    if idle_rounds > 12_000 {
++                        break;
++                    }
+                     tokio::time::sleep(Duration::from_millis(10)).await;
+                     continue;
+                 }
+@@ -1361,8 +1693,11 @@ fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_
+                 dst.flush().await?;
+             }
+             Ok(())
+-        }.await;
+-        if let Err(e) = result { warn!("stdio relay {label} stopped: {e:#}"); }
++        }
++        .await;
++        if let Err(e) = result {
++            warn!("stdio relay {label} stopped: {e:#}");
++        }
+     });
+ }
+ 
+@@ -1370,6 +1705,13 @@ fn spawn_stdio_relay(source: PathBuf, destination: PathBuf, label: String, poll_
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn process_keys_separate_init_and_exec() {
++        assert_eq!(process_key("c1", None), "c1");
++        assert_eq!(process_key("c1", Some("e1")), "c1\0e1");
++        assert_ne!(process_key("c1", None), process_key("c1", Some("e1")));
++    }
++
+     #[test]
+     fn safe_names_are_filesystem_safe() {
+         assert_eq!(safe_name("pod/one:abc"), "pod-one-abc");
+diff --git a/docs/secure-containers-set3.md b/docs/secure-containers-set3.md
+new file mode 100644
+index 0000000..9cfe849
+--- /dev/null
++++ b/docs/secure-containers-set3.md
+@@ -0,0 +1,54 @@
++# FluxVM Secure Containers — Set 3
++
++Base reviewed: `zyvorai/fluxvm` main at `d77c1afb9364b02e897079b7325470e9a2bf361e`.
++
++Set 3 builds on the merged Set 2 runtime and the follow-up fixes already on main
++(virtiofs-safe regular-file stdio, explicit fs0 Pod-share mount, and i64 exit
++timestamps).
++
++## Set 3 additions
++
++- containerd runtime-v2 task events: create, start, exec-added, exec-started,
++  paused, resumed, exit, and delete
++- asynchronous exit watchers backed by the guest `Wait` operation
++- de-duplicated exit publication so Wait and force-delete do not emit duplicate
++  `/tasks/exit` events
++- definitive delete response from the guest: pid, exit status, exit timestamp
++- separate init/exec metadata so `State` reports the correct process stdio/pid
++- per-process regular-file stdio staging, retaining the current virtiofs-safe
++  relay while preventing concurrent exec sessions from colliding
++- retry-safe rootfs/mount staging cleanup
++- OCI process hardening inside the guest:
++  - supplementary GIDs
++  - umask
++  - rlimits
++  - `noNewPrivileges`
++  - bounding/effective/inheritable/permitted/ambient Linux capabilities
++- capability validation and explicit rejection of unsupported capability/rlimit
++  names
++
++## Still explicit follow-ups
++
++This remains a developer-preview runtime until the real-node conformance gate
++is complete. The following are not claimed as finished:
++
++1. TTY/PTY and resize semantics.
++2. CSI/PVC write-through and dynamic volume hotplug.
++3. Full OCI namespace, seccomp, masked/readonly-path and device parity.
++4. IPv6/multi-interface CNI conformance and high-churn teardown validation.
++5. Cloud Hypervisor/Firecracker secure-container backends.
++6. KVM/containerd/Kubernetes end-to-end validation on a real node.
++
++## Required node test
++
++Run on a Linux host with `/dev/kvm`, QEMU, containerd and a bootable secure
++container guest image:
++
++```bash
++./scripts/test-secure-containers.sh
++FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/test-secure-containers.sh
++```
++
++Then validate a Kubernetes Pod using `runtimeClassName: fluxvm`, including Pod
++IP/Service connectivity, exec, kill, resource update, stats, delete and VM/CNI
++teardown.

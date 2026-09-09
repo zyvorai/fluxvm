@@ -8,9 +8,9 @@
 //! runc replacement yet; it implements process lifecycle, chroot, uid/gid,
 //! environment, cwd, signals and stdio inside the guest. Set 3 additionally
 //! enforces supplementary groups, umask, rlimits and noNewPrivileges. OCI
-//! namespace, seccomp and device parity remain explicit follow-up hardening
-//! items in docs/secure-containers.md. Linux capability sets are applied
-//! directly from OCI process.capabilities when present.
+//! Set 4 adds read-only/masked paths, read-only rootfs, OCI devices, Pod-scoped
+//! sysctls and seccomp filters. Namespace creation and full device-cgroup parity
+//! remain explicit follow-up hardening items in docs/secure-containers.md.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -59,6 +59,18 @@ struct CapabilitySets {
 }
 
 #[derive(Clone, Debug)]
+struct SeccompRule {
+    action: u32,
+    names: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SeccompProfile {
+    default_action: u32,
+    rules: Vec<SeccompRule>,
+}
+
+#[derive(Clone, Debug)]
 struct ProcessSpec {
     rootfs: PathBuf,
     args: Vec<String>,
@@ -71,6 +83,7 @@ struct ProcessSpec {
     umask: Option<u32>,
     rlimits: Vec<ProcessRlimit>,
     capabilities: Option<CapabilitySets>,
+    seccomp: Option<SeccompProfile>,
 }
 
 #[derive(Clone, Debug)]
@@ -175,6 +188,7 @@ struct ContainerEntry {
     rootfs: PathBuf,
     mounts: Vec<PathBuf>,
     cgroup_path: PathBuf,
+    seccomp: Option<SeccompProfile>,
     init: Arc<ProcHandle>,
     execs: HashMap<String, Arc<ProcHandle>>,
 }
@@ -341,7 +355,10 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
             bail!("container {id:?} already exists");
         }
     }
-    let cgroup_path = create_container_cgroup(&id, &resources)?;
+    let cgroup_path = match create_container_cgroup(&id, &resources) {
+        Ok(path) => path,
+        Err(e) => { cleanup_mounts(&mounts); return Err(e); }
+    };
     let mut reg = registry().lock().expect("registry poisoned");
     if reg.contains_key(&id) {
         cleanup_container_cgroup(&cgroup_path);
@@ -350,6 +367,7 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
     let init = match spawn_gated(&id, None, &spec, &io) {
         Ok(handle) => handle,
         Err(e) => {
+            cleanup_mounts(&mounts);
             let _ = std::fs::remove_dir(&cgroup_path);
             return Err(e);
         }
@@ -357,6 +375,7 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
     let pid = init.snapshot().pid;
     if let Err(e) = add_pid_to_cgroup(&cgroup_path, pid) {
         let _ = init.signal(libc::SIGKILL, true);
+        cleanup_mounts(&mounts);
         let _ = std::fs::remove_dir(&cgroup_path);
         return Err(e);
     }
@@ -366,6 +385,7 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
             rootfs: spec.rootfs.clone(),
             mounts,
             cgroup_path,
+            seccomp: spec.seccomp.clone(),
             init,
             execs: HashMap::new(),
         },
@@ -384,6 +404,7 @@ fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -
     }
     let mut spec = parse_oci_process(process_json, container.rootfs.clone())?;
     spec.rootfs = container.rootfs.clone();
+    spec.seccomp = container.seccomp.clone();
     let handle = spawn_gated(id, Some(&exec_id), &spec, &io)?;
     let pid = handle.snapshot().pid;
     if let Err(e) = add_pid_to_cgroup(&container.cgroup_path, pid) {
@@ -480,10 +501,24 @@ fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>, ResourceLi
         .and_then(Value::as_str)
         .context("OCI root.path is required")?;
     let rootfs = PathBuf::from(root);
-    let mounts = apply_oci_mounts(&v, &rootfs)?;
-    let process = v.get("process").context("OCI process is required")?;
-    let resources = resource_limits_from_oci(&v);
-    Ok((parse_process_value(process, rootfs)?, mounts, resources))
+    let mut mounts = apply_oci_mounts(&v, &rootfs)?;
+    let parsed = (|| -> Result<(ProcessSpec, ResourceLimits)> {
+        create_oci_devices(&v, &rootfs)?;
+        apply_oci_sysctls(&v)?;
+        apply_oci_path_security(&v, &rootfs, &mut mounts)?;
+        let process = v.get("process").context("OCI process is required")?;
+        let resources = resource_limits_from_oci(&v);
+        let mut spec = parse_process_value(process, rootfs.clone())?;
+        spec.seccomp = parse_seccomp_profile(&v)?;
+        Ok((spec, resources))
+    })();
+    match parsed {
+        Ok((spec, resources)) => Ok((spec, mounts, resources)),
+        Err(e) => {
+            cleanup_mounts(&mounts);
+            Err(e)
+        }
+    }
 }
 
 
@@ -554,6 +589,183 @@ fn apply_oci_mounts(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
         mounted.push(target);
     }
     Ok(mounted)
+}
+
+fn apply_oci_path_security(config: &Value, rootfs: &PathBuf, mounted: &mut Vec<PathBuf>) -> Result<()> {
+    let masked = config
+        .pointer("/linux/maskedPaths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    for path in masked {
+        let target = rootfs.join(safe_guest_destination(path)?);
+        if !target.exists() { continue; }
+        if target.is_dir() {
+            mount_one("tmpfs", &target, Some("tmpfs"), libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, Some("size=0"))?;
+        } else {
+            mount_one("/dev/null", &target, None, libc::MS_BIND, None)?;
+            mount_one("/dev/null", &target, None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY, None)?;
+        }
+        mounted.push(target);
+    }
+
+    let readonly = config
+        .pointer("/linux/readonlyPaths")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    for path in readonly {
+        let target = rootfs.join(safe_guest_destination(path)?);
+        if !target.exists() { continue; }
+        let source = target.to_string_lossy().into_owned();
+        mount_one(&source, &target, None, libc::MS_BIND | libc::MS_REC, None)?;
+        mount_one(&source, &target, None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_REC, None)?;
+        mounted.push(target);
+    }
+
+    if config.pointer("/root/readonly").and_then(Value::as_bool).unwrap_or(false) {
+        let source = rootfs.to_string_lossy().into_owned();
+        mount_one(&source, rootfs, None, libc::MS_BIND | libc::MS_REC, None)?;
+        mount_one(&source, rootfs, None, libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY | libc::MS_REC, None)?;
+        mounted.push(rootfs.clone());
+    }
+    Ok(())
+}
+
+fn create_oci_devices(config: &Value, rootfs: &PathBuf) -> Result<()> {
+    let Some(devices) = config.pointer("/linux/devices").and_then(Value::as_array) else { return Ok(()); };
+    for dev in devices {
+        let path = dev.get("path").and_then(Value::as_str).context("OCI device.path is required")?;
+        let relative = safe_guest_destination(path)?;
+        let target = rootfs.join(relative);
+        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+        let kind = dev.get("type").and_then(Value::as_str).context("OCI device.type is required")?;
+        let file_mode = dev.get("fileMode").and_then(Value::as_u64).unwrap_or(0o666) as libc::mode_t;
+        let mode = match kind {
+            "c" | "u" => libc::S_IFCHR | file_mode,
+            "b" => libc::S_IFBLK | file_mode,
+            "p" => libc::S_IFIFO | file_mode,
+            other => bail!("unsupported OCI device type {other:?}"),
+        };
+        let major = dev.get("major").and_then(Value::as_i64).unwrap_or(0) as u64;
+        let minor = dev.get("minor").and_then(Value::as_i64).unwrap_or(0) as u64;
+        let c = CString::new(target.as_os_str().as_bytes())?;
+        let _ = std::fs::remove_file(&target);
+        let rc = unsafe { libc::mknod(c.as_ptr(), mode, libc::makedev(major as _, minor as _)) };
+        if rc != 0 { return Err(std::io::Error::last_os_error()).with_context(|| format!("creating OCI device {}", target.display())); }
+        let uid = dev.get("uid").and_then(Value::as_u64).unwrap_or(0) as libc::uid_t;
+        let gid = dev.get("gid").and_then(Value::as_u64).unwrap_or(0) as libc::gid_t;
+        unsafe { libc::chown(c.as_ptr(), uid, gid); }
+    }
+    Ok(())
+}
+
+fn apply_oci_sysctls(config: &Value) -> Result<()> {
+    let Some(sysctls) = config.pointer("/linux/sysctl").and_then(Value::as_object) else { return Ok(()); };
+    for (key, value) in sysctls {
+        let value = value.as_str().context("OCI sysctl value must be a string")?;
+        if key.contains('/') || key.contains("..") { bail!("unsafe OCI sysctl key {key:?}"); }
+        let path = PathBuf::from("/proc/sys").join(key.replace('.', "/"));
+        std::fs::write(&path, value).with_context(|| format!("applying OCI sysctl {key}={value}"))?;
+    }
+    Ok(())
+}
+
+const SCMP_ACT_KILL_PROCESS: u32 = 0x8000_0000;
+const SCMP_ACT_KILL_THREAD: u32 = 0x0000_0000;
+const SCMP_ACT_TRAP: u32 = 0x0003_0000;
+const SCMP_ACT_ERRNO: u32 = 0x0005_0000;
+const SCMP_ACT_LOG: u32 = 0x7ffc_0000;
+const SCMP_ACT_ALLOW: u32 = 0x7fff_0000;
+
+fn seccomp_action(raw: &str, errno_ret: Option<u32>) -> Result<u32> {
+    Ok(match raw {
+        "SCMP_ACT_KILL" | "SCMP_ACT_KILL_THREAD" => SCMP_ACT_KILL_THREAD,
+        "SCMP_ACT_KILL_PROCESS" => SCMP_ACT_KILL_PROCESS,
+        "SCMP_ACT_TRAP" => SCMP_ACT_TRAP,
+        "SCMP_ACT_ERRNO" => SCMP_ACT_ERRNO | (errno_ret.unwrap_or(libc::EPERM as u32) & 0xffff),
+        "SCMP_ACT_LOG" => SCMP_ACT_LOG,
+        "SCMP_ACT_ALLOW" => SCMP_ACT_ALLOW,
+        other => bail!("unsupported OCI seccomp action {other:?}"),
+    })
+}
+
+fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
+    let Some(seccomp) = config.pointer("/linux/seccomp") else { return Ok(None); };
+    if let Some(arches) = seccomp.get("architectures").and_then(Value::as_array) {
+        for arch in arches.iter().filter_map(Value::as_str) {
+            if arch != "SCMP_ARCH_X86_64" {
+                bail!("unsupported OCI seccomp architecture {arch:?}; Set 4 enforces native x86_64 only");
+            }
+        }
+    }
+    let default_action = seccomp_action(
+        seccomp.get("defaultAction").and_then(Value::as_str).context("OCI seccomp.defaultAction is required")?,
+        seccomp.get("defaultErrnoRet").and_then(Value::as_u64).map(|v| v as u32),
+    )?;
+    let mut rules = Vec::new();
+    if let Some(items) = seccomp.get("syscalls").and_then(Value::as_array) {
+        for item in items {
+            if item.get("args").and_then(Value::as_array).is_some_and(|v| !v.is_empty()) {
+                bail!("OCI seccomp argument filters are not yet supported by FluxVM Set 4");
+            }
+            let action = seccomp_action(
+                item.get("action").and_then(Value::as_str).context("OCI seccomp syscall action is required")?,
+                item.get("errnoRet").and_then(Value::as_u64).map(|v| v as u32),
+            )?;
+            let names = item.get("names").and_then(Value::as_array).context("OCI seccomp syscall names are required")?
+                .iter().map(|v| v.as_str().map(str::to_string).context("seccomp syscall name must be a string"))
+                .collect::<Result<Vec<_>>>()?;
+            rules.push(SeccompRule { action, names });
+        }
+    }
+    Ok(Some(SeccompProfile { default_action, rules }))
+}
+
+unsafe fn dlsym_required<T: Copy>(handle: *mut libc::c_void, name: &[u8]) -> Result<T> {
+    let ptr = unsafe { libc::dlsym(handle, name.as_ptr().cast()) };
+    if ptr.is_null() { bail!("libseccomp symbol {} is missing", String::from_utf8_lossy(&name[..name.len()-1])); }
+    Ok(unsafe { std::mem::transmute_copy(&ptr) })
+}
+
+fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
+    type Init = unsafe extern "C" fn(u32) -> *mut libc::c_void;
+    type Release = unsafe extern "C" fn(*mut libc::c_void);
+    type Resolve = unsafe extern "C" fn(*const libc::c_char) -> libc::c_int;
+    type RuleAdd = unsafe extern "C" fn(*mut libc::c_void, u32, libc::c_int, u32, ...) -> libc::c_int;
+    type Load = unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int;
+    let name = CString::new("libseccomp.so.2")?;
+    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if handle.is_null() { bail!("OCI seccomp requested but libseccomp.so.2 is not installed in the guest"); }
+    let result = (|| -> Result<()> {
+        let init: Init = unsafe { dlsym_required(handle, b"seccomp_init\0")? };
+        let release: Release = unsafe { dlsym_required(handle, b"seccomp_release\0")? };
+        let resolve: Resolve = unsafe { dlsym_required(handle, b"seccomp_syscall_resolve_name\0")? };
+        let rule_add: RuleAdd = unsafe { dlsym_required(handle, b"seccomp_rule_add\0")? };
+        let load: Load = unsafe { dlsym_required(handle, b"seccomp_load\0")? };
+        let ctx = unsafe { init(profile.default_action) };
+        if ctx.is_null() { bail!("seccomp_init failed"); }
+        let apply = (|| -> Result<()> {
+            for rule in &profile.rules {
+                for name in &rule.names {
+                    let c = CString::new(name.as_bytes())?;
+                    let nr = unsafe { resolve(c.as_ptr()) };
+                    if nr < 0 { bail!("unknown seccomp syscall {name:?}"); }
+                    let rc = unsafe { rule_add(ctx, rule.action, nr, 0) };
+                    if rc != 0 { bail!("seccomp_rule_add({name}) failed: {rc}"); }
+                }
+            }
+            let rc = unsafe { load(ctx) };
+            if rc != 0 { bail!("seccomp_load failed: {rc}"); }
+            Ok(())
+        })();
+        unsafe { release(ctx); }
+        apply
+    })();
+    unsafe { libc::dlclose(handle); }
+    result
 }
 
 fn safe_guest_destination(destination: &str) -> Result<PathBuf> {
@@ -893,6 +1105,7 @@ fn parse_process_value(process: &Value, rootfs: PathBuf) -> Result<ProcessSpec> 
         umask,
         rlimits,
         capabilities,
+        seccomp: None,
     })
 }
 
@@ -1225,6 +1438,15 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
             {
                 libc::_exit(126);
             }
+            if let Some(profile) = spec.seccomp.as_ref() {
+                // A seccomp filter must never be silently skipped. Force
+                // no-new-privileges before loading the guest-local filter.
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+                    || apply_seccomp(profile).is_err()
+                {
+                    libc::_exit(126);
+                }
+            }
 
             let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|v| v.as_ptr()).collect();
             argv_ptrs.push(std::ptr::null());
@@ -1385,6 +1607,27 @@ mod tests {
     #[test]
     fn rejects_empty_args() {
         assert!(parse_oci_config(r#"{"root":{"path":"/r"},"process":{"args":[]}}"#).is_err());
+    }
+
+    #[test]
+    fn parses_seccomp_without_argument_filters() {
+        let (spec, _, _) = parse_oci_config(r#"{
+          "root":{"path":"/run/rootfs"},
+          "process":{"args":["/bin/true"]},
+          "linux":{"seccomp":{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["ptrace"],"action":"SCMP_ACT_ERRNO","errnoRet":1}]}}
+        }"#).unwrap();
+        let seccomp = spec.seccomp.unwrap();
+        assert_eq!(seccomp.rules.len(), 1);
+        assert_eq!(seccomp.rules[0].names, vec!["ptrace"]);
+    }
+
+    #[test]
+    fn rejects_seccomp_argument_filters_instead_of_ignoring_them() {
+        assert!(parse_oci_config(r#"{
+          "root":{"path":"/run/rootfs"},
+          "process":{"args":["/bin/true"]},
+          "linux":{"seccomp":{"defaultAction":"SCMP_ACT_ALLOW","syscalls":[{"names":["clone"],"action":"SCMP_ACT_ERRNO","args":[{"index":0,"value":1,"op":"SCMP_CMP_EQ"}]}]}}
+        }"#).is_err());
     }
 
     #[test]

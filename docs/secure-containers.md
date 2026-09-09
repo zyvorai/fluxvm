@@ -102,14 +102,16 @@ Containers compatibility.
    setups, dual-stack-only paths, or plugins that do not leave a usable
    interface/MAC/routes in the Pod netns may still fall back or fail closed.
    Validate against your CNI (Cilium/Calico/etc.) before production.
-3. **PVC writes are not write-through.** Bind mounts are snapshotted into the
-   Pod share. This is correct for read-mostly ConfigMaps/Secrets but is not a
-   persistent-volume implementation.
+3. **Non-Pod-UID host binds stay snapshot-based.** Set 4 exports Pod-UID-scoped
+   kubelet `volumes/` and `volume-subpaths/` write-through; arbitrary hostPath
+   and other binds remain copied unless a later allowlisted broker/hotplug
+   lands.
 4. **TTY/resize is rejected**, not silently emulated.
 5. **OCI namespace/seccomp/device parity inside the guest is incomplete.** Set 3
    covers common process hardening (caps/rlimits/umask/noNewPrivileges/gids);
-   guest cgroup v2 covers a portable resource subset. The VM remains the
-   primary isolation boundary.
+   Set 4 adds RO rootfs, masked/RO paths, device nodes, sysctls, and
+   libseccomp syscall-name rules (fail closed). Guest cgroup v2 covers a
+   portable resource subset. The VM remains the primary isolation boundary.
 6. **Stdio over virtiofs uses regular log files** (not FIFOs), with a polling
    host relay (Wait drains before returning). Interactive/blocking stdin
    semantics are weaker than true pipes; vsock stdio remains a follow-up.
@@ -120,16 +122,17 @@ correctness.
 
 ## Next gates
 
-### P0 — volume model
+### P0 — volume model (partially Set 4)
 
-Add virtiofs hotplug or a stable shared-fs broker so CSI/PVC mounts can be
-passed through without copying. Enforce read-only/read-write semantics and
-propagation explicitly.
+Pod-UID write-through for kubelet volumes/subpaths is in Set 4. Remaining:
+hostPath allowlist/broker, hotplug for late-attached CSI, and fuller
+propagation semantics.
 
-### P0 — remaining OCI / namespace parity
+### P0 — remaining OCI / namespace parity (partially Set 4)
 
-Namespaces, seccomp, masked/readonly paths and devices beyond Set 3 process
-hardening. Add conformance fixtures from the OCI runtime spec.
+Set 4 covers masked/RO paths, devices, sysctls, and name-based seccomp.
+Remaining: namespace parity, seccomp arg comparators/notify, device cgroup,
+and broader OCI conformance fixtures.
 
 ### P0 — production stdio
 
@@ -190,3 +193,15 @@ no Pod netns, so CNI L2 stays inactive for that smoke.
 The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
 because ordinary hosted runners do not provide the nested virtualization and
 node configuration needed for an honest containerd+FluxVM test.
+
+## Set 4 addendum — write-through Pod volumes + OCI security
+
+Set 4 adds Pod-UID-scoped virtiofs exports for kubelet `volumes/` and
+`volume-subpaths/`, so matching Kubernetes volume bind mounts are write-through
+instead of copied. Arbitrary host binds remain snapshot-based by default.
+
+The guest agent also enforces read-only rootfs, masked/read-only paths, OCI
+device nodes, Pod-VM sysctls and libseccomp syscall-name rules. Seccomp profiles
+using unsupported argument comparators fail closed. See
+[secure-containers-set4.md](secure-containers-set4.md) for the exact support
+boundary and test gates.

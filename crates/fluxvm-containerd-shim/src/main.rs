@@ -6,14 +6,15 @@
 //! v0.1 contract:
 //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
 //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
-//! * bind mounts (ConfigMap/Secret/etc.) are snapshotted into that share;
+//! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
+//! * other bind mounts (ConfigMap/Secret/host inputs) remain snapshotted by default;
 //! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK;
 //! * no host kernel is shared with the workload.
 //!
 //! The copy/snapshot approach is intentionally conservative. It gives a
 //! deterministic first implementation without requiring dynamic virtiofs
-//! hotplug. PVC write-through, CNI plumbing, TTY and full OCI security parity
-//! are documented follow-ups rather than silently pretending to work.
+//! hotplug for ordinary bind inputs. TTY and broader hostPath passthrough remain
+//! explicit follow-ups rather than silently pretending to work.
 
 use anyhow::{Context, Result as AnyResult, bail};
 use async_trait::async_trait;
@@ -164,6 +165,9 @@ struct CniBridge {
 struct SandboxHints {
     resources: ResourceLimits,
     netns_path: Option<PathBuf>,
+    /// Kubernetes Pod UID from CRI annotations. Used to scope write-through
+    /// virtiofs exports to this Pod only.
+    pod_uid: Option<String>,
 }
 
 #[derive(Clone)]
@@ -308,6 +312,37 @@ impl Service {
             json!({"mode": "user", "forwards": []})
         };
 
+        // fs0 is always the Pod staging share. For Kubernetes Pods, add only
+        // the current Pod's kubelet volume roots as extra virtiofs exports.
+        // This preserves PVC/emptyDir writes without exposing other Pods.
+        let mut shared_folders = vec![json!({
+            "host_path": share_dir,
+            "guest_path": GUEST_SHARE,
+            "read_only": false
+        })];
+        let mut kubelet_mounts: Vec<(String, String)> = Vec::new();
+        if let Some(uid) = hints.pod_uid.as_deref() {
+            let pod_root = PathBuf::from("/var/lib/kubelet/pods").join(uid);
+            if pod_root.exists() {
+                // SubPath bind targets can be materialized later during the
+                // same SyncPod. Create only the two bounded Pod directories
+                // up front so the virtiofs tags remain stable (fs1/fs2).
+                for (host, guest) in [
+                    (pod_root.join("volumes"), "/run/fluxvm/kubelet/volumes"),
+                    (pod_root.join("volume-subpaths"), "/run/fluxvm/kubelet/volume-subpaths"),
+                ] {
+                    tokio::fs::create_dir_all(&host).await
+                        .with_context(|| format!("preparing Pod volume export {}", host.display()))?;
+                    shared_folders.push(json!({
+                        "host_path": host,
+                        "guest_path": guest,
+                        "read_only": false
+                    }));
+                    kubelet_mounts.push((format!("fs{}", shared_folders.len() - 1), guest.to_string()));
+                }
+            }
+        }
+
         let create = json!({
             "name": format!("ctr-{}", safe_name(&self.group)),
             "backend": "qemu",
@@ -316,11 +351,7 @@ impl Service {
             "memory_mib": memory_mib,
             "network": network,
             "agent": {"enabled": true},
-            "shared_folders": [{
-                "host_path": share_dir,
-                "guest_path": GUEST_SHARE,
-                "read_only": false
-            }]
+            "shared_folders": shared_folders
         });
 
         let mut vm: VmRecord = match self
@@ -378,7 +409,7 @@ impl Service {
 
             // Cloud-init mounts virtiofs asynchronously; explicitly ensure
             // the Pod share is available before rootfs/stdio staging.
-            self.ensure_guest_share_mounted(&vm).await?;
+            self.ensure_guest_shares_mounted(&vm, &kubelet_mounts).await?;
 
             self.bootstrap_container_agent(&vm).await?;
             match self
@@ -444,15 +475,19 @@ impl Service {
         }
     }
 
-    /// Ensure virtiofs tag fs0 is mounted at the Pod share before container create.
-    async fn ensure_guest_share_mounted(&self, vm: &VmRecord) -> AnyResult<()> {
-        let probe = format!(
-            "bash -lc 'mkdir -p {GUEST_SHARE}; \
-             if ! mountpoint -q {GUEST_SHARE}; then \
-               mount -t virtiofs fs0 {GUEST_SHARE} || mount {GUEST_SHARE}; \
-             fi; \
-             mountpoint -q {GUEST_SHARE} && touch {GUEST_SHARE}/.fluxvm-share-ok'"
-        );
+    /// Ensure fs0 and the optional Pod-scoped kubelet volume exports are
+    /// mounted before container create. Cloud-init is intentionally not a
+    /// correctness dependency for secure containers.
+    async fn ensure_guest_shares_mounted(&self, vm: &VmRecord, extras: &[(String, String)]) -> AnyResult<()> {
+        let mut commands = vec![format!(
+            "mkdir -p {GUEST_SHARE}; if ! mountpoint -q {GUEST_SHARE}; then mount -t virtiofs fs0 {GUEST_SHARE}; fi; mountpoint -q {GUEST_SHARE}"
+        )];
+        for (tag, guest) in extras {
+            commands.push(format!(
+                "mkdir -p {guest}; if ! mountpoint -q {guest}; then mount -t virtiofs {tag} {guest}; fi; mountpoint -q {guest}"
+            ));
+        }
+        let probe = format!("bash -lc '{}'", commands.join("; "));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
             match fluxvm_vsock_client::call(
@@ -466,7 +501,7 @@ impl Service {
                 AgentResponse::Exec { exit_code, stdout, stderr } => {
                     if tokio::time::Instant::now() >= deadline {
                         bail!(
-                            "guest virtiofs share {GUEST_SHARE} not mounted after retries \
+                            "guest virtiofs shares not mounted after retries \
                              (exit={exit_code} stdout={stdout:?} stderr={stderr:?})"
                         );
                     }
@@ -559,7 +594,7 @@ impl Service {
         copy_result?;
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
-        stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr).await?;
+        stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await?;
         let (io, io_dir) = self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await?;
         Ok((vm, serde_json::to_string(&spec)?, io, io_dir))
     }
@@ -1114,14 +1149,22 @@ fn sandbox_hints_from_spec(spec: &Value) -> SandboxHints {
     let mut resources = resource_limits_from_linux_resources(
         spec.pointer("/linux/resources").unwrap_or(&Value::Null),
     );
-    if let Some(annotations) = spec.get("annotations").and_then(Value::as_object) {
-        let parse_i64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<i64>().ok());
-        let parse_u64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<u64>().ok());
-        if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-cpu-quota") { resources.cpu_quota = Some(v); }
-        if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-period") { resources.cpu_period = Some(v); }
-        if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-shares") { resources.cpu_shares = Some(v); }
-        if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-memory") { resources.memory_limit_bytes = Some(v); }
-    }
+    let pod_uid = spec
+        .get("annotations")
+        .and_then(Value::as_object)
+        .and_then(|annotations| {
+            let parse_i64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<i64>().ok());
+            let parse_u64 = |key: &str| annotations.get(key).and_then(Value::as_str).and_then(|v| v.parse::<u64>().ok());
+            if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-cpu-quota") { resources.cpu_quota = Some(v); }
+            if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-period") { resources.cpu_period = Some(v); }
+            if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-shares") { resources.cpu_shares = Some(v); }
+            if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-memory") { resources.memory_limit_bytes = Some(v); }
+            annotations
+                .get("io.kubernetes.cri.sandbox-uid")
+                .and_then(Value::as_str)
+                .filter(|uid| !uid.is_empty() && uid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+                .map(str::to_string)
+        });
     let netns_path = spec
         .pointer("/linux/namespaces")
         .and_then(Value::as_array)
@@ -1135,7 +1178,7 @@ fn sandbox_hints_from_spec(spec: &Value) -> SandboxHints {
                     .map(PathBuf::from)
             })
         });
-    SandboxHints { resources, netns_path }
+    SandboxHints { resources, netns_path, pod_uid }
 }
 
 fn vm_shape(default_vcpus: u8, default_memory_mib: u64, overhead_mib: u64, resources: &ResourceLimits) -> (u8, u64) {
@@ -1619,7 +1662,25 @@ async fn copy_contents(src: &Path, dst: &Path) -> AnyResult<()> {
     Ok(())
 }
 
-async fn stage_bind_mounts(spec: &mut Value, host_ctr: &Path, guest_ctr: &str) -> AnyResult<()> {
+fn kubelet_guest_source(source: &Path, pod_uid: &str) -> Option<PathBuf> {
+    let root = PathBuf::from("/var/lib/kubelet/pods").join(pod_uid);
+    for (host_base, guest_base) in [
+        (root.join("volumes"), "/run/fluxvm/kubelet/volumes"),
+        (root.join("volume-subpaths"), "/run/fluxvm/kubelet/volume-subpaths"),
+    ] {
+        if let Ok(rel) = source.strip_prefix(host_base) {
+            return Some(Path::new(guest_base).join(rel));
+        }
+    }
+    None
+}
+
+async fn stage_bind_mounts(
+    spec: &mut Value,
+    host_ctr: &Path,
+    guest_ctr: &str,
+    pod_uid: Option<&str>,
+) -> AnyResult<()> {
     let Some(mounts) = spec.get_mut("mounts").and_then(Value::as_array_mut) else { return Ok(()); };
     for (idx, mount) in mounts.iter_mut().enumerate() {
         let is_bind = mount.get("type").and_then(Value::as_str) == Some("bind")
@@ -1628,6 +1689,19 @@ async fn stage_bind_mounts(spec: &mut Value, host_ctr: &Path, guest_ctr: &str) -
         let Some(source) = mount.get("source").and_then(Value::as_str).map(str::to_string) else { continue; };
         let source_path = PathBuf::from(&source);
         if !source_path.exists() { continue; }
+
+        // Kubernetes PVC/CSI/emptyDir/projected volume sources are already
+        // mounted by kubelet before runtime SyncPod. Keep them write-through
+        // by translating only paths under this Pod's bounded volume roots.
+        if let Some(uid) = pod_uid {
+            if let Some(guest) = kubelet_guest_source(&source_path, uid) {
+                mount["source"] = Value::String(guest.to_string_lossy().into_owned());
+                continue;
+            }
+        }
+
+        // Non-Pod-scoped bind sources stay snapshot-based. This avoids
+        // exposing arbitrary hostPath content to the guest by accident.
         let host = host_ctr.join("mounts").join(idx.to_string());
         if source_path.is_dir() {
             tokio::fs::create_dir_all(&host).await?;
@@ -1713,6 +1787,18 @@ mod tests {
     }
 
     #[test]
+    fn kubelet_volume_source_maps_only_current_pod() {
+        let uid = "11111111-2222-3333-4444-555555555555";
+        let src = Path::new("/var/lib/kubelet/pods/11111111-2222-3333-4444-555555555555/volumes/kubernetes.io~empty-dir/data/file");
+        assert_eq!(
+            kubelet_guest_source(src, uid).unwrap(),
+            PathBuf::from("/run/fluxvm/kubelet/volumes/kubernetes.io~empty-dir/data/file")
+        );
+        let other = Path::new("/var/lib/kubelet/pods/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/volumes/x");
+        assert!(kubelet_guest_source(other, uid).is_none());
+    }
+
+    #[test]
     fn safe_names_are_filesystem_safe() {
         assert_eq!(safe_name("pod/one:abc"), "pod-one-abc");
         assert_eq!(safe_name(""), "sandbox");
@@ -1736,7 +1822,7 @@ mod tests {
         let source = td.join("source");
         tokio::fs::write(&source, "hello").await.unwrap();
         let mut spec = json!({"mounts":[{"type":"bind","source":source,"destination":"/etc/x","options":["bind","ro"]}]});
-        stage_bind_mounts(&mut spec, &td.join("ctr"), "/run/fluxvm/pod/containers/c").await.unwrap();
+        stage_bind_mounts(&mut spec, &td.join("ctr"), "/run/fluxvm/pod/containers/c", None).await.unwrap();
         assert_eq!(spec["mounts"][0]["source"], "/run/fluxvm/pod/containers/c/mounts/0");
         assert_eq!(tokio::fs::read_to_string(td.join("ctr/mounts/0")).await.unwrap(), "hello");
         let _ = tokio::fs::remove_dir_all(td).await;
