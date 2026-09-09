@@ -41,7 +41,8 @@ noNewPrivileges and Linux capability sets.
 
 ## Remaining gates
 
-- VSOCK-native stdio + TTY/PTY/resize (Set 5)
+- VSOCK-native stdio + TTY/PTY/resize — delivered in
+  [Set 5](secure-containers-set5.md)
 - seccomp argument comparators / notify
 - Linux namespace creation parity and device-cgroup rules
 - explicitly allowlisted hostPath hotplug/broker
