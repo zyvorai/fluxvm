@@ -3,7 +3,7 @@
 
 //! containerd runtime-v2 shim for FluxVM secure containers.
 //!
-//! Secure Containers contract through Set 9:
+//! Secure Containers contract through Set 11:
 //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
 //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
 //! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
@@ -16,6 +16,8 @@
 //! * Pod-scoped raw block volumes are hotplugged into QEMU over QMP;
 //! * explicitly allowlisted VFIO PCI devices can be passed through for device-plugin workloads;
 //! * Set 9 reference-counts device ownership, verifies IOMMU groups, and hot-unplugs unused devices;
+//! * Set 10 enforces seccomp argument filters, process LSM labels, and cgroup-device BPF;
+//! * Set 11 supervises explicit seccomp NOTIFY rules and reports guest security counters;
 //! * no host kernel is shared with the workload.
 //!
 //! The copy/snapshot approach is intentionally conservative. It gives a
@@ -1999,6 +2001,22 @@ impl Service {
         self.call_agent_direct(vm, req).await
     }
 
+    async fn log_guest_security_stats(&self, vm: &VmRecord) {
+        match self.call_agent_direct(vm, ContainerRequest::SecurityStats).await {
+            Ok(ContainerResponse::SecurityStats { stats }) => info!(
+                "FluxVM guest security stats: notify_received={} notify_denied={} notify_continued={} notify_errors={} selinux_mounts_labeled={} lsm_preflight_failures={}",
+                stats.seccomp_notify_received,
+                stats.seccomp_notify_denied,
+                stats.seccomp_notify_continued,
+                stats.seccomp_notify_errors,
+                stats.selinux_mounts_labeled,
+                stats.lsm_apply_failures,
+            ),
+            Ok(other) => warn!("unexpected guest security stats response: {other:?}"),
+            Err(e) => warn!("reading guest security stats failed: {e:#}"),
+        }
+    }
+
     async fn send_event<E>(&self, event: E)
     where
         E: Event + 'static,
@@ -2389,6 +2407,10 @@ impl Task for Service {
             }
             other => return Err(rpc_other(format!("unexpected delete response: {other:?}"))),
         };
+
+        if exec_id.is_none() {
+            self.log_guest_security_stats(&vm).await;
+        }
 
         // containerd expects stdio to be drained and exit to precede delete.
         // The background WaitTask watcher races with force-delete, so this

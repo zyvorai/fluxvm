@@ -174,6 +174,20 @@ pub struct CgroupEvents {
     pub oom_group_kill: u64,
 }
 
+/// Guest-side security enforcement counters. These are process-wide monotonic
+/// counters for the container agent and are intended for diagnostics/audit,
+/// not billing. They deliberately expose counts only, never syscall arguments
+/// or SELinux/AppArmor labels.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SecurityStats {
+    pub seccomp_notify_received: u64,
+    pub seccomp_notify_denied: u64,
+    pub seccomp_notify_continued: u64,
+    pub seccomp_notify_errors: u64,
+    pub selinux_mounts_labeled: u64,
+    pub lsm_apply_failures: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum ContainerRequest {
@@ -243,6 +257,8 @@ pub enum ContainerRequest {
     Pids { id: String },
     Stats { id: String },
     CgroupEvents { id: String },
+    /// Return monotonic guest-agent security counters.
+    SecurityStats,
     UpdateResources {
         id: String,
         resources: ResourceLimits,
@@ -311,6 +327,7 @@ pub enum ContainerResponse {
     Pids { pids: Vec<u32> },
     Stats { stats: ContainerStats },
     CgroupEvents { events: CgroupEvents },
+    SecurityStats { stats: SecurityStats },
     ResourcesUpdated,
     PtyResized,
     IoClosed,
@@ -454,6 +471,16 @@ mod tests {
         assert_eq!(back.id, "c1");
         assert_eq!(back.exec_id.as_deref(), Some("shell"));
         assert_eq!(back.stream, IoStreamKind::Stdout);
+    }
+
+    #[test]
+    fn security_stats_round_trip() {
+        let response = ContainerResponse::SecurityStats {
+            stats: SecurityStats { seccomp_notify_denied: 2, ..Default::default() },
+        };
+        let line = encode_line(&response).unwrap();
+        let back: ContainerResponse = decode_line(&line).unwrap();
+        assert!(matches!(back, ContainerResponse::SecurityStats { stats } if stats.seccomp_notify_denied == 2));
     }
 
 }

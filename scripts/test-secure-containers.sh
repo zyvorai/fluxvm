@@ -40,3 +40,7 @@ fi
 if [[ "${FLUXVM_SECURE_CONTAINERS_SECURITY_E2E:-0}" == "1" ]]; then
   FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/e2e-secure-containers-security.sh
 fi
+
+if [[ "${FLUXVM_SECURE_CONTAINERS_SET11_PREFLIGHT:-0}" == "1" ]]; then
+  ./scripts/preflight-secure-containers-set11.sh
+fi
