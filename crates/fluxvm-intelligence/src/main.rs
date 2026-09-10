@@ -4,8 +4,8 @@
 use anyhow::{Context, Result, bail};
 use axum::{Json, Router, extract::{Path, State}, http::StatusCode, response::{IntoResponse, Response}, routing::get};
 use fluxvm_core::model::{VmRecord, VmStatus};
-use fluxvm_intelligence::{DEFAULT_PIN_ROOT, FeatureProbe, NetworkVmStats, VmDiagnosis, VmRuntimeSnapshot, diagnose_vm, probe, register_raw, snapshot_raw, snapshot_record, unregister_raw, unregister_exact, unregister_stale_tids};
-use fluxvm_network::{dataplane::{PodNetworkPolicy, VmNetworkPolicy}, ebpf::FlowRecord};
+use fluxvm_intelligence::{DEFAULT_PIN_ROOT, FeatureProbe, NetworkVmStats, VmDiagnosis, VmRuntimeSnapshot, diagnose_vm_with_reasons, probe, register_raw, snapshot_raw, snapshot_record, unregister_raw, unregister_exact, unregister_stale_tids};
+use fluxvm_network::{dataplane::{PodNetworkPolicy, VmNetworkPolicy}, ebpf::{DropReasonRecord, FlowRecord}};
 use serde::Serialize;
 use serde_json::json;
 use std::{collections::{BTreeMap, BTreeSet}, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
@@ -163,7 +163,16 @@ async fn diagnose(Path(id): Path<Uuid>, State(state): State<AppState>) -> Respon
         Ok(v) => v,
         Err(e) => return (StatusCode::BAD_GATEWAY, Json(json!({"error":format!("network flows: {e:#}")}))).into_response(),
     };
-    let report: VmDiagnosis = diagnose_vm(&snapshot, &policy, pod_policy.as_ref(), &flows);
+    // Rolling-upgrade safe: an older control plane has no schema-v6 reason
+    // endpoint, in which case Set-2 inference remains the fallback.
+    let reasons = fetch_drop_reasons(&state.cfg, id, 256).await.unwrap_or_default();
+    let report: VmDiagnosis = diagnose_vm_with_reasons(
+        &snapshot,
+        &policy,
+        pod_policy.as_ref(),
+        &flows,
+        &reasons,
+    );
     Json(report).into_response()
 }
 
@@ -196,6 +205,22 @@ async fn fetch_pod_policy(cfg: &Config, id: Uuid) -> Result<Option<PodNetworkPol
 async fn fetch_network_flows(cfg: &Config, id: Uuid, limit: usize) -> Result<Vec<FlowRecord>> {
     let response = authed_get(cfg, format!("{}/v1/vms/{}/network/flows?limit={}", cfg.api_url, id, limit.clamp(1,4096)))
         .send().await?.error_for_status()?;
+    let value: serde_json::Value = response.json().await?;
+    let items = value.get("items").cloned().unwrap_or(value);
+    Ok(serde_json::from_value(items)?)
+}
+
+async fn fetch_drop_reasons(cfg: &Config, id: Uuid, limit: usize) -> Result<Vec<DropReasonRecord>> {
+    let response = authed_get(
+        cfg,
+        format!("{}/v1/vms/{}/network/drop-reasons?limit={}", cfg.api_url, id, limit.clamp(1,4096)),
+    )
+    .send()
+    .await?;
+    if response.status().as_u16() == 404 {
+        return Ok(Vec::new());
+    }
+    let response = response.error_for_status()?;
     let value: serde_json::Value = response.json().await?;
     let items = value.get("items").cloned().unwrap_or(value);
     Ok(serde_json::from_value(items)?)

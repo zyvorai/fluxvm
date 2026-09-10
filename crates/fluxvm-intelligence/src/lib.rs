@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
-use fluxvm_network::{dataplane::{PodNetworkPolicy, VmNetworkPolicy}, ebpf::FlowRecord};
+use fluxvm_network::{dataplane::{PodNetworkPolicy, VmNetworkPolicy}, ebpf::{DropReasonRecord, FlowRecord}};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -432,9 +432,9 @@ pub struct DropFinding {
     pub stage: String,
     /// Stable machine-readable reason code.
     pub code: String,
-    /// `exact` means the visible policy deterministically explains the drop;
-    /// `probable` means a stateful/rate/group stage can explain it but the v5
-    /// flow ABI does not carry the kernel's internal branch reason.
+    /// `exact-kernel` comes from dataplane schema v6 reason accounting;
+    /// `exact` is deterministic policy inference; `probable` is a fallback
+    /// when the kernel reason map is unavailable.
     pub confidence: String,
     pub explanation: String,
     pub suggestion: String,
@@ -452,6 +452,8 @@ pub struct VmDiagnosis {
     pub runtime_findings: Vec<String>,
     pub network_drop_packets: u64,
     pub network_drop_bytes: u64,
+    /// Number of schema-v6 kernel branch-reason records used in this report.
+    pub kernel_reason_records: usize,
     pub drop_findings: Vec<DropFinding>,
 }
 
@@ -465,6 +467,43 @@ pub fn diagnose_vm(
     pod_policy: Option<&PodNetworkPolicy>,
     flows: &[FlowRecord],
 ) -> VmDiagnosis {
+    diagnose_vm_with_reasons(snapshot, policy, pod_policy, flows, &[])
+}
+
+/// Prefer kernel-native branch reasons from dataplane schema v6, then fall
+/// back to Set-2 policy inference only for drop tuples that have no matching
+/// reason record. This keeps diagnostics useful during a rolling upgrade
+/// while eliminating ambiguity for rate, migration and compiled-policy hits
+/// once every node is on schema v6.
+pub fn diagnose_vm_with_reasons(
+    snapshot: &VmRuntimeSnapshot,
+    policy: &VmNetworkPolicy,
+    pod_policy: Option<&PodNetworkPolicy>,
+    flows: &[FlowRecord],
+    reasons: &[DropReasonRecord],
+) -> VmDiagnosis {
+    let mut kernel: Vec<&DropReasonRecord> = reasons.iter().collect();
+    kernel.sort_by(|a, b| {
+        b.packets
+            .cmp(&a.packets)
+            .then_with(|| b.last_seen_ns.cmp(&a.last_seen_ns))
+    });
+    kernel.truncate(128);
+
+    let mut findings: Vec<DropFinding> = kernel.iter().map(|r| kernel_reason_finding(r)).collect();
+    let kernel_keys: BTreeSet<(String, String, u16, u16, u8)> = kernel
+        .iter()
+        .map(|r| {
+            (
+                r.source.clone(),
+                r.destination.clone(),
+                r.source_port,
+                r.destination_port,
+                r.protocol,
+            )
+        })
+        .collect();
+
     let mut drops: Vec<&FlowRecord> = flows.iter().filter(|f| f.verdict == "drop").collect();
     drops.sort_by(|a, b| {
         b.packets
@@ -473,17 +512,35 @@ pub fn diagnose_vm(
     });
     drops.truncate(128);
 
-    let mut findings = Vec::with_capacity(drops.len());
     let mut total_packets = 0u64;
     let mut total_bytes = 0u64;
     for flow in drops {
         total_packets = total_packets.saturating_add(flow.packets);
         total_bytes = total_bytes.saturating_add(flow.bytes);
-        findings.push(explain_drop(flow, policy, pod_policy));
+        let key = (
+            flow.source.clone(),
+            flow.destination.clone(),
+            flow.source_port,
+            flow.destination_port,
+            flow.protocol,
+        );
+        if !kernel_keys.contains(&key) {
+            findings.push(explain_drop(flow, policy, pod_policy));
+        }
     }
+    findings.sort_by(|a, b| {
+        b.evidence
+            .packets
+            .cmp(&a.evidence.packets)
+            .then_with(|| b.evidence.last_seen_ns.cmp(&a.evidence.last_seen_ns))
+    });
 
     let severity = if findings.iter().any(|f| {
-        !f.audit_only && (f.code == "explicit-deny" || f.code == "pod-explicit-deny")
+        !f.audit_only
+            && matches!(
+                f.code.as_str(),
+                "explicit-cidr-deny" | "pod-policy-deny" | "explicit-deny" | "pod-explicit-deny"
+            )
     }) || snapshot.kernel.runnable_delay_max_ns >= 50_000_000
     {
         "critical"
@@ -501,13 +558,13 @@ pub fn diagnose_vm(
     } else {
         let top = &findings[0];
         format!(
-            "{} VM-edge drop finding(s); top cause {} at {} ({} packet(s)).",
-            findings.len(), top.code, top.stage, top.evidence.packets
+            "{} VM-edge finding(s); top cause {} at {} ({} packet(s)); {} kernel reason record(s).",
+            findings.len(), top.code, top.stage, top.evidence.packets, kernel.len()
         )
     };
 
     VmDiagnosis {
-        schema_version: 2,
+        schema_version: 3,
         vm_id: snapshot.vm_id,
         vm_name: snapshot.name.clone(),
         severity: severity.into(),
@@ -515,7 +572,91 @@ pub fn diagnose_vm(
         runtime_findings: snapshot.findings.clone(),
         network_drop_packets: total_packets,
         network_drop_bytes: total_bytes,
+        kernel_reason_records: kernel.len(),
         drop_findings: findings,
+    }
+}
+
+fn kernel_reason_finding(reason: &DropReasonRecord) -> DropFinding {
+    let (stage, explanation, suggestion) = match reason.reason.as_str() {
+        "malformed-l4" => (
+            "vm-edge/parser",
+            "The kernel could not safely parse the packet's L4 header.",
+            "Inspect guest packet construction, fragmentation and offload settings before weakening policy.",
+        ),
+        "fragmented-l4" => (
+            "vm-edge/parser",
+            "The packet is fragmented while L4 enforcement is enabled.",
+            "Avoid fragmented transport traffic or use an MTU that keeps policy-relevant headers in the first packet.",
+        ),
+        "explicit-cidr-deny" => (
+            "vm-policy/cidr-deny",
+            "The destination matched an explicit VM/group deny CIDR.",
+            "Remove or narrow the deny rule only if this destination is intentionally permitted.",
+        ),
+        "cidr-miss" => (
+            "vm-policy/cidr-allowlist",
+            "The destination did not match the effective CIDR allowlist.",
+            "Add the smallest required CIDR or correct DNS/service resolution.",
+        ),
+        "l4-miss" => (
+            "vm-policy/l4-allowlist",
+            "The destination transport protocol/port did not match the effective L4 allowlist.",
+            "Permit only the required protocol/port pair.",
+        ),
+        "pod-policy-deny" => (
+            "pod-policy/peer",
+            "The Kubernetes Pod-identity policy rejected the peer.",
+            "Fix the Pod peer policy or selector resolution rather than weakening VM-wide policy.",
+        ),
+        "rate-limit" => (
+            "vm-policy/rate",
+            "The VM exceeded its configured eBPF packet or bandwidth ceiling.",
+            "Confirm sustained legitimate demand, then tune max_egress_pps/max_egress_mbps if required.",
+        ),
+        "default-deny" => (
+            "vm-policy/default",
+            "No explicit allow dimension applied and the VM default action is deny.",
+            "Add a narrow CIDR and/or L4 allow rule for the required dependency.",
+        ),
+        "migration-quiesce" => (
+            "migration/quiesce",
+            "A new flow was rejected while the source VM was quiescing; established conntrack flows remain allowed.",
+            "Expected during migration. Complete state export/cutover or resume the source if migration is cancelled.",
+        ),
+        "migration-restoring" => (
+            "migration/restore",
+            "A new flow was rejected while the destination VM was restoring eBPF state.",
+            "Complete conntrack import and VMM cutover, then explicitly resume the destination dataplane.",
+        ),
+        "unsupported-ethertype" => (
+            "vm-edge/ethertype",
+            "A non-ARP/non-IPv4/non-IPv6 frame hit a deny-by-default VM edge.",
+            "Permit the protocol only if it is required and has an explicit security model.",
+        ),
+        _ => (
+            "vm-edge",
+            "The kernel reported a VM-edge policy branch not recognized by this userspace build.",
+            "Upgrade FluxVM userspace to the same dataplane schema as the node.",
+        ),
+    };
+    DropFinding {
+        stage: stage.into(),
+        code: reason.reason.clone(),
+        confidence: "exact-kernel".into(),
+        explanation: explanation.into(),
+        suggestion: suggestion.into(),
+        audit_only: reason.action == "audit",
+        evidence: DropEvidence {
+            source: reason.source.clone(),
+            destination: reason.destination.clone(),
+            source_port: reason.source_port,
+            destination_port: reason.destination_port,
+            protocol: reason.protocol,
+            packets: reason.packets,
+            bytes: reason.bytes,
+            last_seen_ns: reason.last_seen_ns,
+        },
     }
 }
 
@@ -739,4 +880,27 @@ mod tests {
         assert!(d.drop_findings[0].audit_only);
         assert_eq!(d.severity,"warning");
     }
+    #[test]
+    fn kernel_reason_overrides_policy_inference() {
+        let id=Uuid::new_v4();
+        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,findings:vec![]};
+        let policy=VmNetworkPolicy{max_egress_pps:Some(10),..Default::default()};
+        let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,verdict:"drop".into(),packets:3,bytes:192,last_seen_ns:2};
+        let reason=DropReasonRecord{identity:1,family:4,source:flow.source.clone(),destination:flow.destination.clone(),source_port:1234,destination_port:443,protocol:6,reason_code:6,reason:"rate-limit".into(),action:"drop".into(),packets:3,bytes:192,last_seen_ns:2};
+        let d=diagnose_vm_with_reasons(&snap,&policy,None,&[flow],&[reason]);
+        assert_eq!(d.kernel_reason_records,1);
+        assert_eq!(d.drop_findings[0].code,"rate-limit");
+        assert_eq!(d.drop_findings[0].confidence,"exact-kernel");
+    }
+
+    #[test]
+    fn migration_reason_is_warning_not_critical() {
+        let id=Uuid::new_v4();
+        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,findings:vec![]};
+        let reason=DropReasonRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,reason_code:9,reason:"migration-quiesce".into(),action:"drop".into(),packets:1,bytes:64,last_seen_ns:1};
+        let d=diagnose_vm_with_reasons(&snap,&VmNetworkPolicy::default(),None,&[],&[reason]);
+        assert_eq!(d.severity,"warning");
+        assert_eq!(d.drop_findings[0].stage,"migration/quiesce");
+    }
+
 }

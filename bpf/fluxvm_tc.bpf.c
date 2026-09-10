@@ -27,6 +27,24 @@
 #define FLUXVM_AF_INET6      6
 #define FLUXVM_RATE_WINDOW_NS 1000000000ULL
 
+#define FLUXVM_REASON_NONE                 0
+#define FLUXVM_REASON_MALFORMED_L4         1
+#define FLUXVM_REASON_FRAGMENTED_L4        2
+#define FLUXVM_REASON_EXPLICIT_CIDR_DENY   3
+#define FLUXVM_REASON_CIDR_MISS            4
+#define FLUXVM_REASON_L4_MISS              5
+#define FLUXVM_REASON_POD_POLICY_DENY      6
+#define FLUXVM_REASON_RATE_LIMIT           7
+#define FLUXVM_REASON_DEFAULT_DENY         8
+#define FLUXVM_REASON_MIGRATION_QUIESCE    9
+#define FLUXVM_REASON_MIGRATION_RESTORING 10
+#define FLUXVM_REASON_UNSUPPORTED_ETHERTYPE 11
+#define FLUXVM_REASON_ACTION_DROP          0
+#define FLUXVM_REASON_ACTION_AUDIT         1
+#define FLUXVM_MIGRATION_RUNNING           0
+#define FLUXVM_MIGRATION_QUIESCING         1
+#define FLUXVM_MIGRATION_RESTORING         2
+
 struct iface_config {
     __u32 identity;
     __u32 default_allow;
@@ -99,6 +117,25 @@ struct flow_value {
     __u64 bytes;
     __u64 last_seen_ns;
 };
+
+struct drop_reason_key {
+    struct flow_key flow;
+    __u32 reason;
+    __u32 action;
+};
+_Static_assert(sizeof(struct drop_reason_key) == 52, "drop reason key ABI");
+
+struct drop_reason_value {
+    __u64 packets;
+    __u64 bytes;
+    __u64 last_seen_ns;
+};
+
+struct migration_state {
+    __u32 phase;
+    __u32 generation;
+};
+_Static_assert(sizeof(struct migration_state) == 8, "migration state ABI");
 
 struct rate_state {
     struct bpf_spin_lock lock;
@@ -175,6 +212,13 @@ struct {
 } fluxvm_flows SEC(".maps");
 
 struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 32768);
+    __type(key, struct drop_reason_key);
+    __type(value, struct drop_reason_value);
+} fluxvm_drop_reasons SEC(".maps");
+
+struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 1 << 20);
 } fluxvm_events SEC(".maps");
@@ -201,6 +245,13 @@ struct {
     __type(key, struct flow_key);
     __type(value, __u8);
 } fluxvm_ct SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8);
+    __type(key, __u32);
+    __type(value, struct migration_state);
+} fluxvm_migration SEC(".maps");
 
 struct group_ids {
     __u32 n;
@@ -424,6 +475,18 @@ static __always_inline void ct_learn(const struct flow_key *probe)
     bpf_map_update_elem(&fluxvm_ct, &key, &one, BPF_ANY);
 }
 
+static __always_inline __u32 migration_block_reason(__u32 identity)
+{
+    struct migration_state *state = bpf_map_lookup_elem(&fluxvm_migration, &identity);
+    if (!state || state->phase == FLUXVM_MIGRATION_RUNNING)
+        return FLUXVM_REASON_NONE;
+    if (state->phase == FLUXVM_MIGRATION_QUIESCING)
+        return FLUXVM_REASON_MIGRATION_QUIESCE;
+    if (state->phase == FLUXVM_MIGRATION_RESTORING)
+        return FLUXVM_REASON_MIGRATION_RESTORING;
+    return FLUXVM_REASON_NONE;
+}
+
 static __always_inline int l4_allowed(__u32 identity, __u8 protocol, __u16 port)
 {
     struct l4_key key = {
@@ -619,6 +682,83 @@ static __always_inline void record_flow6(
                     sport, dport, ip6->nexthdr, verdict, sample_rate);
 }
 
+static __always_inline void record_reason_raw(
+    struct __sk_buff *skb,
+    __u32 identity,
+    __u8 family,
+    const __u8 *src,
+    const __u8 *dst,
+    __u16 sport,
+    __u16 dport,
+    __u8 protocol,
+    __u32 reason,
+    __u32 action)
+{
+    if (reason == FLUXVM_REASON_NONE)
+        return;
+    struct drop_reason_key key = {
+        .flow = {
+            .identity = identity,
+            .sport = sport,
+            .dport = dport,
+            .protocol = protocol,
+            .verdict = FLUXVM_VERDICT_DROP,
+            .family = family,
+            .pad = 0,
+        },
+        .reason = reason,
+        .action = action,
+    };
+    __builtin_memcpy(key.flow.src, src, 16);
+    __builtin_memcpy(key.flow.dst, dst, 16);
+    struct drop_reason_value *value = bpf_map_lookup_elem(&fluxvm_drop_reasons, &key);
+    __u64 now = bpf_ktime_get_ns();
+    if (value) {
+        __sync_fetch_and_add(&value->packets, 1);
+        __sync_fetch_and_add(&value->bytes, skb->len);
+        value->last_seen_ns = now;
+        return;
+    }
+    struct drop_reason_value initial = {
+        .packets = 1,
+        .bytes = skb->len,
+        .last_seen_ns = now,
+    };
+    bpf_map_update_elem(&fluxvm_drop_reasons, &key, &initial, BPF_NOEXIST);
+}
+
+static __always_inline void record_reason4(
+    struct __sk_buff *skb,
+    __u32 identity,
+    struct iphdr *iph,
+    __u16 sport,
+    __u16 dport,
+    __u32 reason,
+    __u32 action)
+{
+    __u8 src[16] = {};
+    __u8 dst[16] = {};
+    __builtin_memcpy(src, &iph->saddr, 4);
+    __builtin_memcpy(dst, &iph->daddr, 4);
+    record_reason_raw(skb, identity, FLUXVM_AF_INET, src, dst, sport, dport,
+                      iph->protocol, reason, action);
+}
+
+static __always_inline void record_reason6(
+    struct __sk_buff *skb,
+    __u32 identity,
+    struct ipv6hdr *ip6,
+    __u16 sport,
+    __u16 dport,
+    __u32 reason,
+    __u32 action)
+{
+    record_reason_raw(skb, identity, FLUXVM_AF_INET6,
+                      ip6->saddr.in6_u.u6_addr8,
+                      ip6->daddr.in6_u.u6_addr8,
+                      sport, dport, ip6->nexthdr, reason, action);
+}
+
 static __always_inline int handle_ipv4(
     struct __sk_buff *skb,
     struct iface_config *cfg,
@@ -637,16 +777,31 @@ static __always_inline int handle_ipv4(
     __u16 frag = bpf_ntohs(iph->frag_off);
     int fragmented = (frag & 0x3fff) != 0;
     int parsed_l4 = 0;
+    __u32 sample = cfg->sample_rate & 0x7fffffffu;
+    __u32 audit = cfg->sample_rate >> 31;
     if (!fragmented) {
         parsed_l4 = parse_ports4(iph, data_end, &sport, &dport);
-        if (parsed_l4 < 0)
+        if (parsed_l4 < 0) {
+            count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+            record_reason4(skb, cfg->identity, iph, 0, 0,
+                           FLUXVM_REASON_MALFORMED_L4, FLUXVM_REASON_ACTION_DROP);
             return TC_ACT_SHOT;
+        }
     }
 
     if (fragmented && cfg->enforce_l4) {
+        record_reason4(skb, cfg->identity, iph, 0, 0,
+                       FLUXVM_REASON_FRAGMENTED_L4,
+                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+        if (audit) {
+            count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+            record_flow4(skb, cfg->identity, iph, 0, 0,
+                         FLUXVM_VERDICT_DROP, sample);
+            return TC_ACT_OK;
+        }
         count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
         record_flow4(skb, cfg->identity, iph, 0, 0,
-                     FLUXVM_VERDICT_DROP, cfg->sample_rate);
+                     FLUXVM_VERDICT_DROP, sample);
         return TC_ACT_SHOT;
     }
 
@@ -657,8 +812,6 @@ static __always_inline int handle_ipv4(
         return TC_ACT_OK;
     }
 
-    __u32 sample = cfg->sample_rate & 0x7fffffffu;
-    __u32 audit = cfg->sample_rate >> 31;
     __u8 src[16] = {};
     __u8 dst[16] = {};
     __builtin_memcpy(src, &iph->saddr, 4);
@@ -675,12 +828,41 @@ static __always_inline int handle_ipv4(
     __builtin_memcpy(ctkey.src, src, 16);
     __builtin_memcpy(ctkey.dst, dst, 16);
     if (ct_hit(&ctkey)) {
+        // Conntrack is a policy-continuity shortcut, not a QoS bypass.
+        // Keep applying the live rate ceiling to established flows.
+        if (!rate_allowed(cfg, skb->len)) {
+            record_reason4(skb, cfg->identity, iph, sport, dport,
+                           FLUXVM_REASON_RATE_LIMIT,
+                           audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+            if (audit) {
+                count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+                record_flow4(skb, cfg->identity, iph, sport, dport,
+                             FLUXVM_VERDICT_DROP, sample);
+                return TC_ACT_OK;
+            }
+            count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+            record_flow4(skb, cfg->identity, iph, sport, dport,
+                         FLUXVM_VERDICT_DROP, sample);
+            return TC_ACT_SHOT;
+        }
         count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
         record_flow4(skb, cfg->identity, iph, sport, dport,
                      FLUXVM_VERDICT_ALLOW, sample);
         return TC_ACT_OK;
     }
+    __u32 migration_reason = migration_block_reason(cfg->identity);
+    if (migration_reason != FLUXVM_REASON_NONE) {
+        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+        record_flow4(skb, cfg->identity, iph, sport, dport,
+                     FLUXVM_VERDICT_DROP, sample);
+        record_reason4(skb, cfg->identity, iph, sport, dport,
+                       migration_reason, FLUXVM_REASON_ACTION_DROP);
+        return TC_ACT_SHOT;
+    }
     if (any_deny4(skb->ifindex, cfg->identity, iph->daddr)) {
+        record_reason4(skb, cfg->identity, iph, sport, dport,
+                       FLUXVM_REASON_EXPLICIT_CIDR_DENY,
+                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
         if (audit) {
             count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
             record_flow4(skb, cfg->identity, iph, sport, dport,
@@ -701,18 +883,40 @@ static __always_inline int handle_ipv4(
     }
     int has_policy = cfg->enforce_cidr || cfg->enforce_l4;
     int allowed = has_policy ? 1 : (cfg->default_allow != 0);
-    if (cfg->enforce_cidr)
-        allowed = allowed && any_cidr4(skb->ifindex, cfg->identity, iph->daddr);
-    if (cfg->enforce_l4)
-        allowed = allowed && parsed_l4 > 0 &&
-                  any_l4(skb->ifindex, cfg->identity, iph->protocol, dport);
-    // Set 6S: Kubernetes-Pod-identity-scoped policy, additive on top of the
-    // VM-level CIDR/L4 verdict above -- can only narrow an allow, never
-    // widen a deny into an allow (mirrors any_deny4's precedence).
-    if (cfg->pod_id && allowed)
-        allowed = fluxvm_pod_policy_allowed4(cfg->pod_id, iph->daddr);
-    if (allowed && !rate_allowed(cfg, skb->len))
+    __u32 deny_reason = (!has_policy && !allowed)
+        ? FLUXVM_REASON_DEFAULT_DENY : FLUXVM_REASON_NONE;
+    if (cfg->enforce_cidr &&
+        !any_cidr4(skb->ifindex, cfg->identity, iph->daddr)) {
         allowed = 0;
+        deny_reason = FLUXVM_REASON_CIDR_MISS;
+    }
+    if (allowed && cfg->enforce_l4 &&
+        !(parsed_l4 > 0 && any_l4(skb->ifindex, cfg->identity, iph->protocol, dport))) {
+        allowed = 0;
+        deny_reason = FLUXVM_REASON_L4_MISS;
+    }
+    // Set 6S remains additive. Schema v6 preserves Pod audit as an exact
+    // kernel reason instead of losing it behind the boolean compatibility API.
+    if (cfg->pod_id && allowed) {
+        int pod_verdict = fluxvm_pod_policy_verdict4(cfg->pod_id, iph->daddr);
+        if (pod_verdict == FLUXVM_POD_VERDICT_DENY) {
+            allowed = 0;
+            deny_reason = FLUXVM_REASON_POD_POLICY_DENY;
+        } else if (pod_verdict == FLUXVM_POD_VERDICT_AUDIT) {
+            record_reason4(skb, cfg->identity, iph, sport, dport,
+                           FLUXVM_REASON_POD_POLICY_DENY,
+                           FLUXVM_REASON_ACTION_AUDIT);
+        }
+    }
+    if (allowed && !rate_allowed(cfg, skb->len)) {
+        allowed = 0;
+        deny_reason = FLUXVM_REASON_RATE_LIMIT;
+    }
+    if (!allowed) {
+        record_reason4(skb, cfg->identity, iph, sport, dport,
+                       deny_reason,
+                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+    }
     if (!allowed && audit)
         allowed = 1;
     if (allowed)
@@ -737,48 +941,132 @@ static __always_inline int handle_ipv6(
 
     __u16 sport = 0;
     __u16 dport = 0;
+    __u32 sample = cfg->sample_rate & 0x7fffffffu;
+    __u32 audit = cfg->sample_rate >> 31;
     int parsed_l4 = parse_ports6(ip6, data_end, &sport, &dport);
-    if (parsed_l4 < 0)
+    if (parsed_l4 < 0) {
+        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+        record_reason6(skb, cfg->identity, ip6, 0, 0,
+                       FLUXVM_REASON_MALFORMED_L4, FLUXVM_REASON_ACTION_DROP);
         return TC_ACT_SHOT;
+    }
 
-    // Neighbor discovery/router discovery and DHCPv6 are infrastructure
-    // bootstrap. Denying these makes an IPv6 guest unable to establish the
-    // addressing information policy itself depends on.
+    // NDP and DHCPv6 remain bootstrap-exempt so address maintenance survives
+    // source quiesce and destination restore.
     if (is_ipv6_ndp(ip6, data_end) || is_dhcp6(ip6->nexthdr, sport, dport)) {
         count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
         record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_ALLOW, cfg->sample_rate);
+                     FLUXVM_VERDICT_ALLOW, sample);
         return TC_ACT_OK;
     }
 
-    if (any_deny6(skb->ifindex, cfg->identity, &ip6->daddr)) {
+    struct flow_key ctkey = {
+        .identity = cfg->identity,
+        .sport = sport,
+        .dport = dport,
+        .protocol = ip6->nexthdr,
+        .verdict = 0,
+        .family = FLUXVM_AF_INET6,
+        .pad = 0,
+    };
+    __builtin_memcpy(ctkey.src, ip6->saddr.in6_u.u6_addr8, 16);
+    __builtin_memcpy(ctkey.dst, ip6->daddr.in6_u.u6_addr8, 16);
+    if (ct_hit(&ctkey)) {
+        if (!rate_allowed(cfg, skb->len)) {
+            record_reason6(skb, cfg->identity, ip6, sport, dport,
+                           FLUXVM_REASON_RATE_LIMIT,
+                           audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+            if (audit) {
+                count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+                record_flow6(skb, cfg->identity, ip6, sport, dport,
+                             FLUXVM_VERDICT_DROP, sample);
+                return TC_ACT_OK;
+            }
+            count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+            record_flow6(skb, cfg->identity, ip6, sport, dport,
+                         FLUXVM_VERDICT_DROP, sample);
+            return TC_ACT_SHOT;
+        }
+        count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+        record_flow6(skb, cfg->identity, ip6, sport, dport,
+                     FLUXVM_VERDICT_ALLOW, sample);
+        return TC_ACT_OK;
+    }
+    __u32 migration_reason = migration_block_reason(cfg->identity);
+    if (migration_reason != FLUXVM_REASON_NONE) {
         count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
         record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_DROP, cfg->sample_rate);
+                     FLUXVM_VERDICT_DROP, sample);
+        record_reason6(skb, cfg->identity, ip6, sport, dport,
+                       migration_reason, FLUXVM_REASON_ACTION_DROP);
+        return TC_ACT_SHOT;
+    }
+
+    if (any_deny6(skb->ifindex, cfg->identity, &ip6->daddr)) {
+        record_reason6(skb, cfg->identity, ip6, sport, dport,
+                       FLUXVM_REASON_EXPLICIT_CIDR_DENY,
+                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+        if (audit) {
+            count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+            record_flow6(skb, cfg->identity, ip6, sport, dport,
+                         FLUXVM_VERDICT_DROP, sample);
+            return TC_ACT_OK;
+        }
+        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+        record_flow6(skb, cfg->identity, ip6, sport, dport,
+                     FLUXVM_VERDICT_DROP, sample);
         return TC_ACT_SHOT;
     }
     if (cfg->allow_icmp && ip6->nexthdr == IPPROTO_ICMPV6) {
         count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
         record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_ALLOW, cfg->sample_rate);
+                     FLUXVM_VERDICT_ALLOW, sample);
+        ct_learn(&ctkey);
         return TC_ACT_OK;
     }
     int has_policy = cfg->enforce_cidr || cfg->enforce_l4;
     int allowed = has_policy ? 1 : (cfg->default_allow != 0);
-    if (cfg->enforce_cidr)
-        allowed = allowed && any_cidr6(skb->ifindex, cfg->identity, &ip6->daddr);
-    if (cfg->enforce_l4)
-        allowed = allowed && parsed_l4 > 0 &&
-                  any_l4(skb->ifindex, cfg->identity, ip6->nexthdr, dport);
-    // Set 6S: see the IPv4 path above for the additive-only precedence.
-    if (cfg->pod_id && allowed)
-        allowed = fluxvm_pod_policy_allowed6(cfg->pod_id, ip6->daddr.in6_u.u6_addr8);
-    if (allowed && !rate_allowed(cfg, skb->len))
+    __u32 deny_reason = (!has_policy && !allowed)
+        ? FLUXVM_REASON_DEFAULT_DENY : FLUXVM_REASON_NONE;
+    if (cfg->enforce_cidr &&
+        !any_cidr6(skb->ifindex, cfg->identity, &ip6->daddr)) {
         allowed = 0;
+        deny_reason = FLUXVM_REASON_CIDR_MISS;
+    }
+    if (allowed && cfg->enforce_l4 &&
+        !(parsed_l4 > 0 && any_l4(skb->ifindex, cfg->identity, ip6->nexthdr, dport))) {
+        allowed = 0;
+        deny_reason = FLUXVM_REASON_L4_MISS;
+    }
+    if (cfg->pod_id && allowed) {
+        int pod_verdict = fluxvm_pod_policy_verdict6(
+            cfg->pod_id, ip6->daddr.in6_u.u6_addr8);
+        if (pod_verdict == FLUXVM_POD_VERDICT_DENY) {
+            allowed = 0;
+            deny_reason = FLUXVM_REASON_POD_POLICY_DENY;
+        } else if (pod_verdict == FLUXVM_POD_VERDICT_AUDIT) {
+            record_reason6(skb, cfg->identity, ip6, sport, dport,
+                           FLUXVM_REASON_POD_POLICY_DENY,
+                           FLUXVM_REASON_ACTION_AUDIT);
+        }
+    }
+    if (allowed && !rate_allowed(cfg, skb->len)) {
+        allowed = 0;
+        deny_reason = FLUXVM_REASON_RATE_LIMIT;
+    }
+    if (!allowed) {
+        record_reason6(skb, cfg->identity, ip6, sport, dport,
+                       deny_reason,
+                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+    }
+    if (!allowed && audit)
+        allowed = 1;
+    if (allowed)
+        ct_learn(&ctkey);
 
     __u8 verdict = allowed ? FLUXVM_VERDICT_ALLOW : FLUXVM_VERDICT_DROP;
     count(cfg->identity, verdict, skb->len);
-    record_flow6(skb, cfg->identity, ip6, sport, dport, verdict, cfg->sample_rate);
+    record_flow6(skb, cfg->identity, ip6, sport, dport, verdict, sample);
     return allowed ? TC_ACT_OK : TC_ACT_SHOT;
 }
 
@@ -811,6 +1099,12 @@ int fluxvm_egress(struct __sk_buff *skb)
 
     __u8 verdict = cfg->default_allow ? FLUXVM_VERDICT_ALLOW : FLUXVM_VERDICT_DROP;
     count(cfg->identity, verdict, skb->len);
+    if (verdict == FLUXVM_VERDICT_DROP) {
+        __u8 zero[16] = {};
+        record_reason_raw(skb, cfg->identity, 0, zero, zero, 0, 0, 0,
+                          FLUXVM_REASON_UNSUPPORTED_ETHERTYPE,
+                          FLUXVM_REASON_ACTION_DROP);
+    }
     return verdict == FLUXVM_VERDICT_ALLOW ? TC_ACT_OK : TC_ACT_SHOT;
 }
 

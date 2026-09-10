@@ -36,6 +36,13 @@
 #define FLUXVM_POD_PEER_ALLOW 1u
 #define FLUXVM_POD_PEER_DENY  2u
 
+/* Rich verdict used by dataplane schema v6 drop-reason accounting. Keep the
+ * existing allowed4/6 wrappers below for source compatibility with any
+ * out-of-tree program that includes this header. */
+#define FLUXVM_POD_VERDICT_DENY  0
+#define FLUXVM_POD_VERDICT_ALLOW 1
+#define FLUXVM_POD_VERDICT_AUDIT 2
+
 struct fluxvm_pod_policy {
     __u32 flags;
     __u32 reserved0;
@@ -118,37 +125,47 @@ static __always_inline void fluxvm_count_pod_policy(__u32 pod_id, int verdict)
  * is additive on top of fluxvm_tc.bpf.c's own CIDR/L4/rate verdict, which
  * already fails closed on its own missing-iface-config case; an unconfigured
  * Pod policy must not turn an otherwise-allowed packet into a silent drop. */
-static __always_inline int fluxvm_pod_policy_allowed4(__u32 pod_id, __u32 daddr)
+static __always_inline int fluxvm_pod_policy_verdict4(__u32 pod_id, __u32 daddr)
 {
     struct fluxvm_pod_policy *p = bpf_map_lookup_elem(&fluxvm_pspol, &pod_id);
     if (!p || !(p->flags & FLUXVM_PSPOL_ENABLED))
-        return 1;
+        return FLUXVM_POD_VERDICT_ALLOW;
     struct fluxvm_pid4_key key = {.pod_id = pod_id, .address = daddr};
     __u32 *v = bpf_map_lookup_elem(&fluxvm_pid4, &key);
     int allowed = v ? (*v != FLUXVM_POD_PEER_DENY) : !(p->flags & FLUXVM_PSPOL_DEFAULT_DENY);
     if (!allowed && (p->flags & FLUXVM_PSPOL_AUDIT)) {
         fluxvm_count_pod_policy(pod_id, 2);
-        return 1;
+        return FLUXVM_POD_VERDICT_AUDIT;
     }
     fluxvm_count_pod_policy(pod_id, allowed ? 0 : 1);
-    return allowed;
+    return allowed ? FLUXVM_POD_VERDICT_ALLOW : FLUXVM_POD_VERDICT_DENY;
 }
 
-static __always_inline int fluxvm_pod_policy_allowed6(__u32 pod_id, const __u8 *daddr)
+static __always_inline int fluxvm_pod_policy_verdict6(__u32 pod_id, const __u8 *daddr)
 {
     struct fluxvm_pod_policy *p = bpf_map_lookup_elem(&fluxvm_pspol, &pod_id);
     if (!p || !(p->flags & FLUXVM_PSPOL_ENABLED))
-        return 1;
+        return FLUXVM_POD_VERDICT_ALLOW;
     struct fluxvm_pid6_key key = {.pod_id = pod_id};
     __builtin_memcpy(key.address, daddr, 16);
     __u32 *v = bpf_map_lookup_elem(&fluxvm_pid6, &key);
     int allowed = v ? (*v != FLUXVM_POD_PEER_DENY) : !(p->flags & FLUXVM_PSPOL_DEFAULT_DENY);
     if (!allowed && (p->flags & FLUXVM_PSPOL_AUDIT)) {
         fluxvm_count_pod_policy(pod_id, 2);
-        return 1;
+        return FLUXVM_POD_VERDICT_AUDIT;
     }
     fluxvm_count_pod_policy(pod_id, allowed ? 0 : 1);
-    return allowed;
+    return allowed ? FLUXVM_POD_VERDICT_ALLOW : FLUXVM_POD_VERDICT_DENY;
+}
+
+static __always_inline int fluxvm_pod_policy_allowed4(__u32 pod_id, __u32 daddr)
+{
+    return fluxvm_pod_policy_verdict4(pod_id, daddr) != FLUXVM_POD_VERDICT_DENY;
+}
+
+static __always_inline int fluxvm_pod_policy_allowed6(__u32 pod_id, const __u8 *daddr)
+{
+    return fluxvm_pod_policy_verdict6(pod_id, daddr) != FLUXVM_POD_VERDICT_DENY;
 }
 
 #endif /* FLUXVM_POD_POLICY_BPF_H */

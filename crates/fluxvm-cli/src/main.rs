@@ -186,6 +186,24 @@ enum DataplaneCommand {
     Health,
     Ipcache,
     RefreshDns,
+    /// Show the VM-edge migration gate and schema generation.
+    MigrationState { id: Uuid },
+    /// Freeze creation of new flows while preserving established conntrack.
+    MigrationQuiesce { id: Uuid },
+    /// Export a migration-consistent conntrack/observability snapshot.
+    MigrationExport {
+        id: Uuid,
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Import network state on the destination and leave it in restoring mode.
+    MigrationRestore {
+        id: Uuid,
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Re-enable new flows after destination cutover, or cancel source quiesce.
+    MigrationResume { id: Uuid },
 }
 
 #[derive(Subcommand)]
@@ -421,11 +439,18 @@ async fn main() -> Result<()> {
             )?;
             let pod_policy = m.pod_network_policy(id).await?;
             let flows = m.network_flows(id, 256).await?;
-            let report = fluxvm_intelligence::diagnose_vm(
+            let reasons = fluxvm_network::ebpf::drop_reasons(
+                &m.cfg.sandbox.dataplane,
+                id,
+                256,
+            )
+            .unwrap_or_default();
+            let report = fluxvm_intelligence::diagnose_vm_with_reasons(
                 &snapshot,
                 &policy,
                 pod_policy.as_ref(),
                 &flows,
+                &reasons,
             );
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
@@ -603,6 +628,37 @@ async fn main() -> Result<()> {
             DataplaneCommand::RefreshDns => {
                 let n = m.refresh_fqdn_policies().await?;
                 println!("{{\"refreshed\":{n}}}");
+            }
+            DataplaneCommand::MigrationState { id } => {
+                println!("{}", serde_json::to_string_pretty(
+                    &fluxvm_network::migration_state::status(&m.cfg, id)?
+                )?);
+            }
+            DataplaneCommand::MigrationQuiesce { id } => {
+                println!("{}", serde_json::to_string_pretty(
+                    &fluxvm_network::migration_state::quiesce(&m.cfg, id)?
+                )?);
+            }
+            DataplaneCommand::MigrationExport { id, output } => {
+                let snapshot = fluxvm_network::migration_state::export_snapshot(&m.cfg, id)?;
+                let encoded = serde_json::to_vec_pretty(&snapshot)?;
+                if let Some(path) = output {
+                    std::fs::write(path, &encoded)?;
+                } else {
+                    println!("{}", String::from_utf8(encoded)?);
+                }
+            }
+            DataplaneCommand::MigrationRestore { id, input } => {
+                let snapshot: fluxvm_network::migration_state::VmNetworkStateSnapshot =
+                    serde_json::from_slice(&std::fs::read(input)?)?;
+                println!("{}", serde_json::to_string_pretty(
+                    &fluxvm_network::migration_state::restore_snapshot(&m.cfg, id, &snapshot)?
+                )?);
+            }
+            DataplaneCommand::MigrationResume { id } => {
+                println!("{}", serde_json::to_string_pretty(
+                    &fluxvm_network::migration_state::resume(&m.cfg, id)?
+                )?);
             }
         },
         Command::Identity { command } => match command {
