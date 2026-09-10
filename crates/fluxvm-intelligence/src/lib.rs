@@ -8,6 +8,7 @@ pub mod tcpintel;
 pub mod netintel;
 pub mod memprof;
 pub mod topology;
+pub mod afxdp;
 
 use anyhow::{Context, Result, anyhow, bail};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};

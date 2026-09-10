@@ -1,0 +1,34 @@
+name: afxdp-fastpath
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_afxdp.bpf.c'
+      - 'crates/fluxvm-intelligence/src/afxdp.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-afxdp.rs'
+      - 'tools/fluxvm-afxdp-*.c'
+      - 'scripts/*afxdp*'
+      - '.github/workflows/afxdp-fastpath.yml'
+  push:
+    paths:
+      - 'bpf/fluxvm_afxdp.bpf.c'
+      - 'crates/fluxvm-intelligence/src/afxdp.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-afxdp.rs'
+      - 'tools/fluxvm-afxdp-*.c'
+      - 'scripts/*afxdp*'
+      - '.github/workflows/afxdp-fastpath.yml'
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Host packages
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev libxdp-dev bpftool pkg-config libsystemd-dev libhivex-dev iproute2 iputils-ping
+      - name: Rust tests
+        run: cargo test -p fluxvm-intelligence afxdp
+      - name: Build AF_XDP fast path
+        run: ./scripts/build-afxdp-fastpath.sh /tmp/afxdp-bpf /tmp/afxdp-bin
+      - name: Portable gates
+        run: ./scripts/test-afxdp-static.sh
+      - name: Privileged veth bridge test
+        run: sudo -E ./scripts/test-afxdp-host.sh
