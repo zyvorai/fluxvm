@@ -18,10 +18,14 @@
 //! docs/secure-containers.md.
 
 use anyhow::{Context, Result, bail};
+use aya::{
+    Ebpf,
+    programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType},
+};
 use clap::Parser;
 use fluxvm_container_protocol::{
-    ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStats,
-    ContainerStatus, ResourceLimits, IoStreamAck, IoStreamAttach, IoStreamKind,
+    ContainerEnvelope, ContainerIo, ContainerNetworkPolicy, ContainerRequest, ContainerResponse,
+    ContainerStats, ContainerStatus, ResourceLimits, IoStreamAck, IoStreamAttach, IoStreamKind,
     DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, MAX_MESSAGE_BYTES, decode_line,
     encode_line,
 };
@@ -31,9 +35,11 @@ use std::{
     ffi::CString,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    net::IpAddr,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
     os::unix::ffi::OsStrExt,
-    path::PathBuf,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -564,8 +570,8 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
             configure_sandbox_resources(&resources)?;
             Ok(ContainerResponse::SandboxResourcesConfigured)
         }
-        ContainerRequest::Create { id, config_json, io, is_sandbox, share_process_namespace } => {
-            create_container(id, &config_json, io, is_sandbox, share_process_namespace)
+        ContainerRequest::Create { id, config_json, io, is_sandbox, share_process_namespace, network_policy } => {
+            create_container(id, &config_json, io, is_sandbox, share_process_namespace, network_policy.as_ref())
         }
         ContainerRequest::Start { id, exec_id } => start_process(&id, exec_id.as_deref()),
         ContainerRequest::State { id, exec_id } => state_process(&id, exec_id.as_deref()),
@@ -622,6 +628,7 @@ fn create_container(
     io: ContainerIo,
     is_sandbox: bool,
     share_process_namespace: bool,
+    network_policy: Option<&ContainerNetworkPolicy>,
 ) -> Result<ContainerResponse> {
     let (spec, mounts, resources) = parse_oci_config(config_json)?;
     {
@@ -634,6 +641,22 @@ fn create_container(
         Ok(path) => path,
         Err(e) => { cleanup_mounts(&mounts); return Err(e); }
     };
+    // Sentinel Set 8S: attach in-guest per-container network policy before
+    // spawning the process, so it's enforced from this container's very
+    // first packet. Best-effort like the resource-limit cgroup itself above
+    // it: a guest kernel missing cgroup_skb/BTF support still runs the
+    // container, just without this layer -- see
+    // docs/secure-containers-set8s.md for why this differs from the
+    // fail-closed-by-default *policy content* design (attach failure is a
+    // platform-capability gap, not a missing-policy race).
+    match attach_guest_network_policy(&cgroup_path) {
+        Ok(()) => {
+            if let Err(e) = configure_container_policy(cgroup_id_for(&cgroup_path).unwrap_or(0), network_policy) {
+                eprintln!("Set 8S: configuring guest network policy for {id:?} failed: {e:#}");
+            }
+        }
+        Err(e) => eprintln!("Set 8S: attaching guest network policy for {id:?} failed: {e:#}"),
+    }
     let mut reg = registry().lock().expect("registry poisoned");
     if reg.contains_key(&id) {
         cleanup_container_cgroup(&cgroup_path);
@@ -749,6 +772,11 @@ fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<Contai
         let final_state = handle.wait();
         if let Some(mut entry) = reg.remove(id) {
             cleanup_mounts(&entry.mounts);
+            // Must read the cgroup id before cleanup_container_cgroup
+            // removes the directory out from under us.
+            if let Ok(cgroup_id) = cgroup_id_for(&entry.cgroup_path) {
+                forget_container_policy(cgroup_id);
+            }
             cleanup_container_cgroup(&entry.cgroup_path);
             if entry.is_sandbox {
                 // Deleting the sandbox invalidates joined-namespace sharing
@@ -1201,6 +1229,196 @@ fn create_container_cgroup(id: &str, resources: &ResourceLimits) -> Result<PathB
     std::fs::create_dir_all(&path).with_context(|| format!("creating container cgroup {}", path.display()))?;
     apply_resource_limits(&path, resources)?;
     Ok(path)
+}
+
+// ---- Sentinel Set 8S: in-guest per-container network policy ----
+//
+// bpf/fluxvm_guest_cgroup.bpf.c is compiled at `cargo build` time (see
+// build.rs) and embedded here so this binary stays a single self-contained
+// file to upload over VSOCK. One loaded instance is shared across every
+// container in this Pod VM -- see that file's header comment for why that's
+// safe (maps are keyed by cgroup id, not by attachment instance).
+
+const FLUXVM_CPOL_ENABLED: u64 = 1 << 0;
+const FLUXVM_CPOL_DEFAULT_ALLOW: u64 = 1 << 1;
+const FLUXVM_CPOL_AUDIT: u64 = 1 << 2;
+const FLUXVM_CPEER_ALLOW: u32 = 1;
+const FLUXVM_CPEER_DENY: u32 = 2;
+
+static GUEST_CGROUP_BPF_OBJ: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/fluxvm_guest_cgroup.bpf.o"));
+
+/// Must byte-match `struct fluxvm_cid4_key` in bpf/fluxvm_guest_cgroup.bpf.c.
+/// `address` is raw packet-order bytes (`Ipv4Addr::octets()`), never a
+/// computed integer -- `bpf_map_lookup_elem` does a byte-for-byte key
+/// comparison, so as long as both sides agree on which bytes go where, no
+/// endianness conversion is needed or correct to apply.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Cid4Key {
+    cgroup_id: u64,
+    address: [u8; 4],
+    reserved: u32,
+}
+unsafe impl aya::Pod for Cid4Key {}
+
+/// Must byte-match `struct fluxvm_cid6_key`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Cid6Key {
+    cgroup_id: u64,
+    address: [u8; 16],
+}
+unsafe impl aya::Pod for Cid6Key {}
+
+struct GuestEbpfState {
+    bpf: Ebpf,
+    programs_loaded: bool,
+}
+
+static GUEST_EBPF: OnceLock<Mutex<Option<GuestEbpfState>>> = OnceLock::new();
+
+fn guest_ebpf_cell() -> &'static Mutex<Option<GuestEbpfState>> {
+    GUEST_EBPF.get_or_init(|| Mutex::new(None))
+}
+
+/// Attaches both Set 8S programs to `cgroup_path` (already created by
+/// `create_container_cgroup`). Lazily loads the shared `Ebpf` object and
+/// loads each program into the kernel exactly once, on the first container;
+/// every later container only needs a fresh `attach()` call against the
+/// already-loaded programs.
+fn attach_guest_network_policy(cgroup_path: &Path) -> Result<()> {
+    let cgroup_file =
+        File::open(cgroup_path).with_context(|| format!("opening cgroup {}", cgroup_path.display()))?;
+    let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
+    if guard.is_none() {
+        let bpf = Ebpf::load(GUEST_CGROUP_BPF_OBJ).context("loading fluxvm_guest_cgroup.bpf.o")?;
+        *guard = Some(GuestEbpfState { bpf, programs_loaded: false });
+    }
+    let state = guard.as_mut().expect("just initialized above");
+
+    if !state.programs_loaded {
+        let egress: &mut CgroupSkb = state
+            .bpf
+            .program_mut("fluxvm_guest_egress")
+            .context("fluxvm_guest_egress program not found in object")?
+            .try_into()?;
+        egress.load().context("loading fluxvm_guest_egress into the kernel")?;
+        let ingress: &mut CgroupSkb = state
+            .bpf
+            .program_mut("fluxvm_guest_ingress")
+            .context("fluxvm_guest_ingress program not found in object")?
+            .try_into()?;
+        ingress.load().context("loading fluxvm_guest_ingress into the kernel")?;
+        state.programs_loaded = true;
+    }
+
+    let egress: &mut CgroupSkb = state.bpf.program_mut("fluxvm_guest_egress").expect("loaded above").try_into()?;
+    let egress_cgroup = cgroup_file.try_clone().context("duplicating cgroup fd")?;
+    egress
+        .attach(egress_cgroup, CgroupSkbAttachType::Egress, CgroupAttachMode::Single)
+        .context("attaching fluxvm_guest_egress")?;
+
+    let ingress: &mut CgroupSkb = state.bpf.program_mut("fluxvm_guest_ingress").expect("loaded above").try_into()?;
+    ingress
+        .attach(cgroup_file, CgroupSkbAttachType::Ingress, CgroupAttachMode::Single)
+        .context("attaching fluxvm_guest_ingress")?;
+
+    Ok(())
+}
+
+/// Populates (or, with `policy: None`, installs an enabled-but-empty entry
+/// for) `cgroup_id`'s policy. Must run after a successful
+/// `attach_guest_network_policy` for the same container.
+fn configure_container_policy(cgroup_id: u64, policy: Option<&ContainerNetworkPolicy>) -> Result<()> {
+    let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
+    let state = guard.as_mut().context("guest eBPF not attached yet")?;
+
+    let mut flags = FLUXVM_CPOL_ENABLED;
+    if let Some(p) = policy {
+        if p.default_allow { flags |= FLUXVM_CPOL_DEFAULT_ALLOW; }
+        if p.audit_mode { flags |= FLUXVM_CPOL_AUDIT; }
+    }
+
+    {
+        let cpol_map = state.bpf.map_mut("fluxvm_cpol").context("fluxvm_cpol map not found")?;
+        let mut cpol: aya::maps::HashMap<_, u64, u64> = aya::maps::HashMap::try_from(cpol_map)?;
+        cpol.insert(cgroup_id, flags, 0).context("writing fluxvm_cpol entry")?;
+    }
+
+    let Some(policy) = policy else { return Ok(()) };
+
+    {
+        let cid4_map = state.bpf.map_mut("fluxvm_cid4").context("fluxvm_cid4 map not found")?;
+        let mut cid4: aya::maps::HashMap<_, Cid4Key, u32> = aya::maps::HashMap::try_from(cid4_map)?;
+        for (addrs, verdict) in [(&policy.allow_addresses, FLUXVM_CPEER_ALLOW), (&policy.deny_addresses, FLUXVM_CPEER_DENY)] {
+            for addr in addrs {
+                if let IpAddr::V4(v4) = addr {
+                    let key = Cid4Key { cgroup_id, address: v4.octets(), reserved: 0 };
+                    cid4.insert(key, verdict, 0).context("writing fluxvm_cid4 entry")?;
+                }
+            }
+        }
+    }
+    {
+        let cid6_map = state.bpf.map_mut("fluxvm_cid6").context("fluxvm_cid6 map not found")?;
+        let mut cid6: aya::maps::HashMap<_, Cid6Key, u32> = aya::maps::HashMap::try_from(cid6_map)?;
+        for (addrs, verdict) in [(&policy.allow_addresses, FLUXVM_CPEER_ALLOW), (&policy.deny_addresses, FLUXVM_CPEER_DENY)] {
+            for addr in addrs {
+                if let IpAddr::V6(v6) = addr {
+                    let key = Cid6Key { cgroup_id, address: v6.octets() };
+                    cid6.insert(key, verdict, 0).context("writing fluxvm_cid6 entry")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort cleanup of a deleted container's map entries. Detaching the
+/// programs themselves happens implicitly when the cgroup is removed
+/// (`cleanup_container_cgroup`); this only prevents `fluxvm_cpol`/
+/// `fluxvm_cid4`/`fluxvm_cid6` from growing unboundedly across a long-lived
+/// Pod VM's container churn.
+fn forget_container_policy(cgroup_id: u64) {
+    let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
+    let Some(state) = guard.as_mut() else { return };
+
+    if let Some(map) = state.bpf.map_mut("fluxvm_cpol") {
+        if let Ok(mut cpol) = aya::maps::HashMap::<_, u64, u64>::try_from(map) {
+            let _ = cpol.remove(&cgroup_id);
+        }
+    }
+    if let Some(map) = state.bpf.map_mut("fluxvm_cid4") {
+        if let Ok(mut cid4) = aya::maps::HashMap::<_, Cid4Key, u32>::try_from(map) {
+            let stale: Vec<Cid4Key> = cid4
+                .iter()
+                .filter_map(Result::ok)
+                .map(|(k, _)| k)
+                .filter(|k| k.cgroup_id == cgroup_id)
+                .collect();
+            for key in stale {
+                let _ = cid4.remove(&key);
+            }
+        }
+    }
+    if let Some(map) = state.bpf.map_mut("fluxvm_cid6") {
+        if let Ok(mut cid6) = aya::maps::HashMap::<_, Cid6Key, u32>::try_from(map) {
+            let stale: Vec<Cid6Key> = cid6
+                .iter()
+                .filter_map(Result::ok)
+                .map(|(k, _)| k)
+                .filter(|k| k.cgroup_id == cgroup_id)
+                .collect();
+            for key in stale {
+                let _ = cid6.remove(&key);
+            }
+        }
+    }
+}
+
+fn cgroup_id_for(path: &Path) -> Result<u64> {
+    Ok(std::fs::metadata(path).with_context(|| format!("statting cgroup {}", path.display()))?.ino())
 }
 
 fn container_cgroup(id: &str) -> Result<PathBuf> {
@@ -2280,5 +2498,61 @@ mod tests {
         assert_ne!(r & libc::FD_CLOEXEC, 0);
         assert_ne!(w & libc::FD_CLOEXEC, 0);
         unsafe { libc::close(read_fd); libc::close(write_fd); }
+    }
+
+    /// Set 8S: exercises the real attach/configure/cleanup flow against a
+    /// throwaway cgroup v2 subtree -- not a mock. Needs root (cgroup_skb
+    /// attach requires CAP_SYS_ADMIN) and a real cgroup2 mount, so it skips
+    /// itself rather than failing CI runners that have neither; run with
+    /// `sudo cargo test -p fluxvm-container-agent guest_cgroup_policy_attaches_and_enforces -- --nocapture`
+    /// on a real Linux host to actually exercise it.
+    #[test]
+    fn guest_cgroup_policy_attaches_and_enforces() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: needs root for cgroup_skb attach");
+            return;
+        }
+        let cgroup_root = std::path::Path::new("/sys/fs/cgroup");
+        if !cgroup_root.join("cgroup.controllers").exists() {
+            eprintln!("skipping: no cgroup v2 mount at /sys/fs/cgroup");
+            return;
+        }
+        let test_cgroup = cgroup_root.join("fluxvm-agent-test-8s");
+        let _ = std::fs::remove_dir(&test_cgroup);
+        std::fs::create_dir_all(&test_cgroup).expect("creating test cgroup");
+
+        let result = (|| -> Result<()> {
+            attach_guest_network_policy(&test_cgroup)?;
+            let cgroup_id = cgroup_id_for(&test_cgroup)?;
+            // default_allow: false, no explicit peers -- everything but
+            // loopback should be denied once this is live.
+            configure_container_policy(cgroup_id, Some(&ContainerNetworkPolicy::default()))?;
+
+            // Move this test thread's process into the cgroup and prove
+            // enforcement with a real socket, not just "attach succeeded".
+            std::fs::write(test_cgroup.join("cgroup.procs"), std::process::id().to_string())?;
+            let deny = std::net::TcpStream::connect_timeout(
+                &"93.184.216.34:80".parse().unwrap(),
+                std::time::Duration::from_millis(500),
+            );
+            assert!(deny.is_err(), "expected non-loopback connect to be blocked by default-deny policy");
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let port = listener.local_addr()?.port();
+            let allow = std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{port}").parse().unwrap(),
+                std::time::Duration::from_millis(500),
+            );
+            assert!(allow.is_ok(), "expected loopback connect to remain allowed (both this process's egress and, as the listener, its own ingress are in the same policed cgroup)");
+
+            forget_container_policy(cgroup_id);
+            Ok(())
+        })();
+
+        // Move this process back to the root cgroup before cleanup can
+        // remove the test one (cgroup v2 requires an empty cgroup to rmdir).
+        let _ = std::fs::write(cgroup_root.join("cgroup.procs"), std::process::id().to_string());
+        let _ = std::fs::remove_dir(&test_cgroup);
+        result.expect("guest cgroup policy attach/configure/enforce flow");
     }
 }

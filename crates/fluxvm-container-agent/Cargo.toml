@@ -18,3 +18,12 @@ clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 serde_json = "1"
 fluxvm-container-protocol = { path = "../fluxvm-container-protocol" }
+# Sentinel Set 8S: a deliberate, narrowly-scoped exception to the project's
+# "bpftool+tc, not aya/libbpf" rule (crates/fluxvm-network/src/ebpf.rs) --
+# this crate is a single self-contained binary the shim uploads fresh into
+# the guest every boot (not part of the shared host dependency graph that
+# rule protects), and the minimal guest image cannot be relied on to have
+# bpftool installed the way the host always does. See
+# docs/secure-containers-set8s.md for the reasoning and empirical
+# confirmation that aya loads a plain clang-compiled BTF object fine.
+aya = "0.13"

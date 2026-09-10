@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 7
+## Implemented through Set 8
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
 - one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
@@ -89,6 +89,13 @@ the VM's existing per-instance authentication token.
   every VM, not only Secure Containers Pods.
 - VM boot pipelined with the host-side rootfs mount+copy instead of strictly
   sequential — see [docs/secure-containers-set7r.md](secure-containers-set7r.md).
+- **Sentinel**: in-guest, per-container `cgroup_skb` network policy
+  (fail-closed by default) so one container in a multi-container Pod can no
+  longer reach another's local ports unchecked — the first Sentinel piece
+  Kata has no equivalent of. Uses `aya` as a deliberate, narrowly-scoped
+  exception to the project's "no aya/libbpf" rule. Not yet wired to Set 6S's
+  Pod policy as an automatic per-container default — see
+  [docs/secure-containers-set8s.md](secure-containers-set8s.md).
 
 ## Current limitations
 
