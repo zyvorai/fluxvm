@@ -90,11 +90,10 @@ pub struct KvmRegs {
 /// Raw host CPUID, used only to backfill leaves KVM_GET_SUPPORTED_CPUID
 /// zeroes out (e.g. leaf 0x15) despite the host actually supporting them.
 #[cfg(target_arch = "x86_64")]
+#[allow(unused_unsafe)] // __cpuid_count's unsafe-ness varies by rustc version
 fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    unsafe {
-        let r = std::arch::x86_64::__cpuid_count(leaf, subleaf);
-        (r.eax, r.ebx, r.ecx, r.edx)
-    }
+    let r = unsafe { std::arch::x86_64::__cpuid_count(leaf, subleaf) };
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// This hypervisor only ever runs on x86_64 (raw KVM ioctls, x86 CPUID) --
@@ -120,6 +119,7 @@ pub struct KvmVm {
     pub vm_fd: i32,
     pub vcpus: Vec<VcpuHandle>,
     pub run_size: usize,
+    tsc_deadline_supported: bool,
 }
 
 unsafe impl Send for KvmVm {}
@@ -167,6 +167,22 @@ impl KvmVm {
             if ffi::flux_ioctl(vm_fd, ffi::KVM_CREATE_IRQCHIP, std::ptr::null_mut()) < 0 {
                 return Err(FluxError::Hypervisor("KVM_CREATE_IRQCHIP".into()));
             }
+            // KVM_GET_SUPPORTED_CPUID unconditionally clears CPUID.01H:
+            // ECX[24] (TSC_DEADLINE) regardless of whether the host CPU
+            // and in-kernel irqchip actually support it -- this capability
+            // check is the real source of truth (same technique crosvm
+            // uses). Without it the guest falls back to legacy
+            // periodic-mode LAPIC timer reprogramming via LVTT/TMICT,
+            // which live tracing showed stalling permanently after an
+            // initial burst of ticks. TSC-deadline mode uses a single
+            // WRMSR per timer event instead, sidestepping that path
+            // entirely.
+            let tsc_deadline_supported = ffi::flux_ioctl(
+                kvm_fd,
+                ffi::KVM_CHECK_EXTENSION,
+                ffi::KVM_CAP_TSC_DEADLINE_TIMER as *mut c_void,
+            ) > 0;
+            eprintln!("[kvm] TSC-deadline timer supported: {tsc_deadline_supported}");
             // In-kernel PIT so the guest can calibrate timers / get IRQ0.
             #[repr(C)]
             struct KvmPitConfig {
@@ -255,6 +271,7 @@ impl KvmVm {
                 vm_fd,
                 vcpus,
                 run_size: mmap_size as usize,
+                tsc_deadline_supported,
             };
             for id in 0..num_cpus as usize {
                 this.setup_cpuid(id)?;
@@ -311,8 +328,21 @@ impl KvmVm {
             let entries = (buf.as_mut_ptr().add(std::mem::size_of::<Header>())) as *mut Entry;
             for i in 0..nent {
                 let e = &mut *entries.add(i);
+                if e.function == 0 && e.index == 0 {
+                    // A guest's CPUID leaf reader may refuse to query leaf
+                    // 0x15 at all if leaf 0's reported max-standard-
+                    // function is lower than that (matches crosvm).
+                    e.eax = e.eax.max(0x15);
+                }
                 if e.function == 1 {
                     e.ebx = (e.ebx & 0x00ff_ffff) | (apic_id << 24);
+                    // "Hypervisor present" -- always true here, and some
+                    // guest-kernel paravirt/topology decisions gate on it
+                    // (matches crosvm, which sets this unconditionally).
+                    e.ecx |= 1 << 31;
+                    if self.tsc_deadline_supported {
+                        e.ecx |= 1 << 24;
+                    }
                 }
                 // KVM_GET_SUPPORTED_CPUID always zeroes leaf 0x15 (TSC /
                 // "core crystal clock" ratio) even when the host CPU
@@ -582,15 +612,33 @@ impl KvmVm {
     pub fn run_once(&self, idx: usize) -> Result<u32> {
         let r = unsafe { ffi::flux_ioctl(self.vcpus[idx].fd, ffi::KVM_RUN, std::ptr::null_mut()) };
         if r < 0 {
-            return Err(FluxError::Hypervisor(format!("KVM_RUN errno {}", unsafe {
-                ffi::flux_errno()
-            })));
+            let errno = unsafe { ffi::flux_errno() };
+            // A signal delivered to force a stuck/looping vCPU out of
+            // KVM_RUN (the gdbstub's break-in mechanism: set
+            // immediate_exit then signal this thread) surfaces as EINTR.
+            // Treat it the same as KVM_EXIT_INTR -- "nothing to handle,
+            // just re-check state and loop" -- rather than a fatal error.
+            if errno == ffi::EINTR {
+                return Ok(ffi::KVM_EXIT_INTR);
+            }
+            return Err(FluxError::Hypervisor(format!("KVM_RUN errno {errno}")));
         }
         Ok(self.exit_reason(idx))
     }
 
     pub fn exit_reason(&self, idx: usize) -> u32 {
         unsafe { std::ptr::read_unaligned(self.vcpus[idx].run.add(8) as *const u32) }
+    }
+
+    /// Force the next (or currently in-flight) KVM_RUN on this vCPU to
+    /// return immediately without entering/continuing guest execution.
+    /// Combined with a signal sent to the vCPU's OS thread (needed to
+    /// break out of a KVM_RUN already in progress), this is the standard
+    /// technique for an external "pause"/gdbstub break-in.
+    pub fn request_immediate_exit(&self, idx: usize, on: bool) {
+        unsafe {
+            std::ptr::write_volatile(self.vcpus[idx].run.add(1), on as u8);
+        }
     }
 
     pub fn io_info(&self, idx: usize) -> (u8, u8, u16, u32, u32) {

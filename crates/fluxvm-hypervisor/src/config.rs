@@ -29,6 +29,8 @@ pub struct VmConfig {
     pub net_mbit_limit: u32,
     pub dry_run: bool,
     pub print_host_net: bool,
+    /// `addr:port` to listen on for the minimal gdbstub (see `gdbstub.rs`).
+    pub gdb: Option<String>,
 }
 
 impl Default for VmConfig {
@@ -49,6 +51,7 @@ impl Default for VmConfig {
             net_mbit_limit: 0,
             dry_run: false,
             print_host_net: false,
+            gdb: None,
         }
     }
 }
@@ -90,6 +93,7 @@ impl VmConfig {
                 "--net-mbit-limit" => c.net_mbit_limit = parse_next(&mut args, "--net-mbit-limit")?,
                 "--dry-run" => c.dry_run = true,
                 "--print-host-net" => c.print_host_net = true,
+                "--gdb" => c.gdb = Some(req(&mut args, "--gdb")?),
                 other => {
                     return Err(FluxError::Unsupported(format!("unknown arg {other}")));
                 }
@@ -155,6 +159,7 @@ OPTIONS:
   --firmware <OVMF.fd>      Windows / UEFI
   --dry-run                 print topology, do not KVM_RUN
   --print-host-net          print TAP setup script
+  --gdb <ADDR:PORT>         minimal read-only gdbstub for live inspection
   -h, --help
 "
     );

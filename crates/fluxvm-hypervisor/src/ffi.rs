@@ -89,6 +89,15 @@ pub const MAP_FAILED: usize = !0;
 
 pub const KVM_GET_API_VERSION: c_ulong = 0xae00;
 pub const KVM_CREATE_VM: c_ulong = 0xae01;
+/// `_IO(KVMIO, 0x03)` — arg is the KVM_CAP_* id itself (not a pointer).
+pub const KVM_CHECK_EXTENSION: c_ulong = 0xae03;
+/// Whether the in-kernel LAPIC can accept a raw TSC-deadline WRMSR.
+/// KVM_GET_SUPPORTED_CPUID unconditionally clears CPUID.01H:ECX[24]
+/// (TSC_DEADLINE) even when both the host CPU and the in-kernel irqchip
+/// support it -- this capability check is the correct way to know
+/// whether it's actually safe to advertise to the guest (matches how
+/// crosvm derives its own TSC-deadline CPUID bit).
+pub const KVM_CAP_TSC_DEADLINE_TIMER: c_ulong = 72;
 pub const KVM_GET_VCPU_MMAP_SIZE: c_ulong = 0xae04;
 pub const KVM_CREATE_VCPU: c_ulong = 0xae41;
 pub const KVM_SET_USER_MEMORY_REGION: c_ulong = 0x4020_ae46;
@@ -124,3 +133,6 @@ pub const KVM_EXIT_INTERNAL_ERROR: u32 = 17;
 
 pub const KVM_EXIT_IO_IN: u8 = 0;
 pub const KVM_EXIT_IO_OUT: u8 = 1;
+
+/// Errno for a syscall interrupted by a delivered signal.
+pub const EINTR: c_int = 4;

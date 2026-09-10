@@ -15,6 +15,7 @@ pub mod control;
 pub mod devices;
 pub mod error;
 pub mod ffi;
+pub mod gdbstub;
 pub mod guest;
 pub mod hypervisor;
 pub mod kvm;
