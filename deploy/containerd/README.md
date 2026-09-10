@@ -74,10 +74,40 @@ OCI seccomp argument filters now use guest `libseccomp.so.2`
 fail-closed when requested. OCI `linux.resources.devices` rules are compiled
 into a `BPF_PROG_TYPE_CGROUP_DEVICE` program and attached to the per-container
 guest cgroup; the guest therefore needs cgroup v2 + `CONFIG_CGROUP_BPF` when a
-device policy is present. `SCMP_ACT_NOTIFY` and SELinux `mountLabel` remain
-unsupported and are rejected rather than ignored.
+device policy is present. `SCMP_ACT_NOTIFY` and SELinux `mountLabel` are
+implemented in Set 11 below, not this Set.
 
 Run `scripts/e2e-secure-containers-security.sh` on the target node/guest image.
+
+## Set 11 seccomp notification + SELinux mount labels
+
+Explicit OCI `SCMP_ACT_NOTIFY` syscall rules are served by a bounded in-guest
+supervisor: the listener fd libseccomp creates is transferred via `SCM_RIGHTS`
+over a private socketpair to a broker thread that stays outside the
+workload's own filter/chroot. Default policy is fail closed
+(`io.zyvor.seccomp.notify.mode=deny` -> `EPERM`; opt in to
+`io.zyvor.seccomp.notify.mode=continue` and
+`io.zyvor.seccomp.notify.errno=<1..4095>` via OCI annotations). `NOTIFY` as
+`seccomp.defaultAction` and `NOTIFY` on `sendmsg` are both rejected at parse
+time — both would deadlock the listener bootstrap before the broker owns the
+fd. `SECCOMP_IOCTL_NOTIF_ADDFD` and remote policy RPC are not implemented.
+
+OCI `linux.mountLabel` is validated against an enabled SELinux guest with
+`libselinux.so.1` present, then appended as `context="<label>"` to
+OCI-created mount options. An existing `context`/`fscontext`/`defcontext`/
+`rootcontext` mount option conflicts with `linux.mountLabel` and is rejected
+rather than merged. Process `selinuxLabel` remains Set 10 behavior; the Pod
+rootfs's own virtiofs superblock (staged before OCI mount setup) is not
+retroactively relabeled.
+
+The container-agent lifecycle protocol exposes a `SecurityStats` counter
+snapshot (notify received/denied/continued/errors, mounts labeled, LSM
+preflight failures); the shim logs one on init-container delete. Run
+`scripts/preflight-secure-containers-set11.sh` in the guest image before
+enabling NOTIFY profiles (checks kernel seccomp user-notify support and a
+v2.5-era `libseccomp.so.2`).
+
+Detail: [docs/secure-containers-set11.md](../../docs/secure-containers-set11.md).
 
 > Developer-preview. Validate VSOCK stdio/TTY, CNI, and PVC behavior on your
 > KVM/containerd/Kubernetes node image before production. See

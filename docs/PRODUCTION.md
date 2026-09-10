@@ -62,11 +62,11 @@ images — not only the dataplane.
       `microvm.fluxvm.zyvor.io`) — [microvm.md](microvm.md),
       [tutorials/microvm/](tutorials/microvm/README.md)
 - [ ] Secure Containers RuntimeClass on lab nodes after guest-image + CNI L2
-      + Set 3–5 lifecycle/OCI/volume/stdio-TTY smoke —
-      [secure-containers.md](secure-containers.md),
-      [secure-containers-set3.md](secure-containers-set3.md),
-      [secure-containers-set4.md](secure-containers-set4.md),
-      [secure-containers-set5.md](secure-containers-set5.md),
+      + Set 3–5 lifecycle/OCI/volume/stdio-TTY smoke, Set 6/6R recovery +
+      namespace isolation, Set 7–9 OOM/metrics + device lifecycle, and
+      Set 10/11 guest AppArmor/SELinux/seccomp-argument/seccomp-notify
+      enforcement —
+      [secure-containers.md](secure-containers.md) (rollup + per-Set links),
       `deploy/containerd/` (`FLUXVM_CONTAINER_CNI=0` for user-mode only)
 
 ## 6. Fleet (non-k8s)
@@ -80,11 +80,22 @@ images — not only the dataplane.
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.
 Secure Containers RuntimeClass as full Kata-equivalent (hostPath hotplug,
-broad CNI conformance, device-cgroup enforcement, opt-in `CLONE_NEWUSER`
-unvalidated under load beyond Set 6) — [secure-containers.md](secure-containers.md).
-Sentinel Pod-scoped network policy (Set 6) as automatically enforcing
+broad CNI/OCI conformance fixtures, `CLONE_NEWUSER` unvalidated under load,
+seccomp `SECCOMP_IOCTL_NOTIF_ADDFD`/remote policy RPC) —
+[secure-containers.md](secure-containers.md). Device-cgroup enforcement
+(`BPF_PROG_TYPE_CGROUP_DEVICE`, Set 10) and the seccomp user-notification
+broker (Set 11) are both implemented; live-node validation of the seccomp
+notify path against a real containerd/Kubernetes Pod and a real
+enforcing-SELinux mount label are still open.
+Sentinel Pod-scoped network policy (Set 6S) as automatically enforcing
 Kubernetes `NetworkPolicy` objects — the eBPF mechanism and API exist, but
 nothing yet watches/resolves live `NetworkPolicy` objects into it. Sentinel
-in-guest per-container network policy (Set 8) as inheriting a Pod's Set 6
+in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
 policy automatically — every container is enforced fail-closed by default,
-but the shim does not yet forward Pod policy content per container.
+but the shim does not yet forward Pod policy content per container. Sentinel
+in-guest eBPF LSM MAC (Set 9S) is off by default
+(`FLUXVM_CONTAINER_LSM=1`) and audit-only unless
+`FLUXVM_CONTAINER_LSM_ENFORCE=1` is also set; the guest-embedded `aya`
+loader has a known intermittent "error parsing ELF data" load failure on at
+least one validation host (see [secure-containers-set9s.md](secure-containers-set9s.md)),
+not yet root-caused to a fix.

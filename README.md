@@ -187,7 +187,7 @@ base image -> SHA256 -> qemu-img -> customize -> reusable template
                                       |
 VM launch: template -> disposable clone -> cloud-init -> VMM -> TTL delete
 
-Secure Containers (developer preview; Sets 2–5: CNI/cgroups, events/OCI, volumes/seccomp, VSOCK stdio/TTY):
+Secure Containers (developer preview; Sets 2–11: CNI/cgroups, events/OCI, volumes/seccomp, VSOCK stdio/TTY, namespaces/Sentinel, recovery/dual-stack, OOM/metrics, device passthrough/lifecycle, guest AppArmor/SELinux/seccomp-notify):
 Kubernetes/ctr -> containerd -> containerd-shim-fluxvm-v2
   -> FluxVM REST -> QEMU + virtiofs Pod share (+ Pod-UID write-through volumes)
   -> fluxvm-guest-agent :17777 -> fluxvm-container-agent :17778 / stdio :17779
@@ -262,6 +262,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - **Security groups** — `key=value` labels and numeric identities (`0x10000+`), deny CIDRs, ICMP passthrough, `fluxvm group` CLI, `/v1/network/groups` + `/v1/vms/{id}/network/effective`. See [docs/network-groups.md](docs/network-groups.md).
 - **Network policy (CNP)** — CNP compiler, reserved identities, CT learn/hit, audit mode, `fluxvm cnp` / `fluxvm identity` / `fluxvm observe`. See [docs/network-policy.md](docs/network-policy.md). Hands-on: [docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
 - **Production dataplane** — FQDN resolve at apply, FluxVM ipcache, health/ipcache/refresh-dns API + CLI, fail-closed prod profile. See [docs/production-dataplane.md](docs/production-dataplane.md).
+- **FluxVM Sentinel** — eBPF-based host + guest security/observability substrate spanning VM lifecycle, network and Secure Containers: per-VM runtime intelligence (page faults, migrations, syscall latency), TCX drop detective, kernel drop-reason + migration-state tracking, VM flight recorder, BPF-LSM VMM guard + adaptive QoS, XDP shield + TCP intelligence, memory-pressure/boot/snapshot profiler, vCPU/NUMA/RPS/IRQ topology steering, and an optional AF_XDP fast path for dedicated VM network interfaces. See [docs/runtime-intelligence.md](docs/runtime-intelligence.md), [docs/tcx-drop-detective.md](docs/tcx-drop-detective.md), [docs/drop-reason-migration-state.md](docs/drop-reason-migration-state.md), [docs/flight-recorder.md](docs/flight-recorder.md), [docs/vmm-guard-qos.md](docs/vmm-guard-qos.md), [docs/xdp-tcp-intelligence.md](docs/xdp-tcp-intelligence.md), [docs/memory-boot-profiler.md](docs/memory-boot-profiler.md), [docs/topology-steering.md](docs/topology-steering.md), and [docs/afxdp-fastpath.md](docs/afxdp-fastpath.md).
 - VNC for every QEMU-backed VM, over a unix socket — no port allocation.
 - Interactive console/shell: `GET /v1/vms/{id}/console` (WebSocket) and a guest-agent `OpenShell` vsock op for a real PTY.
 - File transfer over the guest agent: `PutFile`/`GetFile` vsock ops (`POST /v1/vms/{id}/agent/{put,get}-file`).
@@ -282,7 +283,7 @@ project (path dep from `fluxvm-image`) for offline image customization — see
 - End-to-end lifecycle smoke test (vsock exec, pause/resume, graceful shutdown, and vsock-CID uniqueness under concurrent creates, all verified against real VMs).
 - Kubernetes `DisposableVm` CRD + node-local operator (`fluxvm-kube`), verified against a real k3s cluster — see "Kubernetes CRD/operator" below.
 - Distributed node-agent (`fluxvm-agent`): central fleet registry + per-host heartbeat client with load-aware placement, verified across two real physically separate hosts — see "Distributed node-agent" below.
-- **Secure Containers v0.1+Set2–Set5** (developer preview) — containerd runtime `io.containerd.fluxvm.v2` / shim `containerd-shim-fluxvm-v2`: one Pod/task group → one QEMU FluxVM with virtiofs rootfs staging, guest cgroup-v2 stats/resources, optional CNI L2 Pod IP, task lifecycle events + OCI process hardening (Set 3), Pod-UID write-through volumes + guest RO/masked paths/devices/sysctls/libseccomp (Set 4), authenticated VSOCK stdio on :17779 with real guest PTY/`ResizePty`/`CloseIO` (Set 5), and lifecycle agent on VSOCK :17778. QEMU-only; hostPath hotplug remains a follow-up. See [docs/secure-containers.md](docs/secure-containers.md) and [Secure Containers](#secure-containers).
+- **Secure Containers v0.1+Set2–Set11** (developer preview) — containerd runtime `io.containerd.fluxvm.v2` / shim `containerd-shim-fluxvm-v2`: one Pod/task group → one QEMU FluxVM with virtiofs rootfs staging pipelined with VM boot (Set 7R), guest cgroup-v2 stats/resources + OOM/metrics (Set 7), CNI L2 Pod IP with restart-safe recovery + dual-stack replay (Set 6), task lifecycle events + OCI process hardening (Set 3), Pod-UID write-through volumes + guest RO/masked paths/devices/sysctls/libseccomp with argument comparators (Set 4, Set 10), authenticated VSOCK stdio on :17779 with real guest PTY/`ResizePty`/`CloseIO` (Set 5), per-container PID/mount/IPC/UTS namespace isolation with opt-in user namespace (Set 6R), Pod-scoped raw block/VFIO device hotplug with reference-counted hot-unplug (Set 8/9), fail-closed AppArmor/SELinux process labels, per-container device-cgroup BPF, a bounded seccomp user-notification broker and SELinux mount labels (Set 10/11), plus **FluxVM Sentinel** in-guest/host eBPF policy layered on top — identity-aware Pod network policy (Set 6S), per-VM QEMU cgroup device/egress hardening (Set 7S), in-guest per-container network policy (Set 8S), and in-guest eBPF LSM MAC (Set 9S) — and lifecycle agent on VSOCK :17778. QEMU-only; hostPath hotplug remains a follow-up. See [docs/secure-containers.md](docs/secure-containers.md) and [Secure Containers](#secure-containers).
 
 ## Host requirements
 
@@ -1723,15 +1724,26 @@ and guest cgroup-v2 stats/resource updates. **Set 3** adds containerd task event
 watching, and guest OCI process hardening (caps/rlimits/umask/noNewPrivileges/gids). **Set 4**
 adds Pod-UID-scoped write-through kubelet volumes/`volume-subpaths`, plus guest RO rootfs,
 masked/RO paths, devices, sysctls, and fail-closed libseccomp. **Set 5** adds authenticated
-VSOCK stdio streaming, real guest PTY for `terminal=true`, and `ResizePty`/`CloseIO`. Plain
-`ctr` without a netns still uses user-mode networking.
+VSOCK stdio streaming, real guest PTY for `terminal=true`, and `ResizePty`/`CloseIO`. **Set 6**
+adds a restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay; **Set 6R**
+adds per-container PID/mount/IPC/UTS namespace isolation (`pivot_root`, opt-in `CLONE_NEWUSER`);
+**Set 6S** adds Sentinel identity-aware Pod network policy on the VM edge. **Set 7** adds
+`TaskOOM`/cgroup-v2 metrics and fail-closed raw block/device handling; **Set 7R** pipelines VM
+boot with the rootfs copy; **Set 7S** adds Sentinel per-VM QEMU cgroup device/egress hardening.
+**Set 8/9** add Pod-scoped raw block + VFIO PCI passthrough, reference-counted with QEMU
+`DEVICE_DELETED`-confirmed hot-unplug; **Set 8S** adds Sentinel in-guest per-container network
+policy. **Set 9S** adds Sentinel in-guest eBPF LSM MAC per container. **Set 10** adds OCI seccomp
+argument comparators, fail-closed AppArmor/SELinux process labels, and per-container
+`BPF_PROG_TYPE_CGROUP_DEVICE` enforcement. **Set 11** adds a bounded seccomp user-notification
+broker (`SCMP_ACT_NOTIFY`) and OCI `linux.mountLabel` SELinux mount labels. Plain `ctr` without a
+netns still uses user-mode networking.
 
 | Piece | Value |
 |-------|--------|
 | Runtime id | `io.containerd.fluxvm.v2` |
 | Shim binary | `containerd-shim-fluxvm-v2` |
 | RuntimeClass handler | `fluxvm` |
-| Docs | [docs/secure-containers.md](docs/secure-containers.md), [Set 3](docs/secure-containers-set3.md), [Set 4](docs/secure-containers-set4.md), [Set 5](docs/secure-containers-set5.md) |
+| Docs | [docs/secure-containers.md](docs/secure-containers.md) (rollup + per-Set links through Set 11) |
 | Deploy fragment | [`deploy/containerd/`](deploy/containerd/) |
 
 ```bash
@@ -1967,7 +1979,7 @@ assigned the same vsock CID.
 - The API is localhost-only by default. Off-loopback binds fail closed without `[[auth.tokens]]`; set `auth.require = true` to always require tokens. Audit lines go to the `fluxvm_audit` tracing target.
 - The vsock guest agent is authenticated by default for any VM created with `agent.enabled: true` (see "Pause, resume, and exec"), but this doesn't extend to mTLS/OIDC-style identity — it's one shared secret per VM, good enough to stop an unrelated host process, not a multi-tenant authorization model.
 - `guestkit`'s `inspect_os()` (used by `copy_in`) only recognizes partitioned disks and LVM volumes as OS roots by default; support for a bare, unpartitioned whole-disk filesystem (the shape Firecracker rootfs images are typically built in) was added as part of this project's testing and needs to make it into a real guestkit release — until then, building against a `guestkit` checkout without that fix will fail `copy_in` on such images with "no operating system found in image".
-- **Secure Containers** is developer-preview: QEMU/virtiofs only; Set 2 adds CNI L2 Pod IP + guest cgroup stats/resources; Set 3 adds task events + OCI process hardening; Set 4 adds Pod-UID write-through volumes + guest RO/masked paths/devices/sysctls/libseccomp; Set 5 adds VSOCK stdio streaming + guest PTY/`ResizePty`. HostPath hotplug and broader CNI/OCI namespace parity remain follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent yet.
+- **Secure Containers** is developer-preview: QEMU/virtiofs only. Through Set 11 it has CNI L2 Pod IP + guest cgroup stats/resources/OOM metrics, task events + OCI process hardening, Pod-UID write-through volumes + guest RO/masked paths/devices/sysctls/libseccomp with argument comparators, VSOCK stdio streaming + guest PTY/`ResizePty`, per-container PID/mount/IPC/UTS namespace isolation, restart-safe recovery + dual-stack CNI, Pod-scoped raw block/VFIO device hotplug with hot-unplug, fail-closed AppArmor/SELinux process labels + per-container device-cgroup BPF, a seccomp user-notification broker, and SELinux mount labels — plus Sentinel Pod/QEMU/per-container/in-guest-LSM eBPF policy layered on top. HostPath hotplug and broader CNI/OCI conformance remain follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent yet.
 
 ## License
 

@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 10
+## Implemented through Set 11
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
 - one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
@@ -111,6 +111,12 @@ the VM's existing per-instance authentication token.
   cgroup-v2 `BPF_PROG_TYPE_CGROUP_DEVICE` policy from OCI
   `linux.resources.devices` — see
   [docs/secure-containers-set10.md](secure-containers-set10.md)
+- a bounded in-guest seccomp user-notification broker for explicit
+  `SCMP_ACT_NOTIFY` rules (listener fd handed off via `SCM_RIGHTS` to a
+  supervisor thread outside the workload's own filter/chroot, fail-closed
+  by default), OCI `linux.mountLabel` SELinux mount labels, and a
+  `SecurityStats` lifecycle counter snapshot — see
+  [docs/secure-containers-set11.md](secure-containers-set11.md)
 
 ## Current limitations
 
@@ -133,11 +139,13 @@ Containers compatibility.
    control is now a real `BPF_PROG_TYPE_CGROUP_DEVICE` program compiled from
    OCI `linux.resources.devices` and attached to the per-container guest
    cgroup, not just the existing static device-node bind mounts.
-5. **Seccomp argument comparators are implemented; notify is not.** All OCI
-   comparison operators (`SCMP_CMP_*`) are enforced via
-   `seccomp_rule_add_array`. `SCMP_ACT_NOTIFY` requires a persistent userspace
-   broker FluxVM does not implement yet and fails closed instead of silently
-   dropping policy.
+5. **Seccomp argument comparators and user notification are both
+   implemented.** All OCI comparison operators (`SCMP_CMP_*`) are enforced
+   via `seccomp_rule_add_array`. `SCMP_ACT_NOTIFY` is served by a bounded
+   in-guest broker (Set 11); `SCMP_ACT_NOTIFY` as `defaultAction` and NOTIFY
+   on `sendmsg` are both rejected at OCI-parse time rather than risking a
+   listener-bootstrap deadlock. `SECCOMP_IOCTL_NOTIF_ADDFD` and remote
+   policy RPC are not implemented.
 6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
    resize testing on self-hosted nodes before production claims.**
 7. **`CLONE_NEWUSER` is opt-in and unproven under load.** Default identity
@@ -170,11 +178,16 @@ Keep Pod-scoped kubelet volume exports as the safe default. Add a narrowly
 allowlisted broker/hotplug path for operators that intentionally need arbitrary
 hostPath or non-kubelet mounts.
 
-### P1 — seccomp notification broker
+### P1 — seccomp notification broker (landed, Set 11)
 
-Argument comparators are implemented (Set 10). Add a persistent
-`SCMP_ACT_NOTIFY` listener and broker lifecycle while retaining fail-closed
-behavior when the guest cannot service a requested notification profile.
+Argument comparators (Set 10) and a bounded, fail-closed
+`SCMP_ACT_NOTIFY` listener/broker lifecycle (Set 11) are both implemented —
+see [docs/secure-containers-set11.md](secure-containers-set11.md). Remaining
+follow-up: `SECCOMP_IOCTL_NOTIF_ADDFD` and remote policy RPC are not
+implemented, and the full live-node gates (a real enforcing-SELinux guest
+mount label, killing a notified container mid-flight through the full
+create/delete lifecycle) still need to run against a live containerd/
+Kubernetes Pod, not just the guest-agent binary in isolation.
 
 ### P1 — streaming/TTY conformance
 
@@ -230,7 +243,12 @@ FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`. Run
 `scripts/e2e-secure-containers-tty.sh` for VSOCK stdio + init/exec PTY/resize,
 and `scripts/e2e-secure-containers-namespaces.sh` for Set 6 PID/mount/IPC/UTS
 isolation (both need a Kubernetes cluster with the `fluxvm` RuntimeClass
-applied, not just bare `ctr`).
+applied, not just bare `ctr`). Set
+`FLUXVM_SECURE_CONTAINERS_SECURITY_E2E=1` to additionally run
+`scripts/e2e-secure-containers-security.sh` (Set 10 seccomp/AppArmor/SELinux/
+device-cgroup enforcement), and `FLUXVM_SECURE_CONTAINERS_SET11_PREFLIGHT=1`
+to run `scripts/preflight-secure-containers-set11.sh` (guest kernel/
+libseccomp/libselinux readiness for Set 11 NOTIFY/mountLabel).
 
 The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
 because ordinary hosted runners do not provide the nested virtualization and
