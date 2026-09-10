@@ -898,7 +898,7 @@ static __always_inline int handle_ipv4(
     // Set 6S remains additive. Schema v6 preserves Pod audit as an exact
     // kernel reason instead of losing it behind the boolean compatibility API.
     if (cfg->pod_id && allowed) {
-        int pod_verdict = fluxvm_pod_policy_verdict4(cfg->pod_id, iph->daddr);
+        int pod_verdict = fluxvm_pod_policy_verdict4(cfg->pod_id, iph->daddr, iph->protocol, dport);
         if (pod_verdict == FLUXVM_POD_VERDICT_DENY) {
             allowed = 0;
             deny_reason = FLUXVM_REASON_POD_POLICY_DENY;
@@ -1040,7 +1040,7 @@ static __always_inline int handle_ipv6(
     }
     if (cfg->pod_id && allowed) {
         int pod_verdict = fluxvm_pod_policy_verdict6(
-            cfg->pod_id, ip6->daddr.in6_u.u6_addr8);
+            cfg->pod_id, ip6->daddr.in6_u.u6_addr8, ip6->nexthdr, dport);
         if (pod_verdict == FLUXVM_POD_VERDICT_DENY) {
             allowed = 0;
             deny_reason = FLUXVM_REASON_POD_POLICY_DENY;

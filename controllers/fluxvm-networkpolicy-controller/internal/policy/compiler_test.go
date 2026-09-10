@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/zyvorai/fluxvm/controllers/fluxvm-networkpolicy-controller/internal/fluxvm"
 	"github.com/zyvorai/fluxvm/controllers/fluxvm-networkpolicy-controller/internal/kube"
 )
 
@@ -68,7 +69,7 @@ func TestSelectorUnionAcrossPolicies(t *testing.T) {
 	}
 }
 
-func TestPortRuleFailsStricter(t *testing.T) {
+func TestNumericPortRuleCompiles(t *testing.T) {
 	target := pod("app", "a", "u1", "node1", "10.0.0.1", map[string]string{"app": "web"})
 	db := pod("app", "db", "u2", "node2", "10.0.0.20", map[string]string{"role": "db"})
 	port := kube.NetworkPolicyPort{Protocol: "TCP", Port: float64(5432)}
@@ -77,8 +78,85 @@ func TestPortRuleFailsStricter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(r.Policy.AllowAddresses) != 0 || len(r.Unsupported) != 1 || !strings.Contains(r.Unsupported[0], "ports") {
-		t.Fatalf("unexpected stricter result: %+v", r)
+	want := []fluxvm.PodPeerPortRule{{Address: "10.0.0.20", Protocol: fluxvm.ProtocolTCP, Port: 5432}}
+	if len(r.Policy.AllowAddresses) != 0 || len(r.Unsupported) != 0 || !reflect.DeepEqual(r.Policy.AllowPortRules, want) {
+		t.Fatalf("unexpected numeric-port result: %+v", r)
+	}
+}
+
+func TestPortRuleDefaultsToTCP(t *testing.T) {
+	target := pod("app", "a", "u1", "node1", "10.0.0.1", map[string]string{"app": "web"})
+	db := pod("app", "db", "u2", "node2", "10.0.0.20", map[string]string{"role": "db"})
+	port := kube.NetworkPolicyPort{Port: float64(53)} // Protocol omitted -> Kubernetes default TCP.
+	np := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "dns", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{Ports: []kube.NetworkPolicyPort{port}, To: []kube.NetworkPolicyPeer{{PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"role": "db"}}}}}}}}
+	r, err := Compile(target, Snapshot{Pods: []kube.Pod{target, db}, NetworkPolicies: []kube.NetworkPolicy{np}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []fluxvm.PodPeerPortRule{{Address: "10.0.0.20", Protocol: fluxvm.ProtocolTCP, Port: 53}}
+	if !reflect.DeepEqual(r.Policy.AllowPortRules, want) {
+		t.Fatalf("unexpected default-protocol result: %+v", r)
+	}
+}
+
+func TestAddressWideAllowMakesPortRuleRedundant(t *testing.T) {
+	// Union semantics: a peer already allowed on every port by one selected
+	// policy must not also carry a redundant port-scoped entry from a
+	// second, more restrictive policy that selects the same peer.
+	target := pod("app", "a", "u1", "node1", "10.0.0.1", map[string]string{"app": "web"})
+	db := pod("app", "db", "u2", "node2", "10.0.0.20", map[string]string{"role": "db"})
+	unrestricted := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "all-db", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{To: []kube.NetworkPolicyPeer{{PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"role": "db"}}}}}}}}
+	restricted := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "db-5432", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{Ports: []kube.NetworkPolicyPort{{Protocol: "TCP", Port: float64(5432)}}, To: []kube.NetworkPolicyPeer{{PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"role": "db"}}}}}}}}
+	r, err := Compile(target, Snapshot{Pods: []kube.Pod{target, db}, NetworkPolicies: []kube.NetworkPolicy{unrestricted, restricted}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(r.Policy.AllowAddresses, []string{"10.0.0.20"}) || len(r.Policy.AllowPortRules) != 0 {
+		t.Fatalf("expected address-wide allow to absorb the port rule: %+v", r)
+	}
+}
+
+func TestNamedPortFailsStricter(t *testing.T) {
+	target := pod("app", "a", "u1", "node1", "10.0.0.1", map[string]string{"app": "web"})
+	db := pod("app", "db", "u2", "node2", "10.0.0.20", map[string]string{"role": "db"})
+	port := kube.NetworkPolicyPort{Protocol: "TCP", Port: "postgres"}
+	np := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "db", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{Ports: []kube.NetworkPolicyPort{port}, To: []kube.NetworkPolicyPeer{{PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"role": "db"}}}}}}}}
+	r, err := Compile(target, Snapshot{Pods: []kube.Pod{target, db}, NetworkPolicies: []kube.NetworkPolicy{np}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Policy.AllowAddresses) != 0 || len(r.Policy.AllowPortRules) != 0 || len(r.Unsupported) != 1 || !strings.Contains(r.Unsupported[0], "named ports") {
+		t.Fatalf("unexpected named-port result: %+v", r)
+	}
+}
+
+func TestPortRangeFailsStricter(t *testing.T) {
+	target := pod("app", "a", "u1", "node1", "10.0.0.1", map[string]string{"app": "web"})
+	db := pod("app", "db", "u2", "node2", "10.0.0.20", map[string]string{"role": "db"})
+	endPort := int32(6000)
+	port := kube.NetworkPolicyPort{Protocol: "TCP", Port: float64(5000), EndPort: &endPort}
+	np := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "db", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{Ports: []kube.NetworkPolicyPort{port}, To: []kube.NetworkPolicyPeer{{PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"role": "db"}}}}}}}}
+	r, err := Compile(target, Snapshot{Pods: []kube.Pod{target, db}, NetworkPolicies: []kube.NetworkPolicy{np}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(r.Policy.AllowAddresses) != 0 || len(r.Policy.AllowPortRules) != 0 || len(r.Unsupported) != 1 || !strings.Contains(r.Unsupported[0], "endPort") {
+		t.Fatalf("unexpected port-range result: %+v", r)
+	}
+}
+
+func TestEmptyToWithPortsFailsStricter(t *testing.T) {
+	// A port-restricted rule with no `to` has no peer to attach the port
+	// rule to, and Set 6S has no all-address port-scoped allow -- must deny,
+	// not silently drop the port restriction and allow everyone.
+	target := pod("app", "a", "u1", "node1", "10.0.0.1", map[string]string{"app": "web"})
+	np := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "any-5432", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{Ports: []kube.NetworkPolicyPort{{Protocol: "TCP", Port: float64(5432)}}}}}}
+	r, err := Compile(target, Snapshot{Pods: []kube.Pod{target}, NetworkPolicies: []kube.NetworkPolicy{np}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Policy.DefaultDeny || len(r.Policy.AllowAddresses) != 0 || len(r.Policy.AllowPortRules) != 0 || len(r.Unsupported) != 1 {
+		t.Fatalf("unexpected empty-to-with-ports result: %+v", r)
 	}
 }
 

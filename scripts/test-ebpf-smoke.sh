@@ -120,6 +120,18 @@ print(" ".join(f"{b:02x}" for b in raw))
 PY
 }
 
+pod4_port_key() {
+  # Matches struct fluxvm_pid4_port_key in bpf/fluxvm_pod_policy.bpf.h:
+  # pod_id, address, protocol, one pad byte, port (host order). Set 13.
+  # Args: pod_id ip protocol port
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import ipaddress, struct, sys
+pod_id, ip, protocol, port = int(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
+raw = struct.pack("=I", pod_id) + ipaddress.IPv4Address(ip).packed + struct.pack("=BBH", protocol, 0, port)
+print(" ".join(f"{b:02x}" for b in raw))
+PY
+}
+
 pod_policy_value() {
   # u32 flags + 3*u32 reserved, matching struct fluxvm_pod_policy in
   # bpf/fluxvm_pod_policy.bpf.h. Arg: flags
@@ -378,6 +390,28 @@ expect_ping4
 bpftool -j map dump pinned "$PIN/tc/maps/fluxvm_ppstat" | grep -q 'key'
 # shellcheck disable=SC2086
 bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4" key hex $PODKEY4
+
+# Set 13: with the address-wide fluxvm_pid4 entry gone, a peer with no
+# port-scoped fluxvm_pid4_port entry still falls through to default_deny.
+expect_no_ping4
+# ICMP has no real port, but parse_ports4 defaults sport/dport to 0 for any
+# non-TCP/UDP protocol, so IPPROTO_ICMP(1)/port(0) is exactly the tuple this
+# ping's own packets present to fluxvm_pod_policy_verdict4 -- a wrong port
+# here (9999) must still miss and fall through to deny.
+WRONGPORT4="$(pod4_port_key "$POD_ID" "$A4" 1 9999)"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_port" key hex $WRONGPORT4 value hex $ONE
+expect_no_ping4
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_port" key hex $WRONGPORT4
+PORTKEY4="$(pod4_port_key "$POD_ID" "$A4" 1 0)"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_port" key hex $PORTKEY4 value hex $ONE
+expect_ping4
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_port" key hex $PORTKEY4
+expect_no_ping4
+
 # shellcheck disable=SC2086
 bpftool map delete pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY
 tc filter del dev "$A" ingress pref "$TC_PREF" handle 1 bpf

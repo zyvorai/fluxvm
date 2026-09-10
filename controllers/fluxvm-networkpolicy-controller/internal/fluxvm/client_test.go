@@ -73,3 +73,17 @@ func TestEqualPolicyCanonicalizesAddressOrder(t *testing.T) {
 		t.Fatal("expected policies to be equal")
 	}
 }
+
+func TestEqualPolicyCanonicalizesPortRuleOrderAndDupes(t *testing.T) {
+	rule1 := PodPeerPortRule{Address: "10.0.0.20", Protocol: ProtocolTCP, Port: 5432}
+	rule2 := PodPeerPortRule{Address: "10.0.0.20", Protocol: ProtocolUDP, Port: 53}
+	a := &PodNetworkPolicy{DefaultDeny: true, AllowPortRules: []PodPeerPortRule{rule2, rule1}}
+	b := &PodNetworkPolicy{DefaultDeny: true, AllowPortRules: []PodPeerPortRule{rule1, rule1, rule2}}
+	if !EqualPolicy(a, b) {
+		t.Fatal("expected policies to be equal after canonicalization")
+	}
+	c := &PodNetworkPolicy{DefaultDeny: true, AllowPortRules: []PodPeerPortRule{rule1}}
+	if EqualPolicy(a, c) {
+		t.Fatal("expected policies with different port rules to differ")
+	}
+}

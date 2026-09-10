@@ -107,6 +107,40 @@ pub struct PodNetworkPolicy {
     pub allow_addresses: Vec<IpAddr>,
     #[serde(default)]
     pub deny_addresses: Vec<IpAddr>,
+    /// Set 13: peers allowed only on specific protocol+port tuples, for
+    /// Kubernetes `NetworkPolicy` egress rules that carry a `ports` list. A
+    /// peer address here is ignored if it also appears in `allow_addresses`
+    /// -- an address-wide allow always wins, matching Kubernetes'
+    /// union-of-rules semantics (one unrestricted rule makes every port
+    /// reachable regardless of a separate, more specific rule). Named ports
+    /// and `endPort` ranges are not representable and must not be lowered
+    /// into this list by a compiler; deny those port entries instead.
+    #[serde(default)]
+    pub allow_port_rules: Vec<PodPeerPortRule>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum PodPolicyProtocol {
+    Tcp,
+    Udp,
+}
+
+impl PodPolicyProtocol {
+    /// Raw `IPPROTO_*` value as seen by the eBPF verdict functions.
+    pub fn ip_protocol_number(self) -> u8 {
+        match self {
+            PodPolicyProtocol::Tcp => 6,
+            PodPolicyProtocol::Udp => 17,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct PodPeerPortRule {
+    pub address: IpAddr,
+    pub protocol: PodPolicyProtocol,
+    pub port: u16,
 }
 
 pub fn default_policy(cfg: &Config) -> VmNetworkPolicy {
@@ -874,6 +908,39 @@ mod tests {
         assert_eq!(load_policy(&cfg, id).unwrap(), Some(policy.clone()));
         delete_policy(&cfg, id).unwrap();
         assert_eq!(load_policy(&cfg, id).unwrap(), None);
+    }
+
+    #[test]
+    fn pod_policy_round_trip_includes_port_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.state_dir = tmp.path().to_path_buf();
+        let id = Uuid::new_v4();
+        let policy = PodNetworkPolicy {
+            default_deny: true,
+            audit_mode: false,
+            allow_addresses: vec!["10.0.0.20".parse().unwrap()],
+            deny_addresses: Vec::new(),
+            allow_port_rules: vec![PodPeerPortRule {
+                address: "10.0.0.30".parse().unwrap(),
+                protocol: PodPolicyProtocol::Tcp,
+                port: 5432,
+            }],
+        };
+        save_pod_policy(&cfg, id, &policy).unwrap();
+        assert_eq!(load_pod_policy(&cfg, id).unwrap(), Some(policy));
+        delete_pod_policy(&cfg, id).unwrap();
+        assert_eq!(load_pod_policy(&cfg, id).unwrap(), None);
+    }
+
+    #[test]
+    fn pod_policy_without_port_rules_field_still_parses() {
+        // Set 13 added `allow_port_rules` after Set 6S shipped; a policy
+        // persisted (or POSTed) by an older build must still parse with an
+        // empty list, not fail to deserialize.
+        let json = r#"{"default_deny":true,"audit_mode":false,"allow_addresses":["10.0.0.20"],"deny_addresses":[]}"#;
+        let policy: PodNetworkPolicy = serde_json::from_str(json).unwrap();
+        assert!(policy.allow_port_rules.is_empty());
     }
 
     #[test]

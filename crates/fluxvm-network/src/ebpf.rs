@@ -21,7 +21,7 @@ use std::{
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::dataplane::{PodNetworkPolicy, VmNetworkPolicy};
+use crate::dataplane::{PodNetworkPolicy, PodPolicyProtocol, VmNetworkPolicy};
 use crate::tcx::{self, Preference as TcxPreference};
 
 const TC_PRIORITY: &str = "49152";
@@ -30,7 +30,7 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 6;
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -834,6 +834,12 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
     let pspol_map = map_dir.join("fluxvm_pspol");
     let pid4_map = map_dir.join("fluxvm_pid4");
     let pid6_map = map_dir.join("fluxvm_pid6");
+    // Set 13: may be absent on a fluxvm_tc.bpf.o built before this Set --
+    // port rules are then silently skipped rather than failing the whole
+    // apply, same graceful-degradation shape as the `!pspol_map.exists()`
+    // check below for Set 6S itself.
+    let pid4_port_map = map_dir.join("fluxvm_pid4_port");
+    let pid6_port_map = map_dir.join("fluxvm_pid6_port");
     if !pspol_map.exists() {
         // Older fluxvm_tc.bpf.o predating Set 6S; nothing to configure.
         return Ok(());
@@ -879,6 +885,13 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
     for addr in &policy.deny_addresses {
         update_pod_peer(&pid4_map, &pid6_map, pod_id, *addr, 2)?;
     }
+    if pid4_port_map.exists() && pid6_port_map.exists() {
+        clear_pod_scoped_map(&pid4_port_map, pod_id, 4 + 1 + 1 + 2)?;
+        clear_pod_scoped_map(&pid6_port_map, pod_id, 16 + 1 + 1 + 2)?;
+        for rule in &policy.allow_port_rules {
+            update_pod_peer_port(&pid4_port_map, &pid6_port_map, pod_id, rule.address, rule.protocol, rule.port, 1)?;
+        }
+    }
     update_pod_policy(&pspol_map, pod_id, flags)
 }
 
@@ -911,6 +924,46 @@ fn update_pod_peer(
             key.extend_from_slice(&pod_id.to_ne_bytes());
             key.extend_from_slice(&v6.octets());
             bpftool_map_update(pid6_map, &key, &verdict.to_ne_bytes())
+        }
+    }
+}
+
+/// Set 13: writes one exact protocol+port allow entry for a peer that has no
+/// address-wide `fluxvm_pid4`/`fluxvm_pid6` entry. Key layout must match
+/// `struct fluxvm_pid4_port_key`/`fluxvm_pid6_port_key` in
+/// `bpf/fluxvm_pod_policy.bpf.h` field-for-field: pod_id, raw address octets,
+/// protocol, one pad byte, then port in the host's native byte order (the
+/// BPF side already normalizes the packet's port via `bpf_ntohs` before
+/// comparing, so both sides agree on host order here, same as every other
+/// native-endian map key in this file).
+fn update_pod_peer_port(
+    pid4_port_map: &Path,
+    pid6_port_map: &Path,
+    pod_id: u32,
+    addr: IpAddr,
+    protocol: PodPolicyProtocol,
+    port: u16,
+    verdict: u32,
+) -> Result<()> {
+    let proto = protocol.ip_protocol_number();
+    match addr {
+        IpAddr::V4(v4) => {
+            let mut key = Vec::with_capacity(12);
+            key.extend_from_slice(&pod_id.to_ne_bytes());
+            key.extend_from_slice(&v4.octets());
+            key.push(proto);
+            key.push(0);
+            key.extend_from_slice(&port.to_ne_bytes());
+            bpftool_map_update(pid4_port_map, &key, &verdict.to_ne_bytes())
+        }
+        IpAddr::V6(v6) => {
+            let mut key = Vec::with_capacity(24);
+            key.extend_from_slice(&pod_id.to_ne_bytes());
+            key.extend_from_slice(&v6.octets());
+            key.push(proto);
+            key.push(0);
+            key.extend_from_slice(&port.to_ne_bytes());
+            bpftool_map_update(pid6_port_map, &key, &verdict.to_ne_bytes())
         }
     }
 }

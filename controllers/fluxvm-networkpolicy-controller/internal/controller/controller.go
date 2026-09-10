@@ -220,6 +220,7 @@ func (c *Controller) applyIfChanged(ctx context.Context, pod kube.Pod, vm fluxvm
 		"default_deny", desired.DefaultDeny,
 		"audit", desired.AuditMode,
 		"allow_addresses", len(desired.AllowAddresses),
+		"allow_port_rules", len(desired.AllowPortRules),
 		"selected_policies", strings.Join(compiled.SelectedPolicies, ","))
 	return nil
 }
