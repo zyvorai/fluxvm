@@ -80,5 +80,5 @@ images — not only the dataplane.
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.
 Secure Containers RuntimeClass as full Kata-equivalent (hostPath hotplug,
-broad CNI conformance, OCI namespace/device-cgroup parity beyond Sets 3–5) —
-[secure-containers.md](secure-containers.md).
+broad CNI conformance, device-cgroup enforcement, opt-in `CLONE_NEWUSER`
+unvalidated under load beyond Set 6) — [secure-containers.md](secure-containers.md).

@@ -117,6 +117,19 @@ pub enum ContainerRequest {
         /// into paths visible from inside the guest.
         config_json: String,
         io: ContainerIo,
+        /// Set 6: this container is the CRI pause/sandbox container for its
+        /// Pod group. Its IPC/UTS (and PID, if `share_process_namespace`)
+        /// namespaces are recorded so sibling containers in the same group
+        /// can join them, matching runc/Kata's "join the pause container"
+        /// convention. Defaults to `false` so older shims/bare `ctr run`
+        /// keep today's behavior (every container fully isolated).
+        #[serde(default)]
+        is_sandbox: bool,
+        /// Set 6: mirrors the Kubernetes PodSpec `shareProcessNamespace`
+        /// field. Only meaningful when a sandbox container exists for the
+        /// group; ignored otherwise.
+        #[serde(default)]
+        share_process_namespace: bool,
     },
     Start {
         id: String,
@@ -252,12 +265,17 @@ mod tests {
                     terminal: false,
                     streaming: false,
                 },
+                is_sandbox: true,
+                share_process_namespace: false,
             },
         };
         let line = encode_line(&req).unwrap();
         let back: ContainerEnvelope = decode_line(&line).unwrap();
         assert_eq!(back.token.as_deref(), Some("secret"));
-        assert!(matches!(back.request, ContainerRequest::Create { .. }));
+        assert!(matches!(
+            back.request,
+            ContainerRequest::Create { is_sandbox: true, share_process_namespace: false, .. }
+        ));
     }
 
     #[test]

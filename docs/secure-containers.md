@@ -45,7 +45,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 5
+## Implemented through Set 6
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
 - one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
@@ -64,6 +64,13 @@ the VM's existing per-instance authentication token.
 - containerd `ResizePty` and `CloseIO` forwarding
 - legacy regular-file virtiofs stdio fallback for non-TTY debugging
 - RuntimeClass/containerd examples, source/unit gates and KVM smoke scripts
+- per-container PID/mount/IPC/UTS namespace isolation (`pivot_root`, not
+  `chroot`); containers in a Pod no longer rely on the VM boundary alone
+- sandbox/pause-container convention: the CRI sandbox container's IPC/UTS
+  (and PID, when `shareProcessNamespace: true`) are joined by sibling
+  containers, matching runc/Kata's "join the pause container" model
+- opt-in `CLONE_NEWUSER` per container (`FLUXVM_CONTAINER_USERNS=1`, off by
+  default) for an additional capability-scoping boundary
 
 ## Current limitations
 
@@ -78,20 +85,28 @@ Containers compatibility.
 3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
    Pod volume roots are scoped by sandbox UID; other binds remain copied unless
    an explicit broker/hotplug model is added.
-4. **OCI namespace/device-cgroup parity is incomplete.** The VM remains the
-   primary host isolation boundary.
+4. **Device-cgroup enforcement is not implemented.** PID/mount/IPC/UTS
+   namespace isolation landed in Set 6 (see
+   [docs/secure-containers-set6r.md](secure-containers-set6r.md)), and user
+   namespace isolation is available opt-in, but per-container device access
+   control (an OCI `linux.resources.devices` allow/deny list beyond the
+   existing static device-node bind mounts) still relies on the VM boundary.
 5. **Seccomp argument comparators / notify are not implemented.** Unsupported
    profiles fail closed instead of silently dropping policy.
 6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
    resize testing on self-hosted nodes before production claims.**
+7. **`CLONE_NEWUSER` is opt-in and unproven under load.** Default identity
+   uid/gid mapping avoids virtiofs ACL shifting but has not yet been validated
+   against real multi-container Pods on self-hosted KVM nodes.
 
 ## Next gates to production Kata-style Kubernetes support
 
-### P0 — OCI namespace + device-cgroup parity
+### P0 — device-cgroup enforcement
 
-Add PID/mount/IPC/UTS/user namespace handling inside the Pod VM where OCI
-semantics require it, plus device-cgroup enforcement and broader conformance
-fixtures.
+PID/mount/IPC/UTS namespace isolation landed in Set 6 (opt-in
+`CLONE_NEWUSER`). Remaining: per-container device-cgroup enforcement (a real
+`BPF_PROG_TYPE_CGROUP_DEVICE` allow/deny list, not just the static device-node
+bind mounts) and broader OCI conformance fixtures.
 
 ### P0 — CNI conformance
 
@@ -156,8 +171,11 @@ This builds both binaries and runs all new unit tests.
 
 Set `FLUXVM_SECURE_CONTAINERS_E2E=1`; the script validates KVM, containerd and
 FluxVM API prerequisites and runs `scripts/e2e-secure-containers-ctr.sh`. Run
-`scripts/e2e-secure-containers-volume.sh` for write-through PVC coverage and
-`scripts/e2e-secure-containers-tty.sh` for VSOCK stdio + init/exec PTY/resize.
+`scripts/e2e-secure-containers-volume.sh` for write-through PVC coverage,
+`scripts/e2e-secure-containers-tty.sh` for VSOCK stdio + init/exec PTY/resize,
+and `scripts/e2e-secure-containers-namespaces.sh` for Set 6 PID/mount/IPC/UTS
+isolation (both need a Kubernetes cluster with the `fluxvm` RuntimeClass
+applied, not just bare `ctr`).
 
 The GitHub-hosted CI job intentionally does not claim KVM end-to-end coverage,
 because ordinary hosted runners do not provide the nested virtualization and
