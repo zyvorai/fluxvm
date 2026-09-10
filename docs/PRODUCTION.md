@@ -89,11 +89,15 @@ notify path against a real containerd/Kubernetes Pod and a real
 enforcing-SELinux mount label are still open.
 Sentinel Pod-scoped network policy (Set 6S) automatically enforcing
 Kubernetes `NetworkPolicy` objects — a standalone `fluxvm-networkpolicy-
-controller` DaemonSet now compiles selected egress `NetworkPolicy` objects
-into Set 6S's Pod policy API (Set 13), including exact numeric TCP/UDP port
-rules against dataplane schema v7's new port-scoped allow maps, but named
-ports and `endPort` ranges are still denied rather than widened, ingress and
-CIDR rules are not compiled at all, and it has not yet run a live-cluster
+controller` DaemonSet compiles both egress and ingress `NetworkPolicy`
+objects into Set 6S's Pod policy API (Set 13), including exact numeric and
+named TCP/UDP ports, `endPort` ranges (capped at 8 per peer+protocol), and
+real CIDR entries for broad `ipBlock` peers (dataplane schema v8), all
+proven against a real kernel via `scripts/test-ebpf-smoke.sh`'s live
+namespace/BPF-object test. Still open: a CIDR peer combined with `except` or
+with a `ports` restriction still falls back to exact-address approximation
+rather than a real CIDR entry, more than 8 port ranges per peer+protocol are
+denied rather than representable, and it has not yet run a live-cluster
 reconciliation or multi-node Pod-to-Pod conformance suite —
 [secure-containers-set13.md](secure-containers-set13.md). Sentinel
 in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S

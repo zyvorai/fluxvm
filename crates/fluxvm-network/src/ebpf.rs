@@ -21,7 +21,10 @@ use std::{
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::dataplane::{PodNetworkPolicy, PodPolicyProtocol, VmNetworkPolicy};
+use crate::dataplane::{
+    PodIngressPolicy, PodNetworkPolicy, PodPeerCidr, PodPeerPortRange, PodPolicyProtocol,
+    VmNetworkPolicy,
+};
 use crate::tcx::{self, Preference as TcxPreference};
 
 const TC_PRIORITY: &str = "49152";
@@ -30,7 +33,7 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 7;
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -157,13 +160,22 @@ pub fn apply(
         .context("recording FluxVM eBPF Pod identity")?;
 
     let prog_pin = prog_dir.join("fluxvm_egress");
+    // Set 13 (schema v8): the object now carries a second SEC("tc") program,
+    // `fluxvm_pod_ingress` (bpf/fluxvm_tc.bpf.c), for Pod-ingress-direction
+    // enforcement. Plain `bpftool prog load` pins only the first program
+    // section it finds in ELF order -- with two `SEC("tc")` entries in one
+    // object, that silently became whichever one happens to come first,
+    // NOT necessarily `fluxvm_egress`. `loadall` pinning every program in
+    // the object by its own function name under `prog_dir` is the only way
+    // to load both deterministically and keep `fluxvm_egress`'s existing
+    // pin path/behavior unchanged for every caller below.
     if let Err(e) = run(
         "bpftool",
         &[
             "prog".into(),
-            "load".into(),
+            "loadall".into(),
             cfg.bpf_object.display().to_string(),
-            prog_pin.display().to_string(),
+            prog_dir.display().to_string(),
             "type".into(),
             "classifier".into(),
             "pinmaps".into(),
@@ -189,6 +201,30 @@ pub fn apply(
         return Err(e).context("recording FluxVM TC program id");
     }
 
+    // `fluxvm_pod_ingress` is absent from a `fluxvm_tc.bpf.o` built before
+    // Set 13's ingress addition -- graceful degradation, same shape as the
+    // `pid4_port_map.exists()` check `configure_pod_maps` already uses for
+    // an older object missing Set 13's egress port maps. A pin path that
+    // doesn't exist here is the signal every later step in `apply()` uses
+    // to skip Pod-ingress attach/configuration entirely for this VM.
+    let pod_ingress_prog_pin = prog_dir.join("fluxvm_pod_ingress");
+    if pod_ingress_prog_pin.exists() {
+        match pinned_program_id(&pod_ingress_prog_pin) {
+            Ok(id) => {
+                if let Err(e) = fs::write(meta_dir.join("pod_ingress_prog_id"), id.to_string()) {
+                    let _ = fs::remove_dir_all(&vm_dir);
+                    let _ = fs::remove_dir_all(&meta_dir);
+                    return Err(e).context("recording FluxVM Pod-ingress TC program id");
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_dir_all(&vm_dir);
+                let _ = fs::remove_dir_all(&meta_dir);
+                return Err(e).context("reading newly loaded FluxVM Pod-ingress TC program id");
+            }
+        }
+    }
+
     let attach = (|| -> Result<()> {
         let ifindex = read_ifindex(iface)?;
         let identity = identity_for(id);
@@ -202,19 +238,51 @@ pub fn apply(
         // reset it to unconfigured. `None` (no persisted policy yet) leaves
         // it as a safe/allow no-op, same as an unconfigured VM-level policy.
         configure_pod_maps(&map_dir, pod_id, pod_policy)?;
+        if pod_ingress_prog_pin.exists() {
+            // Same "may be absent on an older object" degradation this
+            // function already applies to Set 13's egress port maps --
+            // `configure_pod_ingress_maps` itself no-ops if the `_in` maps
+            // aren't pinned, but the outer `pod_ingress_prog_pin.exists()`
+            // check additionally skips the whole ingress attach path below
+            // for an object that predates Set 13's ingress program.
+            configure_pod_ingress_maps(&map_dir, pod_id, pod_policy.and_then(|p| p.ingress.as_ref()))?;
+        }
         fs::write(meta_dir.join("schema_version"), DATAPLANE_SCHEMA_VERSION.to_string())
             .context("recording FluxVM eBPF schema version")?;
 
         let tcx_preference = TcxPreference::from_env()?;
         if tcx_preference != TcxPreference::Off {
             let link_pin = tcx::link_pin(&vm_dir);
-            match tcx::attach(iface, &prog_pin, &link_pin) {
+            match tcx::attach(iface, &prog_pin, &link_pin, tcx::Direction::Ingress) {
                 Ok(status) => {
                     fs::write(meta_dir.join("attach_mode"), "tcx")
                         .context("recording FluxVM TCX attachment mode")?;
                     if let Some(revision) = status.revision {
                         fs::write(meta_dir.join("tcx_revision"), revision.to_string())
                             .context("recording FluxVM TCX revision")?;
+                    }
+                    // Set 13: attach the Pod-ingress program at the TCX
+                    // *egress* hook. Once the main program's TCX attach has
+                    // succeeded, a failure here is treated as a hard error
+                    // (not a warn-and-continue) -- unlike an object that
+                    // simply predates this program (skipped above via
+                    // `pod_ingress_prog_pin.exists()`), a present program
+                    // that fails to attach would silently leave Pod-ingress
+                    // policy unenforced while the control plane and any
+                    // caller (e.g. the NetworkPolicy controller) believe it
+                    // is live, which this codebase's fail-closed convention
+                    // does not allow.
+                    if pod_ingress_prog_pin.exists() {
+                        let ingress_link_pin = tcx::ingress_link_pin(&vm_dir);
+                        let ingress_status = tcx::attach(
+                            iface, &pod_ingress_prog_pin, &ingress_link_pin, tcx::Direction::Egress,
+                        )
+                        .context("attaching FluxVM Pod-ingress TCX dataplane")?;
+                        info!(
+                            %id, %iface, identity,
+                            link_id = ?ingress_status.link_id,
+                            "attached FluxVM Pod-ingress edge with TCX/BPF link"
+                        );
                     }
                     info!(
                         %id,
@@ -280,6 +348,31 @@ pub fn apply(
             ],
         )
         .context("attaching FluxVM TC program")?;
+        // Set 13: legacy clsact/tc counterpart to the TCX egress attach
+        // above -- same fail-closed reasoning (a present program that fails
+        // to attach is a hard error, not a warn-and-continue).
+        if pod_ingress_prog_pin.exists() {
+            if tc_filter_program_id_dir(iface, "egress").ok().flatten().is_some() {
+                let _ = run(
+                    "tc",
+                    &[
+                        "filter".into(), "del".into(), "dev".into(), iface.into(),
+                        "egress".into(), "pref".into(), TC_PRIORITY.into(),
+                        "handle".into(), TC_HANDLE.into(), "bpf".into(),
+                    ],
+                );
+            }
+            run(
+                "tc",
+                &[
+                    "filter".into(), "add".into(), "dev".into(), iface.into(),
+                    "egress".into(), "pref".into(), TC_PRIORITY.into(),
+                    "handle".into(), TC_HANDLE.into(), "bpf".into(), "da".into(),
+                    "pinned".into(), pod_ingress_prog_pin.display().to_string(),
+                ],
+            )
+            .context("attaching FluxVM Pod-ingress TC program")?;
+        }
         fs::write(meta_dir.join("attach_mode"), "tc")
             .context("recording FluxVM legacy TC attachment mode")?;
 
@@ -394,7 +487,13 @@ pub fn configure_pod_policy(
     if !map_dir.join("fluxvm_pspol").exists() {
         bail!("VM {id} eBPF dataplane is not attached (or predates Set 6S); attach before setting Pod policy");
     }
-    configure_pod_maps(&map_dir, pod_id, policy)
+    configure_pod_maps(&map_dir, pod_id, policy)?;
+    // Schema v8: mirrors `apply()`'s own "only configure ingress maps when
+    // the ingress program's pin exists" gate -- a VM attached before Set 13
+    // has `fluxvm_pspol` but no `fluxvm_pspol_in`, and
+    // `configure_pod_ingress_maps` itself already no-ops on that, so this
+    // is a plain pass-through rather than a second existence check.
+    configure_pod_ingress_maps(&map_dir, pod_id, policy.and_then(|p| p.ingress.as_ref()))
 }
 
 pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttachmentStatus> {
@@ -567,6 +666,7 @@ pub fn remove_best_effort(id: Uuid) -> Result<()> {
 
 fn detach_tc_filter(id: Uuid, owned_program_id: Option<u32>) {
     let Some(iface) = read_recorded_iface(id) else { return };
+    detach_pod_ingress_tc_filter(id, &iface);
     match tc_filter_program_id(&iface) {
         Ok(Some(current)) => {
             // The interface name is recorded for this VM's pin metadata, so the
@@ -615,6 +715,47 @@ fn detach_tc_filter(id: Uuid, owned_program_id: Option<u32>) {
             "unable to verify TC filter; attempting reclaim of FluxVM pref/handle"
         ),
     }
+}
+
+/// Set 13: the legacy clsact/tc counterpart of removing the TCX Pod-ingress
+/// link (which needs no explicit detach call -- see `remove()`'s comment;
+/// `fs::remove_dir_all` on the VM's whole pin dir drops that pin, and with
+/// it the kernel's only reference). Best-effort like `detach_tc_filter`
+/// itself: an absent egress-direction filter (TCX was used, or the object
+/// predates Set 13's ingress program) is not an error.
+fn detach_pod_ingress_tc_filter(id: Uuid, iface: &str) {
+    let owned = read_owned_pod_ingress_program_id(id);
+    match tc_filter_program_id_dir(iface, "egress") {
+        Ok(Some(current)) => {
+            if let Some(owned) = owned {
+                if current != owned {
+                    tracing::warn!(
+                        %id, %iface, owned_program_id = owned, current_program_id = current,
+                        "stale Pod-ingress TC filter program id on recorded FluxVM iface; reclaiming pref/handle"
+                    );
+                }
+            }
+            let _ = run(
+                "tc",
+                &[
+                    "filter".into(), "del".into(), "dev".into(), iface.into(),
+                    "egress".into(), "pref".into(), TC_PRIORITY.into(),
+                    "handle".into(), TC_HANDLE.into(), "bpf".into(),
+                ],
+            );
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(
+            %id, %iface, error = %e,
+            "unable to verify Pod-ingress TC filter; attempting reclaim of FluxVM pref/handle"
+        ),
+    }
+}
+
+fn read_owned_pod_ingress_program_id(id: Uuid) -> Option<u32> {
+    fs::read_to_string(vm_meta_dir(id).join("pod_ingress_prog_id"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
 fn read_owned_program_id(id: Uuid) -> Option<u32> {
@@ -892,6 +1033,103 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
             update_pod_peer_port(&pid4_port_map, &pid6_port_map, pod_id, rule.address, rule.protocol, rule.port, 1)?;
         }
     }
+    // Schema v8: may be absent on a fluxvm_tc.bpf.o predating Set 13's CIDR
+    // and range extension -- same graceful-degradation shape as the port
+    // maps just above.
+    let pid4_cidr_map = map_dir.join("fluxvm_pid4_cidr");
+    let pid6_cidr_map = map_dir.join("fluxvm_pid6_cidr");
+    if pid4_cidr_map.exists() && pid6_cidr_map.exists() {
+        clear_pod_scoped_lpm_map(&pid4_cidr_map, pod_id, 4)?;
+        clear_pod_scoped_lpm_map(&pid6_cidr_map, pod_id, 16)?;
+        for cidr in &policy.allow_cidrs {
+            update_pod_peer_cidr(&pid4_cidr_map, &pid6_cidr_map, pod_id, cidr, 1)?;
+        }
+    }
+    let pid4_range_map = map_dir.join("fluxvm_pid4_port_range");
+    let pid6_range_map = map_dir.join("fluxvm_pid6_port_range");
+    if pid4_range_map.exists() && pid6_range_map.exists() {
+        clear_pod_scoped_map(&pid4_range_map, pod_id, 8)?;
+        clear_pod_scoped_map(&pid6_range_map, pod_id, 20)?;
+        write_pod_port_ranges(&pid4_range_map, &pid6_range_map, pod_id, &policy.port_ranges)?;
+    }
+    update_pod_policy(&pspol_map, pod_id, flags)
+}
+
+/// Schema v8: the Pod-ingress-direction counterpart to `configure_pod_maps`,
+/// writing the fully parallel "_in" map set from a `PodIngressPolicy`
+/// instead of a `PodNetworkPolicy`. No `deny_addresses` handling -- ingress
+/// policy has no deny concept, mirroring `PodIngressPolicy`'s own shape.
+/// Callers must independently check the Pod-ingress program's pin exists
+/// before calling this (see `apply()`); unlike `configure_pod_maps`, this
+/// function assumes the caller already made that decision rather than
+/// re-checking `fluxvm_pspol_in.exists()` itself, since both checks would
+/// otherwise race against the exact same "does this object have Set 13
+/// ingress support" fact.
+fn configure_pod_ingress_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodIngressPolicy>) -> Result<()> {
+    if pod_id == 0 {
+        return Ok(());
+    }
+    let pspol_map = map_dir.join("fluxvm_pspol_in");
+    let pid4_map = map_dir.join("fluxvm_pid4_in");
+    let pid6_map = map_dir.join("fluxvm_pid6_in");
+    let pid4_port_map = map_dir.join("fluxvm_pid4_port_in");
+    let pid6_port_map = map_dir.join("fluxvm_pid6_port_in");
+    let pid4_cidr_map = map_dir.join("fluxvm_pid4_cidr_in");
+    let pid6_cidr_map = map_dir.join("fluxvm_pid6_cidr_in");
+    let pid4_range_map = map_dir.join("fluxvm_pid4_port_range_in");
+    let pid6_range_map = map_dir.join("fluxvm_pid6_port_range_in");
+    if !pspol_map.exists() {
+        return Ok(());
+    }
+
+    let Some(policy) = policy else {
+        let key = pod_id.to_ne_bytes();
+        let _ = run(
+            "bpftool",
+            &[
+                "map".into(), "delete".into(), "pinned".into(),
+                pspol_map.display().to_string(), "key".into(), "hex".into(),
+            ]
+            .into_iter()
+            .chain(hex_args(&key))
+            .collect::<Vec<_>>(),
+        );
+        return Ok(());
+    };
+
+    const FLUXVM_PSPOL_ENABLED: u32 = 1 << 0;
+    const FLUXVM_PSPOL_DEFAULT_DENY: u32 = 1 << 1;
+    const FLUXVM_PSPOL_AUDIT: u32 = 1 << 2;
+    let mut flags = FLUXVM_PSPOL_ENABLED;
+    if policy.default_deny {
+        flags |= FLUXVM_PSPOL_DEFAULT_DENY;
+    }
+    if policy.audit_mode {
+        flags |= FLUXVM_PSPOL_AUDIT;
+    }
+    if policy.default_deny {
+        update_pod_policy(&pspol_map, pod_id, flags)?;
+    }
+
+    clear_pod_scoped_map(&pid4_map, pod_id, 4)?;
+    clear_pod_scoped_map(&pid6_map, pod_id, 16)?;
+    for addr in &policy.allow_addresses {
+        update_pod_peer(&pid4_map, &pid6_map, pod_id, *addr, 1)?;
+    }
+    clear_pod_scoped_map(&pid4_port_map, pod_id, 4 + 1 + 1 + 2)?;
+    clear_pod_scoped_map(&pid6_port_map, pod_id, 16 + 1 + 1 + 2)?;
+    for rule in &policy.allow_port_rules {
+        update_pod_peer_port(&pid4_port_map, &pid6_port_map, pod_id, rule.address, rule.protocol, rule.port, 1)?;
+    }
+    clear_pod_scoped_lpm_map(&pid4_cidr_map, pod_id, 4)?;
+    clear_pod_scoped_lpm_map(&pid6_cidr_map, pod_id, 16)?;
+    for cidr in &policy.allow_cidrs {
+        update_pod_peer_cidr(&pid4_cidr_map, &pid6_cidr_map, pod_id, cidr, 1)?;
+    }
+    clear_pod_scoped_map(&pid4_range_map, pod_id, 8)?;
+    clear_pod_scoped_map(&pid6_range_map, pod_id, 20)?;
+    write_pod_port_ranges(&pid4_range_map, &pid6_range_map, pod_id, &policy.port_ranges)?;
+
     update_pod_policy(&pspol_map, pod_id, flags)
 }
 
@@ -991,6 +1229,126 @@ fn clear_pod_scoped_map(map: &Path, pod_id: u32, addr_len: usize) -> Result<()> 
         ];
         args.extend(hex_args(&key));
         run("bpftool", &args)?;
+    }
+    Ok(())
+}
+
+/// Schema v8 counterpart of `clear_pod_scoped_map` for the LPM-trie CIDR
+/// maps, whose key layout is `{prefixlen(4); pod_id(4); address}` --
+/// `pod_id` sits at byte offset 4, not 0, since `prefixlen` is a fixed
+/// 4-byte field ahead of it (mirroring `bpf/fluxvm_tc.bpf.c`'s own
+/// `struct ipv4_lpm_key`/`ipv6_lpm_key` layout).
+fn clear_pod_scoped_lpm_map(map: &Path, pod_id: u32, addr_len: usize) -> Result<()> {
+    if !map.exists() {
+        return Ok(());
+    }
+    let root = bpftool_json_dump(map)?;
+    let entries = root.as_array().context("bpftool map dump must be an array")?;
+    for entry in entries {
+        let key = json_bytes(&entry["key"])?;
+        if key.len() != 8 + addr_len || key[4..8] != pod_id.to_ne_bytes() {
+            continue;
+        }
+        let mut args = vec![
+            "map".into(), "delete".into(), "pinned".into(),
+            map.display().to_string(), "key".into(), "hex".into(),
+        ];
+        args.extend(hex_args(&key));
+        run("bpftool", &args)?;
+    }
+    Ok(())
+}
+
+/// Schema v8: writes one CIDR peer allow, keyed into
+/// `fluxvm_pid4_cidr`/`fluxvm_pid6_cidr` (or their `_in` counterparts --
+/// callers pass whichever pair applies). Key layout mirrors
+/// `update_ipv4_allow`/`update_ipv6_allow` field-for-field with `pod_id`
+/// standing in for `identity`; `prefix_len` is clamped to the address
+/// family's real bit width so a malformed wire value (which
+/// `PodPeerCidr` does not itself validate -- see its doc comment in
+/// `dataplane.rs`) cannot build an out-of-range LPM prefixlen.
+fn update_pod_peer_cidr(
+    pid4_cidr_map: &Path,
+    pid6_cidr_map: &Path,
+    pod_id: u32,
+    cidr: &PodPeerCidr,
+    verdict: u32,
+) -> Result<()> {
+    match cidr.addr {
+        IpAddr::V4(v4) => {
+            let lpm_prefix = 32u32 + u32::from(cidr.prefix_len.min(32));
+            let mut key = Vec::with_capacity(12);
+            key.extend_from_slice(&lpm_prefix.to_ne_bytes());
+            key.extend_from_slice(&pod_id.to_ne_bytes());
+            key.extend_from_slice(&v4.octets());
+            bpftool_map_update(pid4_cidr_map, &key, &verdict.to_ne_bytes())
+        }
+        IpAddr::V6(v6) => {
+            let lpm_prefix = 32u32 + u32::from(cidr.prefix_len.min(128));
+            let mut key = Vec::with_capacity(24);
+            key.extend_from_slice(&lpm_prefix.to_ne_bytes());
+            key.extend_from_slice(&pod_id.to_ne_bytes());
+            key.extend_from_slice(&v6.octets());
+            bpftool_map_update(pid6_cidr_map, &key, &verdict.to_ne_bytes())
+        }
+    }
+}
+
+/// Schema v8: writes one `fluxvm_port_range_set` value per distinct
+/// `(address, protocol)` group in `ranges`, keyed into
+/// `fluxvm_pid4_port_range`/`fluxvm_pid6_port_range` (or their `_in`
+/// counterparts). Value layout mirrors `struct fluxvm_port_range_set` in
+/// `bpf/fluxvm_pod_policy.bpf.h` field-for-field: `count` (1 byte), 3 pad
+/// bytes, then up to `FLUXVM_MAX_PORT_RANGES` (8) native-endian `(start,
+/// end)` `u16` pairs. A group with more than 8 ranges is truncated here as
+/// a defensive bound against overflowing the fixed-size kernel struct --
+/// the actual "deny the excess rather than silently drop it" policy
+/// decision belongs to the compiler that built `ranges`
+/// (`controllers/fluxvm-networkpolicy-controller`), not this write path.
+fn write_pod_port_ranges(
+    pid4_range_map: &Path,
+    pid6_range_map: &Path,
+    pod_id: u32,
+    ranges: &[PodPeerPortRange],
+) -> Result<()> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(IpAddr, PodPolicyProtocol), Vec<(u16, u16)>> = BTreeMap::new();
+    for r in ranges {
+        groups.entry((r.address, r.protocol)).or_default().push((r.start, r.end));
+    }
+    for ((addr, protocol), mut pairs) in groups {
+        pairs.truncate(8);
+        let mut value = Vec::with_capacity(36);
+        value.push(pairs.len() as u8);
+        value.extend_from_slice(&[0u8, 0, 0]);
+        for (start, end) in &pairs {
+            value.extend_from_slice(&start.to_ne_bytes());
+            value.extend_from_slice(&end.to_ne_bytes());
+        }
+        while value.len() < 36 {
+            value.push(0);
+        }
+        let proto = protocol.ip_protocol_number();
+        match addr {
+            IpAddr::V4(v4) => {
+                let mut key = Vec::with_capacity(12);
+                key.extend_from_slice(&pod_id.to_ne_bytes());
+                key.extend_from_slice(&v4.octets());
+                key.push(proto);
+                key.push(0);
+                key.extend_from_slice(&0u16.to_ne_bytes());
+                bpftool_map_update(pid4_range_map, &key, &value)?;
+            }
+            IpAddr::V6(v6) => {
+                let mut key = Vec::with_capacity(24);
+                key.extend_from_slice(&pod_id.to_ne_bytes());
+                key.extend_from_slice(&v6.octets());
+                key.push(proto);
+                key.push(0);
+                key.extend_from_slice(&0u16.to_ne_bytes());
+                bpftool_map_update(pid6_range_map, &key, &value)?;
+            }
+        }
     }
     Ok(())
 }
@@ -1473,8 +1831,17 @@ pub(crate) fn pinned_program_id(path: &Path) -> Result<u32> {
 /// handle. We deliberately require the handle match so another BPF filter at
 /// the same preference is never mistaken for ours.
 fn tc_filter_program_id(iface: &str) -> Result<Option<u32>> {
+    tc_filter_program_id_dir(iface, "ingress")
+}
+
+/// Set 13: `fluxvm_pod_ingress` is attached at the tc *egress* hook (see
+/// `tcx::Direction` and `apply()`'s second attach below). Generalized from
+/// the original ingress-only `tc_filter_program_id` rather than duplicated,
+/// since every caller already threads a direction string through `tc`
+/// itself.
+fn tc_filter_program_id_dir(iface: &str, direction: &str) -> Result<Option<u32>> {
     let out = Command::new("tc")
-        .args(["filter", "show", "dev", iface, "ingress", "pref", TC_PRIORITY])
+        .args(["filter", "show", "dev", iface, direction, "pref", TC_PRIORITY])
         .output()
         .context("querying FluxVM TC filter")?;
     if !out.status.success() {

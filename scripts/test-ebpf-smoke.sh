@@ -132,6 +132,30 @@ print(" ".join(f"{b:02x}" for b in raw))
 PY
 }
 
+pod4_range_key() {
+  # Matches struct fluxvm_pid4_range_key in bpf/fluxvm_pod_policy.bpf.h:
+  # pod_id, address, protocol, pad0, pad1 (u16). Schema v8.
+  # Args: pod_id ip protocol
+  python3 - "$1" "$2" "$3" <<'PY'
+import ipaddress, struct, sys
+pod_id, ip, protocol = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+raw = struct.pack("=I", pod_id) + ipaddress.IPv4Address(ip).packed + struct.pack("=BBH", protocol, 0, 0)
+print(" ".join(f"{b:02x}" for b in raw))
+PY
+}
+
+port_range_set_value() {
+  # Matches struct fluxvm_port_range_set in bpf/fluxvm_pod_policy.bpf.h:
+  # count(u8) + 3 pad bytes + up to FLUXVM_MAX_PORT_RANGES (8) (start,end)
+  # u16 pairs, host order. Schema v8. Args: start end
+  python3 - "$1" "$2" <<'PY'
+import struct, sys
+start, end = int(sys.argv[1]), int(sys.argv[2])
+raw = struct.pack("=BBBB", 1, 0, 0, 0) + struct.pack("=HH", start, end) + b"\x00" * 28
+print(" ".join(f"{b:02x}" for b in raw))
+PY
+}
+
 pod_policy_value() {
   # u32 flags + 3*u32 reserved, matching struct fluxvm_pod_policy in
   # bpf/fluxvm_pod_policy.bpf.h. Arg: flags
@@ -242,7 +266,14 @@ mkdir -p "$BPFFS"
 mount -t bpf bpf "$BPFFS"
 mkdir -p "$PIN/tc/progs" "$PIN/tc/maps" "$PIN/xdp/progs" "$PIN/xdp/maps"
 
-bpftool prog load "$TC_OBJ" "$PIN/tc/progs/fluxvm_egress" \
+# Schema v8: fluxvm_tc.bpf.o now carries a second SEC("tc") program,
+# fluxvm_pod_ingress (Pod-ingress-direction enforcement). Plain `bpftool
+# prog load` pins only the first program section it finds in ELF order --
+# with two SEC("tc") entries in one object, that is no longer reliably
+# fluxvm_egress. `loadall` pins every program in the object by its own
+# function name, matching crates/fluxvm-network/src/ebpf.rs's own fix for
+# the identical hazard.
+bpftool prog loadall "$TC_OBJ" "$PIN/tc/progs" \
   type classifier pinmaps "$PIN/tc/maps"
 IFINDEX="$(cat "/sys/class/net/$A/ifindex")"
 IFKEY="$(hex_u32 "$IFINDEX")"
@@ -412,9 +443,68 @@ expect_ping4
 bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_port" key hex $PORTKEY4
 expect_no_ping4
 
+# Schema v8: with both the address-wide fluxvm_pid4 entry and the exact
+# fluxvm_pid4_port entry gone, a peer with no fluxvm_pid4_cidr hit either
+# still falls through correctly, and a CIDR entry covering the peer resolves
+# the same way an exact address would. lpm_prefix=56 == 32 (pod_id bits,
+# always fully matched) + 24 (a /24 covering $A4).
+CIDR4="$(lpm4_key 56 "$POD_ID" "$A4")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_cidr" key hex $CIDR4 value hex $ONE
+expect_ping4
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_cidr" key hex $CIDR4
+expect_no_ping4
+
+# Schema v8: endPort range fallback. A range that does not cover the
+# packet's own port (ICMP's port is always 0, same reasoning as the exact
+# wrong-port case above) still misses; a range that does cover it resolves.
+RANGEKEY4="$(pod4_range_key "$POD_ID" "$A4" 1)"
+WRONGRANGE="$(port_range_set_value 100 200)"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_port_range" key hex $RANGEKEY4 value hex $WRONGRANGE
+expect_no_ping4
+RIGHTRANGE="$(port_range_set_value 0 10)"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_port_range" key hex $RANGEKEY4 value hex $RIGHTRANGE
+expect_ping4
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_port_range" key hex $RANGEKEY4
+expect_no_ping4
+
 # shellcheck disable=SC2086
 bpftool map delete pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY
 tc filter del dev "$A" ingress pref "$TC_PREF" handle 1 bpf
+
+# Schema v8: Pod-ingress-direction enforcement (fluxvm_pod_ingress,
+# attached at the tc *egress* hook -- traffic leaving $A back toward $NSB,
+# which for an ICMP round trip is the echo *reply* $A's kernel generates in
+# response to $NSB's request. Blocking that reply fails the same `ping`
+# round trip expect_ping4/expect_no_ping4 already assert on, so those
+# helpers double as the assertion here with no changes needed -- only which
+# packet actually gets dropped differs, not how the test observes it.
+# fluxvm_egress's own pod policy is left unconfigured (no fluxvm_pspol
+# entry, deleted just above) so only the new ingress-direction maps
+# determine the outcome below.
+tc filter add dev "$A" egress pref "$TC_PREF" handle 1 bpf da \
+  pinned "$PIN/tc/progs/fluxvm_pod_ingress"
+tc filter show dev "$A" egress pref "$TC_PREF" | grep -q 'bpf'
+expect_ping4
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol_in" key hex $POD_POLICY_KEY value hex $POD_POLICY_VALUE
+expect_no_ping4
+PODKEY4_IN="$(pod4_key "$POD_ID" "$A4")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_in" key hex $PODKEY4_IN value hex $ONE
+expect_ping4
+bpftool -j map dump pinned "$PIN/tc/maps/fluxvm_ppstat_in" | grep -q 'key'
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_in" key hex $PODKEY4_IN
+expect_no_ping4
+
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pspol_in" key hex $POD_POLICY_KEY
+tc filter del dev "$A" egress pref "$TC_PREF" handle 1 bpf
 INNER
 
 echo "FluxVM Network Fabric v3 TC/IPv4/IPv6/L4/rate/XDP kernel smoke test passed"
