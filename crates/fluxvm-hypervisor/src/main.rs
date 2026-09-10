@@ -83,6 +83,7 @@ async fn real_main() -> anyhow::Result<()> {
         return Ok(());
     }
     let dry = cfg.dry_run;
+    let gdb = cfg.gdb.clone();
     let has_boot_image = cfg.kernel.is_some() || cfg.initrd.is_some() || cfg.disk.is_some();
     let vm = if has_boot_image {
         VirtualMachine::from_boot_config(cfg)?
@@ -93,7 +94,7 @@ async fn real_main() -> anyhow::Result<()> {
     if dry {
         return Ok(());
     }
-    let log = vm.run()?;
+    let log = vm.run_with_gdb(gdb)?;
     if log.contains("NETWORK IS UP") {
         eprintln!("[ok] guest reported NETWORK IS UP");
         Ok(())

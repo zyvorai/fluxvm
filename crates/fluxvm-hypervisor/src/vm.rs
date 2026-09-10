@@ -11,6 +11,7 @@ use crate::devices::virtio_mmio::{self, VirtioMmio};
 use crate::devices::virtio_net::{self, VirtioNetConfig};
 use crate::error::{FluxError, Result};
 use crate::ffi;
+use crate::gdbstub::{self, GdbCmd, GdbControl};
 use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
 use crate::memory::{GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
@@ -196,11 +197,27 @@ impl VirtualMachine {
     }
 
     pub fn run(self) -> Result<String> {
+        self.run_with_gdb(None)
+    }
+
+    /// Like `run`, but if `gdb_addr` is set, spawns a minimal read-only
+    /// gdbstub (see `gdbstub.rs`) listening there for live inspection of
+    /// a hung/misbehaving guest.
+    pub fn run_with_gdb(self, gdb_addr: Option<String>) -> Result<String> {
+        let gdb = gdb_addr.map(|addr| {
+            let control = GdbControl::new();
+            let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(0);
+            (addr, control, cmd_tx, cmd_rx)
+        });
+        // The gdbstub thread needs Arc<KvmVm>/paused before run_until
+        // creates them, so spawn it from inside run_until once those
+        // exist instead of here.
         self.run_until(
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             None,
             None,
+            gdb,
         )
     }
 
@@ -210,6 +227,7 @@ impl VirtualMachine {
         paused: Arc<AtomicBool>,
         snap_rx: Option<Receiver<SnapCmd>>,
         restore: Option<CpuSnapshot>,
+        gdb: Option<(String, Arc<GdbControl>, std::sync::mpsc::SyncSender<GdbCmd>, Receiver<GdbCmd>)>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -256,6 +274,12 @@ impl VirtualMachine {
             std::thread::spawn(move || run_ap(idx, &kvm, &bus, &serial, &stop));
         }
 
+        let gdb_cmd_rx: Option<Receiver<GdbCmd>> = gdb.map(|(addr, control, cmd_tx, cmd_rx)| {
+            gdbstub::spawn(addr, kvm.clone(), control.clone(), paused.clone(), cmd_tx);
+            control.record_current_thread();
+            cmd_rx
+        });
+
         let mut serial_log = String::new();
         let run_secs: u64 = std::env::var("FLUXVM_KVM_RUN_SECS")
             .ok()
@@ -277,6 +301,23 @@ impl VirtualMachine {
                         let r = kvm_snap::dump(&kvm, &this.mem, &cmd.vmstate, &cmd.mem)
                             .map_err(|e| e.to_string());
                         let _ = cmd.reply.send(r);
+                    }
+                }
+                if let Some(rx) = gdb_cmd_rx.as_ref() {
+                    while let Ok(cmd) = rx.try_recv() {
+                        match cmd {
+                            GdbCmd::GetRegs(reply) => {
+                                let r = kvm.get_regs(0).unwrap_or(unsafe { std::mem::zeroed() });
+                                let _ = reply.send(r);
+                            }
+                            GdbCmd::GetSregs(reply) => {
+                                let r = kvm.get_sregs(0).unwrap_or(unsafe { std::mem::zeroed() });
+                                let _ = reply.send(r);
+                            }
+                            GdbCmd::ReadMem { addr, len, reply } => {
+                                let _ = reply.send(gdbstub::read_guest_mem(&this.mem, addr, len));
+                            }
+                        }
                     }
                 }
                 std::thread::sleep(Duration::from_millis(2));

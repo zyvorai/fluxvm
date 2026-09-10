@@ -133,3 +133,6 @@ pub const KVM_EXIT_INTERNAL_ERROR: u32 = 17;
 
 pub const KVM_EXIT_IO_IN: u8 = 0;
 pub const KVM_EXIT_IO_OUT: u8 = 1;
+
+/// Errno for a syscall interrupted by a delivered signal.
+pub const EINTR: c_int = 4;

@@ -611,15 +611,33 @@ impl KvmVm {
     pub fn run_once(&self, idx: usize) -> Result<u32> {
         let r = unsafe { ffi::flux_ioctl(self.vcpus[idx].fd, ffi::KVM_RUN, std::ptr::null_mut()) };
         if r < 0 {
-            return Err(FluxError::Hypervisor(format!("KVM_RUN errno {}", unsafe {
-                ffi::flux_errno()
-            })));
+            let errno = unsafe { ffi::flux_errno() };
+            // A signal delivered to force a stuck/looping vCPU out of
+            // KVM_RUN (the gdbstub's break-in mechanism: set
+            // immediate_exit then signal this thread) surfaces as EINTR.
+            // Treat it the same as KVM_EXIT_INTR -- "nothing to handle,
+            // just re-check state and loop" -- rather than a fatal error.
+            if errno == ffi::EINTR {
+                return Ok(ffi::KVM_EXIT_INTR);
+            }
+            return Err(FluxError::Hypervisor(format!("KVM_RUN errno {errno}")));
         }
         Ok(self.exit_reason(idx))
     }
 
     pub fn exit_reason(&self, idx: usize) -> u32 {
         unsafe { std::ptr::read_unaligned(self.vcpus[idx].run.add(8) as *const u32) }
+    }
+
+    /// Force the next (or currently in-flight) KVM_RUN on this vCPU to
+    /// return immediately without entering/continuing guest execution.
+    /// Combined with a signal sent to the vCPU's OS thread (needed to
+    /// break out of a KVM_RUN already in progress), this is the standard
+    /// technique for an external "pause"/gdbstub break-in.
+    pub fn request_immediate_exit(&self, idx: usize, on: bool) {
+        unsafe {
+            std::ptr::write_volatile(self.vcpus[idx].run.add(1), on as u8);
+        }
     }
 
     pub fn io_info(&self, idx: usize) -> (u8, u8, u16, u32, u32) {
