@@ -18,10 +18,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::dataplane::{PodNetworkPolicy, VmNetworkPolicy};
+use crate::tcx::{self, Preference as TcxPreference};
 
 const TC_PRIORITY: &str = "49152";
 const TC_HANDLE: &str = "1";
@@ -110,7 +111,8 @@ pub fn apply(
         );
     }
     require_bpftool()?;
-    require_tc()?;
+    // TCX does not depend on the legacy `tc` userspace tool. Require `tc`
+    // only if the TCX path is disabled/unavailable and we actually fall back.
     raise_memlock()?;
 
     validate_policy(policy)?;
@@ -183,6 +185,40 @@ pub fn apply(
         fs::write(meta_dir.join("schema_version"), DATAPLANE_SCHEMA_VERSION.to_string())
             .context("recording FluxVM eBPF schema version")?;
 
+        let tcx_preference = TcxPreference::from_env()?;
+        if tcx_preference != TcxPreference::Off {
+            let link_pin = tcx::link_pin(&vm_dir);
+            match tcx::attach(iface, &prog_pin, &link_pin) {
+                Ok(status) => {
+                    fs::write(meta_dir.join("attach_mode"), "tcx")
+                        .context("recording FluxVM TCX attachment mode")?;
+                    if let Some(revision) = status.revision {
+                        fs::write(meta_dir.join("tcx_revision"), revision.to_string())
+                            .context("recording FluxVM TCX revision")?;
+                    }
+                    info!(
+                        %id,
+                        %iface,
+                        identity,
+                        link_id = ?status.link_id,
+                        revision = ?status.revision,
+                        "attached FluxVM VM edge with TCX/BPF link"
+                    );
+                    return Ok(());
+                }
+                Err(e) if tcx_preference == TcxPreference::Required => {
+                    return Err(e).context("attaching required FluxVM TCX dataplane");
+                }
+                Err(e) => warn!(
+                    %id,
+                    %iface,
+                    error = %e,
+                    "TCX unavailable; falling back to legacy clsact/tc"
+                ),
+            }
+        }
+
+        require_tc()?;
         ensure_clsact(iface).context("installing clsact qdisc")?;
         // Prefer `add` so a foreign owner of this pref/handle fails closed.
         // If a prior FluxVM attach left a filter (common after prog_id drift),
@@ -224,6 +260,8 @@ pub fn apply(
             ],
         )
         .context("attaching FluxVM TC program")?;
+        fs::write(meta_dir.join("attach_mode"), "tc")
+            .context("recording FluxVM legacy TC attachment mode")?;
 
         info!(
             %id,
@@ -272,7 +310,8 @@ pub fn reconfigure(
     id: Uuid,
 ) -> Result<()> {
     require_bpftool()?;
-    require_tc()?;
+    // Reconfigure mutates pinned maps in place; it is independent of whether
+    // the program is attached by TCX or the legacy clsact path.
     validate_policy(policy)?;
     let vm_dir = vm_pin_dir(&cfg.pin_root, id);
     let map_dir = vm_dir.join("maps");
@@ -348,12 +387,19 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
     let policy_fingerprint = read_policy_fingerprint(&meta_dir);
     let owned_program_id = read_owned_program_id(id)
         .or_else(|| pinned_program_id(&prog_pin).ok());
+    let tcx_link = tcx::link_pin(&vm_dir);
+    let tcx_program_id = if tcx_link.exists() {
+        tcx::status(&tcx_link).ok().and_then(|status| status.prog_id)
+    } else {
+        None
+    };
     let attached = if let (Some(iface), Some(owned_program_id)) =
         (iface.as_deref(), owned_program_id)
     {
         schema_compatible
             && prog_pin.exists()
-            && tc_filter_program_id(iface).ok().flatten() == Some(owned_program_id)
+            && (tcx_program_id == Some(owned_program_id)
+                || tc_filter_program_id(iface).ok().flatten() == Some(owned_program_id))
     } else {
         false
     };

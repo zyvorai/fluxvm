@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-# Build fluxvm_tc.bpf.o and fluxvm_xdp.bpf.o into dist/bpf/ (or OUT_DIR).
+# Build fluxvm_tc.bpf.o, fluxvm_xdp.bpf.o and runtime-intelligence BPF into dist/bpf/ (or OUT_DIR).
 # Service Fabric objects are also emitted as map-tier variants
 # (fluxvm_service_tier_{S,M,L}.bpf.o and matching xdp/connect ELFs).
-# Docs: docs/network-fabric.md · docs/service-fabric-phase6.md
+# Docs: docs/network-fabric.md · docs/service-fabric-phase6.md · docs/runtime-intelligence.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,7 +43,7 @@ fi
 # verifier still enforces the kernel limit via per-CPU scratch where needed).
 SERVICE_CFLAGS=("${CFLAGS[@]}" -mllvm -bpf-stack-size=768)
 
-for src in fluxvm_tc fluxvm_xdp; do
+for src in fluxvm_tc fluxvm_xdp fluxvm_intelligence; do
   "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
 done
 
@@ -69,6 +69,7 @@ done
 echo "built:"
 echo "  $OUT_DIR/fluxvm_tc.bpf.o"
 echo "  $OUT_DIR/fluxvm_xdp.bpf.o"
+echo "  $OUT_DIR/fluxvm_intelligence.bpf.o"
 echo "  $OUT_DIR/fluxvm_service.bpf.o  (default M)"
 echo "  $OUT_DIR/fluxvm_service_xdp.bpf.o  (default M)"
 echo "  $OUT_DIR/fluxvm_service_connect.bpf.o  (default M)"

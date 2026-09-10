@@ -39,6 +39,11 @@ enum Command {
     Get {
         id: Uuid,
     },
+    /// Correlate Runtime Intelligence with VM-edge policy and flow state.
+    /// Works as a direct one-shot and does not require the intelligence HTTP daemon.
+    Diagnose {
+        id: Uuid,
+    },
     /// Relaunch a Stopped VM from its existing disk (skips image
     /// clone/cloud-init reseed — see VmManager::start).
     Start {
@@ -401,6 +406,29 @@ async fn main() -> Result<()> {
         }
         Command::List => println!("{}", serde_json::to_string_pretty(&m.list().await)?),
         Command::Get { id } => println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?),
+        Command::Diagnose { id } => {
+            let vm = m.get(id).await?;
+            let pin_root = std::env::var("FLUXVM_INTEL_PIN_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| fluxvm_intelligence::DEFAULT_PIN_ROOT.into());
+            let snapshot = fluxvm_intelligence::snapshot_record(&vm, &pin_root)?;
+            let effective = m.network_effective(id).await?;
+            let policy: fluxvm_network::dataplane::VmNetworkPolicy = serde_json::from_value(
+                effective
+                    .get("effective")
+                    .cloned()
+                    .context("network/effective response has no effective policy")?,
+            )?;
+            let pod_policy = m.pod_network_policy(id).await?;
+            let flows = m.network_flows(id, 256).await?;
+            let report = fluxvm_intelligence::diagnose_vm(
+                &snapshot,
+                &policy,
+                pod_policy.as_ref(),
+                &flows,
+            );
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::Start { id } => println!("{}", serde_json::to_string_pretty(&m.start(id).await?)?),
         Command::Stop { id } => println!("{}", serde_json::to_string_pretty(&m.stop(id).await?)?),
         Command::Pause { id } => println!("{}", serde_json::to_string_pretty(&m.pause(id).await?)?),

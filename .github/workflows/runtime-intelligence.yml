@@ -1,0 +1,47 @@
+name: runtime-intelligence
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_intelligence.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-intelligence-loader.c'
+      - 'scripts/*runtime-intelligence*'
+      - 'scripts/build-ebpf.sh'
+      - '.github/workflows/runtime-intelligence.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/fluxvm_intelligence.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-intelligence-loader.c'
+      - 'scripts/*runtime-intelligence*'
+      - 'scripts/build-ebpf.sh'
+      - '.github/workflows/runtime-intelligence.yml'
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install BPF build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libbpf-dev pkg-config linux-tools-common linux-tools-generic
+      - name: Cargo tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-intelligence
+      - name: Build all FluxVM BPF objects
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh
+      - name: Compile libbpf loader
+        working-directory: fluxvm
+        run: cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-intelligence-loader.c -o /tmp/fluxvm-intelligence-loader $(pkg-config --cflags --libs libbpf)
+      - name: Static gates
+        working-directory: fluxvm
+        run: ./scripts/test-runtime-intelligence-static.sh
