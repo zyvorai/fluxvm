@@ -3,6 +3,9 @@
 
 pub mod guard;
 pub mod qos;
+pub mod shield;
+pub mod tcpintel;
+pub mod netintel;
 
 use anyhow::{Context, Result, anyhow, bail};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};

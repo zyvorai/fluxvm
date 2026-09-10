@@ -1,0 +1,21 @@
+[Unit]
+Description=FluxVM Set 6 Network Intelligence API
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fluxvm-netintel serve 127.0.0.1:7792
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=-/sys/fs/bpf -/var/lib/fluxvm
+
+[Install]
+WantedBy=multi-user.target
