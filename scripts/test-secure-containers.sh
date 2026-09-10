@@ -35,3 +35,8 @@ if [[ "${FLUXVM_SECURE_CONTAINERS_DEVICE_LIFECYCLE_E2E:-0}" == "1" ]]; then
   : "${PVC_NAME:?set PVC_NAME to a disposable Bound volumeMode: Block PVC}"
   FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/e2e-secure-containers-device-lifecycle.sh
 fi
+
+
+if [[ "${FLUXVM_SECURE_CONTAINERS_SECURITY_E2E:-0}" == "1" ]]; then
+  FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/e2e-secure-containers-security.sh
+fi

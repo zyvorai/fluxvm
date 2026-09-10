@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 6
+## Implemented through Set 10
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
 - one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
@@ -57,7 +57,7 @@ the VM's existing per-instance authentication token.
 - containerd task events + asynchronous exit publication
 - OCI create/start/state/wait/kill/pause/resume/delete and exec lifecycle
 - uid/gid, supplementary groups, cwd, argv, PATH, environment, umask and rlimits
-- Linux capability sets, noNewPrivileges, seccomp syscall-name rules
+- Linux capability sets, noNewPrivileges, seccomp syscall + argument-comparator rules
 - read-only rootfs, masked/read-only paths, device nodes and Pod-VM sysctls
 - containerd snapshot rootfs staging into the VM-visible virtiofs share
 - Pod-UID-scoped write-through Kubernetes `volumes` / `volume-subpaths`
@@ -89,6 +89,13 @@ the VM's existing per-instance authentication token.
   reservation/swap translation, allowlisted cgroup-v2 `unified` updates, and
   fail-closed raw block/special-device handling — see
   [docs/secure-containers-set7.md](secure-containers-set7.md)
+- Pod-scoped raw block QMP hotplug and allowlisted VFIO PCI passthrough,
+  reference-counted per container with QEMU `DEVICE_DELETED`-confirmed
+  hot-unplug — see [docs/secure-containers-set9.md](secure-containers-set9.md)
+- fail-closed AppArmor/SELinux process labels and generated per-container
+  cgroup-v2 `BPF_PROG_TYPE_CGROUP_DEVICE` policy from OCI
+  `linux.resources.devices` — see
+  [docs/secure-containers-set10.md](secure-containers-set10.md)
 
 ## Current limitations
 
@@ -104,14 +111,18 @@ Containers compatibility.
 3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
    Pod volume roots are scoped by sandbox UID; other binds remain copied unless
    an explicit broker/hotplug model is added.
-4. **Device-cgroup enforcement is not implemented.** PID/mount/IPC/UTS
+4. **Device-cgroup enforcement landed in Set 10.** PID/mount/IPC/UTS
    namespace isolation landed in Set 6 (see
    [docs/secure-containers-set6r.md](secure-containers-set6r.md)), and user
-   namespace isolation is available opt-in, but per-container device access
-   control (an OCI `linux.resources.devices` allow/deny list beyond the
-   existing static device-node bind mounts) still relies on the VM boundary.
-5. **Seccomp argument comparators / notify are not implemented.** Unsupported
-   profiles fail closed instead of silently dropping policy.
+   namespace isolation is available opt-in. Per-container device access
+   control is now a real `BPF_PROG_TYPE_CGROUP_DEVICE` program compiled from
+   OCI `linux.resources.devices` and attached to the per-container guest
+   cgroup, not just the existing static device-node bind mounts.
+5. **Seccomp argument comparators are implemented; notify is not.** All OCI
+   comparison operators (`SCMP_CMP_*`) are enforced via
+   `seccomp_rule_add_array`. `SCMP_ACT_NOTIFY` requires a persistent userspace
+   broker FluxVM does not implement yet and fails closed instead of silently
+   dropping policy.
 6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
    resize testing on self-hosted nodes before production claims.**
 7. **`CLONE_NEWUSER` is opt-in and unproven under load.** Default identity
@@ -126,12 +137,12 @@ Containers compatibility.
 
 ## Next gates to production Kata-style Kubernetes support
 
-### P0 — device-cgroup enforcement
+### P0 — OCI conformance fixtures
 
-PID/mount/IPC/UTS namespace isolation landed in Set 6 (opt-in
-`CLONE_NEWUSER`). Remaining: per-container device-cgroup enforcement (a real
-`BPF_PROG_TYPE_CGROUP_DEVICE` allow/deny list, not just the static device-node
-bind mounts) and broader OCI conformance fixtures.
+PID/mount/IPC/UTS namespace isolation (opt-in `CLONE_NEWUSER`) and
+per-container device-cgroup enforcement (`BPF_PROG_TYPE_CGROUP_DEVICE`) have
+both landed. Remaining: broader OCI runtime-spec conformance test fixtures
+covering the full matrix of these controls together.
 
 ### P0 — CNI conformance
 
@@ -144,10 +155,11 @@ Keep Pod-scoped kubelet volume exports as the safe default. Add a narrowly
 allowlisted broker/hotplug path for operators that intentionally need arbitrary
 hostPath or non-kubelet mounts.
 
-### P1 — seccomp completeness
+### P1 — seccomp notification broker
 
-Add argument comparators and notification handling while retaining fail-closed
-behavior for profiles the guest cannot enforce.
+Argument comparators are implemented (Set 10). Add a persistent
+`SCMP_ACT_NOTIFY` listener and broker lifecycle while retaining fail-closed
+behavior when the guest cannot service a requested notification profile.
 
 ### P1 — streaming/TTY conformance
 
@@ -265,3 +277,11 @@ passthrough requires an exact BDF allowlist and a device already bound to
 ## Set 9 addendum — passthrough device lifecycle
 
 Set 9 reference-counts raw-block/VFIO attachments by container, waits for QEMU `DEVICE_DELETED` before final backend cleanup, journals delayed unplug for retry, validates raw-block identity and complete VFIO IOMMU groups on recovery, and supports guest-driver GPU companion nodes without copying host major/minor numbers. See [secure-containers-set9.md](secure-containers-set9.md).
+
+## Set 10 addendum — guest security enforcement
+
+Set 10 adds all OCI/libseccomp argument comparison operators, fail-closed
+AppArmor and SELinux process labels, and generated per-container cgroup-v2
+device eBPF (`BPF_PROG_TYPE_CGROUP_DEVICE`). Unsupported seccomp notify and
+SELinux mount labels remain explicit fail-closed boundaries. See
+[secure-containers-set10.md](secure-containers-set10.md).
