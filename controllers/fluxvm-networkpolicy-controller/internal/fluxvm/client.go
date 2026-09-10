@@ -32,16 +32,125 @@ type VMRequest struct {
 	PodUID *string `json:"pod_uid"`
 }
 
+// PodPolicyProtocol matches the lowercase JSON the FluxVM API's
+// PodPolicyProtocol enum expects (crates/fluxvm-network/src/dataplane.rs).
+type PodPolicyProtocol string
+
+const (
+	ProtocolTCP PodPolicyProtocol = "tcp"
+	ProtocolUDP PodPolicyProtocol = "udp"
+)
+
+// PodPeerPortRule is one exact protocol+port allow for a peer that has no
+// address-wide allow entry -- Set 13's representation of a Kubernetes
+// NetworkPolicy egress rule that carries a `ports` list. See
+// docs/secure-containers-set13.md and dataplane schema v7
+// (docs/drop-reason-migration-state.md) for the enforcement side.
+type PodPeerPortRule struct {
+	Address  string            `json:"address"`
+	Protocol PodPolicyProtocol `json:"protocol"`
+	Port     uint16            `json:"port"`
+}
+
+// PodPeerCidr is a CIDR-based peer allow (schema v8), for a Kubernetes
+// NetworkPolicy `ipBlock` peer whose CIDR is not a host route. Field names
+// match crates/fluxvm-network/src/dataplane.rs's `PodPeerCidr` exactly.
+type PodPeerCidr struct {
+	Addr      string `json:"addr"`
+	PrefixLen uint8  `json:"prefix_len"`
+}
+
+// PodPeerPortRange is a protocol-scoped inclusive port range for one peer
+// address (schema v8), for a Kubernetes NetworkPolicyPort carrying
+// `endPort`. Field names match `PodPeerPortRange` in dataplane.rs exactly.
+type PodPeerPortRange struct {
+	Address  string            `json:"address"`
+	Protocol PodPolicyProtocol `json:"protocol"`
+	Start    uint16            `json:"start"`
+	End      uint16            `json:"end"`
+}
+
+// PodIngressPolicy is the Pod-ingress-direction counterpart to
+// PodNetworkPolicy's own egress-direction fields (schema v8), for
+// Kubernetes NetworkPolicy `ingress` rules. No DenyAddresses field --
+// Kubernetes NetworkPolicyIngressRule has no deny concept, matching
+// dataplane.rs's `PodIngressPolicy`.
+type PodIngressPolicy struct {
+	DefaultDeny    bool               `json:"default_deny"`
+	AuditMode      bool               `json:"audit_mode"`
+	AllowAddresses []string           `json:"allow_addresses"`
+	AllowCidrs     []PodPeerCidr      `json:"allow_cidrs"`
+	AllowPortRules []PodPeerPortRule  `json:"allow_port_rules"`
+	PortRanges     []PodPeerPortRange `json:"port_ranges"`
+}
+
+func (p *PodIngressPolicy) canonicalize() {
+	p.AllowAddresses = canonicalStrings(p.AllowAddresses)
+	p.AllowCidrs = canonicalCidrs(p.AllowCidrs)
+	p.AllowPortRules = canonicalPortRules(p.AllowPortRules)
+	p.PortRanges = canonicalPortRanges(p.PortRanges)
+}
+
+func equalIngressPolicy(a, b *PodIngressPolicy) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	ac := *a
+	bc := *b
+	ac.canonicalize()
+	bc.canonicalize()
+	if ac.DefaultDeny != bc.DefaultDeny || ac.AuditMode != bc.AuditMode {
+		return false
+	}
+	if len(ac.AllowAddresses) != len(bc.AllowAddresses) || len(ac.AllowCidrs) != len(bc.AllowCidrs) ||
+		len(ac.AllowPortRules) != len(bc.AllowPortRules) || len(ac.PortRanges) != len(bc.PortRanges) {
+		return false
+	}
+	for i := range ac.AllowAddresses {
+		if ac.AllowAddresses[i] != bc.AllowAddresses[i] {
+			return false
+		}
+	}
+	for i := range ac.AllowCidrs {
+		if ac.AllowCidrs[i] != bc.AllowCidrs[i] {
+			return false
+		}
+	}
+	for i := range ac.AllowPortRules {
+		if ac.AllowPortRules[i] != bc.AllowPortRules[i] {
+			return false
+		}
+	}
+	for i := range ac.PortRanges {
+		if ac.PortRanges[i] != bc.PortRanges[i] {
+			return false
+		}
+	}
+	return true
+}
+
 type PodNetworkPolicy struct {
-	DefaultDeny    bool     `json:"default_deny"`
-	AuditMode      bool     `json:"audit_mode"`
-	AllowAddresses []string `json:"allow_addresses"`
-	DenyAddresses  []string `json:"deny_addresses"`
+	DefaultDeny    bool              `json:"default_deny"`
+	AuditMode      bool              `json:"audit_mode"`
+	AllowAddresses []string          `json:"allow_addresses"`
+	DenyAddresses  []string          `json:"deny_addresses"`
+	AllowPortRules []PodPeerPortRule `json:"allow_port_rules"`
+	// Schema v8 additions -- see PodPeerCidr/PodPeerPortRange/PodIngressPolicy
+	// doc comments above for the semantics of each.
+	AllowCidrs []PodPeerCidr      `json:"allow_cidrs"`
+	PortRanges []PodPeerPortRange `json:"port_ranges"`
+	Ingress    *PodIngressPolicy  `json:"ingress"`
 }
 
 func (p *PodNetworkPolicy) Canonicalize() {
 	p.AllowAddresses = canonicalStrings(p.AllowAddresses)
 	p.DenyAddresses = canonicalStrings(p.DenyAddresses)
+	p.AllowPortRules = canonicalPortRules(p.AllowPortRules)
+	p.AllowCidrs = canonicalCidrs(p.AllowCidrs)
+	p.PortRanges = canonicalPortRanges(p.PortRanges)
+	if p.Ingress != nil {
+		p.Ingress.canonicalize()
+	}
 }
 
 func EqualPolicy(a, b *PodNetworkPolicy) bool {
@@ -55,7 +164,9 @@ func EqualPolicy(a, b *PodNetworkPolicy) bool {
 	if ac.DefaultDeny != bc.DefaultDeny || ac.AuditMode != bc.AuditMode {
 		return false
 	}
-	if len(ac.AllowAddresses) != len(bc.AllowAddresses) || len(ac.DenyAddresses) != len(bc.DenyAddresses) {
+	if len(ac.AllowAddresses) != len(bc.AllowAddresses) || len(ac.DenyAddresses) != len(bc.DenyAddresses) ||
+		len(ac.AllowPortRules) != len(bc.AllowPortRules) || len(ac.AllowCidrs) != len(bc.AllowCidrs) ||
+		len(ac.PortRanges) != len(bc.PortRanges) {
 		return false
 	}
 	for i := range ac.AllowAddresses {
@@ -67,6 +178,24 @@ func EqualPolicy(a, b *PodNetworkPolicy) bool {
 		if ac.DenyAddresses[i] != bc.DenyAddresses[i] {
 			return false
 		}
+	}
+	for i := range ac.AllowPortRules {
+		if ac.AllowPortRules[i] != bc.AllowPortRules[i] {
+			return false
+		}
+	}
+	for i := range ac.AllowCidrs {
+		if ac.AllowCidrs[i] != bc.AllowCidrs[i] {
+			return false
+		}
+	}
+	for i := range ac.PortRanges {
+		if ac.PortRanges[i] != bc.PortRanges[i] {
+			return false
+		}
+	}
+	if !equalIngressPolicy(ac.Ingress, bc.Ingress) {
+		return false
 	}
 	return true
 }
@@ -227,5 +356,74 @@ func canonicalStrings(values []string) []string {
 		out = append(out, value)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func canonicalPortRules(rules []PodPeerPortRule) []PodPeerPortRule {
+	set := make(map[PodPeerPortRule]struct{}, len(rules))
+	for _, rule := range rules {
+		if rule.Address != "" {
+			set[rule] = struct{}{}
+		}
+	}
+	out := make([]PodPeerPortRule, 0, len(set))
+	for rule := range set {
+		out = append(out, rule)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Address != out[j].Address {
+			return out[i].Address < out[j].Address
+		}
+		if out[i].Protocol != out[j].Protocol {
+			return out[i].Protocol < out[j].Protocol
+		}
+		return out[i].Port < out[j].Port
+	})
+	return out
+}
+
+func canonicalCidrs(cidrs []PodPeerCidr) []PodPeerCidr {
+	set := make(map[PodPeerCidr]struct{}, len(cidrs))
+	for _, c := range cidrs {
+		if c.Addr != "" {
+			set[c] = struct{}{}
+		}
+	}
+	out := make([]PodPeerCidr, 0, len(set))
+	for c := range set {
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Addr != out[j].Addr {
+			return out[i].Addr < out[j].Addr
+		}
+		return out[i].PrefixLen < out[j].PrefixLen
+	})
+	return out
+}
+
+func canonicalPortRanges(ranges []PodPeerPortRange) []PodPeerPortRange {
+	set := make(map[PodPeerPortRange]struct{}, len(ranges))
+	for _, r := range ranges {
+		if r.Address != "" {
+			set[r] = struct{}{}
+		}
+	}
+	out := make([]PodPeerPortRange, 0, len(set))
+	for r := range set {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Address != out[j].Address {
+			return out[i].Address < out[j].Address
+		}
+		if out[i].Protocol != out[j].Protocol {
+			return out[i].Protocol < out[j].Protocol
+		}
+		if out[i].Start != out[j].Start {
+			return out[i].Start < out[j].Start
+		}
+		return out[i].End < out[j].End
+	})
 	return out
 }

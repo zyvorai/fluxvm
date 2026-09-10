@@ -73,3 +73,48 @@ func TestEqualPolicyCanonicalizesAddressOrder(t *testing.T) {
 		t.Fatal("expected policies to be equal")
 	}
 }
+
+func TestEqualPolicyCanonicalizesPortRuleOrderAndDupes(t *testing.T) {
+	rule1 := PodPeerPortRule{Address: "10.0.0.20", Protocol: ProtocolTCP, Port: 5432}
+	rule2 := PodPeerPortRule{Address: "10.0.0.20", Protocol: ProtocolUDP, Port: 53}
+	a := &PodNetworkPolicy{DefaultDeny: true, AllowPortRules: []PodPeerPortRule{rule2, rule1}}
+	b := &PodNetworkPolicy{DefaultDeny: true, AllowPortRules: []PodPeerPortRule{rule1, rule1, rule2}}
+	if !EqualPolicy(a, b) {
+		t.Fatal("expected policies to be equal after canonicalization")
+	}
+	c := &PodNetworkPolicy{DefaultDeny: true, AllowPortRules: []PodPeerPortRule{rule1}}
+	if EqualPolicy(a, c) {
+		t.Fatal("expected policies with different port rules to differ")
+	}
+}
+
+func TestEqualPolicyCanonicalizesCidrsAndRanges(t *testing.T) {
+	cidr1 := PodPeerCidr{Addr: "203.0.113.0", PrefixLen: 24}
+	cidr2 := PodPeerCidr{Addr: "198.51.100.0", PrefixLen: 24}
+	range1 := PodPeerPortRange{Address: "10.0.0.20", Protocol: ProtocolTCP, Start: 5000, End: 6000}
+	a := &PodNetworkPolicy{DefaultDeny: true, AllowCidrs: []PodPeerCidr{cidr2, cidr1}, PortRanges: []PodPeerPortRange{range1}}
+	b := &PodNetworkPolicy{DefaultDeny: true, AllowCidrs: []PodPeerCidr{cidr1, cidr1, cidr2}, PortRanges: []PodPeerPortRange{range1, range1}}
+	if !EqualPolicy(a, b) {
+		t.Fatal("expected policies to be equal after canonicalization")
+	}
+	c := &PodNetworkPolicy{DefaultDeny: true, AllowCidrs: []PodPeerCidr{cidr1}}
+	if EqualPolicy(a, c) {
+		t.Fatal("expected policies with different CIDRs to differ")
+	}
+}
+
+func TestEqualPolicyComparesIngress(t *testing.T) {
+	a := &PodNetworkPolicy{DefaultDeny: true, Ingress: &PodIngressPolicy{DefaultDeny: true, AllowAddresses: []string{"10.0.0.30"}}}
+	b := &PodNetworkPolicy{DefaultDeny: true, Ingress: &PodIngressPolicy{DefaultDeny: true, AllowAddresses: []string{"10.0.0.30"}}}
+	if !EqualPolicy(a, b) {
+		t.Fatal("expected policies with equal ingress sub-policies to be equal")
+	}
+	c := &PodNetworkPolicy{DefaultDeny: true, Ingress: nil}
+	if EqualPolicy(a, c) {
+		t.Fatal("expected a present ingress policy to differ from none")
+	}
+	d := &PodNetworkPolicy{DefaultDeny: true, Ingress: &PodIngressPolicy{DefaultDeny: false}}
+	if EqualPolicy(a, d) {
+		t.Fatal("expected policies with different ingress sub-policies to differ")
+	}
+}

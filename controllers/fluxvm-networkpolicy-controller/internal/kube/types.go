@@ -28,7 +28,23 @@ type Pod struct {
 }
 
 type PodSpec struct {
-	NodeName string `json:"nodeName"`
+	NodeName   string      `json:"nodeName"`
+	Containers []Container `json:"containers"`
+}
+
+// Container/ContainerPort model only the fields Set 13's named-port
+// resolution needs. The Kubernetes API server already returns this data on
+// every `/api/v1/pods` list response `internal/kube/client.go` makes --
+// decoding it costs no new API call, it was simply unused until named-port
+// support needed it.
+type Container struct {
+	Ports []ContainerPort `json:"ports"`
+}
+
+type ContainerPort struct {
+	Name          string `json:"name"`
+	ContainerPort int32  `json:"containerPort"`
+	Protocol      string `json:"protocol"`
 }
 
 type PodStatus struct {
@@ -63,14 +79,20 @@ type NetworkPolicy struct {
 }
 
 type NetworkPolicySpec struct {
-	PodSelector LabelSelector             `json:"podSelector"`
-	PolicyTypes []string                  `json:"policyTypes"`
-	Egress      []NetworkPolicyEgressRule `json:"egress"`
+	PodSelector LabelSelector              `json:"podSelector"`
+	PolicyTypes []string                   `json:"policyTypes"`
+	Egress      []NetworkPolicyEgressRule  `json:"egress"`
+	Ingress     []NetworkPolicyIngressRule `json:"ingress"`
 }
 
 type NetworkPolicyEgressRule struct {
 	Ports []NetworkPolicyPort `json:"ports"`
 	To    []NetworkPolicyPeer `json:"to"`
+}
+
+type NetworkPolicyIngressRule struct {
+	Ports []NetworkPolicyPort `json:"ports"`
+	From  []NetworkPolicyPeer `json:"from"`
 }
 
 type NetworkPolicyPort struct {
