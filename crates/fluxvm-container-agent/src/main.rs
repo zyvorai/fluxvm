@@ -14,13 +14,15 @@
 //! namespace isolation (`pivot_root` replacing bare `chroot`, an opt-in
 //! `CLONE_NEWUSER`) so containers in one Pod VM are no longer isolated from
 //! each other by the VM boundary alone — see docs/secure-containers-set6r.md.
+//! Set 7 adds cgroup-v2 OOM counters, richer metrics, correct OCI swap translation,
+//! safe unified updates, and fail-closed handling for unattached host devices.
 //! Full device-cgroup parity remains an explicit follow-up hardening item in
 //! docs/secure-containers.md.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use fluxvm_container_protocol::{
-    ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStats,
+    CgroupEvents, ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStats,
     ContainerStatus, ResourceLimits, IoStreamAck, IoStreamAttach, IoStreamKind,
     DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, MAX_MESSAGE_BYTES, decode_line,
     encode_line,
@@ -32,7 +34,10 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
-    os::unix::ffi::OsStrExt,
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, MetadataExt},
+    },
     path::PathBuf,
     sync::{Arc, Condvar, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
@@ -158,7 +163,9 @@ enum ProcIo {
         stdin_write: Option<RawFd>,
         stdin_attached: bool,
         stdout_read: Option<RawFd>,
+        stdout_attached: bool,
         stderr_read: Option<RawFd>,
+        stderr_attached: bool,
     },
     Pty {
         master_fd: RawFd,
@@ -278,41 +285,71 @@ impl ProcHandle {
 
     fn attach_stream(&self, kind: IoStreamKind) -> Result<File> {
         let mut io = self.io.lock().expect("process io poisoned");
-        match &mut *io {
+        let (source, attached, label) = match &mut *io {
             ProcIo::Legacy => bail!("process uses legacy virtiofs stdio, not VSOCK streaming"),
-            ProcIo::Pipes { stdin_write, stdin_attached, stdout_read, stderr_read } => {
-                let fd = match kind {
-                    IoStreamKind::Stdin => {
-                        let source = stdin_write.as_ref().copied().context("stdin stream is absent")?;
-                        if *stdin_attached { bail!("stdin stream is already attached"); }
-                        *stdin_attached = true;
-                        let dup = unsafe { libc::dup(source) };
-                        if dup < 0 { bail!("dup(stdin pipe): {}", std::io::Error::last_os_error()); }
-                        set_cloexec(dup);
-                        dup
-                    }
-                    IoStreamKind::Stdout => stdout_read.take().context("stdout stream is absent or already attached")?,
-                    IoStreamKind::Stderr => stderr_read.take().context("stderr stream is absent or already attached")?,
-                };
-                Ok(unsafe { File::from_raw_fd(fd) })
-            }
-            ProcIo::Pty { master_fd, stdin_attached, stdout_attached } => {
-                match kind {
-                    IoStreamKind::Stdin => {
-                        if *stdin_attached { bail!("PTY stdin is already attached"); }
-                        *stdin_attached = true;
-                    }
-                    IoStreamKind::Stdout => {
-                        if *stdout_attached { bail!("PTY stdout is already attached"); }
-                        *stdout_attached = true;
-                    }
-                    IoStreamKind::Stderr => bail!("TTY processes have a single PTY output stream"),
-                }
-                let fd = unsafe { libc::dup(*master_fd) };
-                if fd < 0 { bail!("dup(pty master): {}", std::io::Error::last_os_error()); }
-                set_cloexec(fd);
-                Ok(unsafe { File::from_raw_fd(fd) })
-            }
+            ProcIo::Pipes {
+                stdin_write,
+                stdin_attached,
+                stdout_read,
+                stdout_attached,
+                stderr_read,
+                stderr_attached,
+            } => match kind {
+                IoStreamKind::Stdin => (
+                    stdin_write.as_ref().copied().context("stdin stream is absent")?,
+                    stdin_attached,
+                    "stdin pipe",
+                ),
+                IoStreamKind::Stdout => (
+                    stdout_read.as_ref().copied().context("stdout stream is absent")?,
+                    stdout_attached,
+                    "stdout pipe",
+                ),
+                IoStreamKind::Stderr => (
+                    stderr_read.as_ref().copied().context("stderr stream is absent")?,
+                    stderr_attached,
+                    "stderr pipe",
+                ),
+            },
+            ProcIo::Pty { master_fd, stdin_attached, stdout_attached } => match kind {
+                IoStreamKind::Stdin => (*master_fd, stdin_attached, "pty stdin"),
+                IoStreamKind::Stdout => (*master_fd, stdout_attached, "pty stdout"),
+                IoStreamKind::Stderr => bail!("TTY processes have a single PTY output stream"),
+            },
+        };
+        if *attached {
+            bail!("{label} is already attached");
+        }
+        let fd = unsafe { libc::dup(source) };
+        if fd < 0 {
+            bail!("dup({label}): {}", std::io::Error::last_os_error());
+        }
+        set_cloexec(fd);
+        // Only publish attached state after dup succeeds; otherwise recovery
+        // could permanently lose the stream after transient fd exhaustion.
+        *attached = true;
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    fn detach_stream(&self, kind: IoStreamKind) {
+        let mut io = self.io.lock().expect("process io poisoned");
+        match &mut *io {
+            ProcIo::Legacy => {}
+            ProcIo::Pipes {
+                stdin_attached,
+                stdout_attached,
+                stderr_attached,
+                ..
+            } => match kind {
+                IoStreamKind::Stdin => *stdin_attached = false,
+                IoStreamKind::Stdout => *stdout_attached = false,
+                IoStreamKind::Stderr => *stderr_attached = false,
+            },
+            ProcIo::Pty { stdin_attached, stdout_attached, .. } => match kind {
+                IoStreamKind::Stdin => *stdin_attached = false,
+                IoStreamKind::Stdout => *stdout_attached = false,
+                IoStreamKind::Stderr => {}
+            },
         }
     }
 
@@ -497,23 +534,30 @@ fn handle_stream_connection(mut socket: File, expected_token: Option<&str>) -> R
     };
     socket.write_all(encode_line(&IoStreamAck { ok: true, message: None })?.as_bytes())?;
     socket.flush()?;
-    match attach.stream {
-        IoStreamKind::Stdin => {
-            let copied = std::io::copy(&mut socket, &mut endpoint);
-            let _ = endpoint.flush();
-            let _ = process.close_stdin();
-            copied?;
-        }
-        IoStreamKind::Stdout | IoStreamKind::Stderr => {
-            match std::io::copy(&mut endpoint, &mut socket) {
-                Ok(_) => {}
-                Err(e) if e.raw_os_error() == Some(libc::EIO) => {} // PTY slave closed
-                Err(e) => return Err(e).context("streaming guest output"),
+    let stream_kind = attach.stream;
+    let result: Result<()> = (|| {
+        match stream_kind {
+            IoStreamKind::Stdin => {
+                // Socket EOF means the transport disappeared, not that
+                // containerd issued CloseIO. Keep the guest pipe/PTY alive so
+                // a replacement shim can attach again.
+                std::io::copy(&mut socket, &mut endpoint)
+                    .context("streaming container stdin")?;
+                endpoint.flush().ok();
             }
-            socket.flush()?;
+            IoStreamKind::Stdout | IoStreamKind::Stderr => {
+                match std::io::copy(&mut endpoint, &mut socket) {
+                    Ok(_) => {}
+                    Err(e) if e.raw_os_error() == Some(libc::EIO) => {} // PTY slave closed
+                    Err(e) => return Err(e).context("streaming guest output"),
+                }
+                socket.flush()?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })();
+    process.detach_stream(stream_kind);
+    result
 }
 
 fn handle_connection(file: File, expected_token: Option<&str>) -> Result<()> {
@@ -600,6 +644,7 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
         }
         ContainerRequest::Pids { id } => Ok(ContainerResponse::Pids { pids: container_pids(&id)? }),
         ContainerRequest::Stats { id } => Ok(ContainerResponse::Stats { stats: container_stats(&id)? }),
+        ContainerRequest::CgroupEvents { id } => Ok(ContainerResponse::CgroupEvents { events: container_cgroup_events(&id)? }),
         ContainerRequest::UpdateResources { id, resources } => {
             update_container_resources(&id, &resources)?;
             Ok(ContainerResponse::ResourcesUpdated)
@@ -933,17 +978,48 @@ fn create_oci_devices(config: &Value, rootfs: &PathBuf) -> Result<()> {
         if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
         let kind = dev.get("type").and_then(Value::as_str).context("OCI device.type is required")?;
         let file_mode = dev.get("fileMode").and_then(Value::as_u64).unwrap_or(0o666) as libc::mode_t;
+        let major = dev.get("major").and_then(Value::as_i64).unwrap_or(0) as u64;
+        let minor = dev.get("minor").and_then(Value::as_i64).unwrap_or(0) as u64;
+
+        // A host block device cannot be made real inside a hardware VM with
+        // mknod alone: the guest must have an actual virtio/SCSI/NVMe device
+        // attached first. Refuse it instead of accidentally targeting an
+        // unrelated guest device with the same major/minor.
+        if kind == "b" {
+            bail!(
+                "OCI block device {path} ({major}:{minor}) is not attached to the FluxVM guest; raw block volumes require VMM device hotplug"
+            );
+        }
+
         let mode = match kind {
-            "c" | "u" => libc::S_IFCHR | file_mode,
-            "b" => libc::S_IFBLK | file_mode,
+            "c" | "u" => {
+                // Character devices are safe only when the same device already
+                // exists in the guest (e.g. /dev/null, /dev/zero, /dev/tty).
+                // Device-plugin nodes such as GPUs therefore fail closed until
+                // the corresponding hardware is explicitly attached to the VM.
+                let source = PathBuf::from(path);
+                let meta = std::fs::metadata(&source)
+                    .with_context(|| format!("OCI character device {path} is not present in the guest"))?;
+                if !meta.file_type().is_char_device() {
+                    bail!("OCI character device source {path} is not a guest character device");
+                }
+                let rdev = meta.rdev();
+                let actual_major = libc::major(rdev as libc::dev_t) as u64;
+                let actual_minor = libc::minor(rdev as libc::dev_t) as u64;
+                if (actual_major, actual_minor) != (major, minor) {
+                    bail!(
+                        "OCI character device {path} requested {major}:{minor}, guest has {actual_major}:{actual_minor}"
+                    );
+                }
+                libc::S_IFCHR | file_mode
+            }
             "p" => libc::S_IFIFO | file_mode,
             other => bail!("unsupported OCI device type {other:?}"),
         };
-        let major = dev.get("major").and_then(Value::as_i64).unwrap_or(0) as u64;
-        let minor = dev.get("minor").and_then(Value::as_i64).unwrap_or(0) as u64;
         let c = CString::new(target.as_os_str().as_bytes())?;
         let _ = std::fs::remove_file(&target);
-        let rc = unsafe { libc::mknod(c.as_ptr(), mode, libc::makedev(major as _, minor as _)) };
+        let devno = if kind == "p" { 0 } else { libc::makedev(major as _, minor as _) };
+        let rc = unsafe { libc::mknod(c.as_ptr(), mode, devno) };
         if rc != 0 { return Err(std::io::Error::last_os_error()).with_context(|| format!("creating OCI device {}", target.display())); }
         let uid = dev.get("uid").and_then(Value::as_u64).unwrap_or(0) as libc::uid_t;
         let gid = dev.get("gid").and_then(Value::as_u64).unwrap_or(0) as libc::gid_t;
@@ -1139,6 +1215,15 @@ fn cleanup_mounts(mounts: &[PathBuf]) {
 
 
 fn resource_limits_from_oci(config: &Value) -> ResourceLimits {
+    let unified = config
+        .pointer("/linux/resources/unified")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     ResourceLimits {
         cpu_quota: config.pointer("/linux/resources/cpu/quota").and_then(Value::as_i64),
         cpu_period: config.pointer("/linux/resources/cpu/period").and_then(Value::as_u64),
@@ -1146,7 +1231,10 @@ fn resource_limits_from_oci(config: &Value) -> ResourceLimits {
         cpuset_cpus: config.pointer("/linux/resources/cpu/cpus").and_then(Value::as_str).map(str::to_string),
         cpuset_mems: config.pointer("/linux/resources/cpu/mems").and_then(Value::as_str).map(str::to_string),
         memory_limit_bytes: config.pointer("/linux/resources/memory/limit").and_then(Value::as_i64),
+        memory_reservation_bytes: config.pointer("/linux/resources/memory/reservation").and_then(Value::as_i64),
+        memory_swap_bytes: config.pointer("/linux/resources/memory/swap").and_then(Value::as_i64),
         pids_limit: config.pointer("/linux/resources/pids/limit").and_then(Value::as_i64),
+        unified,
     }
 }
 
@@ -1215,6 +1303,65 @@ fn add_pid_to_cgroup(path: &std::path::Path, pid: u32) -> Result<()> {
         .with_context(|| format!("moving pid {pid} into {}", path.display()))
 }
 
+fn read_cgroup_limit(path: &std::path::Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = raw.trim();
+    if raw == "max" { Some(0) } else { raw.parse::<u64>().ok() }
+}
+
+fn current_memory_limit_for_swap(path: &std::path::Path) -> i64 {
+    match std::fs::read_to_string(path.join("memory.max")) {
+        Ok(raw) if raw.trim() == "max" => -1,
+        Ok(raw) => raw.trim().parse::<i64>().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// Mirrors opencontainers/cgroups' cgroup-v1-compatible swap conversion:
+/// OCI `memory.swap` is memory+swap combined, while cgroup v2's
+/// `memory.swap.max` is swap-only.
+fn oci_swap_to_cgroup2(memory_swap: i64, memory: i64) -> Result<Option<String>> {
+    match (memory, memory_swap) {
+        (-1, 0) => return Ok(Some("max".into())),
+        (_, -1) => return Ok(Some("max".into())),
+        (_, 0) => return Ok(None),
+        (-1, swap) if swap > 0 => return Ok(Some(swap.to_string())),
+        (0, _) => bail!("unable to set OCI memory.swap without a memory limit"),
+        (memory, _) if memory < -1 => bail!("invalid OCI memory.limit value {memory}"),
+        (_, swap) if swap < -1 => bail!("invalid OCI memory.swap value {swap}"),
+        (memory, swap) if swap < memory => {
+            bail!("OCI memory+swap limit ({swap}) must be >= memory limit ({memory})")
+        }
+        (memory, swap) => Ok(Some((swap - memory).to_string())),
+    }
+}
+
+fn apply_unified_limits(path: &std::path::Path, unified: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    // Deliberately small cgroup-v2 allowlist. Never turn an OCI-provided key
+    // directly into a filesystem path.
+    const ALLOWED: &[&str] = &[
+        "cpu.max.burst", "cpu.uclamp.min", "cpu.uclamp.max",
+        "memory.min", "memory.low", "memory.high", "memory.max", "memory.swap.max", "memory.oom.group",
+        "pids.max",
+    ];
+    for (key, value) in unified {
+        if !ALLOWED.contains(&key.as_str()) {
+            bail!("unsupported OCI LinuxResources.unified key {key:?}");
+        }
+        let value = value.trim();
+        if value.is_empty() || value.contains('\n') || value.contains('\r') {
+            bail!("invalid value for OCI unified key {key:?}");
+        }
+        let target = path.join(key);
+        if !target.exists() {
+            bail!("OCI unified key {key:?} is unavailable in guest cgroup v2");
+        }
+        std::fs::write(&target, value)
+            .with_context(|| format!("writing OCI unified control {}={value}", target.display()))?;
+    }
+    Ok(())
+}
+
 fn apply_resource_limits(path: &std::path::Path, resources: &ResourceLimits) -> Result<()> {
     if resources.cpu_quota.is_some() || resources.cpu_period.is_some() {
         let current = std::fs::read_to_string(path.join("cpu.max")).unwrap_or_else(|_| "max 100000".into());
@@ -1237,8 +1384,49 @@ fn apply_resource_limits(path: &std::path::Path, resources: &ResourceLimits) -> 
         }
     }
     if let Some(limit) = resources.memory_limit_bytes {
-        let value = if limit > 0 { limit.to_string() } else { "max".into() };
-        std::fs::write(path.join("memory.max"), value)?;
+        let value = match limit {
+            0 => None,
+            -1 => Some("max".to_string()),
+            value if value > 0 => Some(value.to_string()),
+            value => bail!("invalid OCI memory.limit value {value}"),
+        };
+        if let Some(value) = value {
+            std::fs::write(path.join("memory.max"), value)?;
+        }
+    }
+    if let Some(reservation) = resources.memory_reservation_bytes {
+        let target = path.join("memory.low");
+        if !target.exists() { bail!("OCI memory.reservation requested but memory.low is unavailable"); }
+        let value = match reservation {
+            0 => None,
+            -1 => Some("max".to_string()),
+            value if value > 0 => Some(value.to_string()),
+            value => bail!("invalid OCI memory.reservation value {value}"),
+        };
+        if let Some(value) = value {
+            std::fs::write(target, value)?;
+        }
+    }
+    if let Some(memory_swap) = resources.memory_swap_bytes {
+        let target = path.join("memory.swap.max");
+        let memory = resources.memory_limit_bytes
+            .unwrap_or_else(|| current_memory_limit_for_swap(path));
+        if let Some(value) = oci_swap_to_cgroup2(memory_swap, memory)? {
+            if !target.exists() {
+                // Match runc's practical cgroup-v2 behavior for hosts/guests
+                // without swap accounting: unlimited/disabled swap does not
+                // need a backing controller file, but a finite request does.
+                if value == "max" || value == "0" {
+                    // No swap accounting in this guest; unlimited/disabled is
+                    // already effectively satisfied, so keep applying the
+                    // remaining resource fields below.
+                } else {
+                    bail!("OCI memory.swap requested but memory.swap.max is unavailable");
+                }
+            } else {
+                std::fs::write(target, value)?;
+            }
+        }
     }
     if let Some(limit) = resources.pids_limit {
         let value = if limit > 0 { limit.to_string() } else { "max".into() };
@@ -1256,6 +1444,7 @@ fn apply_resource_limits(path: &std::path::Path, resources: &ResourceLimits) -> 
     if let Some(cpus) = resources.cpuset_cpus.as_deref().filter(|v| !v.is_empty()) {
         std::fs::write(path.join("cpuset.cpus"), cpus)?;
     }
+    apply_unified_limits(path, &resources.unified)?;
     Ok(())
 }
 
@@ -1308,16 +1497,60 @@ fn parse_u64_field(path: &std::path::Path, key: &str) -> u64 {
     }).unwrap_or(0)
 }
 
+fn read_u64_file(path: &std::path::Path) -> u64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn container_cgroup_events(id: &str) -> Result<CgroupEvents> {
+    let path = container_cgroup(id)?.join("memory.events");
+    Ok(CgroupEvents {
+        low: parse_u64_field(&path, "low"),
+        high: parse_u64_field(&path, "high"),
+        max: parse_u64_field(&path, "max"),
+        oom: parse_u64_field(&path, "oom"),
+        oom_kill: parse_u64_field(&path, "oom_kill"),
+        oom_group_kill: parse_u64_field(&path, "oom_group_kill"),
+    })
+}
+
 fn container_stats(id: &str) -> Result<ContainerStats> {
     let path = container_cgroup(id)?;
+    let cpu = path.join("cpu.stat");
+    let memory = path.join("memory.stat");
+    let events = container_cgroup_events(id)?;
     let pids_max = std::fs::read_to_string(path.join("pids.max")).unwrap_or_default();
     Ok(ContainerStats {
-        cpu_usage_usec: parse_u64_field(&path.join("cpu.stat"), "usage_usec"),
-        cpu_user_usec: parse_u64_field(&path.join("cpu.stat"), "user_usec"),
-        cpu_system_usec: parse_u64_field(&path.join("cpu.stat"), "system_usec"),
-        memory_usage_bytes: std::fs::read_to_string(path.join("memory.current")).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0),
-        memory_total_inactive_file_bytes: parse_u64_field(&path.join("memory.stat"), "inactive_file"),
-        pids_current: std::fs::read_to_string(path.join("pids.current")).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+        cpu_usage_usec: parse_u64_field(&cpu, "usage_usec"),
+        cpu_user_usec: parse_u64_field(&cpu, "user_usec"),
+        cpu_system_usec: parse_u64_field(&cpu, "system_usec"),
+        cpu_nr_periods: parse_u64_field(&cpu, "nr_periods"),
+        cpu_nr_throttled: parse_u64_field(&cpu, "nr_throttled"),
+        cpu_throttled_usec: parse_u64_field(&cpu, "throttled_usec"),
+        memory_usage_bytes: read_u64_file(&path.join("memory.current")),
+        memory_limit_bytes: read_cgroup_limit(&path.join("memory.max")).unwrap_or(0),
+        memory_peak_bytes: read_u64_file(&path.join("memory.peak")),
+        memory_swap_usage_bytes: read_u64_file(&path.join("memory.swap.current")),
+        memory_swap_limit_bytes: read_cgroup_limit(&path.join("memory.swap.max")).unwrap_or(0),
+        memory_anon_bytes: parse_u64_field(&memory, "anon"),
+        memory_file_bytes: parse_u64_field(&memory, "file"),
+        memory_anon_thp_bytes: parse_u64_field(&memory, "anon_thp"),
+        memory_file_mapped_bytes: parse_u64_field(&memory, "file_mapped"),
+        memory_dirty_bytes: parse_u64_field(&memory, "file_dirty"),
+        memory_writeback_bytes: parse_u64_field(&memory, "file_writeback"),
+        memory_pgfault: parse_u64_field(&memory, "pgfault"),
+        memory_pgmajfault: parse_u64_field(&memory, "pgmajfault"),
+        memory_inactive_anon_bytes: parse_u64_field(&memory, "inactive_anon"),
+        memory_active_anon_bytes: parse_u64_field(&memory, "active_anon"),
+        memory_total_inactive_file_bytes: parse_u64_field(&memory, "inactive_file"),
+        memory_active_file_bytes: parse_u64_field(&memory, "active_file"),
+        memory_unevictable_bytes: parse_u64_field(&memory, "unevictable"),
+        memory_events_max: events.max,
+        memory_events_oom: events.oom,
+        memory_events_oom_kill: events.oom_kill,
+        pids_current: read_u64_file(&path.join("pids.current")),
         pids_limit: if pids_max.trim() == "max" { 0 } else { pids_max.trim().parse().unwrap_or(0) },
     })
 }
@@ -1793,7 +2026,14 @@ fn spawn_gated(
             stdin_file,
             stdout_file,
             stderr_file,
-            ProcIo::Pipes { stdin_write, stdin_attached: false, stdout_read, stderr_read },
+            ProcIo::Pipes {
+                stdin_write,
+                stdin_attached: false,
+                stdout_read,
+                stdout_attached: false,
+                stderr_read,
+                stderr_attached: false,
+            },
         )
     } else {
         (
@@ -2215,6 +2455,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unattached_block_device_nodes() {
+        let root = std::env::temp_dir().join(format!("fluxvm-block-device-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let config = serde_json::json!({
+            "linux": {"devices": [{
+                "path": "/dev/raw-volume", "type": "b", "major": 253, "minor": 17, "fileMode": 384
+            }]}
+        });
+        let error = create_oci_devices(&config, &root).unwrap_err().to_string();
+        assert!(error.contains("raw block volumes require VMM device hotplug"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn rejects_unknown_rlimit() {
         assert!(parse_oci_config(r#"{
           "root":{"path":"/r"},
@@ -2270,6 +2525,31 @@ mod tests {
         assert_eq!(rc, 0);
         assert_eq!((read_back.ws_col, read_back.ws_row), (101, 33));
         unsafe { libc::close(master); libc::close(slave); }
+    }
+
+    #[test]
+    fn oci_swap_translation_matches_cgroup_v2_semantics() {
+        assert_eq!(oci_swap_to_cgroup2(512, 256).unwrap().as_deref(), Some("256"));
+        assert_eq!(oci_swap_to_cgroup2(-1, 256).unwrap().as_deref(), Some("max"));
+        assert_eq!(oci_swap_to_cgroup2(0, 256).unwrap(), None);
+        assert_eq!(oci_swap_to_cgroup2(0, -1).unwrap().as_deref(), Some("max"));
+        assert_eq!(oci_swap_to_cgroup2(512, -1).unwrap().as_deref(), Some("512"));
+        assert!(oci_swap_to_cgroup2(128, 256).is_err());
+        assert!(oci_swap_to_cgroup2(512, 0).is_err());
+    }
+
+    #[test]
+    fn resource_parser_keeps_reservation_swap_and_unified() {
+        let resources = resource_limits_from_oci(&serde_json::json!({
+            "linux": {"resources": {
+                "memory": {"limit": 256, "reservation": 128, "swap": 512},
+                "unified": {"memory.high": "192", "memory.oom.group": "1"}
+            }}
+        }));
+        assert_eq!(resources.memory_limit_bytes, Some(256));
+        assert_eq!(resources.memory_reservation_bytes, Some(128));
+        assert_eq!(resources.memory_swap_bytes, Some(512));
+        assert_eq!(resources.unified.get("memory.high").map(String::as_str), Some("192"));
     }
 
     #[test]

@@ -45,6 +45,20 @@ merge the runtime fragment and restart containerd.
 - Terminal containers/execs use a real guest PTY with `ResizePty` / `CloseIO`.
 - Detail: [docs/secure-containers-set5.md](../../docs/secure-containers-set5.md).
 
+## Set 6 recovery and dual-stack
+
+Recovery is enabled by default and journals ownership under
+`FLUXVM_CONTAINERD_STATE_DIR` (default `/run/fluxvm/containerd`). A corrupt
+journal fails closed to avoid duplicate Pod VMs.
+
+The primary CNI interface now supports IPv4/IPv6 dual-stack replay. Extra
+routable interfaces are rejected by default; use
+`FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0` only in controlled labs.
+
+Set 6 does not change containerd dead-shim supervision policy. It provides
+safe recovery when a replacement shim is launched.
+- Detail: [docs/secure-containers-set6.md](../../docs/secure-containers-set6.md).
+
 > Developer-preview. Validate VSOCK stdio/TTY, CNI, and PVC behavior on your
 > KVM/containerd/Kubernetes node image before production. See
 > [docs/secure-containers.md](../../docs/secure-containers.md). Do not advertise

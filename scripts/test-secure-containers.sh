@@ -21,3 +21,12 @@ if [[ "${FLUXVM_SECURE_CONTAINERS_E2E:-0}" == "1" ]]; then
     ./scripts/e2e-secure-containers-tty.sh
   fi
 fi
+
+
+if [[ "${FLUXVM_SECURE_CONTAINERS_DUALSTACK_E2E:-0}" == "1" ]]; then
+  FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/e2e-secure-containers-dualstack.sh
+fi
+
+if [[ "${FLUXVM_SECURE_CONTAINERS_OOM_E2E:-0}" == "1" ]]; then
+  FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/e2e-secure-containers-oom.sh
+fi

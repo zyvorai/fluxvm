@@ -81,6 +81,14 @@ the VM's existing per-instance authentication token.
   [docs/secure-containers-set6s.md](secure-containers-set6s.md). Populating
   it automatically from live Kubernetes `NetworkPolicy` objects is not yet
   implemented (needs a selector-resolving watcher/controller).
+- restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay
+  on the primary interface — see
+  [docs/secure-containers-set6.md](secure-containers-set6.md)
+- containerd `TaskOOM` publication from guest cgroup-v2 `memory.events`, CPU
+  throttling + detailed memory/swap/fault task metrics, OCI memory
+  reservation/swap translation, allowlisted cgroup-v2 `unified` updates, and
+  fail-closed raw block/special-device handling — see
+  [docs/secure-containers-set7.md](secure-containers-set7.md)
 
 ## Current limitations
 
@@ -89,9 +97,10 @@ Containers compatibility.
 
 1. **QEMU is the supported Secure Containers VMM.** Cloud Hypervisor and
    Firecracker still need equivalent shared-rootfs/volume plumbing.
-2. **CNI coverage is not yet broad conformance.** The current L2 handoff is
-   IPv4/primary-interface oriented; dual-stack, Multus and unusual CNI layouts
-   need dedicated validation.
+2. **CNI coverage is not yet broad conformance.** The L2 handoff now replays
+   IPv4/IPv6 dual-stack on the primary interface and rejects extra routable
+   interfaces by default; real Multus/secondary-NIC hotplug and unusual CNI
+   layouts remain open.
 3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
    Pod volume roots are scoped by sandbox UID; other binds remain copied unless
    an explicit broker/hotplug model is added.
@@ -108,6 +117,11 @@ Containers compatibility.
 7. **`CLONE_NEWUSER` is opt-in and unproven under load.** Default identity
    uid/gid mapping avoids virtiofs ACL shifting but has not yet been validated
    against real multi-container Pods on self-hosted KVM nodes.
+8. **Raw Kubernetes block volumes and device-plugin passthrough are not
+   claimed.** A guest device node is only meaningful when the corresponding
+   hardware is actually attached to the VM; block/character device requests
+   without a matching attached guest device now fail closed instead of
+   silently `mknod`-ing an unrelated node.
 
 ## Next gates to production Kata-style Kubernetes support
 
@@ -210,3 +224,28 @@ on port 17778 while raw process streams attach on authenticated VSOCK port
 17779. Non-TTY tasks use guest pipes; terminal tasks use a real guest PTY and
 containerd `ResizePty` maps to `TIOCSWINSZ`. See
 `docs/secure-containers-set5.md` for protocol, fallback and test details.
+
+## Runtime recovery + dual-stack CNI addendum
+
+Persists an atomic versioned sandbox/task/exec ownership journal (including
+`ready=false` provisional VM ownership), validates it against the live FluxVM
+before reuse, and fails closed rather than risking a duplicate Pod VM when
+recovery cannot be proven safe. Restores task/exec exit watchers and attempts
+VSOCK stdio reattachment after a replacement shim launches. The primary CNI
+interface now captures/replays IPv4 + IPv6 addresses and family-specific
+routes; additional routable interfaces are rejected by default
+(`FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0` to relax in controlled labs
+only). See `docs/secure-containers-set6.md`.
+
+## OOM + cgroup metrics + cleanup-safety addendum
+
+Publishes containerd `TaskOOM` from guest cgroup-v2 `memory.events` with a
+journaled `oom_kill` cursor that survives replacement-shim recovery. `StatsTask`
+gains CPU throttling and detailed memory/swap/fault/pids statistics. OCI
+`memory.reservation` maps to `memory.low`, OCI memory+swap is converted to
+cgroup-v2 swap-only `memory.swap.max`, and `LinuxResources.unified` updates are
+restricted to a small explicit allowlist. Raw block and special host-device
+binds are rejected instead of copied, and character devices are validated
+against the guest's actual attached major/minor. Sandbox teardown retains
+journal/CNI ownership state when FluxVM VM deletion fails, so cleanup can be
+retried safely. See `docs/secure-containers-set7.md`.

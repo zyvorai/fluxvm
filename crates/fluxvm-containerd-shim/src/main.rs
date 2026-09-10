@@ -3,7 +3,7 @@
 
 //! containerd runtime-v2 shim for FluxVM secure containers.
 //!
-//! Secure Containers contract through Set 5:
+//! Secure Containers contract through Set 7:
 //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
 //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
 //! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
@@ -11,6 +11,9 @@
 //! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK 17778;
 //! * stdin/stdout/stderr stream over authenticated VSOCK 17779;
 //! * terminal init/exec processes use a real guest PTY with ResizePty;
+//! * cgroup-v2 memory.events drive containerd TaskOOM events;
+//! * stats expose CPU throttling and detailed memory accounting;
+//! * raw host block/special-device binds fail closed until VMM hotplug exists;
 //! * no host kernel is shared with the workload.
 //!
 //! The copy/snapshot approach is intentionally conservative. It gives a
@@ -36,10 +39,12 @@ use containerd_shim::{
 use containerd_shim_protos::{
     api::{CloseIORequest, ConnectRequest, ConnectResponse, DeleteResponse, PidsRequest, PidsResponse,
           ProcessInfo, ResizePtyRequest, StatsRequest, StatsResponse, UpdateTaskRequest},
-    cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, PidsStat},
+    cgroups::metrics::{
+        CPUStat, CPUUsage, MemoryEntry, MemoryOomControl, MemoryStat, Metrics, PidsStat, Throttle,
+    },
     events::task::{
-        TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskExit, TaskIO, TaskPaused,
-        TaskResumed, TaskStart,
+        TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskExit, TaskIO, TaskOOM,
+        TaskPaused, TaskResumed, TaskStart,
     },
     protobuf::{EnumOrUnknown, MessageDyn},
     shim_async::Task,
@@ -51,14 +56,15 @@ use fluxvm_container_protocol::{
 };
 use fluxvm_core::model::{VmRecord, VmStatus};
 use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
-use log::warn;
+use log::{info, warn};
 use reqwest::{Client, Method};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -92,7 +98,10 @@ struct RuntimeConfig {
     boot_timeout_secs: u64,
     cni_interface: String,
     cni_enabled: bool,
+    cni_strict_multi_interface: bool,
     streaming_stdio: bool,
+    recovery_enabled: bool,
+    oom_poll_ms: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -115,12 +124,18 @@ impl Default for RuntimeConfig {
             boot_timeout_secs: std::env::var("FLUXVM_CONTAINER_BOOT_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
             cni_interface: std::env::var("FLUXVM_CONTAINER_CNI_INTERFACE").unwrap_or_else(|_| "eth0".into()),
             cni_enabled: std::env::var("FLUXVM_CONTAINER_CNI").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            cni_strict_multi_interface: std::env::var("FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE").ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
             streaming_stdio: std::env::var("FLUXVM_CONTAINER_STREAMING_STDIO").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            recovery_enabled: std::env::var("FLUXVM_CONTAINER_RECOVER").ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            oom_poll_ms: std::env::var("FLUXVM_CONTAINER_OOM_POLL_MS").ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(1000).clamp(100, 60_000),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TaskMeta {
     bundle: String,
     stdin: String,
@@ -129,32 +144,66 @@ struct TaskMeta {
     terminal: bool,
     pid: u32,
     /// Host-side virtiofs stdio directory for this init/exec process.
+    #[serde(default)]
     io_dir: Option<PathBuf>,
+    #[serde(default)]
     streaming: bool,
+    /// Last guest memory.events oom_kill counter published to containerd.
+    /// Persisted so a replacement shim can surface OOMs that occurred while
+    /// the previous shim was unavailable.
+    #[serde(default)]
+    oom_kill_seen: u64,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Sandbox {
     vm: VmRecord,
     share_dir: PathBuf,
     cni: Option<CniBridge>,
+    kubelet_mounts: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug)]
-struct CniRoute {
-    destination: Option<(Ipv4Addr, u8)>, // None = default
-    gateway: Option<Ipv4Addr>,
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+enum CniFamily {
+    Ipv4,
+    Ipv6,
 }
 
-#[derive(Clone, Debug)]
-struct CniNetwork {
-    pod_ip: Ipv4Addr,
+impl CniFamily {
+    fn ip_flag(self) -> &'static str {
+        match self { Self::Ipv4 => "-4", Self::Ipv6 => "-6" }
+    }
+    fn max_prefix(self) -> u8 {
+        match self { Self::Ipv4 => 32, Self::Ipv6 => 128 }
+    }
+    fn matches(self, addr: IpAddr) -> bool {
+        matches!((self, addr), (Self::Ipv4, IpAddr::V4(_)) | (Self::Ipv6, IpAddr::V6(_)))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CniAddress {
+    family: CniFamily,
+    address: IpAddr,
     prefix_len: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CniRoute {
+    family: CniFamily,
+    destination: Option<(IpAddr, u8)>, // None = default
+    gateway: Option<IpAddr>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CniNetwork {
+    addresses: Vec<CniAddress>,
     mac: String,
     routes: Vec<CniRoute>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct CniBridge {
     netns_alias: String,
     netns_mount: PathBuf,
@@ -175,6 +224,87 @@ struct SandboxHints {
     pod_uid: Option<String>,
 }
 
+const RUNTIME_STATE_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SandboxJournal {
+    vm_id: String,
+    vm_name: String,
+    #[serde(default)]
+    ready: bool,
+    share_dir: PathBuf,
+    #[serde(default)]
+    cni: Option<CniBridge>,
+    #[serde(default)]
+    kubelet_mounts: Vec<(String, String)>,
+}
+
+impl SandboxJournal {
+    fn from_sandbox(sandbox: &Sandbox) -> Self {
+        Self {
+            vm_id: sandbox.vm.id.to_string(),
+            vm_name: sandbox.vm.name.clone(),
+            ready: true,
+            share_dir: sandbox.share_dir.clone(),
+            cni: sandbox.cni.clone(),
+            kubelet_mounts: sandbox.kubelet_mounts.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RuntimeStateJournal {
+    version: u32,
+    #[serde(default)]
+    sandbox: Option<SandboxJournal>,
+    #[serde(default)]
+    tasks: HashMap<String, TaskMeta>,
+    #[serde(default)]
+    execs: HashMap<String, TaskMeta>,
+}
+
+impl Default for RuntimeStateJournal {
+    fn default() -> Self {
+        Self {
+            version: RUNTIME_STATE_VERSION,
+            sandbox: None,
+            tasks: HashMap::new(),
+            execs: HashMap::new(),
+        }
+    }
+}
+
+fn runtime_state_root(cfg: &RuntimeConfig, namespace: &str, group: &str) -> PathBuf {
+    cfg.state_dir.join(namespace).join(group)
+}
+
+fn runtime_state_path(cfg: &RuntimeConfig, namespace: &str, group: &str) -> PathBuf {
+    runtime_state_root(cfg, namespace, group).join("runtime-state.json")
+}
+
+async fn load_runtime_state(
+    cfg: &RuntimeConfig,
+    namespace: &str,
+    group: &str,
+) -> AnyResult<RuntimeStateJournal> {
+    let path = runtime_state_path(cfg, namespace, group);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(RuntimeStateJournal::default()),
+        Err(e) => return Err(e).with_context(|| format!("reading recovery journal {}", path.display())),
+    };
+    let state: RuntimeStateJournal = serde_json::from_slice(&bytes)
+        .with_context(|| format!("decoding recovery journal {}", path.display()))?;
+    if state.version != RUNTIME_STATE_VERSION {
+        bail!(
+            "unsupported recovery journal version {} (expected {})",
+            state.version,
+            RUNTIME_STATE_VERSION
+        );
+    }
+    Ok(state)
+}
+
 #[derive(Clone)]
 struct Service {
     exit: Arc<ExitSignal>,
@@ -188,7 +318,11 @@ struct Service {
     event_tx: EventSender,
     event_rx: Arc<Mutex<Option<EventReceiver>>>,
     exit_events: Arc<Mutex<HashSet<String>>>,
+    oom_monitors: Arc<Mutex<HashSet<String>>>,
     stream_pending: Arc<Mutex<HashMap<String, usize>>>,
+    journal_sandbox: Arc<Mutex<Option<SandboxJournal>>>,
+    journal_lock: Arc<Mutex<()>>,
+    recovery_error: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
@@ -198,19 +332,35 @@ impl Shim for Service {
     async fn new(_runtime_id: &str, args: &Flags, _config: &mut Config) -> Self {
         let group = pod_group_from_bundle(&args.bundle).await.unwrap_or_else(|| args.id.clone());
         let (event_tx, event_rx) = channel(128);
+        let cfg = RuntimeConfig::default();
+        let (recovered, recovery_error) = if cfg.recovery_enabled {
+            match load_runtime_state(&cfg, &args.namespace, &group).await {
+                Ok(state) => (state, None),
+                Err(e) => (
+                    RuntimeStateJournal::default(),
+                    Some(format!("{e:#}")),
+                ),
+            }
+        } else {
+            (RuntimeStateJournal::default(), None)
+        };
         Self {
             exit: Arc::new(ExitSignal::default()),
             namespace: args.namespace.clone(),
             group,
-            cfg: RuntimeConfig::default(),
+            cfg,
             http: Client::new(),
             sandbox: Arc::new(Mutex::new(None)),
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            execs: Arc::new(RwLock::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(recovered.tasks)),
+            execs: Arc::new(RwLock::new(recovered.execs)),
             event_tx,
             event_rx: Arc::new(Mutex::new(Some(event_rx))),
             exit_events: Arc::new(Mutex::new(HashSet::new())),
+            oom_monitors: Arc::new(Mutex::new(HashSet::new())),
             stream_pending: Arc::new(Mutex::new(HashMap::new())),
+            journal_sandbox: Arc::new(Mutex::new(recovered.sandbox)),
+            journal_lock: Arc::new(Mutex::new(())),
+            recovery_error: Arc::new(Mutex::new(recovery_error)),
         }
     }
 
@@ -220,7 +370,9 @@ impl Shim for Service {
     }
 
     async fn delete_shim(&mut self) -> Result<DeleteResponse, Error> {
-        let _ = self.destroy_sandbox().await;
+        self.destroy_sandbox()
+            .await
+            .map_err(|e| Error::Other(format!("destroying secure-container sandbox: {e:#}")))?;
         Ok(DeleteResponse::new())
     }
 
@@ -251,11 +403,283 @@ impl Service {
         Ok(resp)
     }
 
+
+    async fn persist_runtime_state(&self) -> AnyResult<()> {
+        if !self.cfg.recovery_enabled {
+            return Ok(());
+        }
+        let _guard = self.journal_lock.lock().await;
+        let state = RuntimeStateJournal {
+            version: RUNTIME_STATE_VERSION,
+            sandbox: self.journal_sandbox.lock().await.clone(),
+            tasks: self.tasks.read().await.clone(),
+            execs: self.execs.read().await.clone(),
+        };
+        let root = runtime_state_root(&self.cfg, &self.namespace, &self.group);
+        tokio::fs::create_dir_all(&root).await?;
+        let path = runtime_state_path(&self.cfg, &self.namespace, &self.group);
+        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        tokio::fs::write(&tmp, serde_json::to_vec_pretty(&state)?).await?;
+        tokio::fs::rename(&tmp, &path).await
+            .with_context(|| format!("committing recovery journal {}", path.display()))?;
+        Ok(())
+    }
+
+    async fn clear_runtime_state_file(&self) {
+        let _guard = self.journal_lock.lock().await;
+        let path = runtime_state_path(&self.cfg, &self.namespace, &self.group);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    async fn recovery_vm(&self, id: &str) -> AnyResult<Option<VmRecord>> {
+        let url = format!("{}/v1/vms/{id}", self.cfg.api_url.trim_end_matches('/'));
+        let mut req = self.http.get(&url);
+        if let Some(token) = &self.cfg.api_token {
+            req = req.bearer_auth(token);
+        }
+        let response = req.send().await.with_context(|| format!("recovering FluxVM VM {id}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("FluxVM recovery GET {url} returned {status}: {body}");
+        }
+        Ok(Some(response.json().await.context("decoding recovered FluxVM VM")?))
+    }
+
+    async fn recovery_cni_ready(&self, cni: &CniBridge) -> bool {
+        if !cni.netns_mount.exists()
+            || !Path::new("/sys/class/net").join(&cni.host_bridge).exists()
+            || !Path::new("/sys/class/net").join(&cni.host_veth).exists()
+        {
+            return false;
+        }
+        for iface in [&cni.cni_bridge, &cni.cni_veth, &cni.interface] {
+            let mut args = vec![
+                "netns".to_string(), "exec".to_string(), cni.netns_alias.clone(),
+                "ip".to_string(), "link".to_string(), "show".to_string(), iface.clone(),
+            ];
+            let ok = tokio::process::Command::new("ip")
+                .args(args.drain(..))
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn attach_recovered_streams(&self, vm: &VmRecord) {
+        if !self.cfg.streaming_stdio {
+            return;
+        }
+        let tasks: Vec<(String, TaskMeta)> = self.tasks.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (id, meta) in tasks {
+            if !meta.streaming {
+                continue;
+            }
+            if let Err(e) = self.attach_stream_relays(
+                vm, &id, None, &meta.stdin, &meta.stdout, &meta.stderr, meta.terminal
+            ).await {
+                warn!("recovery stdio attach failed for {id}: {e:#}");
+            }
+        }
+        let execs: Vec<(String, TaskMeta)> = self.execs.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, meta) in execs {
+            if !meta.streaming {
+                continue;
+            }
+            let Some((id, exec_id)) = key.split_once('\0') else { continue; };
+            if let Err(e) = self.attach_stream_relays(
+                vm, id, Some(exec_id), &meta.stdin, &meta.stdout, &meta.stderr, meta.terminal
+            ).await {
+                warn!("recovery exec stdio attach failed for {id}/{exec_id}: {e:#}");
+            }
+        }
+    }
+
+    async fn restore_recovered_processes(&self, vm: &VmRecord) -> AnyResult<()> {
+        let tasks: Vec<(String, TaskMeta)> = self.tasks.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (id, meta) in tasks {
+            let response = self.call_agent_direct(
+                vm,
+                ContainerRequest::State { id: id.clone(), exec_id: None },
+            ).await.with_context(|| format!("checking recovered task {id}"))?;
+            match response {
+                ContainerResponse::State { status: ContainerStatus::Running | ContainerStatus::Paused, pid, .. } => {
+                    self.spawn_exit_watch(vm.clone(), id.clone(), None, if pid == 0 { meta.pid } else { pid });
+                }
+                ContainerResponse::State { status: ContainerStatus::Created, .. } => {}
+                ContainerResponse::State { status: ContainerStatus::Stopped, exit_code, exited_at_unix_nano, pid, .. } => {
+                    if let (Some(code), Some(at)) = (exit_code, exited_at_unix_nano) {
+                        self.publish_exit_once(id.clone(), None, pid, code, at).await;
+                    }
+                }
+                other => bail!("unexpected recovered task state: {other:?}"),
+            }
+            self.spawn_oom_watch(vm.clone(), id);
+        }
+
+        let execs: Vec<(String, TaskMeta)> = self.execs.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, meta) in execs {
+            let Some((id, exec_id)) = key.split_once('\0') else { continue; };
+            let response = self.call_agent_direct(
+                vm,
+                ContainerRequest::State { id: id.to_string(), exec_id: Some(exec_id.to_string()) },
+            ).await.with_context(|| format!("checking recovered exec {id}/{exec_id}"))?;
+            match response {
+                ContainerResponse::State { status: ContainerStatus::Running | ContainerStatus::Paused, pid, .. } => {
+                    self.spawn_exit_watch(
+                        vm.clone(), id.to_string(), Some(exec_id.to_string()),
+                        if pid == 0 { meta.pid } else { pid }
+                    );
+                }
+                ContainerResponse::State { status: ContainerStatus::Created, .. } => {}
+                ContainerResponse::State { status: ContainerStatus::Stopped, exit_code, exited_at_unix_nano, pid, .. } => {
+                    if let (Some(code), Some(at)) = (exit_code, exited_at_unix_nano) {
+                        self.publish_exit_once(
+                            id.to_string(), Some(exec_id.to_string()), pid, code, at
+                        ).await;
+                    }
+                }
+                other => bail!("unexpected recovered exec state: {other:?}"),
+            }
+        }
+        self.attach_recovered_streams(vm).await;
+        Ok(())
+    }
+
+    async fn recover_sandbox_from_journal(
+        &self,
+        journal: &SandboxJournal,
+    ) -> AnyResult<Sandbox> {
+        if !journal.ready {
+            bail!("recovery journal records a provisional, not-ready sandbox");
+        }
+        let started = tokio::time::Instant::now();
+        let mut vm = self.recovery_vm(&journal.vm_id).await?
+            .with_context(|| format!("journal-owned VM {} no longer exists", journal.vm_id))?;
+        if vm.name != journal.vm_name {
+            bail!(
+                "journal VM identity mismatch: expected name {:?}, got {:?}",
+                journal.vm_name,
+                vm.name
+            );
+        }
+        if let Some(cni) = journal.cni.as_ref() {
+            if !self.recovery_cni_ready(cni).await {
+                bail!("journal-owned CNI bridge/netns topology is incomplete");
+            }
+        }
+        if vm.status == VmStatus::Paused {
+            self.api(Method::POST, &format!("/v1/vms/{}/resume", vm.id), None).await?;
+            vm = self.api(Method::GET, &format!("/v1/vms/{}", vm.id), None)
+                .await?.json().await?;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.cfg.boot_timeout_secs);
+        loop {
+            if vm.status == VmStatus::Running
+                && fluxvm_vsock_client::ping(&vm, Duration::from_secs(2)).await.is_ok()
+            {
+                break;
+            }
+            if vm.status == VmStatus::Failed {
+                bail!("journal-owned sandbox VM is failed: {}", vm.error.as_deref().unwrap_or("unknown"));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("timed out recovering journal-owned VM {}", vm.id);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            vm = self.api(Method::GET, &format!("/v1/vms/{}", vm.id), None)
+                .await?.json().await?;
+        }
+        self.ensure_guest_shares_mounted(&vm, &journal.kubelet_mounts).await?;
+        if fluxvm_container_client::ping(&vm, Duration::from_millis(750)).await.is_err() {
+            if self.tasks.read().await.is_empty() && self.execs.read().await.is_empty() {
+                self.bootstrap_container_agent(&vm).await?;
+            } else {
+                bail!("container agent unavailable while live task metadata exists");
+            }
+        }
+        self.restore_recovered_processes(&vm).await?;
+        info!(
+            "secure-container sandbox recovered vm={} group={} elapsed_ms={}",
+            vm.id,
+            self.group,
+            started.elapsed().as_millis()
+        );
+        Ok(Sandbox {
+            vm,
+            share_dir: journal.share_dir.clone(),
+            cni: journal.cni.clone(),
+            kubelet_mounts: journal.kubelet_mounts.clone(),
+        })
+    }
+
     async fn ensure_sandbox(&self, hints: Option<&SandboxHints>) -> AnyResult<VmRecord> {
         let mut guard = self.sandbox.lock().await;
         if let Some(s) = guard.as_ref() {
             return Ok(s.vm.clone());
         }
+
+        if let Some(error) = self.recovery_error.lock().await.clone() {
+            bail!(
+                "secure-container recovery journal is unreadable or unsupported: {error};                  refusing a cold start that could duplicate the Pod VM"
+            );
+        }
+
+        if self.cfg.recovery_enabled {
+            if let Some(journal) = self.journal_sandbox.lock().await.clone() {
+                let has_processes =
+                    !self.tasks.read().await.is_empty() || !self.execs.read().await.is_empty();
+
+                if journal.ready {
+                    match self.recover_sandbox_from_journal(&journal).await {
+                        Ok(recovered) => {
+                            let vm = recovered.vm.clone();
+                            *guard = Some(recovered);
+                            return Ok(vm);
+                        }
+                        Err(e) if has_processes => {
+                            bail!(
+                                "failed to recover live secure-container sandbox: {e:#};                                  refusing to cold-create a duplicate VM"
+                            );
+                        }
+                        Err(e) => {
+                            warn!("discarding stale empty sandbox journal after recovery failure: {e:#}");
+                        }
+                    }
+                } else if has_processes {
+                    bail!(
+                        "recovery journal owns provisional VM {} while task metadata exists;                          refusing duplicate sandbox creation",
+                        journal.vm_id
+                    );
+                }
+
+                // Empty/provisional ownership can be reclaimed. The VM ID was
+                // persisted as soon as create returned, so even a crash during
+                // guest boot is cleaned up before a new sandbox is attempted.
+                if let Ok(Some(vm)) = self.recovery_vm(&journal.vm_id).await {
+                    let _ = self.api(Method::DELETE, &format!("/v1/vms/{}", vm.id), None).await;
+                }
+                if let Some(cni) = journal.cni.as_ref() {
+                    cleanup_cni_bridge(cni).await;
+                }
+                *self.journal_sandbox.lock().await = None;
+                self.clear_runtime_state_file().await;
+            }
+        }
+
+        let cold_started = tokio::time::Instant::now();
 
         if !self.cfg.guest_image.exists() {
             bail!(
@@ -295,6 +719,15 @@ impl Service {
         // before POST /v1/vms.
         let cni = if self.cfg.cni_enabled {
             if let Some(path) = hints.netns_path.as_ref() {
+                if self.cfg.cni_strict_multi_interface {
+                    let extras = detect_additional_cni_interfaces(path, &self.cfg.cni_interface).await?;
+                    if !extras.is_empty() {
+                        bail!(
+                            "CNI namespace has additional routable interfaces {:?};                              FluxVM Set 6 refuses silent partial Multus/multi-interface configuration.                              Set FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0 only for controlled testing",
+                            extras
+                        );
+                    }
+                }
                 Some(
                     prepare_cni_l2(&self.group, path, &self.cfg.cni_interface)
                         .await
@@ -383,6 +816,26 @@ impl Service {
             }
         };
 
+        if self.cfg.recovery_enabled {
+            let provisional = SandboxJournal {
+                vm_id: vm.id.to_string(),
+                vm_name: vm.name.clone(),
+                ready: false,
+                share_dir: share_dir.clone(),
+                cni: cni.clone(),
+                kubelet_mounts: kubelet_mounts.clone(),
+            };
+            *self.journal_sandbox.lock().await = Some(provisional);
+            if let Err(e) = self.persist_runtime_state().await {
+                let _ = self.api(Method::DELETE, &format!("/v1/vms/{}", vm.id), None).await;
+                if let Some(cni) = cni.as_ref() {
+                    cleanup_cni_bridge(cni).await;
+                }
+                *self.journal_sandbox.lock().await = None;
+                return Err(e).context("persisting provisional VM ownership");
+            }
+        }
+
         let setup: AnyResult<()> = async {
             let deadline =
                 tokio::time::Instant::now() + Duration::from_secs(self.cfg.boot_timeout_secs);
@@ -443,14 +896,26 @@ impl Service {
             if let Some(cni) = cni.as_ref() {
                 cleanup_cni_bridge(cni).await;
             }
+            *self.journal_sandbox.lock().await = None;
+            self.clear_runtime_state_file().await;
             return Err(e);
         }
 
-        *guard = Some(Sandbox {
+        let sandbox = Sandbox {
             vm: vm.clone(),
             share_dir,
             cni,
-        });
+            kubelet_mounts,
+        };
+        *self.journal_sandbox.lock().await = Some(SandboxJournal::from_sandbox(&sandbox));
+        *guard = Some(sandbox);
+        self.persist_runtime_state().await?;
+        info!(
+            "secure-container sandbox cold-started vm={} group={} elapsed_ms={}",
+            vm.id,
+            self.group,
+            cold_started.elapsed().as_millis()
+        );
         Ok(vm)
     }
 
@@ -868,6 +1333,74 @@ impl Service {
         });
     }
 
+    fn spawn_oom_watch(&self, vm: VmRecord, id: String) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            {
+                let mut active = service.oom_monitors.lock().await;
+                if !active.insert(id.clone()) {
+                    return;
+                }
+            }
+
+            let mut consecutive_errors = 0u32;
+            loop {
+                if !service.tasks.read().await.contains_key(&id) {
+                    break;
+                }
+                match service.call_agent_direct(&vm, ContainerRequest::CgroupEvents { id: id.clone() }).await {
+                    Ok(ContainerResponse::CgroupEvents { events }) => {
+                        consecutive_errors = 0;
+                        let seen = service.tasks.read().await.get(&id).map(|m| m.oom_kill_seen).unwrap_or(events.oom_kill);
+                        if events.oom_kill > seen {
+                            service.send_event(TaskOOM {
+                                container_id: id.clone(),
+                                ..Default::default()
+                            }).await;
+                            if let Some(meta) = service.tasks.write().await.get_mut(&id) {
+                                meta.oom_kill_seen = events.oom_kill;
+                            }
+                            if let Err(e) = service.persist_runtime_state().await {
+                                warn!("persisting OOM counter for {id} failed: {e:#}");
+                            }
+                            info!(
+                                "secure-container OOM id={} oom={} oom_kill={} max_events={}",
+                                id, events.oom, events.oom_kill, events.max
+                            );
+                        }
+                    }
+                    Ok(other) => {
+                        consecutive_errors += 1;
+                        if consecutive_errors == 1 || consecutive_errors % 20 == 0 {
+                            warn!("unexpected cgroup-events response for {id}: {other:?}");
+                        }
+                    }
+                    Err(e) => {
+                        consecutive_errors += 1;
+                        if consecutive_errors == 1 || consecutive_errors % 20 == 0 {
+                            warn!("OOM monitor query failed for {id}: {e:#}");
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(service.cfg.oom_poll_ms)).await;
+            }
+            service.oom_monitors.lock().await.remove(&id);
+        });
+    }
+
+    async fn delete_fluxvm_vm_idempotent(&self, vm_id: &str) -> AnyResult<()> {
+        let url = format!("{}/v1/vms/{vm_id}", self.cfg.api_url.trim_end_matches('/'));
+        let mut req = self.http.request(Method::DELETE, &url);
+        if let Some(token) = &self.cfg.api_token { req = req.bearer_auth(token); }
+        let response = req.send().await.with_context(|| format!("deleting journal-owned FluxVM VM {vm_id}"))?;
+        if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("FluxVM DELETE {url} returned {status}: {body}");
+    }
+
     async fn cleanup_process_staging(&self, id: &str, exec_id: Option<&str>) {
         self.stream_pending.lock().await.remove(&process_key(id, exec_id));
         let share_dir = {
@@ -891,15 +1424,31 @@ impl Service {
     }
 
     async fn destroy_sandbox(&self) -> AnyResult<()> {
-        let mut guard = self.sandbox.lock().await;
-        if let Some(s) = guard.take() {
-            let _ = self.api(Method::DELETE, &format!("/v1/vms/{}", s.vm.id), None).await;
-            if let Some(cni) = s.cni.as_ref() {
-                cleanup_cni_bridge(cni).await;
-            }
-            let root = self.cfg.state_dir.join(&self.namespace).join(&self.group);
-            let _ = tokio::fs::remove_dir_all(root).await;
+        // Never drop the recovery journal before VM deletion is confirmed.
+        // If the FluxVM API is temporarily unavailable, returning an error
+        // leaves authoritative ownership in place for containerd's retry and
+        // prevents an orphaned VM from becoming invisible to the runtime.
+        let live = self.sandbox.lock().await.clone();
+        let journal = self.journal_sandbox.lock().await.clone();
+        let vm_id = live.as_ref().map(|s| s.vm.id.to_string())
+            .or_else(|| journal.as_ref().map(|j| j.vm_id.clone()));
+        if let Some(vm_id) = vm_id.as_deref() {
+            self.delete_fluxvm_vm_idempotent(vm_id).await?;
         }
+
+        if let Some(cni) = live.as_ref().and_then(|s| s.cni.as_ref()) {
+            cleanup_cni_bridge(cni).await;
+        } else if let Some(cni) = journal.as_ref().and_then(|j| j.cni.as_ref()) {
+            cleanup_cni_bridge(cni).await;
+        }
+
+        *self.sandbox.lock().await = None;
+        *self.journal_sandbox.lock().await = None;
+        self.tasks.write().await.clear();
+        self.execs.write().await.clear();
+        self.oom_monitors.lock().await.clear();
+        let root = runtime_state_root(&self.cfg, &self.namespace, &self.group);
+        let _ = tokio::fs::remove_dir_all(root).await;
         Ok(())
     }
 }
@@ -960,7 +1509,10 @@ impl Task for Service {
             bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
             io_dir,
             streaming: self.cfg.streaming_stdio,
+            oom_kill_seen: 0,
         });
+        self.persist_runtime_state().await.map_err(rpc_other)?;
+        self.spawn_oom_watch(vm.clone(), req.id.clone());
         self.send_event(TaskCreate {
             container_id: req.id.clone(),
             bundle: req.bundle.clone(),
@@ -1111,6 +1663,7 @@ impl Task for Service {
             self.tasks.write().await.remove(&req.id);
             self.execs.write().await.retain(|key, _| !key.starts_with(&format!("{}\0", req.id)));
         }
+        self.persist_runtime_state().await.map_err(rpc_other)?;
 
         self.send_event(TaskDelete {
             container_id: req.id.clone(),
@@ -1165,7 +1718,9 @@ impl Task for Service {
             pid,
             io_dir,
             streaming: self.cfg.streaming_stdio,
+            oom_kill_seen: 0,
         });
+        self.persist_runtime_state().await.map_err(rpc_other)?;
         self.send_event(TaskExecAdded {
             container_id: req.id,
             exec_id: req.exec_id,
@@ -1288,27 +1843,85 @@ fn stats_to_metrics(stats: &ContainerStats) -> Metrics {
     usage.set_total(stats.cpu_usage_usec);
     usage.set_user(stats.cpu_user_usec);
     usage.set_kernel(stats.cpu_system_usec);
+    let mut throttle = Throttle::new();
+    throttle.set_periods(stats.cpu_nr_periods);
+    throttle.set_throttled_periods(stats.cpu_nr_throttled);
+    throttle.set_throttled_time(stats.cpu_throttled_usec);
     let mut cpu = CPUStat::new();
     cpu.set_usage(usage);
+    cpu.set_throttling(throttle);
 
     let mut mem_usage = MemoryEntry::new();
+    mem_usage.set_limit(stats.memory_limit_bytes);
     mem_usage.set_usage(stats.memory_usage_bytes);
+    mem_usage.set_max(stats.memory_peak_bytes);
+    mem_usage.set_failcnt(stats.memory_events_max);
+    let mut swap = MemoryEntry::new();
+    let swap_usage = stats.memory_usage_bytes.saturating_add(stats.memory_swap_usage_bytes);
+    let swap_limit = if stats.memory_limit_bytes == 0 || stats.memory_swap_limit_bytes == 0 {
+        0
+    } else {
+        stats.memory_limit_bytes.saturating_add(stats.memory_swap_limit_bytes)
+    };
+    swap.set_limit(swap_limit);
+    swap.set_usage(swap_usage);
     let mut memory = MemoryStat::new();
     memory.set_usage(mem_usage);
+    memory.set_swap(swap);
+    memory.set_cache(stats.memory_file_bytes);
+    memory.set_rss(stats.memory_anon_bytes);
+    memory.set_rss_huge(stats.memory_anon_thp_bytes);
+    memory.set_mapped_file(stats.memory_file_mapped_bytes);
+    memory.set_dirty(stats.memory_dirty_bytes);
+    memory.set_writeback(stats.memory_writeback_bytes);
+    memory.set_pg_fault(stats.memory_pgfault);
+    memory.set_pg_maj_fault(stats.memory_pgmajfault);
+    memory.set_inactive_anon(stats.memory_inactive_anon_bytes);
+    memory.set_active_anon(stats.memory_active_anon_bytes);
+    memory.set_inactive_file(stats.memory_total_inactive_file_bytes);
+    memory.set_active_file(stats.memory_active_file_bytes);
+    memory.set_unevictable(stats.memory_unevictable_bytes);
+    // cgroup-v2 already reports hierarchical totals for this cgroup, so map
+    // the same counters into containerd's legacy total_* fields as runc does.
+    memory.set_total_cache(stats.memory_file_bytes);
+    memory.set_total_rss(stats.memory_anon_bytes);
+    memory.set_total_rss_huge(stats.memory_anon_thp_bytes);
+    memory.set_total_mapped_file(stats.memory_file_mapped_bytes);
+    memory.set_total_dirty(stats.memory_dirty_bytes);
+    memory.set_total_writeback(stats.memory_writeback_bytes);
+    memory.set_total_pg_fault(stats.memory_pgfault);
+    memory.set_total_pg_maj_fault(stats.memory_pgmajfault);
+    memory.set_total_inactive_anon(stats.memory_inactive_anon_bytes);
+    memory.set_total_active_anon(stats.memory_active_anon_bytes);
     memory.set_total_inactive_file(stats.memory_total_inactive_file_bytes);
+    memory.set_total_active_file(stats.memory_active_file_bytes);
+    memory.set_total_unevictable(stats.memory_unevictable_bytes);
 
     let mut pids = PidsStat::new();
     pids.set_current(stats.pids_current);
     pids.set_limit(stats.pids_limit);
 
+    let mut oom = MemoryOomControl::new();
+    oom.set_oom_kill(stats.memory_events_oom_kill);
+
     let mut metrics = Metrics::new();
     metrics.set_cpu(cpu);
     metrics.set_memory(memory);
     metrics.set_pids(pids);
+    metrics.set_memory_oom_control(oom);
     metrics
 }
 
 fn resource_limits_from_linux_resources(value: &Value) -> ResourceLimits {
+    let unified = value
+        .get("unified")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     ResourceLimits {
         cpu_quota: value.pointer("/cpu/quota").and_then(Value::as_i64),
         cpu_period: value.pointer("/cpu/period").and_then(Value::as_u64),
@@ -1316,7 +1929,10 @@ fn resource_limits_from_linux_resources(value: &Value) -> ResourceLimits {
         cpuset_cpus: value.pointer("/cpu/cpus").and_then(Value::as_str).map(str::to_string),
         cpuset_mems: value.pointer("/cpu/mems").and_then(Value::as_str).map(str::to_string),
         memory_limit_bytes: value.pointer("/memory/limit").and_then(Value::as_i64),
+        memory_reservation_bytes: value.pointer("/memory/reservation").and_then(Value::as_i64),
+        memory_swap_bytes: value.pointer("/memory/swap").and_then(Value::as_i64),
         pids_limit: value.pointer("/pids/limit").and_then(Value::as_i64),
+        unified,
     }
 }
 
@@ -1452,21 +2068,75 @@ fn parse_mac(raw: &str) -> AnyResult<String> {
     Ok(parts.join(":").to_ascii_lowercase())
 }
 
-fn parse_ipv4_destination(raw: &str) -> AnyResult<Option<(Ipv4Addr, u8)>> {
+fn parse_ip_destination(raw: &str, family: CniFamily) -> AnyResult<Option<(IpAddr, u8)>> {
     if raw == "default" || raw.is_empty() {
         return Ok(None);
     }
-    let (address, prefix) = raw.split_once('/').unwrap_or((raw, "32"));
+    let default_prefix = match family { CniFamily::Ipv4 => "32", CniFamily::Ipv6 => "128" };
+    let (address, prefix) = raw.split_once('/').unwrap_or((raw, default_prefix));
     let address = address
-        .parse::<Ipv4Addr>()
-        .with_context(|| format!("invalid IPv4 route destination {raw:?}"))?;
+        .parse::<IpAddr>()
+        .with_context(|| format!("invalid {:?} route destination {raw:?}", family))?;
+    if !family.matches(address) {
+        bail!("route destination {address} does not match family {family:?}");
+    }
     let prefix = prefix
         .parse::<u8>()
-        .with_context(|| format!("invalid IPv4 route prefix {raw:?}"))?;
-    if prefix > 32 {
-        bail!("invalid IPv4 route prefix {raw:?}");
+        .with_context(|| format!("invalid route prefix {raw:?}"))?;
+    if prefix > family.max_prefix() {
+        bail!("invalid {:?} route prefix {raw:?}", family);
     }
     Ok(Some((address, prefix)))
+}
+
+fn address_is_routable(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_loopback() && !v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            !v6.is_unspecified()
+                && !v6.is_loopback()
+                && (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
+async fn detect_additional_cni_interfaces(
+    netns_path: &Path,
+    primary: &str,
+) -> AnyResult<Vec<String>> {
+    let args = vec![
+        format!("--net={}", netns_path.display()),
+        "--".into(),
+        "ip".into(),
+        "-j".into(),
+        "addr".into(),
+        "show".into(),
+    ];
+    let text = command_output("nsenter", &args).await?;
+    let links: Value = serde_json::from_str(&text).context("parsing CNI interface inventory")?;
+    let mut extras = Vec::new();
+    for link in links.as_array().into_iter().flatten() {
+        let Some(name) = link.get("ifname").and_then(Value::as_str) else { continue; };
+        if name == "lo" || name == primary {
+            continue;
+        }
+        let routable = link.get("addr_info").and_then(Value::as_array)
+            .into_iter().flatten()
+            .any(|info| {
+                if info.get("scope").and_then(Value::as_str) == Some("link") {
+                    return false;
+                }
+                info.get("local").and_then(Value::as_str)
+                    .and_then(|v| v.parse::<IpAddr>().ok())
+                    .is_some_and(address_is_routable)
+            });
+        if routable {
+            extras.push(name.to_string());
+        }
+    }
+    extras.sort();
+    extras.dedup();
+    Ok(extras)
 }
 
 async fn capture_cni_network(netns_path: &Path, interface: &str) -> AnyResult<CniNetwork> {
@@ -1481,7 +2151,6 @@ async fn capture_cni_network(netns_path: &Path, interface: &str) -> AnyResult<Cn
         format!("--net={}", netns_path.display()),
         "--".into(),
         "ip".into(),
-        "-4".into(),
         "-j".into(),
         "addr".into(),
         "show".into(),
@@ -1504,88 +2173,95 @@ async fn capture_cni_network(netns_path: &Path, interface: &str) -> AnyResult<Cn
         .get("addr_info")
         .and_then(Value::as_array)
         .context("CNI interface has no addr_info")?;
-    let ipv4 = addr_info
-        .iter()
-        .find(|info| info.get("family").and_then(Value::as_str) == Some("inet"))
-        .context("CNI namespace has no IPv4 address on the primary interface")?;
-    let pod_ip = ipv4
-        .get("local")
-        .and_then(Value::as_str)
-        .context("CNI IPv4 entry has no local address")?
-        .parse::<Ipv4Addr>()
-        .context("parsing CNI Pod IPv4 address")?;
-    let prefix_len = ipv4
-        .get("prefixlen")
-        .and_then(Value::as_u64)
-        .context("CNI IPv4 entry has no prefixlen")? as u8;
-    if prefix_len > 32 {
-        bail!("CNI IPv4 prefix length {prefix_len} is invalid");
-    }
 
-    let route_args = vec![
-        format!("--net={}", netns_path.display()),
-        "--".into(),
-        "ip".into(),
-        "-4".into(),
-        "-j".into(),
-        "route".into(),
-        "show".into(),
-    ];
-    let route_text = command_output("nsenter", &route_args).await?;
-    let route_json: Value =
-        serde_json::from_str(&route_text).context("parsing CNI ip -j route output")?;
+    let mut addresses = Vec::new();
+    for info in addr_info {
+        let family = match info.get("family").and_then(Value::as_str) {
+            Some("inet") => CniFamily::Ipv4,
+            Some("inet6") => CniFamily::Ipv6,
+            _ => continue,
+        };
+        if info.get("scope").and_then(Value::as_str) == Some("link") {
+            continue;
+        }
+        let Some(raw) = info.get("local").and_then(Value::as_str) else { continue; };
+        let address = raw.parse::<IpAddr>()
+            .with_context(|| format!("parsing CNI address {raw:?}"))?;
+        if !address_is_routable(address) || !family.matches(address) {
+            continue;
+        }
+        let prefix_len = info.get("prefixlen").and_then(Value::as_u64)
+            .context("CNI address entry has no prefixlen")? as u8;
+        if prefix_len > family.max_prefix() {
+            bail!("CNI {family:?} prefix length {prefix_len} is invalid");
+        }
+        addresses.push(CniAddress { family, address, prefix_len });
+    }
+    if addresses.is_empty() {
+        bail!("CNI namespace has no routable IPv4/IPv6 address on {interface}");
+    }
+    addresses.sort_by_key(|a| (a.family, a.address));
+
     let mut routes = Vec::new();
-    for route in route_json.as_array().into_iter().flatten() {
-        if route.get("dev").and_then(Value::as_str) != Some(interface) {
-            continue;
+    for family in [CniFamily::Ipv4, CniFamily::Ipv6] {
+        let route_args = vec![
+            format!("--net={}", netns_path.display()),
+            "--".into(),
+            "ip".into(),
+            family.ip_flag().into(),
+            "-j".into(),
+            "route".into(),
+            "show".into(),
+        ];
+        let route_text = command_output("nsenter", &route_args).await?;
+        let route_json: Value = serde_json::from_str(&route_text)
+            .with_context(|| format!("parsing CNI {:?} route output", family))?;
+        for route in route_json.as_array().into_iter().flatten() {
+            if route.get("dev").and_then(Value::as_str) != Some(interface) {
+                continue;
+            }
+            let route_type = route.get("type").and_then(Value::as_str).unwrap_or("unicast");
+            if route_type != "unicast" {
+                continue;
+            }
+            let destination = parse_ip_destination(
+                route.get("dst").and_then(Value::as_str).unwrap_or("default"),
+                family,
+            )?;
+            let gateway = route.get("gateway").and_then(Value::as_str)
+                .map(|v| v.parse::<IpAddr>())
+                .transpose()
+                .context("parsing CNI route gateway")?;
+            if gateway.is_some_and(|gateway| !family.matches(gateway)) {
+                bail!("CNI gateway family does not match route family {family:?}");
+            }
+            routes.push(CniRoute { family, destination, gateway });
         }
-        let route_type = route.get("type").and_then(Value::as_str).unwrap_or("unicast");
-        if route_type != "unicast" {
-            continue;
-        }
-        let destination = parse_ipv4_destination(
-            route.get("dst").and_then(Value::as_str).unwrap_or("default"),
-        )?;
-        let gateway = route
-            .get("gateway")
-            .and_then(Value::as_str)
-            .map(|v| v.parse::<Ipv4Addr>())
-            .transpose()
-            .context("parsing CNI route gateway")?;
-        routes.push(CniRoute {
-            destination,
-            gateway,
-        });
     }
-    // Link/local routes must exist before a default route that points through
-    // them (Calico commonly uses a link-local next hop), so default goes last.
-    routes.sort_by_key(|route| route.destination.is_none());
+    // Link/local routes before defaults, with IPv4 first only for deterministic
+    // logs/tests. The families themselves are configured independently.
+    routes.sort_by_key(|route| (route.family, route.destination.is_none()));
 
-    Ok(CniNetwork {
-        pod_ip,
-        prefix_len,
-        mac,
-        routes,
-    })
+    Ok(CniNetwork { addresses, mac, routes })
 }
 
-fn route_command(route: &CniRoute, interface: &str) -> String {
-    let destination = route
-        .destination
+fn route_command(route: &CniRoute) -> String {
+    let destination = route.destination
         .map(|(ip, prefix)| format!("{ip}/{prefix}"))
         .unwrap_or_else(|| "default".into());
+    let flag = route.family.ip_flag();
     match route.gateway {
         Some(gateway) => format!(
-            "ip -4 route replace {destination} via {gateway} dev \"$IFACE\""
+            "ip {flag} route replace {destination} via {gateway} dev \"$IFACE\""
         ),
-        None => format!("ip -4 route replace {destination} dev \"$IFACE\""),
+        None => format!("ip {flag} route replace {destination} dev \"$IFACE\""),
     }
 }
 
 fn guest_network_command(network: &CniNetwork) -> AnyResult<String> {
     parse_mac(&network.mac)?;
-    if network.prefix_len > 32 {
-        bail!("invalid Pod prefix length {}", network.prefix_len);
+    if network.addresses.is_empty() {
+        bail!("CNI network contains no guest addresses");
     }
     let mut lines = vec![
         "set -eu".to_string(),
@@ -1593,17 +2269,32 @@ fn guest_network_command(network: &CniNetwork) -> AnyResult<String> {
         "[ -n \"$IFACE\" ]".into(),
         "ip link set dev \"$IFACE\" up".into(),
         "ip -4 addr flush dev \"$IFACE\" || true".into(),
+        "ip -6 addr flush dev \"$IFACE\" scope global || true".into(),
         "ip -4 route flush dev \"$IFACE\" || true".into(),
-        format!(
-            "ip -4 addr add {}/{} dev \"$IFACE\"",
-            network.pod_ip, network.prefix_len
-        ),
+        "ip -6 route flush dev \"$IFACE\" || true".into(),
     ];
-    for route in &network.routes {
-        lines.push(route_command(route, "$IFACE"));
+    for address in &network.addresses {
+        if !address.family.matches(address.address) || address.prefix_len > address.family.max_prefix() {
+            bail!("invalid CNI address {:?}", address);
+        }
+        match address.family {
+            CniFamily::Ipv4 => lines.push(format!(
+                "ip -4 addr add {}/{} dev \"$IFACE\"",
+                address.address, address.prefix_len
+            )),
+            CniFamily::Ipv6 => lines.push(format!(
+                "ip -6 addr add {}/{} dev \"$IFACE\" nodad",
+                address.address, address.prefix_len
+            )),
+        }
     }
-    lines.push("ip -4 addr show dev \"$IFACE\"".into());
-    lines.push("ip -4 route show".into());
+    for route in &network.routes {
+        lines.push(route_command(route));
+    }
+    lines.push("ip -4 addr show dev \"$IFACE\" || true".into());
+    lines.push("ip -6 addr show dev \"$IFACE\" || true".into());
+    lines.push("ip -4 route show || true".into());
+    lines.push("ip -6 route show || true".into());
     Ok(lines.join("\n"))
 }
 
@@ -1730,7 +2421,9 @@ async fn prepare_cni_l2(group: &str, netns_path: &Path, interface: &str) -> AnyR
         )
         .await?;
         run_netns(&alias, "ip", &["-4".into(), "addr".into(), "flush".into(), "dev".into(), interface.into()]).await?;
+        run_netns_best_effort(&alias, "ip", &["-6".into(), "addr".into(), "flush".into(), "dev".into(), interface.into(), "scope".into(), "global".into()]).await;
         run_netns_best_effort(&alias, "ip", &["-4".into(), "route".into(), "flush".into(), "dev".into(), interface.into()]).await;
+        run_netns_best_effort(&alias, "ip", &["-6".into(), "route".into(), "flush".into(), "dev".into(), interface.into()]).await;
         run_netns_best_effort(&alias, "ip", &["link".into(), "set".into(), interface.into(), "down".into()]).await;
         run_netns(&alias, "ip", &["link".into(), "set".into(), interface.into(), "address".into(), port_mac]).await?;
         run_netns(&alias, "ip", &["link".into(), "set".into(), interface.into(), "up".into()]).await?;
@@ -1754,26 +2447,34 @@ async fn restore_cni_network(bridge: &CniBridge) {
         alias,
         "ip",
         &["link".into(), "set".into(), interface.clone(), "address".into(), bridge.network.mac.clone()],
-    )
-    .await;
+    ).await;
     run_netns_best_effort(alias, "ip", &["link".into(), "set".into(), interface.clone(), "up".into()]).await;
     run_netns_best_effort(alias, "ip", &["-4".into(), "addr".into(), "flush".into(), "dev".into(), interface.clone()]).await;
-    run_netns_best_effort(
-        alias,
-        "ip",
-        &[
-            "-4".into(), "addr".into(), "add".into(),
-            format!("{}/{}", bridge.network.pod_ip, bridge.network.prefix_len),
+    run_netns_best_effort(alias, "ip", &["-6".into(), "addr".into(), "flush".into(), "dev".into(), interface.clone(), "scope".into(), "global".into()]).await;
+    run_netns_best_effort(alias, "ip", &["-4".into(), "route".into(), "flush".into(), "dev".into(), interface.clone()]).await;
+    run_netns_best_effort(alias, "ip", &["-6".into(), "route".into(), "flush".into(), "dev".into(), interface.clone()]).await;
+
+    for address in &bridge.network.addresses {
+        let mut args = vec![
+            address.family.ip_flag().into(),
+            "addr".into(), "add".into(),
+            format!("{}/{}", address.address, address.prefix_len),
             "dev".into(), interface.clone(),
-        ],
-    )
-    .await;
+        ];
+        if address.family == CniFamily::Ipv6 {
+            args.push("nodad".into());
+        }
+        run_netns_best_effort(alias, "ip", &args).await;
+    }
+
     for route in &bridge.network.routes {
-        let destination = route
-            .destination
+        let destination = route.destination
             .map(|(ip, prefix)| format!("{ip}/{prefix}"))
             .unwrap_or_else(|| "default".into());
-        let mut args = vec!["-4".into(), "route".into(), "replace".into(), destination];
+        let mut args = vec![
+            route.family.ip_flag().into(),
+            "route".into(), "replace".into(), destination,
+        ];
         if let Some(gateway) = route.gateway {
             args.extend(["via".into(), gateway.to_string()]);
         }
@@ -1881,6 +2582,21 @@ async fn stage_bind_mounts(
         let Some(source) = mount.get("source").and_then(Value::as_str).map(str::to_string) else { continue; };
         let source_path = PathBuf::from(&source);
         if !source_path.exists() { continue; }
+        let meta = std::fs::metadata(&source_path)
+            .with_context(|| format!("inspecting OCI bind source {}", source_path.display()))?;
+        let kind = meta.file_type();
+        if kind.is_block_device() {
+            bail!(
+                "OCI bind source {} is a raw block device; FluxVM secure containers require VMM block-device hotplug for raw block volumes",
+                source_path.display()
+            );
+        }
+        if kind.is_char_device() || kind.is_fifo() || kind.is_socket() {
+            bail!(
+                "OCI bind source {} is a special host file and cannot be snapshotted safely into the FluxVM guest",
+                source_path.display()
+            );
+        }
 
         // Kubernetes PVC/CSI/emptyDir/projected volume sources are already
         // mounted by kubelet before runtime SyncPod. Keep them write-through
@@ -1972,6 +2688,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dual_stack_route_and_address_rendering() {
+        let network = CniNetwork {
+            addresses: vec![
+                CniAddress {
+                    family: CniFamily::Ipv4,
+                    address: IpAddr::V4(Ipv4Addr::new(10, 244, 1, 9)),
+                    prefix_len: 24,
+                },
+                CniAddress {
+                    family: CniFamily::Ipv6,
+                    address: IpAddr::V6("fd00::9".parse::<Ipv6Addr>().unwrap()),
+                    prefix_len: 64,
+                },
+            ],
+            mac: "02:11:22:33:44:55".into(),
+            routes: vec![
+                CniRoute {
+                    family: CniFamily::Ipv4,
+                    destination: None,
+                    gateway: Some(IpAddr::V4(Ipv4Addr::new(10, 244, 1, 1))),
+                },
+                CniRoute {
+                    family: CniFamily::Ipv6,
+                    destination: None,
+                    gateway: Some(IpAddr::V6("fd00::1".parse::<Ipv6Addr>().unwrap())),
+                },
+            ],
+        };
+        let command = guest_network_command(&network).unwrap();
+        assert!(command.contains("ip -4 addr add 10.244.1.9/24"));
+        assert!(command.contains("ip -6 addr add fd00::9/64"));
+        assert!(command.contains("ip -4 route replace default via 10.244.1.1"));
+        assert!(command.contains("ip -6 route replace default via fd00::1"));
+    }
+
+    #[test]
+    fn route_parser_rejects_family_mismatch() {
+        assert!(parse_ip_destination("10.0.0.0/24", CniFamily::Ipv6).is_err());
+        assert!(parse_ip_destination("fd00::/64", CniFamily::Ipv4).is_err());
+    }
+
+    #[test]
+    fn recovery_journal_rejects_unknown_version_shape() {
+        let text = r#"{"version":99,"sandbox":null,"tasks":{},"execs":{}}"#;
+        let state: RuntimeStateJournal = serde_json::from_str(text).unwrap();
+        assert_eq!(state.version, 99);
+        assert_ne!(state.version, RUNTIME_STATE_VERSION);
+    }
+
+    #[test]
     fn process_keys_separate_init_and_exec() {
         assert_eq!(process_key("c1", None), "c1");
         assert_eq!(process_key("c1", Some("e1")), "c1\0e1");
@@ -1991,6 +2757,19 @@ mod tests {
     }
 
     #[test]
+    fn resource_update_parser_keeps_swap_reservation_and_unified() {
+        let value = json!({
+            "memory": {"limit": 256, "reservation": 128, "swap": 512},
+            "unified": {"memory.high": "192", "memory.oom.group": "1"}
+        });
+        let r = resource_limits_from_linux_resources(&value);
+        assert_eq!(r.memory_limit_bytes, Some(256));
+        assert_eq!(r.memory_reservation_bytes, Some(128));
+        assert_eq!(r.memory_swap_bytes, Some(512));
+        assert_eq!(r.unified.get("memory.high").map(String::as_str), Some("192"));
+    }
+
+    #[test]
     fn safe_names_are_filesystem_safe() {
         assert_eq!(safe_name("pod/one:abc"), "pod-one-abc");
         assert_eq!(safe_name(""), "sandbox");
@@ -2003,6 +2782,20 @@ mod tests {
         tokio::fs::create_dir_all(&td).await.unwrap();
         tokio::fs::write(td.join("config.json"), r#"{"annotations":{"io.kubernetes.cri.sandbox-id":"pod123"}}"#).await.unwrap();
         assert_eq!(pod_group_from_bundle(td.to_str().unwrap()).await.as_deref(), Some("pod123"));
+        let _ = tokio::fs::remove_dir_all(td).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_special_host_bind_sources() {
+        let td = std::env::temp_dir().join(format!("fluxvm-special-bind-test-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&td).await;
+        tokio::fs::create_dir_all(&td).await.unwrap();
+        let socket = td.join("host.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let mut spec = json!({"mounts":[{"type":"bind","source":socket,"destination":"/run/host.sock","options":["bind"]}]});
+        let error = stage_bind_mounts(&mut spec, &td.join("ctr"), "/run/fluxvm/pod/containers/c", None)
+            .await.unwrap_err().to_string();
+        assert!(error.contains("special host file"));
         let _ = tokio::fs::remove_dir_all(td).await;
     }
 
