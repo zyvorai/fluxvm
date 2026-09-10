@@ -90,6 +90,7 @@ pub struct KvmRegs {
 /// Raw host CPUID, used only to backfill leaves KVM_GET_SUPPORTED_CPUID
 /// zeroes out (e.g. leaf 0x15) despite the host actually supporting them.
 #[cfg(target_arch = "x86_64")]
+#[allow(unused_unsafe)] // __cpuid_count's unsafe-ness varies by rustc version
 fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let r = unsafe { std::arch::x86_64::__cpuid_count(leaf, subleaf) };
     (r.eax, r.ebx, r.ecx, r.edx)
