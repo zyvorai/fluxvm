@@ -315,7 +315,17 @@ impl VirtualMachine {
                                 let _ = reply.send(r);
                             }
                             GdbCmd::ReadMem { addr, len, reply } => {
-                                let _ = reply.send(gdbstub::read_guest_mem(&this.mem, addr, len));
+                                let sregs =
+                                    kvm.get_sregs(0).unwrap_or(unsafe { std::mem::zeroed() });
+                                let paging_enabled = sregs.cr0 & (1 << 31) != 0;
+                                let data = gdbstub::read_guest_mem(
+                                    &this.mem,
+                                    sregs.cr3,
+                                    paging_enabled,
+                                    addr,
+                                    len,
+                                );
+                                let _ = reply.send(data);
                             }
                         }
                     }

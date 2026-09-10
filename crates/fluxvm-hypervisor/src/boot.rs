@@ -90,7 +90,7 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     use linux_loader::loader::{KernelLoader, KernelLoaderResult};
     use crate::ffi;
     use std::fs::File;
-    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
+    use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
 
     let path = cfg
         .kernel

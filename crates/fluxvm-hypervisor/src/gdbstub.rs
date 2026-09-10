@@ -324,10 +324,82 @@ fn le_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Reads guest RAM for the `m` command; called on the BSP vCPU thread
-/// from run_until's pause-service loop, where GuestMemory access is safe.
-pub fn read_guest_mem(mem: &GuestMemory, addr: u64, len: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; len];
-    let _ = mem.read_at(addr, &mut buf);
-    buf
+fn read_phys_u64(mem: &GuestMemory, phys: u64) -> Option<u64> {
+    let mut buf = [0u8; 8];
+    mem.read_at(phys, &mut buf).ok()?;
+    Some(u64::from_le_bytes(buf))
+}
+
+const PAGE_PRESENT: u64 = 1;
+const PAGE_PS: u64 = 1 << 7;
+const PADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
+
+/// Walk standard x86-64 4-level page tables (CR3 -> PML4 -> PDPT -> PD ->
+/// PT) to translate one guest virtual address to its physical address.
+/// Returns None on any not-present level -- fine for inspecting a live,
+/// already-running kernel's own mappings (gdb's `x`/`m` commands always
+/// operate on virtual addresses once paging is on; reading them as
+/// physical addresses directly, as an earlier version of this stub did,
+/// silently returns garbage/zeroed data for any address outside the
+/// guest's physical RAM window, which is most kernel addresses).
+fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
+    let idx = |shift: u32| (vaddr >> shift) & 0x1ff;
+    let pml4e = read_phys_u64(mem, (cr3 & PADDR_MASK) + idx(39) * 8)?;
+    if pml4e & PAGE_PRESENT == 0 {
+        return None;
+    }
+    let pdpte = read_phys_u64(mem, (pml4e & PADDR_MASK) + idx(30) * 8)?;
+    if pdpte & PAGE_PRESENT == 0 {
+        return None;
+    }
+    if pdpte & PAGE_PS != 0 {
+        return Some((pdpte & 0x000f_ffff_c000_0000) | (vaddr & 0x3fff_ffff));
+    }
+    let pde = read_phys_u64(mem, (pdpte & PADDR_MASK) + idx(21) * 8)?;
+    if pde & PAGE_PRESENT == 0 {
+        return None;
+    }
+    if pde & PAGE_PS != 0 {
+        return Some((pde & 0x000f_ffff_ffe0_0000) | (vaddr & 0x1f_ffff));
+    }
+    let pte = read_phys_u64(mem, (pde & PADDR_MASK) + idx(12) * 8)?;
+    if pte & PAGE_PRESENT == 0 {
+        return None;
+    }
+    Some((pte & PADDR_MASK) | (vaddr & 0xfff))
+}
+
+/// Reads guest memory for the `m` command. Translates `addr` as a virtual
+/// address through the vCPU's own page tables when paging is active
+/// (matching what gdb itself means by an address), one page at a time
+/// since consecutive virtual pages need not be physically contiguous;
+/// falls back to a direct physical read only if paging is off. Called on
+/// the BSP vCPU thread from run_until's pause-service loop, where
+/// GuestMemory access is safe.
+pub fn read_guest_mem(
+    mem: &GuestMemory,
+    cr3: u64,
+    paging_enabled: bool,
+    addr: u64,
+    len: usize,
+) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    if !paging_enabled {
+        let _ = mem.read_at(addr, &mut out);
+        return out;
+    }
+    let mut done = 0usize;
+    while done < len {
+        let vaddr = addr + done as u64;
+        let page_off = (vaddr & 0xfff) as usize;
+        let chunk = (0x1000 - page_off).min(len - done);
+        if let Some(phys) = virt_to_phys(mem, cr3, vaddr) {
+            let mut buf = vec![0u8; chunk];
+            if mem.read_at(phys, &mut buf).is_ok() {
+                out[done..done + chunk].copy_from_slice(&buf);
+            }
+        }
+        done += chunk;
+    }
+    out
 }
