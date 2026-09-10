@@ -11,7 +11,7 @@ use crate::devices::virtio_mmio::{self, VirtioMmio};
 use crate::devices::virtio_net::{self, VirtioNetConfig};
 use crate::error::{FluxError, Result};
 use crate::ffi;
-use crate::gdbstub::{self, GdbCmd, GdbControl};
+use crate::gdbstub::{self, GdbCmd, GdbControl, GdbSetup};
 use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
 use crate::memory::{self, GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
@@ -204,10 +204,11 @@ impl VirtualMachine {
     /// gdbstub (see `gdbstub.rs`) listening there for live inspection of
     /// a hung/misbehaving guest.
     pub fn run_with_gdb(self, gdb_addr: Option<String>) -> Result<String> {
-        let gdb = gdb_addr.map(|addr| {
+        let gdb: Option<GdbSetup> = gdb_addr.map(|addr| {
             let control = GdbControl::new();
             let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(0);
-            (addr, control, cmd_tx, cmd_rx)
+            let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel(0);
+            (addr, control, cmd_tx, cmd_rx, stop_tx, stop_rx)
         });
         // The gdbstub thread needs Arc<KvmVm>/paused before run_until
         // creates them, so spawn it from inside run_until once those
@@ -227,7 +228,7 @@ impl VirtualMachine {
         paused: Arc<AtomicBool>,
         snap_rx: Option<Receiver<SnapCmd>>,
         restore: Option<CpuSnapshot>,
-        gdb: Option<(String, Arc<GdbControl>, std::sync::mpsc::SyncSender<GdbCmd>, Receiver<GdbCmd>)>,
+        gdb: Option<GdbSetup>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -274,11 +275,23 @@ impl VirtualMachine {
             std::thread::spawn(move || run_ap(idx, &kvm, &bus, &serial, &stop));
         }
 
-        let gdb_cmd_rx: Option<Receiver<GdbCmd>> = gdb.map(|(addr, control, cmd_tx, cmd_rx)| {
-            gdbstub::spawn(addr, kvm.clone(), control.clone(), paused.clone(), cmd_tx);
+        let mut gdb_cmd_rx: Option<Receiver<GdbCmd>> = None;
+        let mut gdb_stop_tx: Option<std::sync::mpsc::SyncSender<()>> = None;
+        let mut gdb_control: Option<Arc<GdbControl>> = None;
+        if let Some((addr, control, cmd_tx, cmd_rx, stop_tx, stop_rx)) = gdb {
+            gdbstub::spawn(
+                addr,
+                kvm.clone(),
+                control.clone(),
+                paused.clone(),
+                cmd_tx,
+                stop_rx,
+            );
             control.record_current_thread();
-            cmd_rx
-        });
+            gdb_cmd_rx = Some(cmd_rx);
+            gdb_stop_tx = Some(stop_tx);
+            gdb_control = Some(control);
+        }
 
         let mut serial_log = String::new();
         let run_secs: u64 = std::env::var("FLUXVM_KVM_RUN_SECS")
@@ -353,6 +366,27 @@ impl VirtualMachine {
                                     len,
                                 );
                                 let _ = reply.send(data);
+                            }
+                            GdbCmd::SetBreakpoint { addr, reply } => {
+                                let cr3 = kvm.get_sregs(0).map(|s| s.cr3).unwrap_or(0);
+                                let ok = gdbstub::set_breakpoint(
+                                    &mut this.mem,
+                                    &kvm,
+                                    gdb_control.as_ref().unwrap(),
+                                    cr3,
+                                    addr,
+                                );
+                                let _ = reply.send(ok);
+                            }
+                            GdbCmd::ClearBreakpoint { addr, reply } => {
+                                let cr3 = kvm.get_sregs(0).map(|s| s.cr3).unwrap_or(0);
+                                let ok = gdbstub::clear_breakpoint(
+                                    &mut this.mem,
+                                    gdb_control.as_ref().unwrap(),
+                                    cr3,
+                                    addr,
+                                );
+                                let _ = reply.send(ok);
                             }
                         }
                     }
@@ -474,6 +508,22 @@ impl VirtualMachine {
                     eprintln!("[kvm] HLT after {exits} exits");
                     stop.store(true, Ordering::Relaxed);
                     break;
+                }
+                ffi::KVM_EXIT_DEBUG => {
+                    // A gdbstub software breakpoint (int3) fired. RIP has
+                    // already advanced past the 0xCC byte -- rewind it so
+                    // register reads and any later continue see/redo the
+                    // real instruction, then park in the pause-service
+                    // loop and let the gdbstub thread know we've stopped.
+                    if let Ok(mut regs) = kvm.get_regs(0) {
+                        regs.rip = regs.rip.saturating_sub(1);
+                        let _ = kvm.set_regs(0, regs);
+                    }
+                    paused.store(true, Ordering::Relaxed);
+                    if let Some(tx) = gdb_stop_tx.as_ref() {
+                        let _ = tx.send(());
+                    }
+                    continue;
                 }
                 ffi::KVM_EXIT_SHUTDOWN => {
                     eprintln!("[kvm] shutdown");

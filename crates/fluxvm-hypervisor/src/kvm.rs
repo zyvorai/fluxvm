@@ -641,6 +641,36 @@ impl KvmVm {
         }
     }
 
+    /// Enable trapping of the guest's own `int3` (software breakpoint)
+    /// execution to `KVM_EXIT_DEBUG` instead of letting it reach the
+    /// guest's IDT. The gdbstub still has to patch the `0xCC` byte into
+    /// guest memory itself (`KVM_GUESTDBG_USE_SW_BP` only controls how
+    /// KVM *reports* an int3 that already happened, not where one is).
+    pub fn enable_guest_debug(&self, idx: usize) -> Result<()> {
+        #[repr(C)]
+        struct KvmGuestDebug {
+            control: u32,
+            pad: u32,
+            debugreg: [u64; 8],
+        }
+        let mut dbg = KvmGuestDebug {
+            control: ffi::KVM_GUESTDBG_ENABLE | ffi::KVM_GUESTDBG_USE_SW_BP,
+            pad: 0,
+            debugreg: [0; 8],
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_GUEST_DEBUG,
+                &mut dbg as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_GUEST_DEBUG".into()));
+        }
+        Ok(())
+    }
+
     pub fn io_info(&self, idx: usize) -> (u8, u8, u16, u32, u32) {
         // direction, size, port, count, data_offset
         unsafe {
