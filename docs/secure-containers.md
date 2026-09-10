@@ -95,6 +95,8 @@ the VM's existing per-instance authentication token.
   reservation/swap translation, allowlisted cgroup-v2 `unified` updates, and
   fail-closed raw block/special-device handling — see
   [docs/secure-containers-set7.md](secure-containers-set7.md)
+- VM boot pipelined with the host-side rootfs mount+copy instead of strictly
+  sequential — see [docs/secure-containers-set7r.md](secure-containers-set7r.md).
 - Pod-scoped raw block QMP hotplug and allowlisted VFIO PCI passthrough,
   reference-counted per container with QEMU `DEVICE_DELETED`-confirmed
   hot-unplug — see [docs/secure-containers-set9.md](secure-containers-set9.md)
@@ -174,8 +176,11 @@ and abrupt-exit tests on self-hosted KVM/containerd nodes.
 
 ### P1 — performance
 
-Use FluxVM warm pools/snapshots so Pod VM startup can claim/resume a prepared
-sandbox instead of cold-booting every group.
+Set 7 (Runtime) pipelines VM boot with the host-side rootfs copy (no longer
+strictly sequential) — see
+[docs/secure-containers-set7r.md](secure-containers-set7r.md). Full warm-pool
+integration (claim/resume a prepared sandbox instead of cold-booting every
+Pod group) remains open.
 
 ### P1 — additional VMMs
 
