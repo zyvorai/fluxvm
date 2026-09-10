@@ -91,10 +91,8 @@ pub struct KvmRegs {
 /// zeroes out (e.g. leaf 0x15) despite the host actually supporting them.
 #[cfg(target_arch = "x86_64")]
 fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    unsafe {
-        let r = std::arch::x86_64::__cpuid_count(leaf, subleaf);
-        (r.eax, r.ebx, r.ecx, r.edx)
-    }
+    let r = unsafe { std::arch::x86_64::__cpuid_count(leaf, subleaf) };
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// This hypervisor only ever runs on x86_64 (raw KVM ioctls, x86 CPUID) --
