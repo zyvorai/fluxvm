@@ -117,11 +117,12 @@ Containers compatibility.
 7. **`CLONE_NEWUSER` is opt-in and unproven under load.** Default identity
    uid/gid mapping avoids virtiofs ACL shifting but has not yet been validated
    against real multi-container Pods on self-hosted KVM nodes.
-8. **Raw Kubernetes block volumes and device-plugin passthrough are not
-   claimed.** A guest device node is only meaningful when the corresponding
-   hardware is actually attached to the VM; block/character device requests
-   without a matching attached guest device now fail closed instead of
-   silently `mknod`-ing an unrelated node.
+8. **Raw block/device-plugin passthrough is scoped, not general.** Pod-scoped
+   raw block volumes are hotplugged over QMP from the owning Pod's
+   `volumeDevices` tree (or an explicit operator allowlist prefix); VFIO PCI
+   character-device passthrough requires an exact BDF allowlist and a device
+   already bound to `vfio-pci`. Anything outside those allowlists still fails
+   closed instead of silently `mknod`-ing an unrelated node.
 
 ## Next gates to production Kata-style Kubernetes support
 
@@ -249,3 +250,14 @@ binds are rejected instead of copied, and character devices are validated
 against the guest's actual attached major/minor. Sandbox teardown retains
 journal/CNI ownership state when FluxVM VM deletion fails, so cleanup can be
 retried safely. See `docs/secure-containers-set7.md`.
+
+## Set 8 addendum — raw block + VFIO devices
+
+Set 8 replaces the prior raw/special-device fail-closed placeholder with real
+QEMU hotplug for Pod-scoped raw block volumes and explicitly allowlisted VFIO
+PCI devices. Raw block sources are resolved only from the owning Pod's
+`volumeDevices` tree (or an explicit operator prefix), attached as SCSI devices,
+and rediscovered inside the guest by stable serial. VFIO character-device
+passthrough requires an exact BDF allowlist and a device already bound to
+`vfio-pci`; host drivers are never detached automatically. See
+`docs/secure-containers-set8.md`.

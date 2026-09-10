@@ -16,6 +16,8 @@
 //! each other by the VM boundary alone — see docs/secure-containers-set6r.md.
 //! Set 7 adds cgroup-v2 OOM counters, richer metrics, correct OCI swap translation,
 //! safe unified updates, and fail-closed handling for unattached host devices.
+//! Set 8 resolves QMP-hotplugged raw block devices by stable SCSI serial and
+//! binds guest-driver-created VFIO character nodes into the container rootfs.
 //! Full device-cgroup parity remains an explicit follow-up hardening item in
 //! docs/secure-containers.md.
 
@@ -40,7 +42,7 @@ use std::{
     },
     path::PathBuf,
     sync::{Arc, Condvar, Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 const TOKEN_FILE_PATH: &str = "/etc/fluxvm-guest-agent.token";
@@ -838,7 +840,8 @@ fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>, ResourceLi
     let rootfs = PathBuf::from(root);
     let mut mounts = apply_oci_mounts(&v, &rootfs)?;
     let parsed = (|| -> Result<(ProcessSpec, ResourceLimits)> {
-        create_oci_devices(&v, &rootfs)?;
+        let device_mounts = create_oci_devices(&v, &rootfs)?;
+        mounts.extend(device_mounts);
         apply_oci_sysctls(&v)?;
         apply_oci_path_security(&v, &rootfs, &mut mounts)?;
         let process = v.get("process").context("OCI process is required")?;
@@ -870,7 +873,14 @@ fn apply_oci_mounts(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
         let relative = safe_guest_destination(destination)?;
         let target = rootfs.join(relative);
         let fs_type = item.get("type").and_then(Value::as_str).unwrap_or("");
-        let source = item.get("source").and_then(Value::as_str).unwrap_or(fs_type);
+        let raw_source = item.get("source").and_then(Value::as_str).unwrap_or(fs_type);
+        let resolved_source = if let Some(serial) = raw_source.strip_prefix("fluxvm-block://") {
+            resolve_hotplug_block(serial, Duration::from_secs(10))?
+                .to_string_lossy().into_owned()
+        } else {
+            raw_source.to_string()
+        };
+        let source = resolved_source.as_str();
         let options: Vec<String> = item
             .get("options")
             .and_then(Value::as_array)
@@ -969,8 +979,54 @@ fn apply_oci_path_security(config: &Value, rootfs: &PathBuf, mounted: &mut Vec<P
     Ok(())
 }
 
-fn create_oci_devices(config: &Value, rootfs: &PathBuf) -> Result<()> {
-    let Some(devices) = config.pointer("/linux/devices").and_then(Value::as_array) else { return Ok(()); };
+fn resolve_hotplug_block(serial: &str, timeout: Duration) -> Result<PathBuf> {
+    if serial.is_empty() || !serial.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        bail!("unsafe FluxVM block serial {serial:?}");
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Ok(entries) = std::fs::read_dir("/sys/class/block") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let sys = entry.path();
+                for serial_path in [sys.join("device/serial"), sys.join("serial")] {
+                    let Ok(found) = std::fs::read_to_string(&serial_path) else { continue; };
+                    if found.trim() == serial {
+                        let dev = PathBuf::from("/dev").join(&name);
+                        if std::fs::metadata(&dev).map(|m| m.file_type().is_block_device()).unwrap_or(false) {
+                            return Ok(dev);
+                        }
+                    }
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for QMP-hotplugged block device serial {serial}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_guest_char_device(path: &str, timeout: Duration) -> Result<PathBuf> {
+    let source = PathBuf::from(path);
+    if !source.is_absolute() || !source.starts_with("/dev") || path.contains("..") {
+        bail!("unsafe hotplugged guest device path {path:?}");
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if std::fs::metadata(&source).map(|m| m.file_type().is_char_device()).unwrap_or(false) {
+            return Ok(source);
+        }
+        if std::time::Instant::now() >= deadline {
+            bail!("timed out waiting for guest driver device {path}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn create_oci_devices(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
+    let mut mounted = Vec::new();
+    let Some(devices) = config.pointer("/linux/devices").and_then(Value::as_array) else { return Ok(mounted); };
     for dev in devices {
         let path = dev.get("path").and_then(Value::as_str).context("OCI device.path is required")?;
         let relative = safe_guest_destination(path)?;
@@ -978,8 +1034,41 @@ fn create_oci_devices(config: &Value, rootfs: &PathBuf) -> Result<()> {
         if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
         let kind = dev.get("type").and_then(Value::as_str).context("OCI device.type is required")?;
         let file_mode = dev.get("fileMode").and_then(Value::as_u64).unwrap_or(0o666) as libc::mode_t;
-        let major = dev.get("major").and_then(Value::as_i64).unwrap_or(0) as u64;
-        let minor = dev.get("minor").and_then(Value::as_i64).unwrap_or(0) as u64;
+        let major_raw = dev.get("major").and_then(Value::as_i64).unwrap_or(0);
+        let minor_raw = dev.get("minor").and_then(Value::as_i64).unwrap_or(0);
+
+        // Set 8 raw block marker: resolve the QMP SCSI serial in the guest
+        // and bind the actual guest block node at the OCI target path.
+        if kind == "b" && major_raw == -2 && minor_raw == -2 {
+            let serial = dev.get("fluxvmBlockSerial").and_then(Value::as_str)
+                .context("FluxVM hotplugged block device is missing fluxvmBlockSerial")?;
+            let source = resolve_hotplug_block(serial, Duration::from_secs(10))?;
+            if target.exists() { let _ = std::fs::remove_file(&target); }
+            File::create(&target)?;
+            let source_text = source.to_string_lossy().into_owned();
+            mount_one(&source_text, &target, None, libc::MS_BIND, None)
+                .with_context(|| format!("binding hotplugged block device {serial} at {path}"))?;
+            mounted.push(target);
+            continue;
+        }
+
+        // Set 8 VFIO marker: the host shim has attached the PCI device to
+        // QEMU and rewritten host major/minor to -1. Wait for the guest
+        // driver to create the requested node, then bind that *guest* node
+        // into the container rootfs. Never recreate a host device number.
+        if matches!(kind, "c" | "u") && major_raw < 0 && minor_raw < 0 {
+            let source = wait_guest_char_device(path, Duration::from_secs(15))?;
+            if target.exists() { let _ = std::fs::remove_file(&target); }
+            File::create(&target)?;
+            let source_text = source.to_string_lossy().into_owned();
+            mount_one(&source_text, &target, None, libc::MS_BIND, None)
+                .with_context(|| format!("binding hotplugged guest device {path}"))?;
+            mounted.push(target);
+            continue;
+        }
+
+        let major = major_raw.max(0) as u64;
+        let minor = minor_raw.max(0) as u64;
 
         // A host block device cannot be made real inside a hardware VM with
         // mknod alone: the guest must have an actual virtio/SCSI/NVMe device
@@ -1025,7 +1114,7 @@ fn create_oci_devices(config: &Value, rootfs: &PathBuf) -> Result<()> {
         let gid = dev.get("gid").and_then(Value::as_u64).unwrap_or(0) as libc::gid_t;
         unsafe { libc::chown(c.as_ptr(), uid, gid); }
     }
-    Ok(())
+    Ok(mounted)
 }
 
 fn apply_oci_sysctls(config: &Value) -> Result<()> {
@@ -2560,5 +2649,20 @@ mod tests {
         assert_ne!(r & libc::FD_CLOEXEC, 0);
         assert_ne!(w & libc::FD_CLOEXEC, 0);
         unsafe { libc::close(read_fd); libc::close(write_fd); }
+    }
+}
+
+#[cfg(test)]
+mod set8_guest_device_tests {
+    use super::*;
+    #[test]
+    fn rejects_unsafe_block_serials() {
+        let err = resolve_hotplug_block("../../evil", Duration::from_millis(0)).unwrap_err();
+        assert!(err.to_string().contains("unsafe FluxVM block serial"));
+    }
+    #[test]
+    fn rejects_device_path_escape() {
+        let err = wait_guest_char_device("/dev/../etc/passwd", Duration::from_millis(0)).unwrap_err();
+        assert!(err.to_string().contains("unsafe hotplugged guest device path"));
     }
 }
