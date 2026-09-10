@@ -59,6 +59,14 @@ Set 6 does not change containerd dead-shim supervision policy. It provides
 safe recovery when a replacement shim is launched.
 - Detail: [docs/secure-containers-set6.md](../../docs/secure-containers-set6.md).
 
+## Set 9 device lifecycle
+
+Set 9 makes Set 8 raw-block/VFIO passthrough reference-counted by container and hot-unplugs a device after its last owner is deleted. QEMU `DEVICE_DELETED` is required before a raw block backend is removed; failed or delayed unplug remains journaled for retry.
+
+VFIO defaults to full IOMMU-group validation (`FLUXVM_CONTAINER_VFIO_REQUIRE_IOMMU_GROUP=1`). Every group member must be explicitly present in `FLUXVM_CONTAINER_VFIO_ALLOW` and bound to `vfio-pci`. `FLUXVM_CONTAINER_GUEST_DEVICE_ALLOW` adds exact guest-driver companion character nodes, and `FLUXVM_CONTAINER_DEVICE_UNPLUG_TIMEOUT_SECS` controls the QMP completion wait.
+
+Use `scripts/inspect-secure-container-devices.sh` for journal/device telemetry and `scripts/e2e-secure-containers-device-lifecycle.sh` with a disposable raw-block PVC for the node lifecycle gate.
+
 > Developer-preview. Validate VSOCK stdio/TTY, CNI, and PVC behavior on your
 > KVM/containerd/Kubernetes node image before production. See
 > [docs/secure-containers.md](../../docs/secure-containers.md). Do not advertise

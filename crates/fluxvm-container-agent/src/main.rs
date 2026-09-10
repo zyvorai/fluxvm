@@ -18,8 +18,10 @@
 //! safe unified updates, and fail-closed handling for unattached host devices.
 //! Set 8 resolves QMP-hotplugged raw block devices by stable SCSI serial and
 //! binds guest-driver-created VFIO character nodes into the container rootfs.
-//! Full device-cgroup parity remains an explicit follow-up hardening item in
-//! docs/secure-containers.md.
+//! Set 9 extends that guest-resolution path to driver companion nodes (for
+//! example nvidiactl/UVM and AMD KFD) while keeping host device numbers out.
+//! Device-cgroup/DRA parity remains an explicit follow-up item; newer upstream
+//! Secure Containers work also layers per-container namespace isolation.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;

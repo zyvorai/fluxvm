@@ -3,7 +3,7 @@
 
 //! containerd runtime-v2 shim for FluxVM secure containers.
 //!
-//! Secure Containers contract through Set 8:
+//! Secure Containers contract through Set 9:
 //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
 //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
 //! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
@@ -15,6 +15,7 @@
 //! * stats expose CPU throttling and detailed memory accounting;
 //! * Pod-scoped raw block volumes are hotplugged into QEMU over QMP;
 //! * explicitly allowlisted VFIO PCI devices can be passed through for device-plugin workloads;
+//! * Set 9 reference-counts device ownership, verifies IOMMU groups, and hot-unplugs unused devices;
 //! * no host kernel is shared with the workload.
 //!
 //! The copy/snapshot approach is intentionally conservative. It gives a
@@ -65,7 +66,7 @@ use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    os::unix::fs::FileTypeExt,
+    os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -107,6 +108,9 @@ struct RuntimeConfig {
     device_passthrough: bool,
     block_allow_prefixes: Vec<PathBuf>,
     vfio_allow: Vec<String>,
+    vfio_require_iommu_group: bool,
+    guest_device_allow: Vec<String>,
+    device_unplug_timeout_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -142,8 +146,15 @@ impl Default for RuntimeConfig {
                 .map(|v| v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect())
                 .unwrap_or_default(),
             vfio_allow: std::env::var("FLUXVM_CONTAINER_VFIO_ALLOW").ok()
-                .map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+                .map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()).collect())
                 .unwrap_or_default(),
+            vfio_require_iommu_group: std::env::var("FLUXVM_CONTAINER_VFIO_REQUIRE_IOMMU_GROUP").ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            guest_device_allow: std::env::var("FLUXVM_CONTAINER_GUEST_DEVICE_ALLOW").ok()
+                .map(|v| v.split(',').map(str::trim).filter(|s| s.starts_with("/dev/") && !s.contains(".."))
+                    .map(str::to_string).collect()).unwrap_or_default(),
+            device_unplug_timeout_secs: std::env::var("FLUXVM_CONTAINER_DEVICE_UNPLUG_TIMEOUT_SECS").ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(10).clamp(1, 120),
         }
     }
 }
@@ -166,13 +177,84 @@ struct TaskMeta {
     /// the previous shim was unavailable.
     #[serde(default)]
     oom_kill_seen: u64,
+    /// Set 9 device attachment keys claimed by this container. Empty for
+    /// legacy Set 8 journals; those attachments stay pinned until sandbox delete.
+    #[serde(default)]
+    device_claims: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum DeviceAttachment {
-    Block { host_path: PathBuf, serial: String, node_name: String, device_id: String },
-    Vfio { bdf: String, guest_path: String, device_id: String },
+    Block {
+        host_path: PathBuf,
+        serial: String,
+        node_name: String,
+        device_id: String,
+        #[serde(default)]
+        host_major: Option<u64>,
+        #[serde(default)]
+        host_minor: Option<u64>,
+        /// None means a Set 8/legacy attachment whose ownership is unknown;
+        /// it is deliberately pinned until the whole sandbox is destroyed.
+        #[serde(default)]
+        owners: Option<Vec<String>>,
+    },
+    Vfio {
+        bdf: String,
+        guest_path: String,
+        device_id: String,
+        #[serde(default)]
+        iommu_group: Option<u32>,
+        #[serde(default)]
+        owners: Option<Vec<String>>,
+    },
+}
+
+impl DeviceAttachment {
+    fn key(&self) -> String {
+        match self {
+            Self::Block { host_path, .. } => format!("block:{}", host_path.display()),
+            Self::Vfio { bdf, .. } => format!("vfio:{bdf}"),
+        }
+    }
+
+    fn device_id(&self) -> &str {
+        match self {
+            Self::Block { device_id, .. } | Self::Vfio { device_id, .. } => device_id,
+        }
+    }
+
+    fn owners(&self) -> Option<&Vec<String>> {
+        match self {
+            Self::Block { owners, .. } | Self::Vfio { owners, .. } => owners.as_ref(),
+        }
+    }
+
+    fn owners_mut(&mut self) -> Option<&mut Vec<String>> {
+        match self {
+            Self::Block { owners, .. } | Self::Vfio { owners, .. } => owners.as_mut(),
+        }
+    }
+
+    fn add_owner(&mut self, owner: &str) -> bool {
+        let Some(owners) = self.owners_mut() else { return false; };
+        if owners.iter().any(|v| v == owner) { return false; }
+        owners.push(owner.to_string());
+        owners.sort();
+        true
+    }
+
+    fn remove_owner(&mut self, owner: &str) -> bool {
+        let Some(owners) = self.owners_mut() else { return false; };
+        let before = owners.len();
+        owners.retain(|v| v != owner);
+        owners.len() != before
+    }
+
+    fn is_releasable(&self) -> bool {
+        self.owners().is_some_and(Vec::is_empty)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -276,6 +358,18 @@ impl SandboxJournal {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct DeviceStats {
+    #[serde(default)]
+    attach_total: u64,
+    #[serde(default)]
+    detach_total: u64,
+    #[serde(default)]
+    unplug_failures: u64,
+    #[serde(default)]
+    recovery_checks: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct RuntimeStateJournal {
     version: u32,
@@ -285,6 +379,8 @@ struct RuntimeStateJournal {
     tasks: HashMap<String, TaskMeta>,
     #[serde(default)]
     execs: HashMap<String, TaskMeta>,
+    #[serde(default)]
+    device_stats: DeviceStats,
 }
 
 impl Default for RuntimeStateJournal {
@@ -294,6 +390,7 @@ impl Default for RuntimeStateJournal {
             sandbox: None,
             tasks: HashMap::new(),
             execs: HashMap::new(),
+            device_stats: DeviceStats::default(),
         }
     }
 }
@@ -347,6 +444,9 @@ struct Service {
     journal_sandbox: Arc<Mutex<Option<SandboxJournal>>>,
     journal_lock: Arc<Mutex<()>>,
     recovery_error: Arc<Mutex<Option<String>>>,
+    /// Serializes QMP attach/detach and journal ownership transitions.
+    device_op_lock: Arc<Mutex<()>>,
+    device_stats: Arc<Mutex<DeviceStats>>,
 }
 
 #[async_trait]
@@ -385,6 +485,8 @@ impl Shim for Service {
             journal_sandbox: Arc::new(Mutex::new(recovered.sandbox)),
             journal_lock: Arc::new(Mutex::new(())),
             recovery_error: Arc::new(Mutex::new(recovery_error)),
+            device_op_lock: Arc::new(Mutex::new(())),
+            device_stats: Arc::new(Mutex::new(recovered.device_stats)),
         }
     }
 
@@ -438,6 +540,7 @@ impl Service {
             sandbox: self.journal_sandbox.lock().await.clone(),
             tasks: self.tasks.read().await.clone(),
             execs: self.execs.read().await.clone(),
+            device_stats: self.device_stats.lock().await.clone(),
         };
         let root = runtime_state_root(&self.cfg, &self.namespace, &self.group);
         tokio::fs::create_dir_all(&root).await?;
@@ -634,6 +737,9 @@ impl Service {
                 bail!("container agent unavailable while live task metadata exists");
             }
         }
+        self.reconcile_device_attachments(&vm).await?;
+        let recovered_devices = self.journal_sandbox.lock().await.as_ref()
+            .map(|j| j.devices.clone()).unwrap_or_default();
         self.restore_recovered_processes(&vm).await?;
         info!(
             "secure-container sandbox recovered vm={} group={} elapsed_ms={}",
@@ -646,7 +752,7 @@ impl Service {
             share_dir: journal.share_dir.clone(),
             cni: journal.cni.clone(),
             kubelet_mounts: journal.kubelet_mounts.clone(),
-            devices: journal.devices.clone(),
+            devices: recovered_devices,
         })
     }
 
@@ -1086,12 +1192,99 @@ impl Service {
         }
     }
 
-    fn block_source_allowed(&self, source: &Path, pod_uid: Option<&str>) -> bool {
+    async fn qmp_device_del_wait(&self, vm: &VmRecord, device_id: &str) -> AnyResult<()> {
+        let socket = vm.workspace.join("qmp.sock");
+        let stream = tokio::time::timeout(Duration::from_secs(10), UnixStream::connect(&socket))
+            .await.context("timing out connecting QMP for device_del")??;
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 { bail!("QMP closed before greeting"); }
+        let greeting: Value = serde_json::from_str(&line).context("decoding QMP greeting")?;
+        if greeting.get("QMP").is_none() { bail!("invalid QMP greeting from {}", socket.display()); }
+        write_half.write_all(b"{\"execute\":\"qmp_capabilities\"}\n").await?;
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 { bail!("QMP closed during capabilities"); }
+        let caps: Value = serde_json::from_str(&line)?;
+        if let Some(e) = caps.get("error") { bail!("QMP capabilities failed: {e}"); }
+
+        let request_id = format!("fluxvm-device-del-{device_id}");
+        write_half.write_all(
+            format!("{}\n", json!({"execute":"device_del","arguments":{"id":device_id},"id":request_id})).as_bytes()
+        ).await?;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.cfg.device_unplug_timeout_secs);
+        let mut accepted = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("timed out waiting for QEMU DEVICE_DELETED for {device_id}");
+            }
+            line.clear();
+            let read = tokio::time::timeout(remaining, reader.read_line(&mut line))
+                .await.context("timed out reading QMP device_del event")??;
+            if read == 0 { bail!("QMP closed while waiting for device removal {device_id}"); }
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply.get("id").and_then(Value::as_str) == Some(request_id.as_str()) {
+                if let Some(e) = reply.get("error") { bail!("QMP device_del {device_id} failed: {e}"); }
+                accepted = true;
+                continue;
+            }
+            match reply.get("event").and_then(Value::as_str) {
+                Some("DEVICE_DELETED")
+                    if reply.pointer("/data/device").and_then(Value::as_str) == Some(device_id)
+                        || reply.pointer("/data/path").and_then(Value::as_str)
+                            .is_some_and(|path| path.ends_with(&format!("/{device_id}"))) => {
+                        if !accepted {
+                            warn!("QEMU reported DEVICE_DELETED for {device_id} before command response");
+                        }
+                        return Ok(());
+                    }
+                Some("DEVICE_UNPLUG_GUEST_ERROR")
+                    if reply.pointer("/data/device").and_then(Value::as_str) == Some(device_id)
+                        || reply.pointer("/data/path").and_then(Value::as_str)
+                            .is_some_and(|path| path.ends_with(&format!("/{device_id}"))) => {
+                        bail!("guest rejected hot-unplug of QEMU device {device_id}");
+                    }
+                _ => {}
+            }
+        }
+    }
+
+    async fn qmp_device_present(&self, vm: &VmRecord, device_id: &str) -> bool {
+        self.qmp_execute(
+            vm,
+            "qom-list",
+            Some(json!({"path": format!("/machine/peripheral/{device_id}")})),
+        ).await.is_ok()
+    }
+
+    fn canonical_block_source(&self, source: &Path, pod_uid: Option<&str>) -> AnyResult<PathBuf> {
+        // Kubernetes raw-block Pod paths are intentionally symlinks into the
+        // plugin's global device map. Authorize the kubelet-owned *link path*
+        // first, then canonicalize to the actual host block device. Checking
+        // the canonical target against volumeDevices would incorrectly reject
+        // every valid CSI raw-block mapping.
+        let mut allowed_origin = false;
         if let Some(uid) = pod_uid {
             let pod_devices = PathBuf::from("/var/lib/kubelet/pods").join(uid).join("volumeDevices");
-            if source.starts_with(&pod_devices) { return true; }
+            allowed_origin |= source.starts_with(&pod_devices);
         }
-        self.cfg.block_allow_prefixes.iter().any(|p| source.starts_with(p))
+        allowed_origin |= self.cfg.block_allow_prefixes.iter().any(|p| source.starts_with(p));
+        if !allowed_origin {
+            bail!(
+                "raw block source {} is outside the Pod volumeDevices tree and FLUXVM_CONTAINER_BLOCK_ALLOW_PREFIXES",
+                source.display()
+            );
+        }
+        let canonical = std::fs::canonicalize(source)
+            .with_context(|| format!("canonicalizing raw block source {}", source.display()))?;
+        let meta = std::fs::metadata(&canonical)
+            .with_context(|| format!("stat raw block source {}", canonical.display()))?;
+        if !meta.file_type().is_block_device() {
+            bail!("{} resolves to {}, which is not a block device", source.display(), canonical.display());
+        }
+        Ok(canonical)
     }
 
     fn pod_block_source_for_rdev(&self, pod_uid: Option<&str>, major: u64, minor: u64) -> Option<PathBuf> {
@@ -1100,35 +1293,133 @@ impl Service {
         find_block_rdev_under(&root, major, minor, 8)
     }
 
-    async fn remember_device(&self, attachment: DeviceAttachment) -> AnyResult<()> {
+    fn guest_driver_companion_allowed(&self, path: &str) -> bool {
+        let builtin = matches!(
+            path,
+            "/dev/nvidiactl" | "/dev/nvidia-uvm" | "/dev/nvidia-uvm-tools" |
+            "/dev/nvidia-modeset" | "/dev/kfd"
+        );
+        let nvidia_cap = path.strip_prefix("/dev/nvidia-caps/nvidia-cap")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()));
+        builtin || nvidia_cap || self.cfg.guest_device_allow.iter().any(|v| v == path)
+    }
+
+    fn validate_vfio_group(&self, bdf: &str) -> AnyResult<Option<u32>> {
+        if !valid_pci_bdf(bdf) { bail!("invalid PCI BDF {bdf:?}"); }
+        if !self.cfg.vfio_allow.iter().any(|v| v == bdf) {
+            bail!("VFIO device {bdf} is not in FLUXVM_CONTAINER_VFIO_ALLOW");
+        }
+        let driver = pci_driver_name(bdf);
+        if driver.as_deref() != Some("vfio-pci") {
+            bail!("VFIO device {bdf} must already be bound to vfio-pci (found {:?})", driver);
+        }
+        let group = iommu_group_info(bdf)?;
+        if self.cfg.vfio_require_iommu_group {
+            let (group_id, members) = group.as_ref().with_context(|| {
+                format!("VFIO device {bdf} has no IOMMU group; disable FLUXVM_CONTAINER_VFIO_REQUIRE_IOMMU_GROUP only for an isolated lab")
+            })?;
+            for member in members {
+                if !self.cfg.vfio_allow.iter().any(|v| v == member) {
+                    bail!("IOMMU group {group_id} member {member} is not explicitly allowlisted");
+                }
+                if pci_driver_name(member).as_deref() != Some("vfio-pci") {
+                    bail!("IOMMU group {group_id} member {member} is not bound to vfio-pci");
+                }
+            }
+        }
+        Ok(group.map(|(id, _)| id))
+    }
+
+    async fn persist_attachment_owner(&self, key: &str, owner: &str) -> AnyResult<()> {
+        let mut changed = false;
         if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
-            if !sandbox.devices.contains(&attachment) { sandbox.devices.push(attachment.clone()); }
+            if let Some(item) = sandbox.devices.iter_mut().find(|d| d.key() == key) {
+                changed |= item.add_owner(owner);
+            }
         }
         if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
-            if !journal.devices.contains(&attachment) { journal.devices.push(attachment); }
+            if let Some(item) = journal.devices.iter_mut().find(|d| d.key() == key) {
+                changed |= item.add_owner(owner);
+            }
+        }
+        if changed { self.persist_runtime_state().await?; }
+        Ok(())
+    }
+
+    async fn remember_device(&self, attachment: DeviceAttachment) -> AnyResult<()> {
+        let key = attachment.key();
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
+            if let Some(existing) = sandbox.devices.iter_mut().find(|d| d.key() == key) {
+                *existing = attachment.clone();
+            } else {
+                sandbox.devices.push(attachment.clone());
+            }
+        }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
+            if let Some(existing) = journal.devices.iter_mut().find(|d| d.key() == key) {
+                *existing = attachment.clone();
+            } else {
+                journal.devices.push(attachment);
+            }
         }
         self.persist_runtime_state().await
     }
 
-    async fn ensure_block_hotplug(&self, vm: &VmRecord, source: &Path, pod_uid: Option<&str>) -> AnyResult<String> {
-        if !self.cfg.device_passthrough { bail!("raw block passthrough is disabled by FLUXVM_CONTAINER_DEVICE_PASSTHROUGH=0"); }
-        if !self.block_source_allowed(source, pod_uid) {
-            bail!("raw block source {} is outside the Pod volumeDevices tree and FLUXVM_CONTAINER_BLOCK_ALLOW_PREFIXES", source.display());
+    async fn ensure_block_hotplug(
+        &self,
+        vm: &VmRecord,
+        source: &Path,
+        pod_uid: Option<&str>,
+        owner: &str,
+    ) -> AnyResult<(String, String)> {
+        if !self.cfg.device_passthrough {
+            bail!("raw block passthrough is disabled by FLUXVM_CONTAINER_DEVICE_PASSTHROUGH=0");
         }
-        let meta = std::fs::metadata(source).with_context(|| format!("stat raw block source {}", source.display()))?;
-        if !meta.file_type().is_block_device() { bail!("{} is not a block device", source.display()); }
+        let _op = self.device_op_lock.lock().await;
+        let source = self.canonical_block_source(source, pod_uid)?;
+        let meta = std::fs::metadata(&source)?;
+        let rdev = meta.rdev();
+        let host_major = libc::major(rdev) as u64;
+        let host_minor = libc::minor(rdev) as u64;
+        let key = format!("block:{}", source.display());
+
+        let existing = self.journal_sandbox.lock().await.as_ref().and_then(|j| {
+            j.devices.iter().find(|d| match d {
+                DeviceAttachment::Block { host_path, host_major: old_major, host_minor: old_minor, .. } => {
+                    host_path == &source
+                        || std::fs::canonicalize(host_path).ok().as_ref() == Some(&source)
+                        || (old_major == &Some(host_major) && old_minor == &Some(host_minor))
+                }
+                _ => false,
+            }).cloned()
+        });
+        if let Some(existing) = existing {
+            let serial = match &existing {
+                DeviceAttachment::Block { serial, host_major: old_major, host_minor: old_minor, .. } => {
+                    if old_major.is_some_and(|v| v != host_major) || old_minor.is_some_and(|v| v != host_minor) {
+                        bail!("raw block identity drift for {}: journal {:?}:{:?}, host {host_major}:{host_minor}", source.display(), old_major, old_minor);
+                    }
+                    serial.clone()
+                }
+                _ => unreachable!(),
+            };
+            if !self.qmp_device_present(vm, existing.device_id()).await {
+                bail!("journal owns {key} but QEMU device {} is missing; refusing duplicate attach", existing.device_id());
+            }
+            let existing_key = existing.key();
+            self.persist_attachment_owner(&existing_key, owner).await?;
+            return Ok((serial, existing_key));
+        }
+
+        // Retry any previously deferred zero-owner unplug before consuming
+        // another QEMU device slot.
+        let _ = self.reap_unowned_devices_locked(vm).await;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         source.hash(&mut hasher);
         let suffix = format!("{:016x}", hasher.finish());
         let serial = format!("fluxvm-{suffix}");
         let node_name = format!("fvblk{suffix}");
         let device_id = format!("fvdev{suffix}");
-        {
-            let journal = self.journal_sandbox.lock().await;
-            if journal.as_ref().is_some_and(|j| j.devices.iter().any(|d| matches!(d, DeviceAttachment::Block { host_path, .. } if host_path == source))) {
-                return Ok(serial);
-            }
-        }
         self.qmp_execute(vm, "blockdev-add", Some(json!({
             "node-name": node_name, "driver": "host_device", "filename": source,
             "cache": {"direct": true, "no-flush": false}
@@ -1140,22 +1431,49 @@ impl Service {
             let _ = self.qmp_execute(vm, "blockdev-del", Some(json!({"node-name": node_name}))).await;
             return Err(e).with_context(|| format!("attaching raw block {} to guest", source.display()));
         }
-        self.remember_device(DeviceAttachment::Block {
-            host_path: source.to_path_buf(), serial: serial.clone(), node_name, device_id,
-        }).await?;
-        Ok(serial)
+        let attachment = DeviceAttachment::Block {
+            host_path: source,
+            serial: serial.clone(),
+            node_name,
+            device_id,
+            host_major: Some(host_major),
+            host_minor: Some(host_minor),
+            owners: Some(vec![owner.to_string()]),
+        };
+        if let Err(e) = self.remember_device(attachment.clone()).await {
+            let _ = self.detach_device(vm, &attachment).await;
+            let _ = self.remove_attachment_from_state(&key).await;
+            return Err(e).context("persisting raw-block attachment ownership");
+        }
+        {
+            let mut stats = self.device_stats.lock().await;
+            stats.attach_total = stats.attach_total.saturating_add(1);
+        }
+        self.persist_runtime_state().await?;
+        Ok((serial, key))
     }
 
-    async fn ensure_vfio_hotplug(&self, vm: &VmRecord, bdf: &str, guest_path: &str) -> AnyResult<()> {
+    async fn ensure_vfio_hotplug(&self, vm: &VmRecord, bdf: &str, guest_path: &str, owner: &str) -> AnyResult<String> {
         if !self.cfg.device_passthrough { bail!("VFIO passthrough is disabled"); }
-        if !self.cfg.vfio_allow.iter().any(|v| v == bdf) { bail!("VFIO device {bdf} is not in FLUXVM_CONTAINER_VFIO_ALLOW"); }
-        let driver = std::fs::canonicalize(format!("/sys/bus/pci/devices/{bdf}/driver"))
-            .ok().and_then(|p| p.file_name().map(|v| v.to_string_lossy().into_owned()));
-        if driver.as_deref() != Some("vfio-pci") { bail!("VFIO device {bdf} must already be bound to vfio-pci (found {:?})", driver); }
-        {
-            let journal = self.journal_sandbox.lock().await;
-            if journal.as_ref().is_some_and(|j| j.devices.iter().any(|d| matches!(d, DeviceAttachment::Vfio { bdf: existing, .. } if existing == bdf))) { return Ok(()); }
+        let _op = self.device_op_lock.lock().await;
+        let iommu_group = self.validate_vfio_group(bdf)?;
+        let key = format!("vfio:{bdf}");
+        let existing = self.journal_sandbox.lock().await.as_ref()
+            .and_then(|j| j.devices.iter().find(|d| d.key() == key).cloned());
+        if let Some(existing) = existing {
+            if let DeviceAttachment::Vfio { iommu_group: old_group, .. } = &existing {
+                if old_group.is_some() && *old_group != iommu_group {
+                    bail!("VFIO IOMMU-group drift for {bdf}: journal {old_group:?}, host {iommu_group:?}");
+                }
+            }
+            if !self.qmp_device_present(vm, existing.device_id()).await {
+                bail!("journal owns {key} but QEMU device {} is missing; refusing duplicate attach", existing.device_id());
+            }
+            self.persist_attachment_owner(&key, owner).await?;
+            return Ok(key);
         }
+
+        let _ = self.reap_unowned_devices_locked(vm).await;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         bdf.hash(&mut hasher);
         let suffix = format!("{:016x}", hasher.finish());
@@ -1165,8 +1483,22 @@ impl Service {
             let args = json!({"driver":"vfio-pci","host":bdf,"id":device_id,"bus":format!("hotplug-pcie-{port}")});
             match self.qmp_execute(vm, "device_add", Some(args)).await {
                 Ok(_) => {
-                    self.remember_device(DeviceAttachment::Vfio { bdf: bdf.to_string(), guest_path: guest_path.to_string(), device_id }).await?;
-                    return Ok(());
+                    let attachment = DeviceAttachment::Vfio {
+                        bdf: bdf.to_string(), guest_path: guest_path.to_string(), device_id,
+                        iommu_group,
+                        owners: Some(vec![owner.to_string()]),
+                    };
+                    if let Err(e) = self.remember_device(attachment.clone()).await {
+                        let _ = self.detach_device(vm, &attachment).await;
+                        let _ = self.remove_attachment_from_state(&key).await;
+                        return Err(e).context("persisting VFIO attachment ownership");
+                    }
+                    {
+                        let mut stats = self.device_stats.lock().await;
+                        stats.attach_total = stats.attach_total.saturating_add(1);
+                    }
+                    self.persist_runtime_state().await?;
+                    return Ok(key);
                 }
                 Err(e) => last = Some(e),
             }
@@ -1174,7 +1506,139 @@ impl Service {
         Err(last.unwrap_or_else(|| anyhow::anyhow!("no QEMU PCIe hotplug port available"))).with_context(|| format!("attaching VFIO PCI device {bdf}"))
     }
 
-    async fn prepare_hotplug_devices(&self, vm: &VmRecord, spec: &mut Value, pod_uid: Option<&str>) -> AnyResult<()> {
+    async fn detach_device(&self, vm: &VmRecord, attachment: &DeviceAttachment) -> AnyResult<()> {
+        self.qmp_device_del_wait(vm, attachment.device_id()).await?;
+        if let DeviceAttachment::Block { node_name, .. } = attachment {
+            self.qmp_execute(vm, "blockdev-del", Some(json!({"node-name": node_name})))
+                .await.with_context(|| format!("deleting QEMU block node {node_name}"))?;
+        }
+        {
+            let mut stats = self.device_stats.lock().await;
+            stats.detach_total = stats.detach_total.saturating_add(1);
+        }
+        info!("secure-container device detached key={} qdev={}", attachment.key(), attachment.device_id());
+        Ok(())
+    }
+
+    async fn remove_attachment_from_state(&self, key: &str) -> AnyResult<()> {
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
+            sandbox.devices.retain(|d| d.key() != key);
+        }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
+            journal.devices.retain(|d| d.key() != key);
+        }
+        self.persist_runtime_state().await
+    }
+
+    async fn reap_unowned_devices_locked(&self, vm: &VmRecord) -> AnyResult<()> {
+        let candidates: Vec<DeviceAttachment> = self.journal_sandbox.lock().await.as_ref()
+            .map(|j| j.devices.iter().filter(|d| d.is_releasable()).cloned().collect())
+            .unwrap_or_default();
+        let mut failures = Vec::new();
+        for attachment in candidates {
+            match self.detach_device(vm, &attachment).await {
+                Ok(_) => self.remove_attachment_from_state(&attachment.key()).await?,
+                Err(e) => {
+                    warn!("hot-unplug deferred for {}: {e:#}", attachment.key());
+                    failures.push(format!("{}: {e:#}", attachment.key()));
+                    let mut stats = self.device_stats.lock().await;
+                    stats.unplug_failures = stats.unplug_failures.saturating_add(1);
+                }
+            }
+        }
+        if !failures.is_empty() {
+            let _ = self.persist_runtime_state().await;
+            bail!("one or more device hot-unplugs remain pending: {}", failures.join("; "));
+        }
+        Ok(())
+    }
+
+    async fn release_device_claims(&self, vm: &VmRecord, owner: &str, claims: &[String]) {
+        if claims.is_empty() { return; }
+        let _op = self.device_op_lock.lock().await;
+        let claim_set: HashSet<&str> = claims.iter().map(String::as_str).collect();
+        let mut changed = false;
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
+            for item in &mut sandbox.devices {
+                if claim_set.contains(item.key().as_str()) { changed |= item.remove_owner(owner); }
+            }
+        }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
+            for item in &mut journal.devices {
+                if claim_set.contains(item.key().as_str()) { changed |= item.remove_owner(owner); }
+            }
+        }
+        if changed {
+            if let Err(e) = self.persist_runtime_state().await {
+                warn!("persisting released device claims for {owner} failed: {e:#}");
+            }
+        }
+        if let Err(e) = self.reap_unowned_devices_locked(vm).await {
+            // Container deletion must remain successful once the guest process
+            // is gone. Keep the zero-owner attachment in the journal and retry
+            // on the next device operation/recovery or at sandbox destruction.
+            warn!("device cleanup after container {owner} is pending: {e:#}");
+        }
+    }
+
+    async fn reconcile_device_attachments(&self, vm: &VmRecord) -> AnyResult<()> {
+        let _op = self.device_op_lock.lock().await;
+        {
+            let mut stats = self.device_stats.lock().await;
+            stats.recovery_checks = stats.recovery_checks.saturating_add(1);
+        }
+        let attachments = self.journal_sandbox.lock().await.as_ref()
+            .map(|j| j.devices.clone()).unwrap_or_default();
+        for attachment in &attachments {
+            match attachment {
+                DeviceAttachment::Block { host_path, host_major, host_minor, .. } => {
+                    let meta = std::fs::metadata(host_path)
+                        .with_context(|| format!("recovery block device {} disappeared", host_path.display()))?;
+                    if !meta.file_type().is_block_device() { bail!("recovery device {} is no longer block-special", host_path.display()); }
+                    let rdev = meta.rdev();
+                    let major = libc::major(rdev) as u64;
+                    let minor = libc::minor(rdev) as u64;
+                    if host_major.is_some_and(|v| v != major) || host_minor.is_some_and(|v| v != minor) {
+                        bail!("recovery block identity drift for {}", host_path.display());
+                    }
+                }
+                DeviceAttachment::Vfio { bdf, iommu_group, .. } => {
+                    let current = self.validate_vfio_group(bdf)?;
+                    if iommu_group.is_some() && *iommu_group != current {
+                        bail!("recovery VFIO IOMMU-group drift for {bdf}: journal {iommu_group:?}, host {current:?}");
+                    }
+                }
+            }
+            if !self.qmp_device_present(vm, attachment.device_id()).await {
+                bail!("recovery journal device {} ({}) is missing from QEMU", attachment.key(), attachment.device_id());
+            }
+        }
+        // Set 9-owned devices whose containers were deleted immediately
+        // before a shim crash can be left with zero owners. Retry unplug now.
+        let _ = self.reap_unowned_devices_locked(vm).await;
+        self.persist_runtime_state().await?;
+        Ok(())
+    }
+
+    async fn rollback_prepared_device_claims(
+        &self,
+        vm: &VmRecord,
+        owner: &str,
+        claims: &[String],
+        error: anyhow::Error,
+    ) -> AnyResult<Vec<String>> {
+        self.release_device_claims(vm, owner, claims).await;
+        Err(error)
+    }
+
+    async fn prepare_hotplug_devices(
+        &self,
+        vm: &VmRecord,
+        spec: &mut Value,
+        pod_uid: Option<&str>,
+        owner: &str,
+    ) -> AnyResult<Vec<String>> {
+        let mut claims = Vec::new();
         if let Some(mounts) = spec.get_mut("mounts").and_then(Value::as_array_mut) {
             for mount in mounts.iter_mut() {
                 let is_bind = mount.get("type").and_then(Value::as_str) == Some("bind")
@@ -1183,8 +1647,12 @@ impl Service {
                 let Some(source) = mount.get("source").and_then(Value::as_str).map(PathBuf::from) else { continue; };
                 let Ok(meta) = std::fs::metadata(&source) else { continue; };
                 if meta.file_type().is_block_device() {
-                    let serial = self.ensure_block_hotplug(vm, &source, pod_uid).await?;
+                    let (serial, key) = match self.ensure_block_hotplug(vm, &source, pod_uid, owner).await {
+                        Ok(value) => value,
+                        Err(e) => return self.rollback_prepared_device_claims(vm, owner, &claims, e).await,
+                    };
                     mount["source"] = Value::String(format!("fluxvm-block://{serial}"));
+                    if !claims.contains(&key) { claims.push(key); }
                 }
             }
         }
@@ -1197,27 +1665,53 @@ impl Service {
                 if major < 0 || minor < 0 { continue; }
 
                 if kind == "b" {
-                    let source = self.pod_block_source_for_rdev(pod_uid, major as u64, minor as u64)
-                        .or_else(|| host_block_path_for_rdev(major as u64, minor as u64).filter(|p| self.block_source_allowed(p, None)))
-                        .with_context(|| format!("OCI block device {path} ({major}:{minor}) is not owned by this Pod volumeDevices tree or an explicit block allowlist"))?;
-                    let serial = self.ensure_block_hotplug(vm, &source, pod_uid).await?;
+                    let Some(source) = self.pod_block_source_for_rdev(pod_uid, major as u64, minor as u64)
+                        .or_else(|| host_block_path_for_rdev(major as u64, minor as u64)) else {
+                        let e = anyhow::anyhow!(
+                            "OCI block device {path} ({major}:{minor}) is not owned by this Pod volumeDevices tree or an explicit block allowlist"
+                        );
+                        return self.rollback_prepared_device_claims(vm, owner, &claims, e).await;
+                    };
+                    let (serial, key) = match self.ensure_block_hotplug(vm, &source, pod_uid, owner).await {
+                        Ok(value) => value,
+                        Err(e) => return self.rollback_prepared_device_claims(vm, owner, &claims, e).await,
+                    };
                     dev["major"] = Value::from(-2);
                     dev["minor"] = Value::from(-2);
                     dev["fluxvmBlockSerial"] = Value::String(serial);
+                    if !claims.contains(&key) { claims.push(key); }
                     continue;
                 }
 
                 if !matches!(kind, "c" | "u") { continue; }
                 if is_builtin_guest_char_device(&path) { continue; }
                 let Some(bdf) = pci_bdf_for_host_device(major as u64, minor as u64) else {
-                    bail!("OCI device {path} ({major}:{minor}) is not a built-in guest device and has no PCI parent eligible for VFIO");
+                    if self.guest_driver_companion_allowed(&path) {
+                        // Global control nodes (e.g. nvidiactl/UVM, AMD KFD)
+                        // are created by the guest driver after the actual PCI
+                        // function is attached. Mark them guest-resolved only;
+                        // never recreate the host major/minor in the VM.
+                        dev["major"] = Value::from(-1);
+                        dev["minor"] = Value::from(-1);
+                        dev["fluxvmGuestCompanion"] = Value::Bool(true);
+                        continue;
+                    }
+                    let e = anyhow::anyhow!(
+                        "OCI device {path} ({major}:{minor}) has no PCI parent eligible for VFIO and is not an allowed guest-driver companion"
+                    );
+                    return self.rollback_prepared_device_claims(vm, owner, &claims, e).await;
                 };
-                self.ensure_vfio_hotplug(vm, &bdf, &path).await?;
+                let key = match self.ensure_vfio_hotplug(vm, &bdf, &path, owner).await {
+                    Ok(key) => key,
+                    Err(e) => return self.rollback_prepared_device_claims(vm, owner, &claims, e).await,
+                };
                 dev["major"] = Value::from(-1);
                 dev["minor"] = Value::from(-1);
+                if !claims.contains(&key) { claims.push(key); }
             }
         }
-        Ok(())
+        claims.sort();
+        Ok(claims)
     }
 
     async fn sandbox_paths(&self, id: &str, hints: Option<&SandboxHints>) -> AnyResult<(VmRecord, PathBuf, String)> {
@@ -1229,7 +1723,7 @@ impl Service {
         Ok((vm, host, guest))
     }
 
-    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>)> {
+    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>, Vec<String>)> {
         let config_path = Path::new(&req.bundle).join("config.json");
         let text = tokio::fs::read_to_string(&config_path)
             .await
@@ -1256,10 +1750,19 @@ impl Service {
         copy_result?;
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
-        self.prepare_hotplug_devices(&vm, &mut spec, hints.pod_uid.as_deref()).await?;
-        stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await?;
-        let (io, io_dir) = self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await?;
-        Ok((vm, serde_json::to_string(&spec)?, io, io_dir))
+        let device_claims = self.prepare_hotplug_devices(&vm, &mut spec, hints.pod_uid.as_deref(), &req.id).await?;
+        if let Err(e) = stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await {
+            self.release_device_claims(&vm, &req.id, &device_claims).await;
+            return Err(e);
+        }
+        let (io, io_dir) = match self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await {
+            Ok(io) => io,
+            Err(e) => {
+                self.release_device_claims(&vm, &req.id, &device_claims).await;
+                return Err(e);
+            }
+        };
+        Ok((vm, serde_json::to_string(&spec)?, io, io_dir, device_claims))
     }
 
     async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, Option<PathBuf>)> {
@@ -1646,7 +2149,7 @@ impl Service {
 #[async_trait]
 impl Task for Service {
     async fn create(&self, _ctx: &TtrpcContext, req: CreateTaskRequest) -> TtrpcResult<CreateTaskResponse> {
-        let (vm, config_json, io, io_dir) = match self.stage_rootfs_and_config(&req).await {
+        let (vm, config_json, io, io_dir, device_claims) = match self.stage_rootfs_and_config(&req).await {
             Ok(staged) => staged,
             Err(e) => {
                 self.cleanup_process_staging(&req.id, None).await;
@@ -1670,6 +2173,7 @@ impl Task for Service {
         {
             Ok(response) => response,
             Err(e) => {
+                self.release_device_claims(&vm, &req.id, &device_claims).await;
                 self.cleanup_process_staging(&req.id, None).await;
                 return Err(rpc_other(e));
             }
@@ -1677,6 +2181,7 @@ impl Task for Service {
         let pid = match response {
             ContainerResponse::Created { pid } => pid,
             other => {
+                self.release_device_claims(&vm, &req.id, &device_claims).await;
                 self.cleanup_process_staging(&req.id, None).await;
                 return Err(rpc_other(format!("unexpected create response: {other:?}")));
             }
@@ -1687,6 +2192,7 @@ impl Task for Service {
             let _ = self.call_agent(&vm, ContainerRequest::Delete {
                 id: req.id.clone(), exec_id: None, force: true
             }).await;
+            self.release_device_claims(&vm, &req.id, &device_claims).await;
             self.cleanup_process_staging(&req.id, None).await;
             return Err(rpc_other(format!("attaching VSOCK stdio: {e:#}")));
         }
@@ -1700,6 +2206,7 @@ impl Task for Service {
             io_dir,
             streaming: self.cfg.streaming_stdio,
             oom_kill_seen: 0,
+            device_claims,
         });
         self.persist_runtime_state().await.map_err(rpc_other)?;
         self.spawn_oom_watch(vm.clone(), req.id.clone());
@@ -1822,6 +2329,11 @@ impl Task for Service {
     async fn delete(&self, _ctx: &TtrpcContext, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
+        let device_claims = if exec_id.is_none() {
+            self.tasks.read().await.get(&req.id).map(|m| m.device_claims.clone()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let response = self
             .call_agent(
                 &vm,
@@ -1854,6 +2366,9 @@ impl Task for Service {
             self.execs.write().await.retain(|key, _| !key.starts_with(&format!("{}\0", req.id)));
         }
         self.persist_runtime_state().await.map_err(rpc_other)?;
+        if exec_id.is_none() {
+            self.release_device_claims(&vm, &req.id, &device_claims).await;
+        }
 
         self.send_event(TaskDelete {
             container_id: req.id.clone(),
@@ -1909,6 +2424,7 @@ impl Task for Service {
             io_dir,
             streaming: self.cfg.streaming_stdio,
             oom_kill_seen: 0,
+            device_claims: Vec::new(),
         });
         self.persist_runtime_state().await.map_err(rpc_other)?;
         self.send_event(TaskExecAdded {
@@ -2698,7 +3214,6 @@ fn find_block_rdev_under(root: &Path, major: u64, minor: u64, depth: usize) -> O
         let path = entry.path();
         let Ok(meta) = std::fs::metadata(&path) else { continue; };
         if meta.file_type().is_block_device() {
-            use std::os::unix::fs::MetadataExt as _;
             let rdev = meta.rdev();
             if libc::major(rdev as libc::dev_t) as u64 == major && libc::minor(rdev as libc::dev_t) as u64 == minor {
                 return Some(path);
@@ -2727,11 +3242,56 @@ fn looks_like_pci_bdf(name: &str) -> bool {
         && b.iter().enumerate().all(|(i, c)| matches!(i, 4 | 7 | 10) || c.is_ascii_hexdigit())
 }
 
+fn valid_pci_bdf(name: &str) -> bool {
+    if !looks_like_pci_bdf(name) { return false; }
+    let Ok(_domain) = u16::from_str_radix(&name[0..4], 16) else { return false; };
+    let Ok(_bus) = u8::from_str_radix(&name[5..7], 16) else { return false; };
+    let Ok(slot) = u8::from_str_radix(&name[8..10], 16) else { return false; };
+    let Ok(function) = u8::from_str_radix(&name[11..12], 16) else { return false; };
+    slot <= 0x1f && function <= 7
+}
+
+fn pci_driver_name(bdf: &str) -> Option<String> {
+    if !valid_pci_bdf(bdf) { return None; }
+    std::fs::canonicalize(format!("/sys/bus/pci/devices/{bdf}/driver"))
+        .ok()
+        .and_then(|p| p.file_name().map(|v| v.to_string_lossy().into_owned()))
+}
+
+fn iommu_group_info(bdf: &str) -> AnyResult<Option<(u32, Vec<String>)>> {
+    if !valid_pci_bdf(bdf) { bail!("invalid PCI BDF {bdf:?}"); }
+    let group_link = PathBuf::from(format!("/sys/bus/pci/devices/{bdf}/iommu_group"));
+    let group_path = match std::fs::canonicalize(&group_link) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("resolving IOMMU group for {bdf}")),
+    };
+    let group_id = group_path.file_name()
+        .and_then(|v| v.to_str())
+        .context("IOMMU group path has no numeric basename")?
+        .parse::<u32>()
+        .context("parsing IOMMU group id")?;
+    let mut members = Vec::new();
+    for entry in std::fs::read_dir(group_path.join("devices"))
+        .with_context(|| format!("reading IOMMU group {group_id} members"))?
+    {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if valid_pci_bdf(&name) { members.push(name); }
+    }
+    members.sort();
+    members.dedup();
+    if !members.iter().any(|v| v == bdf) {
+        bail!("IOMMU group {group_id} does not contain requested function {bdf}");
+    }
+    Ok(Some((group_id, members)))
+}
+
 fn pci_bdf_for_host_device(major: u64, minor: u64) -> Option<String> {
     let path = std::fs::canonicalize(format!("/sys/dev/char/{major}:{minor}/device")).ok()?;
     for component in path.components().rev() {
         let name = component.as_os_str().to_string_lossy();
-        if looks_like_pci_bdf(&name) { return Some(name.into_owned()); }
+        if valid_pci_bdf(&name) { return Some(name.into_owned().to_ascii_lowercase()); }
     }
     None
 }
@@ -3069,5 +3629,86 @@ mod set8_device_tests {
     fn builtin_guest_devices_are_not_vfio_candidates() {
         assert!(is_builtin_guest_char_device("/dev/null"));
         assert!(!is_builtin_guest_char_device("/dev/nvidia0"));
+    }
+}
+
+#[cfg(test)]
+mod set9_device_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn strict_bdf_parser_rejects_out_of_range_slot_and_function() {
+        assert!(valid_pci_bdf("0000:65:1f.7"));
+        assert!(!valid_pci_bdf("0000:65:20.0"));
+        assert!(!valid_pci_bdf("0000:65:00.8"));
+        assert!(!valid_pci_bdf("../0:65:00.0"));
+    }
+
+    #[test]
+    fn device_owner_reference_counting_is_deterministic() {
+        let mut d = DeviceAttachment::Vfio {
+            bdf: "0000:65:00.0".into(),
+            guest_path: "/dev/nvidia0".into(),
+            device_id: "fvvfio123".into(),
+            iommu_group: Some(42),
+            owners: Some(vec!["container-a".into()]),
+        };
+        assert!(d.add_owner("container-b"));
+        assert!(!d.add_owner("container-b"));
+        assert_eq!(d.owners().unwrap(), &vec!["container-a".to_string(), "container-b".to_string()]);
+        assert!(d.remove_owner("container-a"));
+        assert!(!d.is_releasable());
+        assert!(d.remove_owner("container-b"));
+        assert!(d.is_releasable());
+    }
+
+    #[test]
+    fn legacy_set8_attachment_without_owners_stays_pinned() {
+        let mut d = DeviceAttachment::Block {
+            host_path: "/dev/mapper/example".into(),
+            serial: "fluxvm-test".into(),
+            node_name: "fvblktest".into(),
+            device_id: "fvdevtest".into(),
+            host_major: None,
+            host_minor: None,
+            owners: None,
+        };
+        assert!(!d.add_owner("new-container"));
+        assert!(!d.remove_owner("new-container"));
+        assert!(!d.is_releasable());
+    }
+}
+
+#[cfg(test)]
+mod set9_journal_compat_tests {
+    use super::*;
+
+    #[test]
+    fn set8_journal_without_owner_or_stats_fields_deserializes_pinned() {
+        let text = r#"{
+          "version":1,
+          "sandbox":{
+            "vm_id":"00000000-0000-0000-0000-000000000001",
+            "vm_name":"pod",
+            "ready":true,
+            "share_dir":"/run/fluxvm/containerd/share",
+            "cni":null,
+            "kubelet_mounts":[],
+            "devices":[{
+              "kind":"block",
+              "host_path":"/dev/mapper/example",
+              "serial":"fluxvm-old",
+              "node_name":"fvblkold",
+              "device_id":"fvdevold"
+            }]
+          },
+          "tasks":{},
+          "execs":{}
+        }"#;
+        let state: RuntimeStateJournal = serde_json::from_str(text).unwrap();
+        assert_eq!(state.device_stats.attach_total, 0);
+        let d = &state.sandbox.unwrap().devices[0];
+        assert!(d.owners().is_none());
+        assert!(!d.is_releasable());
     }
 }

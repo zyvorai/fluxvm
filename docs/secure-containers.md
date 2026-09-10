@@ -261,3 +261,7 @@ and rediscovered inside the guest by stable serial. VFIO character-device
 passthrough requires an exact BDF allowlist and a device already bound to
 `vfio-pci`; host drivers are never detached automatically. See
 `docs/secure-containers-set8.md`.
+
+## Set 9 addendum — passthrough device lifecycle
+
+Set 9 reference-counts raw-block/VFIO attachments by container, waits for QEMU `DEVICE_DELETED` before final backend cleanup, journals delayed unplug for retry, validates raw-block identity and complete VFIO IOMMU groups on recovery, and supports guest-driver GPU companion nodes without copying host major/minor numbers. See [secure-containers-set9.md](secure-containers-set9.md).
