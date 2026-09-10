@@ -2192,6 +2192,13 @@ impl Task for Service {
                     io,
                     is_sandbox,
                     share_process_namespace,
+                    // Set 8S: not yet wired to fetch the Pod's Set 6S
+                    // network policy and mirror it per-container (see
+                    // docs/secure-containers-set8s.md) -- every container
+                    // still gets Set 8S's fail-closed-by-default enforcement
+                    // attached, just with an empty (deny-non-loopback)
+                    // policy until that wiring lands.
+                    network_policy: None,
                 },
             )
             .await

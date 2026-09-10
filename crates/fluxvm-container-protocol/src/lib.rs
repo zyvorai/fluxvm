@@ -10,6 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 pub const DEFAULT_CONTAINER_AGENT_PORT: u32 = 17778;
 pub const DEFAULT_CONTAINER_STREAM_PORT: u32 = 17779;
@@ -66,6 +67,32 @@ pub struct IoStreamAck {
     pub ok: bool,
     #[serde(default)]
     pub message: Option<String>,
+}
+
+/// Sentinel Set 8S: per-container network policy, enforced in-guest via
+/// cgroup_skb programs attached to the container's own cgroup (independent
+/// of and additive to Set 6S's host-side, Pod-scoped `fluxvm_pod_policy`).
+/// `None` on `Create` still gets the container policed (every container's
+/// cgroup gets the programs attached unconditionally) but with an
+/// enabled-and-empty policy, which the guest's fail-closed-by-default design
+/// (see bpf/fluxvm_guest_cgroup.bpf.c) turns into "deny all non-loopback
+/// traffic until a policy is actually set."
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerNetworkPolicy {
+    /// An unlisted peer is allowed when true. Default false: unlike Set 6S's
+    /// Pod-level policy (allow-by-default for backward compatibility with
+    /// VMs that never opt in), a container only ever gets this policy
+    /// attached at all once Set 8S is in use, so there's no legacy
+    /// allow-everything behavior to preserve.
+    #[serde(default)]
+    pub default_allow: bool,
+    /// Log-and-allow instead of drop.
+    #[serde(default)]
+    pub audit_mode: bool,
+    #[serde(default)]
+    pub allow_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    pub deny_addresses: Vec<IpAddr>,
 }
 
 /// Portable subset of OCI LinuxResources used by the guest cgroup-v2 layer.
@@ -177,6 +204,9 @@ pub enum ContainerRequest {
         /// group; ignored otherwise.
         #[serde(default)]
         share_process_namespace: bool,
+        /// Set 8S: see `ContainerNetworkPolicy`.
+        #[serde(default)]
+        network_policy: Option<ContainerNetworkPolicy>,
     },
     Start {
         id: String,
@@ -316,6 +346,7 @@ mod tests {
                 },
                 is_sandbox: true,
                 share_process_namespace: false,
+                network_policy: None,
             },
         };
         let line = encode_line(&req).unwrap();
