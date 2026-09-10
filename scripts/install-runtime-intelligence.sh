@@ -18,16 +18,22 @@ install -D -m0755 "$ROOT/dist/bin/fluxvm-xdp-shield-loader" /usr/libexec/fluxvm/
 install -D -m0755 "$ROOT/dist/bin/fluxvm-shield-events" /usr/libexec/fluxvm/fluxvm-shield-events
 install -D -m0755 "$ROOT/dist/bin/fluxvm-tcp-loader" /usr/libexec/fluxvm/fluxvm-tcp-loader
 install -D -m0755 "$ROOT/dist/bin/fluxvm-tcp-events" /usr/libexec/fluxvm/fluxvm-tcp-events
+install -D -m0755 "$ROOT/dist/bin/fluxvm-memprof" /usr/bin/fluxvm-memprof
+install -D -m0755 "$ROOT/dist/bin/fluxvm-memprof-loader" /usr/libexec/fluxvm/fluxvm-memprof-loader
+install -D -m0755 "$ROOT/dist/bin/fluxvm-memprof-events" /usr/libexec/fluxvm/fluxvm-memprof-events
 install -D -m0644 "$ROOT/dist/bpf/fluxvm_intelligence.bpf.o" /usr/lib/fluxvm/bpf/fluxvm_intelligence.bpf.o
 install -D -m0644 "$ROOT/dist/bpf/fluxvm_guard.bpf.o" /usr/lib/fluxvm/bpf/fluxvm_guard.bpf.o
 install -D -m0644 "$ROOT/dist/bpf/fluxvm_xdp_shield.bpf.o" /usr/lib/fluxvm/bpf/fluxvm_xdp_shield.bpf.o
 install -D -m0644 "$ROOT/dist/bpf/fluxvm_tcp_intel.bpf.o" /usr/lib/fluxvm/bpf/fluxvm_tcp_intel.bpf.o
+install -D -m0644 "$ROOT/dist/bpf/fluxvm_memprof.bpf.o" /usr/lib/fluxvm/bpf/fluxvm_memprof.bpf.o
 install -D -m0644 "$ROOT/packaging/systemd/fluxvm-netintel.service" /etc/systemd/system/fluxvm-netintel.service
+install -D -m0644 "$ROOT/packaging/systemd/fluxvm-memprof.service" /etc/systemd/system/fluxvm-memprof.service
 install -D -m0644 "$ROOT/packaging/systemd/fluxvm-guard.service" /etc/systemd/system/fluxvm-guard.service
 install -D -m0644 "$ROOT/deploy/systemd/fluxvm-intelligence.service" /etc/systemd/system/fluxvm-intelligence.service
 systemctl daemon-reload
 systemctl enable --now fluxvm-intelligence.service
 systemctl enable --now fluxvm-netintel.service
+systemctl enable --now fluxvm-memprof.service
 if grep -Eq '(^|,)bpf(,|$)' /sys/kernel/security/lsm 2>/dev/null; then
   systemctl enable --now fluxvm-guard.service
 else
