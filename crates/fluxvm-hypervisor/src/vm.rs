@@ -517,11 +517,37 @@ impl VirtualMachine {
                     // would land one byte past it) -- no rewind needed;
                     // an earlier version that subtracted 1 here landed
                     // one byte *before* the intended address instead.
-                    // Park in the pause-service loop and let the gdbstub
-                    // thread know we've stopped.
+                    //
+                    // TEMP: breakpoint is set at exc_page_fault(struct
+                    // pt_regs *regs, unsigned long error_code) -- regs is
+                    // in rdi, error_code in rsi (System V AMD64 ABI).
+                    // pt_regs->ip (the actual faulting instruction, not
+                    // exc_page_fault's own entry) is at offset 0x80.
+                    // Dumped here directly (bypassing the gdbstub client)
+                    // since scripting many rapid `continue`s over the RSP
+                    // wire hit a client-side race.
+                    if let Ok(regs) = kvm.get_regs(0) {
+                        let cr3 = kvm.get_sregs(0).map(|s| s.cr3).unwrap_or(0);
+                        let fault_ip = gdbstub::virt_to_phys(&this.mem, cr3, regs.rdi + 0x80)
+                            .and_then(|phys| {
+                                let mut buf = [0u8; 8];
+                                this.mem.read_at(phys, &mut buf).ok()?;
+                                Some(u64::from_le_bytes(buf))
+                            });
+                        eprintln!(
+                            "[diag] exc_page_fault regs={:#x} error_code={:#x} fault_ip={:x?}",
+                            regs.rdi, regs.rsi, fault_ip
+                        );
+                    }
                     paused.store(true, Ordering::Relaxed);
                     if let Some(tx) = gdb_stop_tx.as_ref() {
-                        let _ = tx.send(());
+                        // try_send, not send: this is a rendezvous
+                        // (capacity-0) channel, and if no gdb client is
+                        // currently blocked in a `c` waiting to receive,
+                        // a blocking send here would hang this vCPU
+                        // thread forever (e.g. the breakpoint re-fires
+                        // after a client detaches without clearing it).
+                        let _ = tx.try_send(());
                     }
                     continue;
                 }

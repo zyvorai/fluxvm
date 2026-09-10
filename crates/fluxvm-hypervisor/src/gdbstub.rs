@@ -391,7 +391,7 @@ const PADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 /// physical addresses directly, as an earlier version of this stub did,
 /// silently returns garbage/zeroed data for any address outside the
 /// guest's physical RAM window, which is most kernel addresses).
-fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
+pub fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
     let idx = |shift: u32| (vaddr >> shift) & 0x1ff;
     let pml4e = read_phys_u64(mem, (cr3 & PADDR_MASK) + idx(39) * 8)?;
     if pml4e & PAGE_PRESENT == 0 {
