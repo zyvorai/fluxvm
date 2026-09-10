@@ -3327,17 +3327,57 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
         if libc::chdir(rootfs.as_ptr()) != 0 {
             return false;
         }
-        if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) != 0 {
+        // Build "<rootfs>/.fluxvm-pivot-old\0" on the stack (no heap alloc --
+        // this runs single-threaded right after fork(), and this process may
+        // have inherited a locked malloc arena from a sibling thread that
+        // held it at fork time, so allocating here would risk a hang of its
+        // own). Bail rather than truncate if it doesn't fit.
+        const OLD_SUFFIX: &[u8] = b"/.fluxvm-pivot-old\0";
+        let root_bytes = rootfs.as_bytes(); // no NUL
+        if root_bytes.len() + OLD_SUFFIX.len() > libc::PATH_MAX as usize {
             return false;
         }
-        // The old root is now mounted at "." (on top of the new root); lazily
-        // detach it so it stops being reachable at all, then land at "/".
-        if libc::umount2(c".".as_ptr(), libc::MNT_DETACH) != 0 {
+        let mut old_root_buf = [0u8; libc::PATH_MAX as usize];
+        old_root_buf[..root_bytes.len()].copy_from_slice(root_bytes);
+        old_root_buf[root_bytes.len()..root_bytes.len() + OLD_SUFFIX.len()].copy_from_slice(OLD_SUFFIX);
+        let old_root_ptr = old_root_buf.as_ptr().cast::<libc::c_char>();
+        if libc::mkdir(old_root_ptr, 0o700) != 0 && *libc::__errno_location() != libc::EEXIST {
+            return false;
+        }
+        // Standard pivot_root(2) recipe (matches runc/crun): new_root and
+        // put_old are different directories, not new_root pivoted into
+        // itself. A self-pivot (new_root == put_old, then MNT_DETACH the
+        // resulting "." mount) was tried first and reproduced a real,
+        // reliably-hit hang: the container's first read through a
+        // virtiofs-backed rootfs after such a self-pivot got stuck in
+        // kernel state D (uninterruptible sleep) and never made progress,
+        // confirmed to not be a virtiofs data/availability problem (the
+        // identical file read cleanly and fast from the guest's default
+        // mount namespace at the same moment) or a general host-load issue
+        // (reproduced consistently, including under light load). Suspected:
+        // a virtiofs-specific interaction with lazily detaching the old
+        // root when it and the new root are mounted at the exact same
+        // path/dentry. This explicit-put_old form sidesteps that shape
+        // entirely, at the cost of needing exactly one directory created
+        // (and removed) inside the new root.
+        if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), old_root_ptr) != 0 {
             return false;
         }
         if libc::chdir(c"/".as_ptr()) != 0 {
             return false;
         }
+        // put_old is now reachable at this path under the new root. Lazily
+        // detach it so the old root tree stops being reachable at all, then
+        // remove the now-empty mount point directory.
+        let old_root_rel = &OLD_SUFFIX[..OLD_SUFFIX.len() - 1]; // keep leading '/', drop NUL for building the relative form below
+        let mut rel_buf = [0u8; libc::PATH_MAX as usize];
+        rel_buf[..old_root_rel.len()].copy_from_slice(old_root_rel);
+        rel_buf[old_root_rel.len()] = 0;
+        let old_root_rel_ptr = rel_buf.as_ptr().cast::<libc::c_char>();
+        if libc::umount2(old_root_rel_ptr, libc::MNT_DETACH) != 0 {
+            return false;
+        }
+        let _ = libc::rmdir(old_root_rel_ptr);
         // A private mount namespace inherits whatever /proc was mounted at
         // unshare time, which reflects the wrong PID namespace once this
         // container's init lands in its own (or a joined) PID namespace.

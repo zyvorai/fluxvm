@@ -1991,7 +1991,17 @@ impl Service {
     }
 
     async fn call_agent_direct(&self, vm: &VmRecord, req: ContainerRequest) -> AnyResult<ContainerResponse> {
-        match fluxvm_container_client::call(vm, req, Duration::from_secs(60)).await? {
+        // `Wait` blocks in the guest until the container exits, which is
+        // inherently unbounded (anywhere from milliseconds to days
+        // depending on the workload) -- it gets a generous timeout of its
+        // own rather than the short budget every other, normally-quick RPC
+        // (Create/Start/Stats/Kill/...) uses.
+        let timeout = if matches!(req, ContainerRequest::Wait { .. }) {
+            Duration::from_secs(7 * 24 * 60 * 60)
+        } else {
+            Duration::from_secs(60)
+        };
+        match fluxvm_container_client::call(vm, req, timeout).await? {
             ContainerResponse::Error { message } => bail!("guest container-agent: {message}"),
             response => Ok(response),
         }

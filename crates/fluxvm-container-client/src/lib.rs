@@ -175,7 +175,7 @@ pub async fn call(
 
     tokio::time::timeout(timeout, async {
         match vm.backend {
-            BackendKind::Qemu => native_vsock_call(cid, DEFAULT_CONTAINER_AGENT_PORT, &envelope).await,
+            BackendKind::Qemu => native_vsock_call(cid, DEFAULT_CONTAINER_AGENT_PORT, &envelope, timeout).await,
             BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm => {
                 let socket = vm
                     .vsock_socket
@@ -232,9 +232,11 @@ async fn native_vsock_call(
     cid: u32,
     port: u32,
     envelope: &ContainerEnvelope,
+    timeout: Duration,
 ) -> Result<ContainerResponse> {
     let envelope = envelope.clone();
-    tokio::task::spawn_blocking(move || native_vsock_call_blocking(cid, port, &envelope))
+    let deadline = std::time::Instant::now() + timeout;
+    tokio::task::spawn_blocking(move || native_vsock_call_blocking(cid, port, &envelope, deadline))
         .await
         .context("vsock worker panicked")?
 }
@@ -244,9 +246,20 @@ fn native_vsock_call_blocking(
     cid: u32,
     port: u32,
     envelope: &ContainerEnvelope,
+    deadline: std::time::Instant,
 ) -> Result<ContainerResponse> {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
+
+    // Per-syscall socket timeout used for both connect-retry backoff and the
+    // read loop below. Kept short so a single stuck attempt can't eat the
+    // caller's whole deadline, while the surrounding retry loops still honor
+    // that full deadline overall -- long-blocking requests (Wait, in
+    // particular, which can legitimately take anywhere from milliseconds to
+    // days depending on the workload) get a generous caller-supplied
+    // deadline instead of the single fixed 20s window this used to hard-code
+    // regardless of what the caller actually asked for.
+    const SOCK_TIMEOUT: libc::timeval = libc::timeval { tv_sec: 5, tv_usec: 0 };
 
     unsafe {
         let mut file = None;
@@ -255,10 +268,11 @@ fn native_vsock_call_blocking(
         // guest's listener is momentarily busy (e.g. a concurrent connection
         // just landed, or the accept() backlog hasn't drained yet right after
         // the container-agent starts) -- this is the vsock analogue of a busy
-        // TCP accept queue, not a fatal condition. Retry a bounded number of
-        // times with a short backoff rather than failing the whole RPC on the
-        // first transient hiccup.
-        for attempt in 0..8 {
+        // TCP accept queue, not a fatal condition. Retry with a short backoff
+        // until the caller's deadline rather than failing the whole RPC on
+        // the first transient hiccup.
+        let mut attempt: u32 = 0;
+        loop {
             let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
             if fd < 0 {
                 bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
@@ -282,11 +296,14 @@ fn native_vsock_call_blocking(
                 err.raw_os_error(),
                 Some(libc::EAGAIN) | Some(libc::ECONNRESET) | Some(libc::ECONNREFUSED)
             );
+            let now = std::time::Instant::now();
             last_err = Some(err);
-            if !retryable || attempt == 7 {
+            if !retryable || now >= deadline {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(50 * (attempt + 1)));
+            let backoff = Duration::from_millis(50 * u64::from(attempt + 1)).min(deadline - now);
+            std::thread::sleep(backoff);
+            attempt += 1;
         }
         let mut file = match file {
             Some(f) => f,
@@ -296,19 +313,18 @@ fn native_vsock_call_blocking(
             }
         };
         let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
-        let tv = libc::timeval { tv_sec: 20, tv_usec: 0 };
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_RCVTIMEO,
-            (&tv as *const libc::timeval).cast(),
+            (&SOCK_TIMEOUT as *const libc::timeval).cast(),
             std::mem::size_of::<libc::timeval>() as libc::socklen_t,
         );
         libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_SNDTIMEO,
-            (&tv as *const libc::timeval).cast(),
+            (&SOCK_TIMEOUT as *const libc::timeval).cast(),
             std::mem::size_of::<libc::timeval>() as libc::socklen_t,
         );
         file.write_all(encode_line(envelope)?.as_bytes())?;
@@ -316,9 +332,26 @@ fn native_vsock_call_blocking(
         let mut bytes = Vec::new();
         let mut byte = [0u8; 1];
         loop {
-            let n = file.read(&mut byte)?;
-            if n == 0 || byte[0] == b'\n' { break; }
-            bytes.push(byte[0]);
+            match file.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if byte[0] == b'\n' { break; }
+                    bytes.push(byte[0]);
+                }
+                // A per-attempt SO_RCVTIMEO expiry surfaces as EAGAIN/EWOULDBLOCK
+                // on a blocking socket -- that's just this 5s slice ending with
+                // nothing to read yet, not the agent going away. Keep waiting
+                // until the caller's actual deadline instead of failing the
+                // whole RPC on the first quiet interval, which is exactly what
+                // starves a `Wait` for any container that takes longer than a
+                // single socket-timeout window to exit.
+                Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)
+                    && std::time::Instant::now() < deadline =>
+                {
+                    continue;
+                }
+                Err(e) => return Err(e).context("reading container-agent response"),
+            }
         }
         if bytes.is_empty() {
             bail!("container agent closed without a response");
