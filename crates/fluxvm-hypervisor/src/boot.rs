@@ -202,6 +202,16 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     LinuxBootConfigurator::write_bootparams::<GuestMemoryMmap<()>>(&boot_cfg, &gm).map_err(|e| {
         FluxError::Boot(format!("write_bootparams: {e}"))
     })?;
+    // TEMP: verify the write landed, hypervisor-side, before the guest
+    // ever runs (rules out any guest-side explanation).
+    {
+        let mut nent = [0u8; 1];
+        let _ = mem.read_at(memory::BOOT_PARAMS_ADDR + 0x1e8, &mut nent);
+        eprintln!(
+            "[diag] post-write_bootparams e820_entries in mem={} (params.e820_entries={})",
+            nent[0], params.e820_entries
+        );
+    }
     // `gm` is a view over `mem`'s own backing memory (see above), so the
     // zero page write above already landed directly in real guest RAM --
     // no separate copy back into `mem` needed.
