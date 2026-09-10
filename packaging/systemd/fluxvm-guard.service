@@ -1,0 +1,15 @@
+[Unit]
+Description=FluxVM BPF-LSM VMM Guard
+Documentation=https://zyvor.dev
+After=local-fs.target
+Before=fluxvm-intelligence.service
+ConditionPathExists=/sys/fs/bpf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/fluxvm/fluxvm-guard-loader --load /usr/lib/fluxvm/bpf/fluxvm_guard.bpf.o /sys/fs/bpf/fluxvm/guard
+ExecStop=/usr/libexec/fluxvm/fluxvm-guard-loader --unload /sys/fs/bpf/fluxvm/guard
+
+[Install]
+WantedBy=multi-user.target

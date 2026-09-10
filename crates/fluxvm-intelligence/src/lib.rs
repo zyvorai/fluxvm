@@ -1,6 +1,9 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod guard;
+pub mod qos;
+
 use anyhow::{Context, Result, anyhow, bail};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
 use fluxvm_network::{dataplane::{PodNetworkPolicy, VmNetworkPolicy}, ebpf::{DropReasonRecord, FlowRecord}};
