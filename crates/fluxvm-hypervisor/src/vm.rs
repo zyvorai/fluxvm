@@ -37,8 +37,12 @@ pub struct VirtualMachine {
     pub blk_backend: Option<Arc<BlockBackend>>,
     pub tap: Option<Tap>,
     pub boot_rip: u64,
-    /// Linux zero-page GPA for RSI (64-bit boot protocol). None for Windows / netboot.
+    /// Linux zero-page GPA for RSI (64-bit direct-boot protocol). None for
+    /// Windows / netboot / PVH boot.
     pub boot_params_gpa: Option<u64>,
+    /// `hvm_start_info` GPA for PVH boot (see `boot::configure_pvh_boot`).
+    /// Mutually exclusive with `boot_params_gpa`.
+    pub pvh_start_info_gpa: Option<u64>,
     pub notes: Vec<String>,
 }
 
@@ -94,6 +98,7 @@ impl VirtualMachine {
             tap,
             boot_rip: KERNEL_LOAD_ADDR,
             boot_params_gpa: None,
+            pvh_start_info_gpa: None,
             notes,
         })
     }
@@ -177,6 +182,7 @@ impl VirtualMachine {
             tap,
             boot_rip: boot_info.entry_rip,
             boot_params_gpa: boot_info.boot_params_gpa,
+            pvh_start_info_gpa: boot_info.pvh_start_info_gpa,
             notes,
         })
     }
@@ -242,6 +248,17 @@ impl VirtualMachine {
             eprintln!(
                 "[kvm] restored FLUXKVM1 snapshot rip={:#x} cr3={:#x}",
                 cpu.regs.rip, cpu.sregs.cr3
+            );
+        } else if let Some(start_info_gpa) = self.pvh_start_info_gpa {
+            // PVH: hand the kernel a bare 32-bit entry point and let its
+            // own startup_32/startup_64 code build page tables and make
+            // the long-mode transition itself (see kvm.rs::setup_pvh_entry
+            // for why this sidesteps a whole class of bug our own
+            // hand-built identity map + direct long-mode jump can have).
+            kvm.setup_pvh_entry(&mut self.mem, self.boot_rip, start_info_gpa)?;
+            eprintln!(
+                "[kvm] PVH entry rip={:#x} start_info={start_info_gpa:#x}",
+                self.boot_rip
             );
         } else {
             let rsi = self.boot_params_gpa.unwrap_or(0);

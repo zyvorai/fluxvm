@@ -519,6 +519,130 @@ impl KvmVm {
         Ok(())
     }
 
+    /// BSP-only, PVH boot entry. Sets up the *minimum* the PVH spec
+    /// requires -- 32-bit protected mode, paging off, a flat code/data
+    /// GDT, RIP at the kernel's PVH entry point, RBX pointing at the
+    /// `hvm_start_info` structure (the PVH ABI's calling convention) --
+    /// and leaves everything else (page tables, the 32-to-64-bit
+    /// transition, per-cpu/GDT reload) to the kernel's own
+    /// startup_32/startup_64 code, exactly as a real PVH-aware hypervisor
+    /// (Xen, and this is also how cloud-hypervisor does it) would.
+    ///
+    /// This exists because our own hand-built identity page tables +
+    /// direct-to-long-mode jump (`setup_long_mode`) substitutes our
+    /// from-scratch setup for a large piece of what the kernel would
+    /// otherwise do itself on real hardware -- any subtle gap there is a
+    /// bug class PVH boot sidesteps entirely by letting the kernel do it.
+    pub fn setup_pvh_entry(&self, mem: &mut GuestMemory, rip: u64, rbx: u64) -> Result<()> {
+        let idx = 0;
+        const GDT: u64 = 0xB000;
+        // null, code32, data32 -- flat, 4 GiB, matching the well-known
+        // reference GDT bytes documented for the Linux boot protocol's
+        // own 32-bit entry (Documentation/arch/x86/boot.rst).
+        let mut gdt = [0u8; 24];
+        gdt[8..16].copy_from_slice(&0x00cf_9b00_0000_ffffu64.to_le_bytes());
+        gdt[16..24].copy_from_slice(&0x00cf_9300_0000_ffffu64.to_le_bytes());
+        mem.write_at(GDT, &gdt)?;
+
+        let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_GET_SREGS,
+                &mut sregs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_GET_SREGS".into()));
+        }
+
+        let code = KvmSegment {
+            base: 0,
+            limit: 0xffff_ffff,
+            selector: 0x08,
+            type_: 0xb, // execute + read
+            present: 1,
+            dpl: 0,
+            db: 1, // 32-bit
+            s: 1,
+            l: 0,
+            g: 1,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
+        let data = KvmSegment {
+            base: 0,
+            limit: 0xffff_ffff,
+            selector: 0x10,
+            type_: 0x3, // read + write
+            present: 1,
+            dpl: 0,
+            db: 1,
+            s: 1,
+            l: 0,
+            g: 1,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
+        sregs.cs = code;
+        sregs.ds = data;
+        sregs.es = data;
+        sregs.fs = data;
+        sregs.gs = data;
+        sregs.ss = data;
+        sregs.ldt = data;
+        sregs.ldt.unusable = 1;
+        sregs.ldt.present = 0;
+        sregs.ldt.selector = 0;
+        sregs.tr = data;
+        sregs.tr.unusable = 1;
+        sregs.tr.present = 0;
+        sregs.tr.selector = 0;
+        sregs.gdt.base = GDT;
+        sregs.gdt.limit = 24 - 1;
+        sregs.idt.base = 0;
+        sregs.idt.limit = 0;
+        // Protected mode only -- no paging (PG), no PAE, no long mode.
+        // The kernel's own startup_32 builds its own page tables and
+        // makes the jump to long mode itself.
+        sregs.cr0 = 0x1; // PE
+        sregs.cr3 = 0;
+        sregs.cr4 = 0;
+        sregs.efer = 0;
+        sregs.apic_base = 0xfee0_0000 | (1 << 11) | (1 << 8); // enable + BSP
+
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_SREGS,
+                &mut sregs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_SREGS".into()));
+        }
+
+        let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
+        regs.rip = rip;
+        // Per the PVH boot spec, EBX holds a pointer to the
+        // hvm_start_info structure at entry.
+        regs.rbx = rbx;
+        regs.rflags = 0x2;
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_REGS,
+                &mut regs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_REGS".into()));
+        }
+        Ok(())
+    }
+
     /// Assert or deassert a GSI on the in-kernel irqchip (IOAPIC).
     pub fn set_irq_line(&self, gsi: u32, level: bool) -> Result<()> {
         #[repr(C)]

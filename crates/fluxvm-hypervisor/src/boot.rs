@@ -8,8 +8,15 @@ use crate::memory::{self, GuestMemory};
 #[derive(Debug, Clone)]
 pub struct BootInfo {
     pub entry_rip: u64,
-    /// Zero-page / boot_params GPA — Linux 64-bit boot expects this in RSI.
+    /// Zero-page / boot_params GPA — Linux 64-bit direct-boot expects this
+    /// in RSI. Mutually exclusive with `pvh_start_info_gpa`.
     pub boot_params_gpa: Option<u64>,
+    /// `hvm_start_info` GPA for PVH boot — expected in RBX at entry.
+    /// Mutually exclusive with `boot_params_gpa`. When set, the guest's
+    /// own startup_32/startup_64 code does the page-table/long-mode
+    /// transition itself (see `kvm::KvmVm::setup_pvh_entry`), instead of
+    /// our own hand-built identity map + direct long-mode jump.
+    pub pvh_start_info_gpa: Option<u64>,
     pub notes: Vec<String>,
 }
 
@@ -76,6 +83,7 @@ fn prepare_linux_raw(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> 
     Ok(BootInfo {
         entry_rip: memory::KERNEL_LOAD_ADDR,
         boot_params_gpa: Some(memory::BOOT_PARAMS_ADDR),
+        pvh_start_info_gpa: None,
         notes,
     })
 }
@@ -177,6 +185,19 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
 
     write_linux_cmdline(mem, &cfg.cmdline)?;
 
+    // Prefer PVH: the kernel's own startup_32/startup_64 code does the
+    // page-table construction and 32-to-64-bit transition itself, the
+    // same as on a real PVH-aware hypervisor (Xen) or cloud-hypervisor --
+    // sidestepping the entire class of bug our own hand-built identity
+    // page tables + direct long-mode jump (the `else` branch below) can
+    // have. Only ELF kernels carry the PVH entry-point note; bzImage
+    // loader results always report PvhEntryNotPresent.
+    if let linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent(pvh_entry) =
+        loader_result.pvh_boot_cap
+    {
+        return configure_pvh_boot(mem, &gm, cfg, pvh_entry, initrd_len, notes);
+    }
+
     let mut params = boot_params::default();
     if let Some(hdr) = loader_result.setup_header {
         params.hdr = hdr;
@@ -230,6 +251,98 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     Ok(BootInfo {
         entry_rip,
         boot_params_gpa: Some(memory::BOOT_PARAMS_ADDR),
+        pvh_start_info_gpa: None,
+        notes,
+    })
+}
+
+/// Builds the `hvm_start_info` + memory map (+ initrd module, if any) PVH
+/// boot needs and writes them into real guest RAM via
+/// `PvhBootConfigurator`. Addresses reuse the same low-memory scratch
+/// area as the direct-boot zero page (they're mutually exclusive per
+/// boot, so there's no conflict).
+#[cfg(target_os = "linux")]
+fn configure_pvh_boot(
+    mem: &mut GuestMemory,
+    gm: &vm_memory::GuestMemoryMmap<()>,
+    cfg: &VmConfig,
+    pvh_entry: vm_memory::GuestAddress,
+    initrd_len: u32,
+    mut notes: Vec<String>,
+) -> Result<BootInfo> {
+    use linux_loader::configurator::pvh::PvhBootConfigurator;
+    use linux_loader::configurator::{BootConfigurator, BootParams};
+    use linux_loader::loader::elf::start_info::{
+        hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info, XEN_HVM_MEMMAP_TYPE_RAM,
+        XEN_HVM_START_MAGIC_VALUE,
+    };
+    use vm_memory::{Address, GuestAddress};
+
+    const START_INFO_GPA: u64 = memory::BOOT_PARAMS_ADDR; // 0x7000
+    const MEMMAP_GPA: u64 = 0x0000_7100;
+    const MODLIST_GPA: u64 = 0x0000_7200;
+    const HIMEM: u64 = 0x0010_0000;
+
+    let mem_size = mem.len() as u64;
+    let mut memmap = vec![hvm_memmap_table_entry {
+        addr: 0,
+        size: 0x0009_fc00,
+        type_: XEN_HVM_MEMMAP_TYPE_RAM,
+        reserved: 0,
+    }];
+    if mem_size > HIMEM {
+        memmap.push(hvm_memmap_table_entry {
+            addr: HIMEM,
+            size: mem_size - HIMEM,
+            type_: XEN_HVM_MEMMAP_TYPE_RAM,
+            reserved: 0,
+        });
+    }
+
+    let modules = if initrd_len > 0 {
+        vec![hvm_modlist_entry {
+            paddr: memory::INITRD_ADDR,
+            size: initrd_len as u64,
+            cmdline_paddr: 0,
+            reserved: 0,
+        }]
+    } else {
+        Vec::new()
+    };
+
+    let mut start_info = hvm_start_info {
+        magic: XEN_HVM_START_MAGIC_VALUE,
+        version: 1,
+        cmdline_paddr: CMDLINE_GPA,
+        memmap_paddr: MEMMAP_GPA,
+        memmap_entries: memmap.len() as u32,
+        ..Default::default()
+    };
+    if !modules.is_empty() {
+        start_info.nr_modules = modules.len() as u32;
+        start_info.modlist_paddr = MODLIST_GPA;
+    }
+
+    let mut boot_params = BootParams::new::<hvm_start_info>(&start_info, GuestAddress(START_INFO_GPA));
+    boot_params.set_sections::<hvm_memmap_table_entry>(&memmap, GuestAddress(MEMMAP_GPA));
+    if !modules.is_empty() {
+        boot_params.set_modules::<hvm_modlist_entry>(&modules, GuestAddress(MODLIST_GPA));
+    }
+    PvhBootConfigurator::write_bootparams::<vm_memory::GuestMemoryMmap<()>>(&boot_params, gm)
+        .map_err(|e| FluxError::Boot(format!("PVH write_bootparams: {e}")))?;
+    let _ = mem; // written through `gm`, which is a direct view over `mem`'s own backing memory.
+
+    notes.push(format!(
+        "PVH boot: entry={:#x} start_info={:#x} memmap_entries={}",
+        pvh_entry.raw_value(),
+        START_INFO_GPA,
+        memmap.len()
+    ));
+
+    Ok(BootInfo {
+        entry_rip: pvh_entry.raw_value(),
+        boot_params_gpa: None,
+        pvh_start_info_gpa: Some(START_INFO_GPA),
         notes,
     })
 }
@@ -319,6 +432,7 @@ fn prepare_windows(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
     Ok(BootInfo {
         entry_rip: 0xFFFF_FFF0,
         boot_params_gpa: None,
+        pvh_start_info_gpa: None,
         notes,
     })
 }
