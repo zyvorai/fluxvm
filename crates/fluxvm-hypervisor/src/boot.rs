@@ -195,7 +195,7 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     if let linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent(pvh_entry) =
         loader_result.pvh_boot_cap
     {
-        return configure_pvh_boot(mem, &gm, cfg, pvh_entry, initrd_len, notes);
+        return configure_pvh_boot(mem, &gm, pvh_entry, initrd_len, notes);
     }
 
     let mut params = boot_params::default();
@@ -265,7 +265,6 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
 fn configure_pvh_boot(
     mem: &mut GuestMemory,
     gm: &vm_memory::GuestMemoryMmap<()>,
-    cfg: &VmConfig,
     pvh_entry: vm_memory::GuestAddress,
     initrd_len: u32,
     mut notes: Vec<String>,
