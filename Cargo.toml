@@ -26,4 +26,5 @@ members = [
     "crates/fluxvm-container-agent",
     "crates/fluxvm-container-client",
     "crates/fluxvm-containerd-shim",
+    "crates/fluxvm-intelligence",
 ]

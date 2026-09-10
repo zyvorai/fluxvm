@@ -1,0 +1,27 @@
+[Unit]
+Description=Zyvor FluxVM eBPF Runtime Intelligence
+After=network-online.target fluxvm.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=FLUXVM_API_URL=http://127.0.0.1:7788
+Environment=FLUXVM_INTEL_LISTEN=127.0.0.1:7790
+Environment=FLUXVM_INTEL_PIN_ROOT=/sys/fs/bpf/fluxvm/intelligence
+Environment=RUST_LOG=fluxvm_intelligence=info
+ExecStartPre=/usr/libexec/fluxvm/fluxvm-intelligence-loader --load /usr/lib/fluxvm/bpf/fluxvm_intelligence.bpf.o /sys/fs/bpf/fluxvm/intelligence
+ExecStart=/usr/bin/fluxvm-intelligence daemon
+ExecStopPost=/usr/libexec/fluxvm/fluxvm-intelligence-loader --unload /sys/fs/bpf/fluxvm/intelligence
+Restart=on-failure
+RestartSec=2s
+LimitMEMLOCK=infinity
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE CAP_SYS_ADMIN
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE CAP_SYS_ADMIN
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/sys/fs/bpf/fluxvm
+
+[Install]
+WantedBy=multi-user.target

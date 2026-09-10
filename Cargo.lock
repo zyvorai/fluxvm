@@ -1930,6 +1930,7 @@ dependencies = [
  "fluxvm-api",
  "fluxvm-core",
  "fluxvm-image",
+ "fluxvm-intelligence",
  "fluxvm-network",
  "fluxvm-scheduler",
  "rustls",
@@ -2091,6 +2092,24 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "fluxvm-intelligence"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "fluxvm-core",
+ "fluxvm-network",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

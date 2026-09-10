@@ -18,10 +18,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::dataplane::{PodNetworkPolicy, VmNetworkPolicy};
+use crate::tcx::{self, Preference as TcxPreference};
 
 const TC_PRIORITY: &str = "49152";
 const TC_HANDLE: &str = "1";
@@ -29,7 +30,7 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 5;
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -78,6 +79,26 @@ pub struct FlowRecord {
     pub last_seen_ns: u64,
 }
 
+/// Exact branch accounting emitted by dataplane schema v6. Unlike Set-2
+/// policy inference, these records identify the kernel branch that rejected
+/// (or audit-allowed) a tuple, including rate and migration gates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DropReasonRecord {
+    pub identity: u32,
+    pub family: u8,
+    pub source: String,
+    pub destination: String,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub protocol: u8,
+    pub reason_code: u32,
+    pub reason: String,
+    pub action: String,
+    pub packets: u64,
+    pub bytes: u64,
+    pub last_seen_ns: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NativeAttachmentStatus {
     pub attached: bool,
@@ -110,7 +131,8 @@ pub fn apply(
         );
     }
     require_bpftool()?;
-    require_tc()?;
+    // TCX does not depend on the legacy `tc` userspace tool. Require `tc`
+    // only if the TCX path is disabled/unavailable and we actually fall back.
     raise_memlock()?;
 
     validate_policy(policy)?;
@@ -183,6 +205,40 @@ pub fn apply(
         fs::write(meta_dir.join("schema_version"), DATAPLANE_SCHEMA_VERSION.to_string())
             .context("recording FluxVM eBPF schema version")?;
 
+        let tcx_preference = TcxPreference::from_env()?;
+        if tcx_preference != TcxPreference::Off {
+            let link_pin = tcx::link_pin(&vm_dir);
+            match tcx::attach(iface, &prog_pin, &link_pin) {
+                Ok(status) => {
+                    fs::write(meta_dir.join("attach_mode"), "tcx")
+                        .context("recording FluxVM TCX attachment mode")?;
+                    if let Some(revision) = status.revision {
+                        fs::write(meta_dir.join("tcx_revision"), revision.to_string())
+                            .context("recording FluxVM TCX revision")?;
+                    }
+                    info!(
+                        %id,
+                        %iface,
+                        identity,
+                        link_id = ?status.link_id,
+                        revision = ?status.revision,
+                        "attached FluxVM VM edge with TCX/BPF link"
+                    );
+                    return Ok(());
+                }
+                Err(e) if tcx_preference == TcxPreference::Required => {
+                    return Err(e).context("attaching required FluxVM TCX dataplane");
+                }
+                Err(e) => warn!(
+                    %id,
+                    %iface,
+                    error = %e,
+                    "TCX unavailable; falling back to legacy clsact/tc"
+                ),
+            }
+        }
+
+        require_tc()?;
         ensure_clsact(iface).context("installing clsact qdisc")?;
         // Prefer `add` so a foreign owner of this pref/handle fails closed.
         // If a prior FluxVM attach left a filter (common after prog_id drift),
@@ -224,6 +280,8 @@ pub fn apply(
             ],
         )
         .context("attaching FluxVM TC program")?;
+        fs::write(meta_dir.join("attach_mode"), "tc")
+            .context("recording FluxVM legacy TC attachment mode")?;
 
         info!(
             %id,
@@ -272,7 +330,8 @@ pub fn reconfigure(
     id: Uuid,
 ) -> Result<()> {
     require_bpftool()?;
-    require_tc()?;
+    // Reconfigure mutates pinned maps in place; it is independent of whether
+    // the program is attached by TCX or the legacy clsact path.
     validate_policy(policy)?;
     let vm_dir = vm_pin_dir(&cfg.pin_root, id);
     let map_dir = vm_dir.join("maps");
@@ -348,12 +407,19 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
     let policy_fingerprint = read_policy_fingerprint(&meta_dir);
     let owned_program_id = read_owned_program_id(id)
         .or_else(|| pinned_program_id(&prog_pin).ok());
+    let tcx_link = tcx::link_pin(&vm_dir);
+    let tcx_program_id = if tcx_link.exists() {
+        tcx::status(&tcx_link).ok().and_then(|status| status.prog_id)
+    } else {
+        None
+    };
     let attached = if let (Some(iface), Some(owned_program_id)) =
         (iface.as_deref(), owned_program_id)
     {
         schema_compatible
             && prog_pin.exists()
-            && tc_filter_program_id(iface).ok().flatten() == Some(owned_program_id)
+            && (tcx_program_id == Some(owned_program_id)
+                || tc_filter_program_id(iface).ok().flatten() == Some(owned_program_id))
     } else {
         false
     };
@@ -603,6 +669,24 @@ pub fn flows(cfg: &DataplaneConfig, id: Uuid, limit: usize) -> Result<Vec<FlowRe
     let json = bpftool_json_dump(&map)?;
     let mut records = parse_flows_json(&json)?;
     records.sort_by(|a, b| b.last_seen_ns.cmp(&a.last_seen_ns));
+    records.truncate(limit.clamp(1, 4096));
+    Ok(records)
+}
+
+/// Kernel-native VM-edge branch reasons. Requires dataplane schema v6.
+pub fn drop_reasons(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+    limit: usize,
+) -> Result<Vec<DropReasonRecord>> {
+    let map = vm_pin_dir(&cfg.pin_root, id).join("maps/fluxvm_drop_reasons");
+    let json = bpftool_json_dump(&map)?;
+    let mut records = parse_drop_reasons_json(&json)?;
+    records.sort_by(|a, b| {
+        b.packets
+            .cmp(&a.packets)
+            .then_with(|| b.last_seen_ns.cmp(&a.last_seen_ns))
+    });
     records.truncate(limit.clamp(1, 4096));
     Ok(records)
 }
@@ -1063,6 +1147,73 @@ fn parse_flows_json(root: &Value) -> Result<Vec<FlowRecord>> {
     Ok(out)
 }
 
+fn parse_drop_reasons_json(root: &Value) -> Result<Vec<DropReasonRecord>> {
+    let entries = root
+        .as_array()
+        .context("bpftool drop-reason JSON must be an array")?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = json_bytes(&entry["key"])?;
+        let value = json_bytes(&entry["value"])?;
+        // struct drop_reason_key = 44-byte flow_key + u32 reason + u32 action.
+        if key.len() < 52 || value.len() < 24 {
+            continue;
+        }
+        let identity = u32::from_ne_bytes(key[0..4].try_into().unwrap());
+        let family = key[42];
+        let source = decode_flow_ip_allow_zero(family, &key[4..20])?;
+        let destination = decode_flow_ip_allow_zero(family, &key[20..36])?;
+        let source_port = u16::from_ne_bytes(key[36..38].try_into().unwrap());
+        let destination_port = u16::from_ne_bytes(key[38..40].try_into().unwrap());
+        let protocol = key[40];
+        let reason_code = u32::from_ne_bytes(key[44..48].try_into().unwrap());
+        let action_code = u32::from_ne_bytes(key[48..52].try_into().unwrap());
+        let packets = u64::from_ne_bytes(value[0..8].try_into().unwrap());
+        let bytes = u64::from_ne_bytes(value[8..16].try_into().unwrap());
+        let last_seen_ns = u64::from_ne_bytes(value[16..24].try_into().unwrap());
+        out.push(DropReasonRecord {
+            identity,
+            family,
+            source,
+            destination,
+            source_port,
+            destination_port,
+            protocol,
+            reason_code,
+            reason: drop_reason_label(reason_code).to_string(),
+            action: if action_code == 1 { "audit" } else { "drop" }.to_string(),
+            packets,
+            bytes,
+            last_seen_ns,
+        });
+    }
+    Ok(out)
+}
+
+fn drop_reason_label(reason: u32) -> &'static str {
+    match reason {
+        1 => "malformed-l4",
+        2 => "fragmented-l4",
+        3 => "explicit-cidr-deny",
+        4 => "cidr-miss",
+        5 => "l4-miss",
+        6 => "pod-policy-deny",
+        7 => "rate-limit",
+        8 => "default-deny",
+        9 => "migration-quiesce",
+        10 => "migration-restoring",
+        11 => "unsupported-ethertype",
+        _ => "unknown",
+    }
+}
+
+fn decode_flow_ip_allow_zero(family: u8, raw: &[u8]) -> Result<String> {
+    if family == 0 {
+        return Ok("0.0.0.0".into());
+    }
+    decode_flow_ip(family, raw)
+}
+
 fn decode_flow_ip(family: u8, raw: &[u8]) -> Result<String> {
     if raw.len() < 16 {
         bail!("flow address must contain 16 bytes");
@@ -1368,6 +1519,24 @@ mod tests {
         );
         assert!(parse_port_rule("tcp/0").is_err());
         assert!(parse_port_rule("sctp/443").is_err());
+    }
+
+    #[test]
+    fn drop_reason_parser_decodes_schema_v6_key() {
+        let identity = 42u32;
+        let mut key = identity.to_ne_bytes().to_vec();
+        key.extend([10, 0, 0, 2]); key.extend([0; 12]);
+        key.extend([1, 1, 1, 1]); key.extend([0; 12]);
+        key.extend(12345u16.to_ne_bytes());
+        key.extend(443u16.to_ne_bytes());
+        key.extend([6, 0, 4, 0]);
+        key.extend(7u32.to_ne_bytes());
+        key.extend(0u32.to_ne_bytes());
+        let value = [3u64.to_ne_bytes(), 192u64.to_ne_bytes(), 99u64.to_ne_bytes()].concat();
+        let parsed = parse_drop_reasons_json(&json!([{"key": key, "value": value}])).unwrap();
+        assert_eq!(parsed[0].reason, "rate-limit");
+        assert_eq!(parsed[0].action, "drop");
+        assert_eq!(parsed[0].destination, "1.1.1.1");
     }
 
     #[test]

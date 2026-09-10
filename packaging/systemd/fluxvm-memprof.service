@@ -1,0 +1,23 @@
+[Unit]
+Description=FluxVM VM Memory and Boot Profiler
+After=network-online.target fluxvm-intelligence.service
+Wants=network-online.target
+Requires=fluxvm-intelligence.service
+
+[Service]
+Type=simple
+Environment=FLUXVM_API_URL=http://127.0.0.1:7788
+Environment=FLUXVM_INTEL_PIN_ROOT=/sys/fs/bpf/fluxvm/intelligence
+Environment=FLUXVM_MEMPROF_MARKER_ROOT=/run/fluxvm/memprof
+ExecStartPre=/usr/bin/fluxvm-memprof load
+ExecStart=/usr/bin/fluxvm-memprof serve 127.0.0.1:7793
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run/fluxvm /sys/fs/bpf/fluxvm/intelligence
+
+[Install]
+WantedBy=multi-user.target

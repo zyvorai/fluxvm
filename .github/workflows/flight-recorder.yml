@@ -1,0 +1,82 @@
+name: eBPF Flight Recorder
+
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_intelligence.bpf.c'
+      - 'tools/fluxvm-intelligence-loader.c'
+      - 'tools/fluxvm-flight-reader.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'crates/fluxvm-cli/**'
+      - 'scripts/*flight*'
+      - 'scripts/build-runtime-intelligence.sh'
+      - 'scripts/install-runtime-intelligence.sh'
+      - '.github/workflows/flight-recorder.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/fluxvm_intelligence.bpf.c'
+      - 'tools/fluxvm-intelligence-loader.c'
+      - 'tools/fluxvm-flight-reader.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'crates/fluxvm-cli/**'
+      - 'scripts/*flight*'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev bpftool iproute2 pkg-config libsystemd-dev libhivex-dev
+      - name: Rust format
+        working-directory: fluxvm
+        run: cargo fmt --all -- --check
+      - name: Affected Rust tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-intelligence -p fluxvm-cli
+      - name: Build production eBPF objects
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh
+      - name: Build Flight Recorder userspace helpers
+        working-directory: fluxvm
+        run: |
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-intelligence-loader.c -o /tmp/fluxvm-intelligence-loader $(pkg-config --cflags --libs libbpf)
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-flight-reader.c -o /tmp/fluxvm-flight-reader $(pkg-config --cflags --libs libbpf)
+      - name: Portable gates
+        working-directory: fluxvm
+        run: ./scripts/test-flight-recorder-static.sh
+
+  privileged-smoke:
+    # GitHub-hosted runners are not guaranteed to permit BPF/kprobe attach.
+    # Enable this only on installations that explicitly provide a privileged runner.
+    if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+    runs-on: ubuntu-24.04
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install eBPF runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev bpftool iproute2 pkg-config libsystemd-dev libhivex-dev
+      - name: Privileged Flight Recorder smoke
+        working-directory: fluxvm
+        run: sudo --preserve-env=PATH ./scripts/test-flight-recorder-host.sh

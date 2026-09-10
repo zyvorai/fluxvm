@@ -1,0 +1,53 @@
+name: VMM Guard and Adaptive QoS
+
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_guard.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-guard-*.c'
+      - 'scripts/*vmm-guard*'
+      - 'scripts/build-runtime-intelligence.sh'
+      - 'scripts/install-runtime-intelligence.sh'
+      - '.github/workflows/vmm-guard-qos.yml'
+  push:
+    paths:
+      - 'bpf/fluxvm_guard.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-guard-*.c'
+      - 'scripts/*vmm-guard*'
+      - 'scripts/build-runtime-intelligence.sh'
+      - 'scripts/install-runtime-intelligence.sh'
+
+jobs:
+  portable:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev pkg-config libsystemd-dev libhivex-dev bpftool python3-yaml
+      - name: Cargo tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-intelligence
+      - name: Build VMM Guard BPF
+        working-directory: fluxvm
+        run: ./scripts/build-vmm-guard.sh /tmp/fluxvm-bpf
+      - name: Compile guard helpers against real libbpf
+        working-directory: fluxvm
+        run: |
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-guard-loader.c -o /tmp/fluxvm-guard-loader $(pkg-config --cflags --libs libbpf)
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-guard-events.c -o /tmp/fluxvm-guard-events $(pkg-config --cflags --libs libbpf)
+      - name: Static gates
+        working-directory: fluxvm
+        run: ./scripts/test-vmm-guard-qos-static.sh
+      - name: Privileged host smoke test
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: sudo --preserve-env=PATH ./scripts/test-vmm-guard-qos-host.sh

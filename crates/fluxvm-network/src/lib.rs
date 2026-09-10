@@ -12,6 +12,7 @@ pub mod groups;
 pub mod identity;
 pub mod ipam;
 pub mod ipcache;
+pub mod migration_state;
 pub mod netns;
 pub mod packetflow;
 pub mod pod_identity;
@@ -19,6 +20,7 @@ pub mod service;
 pub mod service_ha;
 pub mod service_policy;
 pub mod service_pressure;
+pub mod tcx;
 pub mod xdp;
 
 use anyhow::{Context, Result, bail};

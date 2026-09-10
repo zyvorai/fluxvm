@@ -1,0 +1,53 @@
+name: drop-reason-migration-state
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'crates/fluxvm-network/src/migration_state.rs'
+      - 'crates/fluxvm-network/src/lib.rs'
+      - 'crates/fluxvm-intelligence/**'
+      - 'crates/fluxvm-api/**'
+      - 'crates/fluxvm-cli/**'
+      - 'scripts/test-drop-reason-migration-*'
+      - '.github/workflows/drop-reason-migration-state.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'crates/fluxvm-network/src/migration_state.rs'
+      - 'crates/fluxvm-intelligence/**'
+      - 'crates/fluxvm-api/**'
+      - 'crates/fluxvm-cli/**'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libbpf-dev bpftool iproute2 libsystemd-dev libhivex-dev pkg-config
+      - name: Rust tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-network -p fluxvm-intelligence -p fluxvm-api -p fluxvm-cli
+      - name: Build eBPF object
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh /tmp/fluxvm-bpf
+      - name: Static gates
+        working-directory: fluxvm
+        run: ./scripts/test-drop-reason-migration-static.sh
+      - name: Privileged VM-edge smoke test
+        working-directory: fluxvm
+        run: sudo -E ./scripts/test-drop-reason-migration-host.sh

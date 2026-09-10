@@ -257,7 +257,13 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/stats", get(vm_stats))
         .route("/v1/vms/{id}/network/stats", get(vm_network_stats))
         .route("/v1/vms/{id}/network/flows", get(vm_network_flows))
+        .route("/v1/vms/{id}/network/drop-reasons", get(vm_network_drop_reasons))
         .route("/v1/vms/{id}/network/status", get(vm_network_status))
+        .route("/v1/vms/{id}/network/migration/state", get(vm_network_migration_state))
+        .route("/v1/vms/{id}/network/migration/quiesce", post(vm_network_migration_quiesce))
+        .route("/v1/vms/{id}/network/migration/export", get(vm_network_migration_export))
+        .route("/v1/vms/{id}/network/migration/restore", post(vm_network_migration_restore))
+        .route("/v1/vms/{id}/network/migration/resume", post(vm_network_migration_resume))
         .route(
             "/v1/vms/{id}/network/services/stats",
             get(vm_network_service_stats),
@@ -1151,6 +1157,68 @@ async fn vm_network_flows(
     Query(q): Query<NetworkFlowsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_flows(id, q.limit).await?})))
+}
+
+async fn vm_network_drop_reasons(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<NetworkFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    Ok(Json(json!({
+        "items": fluxvm_network::ebpf::drop_reasons(&m.cfg.sandbox.dataplane, id, q.limit)?
+    })))
+}
+
+async fn vm_network_migration_state(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::status(&m.cfg, id)?)))
+}
+
+async fn vm_network_migration_quiesce(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::quiesce(&m.cfg, id)?)))
+}
+
+async fn vm_network_migration_export(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::export_snapshot(&m.cfg, id)?)))
+}
+
+async fn vm_network_migration_restore(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(snapshot): Json<fluxvm_network::migration_state::VmNetworkStateSnapshot>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::restore_snapshot(
+        &m.cfg, id, &snapshot
+    )?)))
+}
+
+async fn vm_network_migration_resume(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::migration_state::resume(&m.cfg, id)?)))
 }
 
 async fn get_vm_network_policy(
