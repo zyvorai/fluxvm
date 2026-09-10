@@ -2060,7 +2060,10 @@ fn attach_device_cgroup_policy(path: &std::path::Path, policy: &DeviceCgroupPoli
     let license = b"GPL\0";
     let mut log = vec![0u8; 64 * 1024];
     let mut name = [0u8; 16];
-    name[..13].copy_from_slice(b"fluxvm-devcg\0");
+    // BPF_OBJ_NAME_LEN names are validated by the kernel's bpf_obj_name_cpy()
+    // against [A-Za-z0-9_]* -- a hyphen here causes BPF_PROG_LOAD to fail
+    // with EINVAL before the verifier even runs (empty verifier log).
+    name[..13].copy_from_slice(b"fluxvm_devcg\0");
     let mut load = BpfProgLoadAttr {
         prog_type: BPF_PROG_TYPE_CGROUP_DEVICE,
         insn_cnt: insns.len() as u32,
