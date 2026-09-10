@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 11
+## Implemented through Set 13
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
 - one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
@@ -78,9 +78,16 @@ the VM's existing per-instance authentication token.
   policy on the VM edge (`bpf/fluxvm_pod_policy.bpf.h`, additive on top of the
   existing CIDR/L4 dataplane), with a stable per-Pod identity and an
   independent policy-content API (`/v1/vms/{id}/network/pod-policy`) — see
-  [docs/secure-containers-set6s.md](secure-containers-set6s.md). Populating
-  it automatically from live Kubernetes `NetworkPolicy` objects is not yet
-  implemented (needs a selector-resolving watcher/controller).
+  [docs/secure-containers-set6s.md](secure-containers-set6s.md).
+- **Sentinel Set 13**: a standalone node-local `fluxvm-networkpolicy-controller`
+  (dependency-free Go, DaemonSet, read-only RBAC) that compiles selected
+  egress `NetworkPolicy` objects into exact IPv4/IPv6 peer addresses and
+  reconciles them into Set 6S's Pod policy API, closing the "nothing
+  watches/resolves live `NetworkPolicy` objects" gap above. Address-only:
+  port-restricted rules are denied rather than widened, and errors/
+  address-limit overflow fail closed to deny-all. Ingress and L4/named-port
+  NetworkPolicy semantics are out of scope — see
+  [docs/secure-containers-set13.md](secure-containers-set13.md).
 - restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay
   on the primary interface — see
   [docs/secure-containers-set6.md](secure-containers-set6.md)
