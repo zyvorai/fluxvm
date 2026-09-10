@@ -536,12 +536,28 @@ impl KvmVm {
     pub fn setup_pvh_entry(&self, mem: &mut GuestMemory, rip: u64, rbx: u64) -> Result<()> {
         let idx = 0;
         const GDT: u64 = 0xB000;
+        const TSS: u64 = 0xC000;
+        mem.write_at(TSS, &[0u8; 128])?;
         // null, code32, data32 -- flat, 4 GiB, matching the well-known
         // reference GDT bytes documented for the Linux boot protocol's
-        // own 32-bit entry (Documentation/arch/x86/boot.rst).
-        let mut gdt = [0u8; 24];
+        // own 32-bit entry (Documentation/arch/x86/boot.rst) -- plus a
+        // real 32-bit TSS descriptor. Unlike LDTR, VMX's guest-state
+        // entry checks give TR no "unusable" exception: it must always
+        // be a valid, PRESENT, busy (type 11) descriptor, even though
+        // nothing ever actually task-switches into it. Omitting this
+        // (marking TR unusable, matching how LDT is handled) is exactly
+        // what caused KVM_EXIT_FAIL_ENTRY / EXIT_REASON_INVALID_STATE
+        // (basic reason 33) on the very first vmentry -- confirmed live.
+        let mut gdt = [0u8; 32];
         gdt[8..16].copy_from_slice(&0x00cf_9b00_0000_ffffu64.to_le_bytes());
         gdt[16..24].copy_from_slice(&0x00cf_9300_0000_ffffu64.to_le_bytes());
+        let tss_limit = 103u64;
+        let tss_desc = (tss_limit & 0xffff)
+            | ((TSS & 0xff_ffff) << 16)
+            | (0xbu64 << 40) // busy 32-bit TSS
+            | (1u64 << 47) // present
+            | (((TSS >> 24) & 0xff) << 56);
+        gdt[24..32].copy_from_slice(&tss_desc.to_le_bytes());
         mem.write_at(GDT, &gdt)?;
 
         let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
@@ -596,12 +612,23 @@ impl KvmVm {
         sregs.ldt.unusable = 1;
         sregs.ldt.present = 0;
         sregs.ldt.selector = 0;
-        sregs.tr = data;
-        sregs.tr.unusable = 1;
-        sregs.tr.present = 0;
-        sregs.tr.selector = 0;
+        sregs.tr = KvmSegment {
+            base: TSS,
+            limit: 103,
+            selector: 0x18,
+            type_: 0xb, // busy 32-bit TSS
+            present: 1,
+            dpl: 0,
+            db: 0,
+            s: 0,
+            l: 0,
+            g: 0,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
         sregs.gdt.base = GDT;
-        sregs.gdt.limit = 24 - 1;
+        sregs.gdt.limit = 32 - 1;
         sregs.idt.base = 0;
         sregs.idt.limit = 0;
         // Protected mode only -- no paging (PG), no PAE, no long mode.
