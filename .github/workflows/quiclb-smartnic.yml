@@ -1,0 +1,34 @@
+name: quiclb-smartnic
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_quiclb.bpf.c'
+      - 'crates/fluxvm-intelligence/src/quiclb.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-quiclb.rs'
+      - 'tools/fluxvm-quiclb-*.c'
+      - 'scripts/*quiclb*'
+      - '.github/workflows/quiclb-smartnic.yml'
+  push:
+    paths:
+      - 'bpf/fluxvm_quiclb.bpf.c'
+      - 'crates/fluxvm-intelligence/src/quiclb.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-quiclb.rs'
+      - 'tools/fluxvm-quiclb-*.c'
+      - 'scripts/*quiclb*'
+      - '.github/workflows/quiclb-smartnic.yml'
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Host packages
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev bpftool pkg-config libsystemd-dev libhivex-dev iproute2 iputils-ping ethtool
+      - name: Rust tests
+        run: cargo test -p fluxvm-intelligence quiclb
+      - name: Build QUIC LB
+        run: ./scripts/build-quiclb.sh /tmp/quiclb-bpf /tmp/quiclb-bin
+      - name: Portable gates
+        run: ./scripts/test-quiclb-static.sh
+      - name: Privileged QUIC DSR test
+        run: sudo -E ./scripts/test-quiclb-host.sh
