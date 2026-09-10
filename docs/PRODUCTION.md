@@ -87,9 +87,13 @@ seccomp `SECCOMP_IOCTL_NOTIF_ADDFD`/remote policy RPC) —
 broker (Set 11) are both implemented; live-node validation of the seccomp
 notify path against a real containerd/Kubernetes Pod and a real
 enforcing-SELinux mount label are still open.
-Sentinel Pod-scoped network policy (Set 6S) as automatically enforcing
-Kubernetes `NetworkPolicy` objects — the eBPF mechanism and API exist, but
-nothing yet watches/resolves live `NetworkPolicy` objects into it. Sentinel
+Sentinel Pod-scoped network policy (Set 6S) automatically enforcing
+Kubernetes `NetworkPolicy` objects — a standalone `fluxvm-networkpolicy-
+controller` DaemonSet now compiles selected egress `NetworkPolicy` objects
+into Set 6S's Pod policy API (Set 13), but it is address-only (port-
+restricted rules are denied rather than widened) and has not yet run a
+live-cluster reconciliation or multi-node Pod-to-Pod conformance suite —
+[secure-containers-set13.md](secure-containers-set13.md). Sentinel
 in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
 policy automatically — every container is enforced fail-closed by default,
 but the shim does not yet forward Pod policy content per container. Sentinel
