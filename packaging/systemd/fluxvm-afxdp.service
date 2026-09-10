@@ -1,0 +1,19 @@
+[Unit]
+Description=FluxVM AF_XDP fast-path observability API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fluxvm-afxdp serve 127.0.0.1:7795
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RuntimeDirectory=fluxvm/afxdp
+ReadWritePaths=/run/fluxvm/afxdp
+
+[Install]
+WantedBy=multi-user.target
