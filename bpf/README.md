@@ -9,6 +9,8 @@ policy, see below).
 |------|------|
 | `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allow/deny, group identities, CT learn/hit, audit forward, ICMP, Mbps/PPS, stats, flows, events, Pod-scoped policy (Set 6S) |
 | `fluxvm_pod_policy.bpf.h` | Sentinel Set 6S: `fluxvm_pspol`/`fluxvm_pid4`/`fluxvm_pid6`/`fluxvm_ppstat` -- identity-aware Pod network policy, independent of Service Fabric's VIP policy maps below despite the similar shape |
+| `fluxvm_qemu_device.bpf.c` | Sentinel Set 7S: per-VM `BPF_CGROUP_DEVICE` allowlist (kvm/vhost-vsock/net-tun/VFIO) attached to `fluxvm.slice/{id}.scope` |
+| `fluxvm_qemu_egress.bpf.c` | Sentinel Set 7S: per-VM `cgroup_skb/egress` loopback-only outbound-IP filter, same cgroup as above |
 | `fluxvm_xdp.bpf.c` | Optional node-ingress XDP IPv4/IPv6 source-CIDR blocklist (disabled by default; refused in `cilium` mode) |
 | `fluxvm_service.bpf.c` | Service Fabric TC (BPF schema 4 / gen 8): Maglev VIP, NAT/DSR, SNAT, affinity, EDT, flows, identity/L7 policy, HA queue |
 | `fluxvm_service_xdp.bpf.c` | Optional north-south XDP service acceleration (reuses TC service pinmaps) |

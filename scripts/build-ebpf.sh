@@ -43,7 +43,7 @@ fi
 # verifier still enforces the kernel limit via per-CPU scratch where needed).
 SERVICE_CFLAGS=("${CFLAGS[@]}" -mllvm -bpf-stack-size=768)
 
-for src in fluxvm_tc fluxvm_xdp fluxvm_intelligence; do
+for src in fluxvm_tc fluxvm_xdp fluxvm_intelligence fluxvm_qemu_device fluxvm_qemu_egress; do
   "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
 done
 
@@ -70,6 +70,8 @@ echo "built:"
 echo "  $OUT_DIR/fluxvm_tc.bpf.o"
 echo "  $OUT_DIR/fluxvm_xdp.bpf.o"
 echo "  $OUT_DIR/fluxvm_intelligence.bpf.o"
+echo "  $OUT_DIR/fluxvm_qemu_device.bpf.o"
+echo "  $OUT_DIR/fluxvm_qemu_egress.bpf.o"
 echo "  $OUT_DIR/fluxvm_service.bpf.o  (default M)"
 echo "  $OUT_DIR/fluxvm_service_xdp.bpf.o  (default M)"
 echo "  $OUT_DIR/fluxvm_service_connect.bpf.o  (default M)"

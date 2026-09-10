@@ -84,6 +84,12 @@ the VM's existing per-instance authentication token.
 - restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay
   on the primary interface — see
   [docs/secure-containers-set6.md](secure-containers-set6.md)
+- **Sentinel**: per-VM QEMU process hardening — a `BPF_CGROUP_DEVICE`
+  allowlist (only `/dev/kvm`/`/dev/vhost-vsock`/`/dev/net/tun`/configured
+  VFIO devices) and a `cgroup_skb` egress filter (loopback-only outbound IP)
+  on the same `fluxvm.slice/{id}.scope` cgroup every VM already gets — see
+  [docs/secure-containers-set7s.md](secure-containers-set7s.md). Applies to
+  every VM, not only Secure Containers Pods.
 - containerd `TaskOOM` publication from guest cgroup-v2 `memory.events`, CPU
   throttling + detailed memory/swap/fault task metrics, OCI memory
   reservation/swap translation, allowlisted cgroup-v2 `unified` updates, and
