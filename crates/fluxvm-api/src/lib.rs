@@ -267,6 +267,12 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(get_vm_network_policy).post(set_vm_network_policy),
         )
         .route(
+            "/v1/vms/{id}/network/pod-policy",
+            get(get_vm_pod_network_policy)
+                .post(set_vm_pod_network_policy)
+                .delete(clear_vm_pod_network_policy),
+        )
+        .route(
             "/v1/vms/{id}/network/effective",
             get(get_vm_network_effective),
         )
@@ -1573,6 +1579,37 @@ async fn set_vm_network_policy(
     Ok(Json(json!(m.set_network_policy(id, policy).await?)))
 }
 
+/// Set 6S: `null`/absent when unconfigured, matching `get_vm_network_policy`'s
+/// shape but distinguishing "no Pod-scoped policy" from an empty object
+/// (which would mean "policy present, everything allowed").
+async fn get_vm_pod_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.pod_network_policy(id).await?)))
+}
+
+async fn set_vm_pod_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(policy): Json<fluxvm_network::dataplane::PodNetworkPolicy>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.set_pod_network_policy(id, Some(policy)).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn clear_vm_pod_network_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.set_pod_network_policy(id, None).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
 async fn vm_cpuset(
     State(m): State<Arc<VmManager>>,
     Path(id): Path<Uuid>,
@@ -2102,6 +2139,7 @@ mod tests {
                 cpuset: None,
                 hugepages: None,
                 vfio_devices: vec![],
+                pod_uid: None,
             },
             guest_cid: None,
             jail_path: None,

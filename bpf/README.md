@@ -1,12 +1,14 @@
 # FluxVM TC classifier / XDP objects
 
-Network Fabric **v4** BPF sources for the optional `ebpf` / `cilium` sandbox
+Network Fabric **v5** BPF sources for the optional `ebpf` / `cilium` sandbox
 dataplane (v3 maps plus CT learn/hit, audit-mode bit on `sample_rate`,
-`fluxvm_gid` group-identity writes).
+`fluxvm_gid` group-identity writes; v5 adds Secure Containers Pod-scoped
+policy, see below).
 
 | File | Role |
 |------|------|
-| `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allow/deny, group identities, CT learn/hit, audit forward, ICMP, Mbps/PPS, stats, flows, events |
+| `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allow/deny, group identities, CT learn/hit, audit forward, ICMP, Mbps/PPS, stats, flows, events, Pod-scoped policy (Set 6S) |
+| `fluxvm_pod_policy.bpf.h` | Sentinel Set 6S: `fluxvm_pspol`/`fluxvm_pid4`/`fluxvm_pid6`/`fluxvm_ppstat` -- identity-aware Pod network policy, independent of Service Fabric's VIP policy maps below despite the similar shape |
 | `fluxvm_xdp.bpf.c` | Optional node-ingress XDP IPv4/IPv6 source-CIDR blocklist (disabled by default; refused in `cilium` mode) |
 | `fluxvm_service.bpf.c` | Service Fabric TC (BPF schema 4 / gen 8): Maglev VIP, NAT/DSR, SNAT, affinity, EDT, flows, identity/L7 policy, HA queue |
 | `fluxvm_service_xdp.bpf.c` | Optional north-south XDP service acceleration (reuses TC service pinmaps) |

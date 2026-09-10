@@ -358,7 +358,8 @@ impl Service {
             "memory_mib": memory_mib,
             "network": network,
             "agent": {"enabled": true},
-            "shared_folders": shared_folders
+            "shared_folders": shared_folders,
+            "pod_uid": hints.pod_uid
         });
 
         let mut vm: VmRecord = match self
@@ -913,6 +914,8 @@ impl Task for Service {
                 return Err(rpc_other(e));
             }
         };
+        let is_sandbox = req.id == self.group;
+        let share_process_namespace = config_requests_shared_pid_ns(&config_json);
         let response = match self
             .call_agent(
                 &vm,
@@ -920,6 +923,8 @@ impl Task for Service {
                     id: req.id.clone(),
                     config_json,
                     io,
+                    is_sandbox,
+                    share_process_namespace,
                 },
             )
             .await
@@ -1812,6 +1817,24 @@ async fn pod_group_from_bundle(bundle: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Set 6: detects Kubernetes `shareProcessNamespace: true` the same
+/// cross-runtime way Kata/runc do — containerd's CRI plugin only sets a
+/// (host-meaningless, from FluxVM's guest-side perspective) `path` on the
+/// OCI `linux.namespaces` PID entry when the Pod requested a shared PID
+/// namespace; an unset/empty path means "give this container its own". We
+/// only care about presence, never the path's value, since the shared
+/// namespace itself is tracked guest-side by `fluxvm-container-agent`.
+fn config_requests_shared_pid_ns(config_json: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(config_json) else { return false };
+    let Some(namespaces) = v.pointer("/linux/namespaces").and_then(Value::as_array) else {
+        return false;
+    };
+    namespaces.iter().any(|ns| {
+        ns.get("type").and_then(Value::as_str) == Some("pid")
+            && ns.get("path").and_then(Value::as_str).is_some_and(|p| !p.is_empty())
+    })
 }
 
 fn safe_name(s: &str) -> String {

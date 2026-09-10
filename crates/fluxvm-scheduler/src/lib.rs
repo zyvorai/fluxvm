@@ -880,6 +880,37 @@ impl VmManager {
         Ok(policy)
     }
 
+    pub async fn pod_network_policy(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<fluxvm_network::dataplane::PodNetworkPolicy>> {
+        self.get(id).await?;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || fluxvm_network::dataplane::load_pod_policy(&cfg, id))
+            .await
+            .context("Pod network policy reader panicked")?
+    }
+
+    /// Set 6S: Kubernetes-Pod-identity-scoped policy, additive on top of
+    /// `set_network_policy`'s VM-level CIDR/L4 policy. Requires the VM to
+    /// already be attached with a Pod identity (see `CreateVmRequest::pod_uid`)
+    /// -- unlike `set_network_policy`, this does not attempt to attach a VM
+    /// that isn't already running eBPF, since Pod-scoped policy has no
+    /// standalone meaning without a VM-level attachment to layer onto.
+    pub async fn set_pod_network_policy(
+        &self,
+        id: Uuid,
+        policy: Option<fluxvm_network::dataplane::PodNetworkPolicy>,
+    ) -> Result<()> {
+        self.get(id).await?;
+        let cfg = self.cfg.clone();
+        tokio::task::spawn_blocking(move || {
+            fluxvm_network::dataplane::set_pod_network_policy(&cfg, id, policy)
+        })
+        .await
+        .context("Pod network policy apply panicked")?
+    }
+
     pub async fn network_status(
         &self,
         id: Uuid,
@@ -1085,6 +1116,7 @@ impl VmManager {
                     dataplane_if.as_deref(),
                     guest_cidr_for_policy.as_deref(),
                     &allow_cidrs,
+                    req.pod_uid.as_deref(),
                 ) {
                     if self.cfg.sandbox.dataplane.required
                         || self.cfg.sandbox.dataplane.mode
@@ -1346,6 +1378,7 @@ impl VmManager {
                     dataplane_if.as_deref(),
                     guest_cidr_for_policy.as_deref(),
                     &allow_cidrs,
+                    vm.request.pod_uid.as_deref(),
                 ) {
                     if self.cfg.sandbox.dataplane.required
                         || self.cfg.sandbox.dataplane.mode
@@ -2108,6 +2141,7 @@ mod tests {
             cpuset: None,
             hugepages: None,
             vfio_devices: vec![],
+            pod_uid: None,
         }
     }
 

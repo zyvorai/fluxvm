@@ -291,6 +291,13 @@ pub struct CreateVmRequest {
     /// QEMU only: VFIO PCI passthrough device addresses (`host=0000:…`).
     #[serde(default)]
     pub vfio_devices: Vec<String>,
+    /// Set 6S: Kubernetes Pod UID (from the CRI `io.kubernetes.cri.sandbox-uid`
+    /// annotation), supplied by `containerd-shim-fluxvm-v2` for Secure
+    /// Containers Pods. Mints a stable eBPF Pod identity
+    /// (`fluxvm_network::pod_identity`) used for Pod-scoped network policy;
+    /// `None` for every non-Secure-Containers VM, matching today's behavior.
+    #[serde(default)]
+    pub pod_uid: Option<String>,
 }
 fn default_vcpus() -> u8 {
     2

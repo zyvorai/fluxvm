@@ -352,6 +352,7 @@ mod tests {
                 cpuset: None,
                 hugepages: None,
                 vfio_devices: vec![],
+                pod_uid: None,
             },
             guest_cid: None,
             jail_path: None,

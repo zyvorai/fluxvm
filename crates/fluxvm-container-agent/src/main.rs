@@ -9,9 +9,13 @@
 //! environment, cwd, signals and stdio inside the guest. Set 3 additionally
 //! enforces supplementary groups, umask, rlimits and noNewPrivileges. OCI
 //! Set 4 adds read-only/masked paths, read-only rootfs, OCI devices, Pod-scoped
-//! sysctls and seccomp filters. Set 5 adds dedicated VSOCK stdio streams plus guest PTY/resize support.
-//! Namespace creation and full device-cgroup parity remain explicit follow-up
-//! hardening items in docs/secure-containers.md.
+//! sysctls and seccomp filters. Set 5 adds dedicated VSOCK stdio streams plus
+//! guest PTY/resize support. Set 6 adds per-container PID/mount/IPC/UTS
+//! namespace isolation (`pivot_root` replacing bare `chroot`, an opt-in
+//! `CLONE_NEWUSER`) so containers in one Pod VM are no longer isolated from
+//! each other by the VM boundary alone — see docs/secure-containers-set6r.md.
+//! Full device-cgroup parity remains an explicit follow-up hardening item in
+//! docs/secure-containers.md.
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -27,7 +31,7 @@ use std::{
     ffi::CString,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    os::fd::{AsRawFd, FromRawFd, RawFd},
+    os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
     os::unix::ffi::OsStrExt,
     path::PathBuf,
     sync::{Arc, Condvar, Mutex, OnceLock},
@@ -36,6 +40,65 @@ use std::{
 
 const TOKEN_FILE_PATH: &str = "/etc/fluxvm-guest-agent.token";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/fluxvm-containers";
+/// Set 6: env var gating `CLONE_NEWUSER`. Off by default — see
+/// docs/secure-containers-set6r.md for the rationale (virtiofs uid/gid ACL
+/// interaction, and sequencing with the in-guest LSM identity model).
+const USERNS_ENV: &str = "FLUXVM_CONTAINER_USERNS";
+
+/// Set 6: per-container Linux namespace file descriptors, recorded so
+/// sibling containers (sandbox-sharing) and later `Exec` calls can join
+/// them via `setns(2)`. `-1` means "no namespace recorded" (not created, or
+/// intentionally not shared). These are `O_CLOEXEC` fds owned by the agent
+/// process for the lifetime of the container; closed on container delete.
+#[derive(Clone, Copy, Debug)]
+struct ContainerNamespaces {
+    mnt: RawFd,
+    pid: RawFd,
+    ipc: RawFd,
+    uts: RawFd,
+    user: RawFd,
+}
+
+impl Default for ContainerNamespaces {
+    fn default() -> Self {
+        Self { mnt: -1, pid: -1, ipc: -1, uts: -1, user: -1 }
+    }
+}
+
+impl ContainerNamespaces {
+    fn close(&mut self) {
+        for fd in [&mut self.mnt, &mut self.pid, &mut self.ipc, &mut self.uts, &mut self.user] {
+            if *fd >= 0 {
+                unsafe { libc::close(*fd) };
+                *fd = -1;
+            }
+        }
+    }
+}
+
+/// Set 6: which namespaces to create fresh vs. join for one `spawn_gated`
+/// call. `Create` covers both a Pod's sandbox container (fresh IPC/UTS/PID,
+/// optionally shared onward) and an ordinary container joining (or not
+/// finding) a sandbox. `Exec` always joins the target container's own
+/// namespaces so `ps`/`nsenter`-style introspection inside an exec sees the
+/// same process tree and filesystem as the container's init process.
+enum NsRequest {
+    Create { is_sandbox: bool, share_process_namespace: bool },
+    Exec { target: ContainerNamespaces },
+}
+
+/// Set 6: one shared sandbox (CRI pause-container-equivalent) per agent
+/// process. Every `fluxvm-container-agent` supervises exactly one Pod VM, so
+/// there is at most one sandbox container to track — no keying needed.
+static SANDBOX_NAMESPACES: OnceLock<Mutex<Option<ContainerNamespaces>>> = OnceLock::new();
+
+fn sandbox_namespaces() -> &'static Mutex<Option<ContainerNamespaces>> {
+    SANDBOX_NAMESPACES.get_or_init(|| Mutex::new(None))
+}
+
+fn userns_enabled() -> bool {
+    std::env::var(USERNS_ENV).map(|v| v == "1").unwrap_or(false)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "fluxvm-container-agent", version)]
@@ -299,6 +362,8 @@ struct ContainerEntry {
     mounts: Vec<PathBuf>,
     cgroup_path: PathBuf,
     seccomp: Option<SeccompProfile>,
+    namespaces: ContainerNamespaces,
+    is_sandbox: bool,
     init: Arc<ProcHandle>,
     execs: HashMap<String, Arc<ProcHandle>>,
 }
@@ -499,7 +564,9 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
             configure_sandbox_resources(&resources)?;
             Ok(ContainerResponse::SandboxResourcesConfigured)
         }
-        ContainerRequest::Create { id, config_json, io } => create_container(id, &config_json, io),
+        ContainerRequest::Create { id, config_json, io, is_sandbox, share_process_namespace } => {
+            create_container(id, &config_json, io, is_sandbox, share_process_namespace)
+        }
         ContainerRequest::Start { id, exec_id } => start_process(&id, exec_id.as_deref()),
         ContainerRequest::State { id, exec_id } => state_process(&id, exec_id.as_deref()),
         ContainerRequest::Exec { id, exec_id, process_json, io } => {
@@ -549,7 +616,13 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
     }
 }
 
-fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
+fn create_container(
+    id: String,
+    config_json: &str,
+    io: ContainerIo,
+    is_sandbox: bool,
+    share_process_namespace: bool,
+) -> Result<ContainerResponse> {
     let (spec, mounts, resources) = parse_oci_config(config_json)?;
     {
         let reg = registry().lock().expect("registry poisoned");
@@ -566,7 +639,8 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
         cleanup_container_cgroup(&cgroup_path);
         bail!("container {id:?} already exists");
     }
-    let init = match spawn_gated(&id, None, &spec, &io) {
+    let ns_request = NsRequest::Create { is_sandbox, share_process_namespace };
+    let (init, namespaces) = match spawn_gated(&id, None, &spec, &io, ns_request) {
         Ok(handle) => handle,
         Err(e) => {
             cleanup_mounts(&mounts);
@@ -581,6 +655,10 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
         let _ = std::fs::remove_dir(&cgroup_path);
         return Err(e);
     }
+    if is_sandbox {
+        let mut sandbox = sandbox_namespaces().lock().expect("sandbox ns poisoned");
+        *sandbox = Some(namespaces);
+    }
     reg.insert(
         id,
         ContainerEntry {
@@ -588,6 +666,8 @@ fn create_container(id: String, config_json: &str, io: ContainerIo) -> Result<Co
             mounts,
             cgroup_path,
             seccomp: spec.seccomp.clone(),
+            namespaces,
+            is_sandbox,
             init,
             execs: HashMap::new(),
         },
@@ -604,7 +684,8 @@ fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -
     let mut spec = parse_oci_process(process_json, container.rootfs.clone())?;
     spec.rootfs = container.rootfs.clone();
     spec.seccomp = container.seccomp.clone();
-    let handle = spawn_gated(id, Some(&exec_id), &spec, &io)?;
+    let ns_request = NsRequest::Exec { target: container.namespaces };
+    let (handle, _) = spawn_gated(id, Some(&exec_id), &spec, &io, ns_request)?;
     let pid = handle.snapshot().pid;
     if let Err(e) = add_pid_to_cgroup(&container.cgroup_path, pid) {
         let _ = handle.signal(libc::SIGKILL, true);
@@ -666,9 +747,19 @@ fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<Contai
             handle.signal(libc::SIGKILL, true)?;
         }
         let final_state = handle.wait();
-        if let Some(entry) = reg.remove(id) {
+        if let Some(mut entry) = reg.remove(id) {
             cleanup_mounts(&entry.mounts);
             cleanup_container_cgroup(&entry.cgroup_path);
+            if entry.is_sandbox {
+                // Deleting the sandbox invalidates joined-namespace sharing
+                // for any container created after it; siblings created
+                // earlier already hold their own fds to the same
+                // namespaces (namespaces persist as long as any open fd or
+                // member process references them), so this only affects
+                // containers not yet created.
+                *sandbox_namespaces().lock().expect("sandbox ns poisoned") = None;
+            }
+            entry.namespaces.close();
         }
         final_state
     };
@@ -1555,7 +1646,100 @@ fn resolve_executable(spec: &ProcessSpec) -> Result<String> {
     bail!("executable {arg0:?} was not found in OCI PATH")
 }
 
-fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io: &ContainerIo) -> Result<Arc<ProcHandle>> {
+/// Set 6: opens namespace handles for a just-created container's outer
+/// (reaper) process, once it has signaled that its unshare/setns calls are
+/// complete. These become the container's durable namespace handles:
+/// siblings sharing the sandbox's IPC/UTS/PID join via `setns()` on the
+/// recorded fd, and `Exec` joins all of them so exec'd processes share the
+/// container's mount/pid/ipc/uts (and user, if enabled) namespaces.
+///
+/// PID is the one namespace type where `/proc/<outer_pid>/ns/pid` is the
+/// WRONG file to read: per pid_namespaces(7), a process that itself called
+/// `unshare(CLONE_NEWPID)` (or `setns()` into a PID namespace) is never
+/// moved into that namespace itself — only its *future children* are — so
+/// `/proc/<outer_pid>/ns/pid` keeps showing the OUTER's own (ambient, e.g.
+/// the guest init) namespace forever. The correct handle is the dedicated
+/// `pid_for_children` magic symlink (Linux 4.12+), confirmed empirically
+/// against this exact fork/unshare/setns sequence: it matches the inner
+/// (execve'd) process's actual namespace, while plain `ns/pid` does not.
+/// mnt/ipc/uts/user have no such split — unshare/setns move the calling
+/// process itself immediately, so their plain `ns/<type>` files are correct.
+fn open_container_namespaces(pid: libc::pid_t, include_user: bool) -> ContainerNamespaces {
+    let open_ns = |name: &str| -> RawFd {
+        match OpenOptions::new().read(true).open(format!("/proc/{pid}/ns/{name}")) {
+            Ok(f) => {
+                let fd = f.into_raw_fd();
+                set_cloexec(fd);
+                fd
+            }
+            Err(_) => -1,
+        }
+    };
+    ContainerNamespaces {
+        mnt: open_ns("mnt"),
+        pid: open_ns("pid_for_children"),
+        ipc: open_ns("ipc"),
+        uts: open_ns("uts"),
+        user: if include_user { open_ns("user") } else { -1 },
+    }
+}
+
+/// Set 6: `pivot_root` into `rootfs`, replacing the bare `chroot` used
+/// through Set 5. Must run inside a process that has already unshared
+/// `CLONE_NEWNS` (a private copy of the mount table) — the bind-mount and
+/// pivot below are otherwise visible to every other member of the caller's
+/// mount namespace. Async-signal-safe: no allocation, called only from a
+/// freshly forked, single-threaded, pre-`execve` child.
+unsafe fn pivot_root_into(rootfs: &CString) -> bool {
+    unsafe {
+        // Detach mount propagation before touching anything, so pivoting
+        // never leaks back into whatever peer group "/" belonged to.
+        if libc::mount(
+            std::ptr::null(),
+            c"/".as_ptr(),
+            std::ptr::null(),
+            (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
+            std::ptr::null(),
+        ) != 0
+        {
+            return false;
+        }
+        // pivot_root(2) requires new_root to be a mount point; bind-mounting
+        // it onto itself makes an ordinary directory qualify.
+        if libc::mount(rootfs.as_ptr(), rootfs.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) != 0 {
+            return false;
+        }
+        if libc::chdir(rootfs.as_ptr()) != 0 {
+            return false;
+        }
+        if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) != 0 {
+            return false;
+        }
+        // The old root is now mounted at "." (on top of the new root); lazily
+        // detach it so it stops being reachable at all, then land at "/".
+        if libc::umount2(c".".as_ptr(), libc::MNT_DETACH) != 0 {
+            return false;
+        }
+        if libc::chdir(c"/".as_ptr()) != 0 {
+            return false;
+        }
+        // A private mount namespace inherits whatever /proc was mounted at
+        // unshare time, which reflects the wrong PID namespace once this
+        // container's init lands in its own (or a joined) PID namespace.
+        if libc::mount(c"proc".as_ptr(), c"/proc".as_ptr(), c"proc".as_ptr(), 0, std::ptr::null()) != 0 {
+            return false;
+        }
+        true
+    }
+}
+
+fn spawn_gated(
+    container_id: &str,
+    exec_id: Option<&str>,
+    spec: &ProcessSpec,
+    io: &ContainerIo,
+    ns_request: NsRequest,
+) -> Result<(Arc<ProcHandle>, ContainerNamespaces)> {
     let rootfs = CString::new(spec.rootfs.as_os_str().as_bytes()).context("rootfs contains NUL")?;
     let cwd = CString::new(spec.cwd.as_bytes()).context("cwd contains NUL")?;
     let executable = resolve_executable(spec)?;
@@ -1620,22 +1804,146 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
         )
     };
 
+    // Set 6: work out which namespaces this process needs to create fresh
+    // vs. join before either fork happens (allocation is unsafe once a
+    // multi-threaded process has forked, so this must be fully resolved
+    // now — the forked branches below only ever *read* these values).
+    let userns = userns_enabled();
+    let (create_flags, join_list): (libc::c_int, Vec<(RawFd, libc::c_int)>) = match &ns_request {
+        NsRequest::Create { is_sandbox, share_process_namespace } => {
+            let mut flags = libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+            let mut joins = Vec::new();
+            if *is_sandbox {
+                flags |= libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+            } else {
+                let sandbox = sandbox_namespaces().lock().expect("sandbox ns poisoned");
+                match sandbox.as_ref() {
+                    Some(sb) => {
+                        joins.push((sb.ipc, libc::CLONE_NEWIPC));
+                        joins.push((sb.uts, libc::CLONE_NEWUTS));
+                        if *share_process_namespace && sb.pid >= 0 {
+                            joins.push((sb.pid, libc::CLONE_NEWPID));
+                            flags &= !libc::CLONE_NEWPID;
+                        }
+                    }
+                    None => {
+                        // No sandbox recorded yet (bare `ctr run`, or this
+                        // shim's group-derivation saw no CRI sandbox
+                        // annotation): fully isolate, matching pre-Set-6
+                        // per-container behavior.
+                        flags |= libc::CLONE_NEWIPC | libc::CLONE_NEWUTS;
+                    }
+                }
+            }
+            if userns {
+                flags |= libc::CLONE_NEWUSER;
+            }
+            (flags, joins)
+        }
+        NsRequest::Exec { target } => {
+            let mut joins = Vec::new();
+            for (fd, ty) in [
+                (target.user, libc::CLONE_NEWUSER),
+                (target.mnt, libc::CLONE_NEWNS),
+                (target.ipc, libc::CLONE_NEWIPC),
+                (target.uts, libc::CLONE_NEWUTS),
+                (target.pid, libc::CLONE_NEWPID),
+            ] {
+                if fd >= 0 { joins.push((fd, ty)); }
+            }
+            (0, joins)
+        }
+    };
+    let creates_mount_ns = create_flags & libc::CLONE_NEWNS != 0;
+    // Exec joining an existing container: `setns(mnt_fd, CLONE_NEWNS)` in the
+    // outer process below takes effect immediately (unlike PID) and is
+    // inherited by the inner process via the subsequent fork, so "/" is
+    // already the container's pivoted rootfs by the time inner code runs —
+    // no chroot/pivot_root needed there at all.
+    let joined_mount_ns = join_list.iter().any(|(_, ty)| *ty == libc::CLONE_NEWNS);
+    let is_create = matches!(ns_request, NsRequest::Create { .. });
+    let want_user_ns = create_flags & libc::CLONE_NEWUSER != 0;
+
     let mut gate = [0; 2];
     if unsafe { libc::pipe2(gate.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         bail!("pipe2: {}", std::io::Error::last_os_error());
+    }
+    // Set 6: signals "the outer (reaper) process has finished unshare/setns
+    // and successfully forked the inner (execve'd) process" back to this
+    // caller, so it's safe to open /proc/<outer_pid>/ns/* — reading those
+    // paths any earlier could observe pre-unshare (i.e. wrong) namespaces.
+    let mut ns_ready = [0; 2];
+    if unsafe { libc::pipe2(ns_ready.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        unsafe { libc::close(gate[0]); libc::close(gate[1]); }
+        bail!("pipe2 (ns_ready): {}", std::io::Error::last_os_error());
     }
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         unsafe {
             libc::close(gate[0]);
             libc::close(gate[1]);
+            libc::close(ns_ready[0]);
+            libc::close(ns_ready[1]);
         }
         bail!("fork: {}", std::io::Error::last_os_error());
     }
     if pid == 0 {
+        // === Outer (namespace-establishing reaper) process ===
         unsafe {
             libc::close(gate[1]);
+            libc::close(ns_ready[0]);
             for fd in &parent_fds { libc::close(*fd); }
+
+            if create_flags != 0 && libc::unshare(create_flags) != 0 { libc::_exit(126); }
+            if want_user_ns {
+                // We created this user namespace (via the unshare above), so
+                // we automatically hold CAP_SETUID/CAP_SETGID within it and
+                // can map ourselves without an external writer. A full
+                // identity map buys a distinct capability-scoping namespace
+                // without uid-shifting complexity against virtiofs ACLs.
+                let _ = std::fs::write("/proc/self/setgroups", "deny");
+                if std::fs::write("/proc/self/uid_map", "0 0 4294967295").is_err()
+                    || std::fs::write("/proc/self/gid_map", "0 0 4294967295").is_err()
+                {
+                    libc::_exit(126);
+                }
+            }
+            for (fd, ty) in &join_list {
+                if libc::setns(*fd, *ty) != 0 { libc::_exit(126); }
+            }
+
+            let inner_pid = libc::fork();
+            if inner_pid < 0 { libc::_exit(125); }
+            if inner_pid != 0 {
+                // Still outer: hand off readiness, drop our own copies of
+                // the stdio fds (so EOF on the agent side depends only on
+                // the inner process's lifetime, exactly as pre-Set-6), then
+                // reap the inner process and exit with its translated code.
+                let byte = [1u8; 1];
+                let _ = libc::write(ns_ready[1], byte.as_ptr().cast(), 1);
+                libc::close(ns_ready[1]);
+                libc::close(gate[0]);
+                drop(stdin);
+                drop(stdout);
+                drop(stderr);
+                drop(pty_slave);
+                let mut status = 0i32;
+                let rc = libc::waitpid(inner_pid, &mut status, 0);
+                let code = if rc < 0 {
+                    255
+                } else if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else if libc::WIFSIGNALED(status) {
+                    128 + libc::WTERMSIG(status)
+                } else {
+                    255
+                };
+                libc::_exit(code);
+            }
+
+            // === Inner (execve'd) process: PID 1 of a fresh PID namespace,
+            // or a plain member of a joined one, per the setns above ===
+            libc::close(ns_ready[1]);
 
             if let Some(ref slave) = pty_slave {
                 if libc::setsid() < 0 { libc::_exit(126); }
@@ -1653,7 +1961,15 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
             let mut byte = [0u8; 1];
             if libc::read(gate[0], byte.as_mut_ptr().cast(), 1) != 1 { libc::_exit(126); }
             libc::close(gate[0]);
-            if libc::chroot(rootfs.as_ptr()) != 0 { libc::_exit(126); }
+            if creates_mount_ns {
+                if !pivot_root_into(&rootfs) { libc::_exit(126); }
+            } else if !joined_mount_ns && libc::chroot(rootfs.as_ptr()) != 0 {
+                // Only reachable if a container's own mount-namespace fd
+                // could not be recorded at create time (see
+                // `open_container_namespaces`) — fall back to a bare chroot
+                // rather than running this exec fully unconfined.
+                libc::_exit(126);
+            }
             if libc::chdir(cwd.as_ptr()) != 0 { libc::_exit(126); }
 
             if let Some(mask) = spec.umask {
@@ -1706,6 +2022,23 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
         }
     }
 
+    // === Back in the request-handling thread ===
+    unsafe { libc::close(ns_ready[1]) };
+    let mut ready = [0u8; 1];
+    let ready_rc = unsafe { libc::read(ns_ready[0], ready.as_mut_ptr().cast(), 1) };
+    unsafe { libc::close(ns_ready[0]) };
+    if ready_rc != 1 {
+        unsafe { libc::close(gate[0]); libc::close(gate[1]); }
+        let mut status = 0i32;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        bail!("container process failed to establish namespaces (wait status {status})");
+    }
+    let namespaces = if is_create {
+        open_container_namespaces(pid, want_user_ns)
+    } else {
+        ContainerNamespaces::default()
+    };
+
     unsafe { libc::close(gate[0]) };
     drop(stdin);
     drop(stdout);
@@ -1729,7 +2062,7 @@ fn spawn_gated(container_id: &str, exec_id: Option<&str>, spec: &ProcessSpec, io
         eprintln!("container process {label} pid={pid} exited code={code}");
         waiter.mark_exited(code);
     });
-    Ok(handle)
+    Ok((handle, namespaces))
 }
 
 fn pipe_cloexec() -> Result<(RawFd, RawFd)> {
