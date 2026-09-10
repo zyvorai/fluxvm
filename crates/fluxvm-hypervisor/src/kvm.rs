@@ -201,6 +201,31 @@ impl KvmVm {
                 if run as usize == ffi::MAP_FAILED {
                     return Err(FluxError::Hypervisor("mmap kvm_run".into()));
                 }
+                if id != 0 {
+                    // A freshly created vCPU defaults to
+                    // KVM_MP_STATE_RUNNABLE, not "wait for SIPI" -- left
+                    // alone it would immediately execute whatever garbage
+                    // sits at the reset vector (no RIP/sregs are ever set
+                    // for APs) instead of blocking for the guest's real
+                    // INIT-SIPI-SIPI. This is what made the AP thread
+                    // block forever in a single KVM_RUN with zero vmexits
+                    // (a tight, exit-free decode loop over unmapped/zero
+                    // memory) while the BSP spun waiting for it to check
+                    // in -- exactly the original hang symptom, just with
+                    // the real vCPU now silently running junk instead of
+                    // not existing at all.
+                    let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
+                    if ffi::flux_ioctl(
+                        vcpu_fd,
+                        ffi::KVM_SET_MP_STATE,
+                        &mut mp_state as *mut _ as *mut c_void,
+                    ) < 0
+                    {
+                        return Err(FluxError::Hypervisor(format!(
+                            "KVM_SET_MP_STATE id={id}"
+                        )));
+                    }
+                }
                 vcpus.push(VcpuHandle {
                     fd: vcpu_fd,
                     run: run as *mut u8,
