@@ -560,7 +560,42 @@ impl VmManager {
             "kvm": kvm,
             "state_dir": self.cfg.state_dir,
             "dataplane": health,
+            "secure_containers": Self::secure_containers_status(kvm),
         }))
+    }
+
+    /// FluxVM Secure Containers node-capability probe, surfaced under
+    /// `readyz.secure_containers` (`docs/contracts/fabric-fluxvm-readyz.json`)
+    /// for Fabric's `ContainerGroup` placement to filter candidate nodes on.
+    /// This only checks what's visible from the FluxVM daemon itself — it
+    /// does NOT know whether containerd's `config.toml` actually registers
+    /// the `io.containerd.fluxvm.v2` runtime or whether a `RuntimeClass` has
+    /// been applied to the cluster; both remain manual per-node setup today
+    /// (see `docs/secure-containers.md`, `scripts/install-secure-containers.sh`).
+    fn secure_containers_status(kvm: bool) -> serde_json::Value {
+        let shim_installed = Self::secure_containers_shim_path().is_some();
+        let guest_image_present = Self::secure_containers_guest_image_path().exists();
+        serde_json::json!({
+            "available": kvm && shim_installed && guest_image_present,
+            "shim_installed": shim_installed,
+            "guest_image_present": guest_image_present,
+        })
+    }
+
+    fn secure_containers_shim_path() -> Option<std::path::PathBuf> {
+        const BIN_NAME: &str = "containerd-shim-fluxvm-v2";
+        let path_var = std::env::var_os("PATH")?;
+        std::env::split_paths(&path_var)
+            .map(|dir| dir.join(BIN_NAME))
+            .find(|candidate| candidate.is_file())
+    }
+
+    fn secure_containers_guest_image_path() -> std::path::PathBuf {
+        std::env::var("FLUXVM_CONTAINER_GUEST_IMAGE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from("/var/lib/fluxvm/images/secure-container.qcow2")
+            })
     }
 
     pub async fn network_health(&self) -> Result<fluxvm_network::dataplane::DataplaneHealth> {
