@@ -296,6 +296,15 @@ impl KvmVm {
                 if e.function == 1 {
                     e.ebx = (e.ebx & 0x00ff_ffff) | (apic_id << 24);
                 }
+                if idx == 0 && (e.function == 1 || e.function == 0x15 || e.function == 0x16) {
+                    eprintln!(
+                        "[diag] cpuid leaf={:#x} idx={} eax={:#x} ebx={:#x} ecx={:#x} edx={:#x}",
+                        e.function, e.index, e.eax, e.ebx, e.ecx, e.edx
+                    );
+                }
+            }
+            if idx == 0 {
+                eprintln!("[diag] cpuid total entries nent={nent}");
             }
             if ffi::flux_ioctl(
                 self.vcpus[idx].fd,
