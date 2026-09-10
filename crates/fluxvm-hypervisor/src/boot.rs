@@ -88,8 +88,9 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     use linux_loader::loader::bzimage::BzImage;
     use linux_loader::loader::elf::Elf;
     use linux_loader::loader::{KernelLoader, KernelLoaderResult};
+    use crate::ffi;
     use std::fs::File;
-    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap};
+    use vm_memory::{Bytes, GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
 
     let path = cfg
         .kernel
@@ -102,8 +103,36 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
         format!("boot_params at GPA {:#x}", memory::BOOT_PARAMS_ADDR),
     ];
 
-    let gm = GuestMemoryMmap::<()>::from_ranges(&[(GuestAddress(0), mem.len())])
-        .map_err(|e| FluxError::Boot(format!("GuestMemoryMmap: {e}")))?;
+    // `gm` must be a *view over our real, already-KVM-registered* guest
+    // RAM (`mem`), not a separate throwaway mapping. A previous version
+    // of this function loaded the kernel into a freshly allocated
+    // anonymous GuestMemoryMmap and then copied 1 MiB chunks into `mem`,
+    // skipping any chunk that read back as all-zero as an optimization --
+    // that heuristic silently dropped real code living in the same 1 MiB
+    // chunk as unrelated all-zero padding under some condition, which
+    // left holes in the loaded kernel image (confirmed live via a gdbstub
+    // breakpoint landing inside a real function -- asm_exc_page_fault --
+    // and finding it entirely zeroed out on the guest side while the
+    // on-disk vmlinux has real code there). Firecracker and
+    // cloud-hypervisor never do this two-step copy: they hand
+    // Elf::load/BzImage::load their real, already-registered
+    // GuestMemoryMmap directly. Wrapping our existing mmap'd pointer
+    // (already registered with KVM via KVM_SET_USER_MEMORY_REGION) into a
+    // GuestMemoryMmap view does the same here, making the loader write
+    // straight into real guest RAM with no copy step to get wrong.
+    let mmap_region = unsafe {
+        MmapRegion::<()>::build_raw(
+            mem.host_ptr(),
+            mem.len(),
+            ffi::PROT_READ | ffi::PROT_WRITE,
+            ffi::MAP_SHARED,
+        )
+    }
+    .map_err(|e| FluxError::Boot(format!("MmapRegion::build_raw: {e}")))?;
+    let region = GuestRegionMmap::new(mmap_region, GuestAddress(0))
+        .ok_or_else(|| FluxError::Boot("GuestRegionMmap::new failed".into()))?;
+    let gm = GuestMemoryMmap::<()>::from_regions(vec![region])
+        .map_err(|e| FluxError::Boot(format!("GuestMemoryMmap::from_regions: {e}")))?;
 
     let himem = GuestAddress(0x0010_0000);
     let loader_result: KernelLoaderResult = {
@@ -133,9 +162,6 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
             }
         }
     };
-
-    // Mirror loader-populated pages into our KVM GuestMemory (skip all-zero chunks).
-    copy_mmap_to_guest(&gm, mem)?;
 
     let mut initrd_len = 0u32;
     if let Some(initrd) = &cfg.initrd {
@@ -176,12 +202,9 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     LinuxBootConfigurator::write_bootparams::<GuestMemoryMmap<()>>(&boot_cfg, &gm).map_err(|e| {
         FluxError::Boot(format!("write_bootparams: {e}"))
     })?;
-
-    // Copy zero page into KVM guest RAM.
-    let mut zero = vec![0u8; std::mem::size_of::<boot_params>()];
-    gm.read(&mut zero, GuestAddress(memory::BOOT_PARAMS_ADDR))
-        .map_err(|e| FluxError::Boot(format!("read zero page: {e}")))?;
-    mem.write_at(memory::BOOT_PARAMS_ADDR, &zero)?;
+    // `gm` is a view over `mem`'s own backing memory (see above), so the
+    // zero page write above already landed directly in real guest RAM --
+    // no separate copy back into `mem` needed.
 
     // 64-bit bzImage entry is kernel_load + 0x200; ELF uses kernel_load as entry.
     let entry_rip = if loader_result.setup_header.is_some() {
@@ -199,28 +222,6 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
         boot_params_gpa: Some(memory::BOOT_PARAMS_ADDR),
         notes,
     })
-}
-
-#[cfg(target_os = "linux")]
-fn copy_mmap_to_guest(
-    gm: &vm_memory::GuestMemoryMmap<()>,
-    mem: &mut GuestMemory,
-) -> Result<()> {
-    use vm_memory::{Bytes, GuestAddress};
-    const CHUNK: usize = 1024 * 1024;
-    let total = mem.len();
-    let mut offset = 0usize;
-    while offset < total {
-        let n = (total - offset).min(CHUNK);
-        let mut buf = vec![0u8; n];
-        gm.read(&mut buf, GuestAddress(offset as u64))
-            .map_err(|e| FluxError::Boot(format!("gm read @ {offset:#x}: {e}")))?;
-        if buf.iter().any(|&b| b != 0) {
-            mem.write_at(offset as u64, &buf)?;
-        }
-        offset += n;
-    }
-    Ok(())
 }
 
 #[cfg(target_os = "linux")]
