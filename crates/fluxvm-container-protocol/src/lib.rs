@@ -9,6 +9,7 @@
 //! served on a separate port so the stable guest-agent API remains unchanged.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const DEFAULT_CONTAINER_AGENT_PORT: u32 = 17778;
 pub const DEFAULT_CONTAINER_STREAM_PORT: u32 = 17779;
@@ -84,8 +85,19 @@ pub struct ResourceLimits {
     pub cpuset_mems: Option<String>,
     #[serde(default)]
     pub memory_limit_bytes: Option<i64>,
+    /// OCI memory.reservation, mapped to cgroup-v2 memory.low.
+    #[serde(default)]
+    pub memory_reservation_bytes: Option<i64>,
+    /// OCI memory.swap (memory+swap combined): 0 means unset and -1 means
+    /// unlimited, matching OCI/cgroup-v1 compatibility semantics.
+    #[serde(default)]
+    pub memory_swap_bytes: Option<i64>,
     #[serde(default)]
     pub pids_limit: Option<i64>,
+    /// Safe cgroup-v2 unified controls copied from OCI LinuxResources.unified.
+    /// The guest agent enforces a strict allowlist before touching cgroupfs.
+    #[serde(default)]
+    pub unified: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -93,11 +105,46 @@ pub struct ContainerStats {
     pub cpu_usage_usec: u64,
     pub cpu_user_usec: u64,
     pub cpu_system_usec: u64,
+    pub cpu_nr_periods: u64,
+    pub cpu_nr_throttled: u64,
+    pub cpu_throttled_usec: u64,
     pub memory_usage_bytes: u64,
+    pub memory_limit_bytes: u64,
+    pub memory_peak_bytes: u64,
+    pub memory_swap_usage_bytes: u64,
+    pub memory_swap_limit_bytes: u64,
+    pub memory_anon_bytes: u64,
+    pub memory_file_bytes: u64,
+    pub memory_anon_thp_bytes: u64,
+    pub memory_file_mapped_bytes: u64,
+    pub memory_dirty_bytes: u64,
+    pub memory_writeback_bytes: u64,
+    pub memory_pgfault: u64,
+    pub memory_pgmajfault: u64,
+    pub memory_inactive_anon_bytes: u64,
+    pub memory_active_anon_bytes: u64,
     pub memory_total_inactive_file_bytes: u64,
+    pub memory_active_file_bytes: u64,
+    pub memory_unevictable_bytes: u64,
+    pub memory_events_max: u64,
+    pub memory_events_oom: u64,
+    pub memory_events_oom_kill: u64,
     pub pids_current: u64,
     /// `0` means unlimited, matching containerd's cgroup metrics convention.
     pub pids_limit: u64,
+}
+
+/// Monotonic cgroup-v2 event counters used by the host shim to publish
+/// containerd lifecycle events without granting the host access to guest
+/// cgroupfs. Counters come from the container's `memory.events` file.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CgroupEvents {
+    pub low: u64,
+    pub high: u64,
+    pub max: u64,
+    pub oom: u64,
+    pub oom_kill: u64,
+    pub oom_group_kill: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -165,6 +212,7 @@ pub enum ContainerRequest {
     },
     Pids { id: String },
     Stats { id: String },
+    CgroupEvents { id: String },
     UpdateResources {
         id: String,
         resources: ResourceLimits,
@@ -223,6 +271,7 @@ pub enum ContainerResponse {
     },
     Pids { pids: Vec<u32> },
     Stats { stats: ContainerStats },
+    CgroupEvents { events: CgroupEvents },
     ResourcesUpdated,
     PtyResized,
     IoClosed,
@@ -288,7 +337,10 @@ mod tests {
                     cpu_quota: Some(50_000),
                     cpu_period: Some(100_000),
                     memory_limit_bytes: Some(256 * 1024 * 1024),
+                    memory_reservation_bytes: Some(128 * 1024 * 1024),
+                    memory_swap_bytes: Some(512 * 1024 * 1024),
                     pids_limit: Some(128),
+                    unified: BTreeMap::from([("memory.high".into(), "201326592".into())]),
                     ..Default::default()
                 },
             },
@@ -337,6 +389,16 @@ mod tests {
         let line = encode_line(&response).unwrap();
         let back: ContainerResponse = decode_line(&line).unwrap();
         assert!(matches!(back, ContainerResponse::Exited { exit_code: 0, .. }));
+    }
+
+    #[test]
+    fn cgroup_events_round_trip() {
+        let response = ContainerResponse::CgroupEvents {
+            events: CgroupEvents { oom: 2, oom_kill: 1, ..Default::default() },
+        };
+        let line = encode_line(&response).unwrap();
+        let back: ContainerResponse = decode_line(&line).unwrap();
+        assert!(matches!(back, ContainerResponse::CgroupEvents { events } if events.oom_kill == 1));
     }
 
     #[test]

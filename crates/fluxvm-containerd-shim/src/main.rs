@@ -3,7 +3,7 @@
 
 //! containerd runtime-v2 shim for FluxVM secure containers.
 //!
-//! Secure Containers contract through Set 5:
+//! Secure Containers contract through Set 9:
 //! * one FluxVM QEMU VM per containerd shim group / Kubernetes Pod sandbox;
 //! * OCI snapshot rootfs is copied into the Pod's virtiofs share;
 //! * Kubernetes Pod volumes are passed through write-through with Pod-scoped virtiofs exports;
@@ -11,6 +11,11 @@
 //! * process lifecycle is executed by `fluxvm-container-agent` over VSOCK 17778;
 //! * stdin/stdout/stderr stream over authenticated VSOCK 17779;
 //! * terminal init/exec processes use a real guest PTY with ResizePty;
+//! * cgroup-v2 memory.events drive containerd TaskOOM events;
+//! * stats expose CPU throttling and detailed memory accounting;
+//! * Pod-scoped raw block volumes are hotplugged into QEMU over QMP;
+//! * explicitly allowlisted VFIO PCI devices can be passed through for device-plugin workloads;
+//! * Set 9 reference-counts device ownership, verifies IOMMU groups, and hot-unplugs unused devices;
 //! * no host kernel is shared with the workload.
 //!
 //! The copy/snapshot approach is intentionally conservative. It gives a
@@ -36,10 +41,12 @@ use containerd_shim::{
 use containerd_shim_protos::{
     api::{CloseIORequest, ConnectRequest, ConnectResponse, DeleteResponse, PidsRequest, PidsResponse,
           ProcessInfo, ResizePtyRequest, StatsRequest, StatsResponse, UpdateTaskRequest},
-    cgroups::metrics::{CPUStat, CPUUsage, MemoryEntry, MemoryStat, Metrics, PidsStat},
+    cgroups::metrics::{
+        CPUStat, CPUUsage, MemoryEntry, MemoryOomControl, MemoryStat, Metrics, PidsStat, Throttle,
+    },
     events::task::{
-        TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskExit, TaskIO, TaskPaused,
-        TaskResumed, TaskStart,
+        TaskCreate, TaskDelete, TaskExecAdded, TaskExecStarted, TaskExit, TaskIO, TaskOOM,
+        TaskPaused, TaskResumed, TaskStart,
     },
     protobuf::{EnumOrUnknown, MessageDyn},
     shim_async::Task,
@@ -51,20 +58,22 @@ use fluxvm_container_protocol::{
 };
 use fluxvm_core::model::{VmRecord, VmStatus};
 use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
-use log::warn;
+use log::{info, warn};
 use reqwest::{Client, Method};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
-    net::Ipv4Addr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    os::unix::fs::{FileTypeExt, MetadataExt},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
     sync::{
         mpsc::{channel, Receiver, Sender},
         Mutex, RwLock,
@@ -92,7 +101,16 @@ struct RuntimeConfig {
     boot_timeout_secs: u64,
     cni_interface: String,
     cni_enabled: bool,
+    cni_strict_multi_interface: bool,
     streaming_stdio: bool,
+    recovery_enabled: bool,
+    oom_poll_ms: u64,
+    device_passthrough: bool,
+    block_allow_prefixes: Vec<PathBuf>,
+    vfio_allow: Vec<String>,
+    vfio_require_iommu_group: bool,
+    guest_device_allow: Vec<String>,
+    device_unplug_timeout_secs: u64,
 }
 
 impl Default for RuntimeConfig {
@@ -115,12 +133,33 @@ impl Default for RuntimeConfig {
             boot_timeout_secs: std::env::var("FLUXVM_CONTAINER_BOOT_TIMEOUT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(90),
             cni_interface: std::env::var("FLUXVM_CONTAINER_CNI_INTERFACE").unwrap_or_else(|_| "eth0".into()),
             cni_enabled: std::env::var("FLUXVM_CONTAINER_CNI").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            cni_strict_multi_interface: std::env::var("FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE").ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
             streaming_stdio: std::env::var("FLUXVM_CONTAINER_STREAMING_STDIO").ok().map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            recovery_enabled: std::env::var("FLUXVM_CONTAINER_RECOVER").ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            oom_poll_ms: std::env::var("FLUXVM_CONTAINER_OOM_POLL_MS").ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(1000).clamp(100, 60_000),
+            device_passthrough: std::env::var("FLUXVM_CONTAINER_DEVICE_PASSTHROUGH").ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            block_allow_prefixes: std::env::var("FLUXVM_CONTAINER_BLOCK_ALLOW_PREFIXES").ok()
+                .map(|v| v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from).collect())
+                .unwrap_or_default(),
+            vfio_allow: std::env::var("FLUXVM_CONTAINER_VFIO_ALLOW").ok()
+                .map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()).collect())
+                .unwrap_or_default(),
+            vfio_require_iommu_group: std::env::var("FLUXVM_CONTAINER_VFIO_REQUIRE_IOMMU_GROUP").ok()
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off")).unwrap_or(true),
+            guest_device_allow: std::env::var("FLUXVM_CONTAINER_GUEST_DEVICE_ALLOW").ok()
+                .map(|v| v.split(',').map(str::trim).filter(|s| s.starts_with("/dev/") && !s.contains(".."))
+                    .map(str::to_string).collect()).unwrap_or_default(),
+            device_unplug_timeout_secs: std::env::var("FLUXVM_CONTAINER_DEVICE_UNPLUG_TIMEOUT_SECS").ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(10).clamp(1, 120),
         }
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct TaskMeta {
     bundle: String,
     stdin: String,
@@ -129,32 +168,145 @@ struct TaskMeta {
     terminal: bool,
     pid: u32,
     /// Host-side virtiofs stdio directory for this init/exec process.
+    #[serde(default)]
     io_dir: Option<PathBuf>,
+    #[serde(default)]
     streaming: bool,
+    /// Last guest memory.events oom_kill counter published to containerd.
+    /// Persisted so a replacement shim can surface OOMs that occurred while
+    /// the previous shim was unavailable.
+    #[serde(default)]
+    oom_kill_seen: u64,
+    /// Set 9 device attachment keys claimed by this container. Empty for
+    /// legacy Set 8 journals; those attachments stay pinned until sandbox delete.
+    #[serde(default)]
+    device_claims: Vec<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum DeviceAttachment {
+    Block {
+        host_path: PathBuf,
+        serial: String,
+        node_name: String,
+        device_id: String,
+        #[serde(default)]
+        host_major: Option<u64>,
+        #[serde(default)]
+        host_minor: Option<u64>,
+        /// None means a Set 8/legacy attachment whose ownership is unknown;
+        /// it is deliberately pinned until the whole sandbox is destroyed.
+        #[serde(default)]
+        owners: Option<Vec<String>>,
+    },
+    Vfio {
+        bdf: String,
+        guest_path: String,
+        device_id: String,
+        #[serde(default)]
+        iommu_group: Option<u32>,
+        #[serde(default)]
+        owners: Option<Vec<String>>,
+    },
+}
+
+impl DeviceAttachment {
+    fn key(&self) -> String {
+        match self {
+            Self::Block { host_path, .. } => format!("block:{}", host_path.display()),
+            Self::Vfio { bdf, .. } => format!("vfio:{bdf}"),
+        }
+    }
+
+    fn device_id(&self) -> &str {
+        match self {
+            Self::Block { device_id, .. } | Self::Vfio { device_id, .. } => device_id,
+        }
+    }
+
+    fn owners(&self) -> Option<&Vec<String>> {
+        match self {
+            Self::Block { owners, .. } | Self::Vfio { owners, .. } => owners.as_ref(),
+        }
+    }
+
+    fn owners_mut(&mut self) -> Option<&mut Vec<String>> {
+        match self {
+            Self::Block { owners, .. } | Self::Vfio { owners, .. } => owners.as_mut(),
+        }
+    }
+
+    fn add_owner(&mut self, owner: &str) -> bool {
+        let Some(owners) = self.owners_mut() else { return false; };
+        if owners.iter().any(|v| v == owner) { return false; }
+        owners.push(owner.to_string());
+        owners.sort();
+        true
+    }
+
+    fn remove_owner(&mut self, owner: &str) -> bool {
+        let Some(owners) = self.owners_mut() else { return false; };
+        let before = owners.len();
+        owners.retain(|v| v != owner);
+        owners.len() != before
+    }
+
+    fn is_releasable(&self) -> bool {
+        self.owners().is_some_and(Vec::is_empty)
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Sandbox {
     vm: VmRecord,
     share_dir: PathBuf,
     cni: Option<CniBridge>,
+    kubelet_mounts: Vec<(String, String)>,
+    devices: Vec<DeviceAttachment>,
 }
 
-#[derive(Clone, Debug)]
-struct CniRoute {
-    destination: Option<(Ipv4Addr, u8)>, // None = default
-    gateway: Option<Ipv4Addr>,
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+enum CniFamily {
+    Ipv4,
+    Ipv6,
 }
 
-#[derive(Clone, Debug)]
-struct CniNetwork {
-    pod_ip: Ipv4Addr,
+impl CniFamily {
+    fn ip_flag(self) -> &'static str {
+        match self { Self::Ipv4 => "-4", Self::Ipv6 => "-6" }
+    }
+    fn max_prefix(self) -> u8 {
+        match self { Self::Ipv4 => 32, Self::Ipv6 => 128 }
+    }
+    fn matches(self, addr: IpAddr) -> bool {
+        matches!((self, addr), (Self::Ipv4, IpAddr::V4(_)) | (Self::Ipv6, IpAddr::V6(_)))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CniAddress {
+    family: CniFamily,
+    address: IpAddr,
     prefix_len: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CniRoute {
+    family: CniFamily,
+    destination: Option<(IpAddr, u8)>, // None = default
+    gateway: Option<IpAddr>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct CniNetwork {
+    addresses: Vec<CniAddress>,
     mac: String,
     routes: Vec<CniRoute>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct CniBridge {
     netns_alias: String,
     netns_mount: PathBuf,
@@ -175,6 +327,105 @@ struct SandboxHints {
     pod_uid: Option<String>,
 }
 
+const RUNTIME_STATE_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct SandboxJournal {
+    vm_id: String,
+    vm_name: String,
+    #[serde(default)]
+    ready: bool,
+    share_dir: PathBuf,
+    #[serde(default)]
+    cni: Option<CniBridge>,
+    #[serde(default)]
+    kubelet_mounts: Vec<(String, String)>,
+    #[serde(default)]
+    devices: Vec<DeviceAttachment>,
+}
+
+impl SandboxJournal {
+    fn from_sandbox(sandbox: &Sandbox) -> Self {
+        Self {
+            vm_id: sandbox.vm.id.to_string(),
+            vm_name: sandbox.vm.name.clone(),
+            ready: true,
+            share_dir: sandbox.share_dir.clone(),
+            cni: sandbox.cni.clone(),
+            kubelet_mounts: sandbox.kubelet_mounts.clone(),
+            devices: sandbox.devices.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct DeviceStats {
+    #[serde(default)]
+    attach_total: u64,
+    #[serde(default)]
+    detach_total: u64,
+    #[serde(default)]
+    unplug_failures: u64,
+    #[serde(default)]
+    recovery_checks: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RuntimeStateJournal {
+    version: u32,
+    #[serde(default)]
+    sandbox: Option<SandboxJournal>,
+    #[serde(default)]
+    tasks: HashMap<String, TaskMeta>,
+    #[serde(default)]
+    execs: HashMap<String, TaskMeta>,
+    #[serde(default)]
+    device_stats: DeviceStats,
+}
+
+impl Default for RuntimeStateJournal {
+    fn default() -> Self {
+        Self {
+            version: RUNTIME_STATE_VERSION,
+            sandbox: None,
+            tasks: HashMap::new(),
+            execs: HashMap::new(),
+            device_stats: DeviceStats::default(),
+        }
+    }
+}
+
+fn runtime_state_root(cfg: &RuntimeConfig, namespace: &str, group: &str) -> PathBuf {
+    cfg.state_dir.join(namespace).join(group)
+}
+
+fn runtime_state_path(cfg: &RuntimeConfig, namespace: &str, group: &str) -> PathBuf {
+    runtime_state_root(cfg, namespace, group).join("runtime-state.json")
+}
+
+async fn load_runtime_state(
+    cfg: &RuntimeConfig,
+    namespace: &str,
+    group: &str,
+) -> AnyResult<RuntimeStateJournal> {
+    let path = runtime_state_path(cfg, namespace, group);
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(RuntimeStateJournal::default()),
+        Err(e) => return Err(e).with_context(|| format!("reading recovery journal {}", path.display())),
+    };
+    let state: RuntimeStateJournal = serde_json::from_slice(&bytes)
+        .with_context(|| format!("decoding recovery journal {}", path.display()))?;
+    if state.version != RUNTIME_STATE_VERSION {
+        bail!(
+            "unsupported recovery journal version {} (expected {})",
+            state.version,
+            RUNTIME_STATE_VERSION
+        );
+    }
+    Ok(state)
+}
+
 #[derive(Clone)]
 struct Service {
     exit: Arc<ExitSignal>,
@@ -188,7 +439,14 @@ struct Service {
     event_tx: EventSender,
     event_rx: Arc<Mutex<Option<EventReceiver>>>,
     exit_events: Arc<Mutex<HashSet<String>>>,
+    oom_monitors: Arc<Mutex<HashSet<String>>>,
     stream_pending: Arc<Mutex<HashMap<String, usize>>>,
+    journal_sandbox: Arc<Mutex<Option<SandboxJournal>>>,
+    journal_lock: Arc<Mutex<()>>,
+    recovery_error: Arc<Mutex<Option<String>>>,
+    /// Serializes QMP attach/detach and journal ownership transitions.
+    device_op_lock: Arc<Mutex<()>>,
+    device_stats: Arc<Mutex<DeviceStats>>,
 }
 
 #[async_trait]
@@ -198,19 +456,37 @@ impl Shim for Service {
     async fn new(_runtime_id: &str, args: &Flags, _config: &mut Config) -> Self {
         let group = pod_group_from_bundle(&args.bundle).await.unwrap_or_else(|| args.id.clone());
         let (event_tx, event_rx) = channel(128);
+        let cfg = RuntimeConfig::default();
+        let (recovered, recovery_error) = if cfg.recovery_enabled {
+            match load_runtime_state(&cfg, &args.namespace, &group).await {
+                Ok(state) => (state, None),
+                Err(e) => (
+                    RuntimeStateJournal::default(),
+                    Some(format!("{e:#}")),
+                ),
+            }
+        } else {
+            (RuntimeStateJournal::default(), None)
+        };
         Self {
             exit: Arc::new(ExitSignal::default()),
             namespace: args.namespace.clone(),
             group,
-            cfg: RuntimeConfig::default(),
+            cfg,
             http: Client::new(),
             sandbox: Arc::new(Mutex::new(None)),
-            tasks: Arc::new(RwLock::new(HashMap::new())),
-            execs: Arc::new(RwLock::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(recovered.tasks)),
+            execs: Arc::new(RwLock::new(recovered.execs)),
             event_tx,
             event_rx: Arc::new(Mutex::new(Some(event_rx))),
             exit_events: Arc::new(Mutex::new(HashSet::new())),
+            oom_monitors: Arc::new(Mutex::new(HashSet::new())),
             stream_pending: Arc::new(Mutex::new(HashMap::new())),
+            journal_sandbox: Arc::new(Mutex::new(recovered.sandbox)),
+            journal_lock: Arc::new(Mutex::new(())),
+            recovery_error: Arc::new(Mutex::new(recovery_error)),
+            device_op_lock: Arc::new(Mutex::new(())),
+            device_stats: Arc::new(Mutex::new(recovered.device_stats)),
         }
     }
 
@@ -220,7 +496,9 @@ impl Shim for Service {
     }
 
     async fn delete_shim(&mut self) -> Result<DeleteResponse, Error> {
-        let _ = self.destroy_sandbox().await;
+        self.destroy_sandbox()
+            .await
+            .map_err(|e| Error::Other(format!("destroying secure-container sandbox: {e:#}")))?;
         Ok(DeleteResponse::new())
     }
 
@@ -251,11 +529,288 @@ impl Service {
         Ok(resp)
     }
 
+
+    async fn persist_runtime_state(&self) -> AnyResult<()> {
+        if !self.cfg.recovery_enabled {
+            return Ok(());
+        }
+        let _guard = self.journal_lock.lock().await;
+        let state = RuntimeStateJournal {
+            version: RUNTIME_STATE_VERSION,
+            sandbox: self.journal_sandbox.lock().await.clone(),
+            tasks: self.tasks.read().await.clone(),
+            execs: self.execs.read().await.clone(),
+            device_stats: self.device_stats.lock().await.clone(),
+        };
+        let root = runtime_state_root(&self.cfg, &self.namespace, &self.group);
+        tokio::fs::create_dir_all(&root).await?;
+        let path = runtime_state_path(&self.cfg, &self.namespace, &self.group);
+        let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        tokio::fs::write(&tmp, serde_json::to_vec_pretty(&state)?).await?;
+        tokio::fs::rename(&tmp, &path).await
+            .with_context(|| format!("committing recovery journal {}", path.display()))?;
+        Ok(())
+    }
+
+    async fn clear_runtime_state_file(&self) {
+        let _guard = self.journal_lock.lock().await;
+        let path = runtime_state_path(&self.cfg, &self.namespace, &self.group);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    async fn recovery_vm(&self, id: &str) -> AnyResult<Option<VmRecord>> {
+        let url = format!("{}/v1/vms/{id}", self.cfg.api_url.trim_end_matches('/'));
+        let mut req = self.http.get(&url);
+        if let Some(token) = &self.cfg.api_token {
+            req = req.bearer_auth(token);
+        }
+        let response = req.send().await.with_context(|| format!("recovering FluxVM VM {id}"))?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("FluxVM recovery GET {url} returned {status}: {body}");
+        }
+        Ok(Some(response.json().await.context("decoding recovered FluxVM VM")?))
+    }
+
+    async fn recovery_cni_ready(&self, cni: &CniBridge) -> bool {
+        if !cni.netns_mount.exists()
+            || !Path::new("/sys/class/net").join(&cni.host_bridge).exists()
+            || !Path::new("/sys/class/net").join(&cni.host_veth).exists()
+        {
+            return false;
+        }
+        for iface in [&cni.cni_bridge, &cni.cni_veth, &cni.interface] {
+            let mut args = vec![
+                "netns".to_string(), "exec".to_string(), cni.netns_alias.clone(),
+                "ip".to_string(), "link".to_string(), "show".to_string(), iface.clone(),
+            ];
+            let ok = tokio::process::Command::new("ip")
+                .args(args.drain(..))
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn attach_recovered_streams(&self, vm: &VmRecord) {
+        if !self.cfg.streaming_stdio {
+            return;
+        }
+        let tasks: Vec<(String, TaskMeta)> = self.tasks.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (id, meta) in tasks {
+            if !meta.streaming {
+                continue;
+            }
+            if let Err(e) = self.attach_stream_relays(
+                vm, &id, None, &meta.stdin, &meta.stdout, &meta.stderr, meta.terminal
+            ).await {
+                warn!("recovery stdio attach failed for {id}: {e:#}");
+            }
+        }
+        let execs: Vec<(String, TaskMeta)> = self.execs.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, meta) in execs {
+            if !meta.streaming {
+                continue;
+            }
+            let Some((id, exec_id)) = key.split_once('\0') else { continue; };
+            if let Err(e) = self.attach_stream_relays(
+                vm, id, Some(exec_id), &meta.stdin, &meta.stdout, &meta.stderr, meta.terminal
+            ).await {
+                warn!("recovery exec stdio attach failed for {id}/{exec_id}: {e:#}");
+            }
+        }
+    }
+
+    async fn restore_recovered_processes(&self, vm: &VmRecord) -> AnyResult<()> {
+        let tasks: Vec<(String, TaskMeta)> = self.tasks.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (id, meta) in tasks {
+            let response = self.call_agent_direct(
+                vm,
+                ContainerRequest::State { id: id.clone(), exec_id: None },
+            ).await.with_context(|| format!("checking recovered task {id}"))?;
+            match response {
+                ContainerResponse::State { status: ContainerStatus::Running | ContainerStatus::Paused, pid, .. } => {
+                    self.spawn_exit_watch(vm.clone(), id.clone(), None, if pid == 0 { meta.pid } else { pid });
+                }
+                ContainerResponse::State { status: ContainerStatus::Created, .. } => {}
+                ContainerResponse::State { status: ContainerStatus::Stopped, exit_code, exited_at_unix_nano, pid, .. } => {
+                    if let (Some(code), Some(at)) = (exit_code, exited_at_unix_nano) {
+                        self.publish_exit_once(id.clone(), None, pid, code, at).await;
+                    }
+                }
+                other => bail!("unexpected recovered task state: {other:?}"),
+            }
+            self.spawn_oom_watch(vm.clone(), id);
+        }
+
+        let execs: Vec<(String, TaskMeta)> = self.execs.read().await.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        for (key, meta) in execs {
+            let Some((id, exec_id)) = key.split_once('\0') else { continue; };
+            let response = self.call_agent_direct(
+                vm,
+                ContainerRequest::State { id: id.to_string(), exec_id: Some(exec_id.to_string()) },
+            ).await.with_context(|| format!("checking recovered exec {id}/{exec_id}"))?;
+            match response {
+                ContainerResponse::State { status: ContainerStatus::Running | ContainerStatus::Paused, pid, .. } => {
+                    self.spawn_exit_watch(
+                        vm.clone(), id.to_string(), Some(exec_id.to_string()),
+                        if pid == 0 { meta.pid } else { pid }
+                    );
+                }
+                ContainerResponse::State { status: ContainerStatus::Created, .. } => {}
+                ContainerResponse::State { status: ContainerStatus::Stopped, exit_code, exited_at_unix_nano, pid, .. } => {
+                    if let (Some(code), Some(at)) = (exit_code, exited_at_unix_nano) {
+                        self.publish_exit_once(
+                            id.to_string(), Some(exec_id.to_string()), pid, code, at
+                        ).await;
+                    }
+                }
+                other => bail!("unexpected recovered exec state: {other:?}"),
+            }
+        }
+        self.attach_recovered_streams(vm).await;
+        Ok(())
+    }
+
+    async fn recover_sandbox_from_journal(
+        &self,
+        journal: &SandboxJournal,
+    ) -> AnyResult<Sandbox> {
+        if !journal.ready {
+            bail!("recovery journal records a provisional, not-ready sandbox");
+        }
+        let started = tokio::time::Instant::now();
+        let mut vm = self.recovery_vm(&journal.vm_id).await?
+            .with_context(|| format!("journal-owned VM {} no longer exists", journal.vm_id))?;
+        if vm.name != journal.vm_name {
+            bail!(
+                "journal VM identity mismatch: expected name {:?}, got {:?}",
+                journal.vm_name,
+                vm.name
+            );
+        }
+        if let Some(cni) = journal.cni.as_ref() {
+            if !self.recovery_cni_ready(cni).await {
+                bail!("journal-owned CNI bridge/netns topology is incomplete");
+            }
+        }
+        if vm.status == VmStatus::Paused {
+            self.api(Method::POST, &format!("/v1/vms/{}/resume", vm.id), None).await?;
+            vm = self.api(Method::GET, &format!("/v1/vms/{}", vm.id), None)
+                .await?.json().await?;
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.cfg.boot_timeout_secs);
+        loop {
+            if vm.status == VmStatus::Running
+                && fluxvm_vsock_client::ping(&vm, Duration::from_secs(2)).await.is_ok()
+            {
+                break;
+            }
+            if vm.status == VmStatus::Failed {
+                bail!("journal-owned sandbox VM is failed: {}", vm.error.as_deref().unwrap_or("unknown"));
+            }
+            if tokio::time::Instant::now() >= deadline {
+                bail!("timed out recovering journal-owned VM {}", vm.id);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            vm = self.api(Method::GET, &format!("/v1/vms/{}", vm.id), None)
+                .await?.json().await?;
+        }
+        self.ensure_guest_shares_mounted(&vm, &journal.kubelet_mounts).await?;
+        if fluxvm_container_client::ping(&vm, Duration::from_millis(750)).await.is_err() {
+            if self.tasks.read().await.is_empty() && self.execs.read().await.is_empty() {
+                self.bootstrap_container_agent(&vm).await?;
+            } else {
+                bail!("container agent unavailable while live task metadata exists");
+            }
+        }
+        self.reconcile_device_attachments(&vm).await?;
+        let recovered_devices = self.journal_sandbox.lock().await.as_ref()
+            .map(|j| j.devices.clone()).unwrap_or_default();
+        self.restore_recovered_processes(&vm).await?;
+        info!(
+            "secure-container sandbox recovered vm={} group={} elapsed_ms={}",
+            vm.id,
+            self.group,
+            started.elapsed().as_millis()
+        );
+        Ok(Sandbox {
+            vm,
+            share_dir: journal.share_dir.clone(),
+            cni: journal.cni.clone(),
+            kubelet_mounts: journal.kubelet_mounts.clone(),
+            devices: recovered_devices,
+        })
+    }
+
     async fn ensure_sandbox(&self, hints: Option<&SandboxHints>) -> AnyResult<VmRecord> {
         let mut guard = self.sandbox.lock().await;
         if let Some(s) = guard.as_ref() {
             return Ok(s.vm.clone());
         }
+
+        if let Some(error) = self.recovery_error.lock().await.clone() {
+            bail!(
+                "secure-container recovery journal is unreadable or unsupported: {error};                  refusing a cold start that could duplicate the Pod VM"
+            );
+        }
+
+        if self.cfg.recovery_enabled {
+            if let Some(journal) = self.journal_sandbox.lock().await.clone() {
+                let has_processes =
+                    !self.tasks.read().await.is_empty() || !self.execs.read().await.is_empty();
+
+                if journal.ready {
+                    match self.recover_sandbox_from_journal(&journal).await {
+                        Ok(recovered) => {
+                            let vm = recovered.vm.clone();
+                            *guard = Some(recovered);
+                            return Ok(vm);
+                        }
+                        Err(e) if has_processes => {
+                            bail!(
+                                "failed to recover live secure-container sandbox: {e:#};                                  refusing to cold-create a duplicate VM"
+                            );
+                        }
+                        Err(e) => {
+                            warn!("discarding stale empty sandbox journal after recovery failure: {e:#}");
+                        }
+                    }
+                } else if has_processes {
+                    bail!(
+                        "recovery journal owns provisional VM {} while task metadata exists;                          refusing duplicate sandbox creation",
+                        journal.vm_id
+                    );
+                }
+
+                // Empty/provisional ownership can be reclaimed. The VM ID was
+                // persisted as soon as create returned, so even a crash during
+                // guest boot is cleaned up before a new sandbox is attempted.
+                if let Ok(Some(vm)) = self.recovery_vm(&journal.vm_id).await {
+                    let _ = self.api(Method::DELETE, &format!("/v1/vms/{}", vm.id), None).await;
+                }
+                if let Some(cni) = journal.cni.as_ref() {
+                    cleanup_cni_bridge(cni).await;
+                }
+                *self.journal_sandbox.lock().await = None;
+                self.clear_runtime_state_file().await;
+            }
+        }
+
+        let cold_started = tokio::time::Instant::now();
 
         if !self.cfg.guest_image.exists() {
             bail!(
@@ -295,6 +850,15 @@ impl Service {
         // before POST /v1/vms.
         let cni = if self.cfg.cni_enabled {
             if let Some(path) = hints.netns_path.as_ref() {
+                if self.cfg.cni_strict_multi_interface {
+                    let extras = detect_additional_cni_interfaces(path, &self.cfg.cni_interface).await?;
+                    if !extras.is_empty() {
+                        bail!(
+                            "CNI namespace has additional routable interfaces {:?};                              FluxVM Set 6 refuses silent partial Multus/multi-interface configuration.                              Set FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0 only for controlled testing",
+                            extras
+                        );
+                    }
+                }
                 Some(
                     prepare_cni_l2(&self.group, path, &self.cfg.cni_interface)
                         .await
@@ -383,6 +947,27 @@ impl Service {
             }
         };
 
+        if self.cfg.recovery_enabled {
+            let provisional = SandboxJournal {
+                vm_id: vm.id.to_string(),
+                vm_name: vm.name.clone(),
+                ready: false,
+                share_dir: share_dir.clone(),
+                cni: cni.clone(),
+                kubelet_mounts: kubelet_mounts.clone(),
+                devices: Vec::new(),
+            };
+            *self.journal_sandbox.lock().await = Some(provisional);
+            if let Err(e) = self.persist_runtime_state().await {
+                let _ = self.api(Method::DELETE, &format!("/v1/vms/{}", vm.id), None).await;
+                if let Some(cni) = cni.as_ref() {
+                    cleanup_cni_bridge(cni).await;
+                }
+                *self.journal_sandbox.lock().await = None;
+                return Err(e).context("persisting provisional VM ownership");
+            }
+        }
+
         let setup: AnyResult<()> = async {
             let deadline =
                 tokio::time::Instant::now() + Duration::from_secs(self.cfg.boot_timeout_secs);
@@ -443,14 +1028,27 @@ impl Service {
             if let Some(cni) = cni.as_ref() {
                 cleanup_cni_bridge(cni).await;
             }
+            *self.journal_sandbox.lock().await = None;
+            self.clear_runtime_state_file().await;
             return Err(e);
         }
 
-        *guard = Some(Sandbox {
+        let sandbox = Sandbox {
             vm: vm.clone(),
             share_dir,
             cni,
-        });
+            kubelet_mounts,
+            devices: Vec::new(),
+        };
+        *self.journal_sandbox.lock().await = Some(SandboxJournal::from_sandbox(&sandbox));
+        *guard = Some(sandbox);
+        self.persist_runtime_state().await?;
+        info!(
+            "secure-container sandbox cold-started vm={} group={} elapsed_ms={}",
+            vm.id,
+            self.group,
+            cold_started.elapsed().as_millis()
+        );
         Ok(vm)
     }
 
@@ -566,6 +1164,556 @@ impl Service {
         }
     }
 
+    async fn qmp_execute(&self, vm: &VmRecord, command: &str, args: Option<Value>) -> AnyResult<Value> {
+        let socket = vm.workspace.join("qmp.sock");
+        let stream = tokio::time::timeout(Duration::from_secs(10), UnixStream::connect(&socket))
+            .await.context("timing out connecting QMP")??;
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 { bail!("QMP closed before greeting"); }
+        let greeting: Value = serde_json::from_str(&line).context("decoding QMP greeting")?;
+        if greeting.get("QMP").is_none() { bail!("invalid QMP greeting from {}", socket.display()); }
+        write_half.write_all(b"{\"execute\":\"qmp_capabilities\"}\n").await?;
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 { bail!("QMP closed during capabilities"); }
+        let caps: Value = serde_json::from_str(&line)?;
+        if let Some(e) = caps.get("error") { bail!("QMP capabilities failed: {e}"); }
+        let mut request = json!({"execute": command});
+        if let Some(args) = args { request["arguments"] = args; }
+        write_half.write_all(format!("{request}\n").as_bytes()).await?;
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await? == 0 { bail!("QMP closed while waiting for {command}"); }
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply.get("event").is_some() { continue; }
+            if let Some(e) = reply.get("error") { bail!("QMP {command} failed: {e}"); }
+            return Ok(reply.get("return").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    async fn qmp_device_del_wait(&self, vm: &VmRecord, device_id: &str) -> AnyResult<()> {
+        let socket = vm.workspace.join("qmp.sock");
+        let stream = tokio::time::timeout(Duration::from_secs(10), UnixStream::connect(&socket))
+            .await.context("timing out connecting QMP for device_del")??;
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut reader = BufReader::new(read_half);
+        let mut line = String::new();
+        if reader.read_line(&mut line).await? == 0 { bail!("QMP closed before greeting"); }
+        let greeting: Value = serde_json::from_str(&line).context("decoding QMP greeting")?;
+        if greeting.get("QMP").is_none() { bail!("invalid QMP greeting from {}", socket.display()); }
+        write_half.write_all(b"{\"execute\":\"qmp_capabilities\"}\n").await?;
+        line.clear();
+        if reader.read_line(&mut line).await? == 0 { bail!("QMP closed during capabilities"); }
+        let caps: Value = serde_json::from_str(&line)?;
+        if let Some(e) = caps.get("error") { bail!("QMP capabilities failed: {e}"); }
+
+        let request_id = format!("fluxvm-device-del-{device_id}");
+        write_half.write_all(
+            format!("{}\n", json!({"execute":"device_del","arguments":{"id":device_id},"id":request_id})).as_bytes()
+        ).await?;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(self.cfg.device_unplug_timeout_secs);
+        let mut accepted = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("timed out waiting for QEMU DEVICE_DELETED for {device_id}");
+            }
+            line.clear();
+            let read = tokio::time::timeout(remaining, reader.read_line(&mut line))
+                .await.context("timed out reading QMP device_del event")??;
+            if read == 0 { bail!("QMP closed while waiting for device removal {device_id}"); }
+            let reply: Value = serde_json::from_str(&line)?;
+            if reply.get("id").and_then(Value::as_str) == Some(request_id.as_str()) {
+                if let Some(e) = reply.get("error") { bail!("QMP device_del {device_id} failed: {e}"); }
+                accepted = true;
+                continue;
+            }
+            match reply.get("event").and_then(Value::as_str) {
+                Some("DEVICE_DELETED")
+                    if reply.pointer("/data/device").and_then(Value::as_str) == Some(device_id)
+                        || reply.pointer("/data/path").and_then(Value::as_str)
+                            .is_some_and(|path| path.ends_with(&format!("/{device_id}"))) => {
+                        if !accepted {
+                            warn!("QEMU reported DEVICE_DELETED for {device_id} before command response");
+                        }
+                        return Ok(());
+                    }
+                Some("DEVICE_UNPLUG_GUEST_ERROR")
+                    if reply.pointer("/data/device").and_then(Value::as_str) == Some(device_id)
+                        || reply.pointer("/data/path").and_then(Value::as_str)
+                            .is_some_and(|path| path.ends_with(&format!("/{device_id}"))) => {
+                        bail!("guest rejected hot-unplug of QEMU device {device_id}");
+                    }
+                _ => {}
+            }
+        }
+    }
+
+    async fn qmp_device_present(&self, vm: &VmRecord, device_id: &str) -> bool {
+        self.qmp_execute(
+            vm,
+            "qom-list",
+            Some(json!({"path": format!("/machine/peripheral/{device_id}")})),
+        ).await.is_ok()
+    }
+
+    fn canonical_block_source(&self, source: &Path, pod_uid: Option<&str>) -> AnyResult<PathBuf> {
+        // Kubernetes raw-block Pod paths are intentionally symlinks into the
+        // plugin's global device map. Authorize the kubelet-owned *link path*
+        // first, then canonicalize to the actual host block device. Checking
+        // the canonical target against volumeDevices would incorrectly reject
+        // every valid CSI raw-block mapping.
+        let mut allowed_origin = false;
+        if let Some(uid) = pod_uid {
+            let pod_devices = PathBuf::from("/var/lib/kubelet/pods").join(uid).join("volumeDevices");
+            allowed_origin |= source.starts_with(&pod_devices);
+        }
+        allowed_origin |= self.cfg.block_allow_prefixes.iter().any(|p| source.starts_with(p));
+        if !allowed_origin {
+            bail!(
+                "raw block source {} is outside the Pod volumeDevices tree and FLUXVM_CONTAINER_BLOCK_ALLOW_PREFIXES",
+                source.display()
+            );
+        }
+        let canonical = std::fs::canonicalize(source)
+            .with_context(|| format!("canonicalizing raw block source {}", source.display()))?;
+        let meta = std::fs::metadata(&canonical)
+            .with_context(|| format!("stat raw block source {}", canonical.display()))?;
+        if !meta.file_type().is_block_device() {
+            bail!("{} resolves to {}, which is not a block device", source.display(), canonical.display());
+        }
+        Ok(canonical)
+    }
+
+    fn pod_block_source_for_rdev(&self, pod_uid: Option<&str>, major: u64, minor: u64) -> Option<PathBuf> {
+        let uid = pod_uid?;
+        let root = PathBuf::from("/var/lib/kubelet/pods").join(uid).join("volumeDevices");
+        find_block_rdev_under(&root, major, minor, 8)
+    }
+
+    fn guest_driver_companion_allowed(&self, path: &str) -> bool {
+        let builtin = matches!(
+            path,
+            "/dev/nvidiactl" | "/dev/nvidia-uvm" | "/dev/nvidia-uvm-tools" |
+            "/dev/nvidia-modeset" | "/dev/kfd"
+        );
+        let nvidia_cap = path.strip_prefix("/dev/nvidia-caps/nvidia-cap")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()));
+        builtin || nvidia_cap || self.cfg.guest_device_allow.iter().any(|v| v == path)
+    }
+
+    fn validate_vfio_group(&self, bdf: &str) -> AnyResult<Option<u32>> {
+        if !valid_pci_bdf(bdf) { bail!("invalid PCI BDF {bdf:?}"); }
+        if !self.cfg.vfio_allow.iter().any(|v| v == bdf) {
+            bail!("VFIO device {bdf} is not in FLUXVM_CONTAINER_VFIO_ALLOW");
+        }
+        let driver = pci_driver_name(bdf);
+        if driver.as_deref() != Some("vfio-pci") {
+            bail!("VFIO device {bdf} must already be bound to vfio-pci (found {:?})", driver);
+        }
+        let group = iommu_group_info(bdf)?;
+        if self.cfg.vfio_require_iommu_group {
+            let (group_id, members) = group.as_ref().with_context(|| {
+                format!("VFIO device {bdf} has no IOMMU group; disable FLUXVM_CONTAINER_VFIO_REQUIRE_IOMMU_GROUP only for an isolated lab")
+            })?;
+            for member in members {
+                if !self.cfg.vfio_allow.iter().any(|v| v == member) {
+                    bail!("IOMMU group {group_id} member {member} is not explicitly allowlisted");
+                }
+                if pci_driver_name(member).as_deref() != Some("vfio-pci") {
+                    bail!("IOMMU group {group_id} member {member} is not bound to vfio-pci");
+                }
+            }
+        }
+        Ok(group.map(|(id, _)| id))
+    }
+
+    async fn persist_attachment_owner(&self, key: &str, owner: &str) -> AnyResult<()> {
+        let mut changed = false;
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
+            if let Some(item) = sandbox.devices.iter_mut().find(|d| d.key() == key) {
+                changed |= item.add_owner(owner);
+            }
+        }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
+            if let Some(item) = journal.devices.iter_mut().find(|d| d.key() == key) {
+                changed |= item.add_owner(owner);
+            }
+        }
+        if changed { self.persist_runtime_state().await?; }
+        Ok(())
+    }
+
+    async fn remember_device(&self, attachment: DeviceAttachment) -> AnyResult<()> {
+        let key = attachment.key();
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
+            if let Some(existing) = sandbox.devices.iter_mut().find(|d| d.key() == key) {
+                *existing = attachment.clone();
+            } else {
+                sandbox.devices.push(attachment.clone());
+            }
+        }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
+            if let Some(existing) = journal.devices.iter_mut().find(|d| d.key() == key) {
+                *existing = attachment.clone();
+            } else {
+                journal.devices.push(attachment);
+            }
+        }
+        self.persist_runtime_state().await
+    }
+
+    async fn ensure_block_hotplug(
+        &self,
+        vm: &VmRecord,
+        source: &Path,
+        pod_uid: Option<&str>,
+        owner: &str,
+    ) -> AnyResult<(String, String)> {
+        if !self.cfg.device_passthrough {
+            bail!("raw block passthrough is disabled by FLUXVM_CONTAINER_DEVICE_PASSTHROUGH=0");
+        }
+        let _op = self.device_op_lock.lock().await;
+        let source = self.canonical_block_source(source, pod_uid)?;
+        let meta = std::fs::metadata(&source)?;
+        let rdev = meta.rdev();
+        let host_major = libc::major(rdev) as u64;
+        let host_minor = libc::minor(rdev) as u64;
+        let key = format!("block:{}", source.display());
+
+        let existing = self.journal_sandbox.lock().await.as_ref().and_then(|j| {
+            j.devices.iter().find(|d| match d {
+                DeviceAttachment::Block { host_path, host_major: old_major, host_minor: old_minor, .. } => {
+                    host_path == &source
+                        || std::fs::canonicalize(host_path).ok().as_ref() == Some(&source)
+                        || (old_major == &Some(host_major) && old_minor == &Some(host_minor))
+                }
+                _ => false,
+            }).cloned()
+        });
+        if let Some(existing) = existing {
+            let serial = match &existing {
+                DeviceAttachment::Block { serial, host_major: old_major, host_minor: old_minor, .. } => {
+                    if old_major.is_some_and(|v| v != host_major) || old_minor.is_some_and(|v| v != host_minor) {
+                        bail!("raw block identity drift for {}: journal {:?}:{:?}, host {host_major}:{host_minor}", source.display(), old_major, old_minor);
+                    }
+                    serial.clone()
+                }
+                _ => unreachable!(),
+            };
+            if !self.qmp_device_present(vm, existing.device_id()).await {
+                bail!("journal owns {key} but QEMU device {} is missing; refusing duplicate attach", existing.device_id());
+            }
+            let existing_key = existing.key();
+            self.persist_attachment_owner(&existing_key, owner).await?;
+            return Ok((serial, existing_key));
+        }
+
+        // Retry any previously deferred zero-owner unplug before consuming
+        // another QEMU device slot.
+        let _ = self.reap_unowned_devices_locked(vm).await;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        let suffix = format!("{:016x}", hasher.finish());
+        let serial = format!("fluxvm-{suffix}");
+        let node_name = format!("fvblk{suffix}");
+        let device_id = format!("fvdev{suffix}");
+        self.qmp_execute(vm, "blockdev-add", Some(json!({
+            "node-name": node_name, "driver": "host_device", "filename": source,
+            "cache": {"direct": true, "no-flush": false}
+        }))).await.with_context(|| format!("hotplug blockdev-add {}", source.display()))?;
+        if let Err(e) = self.qmp_execute(vm, "device_add", Some(json!({
+            "driver": "scsi-hd", "drive": node_name, "id": device_id,
+            "bus": "scsi0.0", "serial": serial
+        }))).await {
+            let _ = self.qmp_execute(vm, "blockdev-del", Some(json!({"node-name": node_name}))).await;
+            return Err(e).with_context(|| format!("attaching raw block {} to guest", source.display()));
+        }
+        let attachment = DeviceAttachment::Block {
+            host_path: source,
+            serial: serial.clone(),
+            node_name,
+            device_id,
+            host_major: Some(host_major),
+            host_minor: Some(host_minor),
+            owners: Some(vec![owner.to_string()]),
+        };
+        if let Err(e) = self.remember_device(attachment.clone()).await {
+            let _ = self.detach_device(vm, &attachment).await;
+            let _ = self.remove_attachment_from_state(&key).await;
+            return Err(e).context("persisting raw-block attachment ownership");
+        }
+        {
+            let mut stats = self.device_stats.lock().await;
+            stats.attach_total = stats.attach_total.saturating_add(1);
+        }
+        self.persist_runtime_state().await?;
+        Ok((serial, key))
+    }
+
+    async fn ensure_vfio_hotplug(&self, vm: &VmRecord, bdf: &str, guest_path: &str, owner: &str) -> AnyResult<String> {
+        if !self.cfg.device_passthrough { bail!("VFIO passthrough is disabled"); }
+        let _op = self.device_op_lock.lock().await;
+        let iommu_group = self.validate_vfio_group(bdf)?;
+        let key = format!("vfio:{bdf}");
+        let existing = self.journal_sandbox.lock().await.as_ref()
+            .and_then(|j| j.devices.iter().find(|d| d.key() == key).cloned());
+        if let Some(existing) = existing {
+            if let DeviceAttachment::Vfio { iommu_group: old_group, .. } = &existing {
+                if old_group.is_some() && *old_group != iommu_group {
+                    bail!("VFIO IOMMU-group drift for {bdf}: journal {old_group:?}, host {iommu_group:?}");
+                }
+            }
+            if !self.qmp_device_present(vm, existing.device_id()).await {
+                bail!("journal owns {key} but QEMU device {} is missing; refusing duplicate attach", existing.device_id());
+            }
+            self.persist_attachment_owner(&key, owner).await?;
+            return Ok(key);
+        }
+
+        let _ = self.reap_unowned_devices_locked(vm).await;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bdf.hash(&mut hasher);
+        let suffix = format!("{:016x}", hasher.finish());
+        let device_id = format!("fvvfio{}", &suffix[..12]);
+        let mut last = None;
+        for port in 0..4u8 {
+            let args = json!({"driver":"vfio-pci","host":bdf,"id":device_id,"bus":format!("hotplug-pcie-{port}")});
+            match self.qmp_execute(vm, "device_add", Some(args)).await {
+                Ok(_) => {
+                    let attachment = DeviceAttachment::Vfio {
+                        bdf: bdf.to_string(), guest_path: guest_path.to_string(), device_id,
+                        iommu_group,
+                        owners: Some(vec![owner.to_string()]),
+                    };
+                    if let Err(e) = self.remember_device(attachment.clone()).await {
+                        let _ = self.detach_device(vm, &attachment).await;
+                        let _ = self.remove_attachment_from_state(&key).await;
+                        return Err(e).context("persisting VFIO attachment ownership");
+                    }
+                    {
+                        let mut stats = self.device_stats.lock().await;
+                        stats.attach_total = stats.attach_total.saturating_add(1);
+                    }
+                    self.persist_runtime_state().await?;
+                    return Ok(key);
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("no QEMU PCIe hotplug port available"))).with_context(|| format!("attaching VFIO PCI device {bdf}"))
+    }
+
+    async fn detach_device(&self, vm: &VmRecord, attachment: &DeviceAttachment) -> AnyResult<()> {
+        self.qmp_device_del_wait(vm, attachment.device_id()).await?;
+        if let DeviceAttachment::Block { node_name, .. } = attachment {
+            self.qmp_execute(vm, "blockdev-del", Some(json!({"node-name": node_name})))
+                .await.with_context(|| format!("deleting QEMU block node {node_name}"))?;
+        }
+        {
+            let mut stats = self.device_stats.lock().await;
+            stats.detach_total = stats.detach_total.saturating_add(1);
+        }
+        info!("secure-container device detached key={} qdev={}", attachment.key(), attachment.device_id());
+        Ok(())
+    }
+
+    async fn remove_attachment_from_state(&self, key: &str) -> AnyResult<()> {
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
+            sandbox.devices.retain(|d| d.key() != key);
+        }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
+            journal.devices.retain(|d| d.key() != key);
+        }
+        self.persist_runtime_state().await
+    }
+
+    async fn reap_unowned_devices_locked(&self, vm: &VmRecord) -> AnyResult<()> {
+        let candidates: Vec<DeviceAttachment> = self.journal_sandbox.lock().await.as_ref()
+            .map(|j| j.devices.iter().filter(|d| d.is_releasable()).cloned().collect())
+            .unwrap_or_default();
+        let mut failures = Vec::new();
+        for attachment in candidates {
+            match self.detach_device(vm, &attachment).await {
+                Ok(_) => self.remove_attachment_from_state(&attachment.key()).await?,
+                Err(e) => {
+                    warn!("hot-unplug deferred for {}: {e:#}", attachment.key());
+                    failures.push(format!("{}: {e:#}", attachment.key()));
+                    let mut stats = self.device_stats.lock().await;
+                    stats.unplug_failures = stats.unplug_failures.saturating_add(1);
+                }
+            }
+        }
+        if !failures.is_empty() {
+            let _ = self.persist_runtime_state().await;
+            bail!("one or more device hot-unplugs remain pending: {}", failures.join("; "));
+        }
+        Ok(())
+    }
+
+    async fn release_device_claims(&self, vm: &VmRecord, owner: &str, claims: &[String]) {
+        if claims.is_empty() { return; }
+        let _op = self.device_op_lock.lock().await;
+        let claim_set: HashSet<&str> = claims.iter().map(String::as_str).collect();
+        let mut changed = false;
+        if let Some(sandbox) = self.sandbox.lock().await.as_mut() {
+            for item in &mut sandbox.devices {
+                if claim_set.contains(item.key().as_str()) { changed |= item.remove_owner(owner); }
+            }
+        }
+        if let Some(journal) = self.journal_sandbox.lock().await.as_mut() {
+            for item in &mut journal.devices {
+                if claim_set.contains(item.key().as_str()) { changed |= item.remove_owner(owner); }
+            }
+        }
+        if changed {
+            if let Err(e) = self.persist_runtime_state().await {
+                warn!("persisting released device claims for {owner} failed: {e:#}");
+            }
+        }
+        if let Err(e) = self.reap_unowned_devices_locked(vm).await {
+            // Container deletion must remain successful once the guest process
+            // is gone. Keep the zero-owner attachment in the journal and retry
+            // on the next device operation/recovery or at sandbox destruction.
+            warn!("device cleanup after container {owner} is pending: {e:#}");
+        }
+    }
+
+    async fn reconcile_device_attachments(&self, vm: &VmRecord) -> AnyResult<()> {
+        let _op = self.device_op_lock.lock().await;
+        {
+            let mut stats = self.device_stats.lock().await;
+            stats.recovery_checks = stats.recovery_checks.saturating_add(1);
+        }
+        let attachments = self.journal_sandbox.lock().await.as_ref()
+            .map(|j| j.devices.clone()).unwrap_or_default();
+        for attachment in &attachments {
+            match attachment {
+                DeviceAttachment::Block { host_path, host_major, host_minor, .. } => {
+                    let meta = std::fs::metadata(host_path)
+                        .with_context(|| format!("recovery block device {} disappeared", host_path.display()))?;
+                    if !meta.file_type().is_block_device() { bail!("recovery device {} is no longer block-special", host_path.display()); }
+                    let rdev = meta.rdev();
+                    let major = libc::major(rdev) as u64;
+                    let minor = libc::minor(rdev) as u64;
+                    if host_major.is_some_and(|v| v != major) || host_minor.is_some_and(|v| v != minor) {
+                        bail!("recovery block identity drift for {}", host_path.display());
+                    }
+                }
+                DeviceAttachment::Vfio { bdf, iommu_group, .. } => {
+                    let current = self.validate_vfio_group(bdf)?;
+                    if iommu_group.is_some() && *iommu_group != current {
+                        bail!("recovery VFIO IOMMU-group drift for {bdf}: journal {iommu_group:?}, host {current:?}");
+                    }
+                }
+            }
+            if !self.qmp_device_present(vm, attachment.device_id()).await {
+                bail!("recovery journal device {} ({}) is missing from QEMU", attachment.key(), attachment.device_id());
+            }
+        }
+        // Set 9-owned devices whose containers were deleted immediately
+        // before a shim crash can be left with zero owners. Retry unplug now.
+        let _ = self.reap_unowned_devices_locked(vm).await;
+        self.persist_runtime_state().await?;
+        Ok(())
+    }
+
+    async fn rollback_prepared_device_claims(
+        &self,
+        vm: &VmRecord,
+        owner: &str,
+        claims: &[String],
+        error: anyhow::Error,
+    ) -> AnyResult<Vec<String>> {
+        self.release_device_claims(vm, owner, claims).await;
+        Err(error)
+    }
+
+    async fn prepare_hotplug_devices(
+        &self,
+        vm: &VmRecord,
+        spec: &mut Value,
+        pod_uid: Option<&str>,
+        owner: &str,
+    ) -> AnyResult<Vec<String>> {
+        let mut claims = Vec::new();
+        if let Some(mounts) = spec.get_mut("mounts").and_then(Value::as_array_mut) {
+            for mount in mounts.iter_mut() {
+                let is_bind = mount.get("type").and_then(Value::as_str) == Some("bind")
+                    || mount.get("options").and_then(Value::as_array).is_some_and(|o| o.iter().any(|v| matches!(v.as_str(), Some("bind" | "rbind"))));
+                if !is_bind { continue; }
+                let Some(source) = mount.get("source").and_then(Value::as_str).map(PathBuf::from) else { continue; };
+                let Ok(meta) = std::fs::metadata(&source) else { continue; };
+                if meta.file_type().is_block_device() {
+                    let (serial, key) = match self.ensure_block_hotplug(vm, &source, pod_uid, owner).await {
+                        Ok(value) => value,
+                        Err(e) => return self.rollback_prepared_device_claims(vm, owner, &claims, e).await,
+                    };
+                    mount["source"] = Value::String(format!("fluxvm-block://{serial}"));
+                    if !claims.contains(&key) { claims.push(key); }
+                }
+            }
+        }
+        if let Some(devices) = spec.pointer_mut("/linux/devices").and_then(Value::as_array_mut) {
+            for dev in devices.iter_mut() {
+                let kind = dev.get("type").and_then(Value::as_str).unwrap_or("");
+                let Some(path) = dev.get("path").and_then(Value::as_str).map(str::to_string) else { continue; };
+                let Some(major) = dev.get("major").and_then(Value::as_i64) else { continue; };
+                let Some(minor) = dev.get("minor").and_then(Value::as_i64) else { continue; };
+                if major < 0 || minor < 0 { continue; }
+
+                if kind == "b" {
+                    let Some(source) = self.pod_block_source_for_rdev(pod_uid, major as u64, minor as u64)
+                        .or_else(|| host_block_path_for_rdev(major as u64, minor as u64)) else {
+                        let e = anyhow::anyhow!(
+                            "OCI block device {path} ({major}:{minor}) is not owned by this Pod volumeDevices tree or an explicit block allowlist"
+                        );
+                        return self.rollback_prepared_device_claims(vm, owner, &claims, e).await;
+                    };
+                    let (serial, key) = match self.ensure_block_hotplug(vm, &source, pod_uid, owner).await {
+                        Ok(value) => value,
+                        Err(e) => return self.rollback_prepared_device_claims(vm, owner, &claims, e).await,
+                    };
+                    dev["major"] = Value::from(-2);
+                    dev["minor"] = Value::from(-2);
+                    dev["fluxvmBlockSerial"] = Value::String(serial);
+                    if !claims.contains(&key) { claims.push(key); }
+                    continue;
+                }
+
+                if !matches!(kind, "c" | "u") { continue; }
+                if is_builtin_guest_char_device(&path) { continue; }
+                let Some(bdf) = pci_bdf_for_host_device(major as u64, minor as u64) else {
+                    if self.guest_driver_companion_allowed(&path) {
+                        // Global control nodes (e.g. nvidiactl/UVM, AMD KFD)
+                        // are created by the guest driver after the actual PCI
+                        // function is attached. Mark them guest-resolved only;
+                        // never recreate the host major/minor in the VM.
+                        dev["major"] = Value::from(-1);
+                        dev["minor"] = Value::from(-1);
+                        dev["fluxvmGuestCompanion"] = Value::Bool(true);
+                        continue;
+                    }
+                    let e = anyhow::anyhow!(
+                        "OCI device {path} ({major}:{minor}) has no PCI parent eligible for VFIO and is not an allowed guest-driver companion"
+                    );
+                    return self.rollback_prepared_device_claims(vm, owner, &claims, e).await;
+                };
+                let key = match self.ensure_vfio_hotplug(vm, &bdf, &path, owner).await {
+                    Ok(key) => key,
+                    Err(e) => return self.rollback_prepared_device_claims(vm, owner, &claims, e).await,
+                };
+                dev["major"] = Value::from(-1);
+                dev["minor"] = Value::from(-1);
+                if !claims.contains(&key) { claims.push(key); }
+            }
+        }
+        claims.sort();
+        Ok(claims)
+    }
+
     async fn sandbox_paths(&self, id: &str, hints: Option<&SandboxHints>) -> AnyResult<(VmRecord, PathBuf, String)> {
         let vm = self.ensure_sandbox(hints).await?;
         let guard = self.sandbox.lock().await;
@@ -575,7 +1723,7 @@ impl Service {
         Ok((vm, host, guest))
     }
 
-    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>)> {
+    async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>, Vec<String>)> {
         let config_path = Path::new(&req.bundle).join("config.json");
         let text = tokio::fs::read_to_string(&config_path)
             .await
@@ -602,9 +1750,19 @@ impl Service {
         copy_result?;
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
-        stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await?;
-        let (io, io_dir) = self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await?;
-        Ok((vm, serde_json::to_string(&spec)?, io, io_dir))
+        let device_claims = self.prepare_hotplug_devices(&vm, &mut spec, hints.pod_uid.as_deref(), &req.id).await?;
+        if let Err(e) = stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await {
+            self.release_device_claims(&vm, &req.id, &device_claims).await;
+            return Err(e);
+        }
+        let (io, io_dir) = match self.prepare_io(&req.id, &req.stdin, &req.stdout, &req.stderr, req.terminal, &host_ctr, &guest_ctr).await {
+            Ok(io) => io,
+            Err(e) => {
+                self.release_device_claims(&vm, &req.id, &device_claims).await;
+                return Err(e);
+            }
+        };
+        Ok((vm, serde_json::to_string(&spec)?, io, io_dir, device_claims))
     }
 
     async fn prepare_io(&self, id: &str, stdin: &str, stdout: &str, stderr: &str, terminal: bool, host_ctr: &Path, guest_ctr: &str) -> AnyResult<(ContainerIo, Option<PathBuf>)> {
@@ -868,6 +2026,74 @@ impl Service {
         });
     }
 
+    fn spawn_oom_watch(&self, vm: VmRecord, id: String) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            {
+                let mut active = service.oom_monitors.lock().await;
+                if !active.insert(id.clone()) {
+                    return;
+                }
+            }
+
+            let mut consecutive_errors = 0u32;
+            loop {
+                if !service.tasks.read().await.contains_key(&id) {
+                    break;
+                }
+                match service.call_agent_direct(&vm, ContainerRequest::CgroupEvents { id: id.clone() }).await {
+                    Ok(ContainerResponse::CgroupEvents { events }) => {
+                        consecutive_errors = 0;
+                        let seen = service.tasks.read().await.get(&id).map(|m| m.oom_kill_seen).unwrap_or(events.oom_kill);
+                        if events.oom_kill > seen {
+                            service.send_event(TaskOOM {
+                                container_id: id.clone(),
+                                ..Default::default()
+                            }).await;
+                            if let Some(meta) = service.tasks.write().await.get_mut(&id) {
+                                meta.oom_kill_seen = events.oom_kill;
+                            }
+                            if let Err(e) = service.persist_runtime_state().await {
+                                warn!("persisting OOM counter for {id} failed: {e:#}");
+                            }
+                            info!(
+                                "secure-container OOM id={} oom={} oom_kill={} max_events={}",
+                                id, events.oom, events.oom_kill, events.max
+                            );
+                        }
+                    }
+                    Ok(other) => {
+                        consecutive_errors += 1;
+                        if consecutive_errors == 1 || consecutive_errors % 20 == 0 {
+                            warn!("unexpected cgroup-events response for {id}: {other:?}");
+                        }
+                    }
+                    Err(e) => {
+                        consecutive_errors += 1;
+                        if consecutive_errors == 1 || consecutive_errors % 20 == 0 {
+                            warn!("OOM monitor query failed for {id}: {e:#}");
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(service.cfg.oom_poll_ms)).await;
+            }
+            service.oom_monitors.lock().await.remove(&id);
+        });
+    }
+
+    async fn delete_fluxvm_vm_idempotent(&self, vm_id: &str) -> AnyResult<()> {
+        let url = format!("{}/v1/vms/{vm_id}", self.cfg.api_url.trim_end_matches('/'));
+        let mut req = self.http.request(Method::DELETE, &url);
+        if let Some(token) = &self.cfg.api_token { req = req.bearer_auth(token); }
+        let response = req.send().await.with_context(|| format!("deleting journal-owned FluxVM VM {vm_id}"))?;
+        if response.status().is_success() || response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!("FluxVM DELETE {url} returned {status}: {body}");
+    }
+
     async fn cleanup_process_staging(&self, id: &str, exec_id: Option<&str>) {
         self.stream_pending.lock().await.remove(&process_key(id, exec_id));
         let share_dir = {
@@ -891,15 +2117,31 @@ impl Service {
     }
 
     async fn destroy_sandbox(&self) -> AnyResult<()> {
-        let mut guard = self.sandbox.lock().await;
-        if let Some(s) = guard.take() {
-            let _ = self.api(Method::DELETE, &format!("/v1/vms/{}", s.vm.id), None).await;
-            if let Some(cni) = s.cni.as_ref() {
-                cleanup_cni_bridge(cni).await;
-            }
-            let root = self.cfg.state_dir.join(&self.namespace).join(&self.group);
-            let _ = tokio::fs::remove_dir_all(root).await;
+        // Never drop the recovery journal before VM deletion is confirmed.
+        // If the FluxVM API is temporarily unavailable, returning an error
+        // leaves authoritative ownership in place for containerd's retry and
+        // prevents an orphaned VM from becoming invisible to the runtime.
+        let live = self.sandbox.lock().await.clone();
+        let journal = self.journal_sandbox.lock().await.clone();
+        let vm_id = live.as_ref().map(|s| s.vm.id.to_string())
+            .or_else(|| journal.as_ref().map(|j| j.vm_id.clone()));
+        if let Some(vm_id) = vm_id.as_deref() {
+            self.delete_fluxvm_vm_idempotent(vm_id).await?;
         }
+
+        if let Some(cni) = live.as_ref().and_then(|s| s.cni.as_ref()) {
+            cleanup_cni_bridge(cni).await;
+        } else if let Some(cni) = journal.as_ref().and_then(|j| j.cni.as_ref()) {
+            cleanup_cni_bridge(cni).await;
+        }
+
+        *self.sandbox.lock().await = None;
+        *self.journal_sandbox.lock().await = None;
+        self.tasks.write().await.clear();
+        self.execs.write().await.clear();
+        self.oom_monitors.lock().await.clear();
+        let root = runtime_state_root(&self.cfg, &self.namespace, &self.group);
+        let _ = tokio::fs::remove_dir_all(root).await;
         Ok(())
     }
 }
@@ -907,7 +2149,7 @@ impl Service {
 #[async_trait]
 impl Task for Service {
     async fn create(&self, _ctx: &TtrpcContext, req: CreateTaskRequest) -> TtrpcResult<CreateTaskResponse> {
-        let (vm, config_json, io, io_dir) = match self.stage_rootfs_and_config(&req).await {
+        let (vm, config_json, io, io_dir, device_claims) = match self.stage_rootfs_and_config(&req).await {
             Ok(staged) => staged,
             Err(e) => {
                 self.cleanup_process_staging(&req.id, None).await;
@@ -931,6 +2173,7 @@ impl Task for Service {
         {
             Ok(response) => response,
             Err(e) => {
+                self.release_device_claims(&vm, &req.id, &device_claims).await;
                 self.cleanup_process_staging(&req.id, None).await;
                 return Err(rpc_other(e));
             }
@@ -938,6 +2181,7 @@ impl Task for Service {
         let pid = match response {
             ContainerResponse::Created { pid } => pid,
             other => {
+                self.release_device_claims(&vm, &req.id, &device_claims).await;
                 self.cleanup_process_staging(&req.id, None).await;
                 return Err(rpc_other(format!("unexpected create response: {other:?}")));
             }
@@ -948,6 +2192,7 @@ impl Task for Service {
             let _ = self.call_agent(&vm, ContainerRequest::Delete {
                 id: req.id.clone(), exec_id: None, force: true
             }).await;
+            self.release_device_claims(&vm, &req.id, &device_claims).await;
             self.cleanup_process_staging(&req.id, None).await;
             return Err(rpc_other(format!("attaching VSOCK stdio: {e:#}")));
         }
@@ -960,7 +2205,11 @@ impl Task for Service {
             bundle: req.bundle.clone(), stdin: req.stdin.clone(), stdout: req.stdout.clone(), stderr: req.stderr.clone(), terminal: req.terminal, pid,
             io_dir,
             streaming: self.cfg.streaming_stdio,
+            oom_kill_seen: 0,
+            device_claims,
         });
+        self.persist_runtime_state().await.map_err(rpc_other)?;
+        self.spawn_oom_watch(vm.clone(), req.id.clone());
         self.send_event(TaskCreate {
             container_id: req.id.clone(),
             bundle: req.bundle.clone(),
@@ -1080,6 +2329,11 @@ impl Task for Service {
     async fn delete(&self, _ctx: &TtrpcContext, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() { None } else { Some(req.exec_id.clone()) };
+        let device_claims = if exec_id.is_none() {
+            self.tasks.read().await.get(&req.id).map(|m| m.device_claims.clone()).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let response = self
             .call_agent(
                 &vm,
@@ -1110,6 +2364,10 @@ impl Task for Service {
         } else {
             self.tasks.write().await.remove(&req.id);
             self.execs.write().await.retain(|key, _| !key.starts_with(&format!("{}\0", req.id)));
+        }
+        self.persist_runtime_state().await.map_err(rpc_other)?;
+        if exec_id.is_none() {
+            self.release_device_claims(&vm, &req.id, &device_claims).await;
         }
 
         self.send_event(TaskDelete {
@@ -1165,7 +2423,10 @@ impl Task for Service {
             pid,
             io_dir,
             streaming: self.cfg.streaming_stdio,
+            oom_kill_seen: 0,
+            device_claims: Vec::new(),
         });
+        self.persist_runtime_state().await.map_err(rpc_other)?;
         self.send_event(TaskExecAdded {
             container_id: req.id,
             exec_id: req.exec_id,
@@ -1288,27 +2549,85 @@ fn stats_to_metrics(stats: &ContainerStats) -> Metrics {
     usage.set_total(stats.cpu_usage_usec);
     usage.set_user(stats.cpu_user_usec);
     usage.set_kernel(stats.cpu_system_usec);
+    let mut throttle = Throttle::new();
+    throttle.set_periods(stats.cpu_nr_periods);
+    throttle.set_throttled_periods(stats.cpu_nr_throttled);
+    throttle.set_throttled_time(stats.cpu_throttled_usec);
     let mut cpu = CPUStat::new();
     cpu.set_usage(usage);
+    cpu.set_throttling(throttle);
 
     let mut mem_usage = MemoryEntry::new();
+    mem_usage.set_limit(stats.memory_limit_bytes);
     mem_usage.set_usage(stats.memory_usage_bytes);
+    mem_usage.set_max(stats.memory_peak_bytes);
+    mem_usage.set_failcnt(stats.memory_events_max);
+    let mut swap = MemoryEntry::new();
+    let swap_usage = stats.memory_usage_bytes.saturating_add(stats.memory_swap_usage_bytes);
+    let swap_limit = if stats.memory_limit_bytes == 0 || stats.memory_swap_limit_bytes == 0 {
+        0
+    } else {
+        stats.memory_limit_bytes.saturating_add(stats.memory_swap_limit_bytes)
+    };
+    swap.set_limit(swap_limit);
+    swap.set_usage(swap_usage);
     let mut memory = MemoryStat::new();
     memory.set_usage(mem_usage);
+    memory.set_swap(swap);
+    memory.set_cache(stats.memory_file_bytes);
+    memory.set_rss(stats.memory_anon_bytes);
+    memory.set_rss_huge(stats.memory_anon_thp_bytes);
+    memory.set_mapped_file(stats.memory_file_mapped_bytes);
+    memory.set_dirty(stats.memory_dirty_bytes);
+    memory.set_writeback(stats.memory_writeback_bytes);
+    memory.set_pg_fault(stats.memory_pgfault);
+    memory.set_pg_maj_fault(stats.memory_pgmajfault);
+    memory.set_inactive_anon(stats.memory_inactive_anon_bytes);
+    memory.set_active_anon(stats.memory_active_anon_bytes);
+    memory.set_inactive_file(stats.memory_total_inactive_file_bytes);
+    memory.set_active_file(stats.memory_active_file_bytes);
+    memory.set_unevictable(stats.memory_unevictable_bytes);
+    // cgroup-v2 already reports hierarchical totals for this cgroup, so map
+    // the same counters into containerd's legacy total_* fields as runc does.
+    memory.set_total_cache(stats.memory_file_bytes);
+    memory.set_total_rss(stats.memory_anon_bytes);
+    memory.set_total_rss_huge(stats.memory_anon_thp_bytes);
+    memory.set_total_mapped_file(stats.memory_file_mapped_bytes);
+    memory.set_total_dirty(stats.memory_dirty_bytes);
+    memory.set_total_writeback(stats.memory_writeback_bytes);
+    memory.set_total_pg_fault(stats.memory_pgfault);
+    memory.set_total_pg_maj_fault(stats.memory_pgmajfault);
+    memory.set_total_inactive_anon(stats.memory_inactive_anon_bytes);
+    memory.set_total_active_anon(stats.memory_active_anon_bytes);
     memory.set_total_inactive_file(stats.memory_total_inactive_file_bytes);
+    memory.set_total_active_file(stats.memory_active_file_bytes);
+    memory.set_total_unevictable(stats.memory_unevictable_bytes);
 
     let mut pids = PidsStat::new();
     pids.set_current(stats.pids_current);
     pids.set_limit(stats.pids_limit);
 
+    let mut oom = MemoryOomControl::new();
+    oom.set_oom_kill(stats.memory_events_oom_kill);
+
     let mut metrics = Metrics::new();
     metrics.set_cpu(cpu);
     metrics.set_memory(memory);
     metrics.set_pids(pids);
+    metrics.set_memory_oom_control(oom);
     metrics
 }
 
 fn resource_limits_from_linux_resources(value: &Value) -> ResourceLimits {
+    let unified = value
+        .get("unified")
+        .and_then(Value::as_object)
+        .map(|map| {
+            map.iter()
+                .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
     ResourceLimits {
         cpu_quota: value.pointer("/cpu/quota").and_then(Value::as_i64),
         cpu_period: value.pointer("/cpu/period").and_then(Value::as_u64),
@@ -1316,7 +2635,10 @@ fn resource_limits_from_linux_resources(value: &Value) -> ResourceLimits {
         cpuset_cpus: value.pointer("/cpu/cpus").and_then(Value::as_str).map(str::to_string),
         cpuset_mems: value.pointer("/cpu/mems").and_then(Value::as_str).map(str::to_string),
         memory_limit_bytes: value.pointer("/memory/limit").and_then(Value::as_i64),
+        memory_reservation_bytes: value.pointer("/memory/reservation").and_then(Value::as_i64),
+        memory_swap_bytes: value.pointer("/memory/swap").and_then(Value::as_i64),
         pids_limit: value.pointer("/pids/limit").and_then(Value::as_i64),
+        unified,
     }
 }
 
@@ -1452,21 +2774,75 @@ fn parse_mac(raw: &str) -> AnyResult<String> {
     Ok(parts.join(":").to_ascii_lowercase())
 }
 
-fn parse_ipv4_destination(raw: &str) -> AnyResult<Option<(Ipv4Addr, u8)>> {
+fn parse_ip_destination(raw: &str, family: CniFamily) -> AnyResult<Option<(IpAddr, u8)>> {
     if raw == "default" || raw.is_empty() {
         return Ok(None);
     }
-    let (address, prefix) = raw.split_once('/').unwrap_or((raw, "32"));
+    let default_prefix = match family { CniFamily::Ipv4 => "32", CniFamily::Ipv6 => "128" };
+    let (address, prefix) = raw.split_once('/').unwrap_or((raw, default_prefix));
     let address = address
-        .parse::<Ipv4Addr>()
-        .with_context(|| format!("invalid IPv4 route destination {raw:?}"))?;
+        .parse::<IpAddr>()
+        .with_context(|| format!("invalid {:?} route destination {raw:?}", family))?;
+    if !family.matches(address) {
+        bail!("route destination {address} does not match family {family:?}");
+    }
     let prefix = prefix
         .parse::<u8>()
-        .with_context(|| format!("invalid IPv4 route prefix {raw:?}"))?;
-    if prefix > 32 {
-        bail!("invalid IPv4 route prefix {raw:?}");
+        .with_context(|| format!("invalid route prefix {raw:?}"))?;
+    if prefix > family.max_prefix() {
+        bail!("invalid {:?} route prefix {raw:?}", family);
     }
     Ok(Some((address, prefix)))
+}
+
+fn address_is_routable(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_loopback() && !v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            !v6.is_unspecified()
+                && !v6.is_loopback()
+                && (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
+async fn detect_additional_cni_interfaces(
+    netns_path: &Path,
+    primary: &str,
+) -> AnyResult<Vec<String>> {
+    let args = vec![
+        format!("--net={}", netns_path.display()),
+        "--".into(),
+        "ip".into(),
+        "-j".into(),
+        "addr".into(),
+        "show".into(),
+    ];
+    let text = command_output("nsenter", &args).await?;
+    let links: Value = serde_json::from_str(&text).context("parsing CNI interface inventory")?;
+    let mut extras = Vec::new();
+    for link in links.as_array().into_iter().flatten() {
+        let Some(name) = link.get("ifname").and_then(Value::as_str) else { continue; };
+        if name == "lo" || name == primary {
+            continue;
+        }
+        let routable = link.get("addr_info").and_then(Value::as_array)
+            .into_iter().flatten()
+            .any(|info| {
+                if info.get("scope").and_then(Value::as_str) == Some("link") {
+                    return false;
+                }
+                info.get("local").and_then(Value::as_str)
+                    .and_then(|v| v.parse::<IpAddr>().ok())
+                    .is_some_and(address_is_routable)
+            });
+        if routable {
+            extras.push(name.to_string());
+        }
+    }
+    extras.sort();
+    extras.dedup();
+    Ok(extras)
 }
 
 async fn capture_cni_network(netns_path: &Path, interface: &str) -> AnyResult<CniNetwork> {
@@ -1481,7 +2857,6 @@ async fn capture_cni_network(netns_path: &Path, interface: &str) -> AnyResult<Cn
         format!("--net={}", netns_path.display()),
         "--".into(),
         "ip".into(),
-        "-4".into(),
         "-j".into(),
         "addr".into(),
         "show".into(),
@@ -1504,88 +2879,95 @@ async fn capture_cni_network(netns_path: &Path, interface: &str) -> AnyResult<Cn
         .get("addr_info")
         .and_then(Value::as_array)
         .context("CNI interface has no addr_info")?;
-    let ipv4 = addr_info
-        .iter()
-        .find(|info| info.get("family").and_then(Value::as_str) == Some("inet"))
-        .context("CNI namespace has no IPv4 address on the primary interface")?;
-    let pod_ip = ipv4
-        .get("local")
-        .and_then(Value::as_str)
-        .context("CNI IPv4 entry has no local address")?
-        .parse::<Ipv4Addr>()
-        .context("parsing CNI Pod IPv4 address")?;
-    let prefix_len = ipv4
-        .get("prefixlen")
-        .and_then(Value::as_u64)
-        .context("CNI IPv4 entry has no prefixlen")? as u8;
-    if prefix_len > 32 {
-        bail!("CNI IPv4 prefix length {prefix_len} is invalid");
-    }
 
-    let route_args = vec![
-        format!("--net={}", netns_path.display()),
-        "--".into(),
-        "ip".into(),
-        "-4".into(),
-        "-j".into(),
-        "route".into(),
-        "show".into(),
-    ];
-    let route_text = command_output("nsenter", &route_args).await?;
-    let route_json: Value =
-        serde_json::from_str(&route_text).context("parsing CNI ip -j route output")?;
+    let mut addresses = Vec::new();
+    for info in addr_info {
+        let family = match info.get("family").and_then(Value::as_str) {
+            Some("inet") => CniFamily::Ipv4,
+            Some("inet6") => CniFamily::Ipv6,
+            _ => continue,
+        };
+        if info.get("scope").and_then(Value::as_str) == Some("link") {
+            continue;
+        }
+        let Some(raw) = info.get("local").and_then(Value::as_str) else { continue; };
+        let address = raw.parse::<IpAddr>()
+            .with_context(|| format!("parsing CNI address {raw:?}"))?;
+        if !address_is_routable(address) || !family.matches(address) {
+            continue;
+        }
+        let prefix_len = info.get("prefixlen").and_then(Value::as_u64)
+            .context("CNI address entry has no prefixlen")? as u8;
+        if prefix_len > family.max_prefix() {
+            bail!("CNI {family:?} prefix length {prefix_len} is invalid");
+        }
+        addresses.push(CniAddress { family, address, prefix_len });
+    }
+    if addresses.is_empty() {
+        bail!("CNI namespace has no routable IPv4/IPv6 address on {interface}");
+    }
+    addresses.sort_by_key(|a| (a.family, a.address));
+
     let mut routes = Vec::new();
-    for route in route_json.as_array().into_iter().flatten() {
-        if route.get("dev").and_then(Value::as_str) != Some(interface) {
-            continue;
+    for family in [CniFamily::Ipv4, CniFamily::Ipv6] {
+        let route_args = vec![
+            format!("--net={}", netns_path.display()),
+            "--".into(),
+            "ip".into(),
+            family.ip_flag().into(),
+            "-j".into(),
+            "route".into(),
+            "show".into(),
+        ];
+        let route_text = command_output("nsenter", &route_args).await?;
+        let route_json: Value = serde_json::from_str(&route_text)
+            .with_context(|| format!("parsing CNI {:?} route output", family))?;
+        for route in route_json.as_array().into_iter().flatten() {
+            if route.get("dev").and_then(Value::as_str) != Some(interface) {
+                continue;
+            }
+            let route_type = route.get("type").and_then(Value::as_str).unwrap_or("unicast");
+            if route_type != "unicast" {
+                continue;
+            }
+            let destination = parse_ip_destination(
+                route.get("dst").and_then(Value::as_str).unwrap_or("default"),
+                family,
+            )?;
+            let gateway = route.get("gateway").and_then(Value::as_str)
+                .map(|v| v.parse::<IpAddr>())
+                .transpose()
+                .context("parsing CNI route gateway")?;
+            if gateway.is_some_and(|gateway| !family.matches(gateway)) {
+                bail!("CNI gateway family does not match route family {family:?}");
+            }
+            routes.push(CniRoute { family, destination, gateway });
         }
-        let route_type = route.get("type").and_then(Value::as_str).unwrap_or("unicast");
-        if route_type != "unicast" {
-            continue;
-        }
-        let destination = parse_ipv4_destination(
-            route.get("dst").and_then(Value::as_str).unwrap_or("default"),
-        )?;
-        let gateway = route
-            .get("gateway")
-            .and_then(Value::as_str)
-            .map(|v| v.parse::<Ipv4Addr>())
-            .transpose()
-            .context("parsing CNI route gateway")?;
-        routes.push(CniRoute {
-            destination,
-            gateway,
-        });
     }
-    // Link/local routes must exist before a default route that points through
-    // them (Calico commonly uses a link-local next hop), so default goes last.
-    routes.sort_by_key(|route| route.destination.is_none());
+    // Link/local routes before defaults, with IPv4 first only for deterministic
+    // logs/tests. The families themselves are configured independently.
+    routes.sort_by_key(|route| (route.family, route.destination.is_none()));
 
-    Ok(CniNetwork {
-        pod_ip,
-        prefix_len,
-        mac,
-        routes,
-    })
+    Ok(CniNetwork { addresses, mac, routes })
 }
 
-fn route_command(route: &CniRoute, interface: &str) -> String {
-    let destination = route
-        .destination
+fn route_command(route: &CniRoute) -> String {
+    let destination = route.destination
         .map(|(ip, prefix)| format!("{ip}/{prefix}"))
         .unwrap_or_else(|| "default".into());
+    let flag = route.family.ip_flag();
     match route.gateway {
         Some(gateway) => format!(
-            "ip -4 route replace {destination} via {gateway} dev \"$IFACE\""
+            "ip {flag} route replace {destination} via {gateway} dev \"$IFACE\""
         ),
-        None => format!("ip -4 route replace {destination} dev \"$IFACE\""),
+        None => format!("ip {flag} route replace {destination} dev \"$IFACE\""),
     }
 }
 
 fn guest_network_command(network: &CniNetwork) -> AnyResult<String> {
     parse_mac(&network.mac)?;
-    if network.prefix_len > 32 {
-        bail!("invalid Pod prefix length {}", network.prefix_len);
+    if network.addresses.is_empty() {
+        bail!("CNI network contains no guest addresses");
     }
     let mut lines = vec![
         "set -eu".to_string(),
@@ -1593,17 +2975,32 @@ fn guest_network_command(network: &CniNetwork) -> AnyResult<String> {
         "[ -n \"$IFACE\" ]".into(),
         "ip link set dev \"$IFACE\" up".into(),
         "ip -4 addr flush dev \"$IFACE\" || true".into(),
+        "ip -6 addr flush dev \"$IFACE\" scope global || true".into(),
         "ip -4 route flush dev \"$IFACE\" || true".into(),
-        format!(
-            "ip -4 addr add {}/{} dev \"$IFACE\"",
-            network.pod_ip, network.prefix_len
-        ),
+        "ip -6 route flush dev \"$IFACE\" || true".into(),
     ];
-    for route in &network.routes {
-        lines.push(route_command(route, "$IFACE"));
+    for address in &network.addresses {
+        if !address.family.matches(address.address) || address.prefix_len > address.family.max_prefix() {
+            bail!("invalid CNI address {:?}", address);
+        }
+        match address.family {
+            CniFamily::Ipv4 => lines.push(format!(
+                "ip -4 addr add {}/{} dev \"$IFACE\"",
+                address.address, address.prefix_len
+            )),
+            CniFamily::Ipv6 => lines.push(format!(
+                "ip -6 addr add {}/{} dev \"$IFACE\" nodad",
+                address.address, address.prefix_len
+            )),
+        }
     }
-    lines.push("ip -4 addr show dev \"$IFACE\"".into());
-    lines.push("ip -4 route show".into());
+    for route in &network.routes {
+        lines.push(route_command(route));
+    }
+    lines.push("ip -4 addr show dev \"$IFACE\" || true".into());
+    lines.push("ip -6 addr show dev \"$IFACE\" || true".into());
+    lines.push("ip -4 route show || true".into());
+    lines.push("ip -6 route show || true".into());
     Ok(lines.join("\n"))
 }
 
@@ -1730,7 +3127,9 @@ async fn prepare_cni_l2(group: &str, netns_path: &Path, interface: &str) -> AnyR
         )
         .await?;
         run_netns(&alias, "ip", &["-4".into(), "addr".into(), "flush".into(), "dev".into(), interface.into()]).await?;
+        run_netns_best_effort(&alias, "ip", &["-6".into(), "addr".into(), "flush".into(), "dev".into(), interface.into(), "scope".into(), "global".into()]).await;
         run_netns_best_effort(&alias, "ip", &["-4".into(), "route".into(), "flush".into(), "dev".into(), interface.into()]).await;
+        run_netns_best_effort(&alias, "ip", &["-6".into(), "route".into(), "flush".into(), "dev".into(), interface.into()]).await;
         run_netns_best_effort(&alias, "ip", &["link".into(), "set".into(), interface.into(), "down".into()]).await;
         run_netns(&alias, "ip", &["link".into(), "set".into(), interface.into(), "address".into(), port_mac]).await?;
         run_netns(&alias, "ip", &["link".into(), "set".into(), interface.into(), "up".into()]).await?;
@@ -1754,26 +3153,34 @@ async fn restore_cni_network(bridge: &CniBridge) {
         alias,
         "ip",
         &["link".into(), "set".into(), interface.clone(), "address".into(), bridge.network.mac.clone()],
-    )
-    .await;
+    ).await;
     run_netns_best_effort(alias, "ip", &["link".into(), "set".into(), interface.clone(), "up".into()]).await;
     run_netns_best_effort(alias, "ip", &["-4".into(), "addr".into(), "flush".into(), "dev".into(), interface.clone()]).await;
-    run_netns_best_effort(
-        alias,
-        "ip",
-        &[
-            "-4".into(), "addr".into(), "add".into(),
-            format!("{}/{}", bridge.network.pod_ip, bridge.network.prefix_len),
+    run_netns_best_effort(alias, "ip", &["-6".into(), "addr".into(), "flush".into(), "dev".into(), interface.clone(), "scope".into(), "global".into()]).await;
+    run_netns_best_effort(alias, "ip", &["-4".into(), "route".into(), "flush".into(), "dev".into(), interface.clone()]).await;
+    run_netns_best_effort(alias, "ip", &["-6".into(), "route".into(), "flush".into(), "dev".into(), interface.clone()]).await;
+
+    for address in &bridge.network.addresses {
+        let mut args = vec![
+            address.family.ip_flag().into(),
+            "addr".into(), "add".into(),
+            format!("{}/{}", address.address, address.prefix_len),
             "dev".into(), interface.clone(),
-        ],
-    )
-    .await;
+        ];
+        if address.family == CniFamily::Ipv6 {
+            args.push("nodad".into());
+        }
+        run_netns_best_effort(alias, "ip", &args).await;
+    }
+
     for route in &bridge.network.routes {
-        let destination = route
-            .destination
+        let destination = route.destination
             .map(|(ip, prefix)| format!("{ip}/{prefix}"))
             .unwrap_or_else(|| "default".into());
-        let mut args = vec!["-4".into(), "route".into(), "replace".into(), destination];
+        let mut args = vec![
+            route.family.ip_flag().into(),
+            "route".into(), "replace".into(), destination,
+        ];
         if let Some(gateway) = route.gateway {
             args.extend(["via".into(), gateway.to_string()]);
         }
@@ -1798,6 +3205,95 @@ async fn cleanup_cni_bridge(bridge: &CniBridge) {
     )
     .await;
     let _ = tokio::fs::remove_file(&bridge.netns_mount).await;
+}
+
+fn find_block_rdev_under(root: &Path, major: u64, minor: u64, depth: usize) -> Option<PathBuf> {
+    if depth == 0 { return None; }
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = std::fs::metadata(&path) else { continue; };
+        if meta.file_type().is_block_device() {
+            let rdev = meta.rdev();
+            if libc::major(rdev as libc::dev_t) as u64 == major && libc::minor(rdev as libc::dev_t) as u64 == minor {
+                return Some(path);
+            }
+        } else if meta.is_dir() {
+            if let Some(found) = find_block_rdev_under(&path, major, minor, depth - 1) { return Some(found); }
+        }
+    }
+    None
+}
+
+fn host_block_path_for_rdev(major: u64, minor: u64) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(format!("/sys/dev/block/{major}:{minor}/uevent")).ok()?;
+    let devname = text.lines().find_map(|line| line.strip_prefix("DEVNAME="))?;
+    let path = PathBuf::from("/dev").join(devname);
+    std::fs::metadata(&path).ok().filter(|m| m.file_type().is_block_device()).map(|_| path)
+}
+
+fn is_builtin_guest_char_device(path: &str) -> bool {
+    matches!(path, "/dev/null" | "/dev/zero" | "/dev/full" | "/dev/random" | "/dev/urandom" | "/dev/tty" | "/dev/console" | "/dev/ptmx")
+}
+
+fn looks_like_pci_bdf(name: &str) -> bool {
+    let b = name.as_bytes();
+    b.len() == 12 && b[4] == b':' && b[7] == b':' && b[10] == b'.'
+        && b.iter().enumerate().all(|(i, c)| matches!(i, 4 | 7 | 10) || c.is_ascii_hexdigit())
+}
+
+fn valid_pci_bdf(name: &str) -> bool {
+    if !looks_like_pci_bdf(name) { return false; }
+    let Ok(_domain) = u16::from_str_radix(&name[0..4], 16) else { return false; };
+    let Ok(_bus) = u8::from_str_radix(&name[5..7], 16) else { return false; };
+    let Ok(slot) = u8::from_str_radix(&name[8..10], 16) else { return false; };
+    let Ok(function) = u8::from_str_radix(&name[11..12], 16) else { return false; };
+    slot <= 0x1f && function <= 7
+}
+
+fn pci_driver_name(bdf: &str) -> Option<String> {
+    if !valid_pci_bdf(bdf) { return None; }
+    std::fs::canonicalize(format!("/sys/bus/pci/devices/{bdf}/driver"))
+        .ok()
+        .and_then(|p| p.file_name().map(|v| v.to_string_lossy().into_owned()))
+}
+
+fn iommu_group_info(bdf: &str) -> AnyResult<Option<(u32, Vec<String>)>> {
+    if !valid_pci_bdf(bdf) { bail!("invalid PCI BDF {bdf:?}"); }
+    let group_link = PathBuf::from(format!("/sys/bus/pci/devices/{bdf}/iommu_group"));
+    let group_path = match std::fs::canonicalize(&group_link) {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("resolving IOMMU group for {bdf}")),
+    };
+    let group_id = group_path.file_name()
+        .and_then(|v| v.to_str())
+        .context("IOMMU group path has no numeric basename")?
+        .parse::<u32>()
+        .context("parsing IOMMU group id")?;
+    let mut members = Vec::new();
+    for entry in std::fs::read_dir(group_path.join("devices"))
+        .with_context(|| format!("reading IOMMU group {group_id} members"))?
+    {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if valid_pci_bdf(&name) { members.push(name); }
+    }
+    members.sort();
+    members.dedup();
+    if !members.iter().any(|v| v == bdf) {
+        bail!("IOMMU group {group_id} does not contain requested function {bdf}");
+    }
+    Ok(Some((group_id, members)))
+}
+
+fn pci_bdf_for_host_device(major: u64, minor: u64) -> Option<String> {
+    let path = std::fs::canonicalize(format!("/sys/dev/char/{major}:{minor}/device")).ok()?;
+    for component in path.components().rev() {
+        let name = component.as_os_str().to_string_lossy();
+        if valid_pci_bdf(&name) { return Some(name.into_owned().to_ascii_lowercase()); }
+    }
+    None
 }
 
 fn rpc_status(code: ttrpc::Code, message: impl Into<String>) -> ttrpc::Error {
@@ -1881,6 +3377,21 @@ async fn stage_bind_mounts(
         let Some(source) = mount.get("source").and_then(Value::as_str).map(str::to_string) else { continue; };
         let source_path = PathBuf::from(&source);
         if !source_path.exists() { continue; }
+        let meta = std::fs::metadata(&source_path)
+            .with_context(|| format!("inspecting OCI bind source {}", source_path.display()))?;
+        let kind = meta.file_type();
+        if kind.is_block_device() {
+            bail!(
+                "OCI bind source {} is a raw block device; FluxVM secure containers require VMM block-device hotplug for raw block volumes",
+                source_path.display()
+            );
+        }
+        if kind.is_char_device() || kind.is_fifo() || kind.is_socket() {
+            bail!(
+                "OCI bind source {} is a special host file and cannot be snapshotted safely into the FluxVM guest",
+                source_path.display()
+            );
+        }
 
         // Kubernetes PVC/CSI/emptyDir/projected volume sources are already
         // mounted by kubelet before runtime SyncPod. Keep them write-through
@@ -1972,6 +3483,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dual_stack_route_and_address_rendering() {
+        let network = CniNetwork {
+            addresses: vec![
+                CniAddress {
+                    family: CniFamily::Ipv4,
+                    address: IpAddr::V4(Ipv4Addr::new(10, 244, 1, 9)),
+                    prefix_len: 24,
+                },
+                CniAddress {
+                    family: CniFamily::Ipv6,
+                    address: IpAddr::V6("fd00::9".parse::<Ipv6Addr>().unwrap()),
+                    prefix_len: 64,
+                },
+            ],
+            mac: "02:11:22:33:44:55".into(),
+            routes: vec![
+                CniRoute {
+                    family: CniFamily::Ipv4,
+                    destination: None,
+                    gateway: Some(IpAddr::V4(Ipv4Addr::new(10, 244, 1, 1))),
+                },
+                CniRoute {
+                    family: CniFamily::Ipv6,
+                    destination: None,
+                    gateway: Some(IpAddr::V6("fd00::1".parse::<Ipv6Addr>().unwrap())),
+                },
+            ],
+        };
+        let command = guest_network_command(&network).unwrap();
+        assert!(command.contains("ip -4 addr add 10.244.1.9/24"));
+        assert!(command.contains("ip -6 addr add fd00::9/64"));
+        assert!(command.contains("ip -4 route replace default via 10.244.1.1"));
+        assert!(command.contains("ip -6 route replace default via fd00::1"));
+    }
+
+    #[test]
+    fn route_parser_rejects_family_mismatch() {
+        assert!(parse_ip_destination("10.0.0.0/24", CniFamily::Ipv6).is_err());
+        assert!(parse_ip_destination("fd00::/64", CniFamily::Ipv4).is_err());
+    }
+
+    #[test]
+    fn recovery_journal_rejects_unknown_version_shape() {
+        let text = r#"{"version":99,"sandbox":null,"tasks":{},"execs":{}}"#;
+        let state: RuntimeStateJournal = serde_json::from_str(text).unwrap();
+        assert_eq!(state.version, 99);
+        assert_ne!(state.version, RUNTIME_STATE_VERSION);
+    }
+
+    #[test]
     fn process_keys_separate_init_and_exec() {
         assert_eq!(process_key("c1", None), "c1");
         assert_eq!(process_key("c1", Some("e1")), "c1\0e1");
@@ -1991,6 +3552,19 @@ mod tests {
     }
 
     #[test]
+    fn resource_update_parser_keeps_swap_reservation_and_unified() {
+        let value = json!({
+            "memory": {"limit": 256, "reservation": 128, "swap": 512},
+            "unified": {"memory.high": "192", "memory.oom.group": "1"}
+        });
+        let r = resource_limits_from_linux_resources(&value);
+        assert_eq!(r.memory_limit_bytes, Some(256));
+        assert_eq!(r.memory_reservation_bytes, Some(128));
+        assert_eq!(r.memory_swap_bytes, Some(512));
+        assert_eq!(r.unified.get("memory.high").map(String::as_str), Some("192"));
+    }
+
+    #[test]
     fn safe_names_are_filesystem_safe() {
         assert_eq!(safe_name("pod/one:abc"), "pod-one-abc");
         assert_eq!(safe_name(""), "sandbox");
@@ -2003,6 +3577,20 @@ mod tests {
         tokio::fs::create_dir_all(&td).await.unwrap();
         tokio::fs::write(td.join("config.json"), r#"{"annotations":{"io.kubernetes.cri.sandbox-id":"pod123"}}"#).await.unwrap();
         assert_eq!(pod_group_from_bundle(td.to_str().unwrap()).await.as_deref(), Some("pod123"));
+        let _ = tokio::fs::remove_dir_all(td).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_special_host_bind_sources() {
+        let td = std::env::temp_dir().join(format!("fluxvm-special-bind-test-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&td).await;
+        tokio::fs::create_dir_all(&td).await.unwrap();
+        let socket = td.join("host.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let mut spec = json!({"mounts":[{"type":"bind","source":socket,"destination":"/run/host.sock","options":["bind"]}]});
+        let error = stage_bind_mounts(&mut spec, &td.join("ctr"), "/run/fluxvm/pod/containers/c", None)
+            .await.unwrap_err().to_string();
+        assert!(error.contains("special host file"));
         let _ = tokio::fs::remove_dir_all(td).await;
     }
 
@@ -2024,4 +3612,103 @@ mod tests {
 #[tokio::main]
 async fn main() {
     run::<Service>(RUNTIME_ID, None).await;
+}
+
+
+#[cfg(test)]
+mod set8_device_tests {
+    use super::*;
+    #[test]
+    fn pci_bdf_shape_is_strict() {
+        assert!(looks_like_pci_bdf("0000:65:00.0"));
+        assert!(looks_like_pci_bdf("abcd:ef:12.3"));
+        assert!(!looks_like_pci_bdf("65:00.0"));
+        assert!(!looks_like_pci_bdf("0000:gg:00.0"));
+    }
+    #[test]
+    fn builtin_guest_devices_are_not_vfio_candidates() {
+        assert!(is_builtin_guest_char_device("/dev/null"));
+        assert!(!is_builtin_guest_char_device("/dev/nvidia0"));
+    }
+}
+
+#[cfg(test)]
+mod set9_device_lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn strict_bdf_parser_rejects_out_of_range_slot_and_function() {
+        assert!(valid_pci_bdf("0000:65:1f.7"));
+        assert!(!valid_pci_bdf("0000:65:20.0"));
+        assert!(!valid_pci_bdf("0000:65:00.8"));
+        assert!(!valid_pci_bdf("../0:65:00.0"));
+    }
+
+    #[test]
+    fn device_owner_reference_counting_is_deterministic() {
+        let mut d = DeviceAttachment::Vfio {
+            bdf: "0000:65:00.0".into(),
+            guest_path: "/dev/nvidia0".into(),
+            device_id: "fvvfio123".into(),
+            iommu_group: Some(42),
+            owners: Some(vec!["container-a".into()]),
+        };
+        assert!(d.add_owner("container-b"));
+        assert!(!d.add_owner("container-b"));
+        assert_eq!(d.owners().unwrap(), &vec!["container-a".to_string(), "container-b".to_string()]);
+        assert!(d.remove_owner("container-a"));
+        assert!(!d.is_releasable());
+        assert!(d.remove_owner("container-b"));
+        assert!(d.is_releasable());
+    }
+
+    #[test]
+    fn legacy_set8_attachment_without_owners_stays_pinned() {
+        let mut d = DeviceAttachment::Block {
+            host_path: "/dev/mapper/example".into(),
+            serial: "fluxvm-test".into(),
+            node_name: "fvblktest".into(),
+            device_id: "fvdevtest".into(),
+            host_major: None,
+            host_minor: None,
+            owners: None,
+        };
+        assert!(!d.add_owner("new-container"));
+        assert!(!d.remove_owner("new-container"));
+        assert!(!d.is_releasable());
+    }
+}
+
+#[cfg(test)]
+mod set9_journal_compat_tests {
+    use super::*;
+
+    #[test]
+    fn set8_journal_without_owner_or_stats_fields_deserializes_pinned() {
+        let text = r#"{
+          "version":1,
+          "sandbox":{
+            "vm_id":"00000000-0000-0000-0000-000000000001",
+            "vm_name":"pod",
+            "ready":true,
+            "share_dir":"/run/fluxvm/containerd/share",
+            "cni":null,
+            "kubelet_mounts":[],
+            "devices":[{
+              "kind":"block",
+              "host_path":"/dev/mapper/example",
+              "serial":"fluxvm-old",
+              "node_name":"fvblkold",
+              "device_id":"fvdevold"
+            }]
+          },
+          "tasks":{},
+          "execs":{}
+        }"#;
+        let state: RuntimeStateJournal = serde_json::from_str(text).unwrap();
+        assert_eq!(state.device_stats.attach_total, 0);
+        let d = &state.sandbox.unwrap().devices[0];
+        assert!(d.owners().is_none());
+        assert!(!d.is_releasable());
+    }
 }
