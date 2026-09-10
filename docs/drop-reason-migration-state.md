@@ -33,6 +33,12 @@ The original `fluxvm_flows`, policy maps and conntrack key/value ABI stay intact
 
 `action=drop` means the packet was rejected. `action=audit` means the same branch would have rejected it, but audit mode allowed it. Schema v6 also preserves Pod-policy audit verdicts with a richer internal verdict API while keeping the existing boolean Pod-policy helpers as compatibility wrappers. This fixes the previous ambiguity around rate-limit and audit-only observations.
 
+## Dataplane schema v7
+
+Schema v7 adds two maps used only by Set 6S/13's Pod-scoped policy path: `fluxvm_pid4_port` and `fluxvm_pid6_port`. A peer with no entry in the existing address-wide `fluxvm_pid4`/`fluxvm_pid6` maps now falls through to these before the pod-level `default_deny` fallback, keyed by `(pod_id, address, protocol, port)` instead of just `(pod_id, address)`. This lets the Kubernetes NetworkPolicy controller (Set 13) compile a `ports`-restricted egress rule into an exact protocol+port allow instead of denying the rule outright, without ever widening a restricted peer to every port: an address-wide `fluxvm_pid4`/`fluxvm_pid6` ALLOW entry is still checked first and still wins, matching Kubernetes' own union-of-rules semantics.
+
+No existing map's ABI changed. Existing schema-v6 pins are considered incompatible and repaired by the existing attach/reconcile path, same as every prior schema bump. A `fluxvm_tc.bpf.o` built before Set 13 has no `fluxvm_pid4_port`/`fluxvm_pid6_port` pins; `configure_pod_maps` detects their absence and skips writing port rules rather than failing the whole policy apply, the same graceful-degradation shape used for `fluxvm_pspol` predating Set 6S.
+
 ## Migration contract
 
 The migration sequence is deliberately explicit and fail-closed:

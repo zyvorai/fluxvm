@@ -50,6 +50,7 @@ func Compile(target kube.Pod, snapshot Snapshot, opts Options) (Result, error) {
 		},
 	}
 	allowed := map[string]struct{}{}
+	portRules := map[fluxvm.PodPeerPortRule]struct{}{}
 	knownAddresses := knownClusterAddresses(snapshot)
 	allowAll := false
 
@@ -58,10 +59,39 @@ func Compile(target kube.Pod, snapshot Snapshot, opts Options) (Result, error) {
 		for ruleIndex, rule := range np.Spec.Egress {
 			prefix := fmt.Sprintf("%s/%s egress[%d]", np.Metadata.Namespace, np.Metadata.Name, ruleIndex)
 			if len(rule.Ports) > 0 {
-				// Set 6S's PodNetworkPolicy API is address-only. Adding the peer
-				// addresses here would silently widen a port-restricted Kubernetes
-				// rule into all ports, so skip the rule instead (strict subset).
-				result.Unsupported = append(result.Unsupported, prefix+": ports are not representable by the current FluxVM Pod policy; rule denied")
+				// Set 13: numeric TCP/UDP ports compile to an exact
+				// protocol+port allow per resolved peer (dataplane schema
+				// v7's fluxvm_pid4_port/fluxvm_pid6_port). Named ports and
+				// endPort ranges are still not representable and are
+				// reported unsupported rather than widened.
+				tuples, unsupported := compilePortTuples(prefix, rule.Ports)
+				result.Unsupported = append(result.Unsupported, unsupported...)
+				if len(tuples) == 0 {
+					continue
+				}
+				if len(rule.To) == 0 {
+					result.Unsupported = append(result.Unsupported, prefix+": port-restricted rule has no `to` peers; an all-address port allow is not representable, rule denied")
+					continue
+				}
+				for peerIndex, peer := range rule.To {
+					peerPrefix := fmt.Sprintf("%s to[%d]", prefix, peerIndex)
+					addrs, all, peerUnsupported, err := resolvePeerAddresses(np, peer, snapshot, knownAddresses, opts.IncludeServiceClusterIPs)
+					if err != nil {
+						return safeDeny(result), fmt.Errorf("%s: %w", peerPrefix, err)
+					}
+					if peerUnsupported != "" {
+						result.Unsupported = append(result.Unsupported, peerPrefix+": "+peerUnsupported)
+					}
+					if all {
+						result.Unsupported = append(result.Unsupported, peerPrefix+": empty peer combined with a port restriction is not representable (would require an all-address port allow); denied for this peer")
+						continue
+					}
+					for addr := range addrs {
+						for _, t := range tuples {
+							portRules[fluxvm.PodPeerPortRule{Address: addr, Protocol: t.protocol, Port: t.port}] = struct{}{}
+						}
+					}
+				}
 				continue
 			}
 			if len(rule.To) == 0 {
@@ -87,16 +117,31 @@ func Compile(target kube.Pod, snapshot Snapshot, opts Options) (Result, error) {
 
 	if allowAll {
 		// NetworkPolicy allow rules are additive. One unrestricted egress rule
-		// means the union permits every destination; exact-address entries are
-		// no longer relevant.
+		// means the union permits every destination; exact-address and
+		// port-scoped entries are no longer relevant.
 		result.Policy.DefaultDeny = false
 		result.Policy.AllowAddresses = nil
+		result.Policy.AllowPortRules = nil
 		return result, nil
 	}
 
 	result.Policy.AllowAddresses = sortedKeys(allowed)
 	if len(result.Policy.AllowAddresses) > opts.MaxAddresses {
 		return safeDeny(result), fmt.Errorf("compiled allow-address set has %d entries, exceeds configured maximum %d", len(result.Policy.AllowAddresses), opts.MaxAddresses)
+	}
+
+	// A peer already allowed on every port makes any port-scoped entry for
+	// the same address redundant -- drop it rather than spend port-map
+	// budget on a rule the address-wide allow already covers (it would also
+	// be ignored at enforcement time, since fluxvm_pid4/6 is checked first).
+	for rule := range portRules {
+		if _, ok := allowed[rule.Address]; ok {
+			delete(portRules, rule)
+		}
+	}
+	result.Policy.AllowPortRules = sortedPortRules(portRules)
+	if len(result.Policy.AllowPortRules) > opts.MaxAddresses {
+		return safeDeny(result), fmt.Errorf("compiled allow-port-rule set has %d entries, exceeds configured maximum %d", len(result.Policy.AllowPortRules), opts.MaxAddresses)
 	}
 	return result, nil
 }
@@ -106,7 +151,63 @@ func safeDeny(result Result) Result {
 	result.Policy.DefaultDeny = true
 	result.Policy.AllowAddresses = nil
 	result.Policy.DenyAddresses = nil
+	result.Policy.AllowPortRules = nil
 	return result
+}
+
+type portTuple struct {
+	protocol fluxvm.PodPolicyProtocol
+	port     uint16
+}
+
+// compilePortTuples lowers a NetworkPolicyPort list to exact protocol+port
+// tuples, reporting (via the returned messages, prefixed with `prefix`)
+// every entry it cannot represent instead of silently dropping or widening
+// it: named ports (Kubernetes resolves those per-container, which this
+// controller does not fetch) and `endPort` ranges (Set 6S's map has no
+// range dimension) are both unsupported today.
+func compilePortTuples(prefix string, ports []kube.NetworkPolicyPort) (tuples []portTuple, unsupported []string) {
+	for _, p := range ports {
+		if p.EndPort != nil {
+			unsupported = append(unsupported, prefix+": port ranges (endPort) are not representable; that port entry is denied")
+			continue
+		}
+		proto, ok := normalizePortProtocol(p.Protocol)
+		if !ok {
+			unsupported = append(unsupported, fmt.Sprintf("%s: protocol %q is not representable; that port entry is denied", prefix, p.Protocol))
+			continue
+		}
+		port, ok := numericPort(p.Port)
+		if !ok {
+			unsupported = append(unsupported, prefix+": named ports are not representable; that port entry is denied")
+			continue
+		}
+		tuples = append(tuples, portTuple{protocol: proto, port: port})
+	}
+	return tuples, unsupported
+}
+
+func normalizePortProtocol(raw string) (fluxvm.PodPolicyProtocol, bool) {
+	// Kubernetes defaults an omitted `protocol` to TCP.
+	switch strings.ToUpper(raw) {
+	case "", "TCP":
+		return fluxvm.ProtocolTCP, true
+	case "UDP":
+		return fluxvm.ProtocolUDP, true
+	default:
+		return "", false
+	}
+}
+
+// numericPort accepts only a plain numeric port, matching how
+// encoding/json decodes an `IntOrString`-shaped field into `interface{}`:
+// a JSON number becomes float64, a named port becomes string.
+func numericPort(raw interface{}) (uint16, bool) {
+	n, ok := raw.(float64)
+	if !ok || n != float64(int64(n)) || n < 0 || n > 65535 {
+		return 0, false
+	}
+	return uint16(n), true
 }
 
 func selectedEgressPolicies(target kube.Pod, policies []kube.NetworkPolicy) []kube.NetworkPolicy {
@@ -146,6 +247,10 @@ func isolatesEgress(spec kube.NetworkPolicySpec) bool {
 	return false
 }
 
+// resolvePeer resolves a peer directly into the caller's unrestricted
+// allow set. It is a thin wrapper over resolvePeerAddresses kept for the
+// no-`ports` call sites, which have no separate use for the resolved
+// address set once it's merged in.
 func resolvePeer(
 	np kube.NetworkPolicy,
 	peer kube.NetworkPolicyPeer,
@@ -154,6 +259,29 @@ func resolvePeer(
 	includeServiceVIPs bool,
 	allowed map[string]struct{},
 ) (allowAll bool, unsupported string, err error) {
+	addrs, allowAll, unsupported, err := resolvePeerAddresses(np, peer, snapshot, knownAddresses, includeServiceVIPs)
+	if err != nil {
+		return false, "", err
+	}
+	for addr := range addrs {
+		allowed[addr] = struct{}{}
+	}
+	return allowAll, unsupported, nil
+}
+
+// resolvePeerAddresses is the address-resolution core shared by unrestricted
+// (`resolvePeer`) and port-restricted (`Compile`'s `ports` branch) rules --
+// it returns the resolved addresses instead of writing into a shared allow
+// set, since the port-restricted path needs to pair each address with its
+// rule's ports rather than allow it outright.
+func resolvePeerAddresses(
+	np kube.NetworkPolicy,
+	peer kube.NetworkPolicyPeer,
+	snapshot Snapshot,
+	knownAddresses []netip.Addr,
+	includeServiceVIPs bool,
+) (addrs map[string]struct{}, allowAll bool, unsupported string, err error) {
+	addrs = map[string]struct{}{}
 	selectorCount := 0
 	if peer.PodSelector != nil {
 		selectorCount++
@@ -163,13 +291,14 @@ func resolvePeer(
 	}
 	if peer.IPBlock != nil {
 		if selectorCount != 0 {
-			return false, "", fmt.Errorf("invalid NetworkPolicyPeer mixes ipBlock with selectors")
+			return nil, false, "", fmt.Errorf("invalid NetworkPolicyPeer mixes ipBlock with selectors")
 		}
-		return resolveIPBlock(*peer.IPBlock, knownAddresses, allowed)
+		allowAll, unsupported, err = resolveIPBlock(*peer.IPBlock, knownAddresses, addrs)
+		return addrs, allowAll, unsupported, err
 	}
 	if selectorCount == 0 {
 		// Empty peer `{}` means all destinations.
-		return true, "", nil
+		return addrs, true, "", nil
 	}
 
 	namespaces := selectedNamespaces(np.Metadata.Namespace, peer.NamespaceSelector, snapshot.Namespaces)
@@ -190,14 +319,14 @@ func resolvePeer(
 			if parseErr != nil {
 				continue
 			}
-			allowed[addr.String()] = struct{}{}
+			addrs[addr.String()] = struct{}{}
 		}
 	}
 
 	if includeServiceVIPs {
-		includeConservativeServiceVIPs(snapshot, namespaces, selectedPods, allowed)
+		includeConservativeServiceVIPs(snapshot, namespaces, selectedPods, addrs)
 	}
-	return false, "", nil
+	return addrs, false, "", nil
 }
 
 func resolveIPBlock(block kube.IPBlock, known []netip.Addr, allowed map[string]struct{}) (bool, string, error) {
@@ -359,6 +488,28 @@ func sortedKeys(values map[string]struct{}) []string {
 			return a.Less(b)
 		}
 		return out[i] < out[j]
+	})
+	return out
+}
+
+func sortedPortRules(values map[fluxvm.PodPeerPortRule]struct{}) []fluxvm.PodPeerPortRule {
+	out := make([]fluxvm.PodPeerPortRule, 0, len(values))
+	for rule := range values {
+		out = append(out, rule)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Address != out[j].Address {
+			a, aerr := netip.ParseAddr(out[i].Address)
+			b, berr := netip.ParseAddr(out[j].Address)
+			if aerr == nil && berr == nil {
+				return a.Less(b)
+			}
+			return out[i].Address < out[j].Address
+		}
+		if out[i].Protocol != out[j].Protocol {
+			return out[i].Protocol < out[j].Protocol
+		}
+		return out[i].Port < out[j].Port
 	})
 	return out
 }

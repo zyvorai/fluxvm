@@ -32,16 +32,38 @@ type VMRequest struct {
 	PodUID *string `json:"pod_uid"`
 }
 
+// PodPolicyProtocol matches the lowercase JSON the FluxVM API's
+// PodPolicyProtocol enum expects (crates/fluxvm-network/src/dataplane.rs).
+type PodPolicyProtocol string
+
+const (
+	ProtocolTCP PodPolicyProtocol = "tcp"
+	ProtocolUDP PodPolicyProtocol = "udp"
+)
+
+// PodPeerPortRule is one exact protocol+port allow for a peer that has no
+// address-wide allow entry -- Set 13's representation of a Kubernetes
+// NetworkPolicy egress rule that carries a `ports` list. See
+// docs/secure-containers-set13.md and dataplane schema v7
+// (docs/drop-reason-migration-state.md) for the enforcement side.
+type PodPeerPortRule struct {
+	Address  string            `json:"address"`
+	Protocol PodPolicyProtocol `json:"protocol"`
+	Port     uint16            `json:"port"`
+}
+
 type PodNetworkPolicy struct {
-	DefaultDeny    bool     `json:"default_deny"`
-	AuditMode      bool     `json:"audit_mode"`
-	AllowAddresses []string `json:"allow_addresses"`
-	DenyAddresses  []string `json:"deny_addresses"`
+	DefaultDeny    bool              `json:"default_deny"`
+	AuditMode      bool              `json:"audit_mode"`
+	AllowAddresses []string          `json:"allow_addresses"`
+	DenyAddresses  []string          `json:"deny_addresses"`
+	AllowPortRules []PodPeerPortRule `json:"allow_port_rules"`
 }
 
 func (p *PodNetworkPolicy) Canonicalize() {
 	p.AllowAddresses = canonicalStrings(p.AllowAddresses)
 	p.DenyAddresses = canonicalStrings(p.DenyAddresses)
+	p.AllowPortRules = canonicalPortRules(p.AllowPortRules)
 }
 
 func EqualPolicy(a, b *PodNetworkPolicy) bool {
@@ -55,7 +77,8 @@ func EqualPolicy(a, b *PodNetworkPolicy) bool {
 	if ac.DefaultDeny != bc.DefaultDeny || ac.AuditMode != bc.AuditMode {
 		return false
 	}
-	if len(ac.AllowAddresses) != len(bc.AllowAddresses) || len(ac.DenyAddresses) != len(bc.DenyAddresses) {
+	if len(ac.AllowAddresses) != len(bc.AllowAddresses) || len(ac.DenyAddresses) != len(bc.DenyAddresses) ||
+		len(ac.AllowPortRules) != len(bc.AllowPortRules) {
 		return false
 	}
 	for i := range ac.AllowAddresses {
@@ -65,6 +88,11 @@ func EqualPolicy(a, b *PodNetworkPolicy) bool {
 	}
 	for i := range ac.DenyAddresses {
 		if ac.DenyAddresses[i] != bc.DenyAddresses[i] {
+			return false
+		}
+	}
+	for i := range ac.AllowPortRules {
+		if ac.AllowPortRules[i] != bc.AllowPortRules[i] {
 			return false
 		}
 	}
@@ -227,5 +255,28 @@ func canonicalStrings(values []string) []string {
 		out = append(out, value)
 	}
 	sort.Strings(out)
+	return out
+}
+
+func canonicalPortRules(rules []PodPeerPortRule) []PodPeerPortRule {
+	set := make(map[PodPeerPortRule]struct{}, len(rules))
+	for _, rule := range rules {
+		if rule.Address != "" {
+			set[rule] = struct{}{}
+		}
+	}
+	out := make([]PodPeerPortRule, 0, len(set))
+	for rule := range set {
+		out = append(out, rule)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Address != out[j].Address {
+			return out[i].Address < out[j].Address
+		}
+		if out[i].Protocol != out[j].Protocol {
+			return out[i].Protocol < out[j].Protocol
+		}
+		return out[i].Port < out[j].Port
+	})
 	return out
 }
