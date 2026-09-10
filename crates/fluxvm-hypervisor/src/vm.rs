@@ -510,15 +510,15 @@ impl VirtualMachine {
                     break;
                 }
                 ffi::KVM_EXIT_DEBUG => {
-                    // A gdbstub software breakpoint (int3) fired. RIP has
-                    // already advanced past the 0xCC byte -- rewind it so
-                    // register reads and any later continue see/redo the
-                    // real instruction, then park in the pause-service
-                    // loop and let the gdbstub thread know we've stopped.
-                    if let Ok(mut regs) = kvm.get_regs(0) {
-                        regs.rip = regs.rip.saturating_sub(1);
-                        let _ = kvm.set_regs(0, regs);
-                    }
+                    // A gdbstub software breakpoint (int3) fired. Live-
+                    // tested: KVM already reports RIP sitting exactly at
+                    // the breakpoint address for a KVM_GUESTDBG_USE_SW_BP
+                    // exit (unlike raw hardware int3 semantics, where RIP
+                    // would land one byte past it) -- no rewind needed;
+                    // an earlier version that subtracted 1 here landed
+                    // one byte *before* the intended address instead.
+                    // Park in the pause-service loop and let the gdbstub
+                    // thread know we've stopped.
                     paused.store(true, Ordering::Relaxed);
                     if let Some(tx) = gdb_stop_tx.as_ref() {
                         let _ = tx.send(());
