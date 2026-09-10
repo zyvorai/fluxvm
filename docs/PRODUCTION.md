@@ -84,4 +84,7 @@ broad CNI conformance, device-cgroup enforcement, opt-in `CLONE_NEWUSER`
 unvalidated under load beyond Set 6) — [secure-containers.md](secure-containers.md).
 Sentinel Pod-scoped network policy (Set 6) as automatically enforcing
 Kubernetes `NetworkPolicy` objects — the eBPF mechanism and API exist, but
-nothing yet watches/resolves live `NetworkPolicy` objects into it.
+nothing yet watches/resolves live `NetworkPolicy` objects into it. Sentinel
+in-guest per-container network policy (Set 8) as inheriting a Pod's Set 6
+policy automatically — every container is enforced fail-closed by default,
+but the shim does not yet forward Pod policy content per container.

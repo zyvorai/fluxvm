@@ -181,6 +181,11 @@ struct TaskMeta {
     /// legacy Set 8 journals; those attachments stay pinned until sandbox delete.
     #[serde(default)]
     device_claims: Vec<String>,
+    /// Set 9S: stable in-guest container identity for correlating a guest
+    /// LSM denial event back to this container. `0` when the guest kernel
+    /// lacks Set 9S support (see ContainerResponse::Created).
+    #[serde(default)]
+    container_identity: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -529,7 +534,6 @@ impl Service {
         Ok(resp)
     }
 
-
     async fn persist_runtime_state(&self) -> AnyResult<()> {
         if !self.cfg.recovery_enabled {
             return Ok(());
@@ -756,6 +760,20 @@ impl Service {
         })
     }
 
+    /// Deterministic Pod-share directory for this shim's group — a pure
+    /// function of config/namespace/group, never of whether the sandbox VM
+    /// has actually been created yet. Set 7R relies on that: it lets
+    /// `stage_rootfs_and_config` compute a container's staging paths and
+    /// start the host-side rootfs copy *before* `ensure_sandbox`'s VM
+    /// boot/wait completes, instead of only after.
+    fn share_dir(&self) -> PathBuf {
+        self.cfg
+            .state_dir
+            .join(&self.namespace)
+            .join(&self.group)
+            .join("share")
+    }
+
     async fn ensure_sandbox(&self, hints: Option<&SandboxHints>) -> AnyResult<VmRecord> {
         let mut guard = self.sandbox.lock().await;
         if let Some(s) = guard.as_ref() {
@@ -826,12 +844,7 @@ impl Service {
         }
 
         let hints = hints.cloned().unwrap_or_default();
-        let share_dir = self
-            .cfg
-            .state_dir
-            .join(&self.namespace)
-            .join(&self.group)
-            .join("share");
+        let share_dir = self.share_dir();
         tokio::fs::create_dir_all(&share_dir).await?;
 
         let (vcpus, memory_mib) = vm_shape(
@@ -1723,6 +1736,16 @@ impl Service {
         Ok((vm, host, guest))
     }
 
+    /// Set 7R: the VM boot this depends on (`ensure_sandbox`, a fresh QEMU
+    /// cold-boot for the first container in a group) and the host-side
+    /// rootfs mount+copy below have no data dependency on each other until
+    /// both are done — the copy only needs a deterministic staging path
+    /// (`share_dir()`/`safe_name(id)`, computable with no VM involved at
+    /// all), and the guest only reads that path via virtiofs later, once
+    /// the container-agent actually starts the container. Through Set 6,
+    /// these ran strictly sequentially (the full VM boot, then the copy);
+    /// running them concurrently removes the smaller of the two costs from
+    /// the Pod's critical path entirely instead of just shrinking it.
     async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>, Vec<String>)> {
         let config_path = Path::new(&req.bundle).join("config.json");
         let text = tokio::fs::read_to_string(&config_path)
@@ -1730,24 +1753,31 @@ impl Service {
             .with_context(|| format!("reading {}", config_path.display()))?;
         let mut spec: Value = serde_json::from_str(&text)?;
         let hints = sandbox_hints_from_spec(&spec);
-        let (vm, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, Some(&hints)).await?;
+
+        let host_ctr = self.share_dir().join("containers").join(safe_name(&req.id));
+        let guest_ctr = format!("{GUEST_SHARE}/containers/{}", safe_name(&req.id));
         let rootfs = host_ctr.join("rootfs");
         let mountpoint = self.cfg.state_dir.join(&self.namespace).join(&self.group).join("mounts").join(safe_name(&req.id));
-        // A failed/retried CreateTask must never inherit files or FIFOs from
-        // a previous attempt.
-        let _ = tokio::fs::remove_dir_all(&host_ctr).await;
-        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
-        tokio::fs::create_dir_all(&rootfs).await?;
-        tokio::fs::create_dir_all(&mountpoint).await?;
-        for m in &req.rootfs {
-            containerd_shim::asynchronous::util::mount_rootfs(m, &mountpoint)
-                .await
-                .map_err(|e| anyhow::anyhow!("mounting containerd rootfs: {e}"))?;
-        }
-        let copy_result = copy_contents(&mountpoint, &rootfs).await;
-        let _ = tokio::process::Command::new("umount").args(["-l", mountpoint.to_string_lossy().as_ref()]).status().await;
-        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
-        copy_result?;
+
+        let stage_rootfs = async {
+            // A failed/retried CreateTask must never inherit files or FIFOs
+            // from a previous attempt.
+            let _ = tokio::fs::remove_dir_all(&host_ctr).await;
+            let _ = tokio::fs::remove_dir_all(&mountpoint).await;
+            tokio::fs::create_dir_all(&rootfs).await?;
+            tokio::fs::create_dir_all(&mountpoint).await?;
+            for m in &req.rootfs {
+                containerd_shim::asynchronous::util::mount_rootfs(m, &mountpoint)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("mounting containerd rootfs: {e}"))?;
+            }
+            let copy_result = copy_contents(&mountpoint, &rootfs).await;
+            let _ = tokio::process::Command::new("umount").args(["-l", mountpoint.to_string_lossy().as_ref()]).status().await;
+            let _ = tokio::fs::remove_dir_all(&mountpoint).await;
+            copy_result
+        };
+
+        let (vm, ()) = tokio::try_join!(self.ensure_sandbox(Some(&hints)), stage_rootfs)?;
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
         let device_claims = self.prepare_hotplug_devices(&vm, &mut spec, hints.pod_uid.as_deref(), &req.id).await?;
@@ -2167,6 +2197,13 @@ impl Task for Service {
                     io,
                     is_sandbox,
                     share_process_namespace,
+                    // Set 8S: not yet wired to fetch the Pod's Set 6S
+                    // network policy and mirror it per-container (see
+                    // docs/secure-containers-set8s.md) -- every container
+                    // still gets Set 8S's fail-closed-by-default enforcement
+                    // attached, just with an empty (deny-non-loopback)
+                    // policy until that wiring lands.
+                    network_policy: None,
                 },
             )
             .await
@@ -2178,8 +2215,8 @@ impl Task for Service {
                 return Err(rpc_other(e));
             }
         };
-        let pid = match response {
-            ContainerResponse::Created { pid } => pid,
+        let (pid, container_identity) = match response {
+            ContainerResponse::Created { pid, container_identity } => (pid, container_identity),
             other => {
                 self.release_device_claims(&vm, &req.id, &device_claims).await;
                 self.cleanup_process_staging(&req.id, None).await;
@@ -2207,6 +2244,7 @@ impl Task for Service {
             streaming: self.cfg.streaming_stdio,
             oom_kill_seen: 0,
             device_claims,
+            container_identity,
         });
         self.persist_runtime_state().await.map_err(rpc_other)?;
         self.spawn_oom_watch(vm.clone(), req.id.clone());
@@ -2412,7 +2450,14 @@ impl Task for Service {
             self.cleanup_process_staging(&req.id, Some(&req.exec_id)).await;
             return Err(rpc_other(format!("attaching exec VSOCK stdio: {e:#}")));
         }
-        let bundle = self.tasks.read().await.get(&req.id).map(|m| m.bundle.clone()).unwrap_or_default();
+        let (bundle, container_identity) = {
+            let tasks = self.tasks.read().await;
+            let parent = tasks.get(&req.id);
+            (
+                parent.map(|m| m.bundle.clone()).unwrap_or_default(),
+                parent.map(|m| m.container_identity).unwrap_or(0),
+            )
+        };
         self.exit_events.lock().await.remove(&process_key(&req.id, Some(&req.exec_id)));
         self.execs.write().await.insert(process_key(&req.id, Some(&req.exec_id)), TaskMeta {
             bundle,
@@ -2425,6 +2470,7 @@ impl Task for Service {
             streaming: self.cfg.streaming_stdio,
             oom_kill_seen: 0,
             device_claims: Vec::new(),
+            container_identity,
         });
         self.persist_runtime_state().await.map_err(rpc_other)?;
         self.send_event(TaskExecAdded {

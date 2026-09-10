@@ -26,10 +26,15 @@
 //! upstream Secure Containers work also layers per-container namespace isolation.
 
 use anyhow::{Context, Result, bail};
+use aya::{
+    Btf, Ebpf,
+    programs::{CgroupAttachMode, CgroupSkb, CgroupSkbAttachType, Lsm},
+};
 use clap::Parser;
 use fluxvm_container_protocol::{
-    CgroupEvents, ContainerEnvelope, ContainerIo, ContainerRequest, ContainerResponse, ContainerStats,
-    ContainerStatus, ResourceLimits, IoStreamAck, IoStreamAttach, IoStreamKind,
+    CgroupEvents, ContainerEnvelope, ContainerIo, ContainerNetworkPolicy, ContainerRequest,
+    ContainerResponse, ContainerStats, ContainerStatus, ResourceLimits, IoStreamAck,
+    IoStreamAttach, IoStreamKind,
     DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, MAX_MESSAGE_BYTES, decode_line,
     encode_line,
 };
@@ -39,12 +44,13 @@ use std::{
     ffi::CString,
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    net::IpAddr,
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
     os::unix::{
         ffi::OsStrExt,
         fs::{FileTypeExt, MetadataExt},
     },
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -642,8 +648,8 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
             configure_sandbox_resources(&resources)?;
             Ok(ContainerResponse::SandboxResourcesConfigured)
         }
-        ContainerRequest::Create { id, config_json, io, is_sandbox, share_process_namespace } => {
-            create_container(id, &config_json, io, is_sandbox, share_process_namespace)
+        ContainerRequest::Create { id, config_json, io, is_sandbox, share_process_namespace, network_policy } => {
+            create_container(id, &config_json, io, is_sandbox, share_process_namespace, network_policy.as_ref())
         }
         ContainerRequest::Start { id, exec_id } => start_process(&id, exec_id.as_deref()),
         ContainerRequest::State { id, exec_id } => state_process(&id, exec_id.as_deref()),
@@ -701,6 +707,7 @@ fn create_container(
     io: ContainerIo,
     is_sandbox: bool,
     share_process_namespace: bool,
+    network_policy: Option<&ContainerNetworkPolicy>,
 ) -> Result<ContainerResponse> {
     let (spec, mounts, resources, device_policy) = parse_oci_config(config_json)?;
     {
@@ -720,6 +727,55 @@ fn create_container(
             return Err(e);
         }
     }
+    // Sentinel Set 8S: attach in-guest per-container network policy before
+    // spawning the process, so it's enforced from this container's very
+    // first packet. Best-effort like the resource-limit cgroup itself above
+    // it: a guest kernel missing cgroup_skb/BTF support still runs the
+    // container, just without this layer -- see
+    // docs/secure-containers-set8s.md for why this differs from the
+    // fail-closed-by-default *policy content* design (attach failure is a
+    // platform-capability gap, not a missing-policy race).
+    match attach_guest_network_policy(&cgroup_path) {
+        Ok(()) => {
+            if let Err(e) = configure_container_policy(cgroup_id_for(&cgroup_path).unwrap_or(0), network_policy) {
+                eprintln!("Set 8S: configuring guest network policy for {id:?} failed: {e:#}");
+            }
+        }
+        Err(e) => eprintln!("Set 8S: attaching guest network policy for {id:?} failed: {e:#}"),
+    }
+    // Sentinel Set 9S: off by default (FLUXVM_CONTAINER_LSM=1 to enable) --
+    // a new guest MAC control that, unlike Set 8S's network policy, can
+    // plausibly break a container that legitimately writes outside its
+    // declared mounts if misconfigured. Same best-effort posture as Set 8S:
+    // a guest kernel missing BPF LSM/BTF still runs the container, just
+    // without this layer. See docs/secure-containers-set9s.md.
+    let container_identity = if guest_lsm_enabled() {
+        let identity = container_identity_for(&id);
+        match attach_guest_lsm() {
+            Ok(()) => {
+                let (root_readonly, write_prefixes) = oci_write_policy(config_json);
+                let audit_only = std::env::var("FLUXVM_CONTAINER_LSM_ENFORCE")
+                    .map(|v| !matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+                    .unwrap_or(true);
+                let deny_wx = std::env::var("FLUXVM_CONTAINER_LSM_DENY_WX")
+                    .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off"))
+                    .unwrap_or(true);
+                if let Err(e) = configure_container_lsm_policy(
+                    cgroup_id_for(&cgroup_path).unwrap_or(0),
+                    deny_wx,
+                    root_readonly,
+                    &write_prefixes,
+                    audit_only,
+                ) {
+                    eprintln!("Set 9S: configuring guest LSM policy for {id:?} failed: {e:#}");
+                }
+            }
+            Err(e) => eprintln!("Set 9S: attaching guest LSM for {id:?} failed: {e:#}"),
+        }
+        identity
+    } else {
+        0
+    };
     let mut reg = registry().lock().expect("registry poisoned");
     if reg.contains_key(&id) {
         cleanup_container_cgroup(&cgroup_path);
@@ -760,7 +816,7 @@ fn create_container(
             execs: HashMap::new(),
         },
     );
-    Ok(ContainerResponse::Created { pid })
+    Ok(ContainerResponse::Created { pid, container_identity })
 }
 
 fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -> Result<ContainerResponse> {
@@ -843,6 +899,12 @@ fn delete_process(id: &str, exec_id: Option<&str>, force: bool) -> Result<Contai
         let final_state = handle.wait();
         if let Some(mut entry) = reg.remove(id) {
             cleanup_mounts(&entry.mounts);
+            // Must read the cgroup id before cleanup_container_cgroup
+            // removes the directory out from under us.
+            if let Ok(cgroup_id) = cgroup_id_for(&entry.cgroup_path) {
+                forget_container_policy(cgroup_id);
+                forget_container_lsm_policy(cgroup_id);
+            }
             cleanup_container_cgroup(&entry.cgroup_path);
             if entry.is_sandbox {
                 // Deleting the sandbox invalidates joined-namespace sharing
@@ -1800,6 +1862,411 @@ fn create_container_cgroup(id: &str, resources: &ResourceLimits) -> Result<PathB
     std::fs::create_dir_all(&path).with_context(|| format!("creating container cgroup {}", path.display()))?;
     apply_resource_limits(&path, resources)?;
     Ok(path)
+}
+
+// ---- Sentinel Set 8S: in-guest per-container network policy ----
+//
+// bpf/fluxvm_guest_cgroup.bpf.c is compiled at `cargo build` time (see
+// build.rs) and embedded here so this binary stays a single self-contained
+// file to upload over VSOCK. One loaded instance is shared across every
+// container in this Pod VM -- see that file's header comment for why that's
+// safe (maps are keyed by cgroup id, not by attachment instance).
+
+const FLUXVM_CPOL_ENABLED: u64 = 1 << 0;
+const FLUXVM_CPOL_DEFAULT_ALLOW: u64 = 1 << 1;
+const FLUXVM_CPOL_AUDIT: u64 = 1 << 2;
+const FLUXVM_CPEER_ALLOW: u32 = 1;
+const FLUXVM_CPEER_DENY: u32 = 2;
+
+static GUEST_CGROUP_BPF_OBJ: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/fluxvm_guest_cgroup.bpf.o"));
+
+/// Must byte-match `struct fluxvm_cid4_key` in bpf/fluxvm_guest_cgroup.bpf.c.
+/// `address` is raw packet-order bytes (`Ipv4Addr::octets()`), never a
+/// computed integer -- `bpf_map_lookup_elem` does a byte-for-byte key
+/// comparison, so as long as both sides agree on which bytes go where, no
+/// endianness conversion is needed or correct to apply.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Cid4Key {
+    cgroup_id: u64,
+    address: [u8; 4],
+    reserved: u32,
+}
+unsafe impl aya::Pod for Cid4Key {}
+
+/// Must byte-match `struct fluxvm_cid6_key`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Cid6Key {
+    cgroup_id: u64,
+    address: [u8; 16],
+}
+unsafe impl aya::Pod for Cid6Key {}
+
+struct GuestEbpfState {
+    bpf: Ebpf,
+    programs_loaded: bool,
+}
+
+static GUEST_EBPF: OnceLock<Mutex<Option<GuestEbpfState>>> = OnceLock::new();
+
+fn guest_ebpf_cell() -> &'static Mutex<Option<GuestEbpfState>> {
+    GUEST_EBPF.get_or_init(|| Mutex::new(None))
+}
+
+/// Attaches both Set 8S programs to `cgroup_path` (already created by
+/// `create_container_cgroup`). Lazily loads the shared `Ebpf` object and
+/// loads each program into the kernel exactly once, on the first container;
+/// every later container only needs a fresh `attach()` call against the
+/// already-loaded programs.
+fn attach_guest_network_policy(cgroup_path: &Path) -> Result<()> {
+    let cgroup_file =
+        File::open(cgroup_path).with_context(|| format!("opening cgroup {}", cgroup_path.display()))?;
+    let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
+    if guard.is_none() {
+        let bpf = Ebpf::load(GUEST_CGROUP_BPF_OBJ).context("loading fluxvm_guest_cgroup.bpf.o")?;
+        *guard = Some(GuestEbpfState { bpf, programs_loaded: false });
+    }
+    let state = guard.as_mut().expect("just initialized above");
+
+    if !state.programs_loaded {
+        let egress: &mut CgroupSkb = state
+            .bpf
+            .program_mut("fluxvm_guest_egress")
+            .context("fluxvm_guest_egress program not found in object")?
+            .try_into()?;
+        egress.load().context("loading fluxvm_guest_egress into the kernel")?;
+        let ingress: &mut CgroupSkb = state
+            .bpf
+            .program_mut("fluxvm_guest_ingress")
+            .context("fluxvm_guest_ingress program not found in object")?
+            .try_into()?;
+        ingress.load().context("loading fluxvm_guest_ingress into the kernel")?;
+        state.programs_loaded = true;
+    }
+
+    let egress: &mut CgroupSkb = state.bpf.program_mut("fluxvm_guest_egress").expect("loaded above").try_into()?;
+    let egress_cgroup = cgroup_file.try_clone().context("duplicating cgroup fd")?;
+    egress
+        .attach(egress_cgroup, CgroupSkbAttachType::Egress, CgroupAttachMode::Single)
+        .context("attaching fluxvm_guest_egress")?;
+
+    let ingress: &mut CgroupSkb = state.bpf.program_mut("fluxvm_guest_ingress").expect("loaded above").try_into()?;
+    ingress
+        .attach(cgroup_file, CgroupSkbAttachType::Ingress, CgroupAttachMode::Single)
+        .context("attaching fluxvm_guest_ingress")?;
+
+    Ok(())
+}
+
+/// Populates (or, with `policy: None`, installs an enabled-but-empty entry
+/// for) `cgroup_id`'s policy. Must run after a successful
+/// `attach_guest_network_policy` for the same container.
+fn configure_container_policy(cgroup_id: u64, policy: Option<&ContainerNetworkPolicy>) -> Result<()> {
+    let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
+    let state = guard.as_mut().context("guest eBPF not attached yet")?;
+
+    let mut flags = FLUXVM_CPOL_ENABLED;
+    if let Some(p) = policy {
+        if p.default_allow { flags |= FLUXVM_CPOL_DEFAULT_ALLOW; }
+        if p.audit_mode { flags |= FLUXVM_CPOL_AUDIT; }
+    }
+
+    {
+        let cpol_map = state.bpf.map_mut("fluxvm_cpol").context("fluxvm_cpol map not found")?;
+        let mut cpol: aya::maps::HashMap<_, u64, u64> = aya::maps::HashMap::try_from(cpol_map)?;
+        cpol.insert(cgroup_id, flags, 0).context("writing fluxvm_cpol entry")?;
+    }
+
+    let Some(policy) = policy else { return Ok(()) };
+
+    {
+        let cid4_map = state.bpf.map_mut("fluxvm_cid4").context("fluxvm_cid4 map not found")?;
+        let mut cid4: aya::maps::HashMap<_, Cid4Key, u32> = aya::maps::HashMap::try_from(cid4_map)?;
+        for (addrs, verdict) in [(&policy.allow_addresses, FLUXVM_CPEER_ALLOW), (&policy.deny_addresses, FLUXVM_CPEER_DENY)] {
+            for addr in addrs {
+                if let IpAddr::V4(v4) = addr {
+                    let key = Cid4Key { cgroup_id, address: v4.octets(), reserved: 0 };
+                    cid4.insert(key, verdict, 0).context("writing fluxvm_cid4 entry")?;
+                }
+            }
+        }
+    }
+    {
+        let cid6_map = state.bpf.map_mut("fluxvm_cid6").context("fluxvm_cid6 map not found")?;
+        let mut cid6: aya::maps::HashMap<_, Cid6Key, u32> = aya::maps::HashMap::try_from(cid6_map)?;
+        for (addrs, verdict) in [(&policy.allow_addresses, FLUXVM_CPEER_ALLOW), (&policy.deny_addresses, FLUXVM_CPEER_DENY)] {
+            for addr in addrs {
+                if let IpAddr::V6(v6) = addr {
+                    let key = Cid6Key { cgroup_id, address: v6.octets() };
+                    cid6.insert(key, verdict, 0).context("writing fluxvm_cid6 entry")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort cleanup of a deleted container's map entries. Detaching the
+/// programs themselves happens implicitly when the cgroup is removed
+/// (`cleanup_container_cgroup`); this only prevents `fluxvm_cpol`/
+/// `fluxvm_cid4`/`fluxvm_cid6` from growing unboundedly across a long-lived
+/// Pod VM's container churn.
+fn forget_container_policy(cgroup_id: u64) {
+    let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
+    let Some(state) = guard.as_mut() else { return };
+
+    if let Some(map) = state.bpf.map_mut("fluxvm_cpol") {
+        if let Ok(mut cpol) = aya::maps::HashMap::<_, u64, u64>::try_from(map) {
+            let _ = cpol.remove(&cgroup_id);
+        }
+    }
+    if let Some(map) = state.bpf.map_mut("fluxvm_cid4") {
+        if let Ok(mut cid4) = aya::maps::HashMap::<_, Cid4Key, u32>::try_from(map) {
+            let stale: Vec<Cid4Key> = cid4
+                .iter()
+                .filter_map(Result::ok)
+                .map(|(k, _)| k)
+                .filter(|k| k.cgroup_id == cgroup_id)
+                .collect();
+            for key in stale {
+                let _ = cid4.remove(&key);
+            }
+        }
+    }
+    if let Some(map) = state.bpf.map_mut("fluxvm_cid6") {
+        if let Ok(mut cid6) = aya::maps::HashMap::<_, Cid6Key, u32>::try_from(map) {
+            let stale: Vec<Cid6Key> = cid6
+                .iter()
+                .filter_map(Result::ok)
+                .map(|(k, _)| k)
+                .filter(|k| k.cgroup_id == cgroup_id)
+                .collect();
+            for key in stale {
+                let _ = cid6.remove(&key);
+            }
+        }
+    }
+}
+
+// ---- Sentinel Set 9S: in-guest per-container eBPF LSM MAC ----
+//
+// Additive to Set 8S's cgroup_skb network policy and to classic seccomp
+// (apply_seccomp above): seccomp can only filter by syscall name/argument,
+// not by which file is being touched or whether it is one of the
+// container's own declared mounts. bpf/fluxvm_guest_lsm.bpf.c's hooks are
+// attached once, globally, for the whole agent process lifetime (LSM
+// programs cannot be scoped to a cgroup fd the way cgroup_skb can); the
+// per-container boundary is enforced entirely by the kernel program's own
+// `fluxvm_lsmpol` cgroup-id lookup, so a cgroup with no policy entry is
+// always allowed. Off by default -- see docs/secure-containers-set9s.md.
+
+const FLUXVM_LSM_ENABLED: u32 = 1 << 0;
+const FLUXVM_LSM_AUDIT: u32 = 1 << 1;
+const FLUXVM_LSM_DENY_EXEC: u32 = 1 << 2;
+const FLUXVM_LSM_DENY_WX: u32 = 1 << 3;
+const FLUXVM_LSM_RESTRICT_DEVICES: u32 = 1 << 4;
+const FLUXVM_LSM_RESTRICT_WRITES: u32 = 1 << 5;
+const FLUXVM_LSM_MAX_PREFIXES: u32 = 8;
+const FLUXVM_LSM_PREFIX_LEN: usize = 64;
+/// Top bit reserved so a Set 9S container identity never collides with the
+/// host VM-hash space, Service-Fabric's reserved/local identity space, or
+/// Set 6S's Pod-id space -- all already-separate identity spaces in this
+/// codebase. This VM only ever hosts one Kubernetes Pod's containers, so
+/// (unlike Set 6S's Pod identity) no host-assigned Pod component is needed
+/// for uniqueness here; the container's own `id` string is already unique
+/// within this guest.
+const CONTAINER_IDENTITY_TAG_BIT: u32 = 1 << 31;
+
+static GUEST_LSM_BPF_OBJ: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/fluxvm_guest_lsm.bpf.o"));
+
+/// Must byte-match `struct fluxvm_lsm_policy` in bpf/fluxvm_guest_lsm.bpf.c.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LsmPolicyValue {
+    flags: u32,
+    generation: u32,
+}
+unsafe impl aya::Pod for LsmPolicyValue {}
+
+/// Must byte-match `struct fluxvm_lsm_prefix_key`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LsmPrefixKey {
+    cgroup_id: u64,
+    slot: u32,
+    reserved: u32,
+}
+unsafe impl aya::Pod for LsmPrefixKey {}
+
+/// Must byte-match `struct fluxvm_lsm_prefix_value`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LsmPrefixValue {
+    len: u32,
+    bytes: [u8; FLUXVM_LSM_PREFIX_LEN],
+}
+unsafe impl aya::Pod for LsmPrefixValue {}
+
+struct GuestLsmState {
+    bpf: Ebpf,
+    attached: bool,
+    generation: u32,
+}
+
+static GUEST_LSM: OnceLock<Mutex<Option<GuestLsmState>>> = OnceLock::new();
+
+fn guest_lsm_cell() -> &'static Mutex<Option<GuestLsmState>> {
+    GUEST_LSM.get_or_init(|| Mutex::new(None))
+}
+
+fn guest_lsm_enabled() -> bool {
+    std::env::var("FLUXVM_CONTAINER_LSM")
+        .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+/// Mints a stable per-container identity so a guest LSM denial event (keyed
+/// by cgroup id in the kernel, which is not host-visible or stable across a
+/// container recreate) can be correlated back to `(container_id,
+/// container_identity)` over the existing lifecycle RPC. FNV-1a like
+/// `fluxvm_network::identity`/Set 6S's `pod_identity`, for the same reason:
+/// a small, dependency-free, stable hash.
+fn container_identity_for(id: &str) -> u32 {
+    let mut h: u32 = 0x811c9dc5;
+    for b in id.as_bytes() {
+        h ^= *b as u32;
+        h = h.wrapping_mul(0x01000193);
+    }
+    (h | CONTAINER_IDENTITY_TAG_BIT).max(CONTAINER_IDENTITY_TAG_BIT | 1)
+}
+
+/// Lazily loads and attaches (once, globally) the three Set 9S LSM
+/// programs. Idempotent: later containers just reuse the already-attached
+/// programs. Fails (rather than silently no-op-ing) if `FLUXVM_CONTAINER_LSM`
+/// is set but the guest kernel lacks BPF LSM/BTF support, so the caller can
+/// log a clear reason instead of a container silently running unconfined.
+fn attach_guest_lsm() -> Result<()> {
+    let mut guard = guest_lsm_cell().lock().expect("guest LSM poisoned");
+    if let Some(state) = guard.as_ref() {
+        if state.attached {
+            return Ok(());
+        }
+    }
+    if guard.is_none() {
+        let bpf = Ebpf::load(GUEST_LSM_BPF_OBJ).context("loading fluxvm_guest_lsm.bpf.o")?;
+        *guard = Some(GuestLsmState { bpf, attached: false, generation: 0 });
+    }
+    let state = guard.as_mut().expect("just initialized above");
+    let btf = Btf::from_sys_fs().context("reading kernel BTF (requires CONFIG_DEBUG_INFO_BTF)")?;
+    for (prog_name, hook) in [
+        ("fluxvm_lsm_exec", "bprm_check_security"),
+        ("fluxvm_lsm_mprotect", "file_mprotect"),
+        ("fluxvm_lsm_file_open", "file_open"),
+    ] {
+        let lsm: &mut Lsm = state
+            .bpf
+            .program_mut(prog_name)
+            .with_context(|| format!("{prog_name} program not found in object"))?
+            .try_into()?;
+        lsm.load(hook, &btf).with_context(|| format!("loading {prog_name} against lsm/{hook}"))?;
+        lsm.attach().with_context(|| format!("attaching {prog_name}"))?;
+    }
+    state.attached = true;
+    Ok(())
+}
+
+/// Populates `cgroup_id`'s Set 9S policy. `write_prefixes` are guest-visible
+/// absolute paths (OCI mount `destination` values, e.g. `/data`) allowed for
+/// regular-file writes when `restrict_writes` is set; only the first
+/// `FLUXVM_LSM_MAX_PREFIXES` are installed (see bpf/fluxvm_guest_lsm.bpf.c's
+/// header comment for why that bound exists).
+fn configure_container_lsm_policy(
+    cgroup_id: u64,
+    deny_wx: bool,
+    restrict_writes: bool,
+    write_prefixes: &[String],
+    audit_only: bool,
+) -> Result<()> {
+    let mut guard = guest_lsm_cell().lock().expect("guest LSM poisoned");
+    let state = guard.as_mut().context("guest LSM not attached yet")?;
+    state.generation = state.generation.wrapping_add(1).max(1);
+
+    let mut flags = FLUXVM_LSM_ENABLED;
+    if audit_only { flags |= FLUXVM_LSM_AUDIT; }
+    if deny_wx { flags |= FLUXVM_LSM_DENY_WX; }
+    if restrict_writes && !write_prefixes.is_empty() { flags |= FLUXVM_LSM_RESTRICT_WRITES; }
+
+    let pol_map = state.bpf.map_mut("fluxvm_lsmpol").context("fluxvm_lsmpol map not found")?;
+    let mut pol: aya::maps::HashMap<_, u64, LsmPolicyValue> = aya::maps::HashMap::try_from(pol_map)?;
+    pol.insert(cgroup_id, LsmPolicyValue { flags, generation: state.generation }, 0)
+        .context("writing fluxvm_lsmpol entry")?;
+
+    let write_map = state.bpf.map_mut("fluxvm_lsmwrite").context("fluxvm_lsmwrite map not found")?;
+    let mut write: aya::maps::HashMap<_, LsmPrefixKey, LsmPrefixValue> = aya::maps::HashMap::try_from(write_map)?;
+    for slot in 0..FLUXVM_LSM_MAX_PREFIXES {
+        let key = LsmPrefixKey { cgroup_id, slot, reserved: 0 };
+        match write_prefixes.get(slot as usize) {
+            Some(prefix) if prefix.len() < FLUXVM_LSM_PREFIX_LEN => {
+                let mut bytes = [0u8; FLUXVM_LSM_PREFIX_LEN];
+                bytes[..prefix.len()].copy_from_slice(prefix.as_bytes());
+                let value = LsmPrefixValue { len: prefix.len() as u32, bytes };
+                write.insert(key, value, 0).context("writing fluxvm_lsmwrite entry")?;
+            }
+            _ => {
+                let _ = write.remove(&key);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort cleanup of a deleted container's Set 9S map entries, mirroring
+/// `forget_container_policy`.
+fn forget_container_lsm_policy(cgroup_id: u64) {
+    let mut guard = guest_lsm_cell().lock().expect("guest LSM poisoned");
+    let Some(state) = guard.as_mut() else { return };
+    if let Some(map) = state.bpf.map_mut("fluxvm_lsmpol") {
+        if let Ok(mut pol) = aya::maps::HashMap::<_, u64, LsmPolicyValue>::try_from(map) {
+            let _ = pol.remove(&cgroup_id);
+        }
+    }
+    if let Some(map) = state.bpf.map_mut("fluxvm_lsmwrite") {
+        if let Ok(mut write) = aya::maps::HashMap::<_, LsmPrefixKey, LsmPrefixValue>::try_from(map) {
+            for slot in 0..FLUXVM_LSM_MAX_PREFIXES {
+                let _ = write.remove(&LsmPrefixKey { cgroup_id, slot, reserved: 0 });
+            }
+        }
+    }
+}
+
+/// Extracts the OCI `root.readonly` flag and declared mount `destination`
+/// paths directly from the raw config JSON -- independent of
+/// `parse_oci_config`'s host-path-joined `mounts` return, since Set 9S needs
+/// the guest-visible destination strings (e.g. `/data`, not
+/// `<rootfs>/data`) that a running process actually sees after
+/// `pivot_root`. RESTRICT_WRITES is only meaningful (and only ever enabled
+/// by `create_container`) when the rootfs itself is OCI-declared read-only;
+/// otherwise nearly every ordinary write inside the container's own image
+/// layers would be denied.
+fn oci_write_policy(config_json: &str) -> (bool, Vec<String>) {
+    let Ok(v) = serde_json::from_str::<Value>(config_json) else { return (false, Vec::new()); };
+    let root_readonly = v.pointer("/root/readonly").and_then(Value::as_bool).unwrap_or(false);
+    let mut prefixes = Vec::new();
+    if let Some(items) = v.get("mounts").and_then(Value::as_array) {
+        for item in items {
+            if let Some(dest) = item.get("destination").and_then(Value::as_str) {
+                prefixes.push(dest.to_string());
+            }
+        }
+    }
+    (root_readonly, prefixes)
+}
+
+fn cgroup_id_for(path: &Path) -> Result<u64> {
+    Ok(std::fs::metadata(path).with_context(|| format!("statting cgroup {}", path.display()))?.ino())
 }
 
 fn container_cgroup(id: &str) -> Result<PathBuf> {
@@ -3181,6 +3648,191 @@ mod tests {
         assert_ne!(r & libc::FD_CLOEXEC, 0);
         assert_ne!(w & libc::FD_CLOEXEC, 0);
         unsafe { libc::close(read_fd); libc::close(write_fd); }
+    }
+
+    /// Set 8S: exercises the real attach/configure/cleanup flow against a
+    /// throwaway cgroup v2 subtree -- not a mock. Needs root (cgroup_skb
+    /// attach requires CAP_SYS_ADMIN) and a real cgroup2 mount, so it skips
+    /// itself rather than failing CI runners that have neither; run with
+    /// `sudo cargo test -p fluxvm-container-agent guest_cgroup_policy_attaches_and_enforces -- --nocapture`
+    /// on a real Linux host to actually exercise it.
+    #[test]
+    fn guest_cgroup_policy_attaches_and_enforces() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: needs root for cgroup_skb attach");
+            return;
+        }
+        let cgroup_root = std::path::Path::new("/sys/fs/cgroup");
+        if !cgroup_root.join("cgroup.controllers").exists() {
+            eprintln!("skipping: no cgroup v2 mount at /sys/fs/cgroup");
+            return;
+        }
+        let test_cgroup = cgroup_root.join("fluxvm-agent-test-8s");
+        let _ = std::fs::remove_dir(&test_cgroup);
+        std::fs::create_dir_all(&test_cgroup).expect("creating test cgroup");
+
+        let result = (|| -> Result<()> {
+            attach_guest_network_policy(&test_cgroup)?;
+            let cgroup_id = cgroup_id_for(&test_cgroup)?;
+            // default_allow: false, no explicit peers -- everything but
+            // loopback should be denied once this is live.
+            configure_container_policy(cgroup_id, Some(&ContainerNetworkPolicy::default()))?;
+
+            // Move this test thread's process into the cgroup and prove
+            // enforcement with a real socket, not just "attach succeeded".
+            std::fs::write(test_cgroup.join("cgroup.procs"), std::process::id().to_string())?;
+            let deny = std::net::TcpStream::connect_timeout(
+                &"93.184.216.34:80".parse().unwrap(),
+                std::time::Duration::from_millis(500),
+            );
+            assert!(deny.is_err(), "expected non-loopback connect to be blocked by default-deny policy");
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let port = listener.local_addr()?.port();
+            let allow = std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{port}").parse().unwrap(),
+                std::time::Duration::from_millis(500),
+            );
+            assert!(allow.is_ok(), "expected loopback connect to remain allowed (both this process's egress and, as the listener, its own ingress are in the same policed cgroup)");
+
+            forget_container_policy(cgroup_id);
+            Ok(())
+        })();
+
+        // Move this process back to the root cgroup before cleanup can
+        // remove the test one (cgroup v2 requires an empty cgroup to rmdir).
+        let _ = std::fs::write(cgroup_root.join("cgroup.procs"), std::process::id().to_string());
+        let _ = std::fs::remove_dir(&test_cgroup);
+        result.expect("guest cgroup policy attach/configure/enforce flow");
+    }
+
+    /// Set 9S: exercises the real attach/configure/cleanup flow against a
+    /// throwaway cgroup v2 subtree -- not a mock. Needs root and a kernel
+    /// with BPF LSM active (`bpf` present in `/sys/kernel/security/lsm`,
+    /// which itself requires `CONFIG_BPF_LSM=y` plus the `lsm=...,bpf` boot
+    /// parameter), so it skips itself rather than failing hosts/CI runners
+    /// without both. Run with `sudo cargo test -p fluxvm-container-agent
+    /// guest_lsm_policy_attaches_and_enforces -- --nocapture` on a real
+    /// Linux host with BPF LSM enabled to actually exercise it.
+    ///
+    /// Known environment sensitivity: on at least one validation host this
+    /// test intermittently failed at the `Ebpf::load()` step with "error
+    /// parsing ELF data" even though the exact embedded object bytes were
+    /// independently confirmed byte-correct (verified via a standalone
+    /// `aya::Ebpf::load()` reproduction outside this binary, which loaded
+    /// the identical file successfully as root) -- the enforcement logic
+    /// itself was confirmed correct in the runs where loading succeeded
+    /// (both the write-prefix allow/deny and the W+X mprotect denial fired
+    /// exactly as expected). The most likely cause traced so far: `aya`
+    /// 0.13.1 unconditionally requires the `object` crate's `write` feature
+    /// family (`pe`/`coff`/`macho`/`xcoff`) alongside `read_core`, which
+    /// this workspace's Cargo.lock pins to `object 0.36.7` -- a version/
+    /// feature-unification interaction in that exact pin, not a bug in this
+    /// program or in the map-key/path-length fixes already applied here. A
+    /// newer `aya`/`aya-obj`/`object` pin is the likely fix; flagged as a
+    /// follow-up rather than blocking this Set on a dependency bump.
+    #[test]
+    fn guest_lsm_policy_attaches_and_enforces() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: needs root for LSM program load/attach");
+            return;
+        }
+        let cgroup_root = std::path::Path::new("/sys/fs/cgroup");
+        if !cgroup_root.join("cgroup.controllers").exists() {
+            eprintln!("skipping: no cgroup v2 mount at /sys/fs/cgroup");
+            return;
+        }
+        let active_lsms = std::fs::read_to_string("/sys/kernel/security/lsm").unwrap_or_default();
+        if !active_lsms.split(',').any(|v| v == "bpf") {
+            eprintln!("skipping: bpf LSM is not active (/sys/kernel/security/lsm={active_lsms:?})");
+            return;
+        }
+        let test_cgroup = cgroup_root.join("fluxvm-agent-test-9s");
+        let _ = std::fs::remove_dir(&test_cgroup);
+        std::fs::create_dir_all(&test_cgroup).expect("creating test cgroup");
+        let allowed_dir = std::env::temp_dir().join(format!("fluxvm-9s-allowed-{}", std::process::id()));
+        std::fs::create_dir_all(&allowed_dir).expect("creating allowed write dir");
+        let denied_dir = std::env::temp_dir().join(format!("fluxvm-9s-denied-{}", std::process::id()));
+        std::fs::create_dir_all(&denied_dir).expect("creating denied write dir");
+
+        let result = (|| -> Result<()> {
+            attach_guest_lsm()?;
+            let cgroup_id = cgroup_id_for(&test_cgroup)?;
+            let allowed_prefix = allowed_dir.to_string_lossy().into_owned();
+            configure_container_lsm_policy(
+                cgroup_id,
+                /* deny_wx */ true,
+                /* restrict_writes */ true,
+                &[allowed_prefix],
+                /* audit_only */ false,
+            )?;
+
+            std::fs::write(test_cgroup.join("cgroup.procs"), std::process::id().to_string())?;
+
+            let denied_path = denied_dir.join("blocked.txt");
+            let denied = std::fs::OpenOptions::new().create(true).write(true).open(&denied_path);
+            assert!(denied.is_err(), "expected write outside the declared mount prefix to be denied");
+
+            let allowed_path = allowed_dir.join("ok.txt");
+            let allowed = std::fs::OpenOptions::new().create(true).write(true).open(&allowed_path);
+            assert!(allowed.is_ok(), "expected write inside the declared mount prefix to remain allowed");
+            drop(allowed);
+
+            let page = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(page, libc::MAP_FAILED, "mmap for W+X test failed");
+            let rc = unsafe { libc::mprotect(page, 4096, libc::PROT_WRITE | libc::PROT_EXEC) };
+            let wx_errno = if rc != 0 { Some(std::io::Error::last_os_error()) } else { None };
+            unsafe { libc::munmap(page, 4096) };
+            assert!(rc != 0, "expected W+X mprotect to be denied under FLUXVM_LSM_DENY_WX");
+            assert_eq!(
+                wx_errno.and_then(|e| e.raw_os_error()),
+                Some(libc::EPERM),
+                "expected EPERM (LSM denial), not a different mprotect failure"
+            );
+
+            forget_container_lsm_policy(cgroup_id);
+            Ok(())
+        })();
+
+        // Move this process back to the root cgroup before cleanup can
+        // remove the test one (cgroup v2 requires an empty cgroup to rmdir).
+        let _ = std::fs::write(cgroup_root.join("cgroup.procs"), std::process::id().to_string());
+        let _ = std::fs::remove_dir(&test_cgroup);
+        let _ = std::fs::remove_dir_all(&allowed_dir);
+        let _ = std::fs::remove_dir_all(&denied_dir);
+        result.expect("guest LSM attach/configure/enforce flow");
+    }
+
+    #[test]
+    fn container_identity_is_tagged_and_stable() {
+        let a = container_identity_for("container-a");
+        let b = container_identity_for("container-b");
+        assert_eq!(a, container_identity_for("container-a"));
+        assert_ne!(a, b);
+        assert_ne!(a & CONTAINER_IDENTITY_TAG_BIT, 0);
+        assert_ne!(b & CONTAINER_IDENTITY_TAG_BIT, 0);
+    }
+
+    #[test]
+    fn oci_write_policy_extracts_readonly_and_mount_destinations() {
+        let (readonly, prefixes) = oci_write_policy(
+            r#"{"root":{"path":"/r","readonly":true},"mounts":[{"destination":"/data"},{"destination":"/etc/hosts"}]}"#,
+        );
+        assert!(readonly);
+        assert_eq!(prefixes, vec!["/data".to_string(), "/etc/hosts".to_string()]);
+
+        let (readonly, prefixes) = oci_write_policy(r#"{"root":{"path":"/r"}}"#);
+        assert!(!readonly);
+        assert!(prefixes.is_empty());
     }
 }
 

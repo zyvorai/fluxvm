@@ -279,9 +279,27 @@ impl VmManager {
     /// or have its metrics read later (`set_resources`/`freeze`/`metrics`/
     /// `pressure` all report a clear "no cgroup" error rather than a
     /// confusing failure deeper in the cgroupfs).
-    fn attach_cgroup(id: Uuid, pid: u32, record: &mut VmRecord) {
+    fn attach_cgroup(&self, id: Uuid, pid: u32, record: &mut VmRecord, vfio_devices: &[String]) {
         match fluxvm_cgroup::CgroupManager::create_and_migrate(&id.to_string(), pid) {
-            Ok(mgr) => record.cgroup_path = Some(mgr.path().to_path_buf()),
+            Ok(mgr) => {
+                let cgroup_path = mgr.path().to_path_buf();
+                record.cgroup_path = Some(cgroup_path.clone());
+                // Sentinel Set 7S: device-cgroup + outbound-IP hardening for
+                // the QEMU process, layered on the cgroup we just created.
+                // Best-effort like the cgroup creation above it — a failure
+                // here means this VM runs without the extra hardening, not
+                // that it fails to launch at all.
+                if self.cfg.sandbox.dataplane.mode != fluxvm_core::config::DataplaneMode::Legacy {
+                    if let Err(e) = fluxvm_network::qemu_cgroup::attach(
+                        &self.cfg.sandbox.dataplane,
+                        id,
+                        &cgroup_path,
+                        vfio_devices,
+                    ) {
+                        tracing::warn!(vm = %id, error = %e, "Set 7S QEMU cgroup hardening attach failed");
+                    }
+                }
+            }
             Err(e) => {
                 tracing::warn!(vm = %id, error = %e, "failed to create cgroup for VM — resource control/metrics unavailable for it")
             }
@@ -1149,7 +1167,7 @@ impl VmManager {
             if req.qga.as_ref().is_some_and(|q| q.enabled) {
                 record.qga_socket = Some(workspace.join("qga.sock"));
             }
-            Self::attach_cgroup(id, launch.pid, &mut record);
+            self.attach_cgroup(id, launch.pid, &mut record, &req.vfio_devices);
             record.status = VmStatus::Running;
             if req.backend == BackendKind::FluxVm
                 && !self.cfg.sandbox.egress_proxy_listen.is_empty()
@@ -1420,7 +1438,8 @@ impl VmManager {
             if vm.request.qga.as_ref().is_some_and(|q| q.enabled) {
                 vm.qga_socket = Some(vm.workspace.join("qga.sock"));
             }
-            Self::attach_cgroup(id, launch.pid, &mut vm);
+            let vfio_devices = vm.request.vfio_devices.clone();
+            self.attach_cgroup(id, launch.pid, &mut vm, &vfio_devices);
             vm.status = VmStatus::Running;
             vm.error = None;
             if let Some(ref ns) = vm.netns {
@@ -1508,6 +1527,7 @@ impl VmManager {
         // is confirmed dead by this point either way (graceful exit,
         // terminate_pid, or it just never had one to begin with).
         if let Some(cgroup_path) = vm.cgroup_path.take() {
+            let _ = fluxvm_network::qemu_cgroup::detach(&self.cfg.sandbox.dataplane, id, &cgroup_path);
             if let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(cgroup_path) {
                 if let Err(e) = mgr.remove() {
                     tracing::warn!(vm = %id, error = %e, "failed to remove VM cgroup");
@@ -1782,6 +1802,7 @@ impl VmManager {
                         }
                         vm.netns = None;
                         if let Some(cgroup_path) = vm.cgroup_path.take() {
+                            let _ = fluxvm_network::qemu_cgroup::detach(&self.cfg.sandbox.dataplane, vm.id, &cgroup_path);
                             if let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(cgroup_path) {
                                 let _ = mgr.remove();
                             }
