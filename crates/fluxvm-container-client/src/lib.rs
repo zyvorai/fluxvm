@@ -249,23 +249,53 @@ fn native_vsock_call_blocking(
     use std::os::fd::FromRawFd;
 
     unsafe {
-        let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
+        let mut file = None;
+        let mut last_err = None;
+        // AF_VSOCK connect() can return a transient EAGAIN/ECONNRESET when the
+        // guest's listener is momentarily busy (e.g. a concurrent connection
+        // just landed, or the accept() backlog hasn't drained yet right after
+        // the container-agent starts) -- this is the vsock analogue of a busy
+        // TCP accept queue, not a fatal condition. Retry a bounded number of
+        // times with a short backoff rather than failing the whole RPC on the
+        // first transient hiccup.
+        for attempt in 0..8 {
+            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                bail!("socket(AF_VSOCK): {}", std::io::Error::last_os_error());
+            }
+            let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+            addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+            addr.svm_cid = cid;
+            addr.svm_port = port;
+            if libc::connect(
+                fd,
+                (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
+                std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+            ) == 0
+            {
+                file = Some(std::fs::File::from_raw_fd(fd));
+                break;
+            }
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            let retryable = matches!(
+                err.raw_os_error(),
+                Some(libc::EAGAIN) | Some(libc::ECONNRESET) | Some(libc::ECONNREFUSED)
+            );
+            last_err = Some(err);
+            if !retryable || attempt == 7 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50 * (attempt + 1)));
         }
-        let mut file = std::fs::File::from_raw_fd(fd);
-        let mut addr: libc::sockaddr_vm = std::mem::zeroed();
-        addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
-        addr.svm_cid = cid;
-        addr.svm_port = port;
-        if libc::connect(
-            fd,
-            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        ) != 0
-        {
-            bail!("connect(vsock cid={cid} port={port}): {}", std::io::Error::last_os_error());
-        }
+        let mut file = match file {
+            Some(f) => f,
+            None => {
+                let err = last_err.expect("connect loop always sets last_err on failure");
+                bail!("connect(vsock cid={cid} port={port}): {err}");
+            }
+        };
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
         let tv = libc::timeval { tv_sec: 20, tv_usec: 0 };
         libc::setsockopt(
             fd,
