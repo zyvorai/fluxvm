@@ -263,6 +263,8 @@ impl VirtualMachine {
             .unwrap_or(3600);
         let deadline = Instant::now() + Duration::from_secs(run_secs);
         let mut exits = 0u64;
+        // TEMP diagnostic (Bug 2 investigation, remove before merge).
+        let mut diag_ports: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
         let mut this = self;
         let mut serial_injected = false;
         let inject = std::env::var("FLUXVM_SERIAL_INJECT").ok();
@@ -311,9 +313,15 @@ impl VirtualMachine {
             if exits <= 20 {
                 eprintln!("[kvm] exit#{exits} reason={reason}");
             }
+            if exits % 5000 == 0 {
+                let mut v: Vec<_> = diag_ports.iter().collect();
+                v.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+                eprintln!("[diag] exits={exits} top ports={:?}", &v[..v.len().min(10)]);
+            }
             match reason {
                 ffi::KVM_EXIT_IO => {
                     let (dir, size, port, count, off) = kvm.io_info(0);
+                    *diag_ports.entry(port).or_insert(0) += 1;
                     let n = (size as u32 * count) as usize;
                     if dir == ffi::KVM_EXIT_IO_OUT {
                         let data = kvm.io_data(0, off, n).to_vec();
