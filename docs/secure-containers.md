@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 6
+## Implemented through Set 7
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`
 - one Kubernetes Pod/containerd shim group -> one FluxVM QEMU VM
@@ -87,6 +87,8 @@ the VM's existing per-instance authentication token.
   on the same `fluxvm.slice/{id}.scope` cgroup every VM already gets — see
   [docs/secure-containers-set7s.md](secure-containers-set7s.md). Applies to
   every VM, not only Secure Containers Pods.
+- VM boot pipelined with the host-side rootfs mount+copy instead of strictly
+  sequential — see [docs/secure-containers-set7r.md](secure-containers-set7r.md).
 
 ## Current limitations
 
@@ -147,8 +149,11 @@ and abrupt-exit tests on self-hosted KVM/containerd nodes.
 
 ### P1 — performance
 
-Use FluxVM warm pools/snapshots so Pod VM startup can claim/resume a prepared
-sandbox instead of cold-booting every group.
+Set 7 (Runtime) pipelines VM boot with the host-side rootfs copy (no longer
+strictly sequential) — see
+[docs/secure-containers-set7r.md](secure-containers-set7r.md). Full warm-pool
+integration (claim/resume a prepared sandbox instead of cold-booting every
+Pod group) remains open.
 
 ### P1 — additional VMMs
 

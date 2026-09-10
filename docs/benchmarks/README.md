@@ -69,6 +69,19 @@ Lab one-shot (sandbox + MicroVM):
 ./scripts/run-lab-benches.sh
 ```
 
+## Secure Containers (`ctr run` cold-boot)
+
+```bash
+chmod +x scripts/bench-secure-containers.sh
+BENCH_N=5 ./scripts/bench-secure-containers.sh
+```
+
+Reports `avg_run_ms` for `ctr run` (containerd task create through completion)
+against the `io.containerd.fluxvm.v2` runtime. There is no warm-pool reuse
+for Secure Containers yet (see
+[docs/secure-containers-set7r.md](../secure-containers-set7r.md)), so every
+run cold-boots a fresh Pod VM — this is the number that Set closes.
+
 ## Lab results (2026-09-08)
 
 Host: Ubuntu 24.04 · Xeon E-2336 (12 threads) · 31 GiB RAM · k3s + FluxVM

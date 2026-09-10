@@ -251,6 +251,20 @@ impl Service {
         Ok(resp)
     }
 
+    /// Deterministic Pod-share directory for this shim's group — a pure
+    /// function of config/namespace/group, never of whether the sandbox VM
+    /// has actually been created yet. Set 7R relies on that: it lets
+    /// `stage_rootfs_and_config` compute a container's staging paths and
+    /// start the host-side rootfs copy *before* `ensure_sandbox`'s VM
+    /// boot/wait completes, instead of only after.
+    fn share_dir(&self) -> PathBuf {
+        self.cfg
+            .state_dir
+            .join(&self.namespace)
+            .join(&self.group)
+            .join("share")
+    }
+
     async fn ensure_sandbox(&self, hints: Option<&SandboxHints>) -> AnyResult<VmRecord> {
         let mut guard = self.sandbox.lock().await;
         if let Some(s) = guard.as_ref() {
@@ -271,12 +285,7 @@ impl Service {
         }
 
         let hints = hints.cloned().unwrap_or_default();
-        let share_dir = self
-            .cfg
-            .state_dir
-            .join(&self.namespace)
-            .join(&self.group)
-            .join("share");
+        let share_dir = self.share_dir();
         tokio::fs::create_dir_all(&share_dir).await?;
 
         let (vcpus, memory_mib) = vm_shape(
@@ -575,6 +584,16 @@ impl Service {
         Ok((vm, host, guest))
     }
 
+    /// Set 7R: the VM boot this depends on (`ensure_sandbox`, a fresh QEMU
+    /// cold-boot for the first container in a group) and the host-side
+    /// rootfs mount+copy below have no data dependency on each other until
+    /// both are done — the copy only needs a deterministic staging path
+    /// (`share_dir()`/`safe_name(id)`, computable with no VM involved at
+    /// all), and the guest only reads that path via virtiofs later, once
+    /// the container-agent actually starts the container. Through Set 6,
+    /// these ran strictly sequentially (the full VM boot, then the copy);
+    /// running them concurrently removes the smaller of the two costs from
+    /// the Pod's critical path entirely instead of just shrinking it.
     async fn stage_rootfs_and_config(&self, req: &CreateTaskRequest) -> AnyResult<(VmRecord, String, ContainerIo, Option<PathBuf>)> {
         let config_path = Path::new(&req.bundle).join("config.json");
         let text = tokio::fs::read_to_string(&config_path)
@@ -582,24 +601,31 @@ impl Service {
             .with_context(|| format!("reading {}", config_path.display()))?;
         let mut spec: Value = serde_json::from_str(&text)?;
         let hints = sandbox_hints_from_spec(&spec);
-        let (vm, host_ctr, guest_ctr) = self.sandbox_paths(&req.id, Some(&hints)).await?;
+
+        let host_ctr = self.share_dir().join("containers").join(safe_name(&req.id));
+        let guest_ctr = format!("{GUEST_SHARE}/containers/{}", safe_name(&req.id));
         let rootfs = host_ctr.join("rootfs");
         let mountpoint = self.cfg.state_dir.join(&self.namespace).join(&self.group).join("mounts").join(safe_name(&req.id));
-        // A failed/retried CreateTask must never inherit files or FIFOs from
-        // a previous attempt.
-        let _ = tokio::fs::remove_dir_all(&host_ctr).await;
-        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
-        tokio::fs::create_dir_all(&rootfs).await?;
-        tokio::fs::create_dir_all(&mountpoint).await?;
-        for m in &req.rootfs {
-            containerd_shim::asynchronous::util::mount_rootfs(m, &mountpoint)
-                .await
-                .map_err(|e| anyhow::anyhow!("mounting containerd rootfs: {e}"))?;
-        }
-        let copy_result = copy_contents(&mountpoint, &rootfs).await;
-        let _ = tokio::process::Command::new("umount").args(["-l", mountpoint.to_string_lossy().as_ref()]).status().await;
-        let _ = tokio::fs::remove_dir_all(&mountpoint).await;
-        copy_result?;
+
+        let stage_rootfs = async {
+            // A failed/retried CreateTask must never inherit files or FIFOs
+            // from a previous attempt.
+            let _ = tokio::fs::remove_dir_all(&host_ctr).await;
+            let _ = tokio::fs::remove_dir_all(&mountpoint).await;
+            tokio::fs::create_dir_all(&rootfs).await?;
+            tokio::fs::create_dir_all(&mountpoint).await?;
+            for m in &req.rootfs {
+                containerd_shim::asynchronous::util::mount_rootfs(m, &mountpoint)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("mounting containerd rootfs: {e}"))?;
+            }
+            let copy_result = copy_contents(&mountpoint, &rootfs).await;
+            let _ = tokio::process::Command::new("umount").args(["-l", mountpoint.to_string_lossy().as_ref()]).status().await;
+            let _ = tokio::fs::remove_dir_all(&mountpoint).await;
+            copy_result
+        };
+
+        let (vm, ()) = tokio::try_join!(self.ensure_sandbox(Some(&hints)), stage_rootfs)?;
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
         stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await?;
