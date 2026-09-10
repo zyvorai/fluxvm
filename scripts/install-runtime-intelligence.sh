@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 install -D -m0755 "$ROOT/dist/bin/fluxvm-intelligence" /usr/bin/fluxvm-intelligence
 install -D -m0755 "$ROOT/dist/bin/fluxvm-intelligence-loader" /usr/libexec/fluxvm/fluxvm-intelligence-loader
 install -D -m0755 "$ROOT/dist/bin/fluxvm-tcx" /usr/libexec/fluxvm/fluxvm-tcx
+install -D -m0755 "$ROOT/dist/bin/fluxvm-flight-reader" /usr/libexec/fluxvm/fluxvm-flight-reader
 install -D -m0644 "$ROOT/dist/bpf/fluxvm_intelligence.bpf.o" /usr/lib/fluxvm/bpf/fluxvm_intelligence.bpf.o
 install -D -m0644 "$ROOT/deploy/systemd/fluxvm-intelligence.service" /etc/systemd/system/fluxvm-intelligence.service
 systemctl daemon-reload

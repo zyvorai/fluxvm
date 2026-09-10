@@ -10,12 +10,13 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     net::IpAddr,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
 };
 use uuid::Uuid;
 
-pub const INTELLIGENCE_SCHEMA_VERSION: u32 = 1;
+pub const INTELLIGENCE_SCHEMA_VERSION: u32 = 2;
 pub const DEFAULT_PIN_ROOT: &str = "/sys/fs/bpf/fluxvm/intelligence";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,7 +30,12 @@ pub struct FeatureProbe {
     pub sched_wakeup: bool,
     pub sched_switch: bool,
     pub sched_migrate_task: bool,
+    pub blk_mq_start_request: bool,
+    pub blk_account_io_done: bool,
+    pub vhost_work_queue: bool,
+    pub vhost_poll_wakeup: bool,
     pub maps_loaded: bool,
+    pub flight_maps_loaded: bool,
     pub kernel_btf: bool,
 }
 
@@ -39,6 +45,9 @@ impl FeatureProbe {
     }
     pub fn ready_for_kvm(&self) -> bool {
         self.ready_for_scheduler() && self.kvm_entry && self.kvm_exit
+    }
+    pub fn ready_for_flight_recorder(&self) -> bool {
+        self.maps_loaded && self.flight_maps_loaded
     }
 }
 
@@ -51,6 +60,65 @@ pub struct KernelVmStats {
     pub runnable_delay_max_ns: u64,
     pub migrations: u64,
     pub last_event_ns: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlightValue {
+    pub count: u64,
+    pub total_ns: u64,
+    pub max_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KvmExitReasonStat {
+    pub vcpu_tid: u32,
+    pub reason: u32,
+    pub reason_label: String,
+    pub count: u64,
+    pub total_guest_ns: u64,
+    pub max_guest_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LatencyBucket {
+    pub kind: String,
+    pub bucket: u32,
+    /// Inclusive upper bound in nanoseconds. `None` is +Inf.
+    pub le_ns: Option<u64>,
+    pub count: u64,
+    pub total_ns: u64,
+    pub max_ns: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlightCounters {
+    pub block_started: u64,
+    pub block_completed: u64,
+    pub block_orphan_completions: u64,
+    pub vhost_queued: u64,
+    pub vhost_wakeups: u64,
+    pub ringbuf_lost: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlightRecorderSnapshot {
+    pub available: bool,
+    pub kvm_exits: Vec<KvmExitReasonStat>,
+    pub latency: Vec<LatencyBucket>,
+    pub counters: FlightCounters,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FlightEvent {
+    pub timestamp_ns: u64,
+    pub vm_key: u64,
+    pub event_type: u32,
+    pub event: String,
+    pub tid: u32,
+    pub cpu: u32,
+    pub duration_ns: u64,
+    pub arg0: u64,
+    pub arg1: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,6 +166,8 @@ pub struct VmRuntimeSnapshot {
     pub process: ProcVmStats,
     pub pressure: PressureStats,
     pub network: Option<NetworkVmStats>,
+    #[serde(default)]
+    pub flight: Option<FlightRecorderSnapshot>,
     pub findings: Vec<String>,
 }
 
@@ -128,16 +198,34 @@ pub fn probe(pin_root: &Path) -> FeatureProbe {
         sched_wakeup: event("sched/sched_wakeup"),
         sched_switch: event("sched/sched_switch"),
         sched_migrate_task: event("sched/sched_migrate_task"),
+        blk_mq_start_request: kernel_symbol_exists("blk_mq_start_request"),
+        blk_account_io_done: kernel_symbol_exists("blk_account_io_done"),
+        vhost_work_queue: kernel_symbol_exists("vhost_work_queue"),
+        vhost_poll_wakeup: kernel_symbol_exists("vhost_poll_wakeup"),
         maps_loaded: pin_root.join("maps/tracked_tgids").exists()
             && pin_root.join("maps/tracked_tids").exists()
             && pin_root.join("maps/vm_stats").exists(),
+        flight_maps_loaded: pin_root.join("maps/kvm_exit_hist").exists()
+            && pin_root.join("maps/latency_hist").exists()
+            && pin_root.join("maps/flight_counts").exists()
+            && pin_root.join("maps/flight_events").exists(),
         kernel_btf: Path::new("/sys/kernel/btf/vmlinux").exists(),
     }
 }
 
 pub fn register_record(record: &VmRecord, pin_root: &Path) -> Result<Vec<u32>> {
     let pid = record.pid.ok_or_else(|| anyhow!("VM {} has no VMM pid", record.id))?;
-    register_raw(record.id, pid, pin_root)
+    let tids = register_raw(record.id, pid, pin_root)?;
+    if let Some(cgroup) = record.cgroup_path.as_deref() {
+        let map = pin_root.join("maps/tracked_cgroups");
+        if map.exists() {
+            let cgroup = if cgroup.is_absolute() { cgroup.to_path_buf() } else { Path::new("/sys/fs/cgroup").join(cgroup) };
+            if let Ok(meta) = fs::metadata(cgroup) {
+                let _ = bpftool_update_u64_u64(&map, meta.ino(), vm_key(record.id));
+            }
+        }
+    }
+    Ok(tids)
 }
 
 pub fn register_raw(id: Uuid, pid: u32, pin_root: &Path) -> Result<Vec<u32>> {
@@ -149,7 +237,10 @@ pub fn register_raw(id: Uuid, pid: u32, pin_root: &Path) -> Result<Vec<u32>> {
     require_map(&maps.join("tracked_tgids"))?;
     require_map(&maps.join("tracked_tids"))?;
     bpftool_update_u32_u64(&maps.join("tracked_tgids"), pid, key)?;
-    let tids = task_ids(pid)?;
+    let mut tids = task_ids(pid)?;
+    tids.extend(discover_vhost_tids(pid));
+    tids.sort_unstable();
+    tids.dedup();
     for tid in &tids {
         bpftool_update_u32_u64(&maps.join("tracked_tids"), *tid, key)?;
     }
@@ -166,6 +257,7 @@ pub fn unregister_raw(id: Uuid, pid: Option<u32>, pin_root: &Path) -> Result<()>
         }
     }
     let _ = bpftool_delete_u64(&maps.join("vm_stats"), key);
+    let _ = clear_vm_aux_maps(pin_root, key);
     Ok(())
 }
 
@@ -174,7 +266,9 @@ pub fn unregister_exact(id: Uuid, pid: u32, tids: &[u32], pin_root: &Path) -> Re
     let maps = pin_root.join("maps");
     let _ = bpftool_delete_u32(&maps.join("tracked_tgids"), pid);
     for tid in tids { let _ = bpftool_delete_u32(&maps.join("tracked_tids"), *tid); }
-    let _ = bpftool_delete_u64(&maps.join("vm_stats"), vm_key(id));
+    let key = vm_key(id);
+    let _ = bpftool_delete_u64(&maps.join("vm_stats"), key);
+    let _ = clear_vm_aux_maps(pin_root, key);
     Ok(())
 }
 
@@ -224,6 +318,11 @@ fn snapshot_parts(
     let kernel = if p.maps_loaded { read_kernel_stats(pin_root, vm_key(id)).unwrap_or_default() } else { KernelVmStats::default() };
     let process = read_proc_stats(pid).unwrap_or_default();
     let pressure = cgroup_path.map(read_pressure).transpose().unwrap_or(None).unwrap_or_default();
+    let flight = if p.flight_maps_loaded {
+        read_flight_snapshot(pin_root, vm_key(id)).ok()
+    } else {
+        None
+    };
     let mut findings = Vec::new();
     if kernel.runnable_delay_max_ns >= 10_000_000 {
         findings.push(format!("high vCPU/thread runnable delay: {:.2} ms max", kernel.runnable_delay_max_ns as f64 / 1_000_000.0));
@@ -237,10 +336,22 @@ fn snapshot_parts(
     if pressure.io_full_avg10.unwrap_or(0.0) >= 1.0 {
         findings.push(format!("full I/O pressure avg10 is {:.2}%", pressure.io_full_avg10.unwrap_or(0.0)));
     }
+    if let Some(flight) = &flight {
+        if flight.counters.ringbuf_lost > 0 {
+            findings.push(format!("Flight Recorder dropped {} live event(s) because the ring buffer was full", flight.counters.ringbuf_lost));
+        }
+        let block_max = flight.latency.iter().filter(|b| b.kind == "block-io").map(|b| b.max_ns).max().unwrap_or(0);
+        if block_max >= 20_000_000 {
+            findings.push(format!("slow VM-attributed block I/O observed: {:.2} ms max", block_max as f64 / 1_000_000.0));
+        }
+    }
     if !p.maps_loaded {
         findings.push("eBPF intelligence maps are not loaded; showing procfs/cgroup fallback only".into());
     } else if !p.ready_for_kvm() {
         findings.push("KVM tracepoints unavailable; scheduler telemetry remains usable".into());
+    }
+    if p.maps_loaded && !p.flight_maps_loaded {
+        findings.push("Flight Recorder maps are unavailable; runtime-intelligence object predates schema v2".into());
     }
     Ok(VmRuntimeSnapshot {
         schema_version: INTELLIGENCE_SCHEMA_VERSION,
@@ -256,6 +367,7 @@ fn snapshot_parts(
         process,
         pressure,
         network: None,
+        flight,
         findings,
     })
 }
@@ -307,6 +419,256 @@ pub fn task_ids(pid: u32) -> Result<Vec<u32>> {
         if let Ok(tid) = ent.file_name().to_string_lossy().parse::<u32>() { tids.insert(tid); }
     }
     Ok(tids.into_iter().collect())
+}
+
+pub fn read_flight_snapshot(pin_root: &Path, wanted: u64) -> Result<FlightRecorderSnapshot> {
+    let kvm_path = pin_root.join("maps/kvm_exit_hist");
+    let latency_path = pin_root.join("maps/latency_hist");
+    let counts_path = pin_root.join("maps/flight_counts");
+    if !kvm_path.exists() || !latency_path.exists() || !counts_path.exists() {
+        return Ok(FlightRecorderSnapshot::default());
+    }
+    Ok(FlightRecorderSnapshot {
+        available: true,
+        kvm_exits: read_kvm_exit_hist(&kvm_path, wanted)?,
+        latency: read_latency_hist(&latency_path, wanted)?,
+        counters: read_flight_counts(&counts_path, wanted)?,
+    })
+}
+
+pub fn trace_events(
+    id: Uuid,
+    pin_root: &Path,
+    seconds: u64,
+    limit: usize,
+) -> Result<Vec<FlightEvent>> {
+    let map = pin_root.join("maps/flight_events");
+    require_map(&map)?;
+    let helper = std::env::var("FLUXVM_FLIGHT_READER")
+        .unwrap_or_else(|_| "/usr/libexec/fluxvm/fluxvm-flight-reader".into());
+    let args = vec![
+        "--map".to_string(), map.display().to_string(),
+        "--vm-key".to_string(), vm_key(id).to_string(),
+        "--seconds".to_string(), seconds.clamp(1, 3600).to_string(),
+        "--limit".to_string(), limit.clamp(1, 10000).to_string(),
+    ];
+    let out = Command::new(&helper)
+        .args(&args)
+        .output()
+        .with_context(|| format!("running Flight Recorder reader {helper}"))?;
+    if !out.status.success() {
+        bail!("Flight Recorder reader failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let text = String::from_utf8(out.stdout).context("Flight Recorder reader emitted non-UTF8 output")?;
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str::<FlightEvent>(line).context("decoding Flight Recorder JSONL"))
+        .collect()
+}
+
+fn read_kvm_exit_hist(path: &Path, wanted: u64) -> Result<Vec<KvmExitReasonStat>> {
+    let rows = bpftool_rows(path)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (vm_key, vcpu_tid, reason) = if let Some(Value::Object(key)) = row.get("key") {
+            (
+                json_u64(key.get("vm_key")).unwrap_or(0),
+                json_u64(key.get("vcpu_tid")).unwrap_or(0) as u32,
+                json_u64(key.get("reason")).unwrap_or(0) as u32,
+            )
+        } else {
+            let Some(raw) = decode_hex_field(row.get("key")) else { continue; };
+            if raw.len() < 16 { continue; }
+            (le_u64(&raw[0..8]).unwrap_or(0), le_u32(&raw[8..12]).unwrap_or(0), le_u32(&raw[12..16]).unwrap_or(0))
+        };
+        if vm_key != wanted { continue; }
+        let value = flight_value_from_row(row.get("value"));
+        out.push(KvmExitReasonStat {
+            vcpu_tid,
+            reason,
+            reason_label: kvm_exit_reason_label(reason).into(),
+            count: value.count,
+            total_guest_ns: value.total_ns,
+            max_guest_ns: value.max_ns,
+        });
+    }
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.vcpu_tid.cmp(&b.vcpu_tid)).then_with(|| a.reason.cmp(&b.reason)));
+    Ok(out)
+}
+
+fn read_latency_hist(path: &Path, wanted: u64) -> Result<Vec<LatencyBucket>> {
+    let rows = bpftool_rows(path)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (vm_key, kind, bucket) = if let Some(Value::Object(key)) = row.get("key") {
+            (
+                json_u64(key.get("vm_key")).unwrap_or(0),
+                json_u64(key.get("kind")).unwrap_or(0) as u32,
+                json_u64(key.get("bucket")).unwrap_or(0) as u32,
+            )
+        } else {
+            let Some(raw) = decode_hex_field(row.get("key")) else { continue; };
+            if raw.len() < 16 { continue; }
+            (le_u64(&raw[0..8]).unwrap_or(0), le_u32(&raw[8..12]).unwrap_or(0), le_u32(&raw[12..16]).unwrap_or(0))
+        };
+        if vm_key != wanted { continue; }
+        let value = flight_value_from_row(row.get("value"));
+        out.push(LatencyBucket {
+            kind: latency_kind_label(kind).into(),
+            bucket,
+            le_ns: latency_upper_bound_ns(bucket),
+            count: value.count,
+            total_ns: value.total_ns,
+            max_ns: value.max_ns,
+        });
+    }
+    out.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.bucket.cmp(&b.bucket)));
+    Ok(out)
+}
+
+fn read_flight_counts(path: &Path, wanted: u64) -> Result<FlightCounters> {
+    let rows = bpftool_rows(path)?;
+    let mut out = FlightCounters::default();
+    for row in rows {
+        let (vm_key, kind) = if let Some(Value::Object(key)) = row.get("key") {
+            (json_u64(key.get("vm_key")).unwrap_or(0), json_u64(key.get("kind")).unwrap_or(0) as u32)
+        } else {
+            let Some(raw) = decode_hex_field(row.get("key")) else { continue; };
+            if raw.len() < 12 { continue; }
+            (le_u64(&raw[0..8]).unwrap_or(0), le_u32(&raw[8..12]).unwrap_or(0))
+        };
+        if vm_key != wanted { continue; }
+        let value = decode_scalar_or_hex_u64(row.get("value")).unwrap_or(0);
+        match kind {
+            1 => out.block_started = value,
+            2 => out.block_completed = value,
+            3 => out.block_orphan_completions = value,
+            4 => out.vhost_queued = value,
+            5 => out.vhost_wakeups = value,
+            6 => out.ringbuf_lost = value,
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+fn flight_value_from_row(v: Option<&Value>) -> FlightValue {
+    if let Some(Value::Object(value)) = v {
+        return FlightValue {
+            count: json_u64(value.get("count")).unwrap_or(0),
+            total_ns: json_u64(value.get("total_ns")).unwrap_or(0),
+            max_ns: json_u64(value.get("max_ns")).unwrap_or(0),
+        };
+    }
+    let raw = decode_hex_field(v).unwrap_or_default();
+    FlightValue {
+        count: raw.get(0..8).and_then(le_u64).unwrap_or(0),
+        total_ns: raw.get(8..16).and_then(le_u64).unwrap_or(0),
+        max_ns: raw.get(16..24).and_then(le_u64).unwrap_or(0),
+    }
+}
+
+fn bpftool_rows(path: &Path) -> Result<Vec<Value>> {
+    let out = Command::new("bpftool")
+        .args(["-j", "map", "dump", "pinned"])
+        .arg(path)
+        .output()
+        .with_context(|| format!("running bpftool for {}", path.display()))?;
+    if !out.status.success() {
+        bail!("bpftool map dump {} failed: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    serde_json::from_slice(&out.stdout).context("parsing Flight Recorder bpftool JSON")
+}
+
+fn latency_kind_label(kind: u32) -> &'static str {
+    match kind { 1 => "kvm-run", 2 => "runnable", 3 => "block-io", _ => "unknown" }
+}
+
+fn latency_upper_bound_ns(bucket: u32) -> Option<u64> {
+    if bucket >= 24 { return None; }
+    Some(1000u64.saturating_mul(1u64 << bucket))
+}
+
+fn kvm_exit_reason_label(reason: u32) -> &'static str {
+    if !cfg!(target_arch = "x86_64") { return "architecture-specific"; }
+    match reason {
+        0 => "exception-or-nmi",
+        1 => "external-interrupt",
+        2 => "triple-fault",
+        7 => "interrupt-window",
+        10 => "cpuid",
+        12 => "hlt",
+        18 => "vmcall",
+        28 => "control-register",
+        30 => "io-instruction",
+        31 => "msr-read",
+        32 => "msr-write",
+        44 => "ept-misconfig",
+        48 => "ept-violation",
+        _ => "other",
+    }
+}
+
+fn discover_vhost_tids(vmm_pid: u32) -> Vec<u32> {
+    let prefix = format!("vhost-{vmm_pid}");
+    let mut out = Vec::new();
+    let Ok(proc) = fs::read_dir("/proc") else { return out; };
+    for ent in proc.flatten() {
+        let Ok(tid) = ent.file_name().to_string_lossy().parse::<u32>() else { continue; };
+        let Ok(comm) = fs::read_to_string(ent.path().join("comm")) else { continue; };
+        let comm = comm.trim();
+        if comm == prefix || comm.starts_with(&(prefix.clone() + "-")) { out.push(tid); }
+    }
+    out
+}
+
+fn clear_vm_aux_maps(pin_root: &Path, wanted: u64) -> Result<()> {
+    clear_scalar_value_map(&pin_root.join("maps/tracked_cgroups"), wanted)?;
+    clear_struct_vm_map(&pin_root.join("maps/kvm_exit_hist"), wanted, 16)?;
+    clear_struct_vm_map(&pin_root.join("maps/latency_hist"), wanted, 16)?;
+    clear_struct_vm_map(&pin_root.join("maps/flight_counts"), wanted, 16)?;
+    Ok(())
+}
+
+fn clear_scalar_value_map(path: &Path, wanted: u64) -> Result<()> {
+    if !path.exists() { return Ok(()); }
+    for row in bpftool_rows(path)? {
+        let value = decode_scalar_or_hex_u64(row.get("value")).unwrap_or(0);
+        if value != wanted { continue; }
+        if let Some(key) = map_key_bytes(row.get("key"), 8) { let _ = bpftool_delete_bytes(path, &key); }
+    }
+    Ok(())
+}
+
+fn clear_struct_vm_map(path: &Path, wanted: u64, key_len: usize) -> Result<()> {
+    if !path.exists() { return Ok(()); }
+    for row in bpftool_rows(path)? {
+        let key = if let Some(raw) = decode_hex_field(row.get("key")) {
+            raw
+        } else if let Some(Value::Object(obj)) = row.get("key") {
+            let vm = json_u64(obj.get("vm_key")).unwrap_or(0);
+            if vm != wanted { continue; }
+            let mut raw = vm.to_le_bytes().to_vec();
+            raw.extend((json_u64(obj.get("kind")).or_else(|| json_u64(obj.get("vcpu_tid"))).unwrap_or(0) as u32).to_le_bytes());
+            raw.extend((json_u64(obj.get("bucket")).or_else(|| json_u64(obj.get("reason"))).unwrap_or(0) as u32).to_le_bytes());
+            raw
+        } else { continue; };
+        if key.len() < key_len || le_u64(&key[..8]) != Some(wanted) { continue; }
+        let _ = bpftool_delete_bytes(path, &key[..key_len]);
+    }
+    Ok(())
+}
+
+fn map_key_bytes(v: Option<&Value>, width: usize) -> Option<Vec<u8>> {
+    if let Some(raw) = decode_hex_field(v) { return (raw.len() >= width).then(|| raw[..width].to_vec()); }
+    let scalar = decode_scalar_or_hex_u64(v)?;
+    Some(scalar.to_le_bytes()[..width].to_vec())
+}
+
+fn bpftool_delete_bytes(map: &Path, key: &[u8]) -> Result<()> {
+    let mut args = vec!["map".into(), "delete".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
+    args.extend(key.iter().map(|b| format!("{b:02x}")));
+    run_bpftool(&args)
 }
 
 fn read_proc_stats(pid: u32) -> Result<ProcVmStats> {
@@ -368,6 +730,11 @@ fn read_pressure_file(path: &Path) -> BTreeMap<String, f64> {
 fn command_exists(name: &str) -> bool {
     Command::new("sh").args(["-c", &format!("command -v {name} >/dev/null 2>&1")]).status().is_ok_and(|s| s.success())
 }
+fn kernel_symbol_exists(name: &str) -> bool {
+    fs::read_to_string("/proc/kallsyms")
+        .ok()
+        .is_some_and(|s| s.lines().any(|line| line.split_whitespace().last() == Some(name)))
+}
 fn require_map(path: &Path) -> Result<()> { if path.exists() { Ok(()) } else { bail!("required pinned map missing: {}", path.display()) } }
 fn run_bpftool(args: &[String]) -> Result<()> {
     let out = Command::new("bpftool").args(args).output().context("running bpftool")?;
@@ -376,6 +743,10 @@ fn run_bpftool(args: &[String]) -> Result<()> {
 fn bpftool_update_u32_u64(map: &Path, key: u32, value: u64) -> Result<()> {
     let mut args = vec!["map".into(), "update".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
     args.extend(le_bytes(key as u64, 4)); args.push("value".into()); args.push("hex".into()); args.extend(le_bytes(value, 8)); run_bpftool(&args)
+}
+fn bpftool_update_u64_u64(map: &Path, key: u64, value: u64) -> Result<()> {
+    let mut args = vec!["map".into(), "update".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
+    args.extend(le_bytes(key, 8)); args.push("value".into()); args.push("hex".into()); args.extend(le_bytes(value, 8)); run_bpftool(&args)
 }
 fn bpftool_delete_u32(map: &Path, key: u32) -> Result<()> {
     if !map.exists() { return Ok(()); }
@@ -390,7 +761,14 @@ fn bpftool_delete_u64(map: &Path, key: u64) -> Result<()> {
 fn le_bytes(value: u64, width: usize) -> Vec<String> { value.to_le_bytes()[..width].iter().map(|b| format!("{b:02x}")).collect() }
 fn decode_hex_field(v: Option<&Value>) -> Option<Vec<u8>> {
     match v? {
-        Value::Array(a) => a.iter().map(|x| x.as_str().and_then(|s| u8::from_str_radix(s.trim_start_matches("0x"), 16).ok())).collect(),
+        Value::Array(a) => a
+            .iter()
+            .map(|x| match x {
+                Value::Number(n) => n.as_u64().filter(|n| *n <= 255).map(|n| n as u8),
+                Value::String(s) => u8::from_str_radix(s.trim_start_matches("0x"), 16).ok(),
+                _ => None,
+            })
+            .collect(),
         Value::Object(o) => o.get("bytes").and_then(|v| decode_hex_field(Some(v))),
         _ => None,
     }
@@ -409,6 +787,7 @@ fn decode_scalar_or_hex_u64(v: Option<&Value>) -> Option<u64> {
     }
     decode_hex_field(v).and_then(|b| le_u64(&b))
 }
+fn le_u32(bytes: &[u8]) -> Option<u32> { if bytes.len() < 4 { None } else { Some(u32::from_le_bytes(bytes[..4].try_into().ok()?)) } }
 fn le_u64(bytes: &[u8]) -> Option<u64> { if bytes.len() < 8 { None } else { Some(u64::from_le_bytes(bytes[..8].try_into().ok()?)) } }
 fn backend_label(v: BackendKind) -> &'static str { match v { BackendKind::Qemu => "qemu", BackendKind::CloudHypervisor => "cloud-hypervisor", BackendKind::Firecracker => "firecracker", BackendKind::FluxVm => "flux-vm", BackendKind::Auto => "auto" } }
 fn status_label(v: VmStatus) -> &'static str { match v { VmStatus::Creating => "creating", VmStatus::Running => "running", VmStatus::Paused => "paused", VmStatus::Stopped => "stopped", VmStatus::Failed => "failed" } }
@@ -853,7 +1232,7 @@ mod tests {
     #[test]
     fn detective_identifies_exact_l4_drop() {
         let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,findings:vec![]};
+        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
         let policy=VmNetworkPolicy{allow_ports:vec!["tcp/443".into()],..Default::default()};
         let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:80,protocol:6,verdict:"drop".into(),packets:7,bytes:700,last_seen_ns:1};
         let d=diagnose_vm(&snap,&policy,None,&[flow]);
@@ -863,7 +1242,7 @@ mod tests {
     #[test]
     fn detective_prefers_exact_default_deny_over_rate_hint() {
         let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,findings:vec![]};
+        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
         let policy=VmNetworkPolicy{default_allow:false,max_egress_pps:Some(100),..Default::default()};
         let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,verdict:"drop".into(),packets:1,bytes:64,last_seen_ns:1};
         let d=diagnose_vm(&snap,&policy,None,&[flow]);
@@ -873,7 +1252,7 @@ mod tests {
     #[test]
     fn audit_only_explicit_deny_is_not_critical() {
         let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,findings:vec![]};
+        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
         let policy=VmNetworkPolicy{deny_cidrs:vec!["1.1.1.1/32".into()],audit_mode:true,..Default::default()};
         let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,verdict:"drop".into(),packets:1,bytes:64,last_seen_ns:1};
         let d=diagnose_vm(&snap,&policy,None,&[flow]);
@@ -883,7 +1262,7 @@ mod tests {
     #[test]
     fn kernel_reason_overrides_policy_inference() {
         let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,findings:vec![]};
+        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
         let policy=VmNetworkPolicy{max_egress_pps:Some(10),..Default::default()};
         let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,verdict:"drop".into(),packets:3,bytes:192,last_seen_ns:2};
         let reason=DropReasonRecord{identity:1,family:4,source:flow.source.clone(),destination:flow.destination.clone(),source_port:1234,destination_port:443,protocol:6,reason_code:6,reason:"rate-limit".into(),action:"drop".into(),packets:3,bytes:192,last_seen_ns:2};
@@ -896,11 +1275,33 @@ mod tests {
     #[test]
     fn migration_reason_is_warning_not_critical() {
         let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,findings:vec![]};
+        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
         let reason=DropReasonRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,reason_code:9,reason:"migration-quiesce".into(),action:"drop".into(),packets:1,bytes:64,last_seen_ns:1};
         let d=diagnose_vm_with_reasons(&snap,&VmNetworkPolicy::default(),None,&[],&[reason]);
         assert_eq!(d.severity,"warning");
         assert_eq!(d.drop_findings[0].stage,"migration/quiesce");
+    }
+
+    #[test]
+    fn flight_latency_bounds_are_stable() {
+        assert_eq!(latency_upper_bound_ns(0), Some(1_000));
+        assert_eq!(latency_upper_bound_ns(10), Some(1_024_000));
+        assert_eq!(latency_upper_bound_ns(24), None);
+    }
+
+    #[test]
+    fn flight_value_parser_accepts_btf_json() {
+        let row = serde_json::json!({"count": 7, "total_ns": 9000, "max_ns": 4000});
+        assert_eq!(flight_value_from_row(Some(&row)), FlightValue { count: 7, total_ns: 9000, max_ns: 4000 });
+    }
+
+    #[test]
+    fn x86_kvm_reason_labels_remain_numeric_safe() {
+        if cfg!(target_arch = "x86_64") {
+            assert_eq!(kvm_exit_reason_label(10), "cpuid");
+            assert_eq!(kvm_exit_reason_label(30), "io-instruction");
+        }
+        assert!(!kvm_exit_reason_label(0xffff).is_empty());
     }
 
 }

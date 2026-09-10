@@ -63,6 +63,31 @@ static int tracepoint_available(const char *section)
     return 0;
 }
 
+static int kernel_symbol_available(const char *section)
+{
+    const char *prefix = "kprobe/";
+    if (strncmp(section, prefix, strlen(prefix)) != 0) return 1;
+    const char *symbol = section + strlen(prefix);
+    FILE *f = fopen("/proc/kallsyms", "r");
+    if (!f) return 1; /* attach itself remains the authority */
+    unsigned long long addr;
+    char type;
+    char name[512];
+    int found = 0;
+    while (fscanf(f, "%llx %c %511s", &addr, &type, name) == 3) {
+        (void)addr; (void)type;
+        if (strcmp(name, symbol) == 0) { found = 1; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+static int optional_attach_error(long err)
+{
+    return err == -ENOENT || err == -EINVAL || err == -ENOTSUP ||
+           err == -EOPNOTSUPP || err == -ENOSYS;
+}
+
 static int load_object(const char *object_path, const char *root)
 {
     struct bpf_object *obj = NULL;
@@ -88,14 +113,25 @@ static int load_object(const char *object_path, const char *root)
 
     bpf_object__for_each_program(prog, obj) {
         const char *section = bpf_program__section_name(prog);
+        const int optional_kprobe = strncmp(section, "kprobe/", 7) == 0;
         if (!tracepoint_available(section)) {
             fprintf(stderr, "skip unavailable tracepoint: %s\n", section);
+            continue;
+        }
+        if (optional_kprobe && !kernel_symbol_available(section)) {
+            fprintf(stderr, "skip unavailable optional kprobe: %s\n", section);
             continue;
         }
         struct bpf_link *link = bpf_program__attach(prog);
         long lerr = libbpf_get_error(link);
         if (lerr) {
-            fprintf(stderr, "attach %s (%s): %s\n", bpf_program__name(prog), section, strerror((int)-lerr));
+            if (optional_kprobe && optional_attach_error(lerr)) {
+                fprintf(stderr, "skip unsupported optional kprobe %s: %s\n",
+                        section, strerror((int)-lerr));
+                continue;
+            }
+            fprintf(stderr, "attach %s (%s): %s\n", bpf_program__name(prog), section,
+                    strerror((int)-lerr));
             err = (int)lerr; goto out;
         }
         if (link_count == link_cap) {
@@ -111,7 +147,7 @@ static int load_object(const char *object_path, const char *root)
         err = bpf_link__pin(link, link_path);
         if (err) { fprintf(stderr, "pin link %s: %s\n", link_path, strerror(-err)); goto out; }
     }
-    if (link_count == 0) { fprintf(stderr, "no supported tracepoints were attached\n"); err = -ENOTSUP; goto out; }
+    if (link_count == 0) { fprintf(stderr, "no supported runtime-intelligence probes were attached\n"); err = -ENOTSUP; goto out; }
     printf("FluxVM runtime intelligence loaded: %s -> %s (%zu links)\n", object_path, root, link_count);
 out:
     if (err) unload_root(root);

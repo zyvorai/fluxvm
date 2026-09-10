@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use axum::{Json, Router, extract::{Path, State}, http::StatusCode, response::{IntoResponse, Response}, routing::get};
 use fluxvm_core::model::{VmRecord, VmStatus};
-use fluxvm_intelligence::{DEFAULT_PIN_ROOT, FeatureProbe, NetworkVmStats, VmDiagnosis, VmRuntimeSnapshot, diagnose_vm_with_reasons, probe, register_raw, snapshot_raw, snapshot_record, unregister_raw, unregister_exact, unregister_stale_tids};
+use fluxvm_intelligence::{DEFAULT_PIN_ROOT, FeatureProbe, FlightRecorderSnapshot, NetworkVmStats, VmDiagnosis, VmRuntimeSnapshot, diagnose_vm_with_reasons, probe, register_raw, snapshot_raw, snapshot_record, trace_events, unregister_raw, unregister_exact, unregister_stale_tids};
 use fluxvm_network::{dataplane::{PodNetworkPolicy, VmNetworkPolicy}, ebpf::{DropReasonRecord, FlowRecord}};
 use serde::Serialize;
 use serde_json::json;
@@ -55,8 +55,9 @@ async fn main() -> Result<()> {
         "unregister" => { let id=args.get(2).context("usage: fluxvm-intelligence unregister <uuid> [pid]")?.parse()?; let pid=args.get(3).and_then(|s|s.parse().ok()); unregister_raw(id,pid,&cfg.pin_root)?; Ok(()) }
         "snapshot" => { let (id,pid)=parse_id_pid(&args)?; println!("{}",serde_json::to_string_pretty(&snapshot_raw(id,pid,&cfg.pin_root)?)?); Ok(()) }
         "diagnose" => diagnose_cli(&args).await,
+        "trace" => trace_cli(&args, &cfg),
         "daemon" => daemon(cfg).await,
-        other => bail!("unknown command {other}; use daemon|probe|register|unregister|snapshot|diagnose"),
+        other => bail!("unknown command {other}; use daemon|probe|register|unregister|snapshot|diagnose|trace"),
     }
 }
 
@@ -81,6 +82,7 @@ async fn daemon(cfg: Config) -> Result<()> {
         .route("/v1/intelligence/vms",get(list_vms))
         .route("/v1/intelligence/vms/{id}",get(get_vm))
         .route("/v1/intelligence/vms/{id}/diagnose",get(diagnose))
+        .route("/v1/intelligence/vms/{id}/flight",get(flight))
         .route("/metrics",get(metrics))
         .with_state(state);
     let listener=tokio::net::TcpListener::bind(cfg.listen).await?;
@@ -127,6 +129,19 @@ async fn sync_once(cfg:&Config,state:&AppState)->Result<()> {
 }
 
 
+
+fn trace_cli(args: &[String], cfg: &Config) -> Result<()> {
+    let id: Uuid = args
+        .get(2)
+        .context("usage: fluxvm-intelligence trace <uuid> [seconds] [limit]")?
+        .parse()?;
+    let seconds = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(5);
+    let limit = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(128);
+    for event in trace_events(id, &cfg.pin_root, seconds, limit)? {
+        println!("{}", serde_json::to_string(&event)?);
+    }
+    Ok(())
+}
 
 async fn diagnose_cli(args: &[String]) -> Result<()> {
     let id: Uuid = args
@@ -237,5 +252,75 @@ async fn health()->Json<serde_json::Value>{Json(json!({"ok":true}))}
 async fn status(State(s):State<AppState>)->Json<Status>{let p=s.probe.read().await.clone();let n=s.snapshots.read().await.len();Json(Status{ok:p.ready_for_scheduler(),probe:p,vm_count:n})}
 async fn list_vms(State(s):State<AppState>)->Json<Vec<VmRuntimeSnapshot>>{Json(s.snapshots.read().await.values().cloned().collect())}
 async fn get_vm(Path(id):Path<Uuid>,State(s):State<AppState>)->Response{match s.snapshots.read().await.get(&id).cloned(){Some(v)=>Json(v).into_response(),None=>(StatusCode::NOT_FOUND,Json(json!({"error":"VM intelligence snapshot not found"}))).into_response()}}
-async fn metrics(State(s):State<AppState>)->Response{let rows=s.snapshots.read().await;let mut out=String::new();out.push_str("# HELP fluxvm_intel_kvm_exits_total KVM exits attributed to a FluxVM VM.\n# TYPE fluxvm_intel_kvm_exits_total counter\n");for v in rows.values(){let labels=format!("vm=\"{}\",name=\"{}\",backend=\"{}\"",v.vm_id,escape(&v.name),escape(&v.backend));out.push_str(&format!("fluxvm_intel_kvm_exits_total{{{labels}}} {}\n",v.kernel.kvm_exits));out.push_str(&format!("fluxvm_intel_guest_run_seconds_total{{{labels}}} {:.9}\n",v.kernel.guest_run_ns as f64/1e9));out.push_str(&format!("fluxvm_intel_sched_wakeups_total{{{labels}}} {}\n",v.kernel.sched_wakeups));out.push_str(&format!("fluxvm_intel_runnable_delay_seconds_total{{{labels}}} {:.9}\n",v.kernel.runnable_delay_ns as f64/1e9));out.push_str(&format!("fluxvm_intel_runnable_delay_max_seconds{{{labels}}} {:.9}\n",v.kernel.runnable_delay_max_ns as f64/1e9));out.push_str(&format!("fluxvm_intel_thread_migrations_total{{{labels}}} {}\n",v.kernel.migrations));out.push_str(&format!("fluxvm_intel_vmm_read_bytes{{{labels}}} {}\n",v.process.read_bytes));out.push_str(&format!("fluxvm_intel_vmm_write_bytes{{{labels}}} {}\n",v.process.write_bytes));if let Some(n)=&v.network{out.push_str(&format!("fluxvm_intel_network_allowed_packets_total{{{labels}}} {}\n",n.allowed_packets));out.push_str(&format!("fluxvm_intel_network_dropped_packets_total{{{labels}}} {}\n",n.dropped_packets));out.push_str(&format!("fluxvm_intel_network_dropped_bytes_total{{{labels}}} {}\n",n.dropped_bytes));}} (StatusCode::OK,[("content-type","text/plain; version=0.0.4; charset=utf-8")],out).into_response()}
+async fn flight(Path(id):Path<Uuid>,State(s):State<AppState>)->Response{
+    match s.snapshots.read().await.get(&id).and_then(|v|v.flight.clone()) {
+        Some(v)=>Json(v).into_response(),
+        None=>(StatusCode::NOT_FOUND,Json(json!({"error":"Flight Recorder snapshot unavailable"}))).into_response(),
+    }
+}
+async fn metrics(State(s):State<AppState>)->Response {
+    let rows=s.snapshots.read().await;
+    let mut out=String::new();
+    out.push_str("# HELP fluxvm_intel_kvm_exits_total KVM exits attributed to a FluxVM VM.\n# TYPE fluxvm_intel_kvm_exits_total counter\n");
+    for v in rows.values() {
+        let labels=format!("vm=\"{}\",name=\"{}\",backend=\"{}\"",v.vm_id,escape(&v.name),escape(&v.backend));
+        out.push_str(&format!("fluxvm_intel_kvm_exits_total{{{labels}}} {}\n",v.kernel.kvm_exits));
+        out.push_str(&format!("fluxvm_intel_guest_run_seconds_total{{{labels}}} {:.9}\n",v.kernel.guest_run_ns as f64/1e9));
+        out.push_str(&format!("fluxvm_intel_sched_wakeups_total{{{labels}}} {}\n",v.kernel.sched_wakeups));
+        out.push_str(&format!("fluxvm_intel_runnable_delay_seconds_total{{{labels}}} {:.9}\n",v.kernel.runnable_delay_ns as f64/1e9));
+        out.push_str(&format!("fluxvm_intel_runnable_delay_max_seconds{{{labels}}} {:.9}\n",v.kernel.runnable_delay_max_ns as f64/1e9));
+        out.push_str(&format!("fluxvm_intel_thread_migrations_total{{{labels}}} {}\n",v.kernel.migrations));
+        out.push_str(&format!("fluxvm_intel_vmm_read_bytes{{{labels}}} {}\n",v.process.read_bytes));
+        out.push_str(&format!("fluxvm_intel_vmm_write_bytes{{{labels}}} {}\n",v.process.write_bytes));
+        if let Some(n)=&v.network {
+            out.push_str(&format!("fluxvm_intel_network_allowed_packets_total{{{labels}}} {}\n",n.allowed_packets));
+            out.push_str(&format!("fluxvm_intel_network_dropped_packets_total{{{labels}}} {}\n",n.dropped_packets));
+            out.push_str(&format!("fluxvm_intel_network_dropped_bytes_total{{{labels}}} {}\n",n.dropped_bytes));
+        }
+        if let Some(f)=&v.flight { append_flight_metrics(&mut out, &labels, f); }
+    }
+    (StatusCode::OK,[("content-type","text/plain; version=0.0.4; charset=utf-8")],out).into_response()
+}
+
+fn append_flight_metrics(out: &mut String, labels: &str, flight: &FlightRecorderSnapshot) {
+    for exit in &flight.kvm_exits {
+        out.push_str(&format!(
+            "fluxvm_intel_kvm_exit_reason_total{{{labels},vcpu_tid=\"{}\",reason=\"{}\",reason_name=\"{}\"}} {}\n",
+            exit.vcpu_tid, exit.reason, escape(&exit.reason_label), exit.count
+        ));
+    }
+    out.push_str(&format!("fluxvm_intel_block_started_total{{{labels}}} {}\n",flight.counters.block_started));
+    out.push_str(&format!("fluxvm_intel_block_completed_total{{{labels}}} {}\n",flight.counters.block_completed));
+    out.push_str(&format!("fluxvm_intel_block_orphan_completions_total{{{labels}}} {}\n",flight.counters.block_orphan_completions));
+    out.push_str(&format!("fluxvm_intel_vhost_queued_total{{{labels}}} {}\n",flight.counters.vhost_queued));
+    out.push_str(&format!("fluxvm_intel_vhost_wakeups_total{{{labels}}} {}\n",flight.counters.vhost_wakeups));
+    out.push_str(&format!("fluxvm_intel_flight_events_lost_total{{{labels}}} {}\n",flight.counters.ringbuf_lost));
+
+    // Export a complete Prometheus histogram. Missing kernel buckets are zero,
+    // and +Inf is always present; sparse output is not a valid histogram for
+    // consumers that calculate quantiles across successive scrapes.
+    for kind in ["kvm-run", "runnable", "block-io"] {
+        let mut counts = [0u64; 25];
+        let mut total_ns = 0u64;
+        for b in flight.latency.iter().filter(|b| b.kind == kind) {
+            if let Some(slot) = counts.get_mut(b.bucket as usize) {
+                *slot = slot.saturating_add(b.count);
+            }
+            total_ns = total_ns.saturating_add(b.total_ns);
+        }
+        let mut cumulative = 0u64;
+        for (bucket, count) in counts.iter().enumerate() {
+            cumulative = cumulative.saturating_add(*count);
+            let le = if bucket >= 24 {
+                "+Inf".to_string()
+            } else {
+                format!("{:.9}", (1000u64.saturating_mul(1u64 << bucket)) as f64 / 1e9)
+            };
+            out.push_str(&format!("fluxvm_intel_latency_seconds_bucket{{{labels},kind=\"{kind}\",le=\"{le}\"}} {cumulative}\n"));
+        }
+        out.push_str(&format!("fluxvm_intel_latency_seconds_count{{{labels},kind=\"{kind}\"}} {cumulative}\n"));
+        out.push_str(&format!("fluxvm_intel_latency_seconds_sum{{{labels},kind=\"{kind}\"}} {:.9}\n",total_ns as f64/1e9));
+    }
+}
+
 fn escape(s:&str)->String{s.replace('\\',"\\\\").replace('"',"\\\"").replace('\n',"\\n")}

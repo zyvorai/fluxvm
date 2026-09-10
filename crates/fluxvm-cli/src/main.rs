@@ -44,6 +44,17 @@ enum Command {
     Diagnose {
         id: Uuid,
     },
+    /// Live VM Flight Recorder events from KVM/scheduler/block/vhost eBPF probes.
+    Trace {
+        id: Uuid,
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        #[arg(long, default_value_t = 128)]
+        limit: usize,
+        /// json | jsonl
+        #[arg(long, default_value = "json")]
+        output: String,
+    },
     /// Relaunch a Stopped VM from its existing disk (skips image
     /// clone/cloud-init reseed — see VmManager::start).
     Start {
@@ -453,6 +464,18 @@ async fn main() -> Result<()> {
                 &reasons,
             );
             println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Trace { id, seconds, limit, output } => {
+            m.get(id).await?;
+            let pin_root = std::env::var("FLUXVM_INTEL_PIN_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| fluxvm_intelligence::DEFAULT_PIN_ROOT.into());
+            let events = fluxvm_intelligence::trace_events(id, &pin_root, seconds, limit)?;
+            match output.to_ascii_lowercase().as_str() {
+                "json" => println!("{}", serde_json::to_string_pretty(&events)?),
+                "jsonl" => for event in events { println!("{}", serde_json::to_string(&event)?); },
+                other => anyhow::bail!("unsupported trace output {other:?}; use json or jsonl"),
+            }
         }
         Command::Start { id } => println!("{}", serde_json::to_string_pretty(&m.start(id).await?)?),
         Command::Stop { id } => println!("{}", serde_json::to_string_pretty(&m.stop(id).await?)?),
