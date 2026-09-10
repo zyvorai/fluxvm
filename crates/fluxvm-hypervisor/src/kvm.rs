@@ -87,6 +87,24 @@ pub struct KvmRegs {
     pub rflags: u64,
 }
 
+/// Raw host CPUID, used only to backfill leaves KVM_GET_SUPPORTED_CPUID
+/// zeroes out (e.g. leaf 0x15) despite the host actually supporting them.
+#[cfg(target_arch = "x86_64")]
+fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    unsafe {
+        let r = std::arch::x86_64::__cpuid_count(leaf, subleaf);
+        (r.eax, r.ebx, r.ecx, r.edx)
+    }
+}
+
+/// This hypervisor only ever runs on x86_64 (raw KVM ioctls, x86 CPUID) --
+/// this fallback exists solely so the crate still type-checks when built
+/// for local tooling on a non-x86_64 host (e.g. macOS/arm64 dev machine).
+#[cfg(not(target_arch = "x86_64"))]
+fn host_cpuid(_leaf: u32, _subleaf: u32) -> (u32, u32, u32, u32) {
+    (0, 0, 0, 0)
+}
+
 /// One vCPU's KVM file descriptor and its mmap'd `kvm_run` page. Each
 /// vCPU's `run` page is a disjoint mmap region, so concurrent `&self`
 /// access to *different* indices from different vCPU threads is sound —
@@ -296,15 +314,29 @@ impl KvmVm {
                 if e.function == 1 {
                     e.ebx = (e.ebx & 0x00ff_ffff) | (apic_id << 24);
                 }
-                if idx == 0 && (e.function == 1 || e.function == 0x15 || e.function == 0x16) {
-                    eprintln!(
-                        "[diag] cpuid leaf={:#x} idx={} eax={:#x} ebx={:#x} ecx={:#x} edx={:#x}",
-                        e.function, e.index, e.eax, e.ebx, e.ecx, e.edx
-                    );
+                // KVM_GET_SUPPORTED_CPUID always zeroes leaf 0x15 (TSC /
+                // "core crystal clock" ratio) even when the host CPU
+                // reports it -- confirmed live: this host's raw CPUID.15H
+                // is {eax=2,ebx=242,ecx=24000000}, but the KVM-reported
+                // "supported" leaf comes back all zero. Without it, Linux
+                // can't derive tsc_khz from CPUID and falls back to the
+                // legacy PIT/APIC-timer calibration dance
+                // (calibrate_APIC_clock), which is what was actually
+                // hanging boot (confirmed live: LAPIC periodic-timer
+                // interrupts stop arriving partway through calibration,
+                // stalling the boot/AP-checkin wait loops that depend on
+                // jiffies). The guest's TSC isn't scaled by us (no
+                // KVM_SET_TSC_KHZ), so it runs 1:1 with the host TSC and
+                // the host's own leaf 0x15 values are valid to hand
+                // through directly.
+                if e.function == 0x15 && e.eax == 0 && e.ebx == 0 && e.ecx == 0 {
+                    let (heax, hebx, hecx, _) = host_cpuid(0x15, 0);
+                    if heax != 0 && hebx != 0 && hecx != 0 {
+                        e.eax = heax;
+                        e.ebx = hebx;
+                        e.ecx = hecx;
+                    }
                 }
-            }
-            if idx == 0 {
-                eprintln!("[diag] cpuid total entries nent={nent}");
             }
             if ffi::flux_ioctl(
                 self.vcpus[idx].fd,
