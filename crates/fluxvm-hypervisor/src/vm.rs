@@ -212,10 +212,14 @@ impl VirtualMachine {
         restore: Option<CpuSnapshot>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
-        let mut kvm = KvmVm::create(&self.mem)?;
+        let num_cpus = self.cfg.cpus.max(1);
+        let kvm = Arc::new(KvmVm::create(&self.mem, num_cpus)?);
         if let Some(cpu) = restore {
-            kvm.set_sregs(cpu.sregs)?;
-            kvm.set_regs(cpu.regs)?;
+            // Snapshot/restore is BSP-only; extending it to N vCPUs is
+            // separate, out-of-scope follow-up work. Under SMP the APs
+            // still come up fresh via a real SIPI, same as a normal boot.
+            kvm.set_sregs(0, cpu.sregs)?;
+            kvm.set_regs(0, cpu.regs)?;
             eprintln!(
                 "[kvm] restored FLUXKVM1 snapshot rip={:#x} cr3={:#x}",
                 cpu.regs.rip, cpu.sregs.cr3
@@ -229,6 +233,29 @@ impl VirtualMachine {
             );
         }
 
+        // Secondary vCPUs (APs). With the in-kernel irqchip already active
+        // (KVM_CREATE_IRQCHIP), a freshly created non-BSP vCPU starts
+        // KVM_MP_STATE_UNINITIALIZED and just blocks inside KVM_RUN until
+        // the guest's own real INIT-SIPI-SIPI sequence arrives -- handled
+        // entirely by KVM's in-kernel LAPIC, no userspace SIPI emulation
+        // needed here. AP threads service register-level PIO/MMIO traps
+        // (bus/serial are already thread-safe for concurrent access) but
+        // deliberately do not run the virtio queue-notify -> guest-RAM
+        // path -- that stays BSP-only, the same scope boundary many
+        // minimal VMMs use by pinning device-queue processing to one
+        // vCPU. Threads are intentionally not joined: an idle AP parked
+        // in KVM_RUN on HLT only wakes on its own next interrupt, so
+        // joining here could block VM teardown indefinitely; each AP
+        // notices `stop` on its next wake (or the thread just outlives
+        // the VM harmlessly, kept alive by its own Arc<KvmVm> clone).
+        for idx in 1..num_cpus as usize {
+            let kvm = kvm.clone();
+            let bus = self.bus.clone();
+            let serial = self.serial.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &serial, &stop));
+        }
+
         let mut serial_log = String::new();
         let run_secs: u64 = std::env::var("FLUXVM_KVM_RUN_SECS")
             .ok()
@@ -236,6 +263,8 @@ impl VirtualMachine {
             .unwrap_or(3600);
         let deadline = Instant::now() + Duration::from_secs(run_secs);
         let mut exits = 0u64;
+        // TEMP diagnostic (Bug 2 investigation, remove before merge).
+        let mut diag_ports: std::collections::HashMap<u16, u64> = std::collections::HashMap::new();
         let mut this = self;
         let mut serial_injected = false;
         let inject = std::env::var("FLUXVM_SERIAL_INJECT").ok();
@@ -279,17 +308,23 @@ impl VirtualMachine {
                 let _ = kvm.pulse_irq(this.serial.irq);
             }
 
-            let reason = kvm.run_once()?;
+            let reason = kvm.run_once(0)?;
             exits += 1;
             if exits <= 20 {
                 eprintln!("[kvm] exit#{exits} reason={reason}");
             }
+            if exits % 5000 == 0 {
+                let mut v: Vec<_> = diag_ports.iter().collect();
+                v.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+                eprintln!("[diag] exits={exits} top ports={:?}", &v[..v.len().min(10)]);
+            }
             match reason {
                 ffi::KVM_EXIT_IO => {
-                    let (dir, size, port, count, off) = kvm.io_info();
+                    let (dir, size, port, count, off) = kvm.io_info(0);
+                    *diag_ports.entry(port).or_insert(0) += 1;
                     let n = (size as u32 * count) as usize;
                     if dir == ffi::KVM_EXIT_IO_OUT {
-                        let data = kvm.io_data(off, n).to_vec();
+                        let data = kvm.io_data(0, off, n).to_vec();
                         this.bus.pio_write(port, &data)?;
                         for b in data {
                             if b.is_ascii() && (b >= 32 || b == b'\n' || b == b'\r') {
@@ -299,20 +334,20 @@ impl VirtualMachine {
                     } else {
                         let mut buf = vec![0u8; n];
                         this.bus.pio_read(port, &mut buf)?;
-                        kvm.io_data_mut(off, n).copy_from_slice(&buf);
+                        kvm.set_io_data(0, off, &buf);
                     }
                     if this.serial.irq_pending() {
                         let _ = kvm.pulse_irq(this.serial.irq);
                     }
                 }
                 ffi::KVM_EXIT_MMIO => {
-                    let (addr, data, _len, is_write) = kvm.mmio_info();
+                    let (addr, data, _len, is_write) = kvm.mmio_info(0);
                     if is_write {
                         let _ = this.bus.mmio_write(addr, &data);
                     } else {
                         let mut buf = data;
                         let _ = this.bus.mmio_read(addr, &mut buf);
-                        kvm.mmio_set_data(&buf);
+                        kvm.mmio_set_data(0, &buf);
                     }
                     if let Some(net) = &this.net {
                         if let Some(q) = virtio_mmio::take_notify(&net.state) {
@@ -354,20 +389,30 @@ impl VirtualMachine {
                     }
                 }
                 ffi::KVM_EXIT_HLT => {
+                    // BSP HLT ends the VM (as before). An idle AP HLTing
+                    // while waiting for its next IPI/timer is normal and
+                    // handled separately in run_ap -- it must not reach
+                    // this arm since this loop only ever drives vCPU 0.
                     eprintln!("[kvm] HLT after {exits} exits");
+                    stop.store(true, Ordering::Relaxed);
                     break;
                 }
                 ffi::KVM_EXIT_SHUTDOWN => {
                     eprintln!("[kvm] shutdown");
+                    stop.store(true, Ordering::Relaxed);
                     break;
                 }
                 ffi::KVM_EXIT_FAIL_ENTRY => {
-                    let reason = unsafe { std::ptr::read_unaligned(kvm.run.add(32) as *const u64) };
+                    let reason = unsafe {
+                        std::ptr::read_unaligned(kvm.vcpus[0].run.add(32) as *const u64)
+                    };
+                    stop.store(true, Ordering::Relaxed);
                     return Err(FluxError::Hypervisor(format!(
                         "KVM_EXIT_FAIL_ENTRY reason={reason:#x}"
                     )));
                 }
                 ffi::KVM_EXIT_INTERNAL_ERROR => {
+                    stop.store(true, Ordering::Relaxed);
                     return Err(FluxError::Hypervisor("KVM_EXIT_INTERNAL_ERROR".into()));
                 }
                 ffi::KVM_EXIT_INTR => continue,
@@ -394,8 +439,70 @@ impl VirtualMachine {
             }
         }
 
+        // Make sure any AP threads parked in KVM_RUN notice on their next
+        // wake, whichever path above (deadline/serial-match/HLT/shutdown)
+        // ended the loop.
+        stop.store(true, Ordering::Relaxed);
+
         eprintln!("[kvm] serial log:\n{serial_log}");
         Ok(serial_log)
+    }
+}
+
+/// Secondary-vCPU (AP) run loop. See the comment in `run_until` for the
+/// scope boundary: register-level PIO/MMIO only, no virtio queue-notify
+/// processing (that stays BSP-only).
+fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, serial: &Serial16550, stop: &AtomicBool) {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let reason = match kvm.run_once(idx) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[kvm] vcpu{idx} run error: {e}");
+                return;
+            }
+        };
+        match reason {
+            ffi::KVM_EXIT_HLT | ffi::KVM_EXIT_INTR => continue,
+            ffi::KVM_EXIT_IO => {
+                let (dir, size, port, count, off) = kvm.io_info(idx);
+                let n = (size as u32 * count) as usize;
+                if dir == ffi::KVM_EXIT_IO_OUT {
+                    let data = kvm.io_data(idx, off, n).to_vec();
+                    let _ = bus.pio_write(port, &data);
+                } else {
+                    let mut buf = vec![0u8; n];
+                    let _ = bus.pio_read(port, &mut buf);
+                    kvm.set_io_data(idx, off, &buf);
+                }
+                if serial.irq_pending() {
+                    let _ = kvm.pulse_irq(serial.irq);
+                }
+            }
+            ffi::KVM_EXIT_MMIO => {
+                let (addr, data, _len, is_write) = kvm.mmio_info(idx);
+                if is_write {
+                    let _ = bus.mmio_write(addr, &data);
+                } else {
+                    let mut buf = data;
+                    let _ = bus.mmio_read(addr, &mut buf);
+                    kvm.mmio_set_data(idx, &buf);
+                }
+            }
+            ffi::KVM_EXIT_SHUTDOWN => {
+                eprintln!("[kvm] vcpu{idx} shutdown");
+                stop.store(true, Ordering::Relaxed);
+                return;
+            }
+            ffi::KVM_EXIT_FAIL_ENTRY | ffi::KVM_EXIT_INTERNAL_ERROR => {
+                eprintln!("[kvm] vcpu{idx} fatal exit reason={reason}");
+                stop.store(true, Ordering::Relaxed);
+                return;
+            }
+            _ => {}
+        }
     }
 }
 

@@ -87,18 +87,46 @@ pub struct KvmRegs {
     pub rflags: u64,
 }
 
+/// Raw host CPUID, used only to backfill leaves KVM_GET_SUPPORTED_CPUID
+/// zeroes out (e.g. leaf 0x15) despite the host actually supporting them.
+#[cfg(target_arch = "x86_64")]
+fn host_cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+    unsafe {
+        let r = std::arch::x86_64::__cpuid_count(leaf, subleaf);
+        (r.eax, r.ebx, r.ecx, r.edx)
+    }
+}
+
+/// This hypervisor only ever runs on x86_64 (raw KVM ioctls, x86 CPUID) --
+/// this fallback exists solely so the crate still type-checks when built
+/// for local tooling on a non-x86_64 host (e.g. macOS/arm64 dev machine).
+#[cfg(not(target_arch = "x86_64"))]
+fn host_cpuid(_leaf: u32, _subleaf: u32) -> (u32, u32, u32, u32) {
+    (0, 0, 0, 0)
+}
+
+/// One vCPU's KVM file descriptor and its mmap'd `kvm_run` page. Each
+/// vCPU's `run` page is a disjoint mmap region, so concurrent `&self`
+/// access to *different* indices from different vCPU threads is sound —
+/// there is no shared mutable state between vCPUs here, only per-vCPU
+/// raw-pointer access that was already unsafe before this struct existed.
+pub struct VcpuHandle {
+    pub fd: i32,
+    pub run: *mut u8,
+}
+
 pub struct KvmVm {
     pub kvm_fd: i32,
     pub vm_fd: i32,
-    pub vcpu_fd: i32,
-    pub run: *mut u8,
+    pub vcpus: Vec<VcpuHandle>,
     pub run_size: usize,
 }
 
 unsafe impl Send for KvmVm {}
+unsafe impl Sync for KvmVm {}
 
 impl KvmVm {
-    pub fn create(mem: &GuestMemory) -> Result<Self> {
+    pub fn create(mem: &GuestMemory, num_cpus: u8) -> Result<Self> {
         unsafe {
             let path = b"/dev/kvm\0";
             let kvm_fd = ffi::open(path.as_ptr() as *const c_char, ffi::O_RDWR);
@@ -128,7 +156,17 @@ impl KvmVm {
             {
                 return Err(FluxError::Hypervisor("KVM_SET_USER_MEMORY_REGION".into()));
             }
-            let _ = ffi::flux_ioctl(vm_fd, ffi::KVM_CREATE_IRQCHIP, std::ptr::null_mut());
+            // Real in-kernel LAPIC/IOAPIC/PIC. This is what makes real SMP
+            // possible without any userspace INIT-SIPI emulation below: a
+            // freshly created non-BSP vCPU on a VM with an irqchip starts
+            // KVM_MP_STATE_UNINITIALIZED and blocks in KVM_RUN until KVM's
+            // own in-kernel LAPIC delivers the guest's real SIPI. A silent
+            // failure here previously produced an indefinite, undiagnosable
+            // hang (the exact failure class chased for hours before this
+            // fix) -- it's now a real error instead of `let _ =`.
+            if ffi::flux_ioctl(vm_fd, ffi::KVM_CREATE_IRQCHIP, std::ptr::null_mut()) < 0 {
+                return Err(FluxError::Hypervisor("KVM_CREATE_IRQCHIP".into()));
+            }
             // In-kernel PIT so the guest can calibrate timers / get IRQ0.
             #[repr(C)]
             struct KvmPitConfig {
@@ -155,36 +193,88 @@ impl KvmVm {
             if mmap_size <= 0 {
                 return Err(FluxError::Hypervisor("KVM_GET_VCPU_MMAP_SIZE".into()));
             }
-            let vcpu_fd = ffi::flux_ioctl(vm_fd, ffi::KVM_CREATE_VCPU, std::ptr::null_mut());
-            if vcpu_fd < 0 {
-                return Err(FluxError::Hypervisor("KVM_CREATE_VCPU".into()));
+
+            let mut vcpus = Vec::with_capacity(num_cpus as usize);
+            for id in 0..num_cpus as i32 {
+                // KVM_CREATE_VCPU's arg is the vCPU id, which for x86 is
+                // also its initial APIC id -- must match the id
+                // mptable::write_mptable already writes per-processor
+                // entry (mptable.rs's `local_apic_id: i`).
+                let vcpu_fd = ffi::flux_ioctl(
+                    vm_fd,
+                    ffi::KVM_CREATE_VCPU,
+                    id as *mut c_void,
+                );
+                if vcpu_fd < 0 {
+                    return Err(FluxError::Hypervisor(format!("KVM_CREATE_VCPU id={id}")));
+                }
+                let run = ffi::mmap(
+                    std::ptr::null_mut(),
+                    mmap_size as usize,
+                    ffi::PROT_READ | ffi::PROT_WRITE,
+                    ffi::MAP_SHARED,
+                    vcpu_fd,
+                    0,
+                );
+                if run as usize == ffi::MAP_FAILED {
+                    return Err(FluxError::Hypervisor("mmap kvm_run".into()));
+                }
+                if id != 0 {
+                    // A freshly created vCPU defaults to
+                    // KVM_MP_STATE_RUNNABLE, not "wait for SIPI" -- left
+                    // alone it would immediately execute whatever garbage
+                    // sits at the reset vector (no RIP/sregs are ever set
+                    // for APs) instead of blocking for the guest's real
+                    // INIT-SIPI-SIPI. This is what made the AP thread
+                    // block forever in a single KVM_RUN with zero vmexits
+                    // (a tight, exit-free decode loop over unmapped/zero
+                    // memory) while the BSP spun waiting for it to check
+                    // in -- exactly the original hang symptom, just with
+                    // the real vCPU now silently running junk instead of
+                    // not existing at all.
+                    let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
+                    if ffi::flux_ioctl(
+                        vcpu_fd,
+                        ffi::KVM_SET_MP_STATE,
+                        &mut mp_state as *mut _ as *mut c_void,
+                    ) < 0
+                    {
+                        return Err(FluxError::Hypervisor(format!(
+                            "KVM_SET_MP_STATE id={id}"
+                        )));
+                    }
+                }
+                vcpus.push(VcpuHandle {
+                    fd: vcpu_fd,
+                    run: run as *mut u8,
+                });
             }
-            let run = ffi::mmap(
-                std::ptr::null_mut(),
-                mmap_size as usize,
-                ffi::PROT_READ | ffi::PROT_WRITE,
-                ffi::MAP_SHARED,
-                vcpu_fd,
-                0,
-            );
-            if run as usize == ffi::MAP_FAILED {
-                return Err(FluxError::Hypervisor("mmap kvm_run".into()));
-            }
-            let mut this = Self {
+
+            let this = Self {
                 kvm_fd,
                 vm_fd,
-                vcpu_fd,
-                run: run as *mut u8,
+                vcpus,
                 run_size: mmap_size as usize,
             };
-            this.setup_cpuid()?;
+            for id in 0..num_cpus as usize {
+                this.setup_cpuid(id)?;
+            }
             Ok(this)
         }
     }
 
-    /// Expose host-supported CPUID leaves to the guest. Without this, Linux
-    /// hits #UD on the first `cpuid` (empty IDT → triple fault → SHUTDOWN).
-    fn setup_cpuid(&mut self) -> Result<()> {
+    pub fn num_cpus(&self) -> usize {
+        self.vcpus.len()
+    }
+
+    /// Expose host-supported CPUID leaves to the guest, patched with this
+    /// vCPU's own initial APIC id (leaf 1, EBX[31:24]). Without the base
+    /// CPUID setup, Linux hits #UD on the first `cpuid` (empty IDT →
+    /// triple fault → SHUTDOWN). Without the per-vCPU APIC id patch, every
+    /// vCPU would report the same (BSP's) APIC id, and the guest's real
+    /// INIT-SIPI addressing (by APIC id, done entirely in-kernel by KVM's
+    /// LAPIC model) would never reach the intended AP.
+    fn setup_cpuid(&self, idx: usize) -> Result<()> {
         const MAX: usize = 256;
         #[repr(C)]
         #[derive(Clone, Copy)]
@@ -205,6 +295,7 @@ impl KvmVm {
         }
         let entry_size = std::mem::size_of::<Entry>();
         let mut buf = vec![0u8; std::mem::size_of::<Header>() + MAX * entry_size];
+        let apic_id = idx as u32;
         unsafe {
             let hdr = buf.as_mut_ptr() as *mut Header;
             (*hdr).nent = MAX as u32;
@@ -216,27 +307,63 @@ impl KvmVm {
             {
                 return Err(FluxError::Hypervisor("KVM_GET_SUPPORTED_CPUID".into()));
             }
+            let nent = (*hdr).nent as usize;
+            let entries = (buf.as_mut_ptr().add(std::mem::size_of::<Header>())) as *mut Entry;
+            for i in 0..nent {
+                let e = &mut *entries.add(i);
+                if e.function == 1 {
+                    e.ebx = (e.ebx & 0x00ff_ffff) | (apic_id << 24);
+                }
+                // KVM_GET_SUPPORTED_CPUID always zeroes leaf 0x15 (TSC /
+                // "core crystal clock" ratio) even when the host CPU
+                // reports it -- confirmed live: this host's raw CPUID.15H
+                // is {eax=2,ebx=242,ecx=24000000}, but the KVM-reported
+                // "supported" leaf comes back all zero. Without it, Linux
+                // can't derive tsc_khz from CPUID and falls back to the
+                // legacy PIT/APIC-timer calibration dance
+                // (calibrate_APIC_clock), which is what was actually
+                // hanging boot (confirmed live: LAPIC periodic-timer
+                // interrupts stop arriving partway through calibration,
+                // stalling the boot/AP-checkin wait loops that depend on
+                // jiffies). The guest's TSC isn't scaled by us (no
+                // KVM_SET_TSC_KHZ), so it runs 1:1 with the host TSC and
+                // the host's own leaf 0x15 values are valid to hand
+                // through directly.
+                if e.function == 0x15 && e.eax == 0 && e.ebx == 0 && e.ecx == 0 {
+                    let (heax, hebx, hecx, _) = host_cpuid(0x15, 0);
+                    if heax != 0 && hebx != 0 && hecx != 0 {
+                        e.eax = heax;
+                        e.ebx = hebx;
+                        e.ecx = hecx;
+                    }
+                }
+            }
             if ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_SET_CPUID2,
                 buf.as_mut_ptr() as *mut c_void,
             ) < 0
             {
                 return Err(FluxError::Hypervisor("KVM_SET_CPUID2".into()));
             }
-            eprintln!("[kvm] CPUID leaves={}", (*hdr).nent);
+            eprintln!("[kvm] vcpu{idx} CPUID leaves={nent} apic_id={apic_id}");
         }
         Ok(())
     }
 
+    /// BSP-only. APs must never go through this: their RIP/CS/segment
+    /// state is set entirely by KVM's in-kernel LAPIC when the guest's own
+    /// INIT-SIPI-SIPI sequence actually arrives -- writing real register
+    /// state here for an AP would race (and likely conflict with) that.
     pub fn setup_long_mode(
-        &mut self,
+        &self,
         mem: &mut GuestMemory,
         rip: u64,
         rsp: u64,
         cr3: u64,
         rsi: u64,
     ) -> Result<()> {
+        let idx = 0;
         const GDT: u64 = 0xB000;
         const TSS: u64 = 0xC000;
         mem.write_at(TSS, &[0u8; 128])?;
@@ -258,7 +385,7 @@ impl KvmVm {
         let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
         if unsafe {
             ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_GET_SREGS,
                 &mut sregs as *mut _ as *mut c_void,
             )
@@ -335,7 +462,7 @@ impl KvmVm {
 
         if unsafe {
             ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_SET_SREGS,
                 &mut sregs as *mut _ as *mut c_void,
             )
@@ -351,7 +478,7 @@ impl KvmVm {
         regs.rflags = 0x2;
         if unsafe {
             ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_SET_REGS,
                 &mut regs as *mut _ as *mut c_void,
             )
@@ -394,11 +521,11 @@ impl KvmVm {
         self.set_irq_line(gsi, false)
     }
 
-    pub fn get_regs(&self) -> Result<KvmRegs> {
+    pub fn get_regs(&self, idx: usize) -> Result<KvmRegs> {
         let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
         if unsafe {
             ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_GET_REGS,
                 &mut regs as *mut _ as *mut c_void,
             )
@@ -409,10 +536,10 @@ impl KvmVm {
         Ok(regs)
     }
 
-    pub fn set_regs(&self, mut regs: KvmRegs) -> Result<()> {
+    pub fn set_regs(&self, idx: usize, mut regs: KvmRegs) -> Result<()> {
         if unsafe {
             ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_SET_REGS,
                 &mut regs as *mut _ as *mut c_void,
             )
@@ -423,11 +550,11 @@ impl KvmVm {
         Ok(())
     }
 
-    pub fn get_sregs(&self) -> Result<KvmSregs> {
+    pub fn get_sregs(&self, idx: usize) -> Result<KvmSregs> {
         let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
         if unsafe {
             ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_GET_SREGS,
                 &mut sregs as *mut _ as *mut c_void,
             )
@@ -438,10 +565,10 @@ impl KvmVm {
         Ok(sregs)
     }
 
-    pub fn set_sregs(&self, mut sregs: KvmSregs) -> Result<()> {
+    pub fn set_sregs(&self, idx: usize, mut sregs: KvmSregs) -> Result<()> {
         if unsafe {
             ffi::flux_ioctl(
-                self.vcpu_fd,
+                self.vcpus[idx].fd,
                 ffi::KVM_SET_SREGS,
                 &mut sregs as *mut _ as *mut c_void,
             )
@@ -452,54 +579,66 @@ impl KvmVm {
         Ok(())
     }
 
-    pub fn run_once(&mut self) -> Result<u32> {
-        let r = unsafe { ffi::flux_ioctl(self.vcpu_fd, ffi::KVM_RUN, std::ptr::null_mut()) };
+    pub fn run_once(&self, idx: usize) -> Result<u32> {
+        let r = unsafe { ffi::flux_ioctl(self.vcpus[idx].fd, ffi::KVM_RUN, std::ptr::null_mut()) };
         if r < 0 {
             return Err(FluxError::Hypervisor(format!("KVM_RUN errno {}", unsafe {
                 ffi::flux_errno()
             })));
         }
-        Ok(self.exit_reason())
+        Ok(self.exit_reason(idx))
     }
 
-    pub fn exit_reason(&self) -> u32 {
-        unsafe { std::ptr::read_unaligned(self.run.add(8) as *const u32) }
+    pub fn exit_reason(&self, idx: usize) -> u32 {
+        unsafe { std::ptr::read_unaligned(self.vcpus[idx].run.add(8) as *const u32) }
     }
 
-    pub fn io_info(&self) -> (u8, u8, u16, u32, u32) {
+    pub fn io_info(&self, idx: usize) -> (u8, u8, u16, u32, u32) {
         // direction, size, port, count, data_offset
         unsafe {
-            let d = std::ptr::read_unaligned(self.run.add(32) as *const u8);
-            let sz = std::ptr::read_unaligned(self.run.add(33) as *const u8);
-            let port = std::ptr::read_unaligned(self.run.add(34) as *const u16);
-            let count = std::ptr::read_unaligned(self.run.add(36) as *const u32);
-            let off = std::ptr::read_unaligned(self.run.add(40) as *const u32);
+            let run = self.vcpus[idx].run;
+            let d = std::ptr::read_unaligned(run.add(32) as *const u8);
+            let sz = std::ptr::read_unaligned(run.add(33) as *const u8);
+            let port = std::ptr::read_unaligned(run.add(34) as *const u16);
+            let count = std::ptr::read_unaligned(run.add(36) as *const u32);
+            let off = std::ptr::read_unaligned(run.add(40) as *const u32);
             (d, sz, port, count, off)
         }
     }
 
-    pub fn io_data(&self, off: u32, len: usize) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.run.add(off as usize), len) }
+    pub fn io_data(&self, idx: usize, off: u32, len: usize) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.vcpus[idx].run.add(off as usize), len) }
     }
 
-    pub fn io_data_mut(&mut self, off: u32, len: usize) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.run.add(off as usize), len) }
-    }
-
-    pub fn mmio_info(&self) -> (u64, Vec<u8>, u32, bool) {
+    pub fn set_io_data(&self, idx: usize, off: u32, data: &[u8]) {
         unsafe {
-            let phys = std::ptr::read_unaligned(self.run.add(32) as *const u64);
-            let len = std::ptr::read_unaligned(self.run.add(48) as *const u32);
-            let is_write = std::ptr::read_unaligned(self.run.add(52) as *const u8) != 0;
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                self.vcpus[idx].run.add(off as usize),
+                data.len(),
+            );
+        }
+    }
+
+    pub fn mmio_info(&self, idx: usize) -> (u64, Vec<u8>, u32, bool) {
+        unsafe {
+            let run = self.vcpus[idx].run;
+            let phys = std::ptr::read_unaligned(run.add(32) as *const u64);
+            let len = std::ptr::read_unaligned(run.add(48) as *const u32);
+            let is_write = std::ptr::read_unaligned(run.add(52) as *const u8) != 0;
             let mut data = vec![0u8; len as usize];
-            std::ptr::copy_nonoverlapping(self.run.add(40), data.as_mut_ptr(), len as usize);
+            std::ptr::copy_nonoverlapping(run.add(40), data.as_mut_ptr(), len as usize);
             (phys, data, len, is_write)
         }
     }
 
-    pub fn mmio_set_data(&mut self, data: &[u8]) {
+    pub fn mmio_set_data(&self, idx: usize, data: &[u8]) {
         unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), self.run.add(40), data.len().min(8));
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                self.vcpus[idx].run.add(40),
+                data.len().min(8),
+            );
         }
     }
 }
@@ -507,11 +646,13 @@ impl KvmVm {
 impl Drop for KvmVm {
     fn drop(&mut self) {
         unsafe {
-            if !self.run.is_null() {
-                ffi::munmap(self.run as *mut c_void, self.run_size);
-            }
-            if self.vcpu_fd >= 0 {
-                ffi::close(self.vcpu_fd);
+            for vcpu in &self.vcpus {
+                if !vcpu.run.is_null() {
+                    ffi::munmap(vcpu.run as *mut c_void, self.run_size);
+                }
+                if vcpu.fd >= 0 {
+                    ffi::close(vcpu.fd);
+                }
             }
             if self.vm_fd >= 0 {
                 ffi::close(self.vm_fd);
