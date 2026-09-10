@@ -41,8 +41,10 @@ pub fn dump(kvm: &KvmVm, mem: &GuestMemory, vmstate: &Path, mem_path: &Path) -> 
     }
     fs::write(mem_path, mem.as_slice()).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
 
-    let regs = kvm.get_regs()?;
-    let sregs = kvm.get_sregs()?;
+    // Snapshot/restore is BSP-only (vCPU 0); extending to N vCPUs is
+    // separate, out-of-scope follow-up work (see fluxvm-hypervisor SMP plan).
+    let regs = kvm.get_regs(0)?;
+    let sregs = kvm.get_sregs(0)?;
     let mut f = File::create(vmstate).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     f.write_all(MAGIC)
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;

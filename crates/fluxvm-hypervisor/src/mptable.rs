@@ -104,7 +104,9 @@ fn as_bytes<T>(v: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts((v as *const T) as *const u8, std::mem::size_of::<T>()) }
 }
 
-/// Write MP floating pointer + config table for a single-vCPU guest.
+/// Write MP floating pointer + config table describing all `num_cpus`
+/// processors (clamped to 1..=8), with `local_apic_id: i` matching the
+/// initial APIC ID each real KVM vCPU is created with (see kvm.rs).
 pub fn write_mptable(mem: &mut GuestMemory, num_cpus: u8) -> Result<()> {
     let cpus = num_cpus.max(1).min(8);
     let mut table: Vec<u8> = Vec::with_capacity(256);
