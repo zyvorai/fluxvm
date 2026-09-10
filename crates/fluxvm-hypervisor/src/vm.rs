@@ -312,6 +312,10 @@ impl VirtualMachine {
                             }
                             GdbCmd::GetSregs(reply) => {
                                 let r = kvm.get_sregs(0).unwrap_or(unsafe { std::mem::zeroed() });
+                                eprintln!(
+                                    "[gdbstub] cr0={:#x} cr2={:#x} cr3={:#x} cr4={:#x}",
+                                    r.cr0, r.cr2, r.cr3, r.cr4
+                                );
                                 let _ = reply.send(r);
                             }
                             GdbCmd::ReadMem { addr, len, reply } => {
