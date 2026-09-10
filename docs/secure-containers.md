@@ -4,7 +4,10 @@ FluxVM Secure Containers is the first container-runtime layer on top of the
 existing FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support.
 The goal is the same security shape users expect from Kata Containers: a Pod
 or container group gets its own guest kernel instead of sharing the node's
-host kernel.
+host kernel — plus, starting with Set 6, **FluxVM Sentinel**: an eBPF-based
+policy substrate spanning the host VMM edge and (in later Sets) the guest
+kernel with one shared schema and identity model, which Kata's namespace +
+seccomp + static-policy-file model does not attempt.
 
 ## Architecture
 
@@ -71,6 +74,13 @@ the VM's existing per-instance authentication token.
   containers, matching runc/Kata's "join the pause container" model
 - opt-in `CLONE_NEWUSER` per container (`FLUXVM_CONTAINER_USERNS=1`, off by
   default) for an additional capability-scoping boundary
+- **Sentinel**: identity-aware, Kubernetes-NetworkPolicy-*shaped* Pod network
+  policy on the VM edge (`bpf/fluxvm_pod_policy.bpf.h`, additive on top of the
+  existing CIDR/L4 dataplane), with a stable per-Pod identity and an
+  independent policy-content API (`/v1/vms/{id}/network/pod-policy`) — see
+  [docs/secure-containers-set6s.md](secure-containers-set6s.md). Populating
+  it automatically from live Kubernetes `NetworkPolicy` objects is not yet
+  implemented (needs a selector-resolving watcher/controller).
 
 ## Current limitations
 

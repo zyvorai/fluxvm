@@ -19,6 +19,7 @@
 #include <linux/udp.h>
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
+#include "fluxvm_pod_policy.bpf.h"
 
 #define FLUXVM_VERDICT_DROP  0
 #define FLUXVM_VERDICT_ALLOW 1
@@ -37,7 +38,17 @@ struct iface_config {
     __u32 allow_icmp;
     __u64 rate_bytes_per_sec;
     __u64 rate_packets_per_sec;
+    // Set 6S: Kubernetes Pod identity for fluxvm_pspol/fluxvm_pid4/6 lookups.
+    // 0 means "no Pod-scoped policy" (Secure Containers not in use for this
+    // VM, or Set 6S not configured) -- handle_ipv4/6 skip the pod-policy
+    // check entirely in that case, so every non-Secure-Containers sandbox
+    // keeps today's behavior unchanged. `reserved0` is explicit trailing
+    // padding so the struct's size (48 bytes) has no implicit compiler-
+    // inserted padding for the userspace loader to get wrong.
+    __u32 pod_id;
+    __u32 reserved0;
 };
+_Static_assert(sizeof(struct iface_config) == 48, "iface config ABI");
 
 // Prefix length covers exact 32-bit FluxVM identity + destination prefix.
 struct ipv4_lpm_key {
@@ -695,6 +706,11 @@ static __always_inline int handle_ipv4(
     if (cfg->enforce_l4)
         allowed = allowed && parsed_l4 > 0 &&
                   any_l4(skb->ifindex, cfg->identity, iph->protocol, dport);
+    // Set 6S: Kubernetes-Pod-identity-scoped policy, additive on top of the
+    // VM-level CIDR/L4 verdict above -- can only narrow an allow, never
+    // widen a deny into an allow (mirrors any_deny4's precedence).
+    if (cfg->pod_id && allowed)
+        allowed = fluxvm_pod_policy_allowed4(cfg->pod_id, iph->daddr);
     if (allowed && !rate_allowed(cfg, skb->len))
         allowed = 0;
     if (!allowed && audit)
@@ -754,6 +770,9 @@ static __always_inline int handle_ipv6(
     if (cfg->enforce_l4)
         allowed = allowed && parsed_l4 > 0 &&
                   any_l4(skb->ifindex, cfg->identity, ip6->nexthdr, dport);
+    // Set 6S: see the IPv4 path above for the additive-only precedence.
+    if (cfg->pod_id && allowed)
+        allowed = fluxvm_pod_policy_allowed6(cfg->pod_id, ip6->daddr.in6_u.u6_addr8);
     if (allowed && !rate_allowed(cfg, skb->len))
         allowed = 0;
 

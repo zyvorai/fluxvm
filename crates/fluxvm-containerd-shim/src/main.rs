@@ -358,7 +358,8 @@ impl Service {
             "memory_mib": memory_mib,
             "network": network,
             "agent": {"enabled": true},
-            "shared_folders": shared_folders
+            "shared_folders": shared_folders,
+            "pod_uid": hints.pod_uid
         });
 
         let mut vm: VmRecord = match self

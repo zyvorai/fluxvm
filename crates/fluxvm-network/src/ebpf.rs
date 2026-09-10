@@ -21,7 +21,7 @@ use std::{
 use tracing::info;
 use uuid::Uuid;
 
-use crate::dataplane::VmNetworkPolicy;
+use crate::dataplane::{PodNetworkPolicy, VmNetworkPolicy};
 
 const TC_PRIORITY: &str = "49152";
 const TC_HANDLE: &str = "1";
@@ -29,7 +29,7 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 4;
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -97,6 +97,8 @@ pub fn apply(
     policy: &VmNetworkPolicy,
     id: Uuid,
     iface: &str,
+    pod_id: u32,
+    pod_policy: Option<&PodNetworkPolicy>,
 ) -> Result<()> {
     if iface.is_empty() {
         bail!("cannot attach eBPF dataplane without a host-visible interface");
@@ -129,6 +131,8 @@ pub fn apply(
         .with_context(|| format!("creating eBPF meta dir {}", meta_dir.display()))?;
     fs::write(meta_dir.join("iface"), iface)
         .with_context(|| format!("recording eBPF interface {iface}"))?;
+    fs::write(meta_dir.join("pod_id"), pod_id.to_string())
+        .context("recording FluxVM eBPF Pod identity")?;
 
     let prog_pin = prog_dir.join("fluxvm_egress");
     if let Err(e) = run(
@@ -170,7 +174,12 @@ pub fn apply(
         // Configure every policy map before the program becomes reachable
         // from TC. v2 attached first and had a tiny initial allow window
         // while fluxvm_id was still empty; v3 closes that window entirely.
-        configure_maps(&map_dir, ifindex, identity, policy, false)?;
+        configure_maps(&map_dir, ifindex, identity, pod_id, policy, false)?;
+        // Re-apply whatever Pod-scoped policy the caller loaded (persisted
+        // via `set_pod_network_policy`) so a restart/repair doesn't silently
+        // reset it to unconfigured. `None` (no persisted policy yet) leaves
+        // it as a safe/allow no-op, same as an unconfigured VM-level policy.
+        configure_pod_maps(&map_dir, pod_id, pod_policy)?;
         fs::write(meta_dir.join("schema_version"), DATAPLANE_SCHEMA_VERSION.to_string())
             .context("recording FluxVM eBPF schema version")?;
 
@@ -287,11 +296,12 @@ pub fn reconfigure(
     }
     let ifindex = read_ifindex(iface)?;
     let identity = identity_for(id);
+    let pod_id = read_pod_id(id);
     // Clear the commit marker before touching any policy map. If the daemon
     // dies mid-update, the next reconcile sees an unsynchronized policy and
     // repairs it instead of trusting a stale marker.
     invalidate_policy_fingerprint(id)?;
-    configure_maps(&map_dir, ifindex, identity, policy, true)?;
+    configure_maps(&map_dir, ifindex, identity, pod_id, policy, true)?;
     info!(
         %id,
         %iface,
@@ -303,6 +313,29 @@ pub fn reconfigure(
         "updated FluxVM eBPF policy in place"
     );
     Ok(())
+}
+
+/// Set 6S: populate (or clear, with `policy = None`) a VM's Pod-scoped
+/// network policy without a full re-attach. Requires the VM to already have
+/// a Pod identity (`apply()` was called with a nonzero `pod_id`) and to be
+/// currently attached; both are operator/caller errors, not something to
+/// silently no-op, since a caller asking to set Pod policy presumably wants
+/// to know if it did not take effect.
+pub fn configure_pod_policy(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+    policy: Option<&PodNetworkPolicy>,
+) -> Result<()> {
+    require_bpftool()?;
+    let pod_id = read_pod_id(id);
+    if pod_id == 0 {
+        bail!("VM {id} has no associated Pod identity; nothing to configure");
+    }
+    let map_dir = vm_pin_dir(&cfg.pin_root, id).join("maps");
+    if !map_dir.join("fluxvm_pspol").exists() {
+        bail!("VM {id} eBPF dataplane is not attached (or predates Set 6S); attach before setting Pod policy");
+    }
+    configure_pod_maps(&map_dir, pod_id, policy)
 }
 
 pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttachmentStatus> {
@@ -348,7 +381,13 @@ pub fn ensure(
     if status.attached && status.interface.as_deref() == Some(iface) {
         return Ok(false);
     }
-    apply(cfg, policy, id, iface)?;
+    // No fresh pod_uid at this call site; preserve the VM's existing Pod
+    // association (see dataplane::reconfigure_sandbox_policy's comment).
+    // Unreachable today (nothing in-tree calls `ensure`), and this narrower
+    // `DataplaneConfig` has no access to the state_dir persisted Pod policy
+    // lives under, so this cannot re-apply Pod-scoped policy content on its
+    // own -- a real caller should prefer `dataplane::ensure_sandbox_policy`.
+    apply(cfg, policy, id, iface, read_pod_id(id), None)?;
     Ok(true)
 }
 
@@ -387,6 +426,17 @@ fn read_schema_version(meta_dir: &Path) -> Option<u32> {
     fs::read_to_string(meta_dir.join("schema_version"))
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+/// Set 6S: the Pod identity `apply()` last associated with this VM, or `0`
+/// (no Pod-scoped policy) for VMs attached before Set 6S or never given one.
+/// Reconcile/update paths that don't have a fresh Pod UID to mint from read
+/// this back rather than resetting a VM's Pod association on every repair.
+pub fn read_pod_id(id: Uuid) -> u32 {
+    fs::read_to_string(vm_meta_dir(id).join("pod_id"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0)
 }
 
 fn read_policy_fingerprint(meta_dir: &Path) -> Option<u64> {
@@ -604,6 +654,7 @@ fn configure_maps(
     map_dir: &Path,
     ifindex: u32,
     identity: u32,
+    pod_id: u32,
     policy: &VmNetworkPolicy,
     fail_closed_first: bool,
 ) -> Result<()> {
@@ -616,7 +667,7 @@ fn configure_maps(
     if fail_closed_first {
         // Publish deny-all first, before deleting any old allowlist keys.
         update_iface_config(
-            &id_map, ifindex, identity, false, false, false, 0, false, 0, 0,
+            &id_map, ifindex, identity, false, false, false, 0, false, 0, 0, pod_id,
         )?;
     }
 
@@ -680,7 +731,131 @@ fn configure_maps(
         policy.allow_icmp,
         rate_bytes,
         rate_packets,
+        pod_id,
     )
+}
+
+/// Set 6S: populate the Pod-scoped identity ACL (`fluxvm_pspol`/
+/// `fluxvm_pid4`/`fluxvm_pid6`), independent of the VM-level CIDR/L4 maps
+/// `configure_maps` already owns. A no-op when `pod_id == 0` (VM has no
+/// associated Pod, e.g. non-Secure-Containers sandboxes) or when `policy` is
+/// `None` (Pod identity associated, but no Pod-scoped policy configured yet
+/// -- `fluxvm_tc.bpf.c` treats a missing `fluxvm_pspol` entry as allow, so
+/// this intentionally leaves the map empty rather than writing a
+/// default-enabled-but-empty entry).
+fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPolicy>) -> Result<()> {
+    if pod_id == 0 {
+        return Ok(());
+    }
+    let pspol_map = map_dir.join("fluxvm_pspol");
+    let pid4_map = map_dir.join("fluxvm_pid4");
+    let pid6_map = map_dir.join("fluxvm_pid6");
+    if !pspol_map.exists() {
+        // Older fluxvm_tc.bpf.o predating Set 6S; nothing to configure.
+        return Ok(());
+    }
+
+    let Some(policy) = policy else {
+        let key = pod_id.to_ne_bytes();
+        let _ = run(
+            "bpftool",
+            &[
+                "map".into(), "delete".into(), "pinned".into(),
+                pspol_map.display().to_string(), "key".into(), "hex".into(),
+            ]
+            .into_iter()
+            .chain(hex_args(&key))
+            .collect::<Vec<_>>(),
+        );
+        return Ok(());
+    };
+
+    // Fail-closed-first when the policy actually restricts traffic: publish
+    // ENABLED|DEFAULT_DENY before clearing old allow entries, mirroring
+    // configure_maps's own ordering for the VM-level CIDR maps.
+    const FLUXVM_PSPOL_ENABLED: u32 = 1 << 0;
+    const FLUXVM_PSPOL_DEFAULT_DENY: u32 = 1 << 1;
+    const FLUXVM_PSPOL_AUDIT: u32 = 1 << 2;
+    let mut flags = FLUXVM_PSPOL_ENABLED;
+    if policy.default_deny {
+        flags |= FLUXVM_PSPOL_DEFAULT_DENY;
+    }
+    if policy.audit_mode {
+        flags |= FLUXVM_PSPOL_AUDIT;
+    }
+    if policy.default_deny {
+        update_pod_policy(&pspol_map, pod_id, flags)?;
+    }
+
+    clear_pod_scoped_map(&pid4_map, pod_id, 4)?;
+    clear_pod_scoped_map(&pid6_map, pod_id, 16)?;
+    for addr in &policy.allow_addresses {
+        update_pod_peer(&pid4_map, &pid6_map, pod_id, *addr, 1)?;
+    }
+    for addr in &policy.deny_addresses {
+        update_pod_peer(&pid4_map, &pid6_map, pod_id, *addr, 2)?;
+    }
+    update_pod_policy(&pspol_map, pod_id, flags)
+}
+
+fn update_pod_policy(map: &Path, pod_id: u32, flags: u32) -> Result<()> {
+    let key = pod_id.to_ne_bytes();
+    let mut value = Vec::with_capacity(16);
+    value.extend_from_slice(&flags.to_ne_bytes());
+    value.extend_from_slice(&0u32.to_ne_bytes());
+    value.extend_from_slice(&0u32.to_ne_bytes());
+    value.extend_from_slice(&0u32.to_ne_bytes());
+    bpftool_map_update(map, &key, &value)
+}
+
+fn update_pod_peer(
+    pid4_map: &Path,
+    pid6_map: &Path,
+    pod_id: u32,
+    addr: IpAddr,
+    verdict: u32,
+) -> Result<()> {
+    match addr {
+        IpAddr::V4(v4) => {
+            let mut key = Vec::with_capacity(8);
+            key.extend_from_slice(&pod_id.to_ne_bytes());
+            key.extend_from_slice(&v4.octets());
+            bpftool_map_update(pid4_map, &key, &verdict.to_ne_bytes())
+        }
+        IpAddr::V6(v6) => {
+            let mut key = Vec::with_capacity(20);
+            key.extend_from_slice(&pod_id.to_ne_bytes());
+            key.extend_from_slice(&v6.octets());
+            bpftool_map_update(pid6_map, &key, &verdict.to_ne_bytes())
+        }
+    }
+}
+
+/// Deletes only this `pod_id`'s entries from a shared `fluxvm_pid4`/
+/// `fluxvm_pid6` map instance. Unlike `clear_map` (used for the VM-level
+/// `fluxvm_v4`/`fluxvm_v6` maps, which are private per VM via `pinmaps`),
+/// these entries are additionally namespaced by the `pod_id` prefix of the
+/// key even though the map instance itself is also per-VM -- kept
+/// pod_id-scoped for defense in depth if a future Set ever changes that.
+fn clear_pod_scoped_map(map: &Path, pod_id: u32, addr_len: usize) -> Result<()> {
+    if !map.exists() {
+        return Ok(());
+    }
+    let root = bpftool_json_dump(map)?;
+    let entries = root.as_array().context("bpftool map dump must be an array")?;
+    for entry in entries {
+        let key = json_bytes(&entry["key"])?;
+        if key.len() != 4 + addr_len || key[..4] != pod_id.to_ne_bytes() {
+            continue;
+        }
+        let mut args = vec![
+            "map".into(), "delete".into(), "pinned".into(),
+            map.display().to_string(), "key".into(), "hex".into(),
+        ];
+        args.extend(hex_args(&key));
+        run("bpftool", &args)?;
+    }
+    Ok(())
 }
 
 fn write_group_ids(map: &Path, ifindex: u32, ids: &[u32]) -> Result<()> {
@@ -706,13 +881,15 @@ fn update_iface_config(
     allow_icmp: bool,
     rate_bytes_per_sec: u64,
     rate_packets_per_sec: u64,
+    pod_id: u32,
 ) -> Result<()> {
     let mut key = Vec::with_capacity(4);
     key.extend_from_slice(&ifindex.to_ne_bytes());
 
     // Must match struct iface_config in bpf/fluxvm_tc.bpf.c exactly:
-    // 6 x u32 followed by 2 x u64.
-    let mut value = Vec::with_capacity(40);
+    // 6 x u32, 2 x u64, then pod_id + explicit reserved padding (Set 6S) --
+    // 48 bytes total, confirmed against the compiled object's BTF.
+    let mut value = Vec::with_capacity(48);
     value.extend_from_slice(&identity.to_ne_bytes());
     value.extend_from_slice(&(default_allow as u32).to_ne_bytes());
     value.extend_from_slice(&(enforce_cidr as u32).to_ne_bytes());
@@ -721,6 +898,8 @@ fn update_iface_config(
     value.extend_from_slice(&(allow_icmp as u32).to_ne_bytes());
     value.extend_from_slice(&rate_bytes_per_sec.to_ne_bytes());
     value.extend_from_slice(&rate_packets_per_sec.to_ne_bytes());
+    value.extend_from_slice(&pod_id.to_ne_bytes());
+    value.extend_from_slice(&0u32.to_ne_bytes());
     bpftool_map_update(map, &key, &value)
 }
 

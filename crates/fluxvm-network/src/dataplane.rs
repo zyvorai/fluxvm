@@ -10,7 +10,7 @@
 use anyhow::{Context, Result};
 use fluxvm_core::config::{Config, DataplaneMode};
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Write, path::PathBuf, process::Command};
+use std::{fs, io::Write, net::IpAddr, path::PathBuf, process::Command};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -82,6 +82,31 @@ impl Default for VmNetworkPolicy {
             compiled_group_ids: Vec::new(),
         }
     }
+}
+
+/// Set 6S: Kubernetes-Pod-identity-scoped network policy, additive on top of
+/// a VM's own `VmNetworkPolicy` (CIDR/L4/rate). Peers are individual
+/// addresses (matching Service Fabric's `fluxvm_sid4/6` model), not CIDRs --
+/// a selector/CIDR-to-address resolver (e.g. a Kubernetes `NetworkPolicy`
+/// watcher translating pod-selector matches to peer Pod IPs) is expected to
+/// populate this, not `fluxvm_tc.bpf.c` itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PodNetworkPolicy {
+    /// A peer with no explicit allow/deny entry is denied when true. When
+    /// false (default), an unlisted peer is allowed -- Set 6S's policy is
+    /// opt-in restrictive, not opt-in permissive, so a Pod with no policy
+    /// configured at all behaves exactly as it did before this Set (see
+    /// `configure_pod_maps`'s `policy: None` no-op case).
+    #[serde(default)]
+    pub default_deny: bool,
+    /// Log-and-allow instead of drop, same semantics as
+    /// `VmNetworkPolicy::audit_mode`.
+    #[serde(default)]
+    pub audit_mode: bool,
+    #[serde(default)]
+    pub allow_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    pub deny_addresses: Vec<IpAddr>,
 }
 
 pub fn default_policy(cfg: &Config) -> VmNetworkPolicy {
@@ -156,6 +181,50 @@ pub fn delete_policy(cfg: &Config, id: Uuid) -> Result<()> {
     }
 }
 
+/// Set 6S: persisted so a VM restart/reconcile re-applies whatever Pod
+/// policy was last set instead of `apply()`'s fresh-attach path silently
+/// resetting it to unconfigured every time. Keyed by VM id like
+/// `policy_path`, not by `pod_id` -- each Secure Containers VM has at most
+/// one Pod, so this needs no separate key space.
+pub fn load_pod_policy(cfg: &Config, id: Uuid) -> Result<Option<PodNetworkPolicy>> {
+    let path = pod_policy_path(cfg, id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("reading Pod network policy {}", path.display()))?;
+    Ok(Some(serde_json::from_str(&raw).with_context(|| {
+        format!("parsing Pod network policy {}", path.display())
+    })?))
+}
+
+pub fn save_pod_policy(cfg: &Config, id: Uuid, policy: &PodNetworkPolicy) -> Result<()> {
+    let path = pod_policy_path(cfg, id);
+    let parent = path.parent().context("Pod network policy path has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating Pod network policy directory {}", parent.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(policy)?)
+        .with_context(|| format!("writing Pod network policy {}", tmp.display()))?;
+    fs::rename(&tmp, &path)
+        .with_context(|| format!("committing Pod network policy {}", path.display()))
+}
+
+pub fn delete_pod_policy(cfg: &Config, id: Uuid) -> Result<()> {
+    let path = pod_policy_path(cfg, id);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("deleting Pod network policy {}", path.display())),
+    }
+}
+
+fn pod_policy_path(cfg: &Config, id: Uuid) -> PathBuf {
+    cfg.state_dir
+        .join("network-pod-policy")
+        .join(format!("{id}.json"))
+}
+
 fn policy_path(cfg: &Config, id: Uuid) -> PathBuf {
     cfg.state_dir
         .join("network-policy")
@@ -204,7 +273,17 @@ pub fn apply_sandbox_policy(
     iface: Option<&str>,
     guest_cidr: Option<&str>,
     extra_allow_cidrs: &[String],
+    pod_uid: Option<&str>,
 ) -> Result<()> {
+    // Set 6S: mint (or recall) a stable Pod identity when the caller knows
+    // this VM belongs to a Kubernetes Pod (Secure Containers). `0` means "no
+    // Pod-scoped policy" throughout the eBPF layer, matching every other
+    // sandbox that never supplies a pod_uid.
+    let pod_id = match pod_uid {
+        Some(uid) => crate::pod_identity::pod_id_for(cfg, uid)?,
+        None => 0,
+    };
+    let pod_policy = if pod_id != 0 { load_pod_policy(cfg, id)? } else { None };
     let dp = &cfg.sandbox.dataplane;
     let base_policy = effective_policy(cfg, id)?;
     let base_fingerprint = policy_fingerprint(&base_policy)?;
@@ -255,7 +334,7 @@ pub fn apply_sandbox_policy(
                 if dp.mode == DataplaneMode::Cilium {
                     crate::cilium::validate_host()?;
                 }
-                crate::ebpf::apply(dp, &policy, id, iface)
+                crate::ebpf::apply(dp, &policy, id, iface, pod_id, pod_policy.as_ref())
             })();
 
             match native {
@@ -354,7 +433,13 @@ pub fn reconfigure_sandbox_policy(
             if status.attached {
                 crate::ebpf::reconfigure(dp, &policy, id)?;
             } else {
-                crate::ebpf::apply(dp, &policy, id, iface)?;
+                // No fresh pod_uid at this call site (this is a policy
+                // update, not a create/restart) -- preserve whatever Pod
+                // identity/policy `apply_sandbox_policy`/`set_pod_network_policy`
+                // last associated with this VM instead of dropping it on a repair.
+                let pod_id = crate::ebpf::read_pod_id(id);
+                let pod_policy = if pod_id != 0 { load_pod_policy(cfg, id)? } else { None };
+                crate::ebpf::apply(dp, &policy, id, iface, pod_id, pod_policy.as_ref())?;
             }
             crate::ebpf::commit_policy_fingerprint(id, base_fingerprint)?;
             crate::service::ensure_for_vm(cfg, id, iface)?;
@@ -466,10 +551,35 @@ pub fn ensure_sandbox_policy(
     {
         return Ok(service_repaired);
     }
-    crate::ebpf::apply(dp, &policy, id, iface)?;
+    // Reconcile/heal path: no fresh pod_uid, preserve the VM's existing
+    // Pod association (see reconfigure_sandbox_policy's identical comment).
+    let repair_pod_id = crate::ebpf::read_pod_id(id);
+    let repair_pod_policy = if repair_pod_id != 0 { load_pod_policy(cfg, id)? } else { None };
+    crate::ebpf::apply(dp, &policy, id, iface, repair_pod_id, repair_pod_policy.as_ref())?;
     crate::ebpf::commit_policy_fingerprint(id, desired_fingerprint)?;
     crate::service::ensure_for_vm(cfg, id, iface)?;
     Ok(true)
+}
+
+/// Set 6S: populate (`Some`) or clear (`None`) a VM's Pod-scoped network
+/// policy. The VM must already be attached with a nonzero Pod identity (see
+/// `apply_sandbox_policy`'s `pod_uid` argument) -- this does not itself
+/// resolve a Kubernetes `NetworkPolicy` object into peer addresses; that
+/// translation is expected to live in a separate controller/watcher that
+/// calls this once it has resolved concrete peer IPs.
+pub fn set_pod_network_policy(cfg: &Config, id: Uuid, policy: Option<PodNetworkPolicy>) -> Result<()> {
+    let dp = &cfg.sandbox.dataplane;
+    if dp.mode == DataplaneMode::Legacy {
+        anyhow::bail!("Pod-scoped network policy requires native eBPF mode");
+    }
+    // Apply live before persisting: a failed apply (e.g. the VM is not
+    // attached yet) must not leave a "confirmed" policy on disk that a
+    // later restart would apply without ever having been validated live.
+    crate::ebpf::configure_pod_policy(dp, id, policy.as_ref())?;
+    match &policy {
+        Some(p) => save_pod_policy(cfg, id, p),
+        None => delete_pod_policy(cfg, id),
+    }
 }
 
 pub fn reconcile_orphan_pins(cfg: &Config, live_ids: &[Uuid]) -> Result<usize> {

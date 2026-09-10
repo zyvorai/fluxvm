@@ -82,3 +82,6 @@ in-tree KVM without Firecracker for production density.
 Secure Containers RuntimeClass as full Kata-equivalent (hostPath hotplug,
 broad CNI conformance, device-cgroup enforcement, opt-in `CLONE_NEWUSER`
 unvalidated under load beyond Set 6) — [secure-containers.md](secure-containers.md).
+Sentinel Pod-scoped network policy (Set 6) as automatically enforcing
+Kubernetes `NetworkPolicy` objects — the eBPF mechanism and API exist, but
+nothing yet watches/resolves live `NetworkPolicy` objects into it.

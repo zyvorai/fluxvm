@@ -83,18 +83,19 @@ PY
 }
 
 iface_value() {
-  # 6*u32 + 2*u64, matching struct iface_config in bpf/fluxvm_tc.bpf.c:
+  # 6*u32 + 2*u64 + 2*u32, matching struct iface_config in bpf/fluxvm_tc.bpf.c:
   # identity, default_allow, enforce_cidr, enforce_l4, sample_rate, allow_icmp,
-  # rate_bytes_per_sec, rate_packets_per_sec.
+  # rate_bytes_per_sec, rate_packets_per_sec, pod_id, reserved0 (Set 6S).
   # Args: identity default_allow enforce_cidr enforce_l4 sample rate_bytes rate_pps
-  #       [allow_icmp=0]
+  #       [allow_icmp=0] [pod_id=0]
   python3 - "$@" <<'PY'
 import struct, sys
 vals = [int(x) for x in sys.argv[1:]]
 identity, default_allow, enforce_cidr, enforce_l4, sample, rate_bytes, rate_pps = vals[:7]
 allow_icmp = vals[7] if len(vals) > 7 else 0
+pod_id = vals[8] if len(vals) > 8 else 0
 raw = struct.pack(
-    "=IIIIIIQQ",
+    "=IIIIIIQQII",
     identity,
     default_allow,
     enforce_cidr,
@@ -103,8 +104,28 @@ raw = struct.pack(
     allow_icmp,
     rate_bytes,
     rate_pps,
+    pod_id,
+    0,
 )
 print(" ".join(f"{b:02x}" for b in raw))
+PY
+}
+
+pod4_key() {
+  python3 - "$1" "$2" <<'PY'
+import ipaddress, struct, sys
+pod_id, ip = int(sys.argv[1]), sys.argv[2]
+raw = struct.pack("=I", pod_id) + ipaddress.IPv4Address(ip).packed
+print(" ".join(f"{b:02x}" for b in raw))
+PY
+}
+
+pod_policy_value() {
+  # u32 flags + 3*u32 reserved, matching struct fluxvm_pod_policy in
+  # bpf/fluxvm_pod_policy.bpf.h. Arg: flags
+  python3 - "$1" <<'PY'
+import struct, sys
+print(" ".join(f"{b:02x}" for b in struct.pack("=IIII", int(sys.argv[1]), 0, 0, 0)))
 PY
 }
 
@@ -332,6 +353,34 @@ expect_no_ping6
 bpftool map delete pinned "$PIN/xdp/maps/fvm_xdp_block6" key hex $BLOCK6
 expect_ping6
 ip link set dev "$A" xdp off
+
+# Set 6S: Pod-scoped identity policy, additive on top of an otherwise-allowed
+# VM-level verdict. pod_id=0 (every prior section above) must have exercised
+# zero pod-policy behavior; this section is the first to set pod_id nonzero.
+tc filter add dev "$A" ingress pref "$TC_PREF" handle 1 bpf da \
+  pinned "$PIN/tc/progs/fluxvm_egress"
+POD_ID=777
+POD_ALLOW_BASELINE="$(iface_value "$IDENTITY" 1 0 0 0 0 0 0 "$POD_ID")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_id" key hex $IFKEY value hex $POD_ALLOW_BASELINE
+expect_ping4
+FLUXVM_PSPOL_ENABLED=1
+FLUXVM_PSPOL_DEFAULT_DENY=2
+POD_POLICY_KEY="$(hex_u32 "$POD_ID")"
+POD_POLICY_VALUE="$(pod_policy_value $((FLUXVM_PSPOL_ENABLED | FLUXVM_PSPOL_DEFAULT_DENY)))"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY value hex $POD_POLICY_VALUE
+expect_no_ping4
+PODKEY4="$(pod4_key "$POD_ID" "$A4")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4" key hex $PODKEY4 value hex $ONE
+expect_ping4
+bpftool -j map dump pinned "$PIN/tc/maps/fluxvm_ppstat" | grep -q 'key'
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4" key hex $PODKEY4
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY
+tc filter del dev "$A" ingress pref "$TC_PREF" handle 1 bpf
 INNER
 
 echo "FluxVM Network Fabric v3 TC/IPv4/IPv6/L4/rate/XDP kernel smoke test passed"
