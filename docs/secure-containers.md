@@ -303,3 +303,18 @@ AppArmor and SELinux process labels, and generated per-container cgroup-v2
 device eBPF (`BPF_PROG_TYPE_CGROUP_DEVICE`). Unsupported seccomp notify and
 SELinux mount labels remain explicit fail-closed boundaries. See
 [secure-containers-set10.md](secure-containers-set10.md).
+
+## Set 11 addendum — seccomp notification + SELinux mount labels
+
+Set 11 adds a guest-agent seccomp user-notification supervisor for explicit
+`SCMP_ACT_NOTIFY` syscall rules. Listener fds are transferred to the unfiltered
+supervisor with `SCM_RIGHTS`; default behavior denies with `EPERM`, while the
+vendor annotation `io.zyvor.seccomp.notify.mode=continue` explicitly opts into
+kernel CONTINUE semantics. NOTIFY as the filter default and NOTIFY on `sendmsg`
+remain rejected because they can deadlock listener bootstrap.
+
+OCI `linux.mountLabel` is applied as `context="<label>"` to mounts created by the
+guest OCI setup path after SELinux/libselinux preflight. It does not claim to
+retroactively relabel the already-mounted virtiofs rootfs. The lifecycle
+protocol also exposes VM-local cumulative security counters, which the shim logs
+on init-task delete. See [secure-containers-set11.md](secure-containers-set11.md).

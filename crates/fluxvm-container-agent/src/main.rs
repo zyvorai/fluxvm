@@ -21,9 +21,10 @@
 //! Set 9 extends that guest-resolution path to driver companion nodes (for
 //! example nvidiactl/UVM and AMD KFD) while keeping host device numbers out.
 //! Set 10 adds OCI seccomp argument comparators, AppArmor/SELinux process
-//! labels, and per-container cgroup-v2 BPF device access enforcement. Seccomp
-//! notify and SELinux mount labeling remain explicit follow-up items; newer
-//! upstream Secure Containers work also layers per-container namespace isolation.
+//! labels, and per-container cgroup-v2 BPF device access enforcement. Set 11
+//! adds a bounded seccomp userspace-notification broker, SELinux mount labels,
+//! and monotonic security counters. Newer upstream Secure Containers work also
+//! layers per-container namespace isolation.
 
 use anyhow::{Context, Result, bail};
 use aya::{
@@ -33,8 +34,8 @@ use aya::{
 use clap::Parser;
 use fluxvm_container_protocol::{
     CgroupEvents, ContainerEnvelope, ContainerIo, ContainerNetworkPolicy, ContainerRequest,
-    ContainerResponse, ContainerStats, ContainerStatus, ResourceLimits, IoStreamAck,
-    IoStreamAttach, IoStreamKind,
+    ContainerResponse, ContainerStats, ContainerStatus, ResourceLimits, SecurityStats,
+    IoStreamAck, IoStreamAttach, IoStreamKind,
     DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, MAX_MESSAGE_BYTES, decode_line,
     encode_line,
 };
@@ -51,7 +52,7 @@ use std::{
         fs::{FileTypeExt, MetadataExt},
     },
     path::{Path, PathBuf},
-    sync::{Arc, Condvar, Mutex, OnceLock},
+    sync::{Arc, Condvar, Mutex, OnceLock, atomic::{AtomicU64, Ordering}},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -161,6 +162,52 @@ struct SeccompProfile {
     rules: Vec<SeccompRule>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SeccompNotifyMode {
+    Deny,
+    Continue,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SeccompNotifyPolicy {
+    mode: SeccompNotifyMode,
+    errno: i32,
+}
+
+impl Default for SeccompNotifyPolicy {
+    fn default() -> Self {
+        Self { mode: SeccompNotifyMode::Deny, errno: libc::EPERM }
+    }
+}
+
+#[derive(Default)]
+struct SecurityCounters {
+    seccomp_notify_received: AtomicU64,
+    seccomp_notify_denied: AtomicU64,
+    seccomp_notify_continued: AtomicU64,
+    seccomp_notify_errors: AtomicU64,
+    selinux_mounts_labeled: AtomicU64,
+    lsm_apply_failures: AtomicU64,
+}
+
+static SECURITY_COUNTERS: OnceLock<SecurityCounters> = OnceLock::new();
+
+fn security_counters() -> &'static SecurityCounters {
+    SECURITY_COUNTERS.get_or_init(SecurityCounters::default)
+}
+
+fn security_stats_snapshot() -> SecurityStats {
+    let c = security_counters();
+    SecurityStats {
+        seccomp_notify_received: c.seccomp_notify_received.load(Ordering::Relaxed),
+        seccomp_notify_denied: c.seccomp_notify_denied.load(Ordering::Relaxed),
+        seccomp_notify_continued: c.seccomp_notify_continued.load(Ordering::Relaxed),
+        seccomp_notify_errors: c.seccomp_notify_errors.load(Ordering::Relaxed),
+        selinux_mounts_labeled: c.selinux_mounts_labeled.load(Ordering::Relaxed),
+        lsm_apply_failures: c.lsm_apply_failures.load(Ordering::Relaxed),
+    }
+}
+
 #[derive(Clone, Debug)]
 struct DeviceCgroupRule {
     allow: bool,
@@ -190,6 +237,7 @@ struct ProcessSpec {
     rlimits: Vec<ProcessRlimit>,
     capabilities: Option<CapabilitySets>,
     seccomp: Option<SeccompProfile>,
+    seccomp_notify: SeccompNotifyPolicy,
     apparmor_profile: Option<String>,
     selinux_label: Option<String>,
 }
@@ -437,6 +485,7 @@ struct ContainerEntry {
     mounts: Vec<PathBuf>,
     cgroup_path: PathBuf,
     seccomp: Option<SeccompProfile>,
+    seccomp_notify: SeccompNotifyPolicy,
     apparmor_profile: Option<String>,
     selinux_label: Option<String>,
     namespaces: ContainerNamespaces,
@@ -685,6 +734,7 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
         ContainerRequest::Pids { id } => Ok(ContainerResponse::Pids { pids: container_pids(&id)? }),
         ContainerRequest::Stats { id } => Ok(ContainerResponse::Stats { stats: container_stats(&id)? }),
         ContainerRequest::CgroupEvents { id } => Ok(ContainerResponse::CgroupEvents { events: container_cgroup_events(&id)? }),
+        ContainerRequest::SecurityStats => Ok(ContainerResponse::SecurityStats { stats: security_stats_snapshot() }),
         ContainerRequest::UpdateResources { id, resources } => {
             update_container_resources(&id, &resources)?;
             Ok(ContainerResponse::ResourcesUpdated)
@@ -808,6 +858,7 @@ fn create_container(
             mounts,
             cgroup_path,
             seccomp: spec.seccomp.clone(),
+            seccomp_notify: spec.seccomp_notify,
             apparmor_profile: spec.apparmor_profile.clone(),
             selinux_label: spec.selinux_label.clone(),
             namespaces,
@@ -828,6 +879,7 @@ fn create_exec(id: &str, exec_id: String, process_json: &str, io: ContainerIo) -
     let mut spec = parse_oci_process(process_json, container.rootfs.clone())?;
     spec.rootfs = container.rootfs.clone();
     spec.seccomp = container.seccomp.clone();
+    spec.seccomp_notify = container.seccomp_notify;
     if spec.apparmor_profile.is_none() {
         spec.apparmor_profile = container.apparmor_profile.clone();
     }
@@ -947,7 +999,11 @@ fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>, ResourceLi
         .and_then(Value::as_str)
         .context("OCI root.path is required")?;
     let rootfs = PathBuf::from(root);
-    let mut mounts = apply_oci_mounts(&v, &rootfs)?;
+    let mount_label = v.pointer("/linux/mountLabel").and_then(Value::as_str).filter(|v| !v.is_empty());
+    if let Some(label) = mount_label {
+        validate_selinux_mount_label(label)?;
+    }
+    let mut mounts = apply_oci_mounts(&v, &rootfs, mount_label)?;
     let parsed = (|| -> Result<(ProcessSpec, ResourceLimits, Option<DeviceCgroupPolicy>)> {
         let device_mounts = create_oci_devices(&v, &rootfs)?;
         mounts.extend(device_mounts);
@@ -956,12 +1012,9 @@ fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>, ResourceLi
         let process = v.get("process").context("OCI process is required")?;
         let resources = resource_limits_from_oci(&v);
         let device_policy = parse_device_cgroup_policy(&v)?;
-        let mount_label = v.pointer("/linux/mountLabel").and_then(Value::as_str).unwrap_or("");
-        if !mount_label.is_empty() {
-            bail!("OCI linux.mountLabel is not implemented by FluxVM Set 10; refusing to silently ignore an SELinux mount label");
-        }
         let mut spec = parse_process_value(process, rootfs.clone())?;
         spec.seccomp = parse_seccomp_profile(&v)?;
+        spec.seccomp_notify = parse_seccomp_notify_policy(&v)?;
         Ok((spec, resources, device_policy))
     })();
     match parsed {
@@ -974,7 +1027,7 @@ fn parse_oci_config(json: &str) -> Result<(ProcessSpec, Vec<PathBuf>, ResourceLi
 }
 
 
-fn apply_oci_mounts(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
+fn apply_oci_mounts(config: &Value, rootfs: &PathBuf, mount_label: Option<&str>) -> Result<Vec<PathBuf>> {
     let mut mounted = Vec::new();
     let Some(items) = config.get("mounts").and_then(Value::as_array) else {
         return Ok(mounted);
@@ -1015,6 +1068,7 @@ fn apply_oci_mounts(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
         }
 
         let (flags, data) = mount_options(&options, is_bind);
+        let data = format_selinux_mount_data(data.as_deref(), mount_label)?;
         let mount_result = mount_one(
             source,
             &target,
@@ -1029,6 +1083,10 @@ fn apply_oci_mounts(config: &Value, rootfs: &PathBuf) -> Result<Vec<PathBuf>> {
             } else {
                 return Err(first).with_context(|| format!("mounting {source:?} on {}", target.display()));
             }
+        }
+
+        if mount_label.is_some() {
+            security_counters().selinux_mounts_labeled.fetch_add(1, Ordering::Relaxed);
         }
 
         if is_bind && options.iter().any(|o| o == "ro") {
@@ -1246,8 +1304,10 @@ const SCMP_ACT_KILL_PROCESS: u32 = 0x8000_0000;
 const SCMP_ACT_KILL_THREAD: u32 = 0x0000_0000;
 const SCMP_ACT_TRAP: u32 = 0x0003_0000;
 const SCMP_ACT_ERRNO: u32 = 0x0005_0000;
+const SCMP_ACT_NOTIFY: u32 = 0x7fc0_0000;
 const SCMP_ACT_LOG: u32 = 0x7ffc_0000;
 const SCMP_ACT_ALLOW: u32 = 0x7fff_0000;
+const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
 
 const SCMP_CMP_NE: u32 = 1;
 const SCMP_CMP_LT: u32 = 2;
@@ -1272,10 +1332,42 @@ fn seccomp_action(raw: &str, errno_ret: Option<u32>) -> Result<u32> {
         }
         "SCMP_ACT_LOG" => SCMP_ACT_LOG,
         "SCMP_ACT_ALLOW" => SCMP_ACT_ALLOW,
-        "SCMP_ACT_NOTIFY" => bail!("OCI seccomp notify requires a persistent userspace broker and is not implemented by FluxVM Set 10"),
-        "SCMP_ACT_TRACE" => bail!("OCI seccomp TRACE is not supported by FluxVM Set 10"),
+        "SCMP_ACT_NOTIFY" => SCMP_ACT_NOTIFY,
+        "SCMP_ACT_TRACE" => bail!("OCI seccomp TRACE is not supported by FluxVM Set 11"),
         other => bail!("unsupported OCI seccomp action {other:?}"),
     })
+}
+
+fn parse_seccomp_notify_policy(config: &Value) -> Result<SeccompNotifyPolicy> {
+    let annotations = config.get("annotations").and_then(Value::as_object);
+    let mode = annotations
+        .and_then(|a| a.get("io.zyvor.seccomp.notify.mode"))
+        .and_then(Value::as_str)
+        .unwrap_or("deny");
+    let mode = match mode {
+        "deny" => SeccompNotifyMode::Deny,
+        "continue" => SeccompNotifyMode::Continue,
+        other => bail!("invalid io.zyvor.seccomp.notify.mode {other:?}; expected deny or continue"),
+    };
+    let errno = annotations
+        .and_then(|a| a.get("io.zyvor.seccomp.notify.errno"))
+        .and_then(Value::as_str)
+        .map(|v| v.parse::<i32>().context("parsing io.zyvor.seccomp.notify.errno"))
+        .transpose()?
+        .unwrap_or(libc::EPERM);
+    if !(1..=4095).contains(&errno) {
+        bail!("io.zyvor.seccomp.notify.errno must be in 1..=4095");
+    }
+    Ok(SeccompNotifyPolicy { mode, errno })
+}
+
+fn seccomp_action_base(action: u32) -> u32 {
+    action & 0xffff_0000
+}
+
+fn seccomp_profile_uses_notify(profile: &SeccompProfile) -> bool {
+    seccomp_action_base(profile.default_action) == SCMP_ACT_NOTIFY
+        || profile.rules.iter().any(|rule| seccomp_action_base(rule.action) == SCMP_ACT_NOTIFY)
 }
 
 fn seccomp_compare(raw: &str) -> Result<u32> {
@@ -1296,7 +1388,7 @@ fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
     if let Some(arches) = seccomp.get("architectures").and_then(Value::as_array) {
         for arch in arches.iter().filter_map(Value::as_str) {
             if arch != "SCMP_ARCH_X86_64" {
-                bail!("unsupported OCI seccomp architecture {arch:?}; FluxVM Set 10 currently enforces native x86_64 only");
+                bail!("unsupported OCI seccomp architecture {arch:?}; FluxVM Set 11 currently enforces native x86_64 only");
             }
         }
     }
@@ -1304,6 +1396,9 @@ fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
         seccomp.get("defaultAction").and_then(Value::as_str).context("OCI seccomp.defaultAction is required")?,
         seccomp.get("defaultErrnoRet").and_then(Value::as_u64).map(|v| v as u32),
     )?;
+    if seccomp_action_base(default_action) == SCMP_ACT_NOTIFY {
+        bail!("SCMP_ACT_NOTIFY is not supported as seccomp.defaultAction because the listener bootstrap syscalls would deadlock; use explicit NOTIFY syscall rules");
+    }
     let mut rules = Vec::new();
     if let Some(items) = seccomp.get("syscalls").and_then(Value::as_array) {
         for item in items {
@@ -1315,6 +1410,9 @@ fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
                 .iter().map(|v| v.as_str().map(str::to_string).context("seccomp syscall name must be a string"))
                 .collect::<Result<Vec<_>>>()?;
             if names.is_empty() { bail!("OCI seccomp syscall rule must contain at least one name"); }
+            if seccomp_action_base(action) == SCMP_ACT_NOTIFY && names.iter().any(|name| name == "sendmsg") {
+                bail!("seccomp NOTIFY on sendmsg is unsafe for FluxVM because sendmsg transfers the notification listener to the guest supervisor");
+            }
             let mut args = Vec::new();
             if let Some(items) = item.get("args").and_then(Value::as_array) {
                 for arg in items {
@@ -1348,18 +1446,262 @@ struct ScmpArgCmp {
     datum_b: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScmpNotifData {
+    nr: i32,
+    arch: u32,
+    instruction_pointer: u64,
+    args: [u64; 6],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScmpNotif {
+    id: u64,
+    pid: u32,
+    flags: u32,
+    data: ScmpNotifData,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ScmpNotifResp {
+    id: u64,
+    val: i64,
+    error: i32,
+    flags: u32,
+}
+
+fn unix_fd_socketpair() -> Result<[RawFd; 2]> {
+    let mut fds = [-1; 2];
+    let rc = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error()).context("creating seccomp notification socketpair");
+    }
+    Ok(fds)
+}
+
+fn send_fd(socket: RawFd, fd: RawFd) -> Result<()> {
+    let mut byte = [0u8; 1];
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let words = space.div_ceil(std::mem::size_of::<usize>());
+    let mut control = vec![0usize; words];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space;
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    if cmsg.is_null() { bail!("building SCM_RIGHTS header failed"); }
+    unsafe {
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as usize;
+        std::ptr::write_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>(), fd);
+    }
+    let rc = unsafe { libc::sendmsg(socket, &msg, libc::MSG_NOSIGNAL) };
+    if rc != 1 {
+        return Err(std::io::Error::last_os_error()).context("sending seccomp notification fd");
+    }
+    Ok(())
+}
+
+fn recv_fd(socket: RawFd) -> Result<RawFd> {
+    let mut byte = [0u8; 1];
+    let mut iov = libc::iovec { iov_base: byte.as_mut_ptr().cast(), iov_len: 1 };
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let words = space.div_ceil(std::mem::size_of::<usize>());
+    let mut control = vec![0usize; words];
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space;
+    let rc = unsafe { libc::recvmsg(socket, &mut msg, libc::MSG_CMSG_CLOEXEC) };
+    if rc <= 0 {
+        return Err(if rc == 0 {
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "seccomp notification socket closed before fd transfer")
+        } else {
+            std::io::Error::last_os_error()
+        }).context("receiving seccomp notification fd");
+    }
+    if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+        bail!("seccomp notification fd transfer ancillary data was truncated");
+    }
+    let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    if cmsg.is_null()
+        || unsafe { (*cmsg).cmsg_level } != libc::SOL_SOCKET
+        || unsafe { (*cmsg).cmsg_type } != libc::SCM_RIGHTS
+        || unsafe { (*cmsg).cmsg_len } < unsafe { libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) } as usize
+    {
+        bail!("seccomp notification fd transfer did not contain SCM_RIGHTS");
+    }
+    let fd = unsafe { std::ptr::read_unaligned(libc::CMSG_DATA(cmsg).cast::<RawFd>()) };
+    if fd < 0 { bail!("received invalid seccomp notification fd"); }
+    Ok(fd)
+}
+
+fn process_still_exists(pid: u32) -> bool {
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    if rc == 0 { return true; }
+    matches!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EPERM))
+}
+
+fn wait_for_seccomp_listener(socket: RawFd, target_pid: u32) -> Result<RawFd> {
+    loop {
+        let mut pfd = libc::pollfd { fd: socket, events: libc::POLLIN, revents: 0 };
+        let rc = unsafe { libc::poll(&mut pfd, 1, 1000) };
+        if rc < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
+            return Err(std::io::Error::last_os_error()).context("polling seccomp listener bootstrap socket");
+        }
+        if rc == 0 {
+            if !process_still_exists(target_pid) {
+                bail!("container process exited before transferring the seccomp notification listener");
+            }
+            continue;
+        }
+        if pfd.revents & libc::POLLIN != 0 {
+            return recv_fd(socket);
+        }
+        if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+            bail!("seccomp notification bootstrap socket closed before listener transfer");
+        }
+    }
+}
+
+fn run_seccomp_notify_broker(socket: RawFd, policy: SeccompNotifyPolicy, target_pid: u32, label: String) {
+    let received = wait_for_seccomp_listener(socket, target_pid);
+    unsafe { libc::close(socket); }
+    let notify_fd = match received {
+        Ok(fd) => fd,
+        Err(e) => {
+            security_counters().seccomp_notify_errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!("security audit: seccomp-notify broker {label} failed to receive listener: {e:#}");
+            return;
+        }
+    };
+
+    type NotifyAlloc = unsafe extern "C" fn(*mut *mut ScmpNotif, *mut *mut ScmpNotifResp) -> libc::c_int;
+    type NotifyFree = unsafe extern "C" fn(*mut ScmpNotif, *mut ScmpNotifResp);
+    type NotifyReceive = unsafe extern "C" fn(libc::c_int, *mut ScmpNotif) -> libc::c_int;
+    type NotifyRespond = unsafe extern "C" fn(libc::c_int, *mut ScmpNotifResp) -> libc::c_int;
+    type NotifyIdValid = unsafe extern "C" fn(libc::c_int, u64) -> libc::c_int;
+
+    let soname = match CString::new("libseccomp.so.2") { Ok(v) => v, Err(_) => return };
+    let handle = unsafe { libc::dlopen(soname.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if handle.is_null() {
+        security_counters().seccomp_notify_errors.fetch_add(1, Ordering::Relaxed);
+        eprintln!("security audit: seccomp-notify broker {label} cannot load libseccomp.so.2");
+        unsafe { libc::close(notify_fd); }
+        return;
+    }
+
+    let run = (|| -> Result<()> {
+        let alloc: NotifyAlloc = unsafe { dlsym_required(handle, b"seccomp_notify_alloc\0")? };
+        let free: NotifyFree = unsafe { dlsym_required(handle, b"seccomp_notify_free\0")? };
+        let receive: NotifyReceive = unsafe { dlsym_required(handle, b"seccomp_notify_receive\0")? };
+        let respond: NotifyRespond = unsafe { dlsym_required(handle, b"seccomp_notify_respond\0")? };
+        let id_valid: NotifyIdValid = unsafe { dlsym_required(handle, b"seccomp_notify_id_valid\0")? };
+        let mut req: *mut ScmpNotif = std::ptr::null_mut();
+        let mut resp: *mut ScmpNotifResp = std::ptr::null_mut();
+        let rc = unsafe { alloc(&mut req, &mut resp) };
+        if rc != 0 || req.is_null() || resp.is_null() {
+            bail!("seccomp_notify_alloc failed: {rc}");
+        }
+        struct NotifyBuffers {
+            req: *mut ScmpNotif,
+            resp: *mut ScmpNotifResp,
+            free: NotifyFree,
+        }
+        impl Drop for NotifyBuffers {
+            fn drop(&mut self) { unsafe { (self.free)(self.req, self.resp); } }
+        }
+        let buffers = NotifyBuffers { req, resp, free };
+
+        loop {
+            let mut pfd = libc::pollfd { fd: notify_fd, events: libc::POLLIN, revents: 0 };
+            let poll_rc = unsafe { libc::poll(&mut pfd, 1, 1000) };
+            if poll_rc < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted { continue; }
+                bail!("polling seccomp notification fd: {}", std::io::Error::last_os_error());
+            }
+            if poll_rc == 0 {
+                if !process_still_exists(target_pid) { break; }
+                continue;
+            }
+            if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+                && pfd.revents & libc::POLLIN == 0
+            {
+                break;
+            }
+            if pfd.revents & libc::POLLIN == 0 { continue; }
+
+            let rc = unsafe { receive(notify_fd, buffers.req) };
+            if rc != 0 {
+                if rc == -libc::EINTR || rc == -libc::ENOENT { continue; }
+                bail!("seccomp_notify_receive failed: {rc}");
+            }
+            security_counters().seccomp_notify_received.fetch_add(1, Ordering::Relaxed);
+            let request = unsafe { *buffers.req };
+            if unsafe { id_valid(notify_fd, request.id) } != 0 { continue; }
+
+            let response = unsafe { &mut *buffers.resp };
+            *response = ScmpNotifResp::default();
+            response.id = request.id;
+            match policy.mode {
+                SeccompNotifyMode::Deny => {
+                    response.error = -policy.errno;
+                    security_counters().seccomp_notify_denied.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("security audit: seccomp-notify {label} nr={} pid={} decision=deny errno={}", request.data.nr, request.pid, policy.errno);
+                }
+                SeccompNotifyMode::Continue => {
+                    response.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+                    security_counters().seccomp_notify_continued.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("security audit: seccomp-notify {label} nr={} pid={} decision=continue", request.data.nr, request.pid);
+                }
+            }
+            let rc = unsafe { respond(notify_fd, response) };
+            if rc != 0 && rc != -libc::ENOENT { bail!("seccomp_notify_respond failed: {rc}"); }
+        }
+        Ok(())
+    })();
+    if let Err(e) = run {
+        security_counters().seccomp_notify_errors.fetch_add(1, Ordering::Relaxed);
+        eprintln!("security audit: seccomp-notify broker {label} stopped with error: {e:#}");
+    }
+    unsafe {
+        libc::dlclose(handle);
+        libc::close(notify_fd);
+    }
+}
+
 unsafe fn dlsym_required<T: Copy>(handle: *mut libc::c_void, name: &[u8]) -> Result<T> {
     let ptr = unsafe { libc::dlsym(handle, name.as_ptr().cast()) };
     if ptr.is_null() { bail!("dynamic security library symbol {} is missing", String::from_utf8_lossy(&name[..name.len()-1])); }
     Ok(unsafe { std::mem::transmute_copy(&ptr) })
 }
 
-fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
+fn apply_seccomp(profile: &SeccompProfile, notify_socket: Option<RawFd>) -> Result<()> {
     type Init = unsafe extern "C" fn(u32) -> *mut libc::c_void;
     type Release = unsafe extern "C" fn(*mut libc::c_void);
     type Resolve = unsafe extern "C" fn(*const libc::c_char) -> libc::c_int;
     type RuleAddArray = unsafe extern "C" fn(*mut libc::c_void, u32, libc::c_int, u32, *const ScmpArgCmp) -> libc::c_int;
     type Load = unsafe extern "C" fn(*mut libc::c_void) -> libc::c_int;
+    type NotifyFd = unsafe extern "C" fn(*const libc::c_void) -> libc::c_int;
+    let needs_notify = seccomp_profile_uses_notify(profile);
+    if needs_notify != notify_socket.is_some() {
+        bail!("seccomp notify listener bootstrap state does not match the OCI filter");
+    }
     let name = CString::new("libseccomp.so.2")?;
     let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
     if handle.is_null() { bail!("OCI seccomp requested but libseccomp.so.2 is not installed in the guest"); }
@@ -1369,6 +1711,11 @@ fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
         let resolve: Resolve = unsafe { dlsym_required(handle, b"seccomp_syscall_resolve_name\0")? };
         let rule_add_array: RuleAddArray = unsafe { dlsym_required(handle, b"seccomp_rule_add_array\0")? };
         let load: Load = unsafe { dlsym_required(handle, b"seccomp_load\0")? };
+        let notify_fd_fn: Option<NotifyFd> = if needs_notify {
+            Some(unsafe { dlsym_required(handle, b"seccomp_notify_fd\0")? })
+        } else {
+            None
+        };
         let ctx = unsafe { init(profile.default_action) };
         if ctx.is_null() { bail!("seccomp_init failed"); }
         let apply = (|| -> Result<()> {
@@ -1390,6 +1737,15 @@ fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
             }
             let rc = unsafe { load(ctx) };
             if rc != 0 { bail!("seccomp_load failed: {rc}"); }
+            if let (Some(notify_fd_fn), Some(socket)) = (notify_fd_fn, notify_socket) {
+                let fd = unsafe { notify_fd_fn(ctx) };
+                if fd < 0 { bail!("seccomp_notify_fd failed after loading notify filter: {fd}"); }
+                // Transfer the listener before releasing the filter context or
+                // dlclosing libseccomp. This keeps the bootstrap path tiny and
+                // ensures any later NOTIFY-triggering cleanup syscall already
+                // has a live supervisor on the other end.
+                send_fd(socket, fd)?;
+            }
             Ok(())
         })();
         unsafe { release(ctx); }
@@ -1397,6 +1753,43 @@ fn apply_seccomp(profile: &SeccompProfile) -> Result<()> {
     })();
     unsafe { libc::dlclose(handle); }
     result
+}
+
+fn validate_selinux_mount_label(label: &str) -> Result<()> {
+    validate_lsm_string("linux.mountLabel", label)?;
+    if label.contains('"') || label.contains('\\') {
+        bail!("invalid OCI linux.mountLabel: quote/backslash characters are not supported in mount options");
+    }
+    type IsEnabled = unsafe extern "C" fn() -> libc::c_int;
+    let soname = CString::new("libselinux.so.1")?;
+    let handle = unsafe { libc::dlopen(soname.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if handle.is_null() {
+        security_counters().lsm_apply_failures.fetch_add(1, Ordering::Relaxed);
+        bail!("OCI SELinux mount label requested but libselinux.so.1 is not installed in the guest");
+    }
+    let result = (|| -> Result<()> {
+        let is_enabled: IsEnabled = unsafe { dlsym_required(handle, b"is_selinux_enabled\0")? };
+        if unsafe { is_enabled() } <= 0 {
+            bail!("OCI SELinux mount label {label:?} requested but SELinux is not enabled in the guest");
+        }
+        Ok(())
+    })();
+    unsafe { libc::dlclose(handle); }
+    if result.is_err() { security_counters().lsm_apply_failures.fetch_add(1, Ordering::Relaxed); }
+    result
+}
+
+fn format_selinux_mount_data(data: Option<&str>, mount_label: Option<&str>) -> Result<Option<String>> {
+    let Some(label) = mount_label else { return Ok(data.map(str::to_string)); };
+    if data.is_some_and(|d| d.split(',').any(|part| part.starts_with("context=") || part.starts_with("fscontext=") || part.starts_with("defcontext=") || part.starts_with("rootcontext="))) {
+        bail!("OCI mount data already contains an SELinux context option while linux.mountLabel is set");
+    }
+    let context = format!("context=\"{label}\"");
+    let formatted = match data.filter(|d| !d.is_empty()) {
+        Some(data) => format!("{data},{context}"),
+        None => context,
+    };
+    Ok(Some(formatted))
 }
 
 fn validate_lsm_string(kind: &str, value: &str) -> Result<()> {
@@ -1413,15 +1806,20 @@ fn apply_apparmor_on_exec(profile: &str) -> Result<()> {
     let enabled = std::fs::read_to_string("/sys/module/apparmor/parameters/enabled")
         .map(|v| v.starts_with('Y'))
         .unwrap_or(false);
-    if !enabled { bail!("OCI AppArmor profile {profile:?} requested but AppArmor is not enabled in the guest"); }
+    if !enabled {
+        security_counters().lsm_apply_failures.fetch_add(1, Ordering::Relaxed);
+        bail!("OCI AppArmor profile {profile:?} requested but AppArmor is not enabled in the guest");
+    }
     let candidates = ["/proc/thread-self/attr/apparmor/exec", "/proc/thread-self/attr/exec", "/proc/self/attr/apparmor/exec", "/proc/self/attr/exec"];
     let payload = format!("exec {profile}");
     let mut last = None;
     for path in candidates {
         match OpenOptions::new().write(true).open(path) {
             Ok(mut f) => {
-                return f.write_all(payload.as_bytes())
+                let result = f.write_all(payload.as_bytes())
                     .with_context(|| format!("applying OCI AppArmor profile {profile:?}"));
+                if result.is_err() { security_counters().lsm_apply_failures.fetch_add(1, Ordering::Relaxed); }
+                return result;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => last = Some(e),
             Err(e) => return Err(e).with_context(|| format!("opening AppArmor exec attribute {path}")),
@@ -2607,6 +3005,7 @@ fn parse_process_value(process: &Value, rootfs: PathBuf) -> Result<ProcessSpec> 
         rlimits,
         capabilities,
         seccomp: None,
+        seccomp_notify: SeccompNotifyPolicy::default(),
         apparmor_profile: process.get("apparmorProfile").and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string),
         selinux_label: process.get("selinuxLabel").and_then(Value::as_str).filter(|v| !v.is_empty()).map(str::to_string),
     })
@@ -3084,6 +3483,12 @@ fn spawn_gated(
     let is_create = matches!(ns_request, NsRequest::Create { .. });
     let want_user_ns = create_flags & libc::CLONE_NEWUSER != 0;
 
+    let notify_pair = if spec.seccomp.as_ref().is_some_and(seccomp_profile_uses_notify) {
+        Some(unix_fd_socketpair()?)
+    } else {
+        None
+    };
+
     let mut gate = [0; 2];
     if unsafe { libc::pipe2(gate.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         bail!("pipe2: {}", std::io::Error::last_os_error());
@@ -3104,6 +3509,10 @@ fn spawn_gated(
             libc::close(gate[1]);
             libc::close(ns_ready[0]);
             libc::close(ns_ready[1]);
+            if let Some(pair) = notify_pair {
+                libc::close(pair[0]);
+                libc::close(pair[1]);
+            }
         }
         bail!("fork: {}", std::io::Error::last_os_error());
     }
@@ -3112,6 +3521,10 @@ fn spawn_gated(
         unsafe {
             libc::close(gate[1]);
             libc::close(ns_ready[0]);
+            // Only the grandparent (request-handling thread, below) reads
+            // the notification listener fd; the outer reaper never touches
+            // either end of this pair.
+            if let Some(pair) = notify_pair { libc::close(pair[0]); }
             for fd in &parent_fds { libc::close(*fd); }
 
             if create_flags != 0 && libc::unshare(create_flags) != 0 { libc::_exit(126); }
@@ -3143,6 +3556,7 @@ fn spawn_gated(
                 let _ = libc::write(ns_ready[1], byte.as_ptr().cast(), 1);
                 libc::close(ns_ready[1]);
                 libc::close(gate[0]);
+                if let Some(pair) = notify_pair { libc::close(pair[1]); }
                 drop(stdin);
                 drop(stdout);
                 drop(stderr);
@@ -3232,11 +3646,17 @@ fn spawn_gated(
                 libc::_exit(126);
             }
             if let Some(profile) = spec.seccomp.as_ref() {
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
-                    || apply_seccomp(profile).is_err()
-                {
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     libc::_exit(126);
                 }
+                let notify_socket = notify_pair.map(|pair| pair[1]);
+                if apply_seccomp(profile, notify_socket).is_err() {
+                    if let Some(fd) = notify_socket { libc::close(fd); }
+                    libc::_exit(126);
+                }
+                if let Some(fd) = notify_socket { libc::close(fd); }
+            } else if let Some(pair) = notify_pair {
+                libc::close(pair[1]);
             }
 
             let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|v| v.as_ptr()).collect();
@@ -3266,6 +3686,19 @@ fn spawn_gated(
     };
 
     unsafe { libc::close(gate[0]) };
+    if let Some(pair) = notify_pair {
+        unsafe { libc::close(pair[1]); }
+        let policy = spec.seccomp_notify;
+        let broker_label = format!("{container_id}/{}", exec_id.unwrap_or("init"));
+        // `pid` here is the outer namespace-reaper process (see the
+        // double-fork above), not the inner execve'd process directly — but
+        // the reaper blocks in waitpid() for the inner process's entire
+        // lifetime and exits immediately after it does, so tracking the
+        // reaper's liveness is an accurate proxy for "is the notified
+        // container process still around" without threading the inner pid
+        // back out of the forked child.
+        std::thread::spawn(move || run_seccomp_notify_broker(pair[0], policy, pid as u32, broker_label));
+    }
     drop(stdin);
     drop(stdout);
     drop(stderr);
@@ -3552,13 +3985,140 @@ mod tests {
     }
 
     #[test]
-    fn refuses_unimplemented_selinux_mount_label() {
-        let err = parse_oci_config(r#"{
-          "root":{"path":"/run/rootfs"},
-          "process":{"args":["/bin/true"]},
-          "linux":{"mountLabel":"system_u:object_r:container_file_t:s0:c1,c2"}
-        }"#).unwrap_err().to_string();
-        assert!(err.contains("mountLabel"));
+    fn formats_selinux_mount_label_like_oci_runtimes() {
+        let label = "system_u:object_r:container_file_t:s0:c1,c2";
+        assert_eq!(
+            format_selinux_mount_data(Some("mode=755"), Some(label)).unwrap().as_deref(),
+            Some("mode=755,context=\"system_u:object_r:container_file_t:s0:c1,c2\"")
+        );
+        assert!(format_selinux_mount_data(Some("context=\"old\""), Some(label)).is_err());
+    }
+
+    #[test]
+    fn parses_seccomp_notify_policy_fail_closed() {
+        let config = serde_json::json!({
+            "annotations": {
+                "io.zyvor.seccomp.notify.mode": "continue",
+                "io.zyvor.seccomp.notify.errno": "13"
+            }
+        });
+        let policy = parse_seccomp_notify_policy(&config).unwrap();
+        assert_eq!(policy.mode, SeccompNotifyMode::Continue);
+        assert_eq!(policy.errno, 13);
+        let default_policy = parse_seccomp_notify_policy(&serde_json::json!({})).unwrap();
+        assert_eq!(default_policy.mode, SeccompNotifyMode::Deny);
+        assert_eq!(default_policy.errno, libc::EPERM);
+    }
+
+    #[test]
+    fn parses_explicit_seccomp_notify_rules() {
+        let config = serde_json::json!({
+            "linux": {"seccomp": {
+                "defaultAction": "SCMP_ACT_ALLOW",
+                "syscalls": [{"names": ["mount"], "action": "SCMP_ACT_NOTIFY"}]
+            }}
+        });
+        let profile = parse_seccomp_profile(&config).unwrap().unwrap();
+        assert!(seccomp_profile_uses_notify(&profile));
+        assert_eq!(profile.rules[0].action, SCMP_ACT_NOTIFY);
+    }
+
+    #[test]
+    fn rejects_notify_bootstrap_deadlocks() {
+        let default_notify = serde_json::json!({
+            "linux": {"seccomp": {"defaultAction": "SCMP_ACT_NOTIFY"}}
+        });
+        assert!(parse_seccomp_profile(&default_notify).is_err());
+        let sendmsg_notify = serde_json::json!({
+            "linux": {"seccomp": {
+                "defaultAction": "SCMP_ACT_ALLOW",
+                "syscalls": [{"names": ["sendmsg"], "action": "SCMP_ACT_NOTIFY"}]
+            }}
+        });
+        assert!(parse_seccomp_profile(&sendmsg_notify).is_err());
+    }
+
+    /// Real end-to-end validation of the Set 11 seccomp-notify broker: forks
+    /// a real child, loads a real NOTIFY filter on the real `getpid` syscall
+    /// via `libseccomp.so.2`, transfers the listener fd with real SCM_RIGHTS
+    /// over a real socketpair, and runs the real broker loop against it --
+    /// not just the OCI-parsing-level unit tests above. Uses
+    /// `libc::syscall(SYS_getpid)` (not the glibc `getpid()` wrapper) because
+    /// glibc may cache/vDSO-shortcut the wrapper and never issue the actual
+    /// syscall the kernel notification path depends on.
+    #[test]
+    fn seccomp_notify_broker_enforces_deny_and_continue() {
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: needs root for seccomp NOTIFY");
+            return;
+        }
+        let probe = CString::new("libseccomp.so.2").unwrap();
+        let handle = unsafe { libc::dlopen(probe.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+        if handle.is_null() {
+            eprintln!("skipping: libseccomp.so.2 not installed");
+            return;
+        }
+        unsafe { libc::dlclose(handle); }
+
+        let deny = run_notify_case(SeccompNotifyPolicy { mode: SeccompNotifyMode::Deny, errno: libc::EACCES });
+        assert_eq!(deny, -(libc::EACCES as i64), "denied syscall should observe the configured errno, got {deny}");
+
+        let cont = run_notify_case(SeccompNotifyPolicy { mode: SeccompNotifyMode::Continue, errno: libc::EPERM });
+        assert!(cont >= 0, "continued syscall should actually execute and succeed, got {cont}");
+    }
+
+    /// Forks a child that installs a NOTIFY filter on `getpid`, calls it, and
+    /// reports the raw result (`>=0` success or `-errno`) back over a pipe.
+    /// The broker runs synchronously in the parent -- its own poll loop exits
+    /// once the child has responded and exited, so this never needs a
+    /// separate supervisor thread or an explicit timeout in the test itself.
+    fn run_notify_case(policy: SeccompNotifyPolicy) -> i64 {
+        let profile = SeccompProfile {
+            default_action: SCMP_ACT_ALLOW,
+            rules: vec![SeccompRule {
+                action: SCMP_ACT_NOTIFY,
+                names: vec!["getpid".to_string()],
+                args: vec![],
+            }],
+        };
+        let pair = unix_fd_socketpair().expect("notify socketpair");
+        let mut result_pipe = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(result_pipe.as_mut_ptr()) }, 0);
+
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork failed");
+        if pid == 0 {
+            unsafe {
+                libc::close(pair[0]);
+                libc::close(result_pipe[0]);
+                if apply_seccomp(&profile, Some(pair[1])).is_err() {
+                    libc::_exit(120);
+                }
+                libc::close(pair[1]);
+                let rc = libc::syscall(libc::SYS_getpid);
+                let observed: i64 = if rc < 0 {
+                    -(std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as i64)
+                } else {
+                    rc
+                };
+                let bytes = observed.to_ne_bytes();
+                libc::write(result_pipe[1], bytes.as_ptr().cast(), bytes.len());
+                libc::close(result_pipe[1]);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(pair[1]);
+            libc::close(result_pipe[1]);
+        }
+        run_seccomp_notify_broker(pair[0], policy, pid as u32, "test/notify".to_string());
+        let mut buf = [0u8; 8];
+        let n = unsafe { libc::read(result_pipe[0], buf.as_mut_ptr().cast(), buf.len()) };
+        unsafe { libc::close(result_pipe[0]); }
+        let mut status = 0i32;
+        unsafe { libc::waitpid(pid, &mut status, 0); }
+        assert_eq!(n, 8, "child did not report a getpid() result before exiting");
+        i64::from_ne_bytes(buf)
     }
 
     #[test]
