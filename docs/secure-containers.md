@@ -81,6 +81,12 @@ the VM's existing per-instance authentication token.
   [docs/secure-containers-set6s.md](secure-containers-set6s.md). Populating
   it automatically from live Kubernetes `NetworkPolicy` objects is not yet
   implemented (needs a selector-resolving watcher/controller).
+- **Sentinel**: per-VM QEMU process hardening — a `BPF_CGROUP_DEVICE`
+  allowlist (only `/dev/kvm`/`/dev/vhost-vsock`/`/dev/net/tun`/configured
+  VFIO devices) and a `cgroup_skb` egress filter (loopback-only outbound IP)
+  on the same `fluxvm.slice/{id}.scope` cgroup every VM already gets — see
+  [docs/secure-containers-set7s.md](secure-containers-set7s.md). Applies to
+  every VM, not only Secure Containers Pods.
 
 ## Current limitations
 

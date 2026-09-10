@@ -629,7 +629,7 @@ pub fn validate_policy(policy: &VmNetworkPolicy) -> Result<()> {
     Ok(())
 }
 
-fn vm_pin_dir(root: &Path, id: Uuid) -> PathBuf {
+pub(crate) fn vm_pin_dir(root: &Path, id: Uuid) -> PathBuf {
     root.join("vms").join(id.simple().to_string())
 }
 
@@ -961,7 +961,7 @@ fn update_l4_allow(map: &Path, identity: u32, rule: PortRule) -> Result<()> {
     bpftool_map_update(map, &key, &1u32.to_ne_bytes())
 }
 
-fn bpftool_map_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
+pub(crate) fn bpftool_map_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
     let mut args = vec![
         "map".into(),
         "update".into(),
@@ -1104,7 +1104,7 @@ fn json_bytes(v: &Value) -> Result<Vec<u8>> {
     bail!("unsupported bpftool JSON byte representation: {v}")
 }
 
-fn hex_args(bytes: &[u8]) -> Vec<String> {
+pub(crate) fn hex_args(bytes: &[u8]) -> Vec<String> {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -1174,7 +1174,7 @@ pub fn policy_contains_ipv6(policy: &VmNetworkPolicy) -> bool {
         .any(|cidr| matches!(parse_ip_cidr(cidr), Ok(IpCidr::V6(_))))
 }
 
-fn require_bpftool() -> Result<()> {
+pub(crate) fn require_bpftool() -> Result<()> {
     require_version("bpftool", &["version"])
 }
 
@@ -1243,7 +1243,7 @@ fn ensure_clsact(iface: &str) -> Result<()> {
     )
 }
 
-fn pinned_program_id(path: &Path) -> Result<u32> {
+pub(crate) fn pinned_program_id(path: &Path) -> Result<u32> {
     if !path.exists() {
         bail!("pinned BPF program does not exist at {}", path.display());
     }
@@ -1308,7 +1308,7 @@ fn parse_tc_program_id(text: &str) -> Option<u32> {
     None
 }
 
-fn run(program: &str, args: &[String]) -> Result<()> {
+pub(crate) fn run(program: &str, args: &[String]) -> Result<()> {
     let out = Command::new(program)
         .args(args)
         .output()
