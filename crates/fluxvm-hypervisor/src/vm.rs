@@ -14,7 +14,7 @@ use crate::ffi;
 use crate::gdbstub::{self, GdbCmd, GdbControl};
 use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
-use crate::memory::{GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
+use crate::memory::{self, GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
 use crate::tap::Tap;
 use std::io;
 use std::sync::{
@@ -316,6 +316,29 @@ impl VirtualMachine {
                                     "[gdbstub] cr0={:#x} cr2={:#x} cr3={:#x} cr4={:#x}",
                                     r.cr0, r.cr2, r.cr3, r.cr4
                                 );
+                                // TEMP: dump the actual e820 table as the
+                                // guest kernel parsed it from the zero
+                                // page, to check for a discrepancy against
+                                // what fill_e820 intended to write.
+                                let mut nent = [0u8; 1];
+                                let _ = this
+                                    .mem
+                                    .read_at(memory::BOOT_PARAMS_ADDR + 0x1e8, &mut nent);
+                                eprintln!("[diag] e820_entries={}", nent[0]);
+                                for i in 0..(nent[0] as u64).min(8) {
+                                    let mut ent = [0u8; 20];
+                                    let _ = this.mem.read_at(
+                                        memory::BOOT_PARAMS_ADDR + 0x2d0 + i * 20,
+                                        &mut ent,
+                                    );
+                                    let addr = u64::from_le_bytes(ent[0..8].try_into().unwrap());
+                                    let size = u64::from_le_bytes(ent[8..16].try_into().unwrap());
+                                    let typ = u32::from_le_bytes(ent[16..20].try_into().unwrap());
+                                    eprintln!(
+                                        "[diag] e820[{i}] addr={addr:#x} size={size:#x} end={:#x} type={typ}",
+                                        addr + size
+                                    );
+                                }
                                 let _ = reply.send(r);
                             }
                             GdbCmd::ReadMem { addr, len, reply } => {
