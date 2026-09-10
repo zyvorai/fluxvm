@@ -1,0 +1,36 @@
+name: topology-intelligence
+on:
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_topology.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-topology-*.c'
+      - 'scripts/*topology*'
+      - '.github/workflows/topology-intelligence.yml'
+  push:
+    paths:
+      - 'bpf/fluxvm_topology.bpf.c'
+      - 'crates/fluxvm-intelligence/**'
+      - 'tools/fluxvm-topology-*.c'
+      - 'scripts/*topology*'
+      - '.github/workflows/topology-intelligence.yml'
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Host packages
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev bpftool pkg-config libsystemd-dev libhivex-dev taskset || sudo apt-get install -y clang llvm libbpf-dev bpftool pkg-config libsystemd-dev libhivex-dev util-linux
+      - name: Rust tests
+        run: cargo test -p fluxvm-intelligence topology
+      - name: Build topology BPF and helpers
+        run: |
+          ./scripts/build-topology-intelligence.sh /tmp/fluxvm-topology-bpf
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-topology-loader.c -o /tmp/fluxvm-topology-loader $(pkg-config --cflags --libs libbpf)
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-topology-events.c -o /tmp/fluxvm-topology-events $(pkg-config --cflags --libs libbpf)
+      - name: Portable gates
+        run: ./scripts/test-topology-static.sh
+      - name: Privileged host test
+        run: sudo -E ./scripts/test-topology-host.sh

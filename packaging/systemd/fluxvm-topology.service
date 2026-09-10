@@ -1,0 +1,19 @@
+[Unit]
+Description=Zyvor FluxVM topology and IRQ intelligence
+After=network-online.target fluxvm-intelligence.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/fluxvm-topology load
+ExecStart=/usr/bin/fluxvm-topology serve 127.0.0.1:7794
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/sys/fs/bpf /var/lib/fluxvm
+
+[Install]
+WantedBy=multi-user.target
