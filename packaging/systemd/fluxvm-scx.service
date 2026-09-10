@@ -1,0 +1,22 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=FluxVM sched_ext observability API (Sentinel Set 11E)
+After=network.target
+ConditionPathExists=/sys/kernel/sched_ext/state
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fluxvm-scx serve 127.0.0.1:7797
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/fluxvm/scx
+
+[Install]
+WantedBy=multi-user.target

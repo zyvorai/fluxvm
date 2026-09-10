@@ -1,0 +1,19 @@
+[Unit]
+Description=FluxVM QUIC load-balancer observability API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/fluxvm-quiclb serve 127.0.0.1:7796
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RuntimeDirectory=fluxvm/quiclb
+ReadWritePaths=/run/fluxvm/quiclb
+
+[Install]
+WantedBy=multi-user.target

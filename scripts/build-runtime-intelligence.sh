@@ -11,6 +11,16 @@ mkdir -p "$OUT/bin" "$OUT/bpf"
 "$ROOT/scripts/build-memory-profiler.sh" "$OUT/bpf"
 "$ROOT/scripts/build-topology-intelligence.sh" "$OUT/bpf"
 "$ROOT/scripts/build-afxdp-fastpath.sh" "$OUT/bpf" "$OUT/bin"
+"$ROOT/scripts/build-quiclb.sh" "$OUT/bpf" "$OUT/bin"
+if [[ "${FLUXVM_BUILD_SCX:-auto}" != "off" ]]; then
+  if ! "$ROOT/scripts/build-scx-scheduler.sh" "$OUT/bpf" "$OUT/bin"; then
+    if [[ "${FLUXVM_BUILD_SCX:-auto}" == "required" ]]; then
+      echo "Sentinel Set 11E sched_ext build was required and failed" >&2
+      exit 2
+    fi
+    echo "optional Sentinel Set 11E sched_ext target build skipped; set FLUXVM_BUILD_SCX=required to make this fatal" >&2
+  fi
+fi
 command -v pkg-config >/dev/null || { echo "pkg-config required" >&2; exit 2; }
 pkg-config --exists libbpf || { echo "libbpf development package required" >&2; exit 2; }
 ${CC:-cc} -O2 -g -Wall -Wextra -Werror "$ROOT/tools/fluxvm-intelligence-loader.c" -o "$OUT/bin/fluxvm-intelligence-loader" $(pkg-config --cflags --libs libbpf)
@@ -27,5 +37,5 @@ ${CC:-cc} -O2 -g -Wall -Wextra -Werror "$ROOT/tools/fluxvm-memprof-events.c" -o 
 ${CC:-cc} -O2 -g -Wall -Wextra -Werror "$ROOT/tools/fluxvm-topology-loader.c" -o "$OUT/bin/fluxvm-topology-loader" $(pkg-config --cflags --libs libbpf)
 ${CC:-cc} -O2 -g -Wall -Wextra -Werror "$ROOT/tools/fluxvm-topology-events.c" -o "$OUT/bin/fluxvm-topology-events" $(pkg-config --cflags --libs libbpf)
 cargo build --release -p fluxvm-intelligence --bins
-for bin in fluxvm-intelligence fluxvm-guard fluxvm-qos fluxvm-shield fluxvm-tcpintel fluxvm-netintel fluxvm-memprof fluxvm-topology fluxvm-afxdp; do cp "$ROOT/target/release/$bin" "$OUT/bin/$bin"; done
-echo "runtime intelligence + guard + Set 6 network intelligence + Set 7 memory profiler + Set 8 topology intelligence + Set 9 AF_XDP fast-path artifacts are in $OUT/bin and $OUT/bpf"
+for bin in fluxvm-intelligence fluxvm-guard fluxvm-qos fluxvm-shield fluxvm-tcpintel fluxvm-netintel fluxvm-memprof fluxvm-topology fluxvm-afxdp fluxvm-quiclb fluxvm-scx; do cp "$ROOT/target/release/$bin" "$OUT/bin/$bin"; done
+echo "runtime intelligence + guard + Set 6 network intelligence + Set 7 memory profiler + Set 8 topology intelligence + Set 9 AF_XDP fast-path + Set 10 QUIC LB + Sentinel Set 11E sched_ext artifacts are in $OUT/bin and $OUT/bpf"

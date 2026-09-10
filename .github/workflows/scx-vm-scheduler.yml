@@ -1,0 +1,57 @@
+name: Sentinel Set 11E sched_ext
+
+on:
+  push:
+    paths:
+      - 'bpf/fluxvm_scx.bpf.c'
+      - 'crates/fluxvm-intelligence/src/scx.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-scx.rs'
+      - 'tools/fluxvm-scx-*.c'
+      - 'scripts/*scx*.sh'
+      - 'docs/scx-vm-scheduler.md'
+      - '.github/workflows/scx-vm-scheduler.yml'
+  pull_request:
+    paths:
+      - 'bpf/fluxvm_scx.bpf.c'
+      - 'crates/fluxvm-intelligence/src/scx.rs'
+      - 'crates/fluxvm-intelligence/src/bin/fluxvm-scx.rs'
+      - 'tools/fluxvm-scx-*.c'
+      - 'scripts/*scx*.sh'
+      - 'docs/scx-vm-scheduler.md'
+      - '.github/workflows/scx-vm-scheduler.yml'
+  workflow_dispatch:
+
+jobs:
+  portable:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev bpftool pkg-config python3-yaml
+      - name: Rust tests
+        run: cargo test -p fluxvm-intelligence scx -- --nocapture
+      - name: Portable gates
+        run: ./scripts/test-scx-static.sh
+      - name: Build userspace helpers
+        run: |
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-scx-taskctl.c -o /tmp/fluxvm-scx-taskctl
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-scx-loader.c -o /tmp/fluxvm-scx-loader $(pkg-config --cflags --libs libbpf)
+          cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-scx-events.c -o /tmp/fluxvm-scx-events $(pkg-config --cflags --libs libbpf)
+      - name: Target-kernel build when runner supports sched_ext
+        shell: bash
+        run: |
+          if [[ -r /sys/kernel/sched_ext/state && -r /sys/kernel/btf/vmlinux ]]; then
+            if find /lib/modules/"$(uname -r)"/build /usr/src -path '*/tools/sched_ext/include/scx/common.bpf.h' -print -quit 2>/dev/null | grep -q .; then
+              ./scripts/build-scx-scheduler.sh /tmp/scx-bpf /tmp/scx-bin
+              /tmp/scx-bin/fluxvm-scx-loader verify /tmp/scx-bpf/fluxvm_scx.bpf.o
+            else
+              echo 'runner exposes sched_ext but matching tools/sched_ext headers are not installed; target build is a certified-host gate'
+            fi
+          else
+            echo 'runner kernel has no sched_ext; target build is a certified-host gate'
+          fi
+      - name: Privileged host smoke when sched_ext is available
+        env:
+          FLUXVM_SCX_HOST_REQUIRED: '0'
+        run: sudo -E ./scripts/test-scx-host.sh
