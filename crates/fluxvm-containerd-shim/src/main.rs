@@ -181,6 +181,11 @@ struct TaskMeta {
     /// legacy Set 8 journals; those attachments stay pinned until sandbox delete.
     #[serde(default)]
     device_claims: Vec<String>,
+    /// Set 9S: stable in-guest container identity for correlating a guest
+    /// LSM denial event back to this container. `0` when the guest kernel
+    /// lacks Set 9S support (see ContainerResponse::Created).
+    #[serde(default)]
+    container_identity: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -2210,8 +2215,8 @@ impl Task for Service {
                 return Err(rpc_other(e));
             }
         };
-        let pid = match response {
-            ContainerResponse::Created { pid } => pid,
+        let (pid, container_identity) = match response {
+            ContainerResponse::Created { pid, container_identity } => (pid, container_identity),
             other => {
                 self.release_device_claims(&vm, &req.id, &device_claims).await;
                 self.cleanup_process_staging(&req.id, None).await;
@@ -2239,6 +2244,7 @@ impl Task for Service {
             streaming: self.cfg.streaming_stdio,
             oom_kill_seen: 0,
             device_claims,
+            container_identity,
         });
         self.persist_runtime_state().await.map_err(rpc_other)?;
         self.spawn_oom_watch(vm.clone(), req.id.clone());
@@ -2444,7 +2450,14 @@ impl Task for Service {
             self.cleanup_process_staging(&req.id, Some(&req.exec_id)).await;
             return Err(rpc_other(format!("attaching exec VSOCK stdio: {e:#}")));
         }
-        let bundle = self.tasks.read().await.get(&req.id).map(|m| m.bundle.clone()).unwrap_or_default();
+        let (bundle, container_identity) = {
+            let tasks = self.tasks.read().await;
+            let parent = tasks.get(&req.id);
+            (
+                parent.map(|m| m.bundle.clone()).unwrap_or_default(),
+                parent.map(|m| m.container_identity).unwrap_or(0),
+            )
+        };
         self.exit_events.lock().await.remove(&process_key(&req.id, Some(&req.exec_id)));
         self.execs.write().await.insert(process_key(&req.id, Some(&req.exec_id)), TaskMeta {
             bundle,
@@ -2457,6 +2470,7 @@ impl Task for Service {
             streaming: self.cfg.streaming_stdio,
             oom_kill_seen: 0,
             device_claims: Vec::new(),
+            container_identity,
         });
         self.persist_runtime_state().await.map_err(rpc_other)?;
         self.send_event(TaskExecAdded {

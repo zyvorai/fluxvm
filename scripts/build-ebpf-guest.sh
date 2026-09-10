@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-# Build bpf/fluxvm_guest_cgroup.bpf.o for embedding into fluxvm-container-agent
-# (crates/fluxvm-container-agent/build.rs calls this). Single object, no
-# map-tier variants -- guest container counts per Pod are small, unlike the
-# node-wide Service Fabric maps scripts/build-ebpf.sh tiers for.
+# Build bpf/fluxvm_guest_cgroup.bpf.o (Set 8S) and bpf/fluxvm_guest_lsm.bpf.o
+# (Set 9S) for embedding into fluxvm-container-agent (crates/fluxvm-
+# container-agent/build.rs calls this). No map-tier variants -- guest
+# container counts per Pod are small, unlike the node-wide Service Fabric
+# maps scripts/build-ebpf.sh tiers for.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,5 +40,6 @@ if command -v gcc >/dev/null 2>&1; then
 fi
 
 "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/fluxvm_guest_cgroup.bpf.c" -o "$OUT_DIR/fluxvm_guest_cgroup.bpf.o"
+"$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/fluxvm_guest_lsm.bpf.c" -o "$OUT_DIR/fluxvm_guest_lsm.bpf.o"
 
-echo "built: $OUT_DIR/fluxvm_guest_cgroup.bpf.o"
+echo "built: $OUT_DIR/fluxvm_guest_cgroup.bpf.o $OUT_DIR/fluxvm_guest_lsm.bpf.o"

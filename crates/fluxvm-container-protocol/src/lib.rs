@@ -281,7 +281,16 @@ pub struct ContainerEnvelope {
 pub enum ContainerResponse {
     Pong,
     SandboxResourcesConfigured,
-    Created { pid: u32 },
+    Created {
+        pid: u32,
+        /// Set 9S: stable per-container identity minted in-guest, exposed so
+        /// host-side audit can correlate an in-guest LSM denial event back
+        /// to `(container_id, container_identity)`. `0` when Set 9S's guest
+        /// LSM isn't attached (missing `CONFIG_BPF_LSM`/BTF/bpffs) — never a
+        /// minted value, since the top tag bit is always set on a real one.
+        #[serde(default)]
+        container_identity: u32,
+    },
     Started { pid: u32 },
     ExecStarted { pid: u32 },
     State {
