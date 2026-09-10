@@ -1,0 +1,69 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+name: Sentinel GA Certification
+
+on:
+  pull_request:
+    paths:
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'tools/tests/test_fluxvm_sentinel_certify.py'
+      - 'scripts/sentinel-ga-*'
+      - 'scripts/test-sentinel-ga-*'
+      - 'benchmarks/**'
+      - 'docs/sentinel-ga-*'
+      - 'packaging/systemd/fluxvm-sentinel-reconcile.*'
+      - '.github/workflows/sentinel-ga-certification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'tools/tests/test_fluxvm_sentinel_certify.py'
+      - 'scripts/sentinel-ga-*'
+      - 'scripts/test-sentinel-ga-*'
+      - 'benchmarks/**'
+      - 'docs/sentinel-ga-*'
+      - 'packaging/systemd/fluxvm-sentinel-reconcile.*'
+      - '.github/workflows/sentinel-ga-certification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install static test dependencies
+        run: sudo apt-get update && sudo apt-get install -y shellcheck bpftool iproute2 ethtool
+      - name: Static and unit gates
+        run: scripts/test-sentinel-ga-static.sh
+      - name: Non-destructive host recovery gates
+        run: scripts/test-sentinel-ga-host.sh
+      - name: Baseline capability report
+        run: |
+          mkdir -p artifacts
+          python3 tools/fluxvm-sentinel-certify.py probe > artifacts/probe.json
+          python3 tools/fluxvm-sentinel-certify.py evidence artifacts/evidence > artifacts/evidence-summary.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-ga-probe
+          path: artifacts
+
+  privileged-lab:
+    if: ${{ vars.FLUXVM_SENTINEL_PRIVILEGED_CI == '1' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-sentinel-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Failure injection
+        env:
+          FLUXVM_SENTINEL_FAILURE_INJECTION: '1'
+          FLUXVM_SENTINEL_LAB_MARKER: /etc/fluxvm/sentinel-lab-host
+        run: sudo -E scripts/sentinel-ga-failure-injection.sh
+      - name: Strict capability gate
+        run: |
+          python3 tools/fluxvm-sentinel-certify.py gate \
+            --profile strict \
+            --budgets benchmarks/sentinel-ga-budgets.json \
+            --json-out /tmp/sentinel-strict.json
+          cat /tmp/sentinel-strict.json

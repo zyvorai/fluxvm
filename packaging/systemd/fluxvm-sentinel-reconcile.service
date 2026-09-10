@@ -1,0 +1,20 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=FluxVM Sentinel stale eBPF state reconciler
+After=local-fs.target
+ConditionPathIsMountPoint=/sys/fs/bpf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/fluxvm/fluxvm-sentinel-certify reconcile --root /sys/fs/bpf/fluxvm --min-age-seconds 900 --apply
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/sys/fs/bpf/fluxvm
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_DAC_OVERRIDE
