@@ -120,6 +120,7 @@ pub struct KvmVm {
     pub vm_fd: i32,
     pub vcpus: Vec<VcpuHandle>,
     pub run_size: usize,
+    tsc_deadline_supported: bool,
 }
 
 unsafe impl Send for KvmVm {}
@@ -167,6 +168,22 @@ impl KvmVm {
             if ffi::flux_ioctl(vm_fd, ffi::KVM_CREATE_IRQCHIP, std::ptr::null_mut()) < 0 {
                 return Err(FluxError::Hypervisor("KVM_CREATE_IRQCHIP".into()));
             }
+            // KVM_GET_SUPPORTED_CPUID unconditionally clears CPUID.01H:
+            // ECX[24] (TSC_DEADLINE) regardless of whether the host CPU
+            // and in-kernel irqchip actually support it -- this capability
+            // check is the real source of truth (same technique crosvm
+            // uses). Without it the guest falls back to legacy
+            // periodic-mode LAPIC timer reprogramming via LVTT/TMICT,
+            // which live tracing showed stalling permanently after an
+            // initial burst of ticks. TSC-deadline mode uses a single
+            // WRMSR per timer event instead, sidestepping that path
+            // entirely.
+            let tsc_deadline_supported = ffi::flux_ioctl(
+                kvm_fd,
+                ffi::KVM_CHECK_EXTENSION,
+                ffi::KVM_CAP_TSC_DEADLINE_TIMER as *mut c_void,
+            ) > 0;
+            eprintln!("[kvm] TSC-deadline timer supported: {tsc_deadline_supported}");
             // In-kernel PIT so the guest can calibrate timers / get IRQ0.
             #[repr(C)]
             struct KvmPitConfig {
@@ -255,6 +272,7 @@ impl KvmVm {
                 vm_fd,
                 vcpus,
                 run_size: mmap_size as usize,
+                tsc_deadline_supported,
             };
             for id in 0..num_cpus as usize {
                 this.setup_cpuid(id)?;
@@ -311,8 +329,21 @@ impl KvmVm {
             let entries = (buf.as_mut_ptr().add(std::mem::size_of::<Header>())) as *mut Entry;
             for i in 0..nent {
                 let e = &mut *entries.add(i);
+                if e.function == 0 && e.index == 0 {
+                    // A guest's CPUID leaf reader may refuse to query leaf
+                    // 0x15 at all if leaf 0's reported max-standard-
+                    // function is lower than that (matches crosvm).
+                    e.eax = e.eax.max(0x15);
+                }
                 if e.function == 1 {
                     e.ebx = (e.ebx & 0x00ff_ffff) | (apic_id << 24);
+                    // "Hypervisor present" -- always true here, and some
+                    // guest-kernel paravirt/topology decisions gate on it
+                    // (matches crosvm, which sets this unconditionally).
+                    e.ecx |= 1 << 31;
+                    if self.tsc_deadline_supported {
+                        e.ecx |= 1 << 24;
+                    }
                 }
                 // KVM_GET_SUPPORTED_CPUID always zeroes leaf 0x15 (TSC /
                 // "core crystal clock" ratio) even when the host CPU
