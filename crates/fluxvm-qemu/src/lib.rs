@@ -267,10 +267,10 @@ pub fn build_args(
         }
     }
 
-    if req.agent.as_ref().is_some_and(|a| a.enabled) {
-        if let Some(cid) = ctx.guest_cid {
-            a.extend(["-device".into(), format!("vhost-vsock-pci,guest-cid={cid}")]);
-        }
+    if req.agent.as_ref().is_some_and(|agent| agent.enabled)
+        && let Some(cid) = ctx.guest_cid
+    {
+        a.extend(["-device".into(), format!("vhost-vsock-pci,guest-cid={cid}")]);
     }
 
     if req.qga.as_ref().is_some_and(|q| q.enabled) {

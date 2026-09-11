@@ -412,11 +412,6 @@ pub async fn savevm(socket: &Path, name: &str, timeout: Duration) -> Result<Valu
     .await
 }
 
-/// Alias for callers that prefer snapshot-oriented naming.
-pub async fn snapshot_create(socket: &Path, name: &str, timeout: Duration) -> Result<Value> {
-    savevm(socket, name, timeout).await
-}
-
 async fn execute_inner(socket: &Path, command: &str, args: Option<Value>) -> Result<Value> {
     let (mut reader, mut write_half) = handshake_retrying(socket).await?;
 

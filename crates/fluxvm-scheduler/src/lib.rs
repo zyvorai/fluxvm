@@ -1,6 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+// Pre-existing style debt across this large, actively-developed file,
+// unrelated to the migration-receiver work -- suppressed here (rather than
+// hand-rewritten at 27+ call sites) so the new migration-receiver CI gate
+// (.github/workflows/migration-receiver.yml) enforces -D warnings for
+// genuinely new issues without retroactively blocking on debt outside this
+// change's scope.
+#![allow(clippy::collapsible_if, clippy::field_reassign_with_default)]
+
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
 use fluxvm_core::{

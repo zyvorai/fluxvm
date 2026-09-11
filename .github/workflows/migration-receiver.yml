@@ -1,0 +1,62 @@
+name: migration-receiver
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+      - '.github/workflows/migration-receiver.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+
+jobs:
+  migration-receiver:
+    runs-on: ubuntu-latest
+    steps:
+      # fluxvm-scheduler and fluxvm-api both depend (via fluxvm-image) on the
+      # sibling `guestkit` project through a relative path dependency, so it
+      # must land as an actual sibling directory here too -- see ci.yml.
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # guestkit's registry-write/agent features (pulled in by fluxvm-image)
+      # need these; see ci.yml's own note on this exact requirement.
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+      # Informational only, not a gate: cargo fmt --all --check currently
+      # fails across large, unrelated parts of this workspace (verified
+      # directly, not assumed) that predate this workflow and are out of
+      # scope for a migration-receiver-focused gate to fix. Flag drift
+      # without blocking on debt this workflow doesn't own.
+      - name: Formatting (informational)
+        working-directory: fluxvm
+        run: cargo fmt --all -- --check || true
+      - name: Test (migration-receiver crates)
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-core -p fluxvm-qemu -p fluxvm-scheduler -p fluxvm-api
+      # --no-deps keeps `-D warnings` scoped to just these 4 crates --
+      # without it, clippy denies warnings for the whole dependency graph
+      # it has to compile along the way (verified directly), which would
+      # fail this gate on pre-existing issues in unrelated crates.
+      - name: Clippy (migration-receiver crates, deny warnings)
+        working-directory: fluxvm
+        run: cargo clippy --locked --no-deps -p fluxvm-core -p fluxvm-qemu -p fluxvm-scheduler -p fluxvm-api --all-targets -- -D warnings
