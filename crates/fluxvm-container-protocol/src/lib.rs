@@ -550,4 +550,86 @@ mod tests {
             matches!(back, ContainerResponse::SecurityStats { stats } if stats.seccomp_notify_denied == 2)
         );
     }
+
+    #[test]
+    fn update_network_policy_round_trip() {
+        let req = ContainerRequest::UpdateNetworkPolicy {
+            id: "c1".into(),
+            policy: ContainerNetworkPolicy {
+                default_allow: false,
+                audit_mode: false,
+                schema_version: 2,
+                ingress_isolated: true,
+                egress_isolated: true,
+                rules: vec![
+                    ContainerNetworkRule {
+                        direction: "egress".into(),
+                        cidr: "10.0.0.0/8".into(),
+                    },
+                    ContainerNetworkRule {
+                        direction: "egress".into(),
+                        cidr: "10.0.0.0/8".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        };
+        let line = encode_line(&req).unwrap();
+        let back: ContainerRequest = decode_line(&line).unwrap();
+        match back {
+            ContainerRequest::UpdateNetworkPolicy { id, policy } => {
+                assert_eq!(id, "c1");
+                assert_eq!(policy.schema_version, 2);
+                assert!(policy.egress_isolated && policy.ingress_isolated);
+                assert_eq!(policy.rules.len(), 2);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn guest_mirror_empty_policy_is_explicit_unisolated() {
+        let policy = ContainerNetworkPolicy {
+            default_allow: true,
+            schema_version: 2,
+            ingress_isolated: false,
+            egress_isolated: false,
+            rules: Vec::new(),
+            ..Default::default()
+        };
+        let line = encode_line(&policy).unwrap();
+        let back: ContainerNetworkPolicy = decode_line(&line).unwrap();
+        assert!(back.default_allow);
+        assert!(!back.ingress_isolated && !back.egress_isolated);
+        assert!(back.rules.is_empty());
+        assert_eq!(back.schema_version, 2);
+    }
+
+    #[test]
+    fn guest_mirror_dedupe_preserves_direction_cidr_identity() {
+        let mut rules = vec![
+            ContainerNetworkRule {
+                direction: "egress".into(),
+                cidr: "192.0.2.0/24".into(),
+            },
+            ContainerNetworkRule {
+                direction: "ingress".into(),
+                cidr: "192.0.2.0/24".into(),
+            },
+            ContainerNetworkRule {
+                direction: "egress".into(),
+                cidr: "192.0.2.0/24".into(),
+            },
+        ];
+        let mut deduped = Vec::new();
+        for r in rules.drain(..) {
+            if !deduped
+                .iter()
+                .any(|x: &ContainerNetworkRule| x.direction == r.direction && x.cidr == r.cidr)
+            {
+                deduped.push(r);
+            }
+        }
+        assert_eq!(deduped.len(), 2);
+    }
 }

@@ -51,5 +51,11 @@ Set 19 closed code-side S5–S7 and advanced S8; Sets 17–18 remain for S3–S4
 3. real RSS/scrape of Set 17/19 Observer metrics (S8 live);
 4. Kata / multi-host fleet / attached-migration proofs (S9–S11).
 
+Portable CI maps each code-side use case to a test target in
+[secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)
+(enforced by `scripts/check-use-case-matrix.sh` and
+`.github/workflows/secure-containers-coverage.yml`). Live rows stay opt-in via
+`FLUXVM_SECURE_CONTAINERS_LIVE_CI=1`.
+
 Hypervisor work should stay Firecracker/CH-matched (no novel device models):
 prefer **H1** or **H3** over inventing P3 features.

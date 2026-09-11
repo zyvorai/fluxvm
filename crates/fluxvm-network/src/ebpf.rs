@@ -1175,7 +1175,7 @@ fn update_pod_rule(map: &Path, slot: u32, pod_id: u32, rule: &PodPolicyRule) -> 
 /// Set 19: compile the 64 rich-rule slots into protocol/direction/family
 /// candidate bitmaps. Wildcard protocol rules live in protocol=0 and are ORed
 /// with the packet's exact-protocol bucket by the BPF program.
-fn update_pod_rule_index(map: &Path, pod_id: u32, rules: &[PodPolicyRule]) -> Result<()> {
+fn pod_rule_index_entries(pod_id: u32, rules: &[PodPolicyRule]) -> Result<Vec<([u8; 8], u64)>> {
     let mut entries: Vec<([u8; 8], u64)> = Vec::new();
     for (slot, rule) in rules.iter().enumerate() {
         let direction = match rule.direction.to_ascii_lowercase().as_str() {
@@ -1204,7 +1204,11 @@ fn update_pod_rule_index(map: &Path, pod_id: u32, rules: &[PodPolicyRule]) -> Re
             entries.push((key, bit));
         }
     }
-    for (key, mask) in entries {
+    Ok(entries)
+}
+
+fn update_pod_rule_index(map: &Path, pod_id: u32, rules: &[PodPolicyRule]) -> Result<()> {
+    for (key, mask) in pod_rule_index_entries(pod_id, rules)? {
         bpftool_map_update(map, &key, &mask.to_ne_bytes())?;
     }
     Ok(())
@@ -2275,5 +2279,58 @@ filter protocol all pref 49152 bpf chain 0 handle 0x1 direct-action not_in_hw id
         );
         assert_eq!(c.prefix, 64);
         assert!(parse_ip_cidr("2001:db8::1/129").is_err());
+    }
+
+    #[test]
+    fn pod_rule_index_encodes_direction_family_protocol() {
+        let rules = vec![
+            PodPolicyRule {
+                direction: "egress".into(),
+                cidr: "10.0.0.0/8".into(),
+                protocol: "TCP".into(),
+                port_start: 443,
+                port_end: 443,
+            },
+            PodPolicyRule {
+                direction: "egress".into(),
+                cidr: "10.0.0.0/8".into(),
+                protocol: "TCP".into(),
+                port_start: 80,
+                port_end: 80,
+            },
+            PodPolicyRule {
+                direction: "ingress".into(),
+                cidr: "2001:db8::/32".into(),
+                protocol: "".into(),
+                port_start: 0,
+                port_end: 0,
+            },
+        ];
+        let entries = pod_rule_index_entries(42, &rules).unwrap();
+        assert_eq!(entries.len(), 2);
+        let (k_tcp, mask_tcp) = entries
+            .iter()
+            .find(|(k, _)| k[4] == 1 && k[5] == 4 && k[6] == 6)
+            .expect("tcp egress v4 key");
+        assert_eq!(&k_tcp[..4], &42u32.to_ne_bytes());
+        assert_eq!(*mask_tcp, (1u64 << 0) | (1u64 << 1));
+        let (k_wild, mask_wild) = entries
+            .iter()
+            .find(|(k, _)| k[4] == 2 && k[5] == 6 && k[6] == 0)
+            .expect("wildcard ingress v6 key");
+        assert_eq!(&k_wild[..4], &42u32.to_ne_bytes());
+        assert_eq!(*mask_wild, 1u64 << 2);
+    }
+
+    #[test]
+    fn pod_rule_index_rejects_bad_direction() {
+        let rules = vec![PodPolicyRule {
+            direction: "sideways".into(),
+            cidr: "10.0.0.0/8".into(),
+            protocol: "TCP".into(),
+            port_start: 1,
+            port_end: 1,
+        }];
+        assert!(pod_rule_index_entries(1, &rules).is_err());
     }
 }

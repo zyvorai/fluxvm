@@ -422,5 +422,6 @@ Set 19 bumps the native dataplane to schema-v10 with `fluxvm_pridx`,
 bounded IPv6 extension-header walking, Set 8S guest CIDR/direction mirror
 (create + live), and Observer ServiceMonitor/sizing. External S1/S2/S9–S11
 lab evidence remains mandatory —
-[secure-containers-set19.md](secure-containers-set19.md) and
+[secure-containers-set19.md](secure-containers-set19.md),
+[secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md), and
 [NEXT-FEATURES.md](NEXT-FEATURES.md).

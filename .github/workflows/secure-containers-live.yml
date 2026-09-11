@@ -1,0 +1,78 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+name: Secure Containers Live
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 5 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/test-networkpolicy*.sh'
+      - 'scripts/secure-containers-ga-gate-set19.sh'
+      - '.github/workflows/secure-containers-live.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  live-endpointslice:
+    if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set 18 EndpointSlice live gate
+        run: |
+          export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+          scripts/test-networkpolicy-endpointslice-set18.sh
+        env:
+          FLUXVM_LAB_KUBECONFIG: ${{ vars.FLUXVM_LAB_KUBECONFIG }}
+
+  live-stateful:
+    if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set 17 stateful NetworkPolicy (single-node)
+        run: |
+          export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+          export RUNTIME_CLASS="${FLUXVM_RUNTIMECLASS:-fluxvm}"
+          export REQUIRE_MULTI_NODE=0
+          scripts/test-networkpolicy-stateful-set17.sh
+        env:
+          FLUXVM_LAB_KUBECONFIG: ${{ vars.FLUXVM_LAB_KUBECONFIG }}
+          FLUXVM_RUNTIMECLASS: ${{ vars.FLUXVM_RUNTIMECLASS }}
+
+  live-stateful-multinode:
+    if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' && vars.FLUXVM_REQUIRE_MULTI_NODE == '1' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set 17 stateful NetworkPolicy (multi-node)
+        run: |
+          export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+          export RUNTIME_CLASS="${FLUXVM_RUNTIMECLASS:-fluxvm}"
+          export REQUIRE_MULTI_NODE=1
+          scripts/test-networkpolicy-stateful-set17.sh
+        env:
+          FLUXVM_LAB_KUBECONFIG: ${{ vars.FLUXVM_LAB_KUBECONFIG }}
+          FLUXVM_RUNTIMECLASS: ${{ vars.FLUXVM_RUNTIMECLASS }}
+
+  live-ga:
+    if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' && vars.FLUXVM_SECOND_CNI_GATE != '' && vars.FLUXVM_KATA_GATE != '' && vars.FLUXVM_REAL_FLEET_GATE != '' && vars.FLUXVM_ATTACHED_MIGRATION_GATE != '' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set 19 fail-hard GA gate
+        run: |
+          export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
+          export FLUXVM_RUNTIMECLASS="${FLUXVM_RUNTIMECLASS:-fluxvm}"
+          scripts/secure-containers-ga-gate-set19.sh
+        env:
+          FLUXVM_LAB_KUBECONFIG: ${{ vars.FLUXVM_LAB_KUBECONFIG }}
+          FLUXVM_RUNTIMECLASS: ${{ vars.FLUXVM_RUNTIMECLASS }}
+          FLUXVM_SECOND_CNI_GATE: ${{ vars.FLUXVM_SECOND_CNI_GATE }}
+          FLUXVM_KATA_GATE: ${{ vars.FLUXVM_KATA_GATE }}
+          FLUXVM_REAL_FLEET_GATE: ${{ vars.FLUXVM_REAL_FLEET_GATE }}
+          FLUXVM_ATTACHED_MIGRATION_GATE: ${{ vars.FLUXVM_ATTACHED_MIGRATION_GATE }}
