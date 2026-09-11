@@ -81,6 +81,15 @@ Not the same "fleet" as section 6 above — `fluxvm-fleet` here is a
 multi-node *rollout orchestrator* for Sentinel's own eBPF/controller
 components, unrelated to `fluxvm-agent`'s VM-placement fleet.
 
+- [ ] `fluxvm-sentinel-certify` (Set 12E): GA hardening & performance
+      certification — capability profiles (`baseline`/`performance`/`strict`),
+      versioned budgets, evidence bundling, ownership-conservative stale-bpffs
+      reconcile, and double-gated failure injection. Static + host recovery
+      gates are proven; a full release certification (real verifier matrix,
+      privileged lab lane, archived evidence + commit SHA) is still a
+      release-engineering step, not an automatic claim
+      ([sentinel-ga-certification.md](sentinel-ga-certification.md),
+      [sentinel-ga-release-checklist.md](sentinel-ga-release-checklist.md))
 - [ ] `fluxvm-migrate` (Set 13E): crash-resumable per-VM migration
       transactions wrapping the real `fluxvm dataplane migration-*` CLI —
       real CLI integration and real failure/rollback proven; not yet run
@@ -147,14 +156,21 @@ conntrack revocation-safety was verifier-loaded and its `ct_state` write
 confirmed for real (a real ping's learned entry decodes as a plausible
 `last_seen_ns` timestamp via bpftool's BTF-aware dump), and VM-level
 `allow_ports` now also accepts `sctp/PORT` — see
-[secure-containers-set16.md](secure-containers-set16.md). Still open: the live
+[secure-containers-set16.md](secure-containers-set16.md). Set 17 adds optional
+`fluxvm_prhit` rule-attributed directional telemetry (no schema-v8 ABI bump;
+Policy Observer prefers it when present and keeps Set 15's shared-counter
+fallback otherwise) —
+[secure-containers-set17.md](secure-containers-set17.md). Still open: the live
 stateful-conntrack-bypass path between the egress and Pod-ingress programs,
 and Set 16's own timeout expiry/anti-replay behavior, are implemented but not
 yet proven with a live TCP handshake or wall-clock timing test; the per-VM
 rule cap is 64 (kernel verifier limit); multi-node Pod-to-Pod dataplane
-conformance is still missing — see [NEXT-FEATURES.md](NEXT-FEATURES.md),
-[secure-containers-set14.md](secure-containers-set14.md), and
-[secure-containers-set16.md](secure-containers-set16.md). Sentinel
+conformance is still missing; Set 17's production Prometheus scrape of
+directional/rule metrics remains a gate — see
+[NEXT-FEATURES.md](NEXT-FEATURES.md),
+[secure-containers-set14.md](secure-containers-set14.md),
+[secure-containers-set16.md](secure-containers-set16.md), and
+[secure-containers-set17.md](secure-containers-set17.md). Sentinel
 in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
 policy automatically — every container is enforced fail-closed by default,
 but the shim does not yet forward Pod policy content per container. Sentinel

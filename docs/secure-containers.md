@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 15
+## Implemented through Set 17
 
 Everything through Set 13 below, plus:
 
@@ -58,6 +58,12 @@ Everything through Set 13 below, plus:
 - **Set 15** — directional attachment health (`pod_ingress_*` on
   `NativeAttachmentStatus`) and the read-only Sentinel Policy Observer —
   see [docs/secure-containers-set15.md](secure-containers-set15.md).
+- **Set 16** — schema-v9 timestamped conntrack with idle expiry, synchronous
+  clear on policy update, SYN/INIT anti-replay, and VM-level `sctp/PORT` —
+  see [docs/secure-containers-set16.md](secure-containers-set16.md).
+- **Set 17** — optional `fluxvm_prhit` rule-attributed directional telemetry
+  (no schema-v8 ABI bump; Observer keeps Set 15 shared-counter fallback) —
+  see [docs/secure-containers-set17.md](secure-containers-set17.md).
 
 ## Implemented through Set 13
 
@@ -100,6 +106,11 @@ Everything through Set 13 below, plus:
   `NativeAttachmentStatus`, plus the read-only Policy Observer
   (`tools/fluxvm-policy-observer`) — see
   [docs/secure-containers-set15.md](secure-containers-set15.md).
+- **Sentinel Set 16**: schema-v9 revocation-safe conntrack + VM-level SCTP —
+  see [docs/secure-containers-set16.md](secure-containers-set16.md).
+- **Sentinel Set 17**: optional `fluxvm_prhit` rule-hit / directional
+  counters on the Policy Observer — see
+  [docs/secure-containers-set17.md](secure-containers-set17.md).
 - restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay
   on the primary interface — see
   [docs/secure-containers-set6.md](secure-containers-set6.md)
@@ -368,5 +379,19 @@ tuple rules (`ipBlock.except`, SCTP, named/`endPort` ports) and a separate
 Set 15 makes `attachment_status()` fail unhealthy when Pod-ingress is pinned
 but its TC hook is missing, and ships the read-only Policy Observer
 (`tools/fluxvm-policy-observer`). See
-[secure-containers-set15.md](secure-containers-set15.md) and
+[secure-containers-set15.md](secure-containers-set15.md).
+
+## Set 16 addendum — conntrack revocation safety
+
+Set 16 moves shared conntrack to schema-v9 timestamped entries with
+per-protocol idle timeout, clears the table on policy update, and forces
+TCP SYN / SCTP INIT through current policy. VM-level `allow_ports` accepts
+`sctp/PORT`. See [secure-containers-set16.md](secure-containers-set16.md).
+
+## Set 17 addendum — rule-attributed telemetry
+
+Set 17 adds optional `fluxvm_prhit` so the Observer can export true
+per-direction and per-rule packet counters without a schema-v8 ABI bump.
+Live production scrape and multi-node / stateful CT proof remain open —
+[secure-containers-set17.md](secure-containers-set17.md) and
 [NEXT-FEATURES.md](NEXT-FEATURES.md).
