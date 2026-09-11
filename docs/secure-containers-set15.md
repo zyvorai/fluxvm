@@ -161,3 +161,15 @@ leaving egress and `hook_required` untouched -- proving the observer
 distinguishes "program present" from "program actually attached" against
 the real kernel, not just its own mocked unit tests. A live Kubernetes
 Secure Containers cluster and `/dev/kvm` remain out of scope for this pass.
+
+## Remaining follow-ups after Set 15
+
+1. prove live stateful conntrack bypass under a real TCP handshake (Set 14
+   follow-up still open);
+2. true per-direction `fluxvm_ppstat` (or equivalent) + rule-hit identity —
+   today one shared counter covers both directions;
+3. production sizing gate: realistic VM/rule counts for observer scrape cost;
+4. scrape Policy Observer from cluster Prometheus alongside FluxVM metrics;
+5. multi-node NetworkPolicy conformance (Cilium + ≥1 non-Cilium CNI).
+
+See [NEXT-FEATURES.md](NEXT-FEATURES.md).

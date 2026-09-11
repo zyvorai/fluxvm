@@ -187,7 +187,7 @@ base image -> SHA256 -> qemu-img -> customize -> reusable template
                                       |
 VM launch: template -> disposable clone -> cloud-init -> VMM -> TTL delete
 
-Secure Containers (developer preview; Sets 2–11: CNI/cgroups, events/OCI, volumes/seccomp, VSOCK stdio/TTY, namespaces/Sentinel, recovery/dual-stack, OOM/metrics, device passthrough/lifecycle, guest AppArmor/SELinux/seccomp-notify):
+Secure Containers (developer preview; Sets 2–15: CNI/cgroups, events/OCI, volumes/seccomp, VSOCK stdio/TTY, namespaces/Sentinel, recovery/dual-stack, OOM/metrics, device passthrough/lifecycle, guest AppArmor/SELinux/seccomp-notify, NetworkPolicy v2 controller, Policy Observer):
 Kubernetes/ctr -> containerd -> containerd-shim-fluxvm-v2
   -> FluxVM REST -> QEMU + virtiofs Pod share (+ Pod-UID write-through volumes)
   -> fluxvm-guest-agent :17777 -> fluxvm-container-agent :17778 / stdio :17779
@@ -1743,7 +1743,9 @@ netns still uses user-mode networking.
 | Runtime id | `io.containerd.fluxvm.v2` |
 | Shim binary | `containerd-shim-fluxvm-v2` |
 | RuntimeClass handler | `fluxvm` |
-| Docs | [docs/secure-containers.md](docs/secure-containers.md) (rollup + per-Set links through Set 11) |
+| Docs | [docs/secure-containers.md](docs/secure-containers.md) (rollup through Set 15), [NEXT-FEATURES.md](docs/NEXT-FEATURES.md) |
+| NetworkPolicy controller | [`controllers/fluxvm-networkpolicy-controller/`](controllers/fluxvm-networkpolicy-controller/) (Sets 13–14) |
+| Policy Observer | [`tools/fluxvm-policy-observer/`](tools/fluxvm-policy-observer/) (Set 15) |
 | Deploy fragment | [`deploy/containerd/`](deploy/containerd/) |
 
 ```bash
@@ -1979,7 +1981,7 @@ assigned the same vsock CID.
 - The API is localhost-only by default. Off-loopback binds fail closed without `[[auth.tokens]]`; set `auth.require = true` to always require tokens. Audit lines go to the `fluxvm_audit` tracing target.
 - The vsock guest agent is authenticated by default for any VM created with `agent.enabled: true` (see "Pause, resume, and exec"), but this doesn't extend to mTLS/OIDC-style identity — it's one shared secret per VM, good enough to stop an unrelated host process, not a multi-tenant authorization model.
 - `guestkit`'s `inspect_os()` (used by `copy_in`) only recognizes partitioned disks and LVM volumes as OS roots by default; support for a bare, unpartitioned whole-disk filesystem (the shape Firecracker rootfs images are typically built in) was added as part of this project's testing and needs to make it into a real guestkit release — until then, building against a `guestkit` checkout without that fix will fail `copy_in` on such images with "no operating system found in image".
-- **Secure Containers** is developer-preview: QEMU/virtiofs only. Through Set 11 it has CNI L2 Pod IP + guest cgroup stats/resources/OOM metrics, task events + OCI process hardening, Pod-UID write-through volumes + guest RO/masked paths/devices/sysctls/libseccomp with argument comparators, VSOCK stdio streaming + guest PTY/`ResizePty`, per-container PID/mount/IPC/UTS namespace isolation, restart-safe recovery + dual-stack CNI, Pod-scoped raw block/VFIO device hotplug with hot-unplug, fail-closed AppArmor/SELinux process labels + per-container device-cgroup BPF, a seccomp user-notification broker, and SELinux mount labels — plus Sentinel Pod/QEMU/per-container/in-guest-LSM eBPF policy layered on top. HostPath hotplug and broader CNI/OCI conformance remain follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent yet.
+- **Secure Containers** is developer-preview: QEMU/virtiofs only. Through Set 15 it adds Sets 2–11 guest/runtime surfaces, plus Sentinel NetworkPolicy v2 (Set 14 controller + ingress BPF) and directional attachment health / Policy Observer (Set 15). HostPath hotplug and broader CNI/OCI conformance remain follow-up gates — see [docs/secure-containers.md](docs/secure-containers.md) and [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md). Do not treat RuntimeClass `fluxvm` as production Kata-equivalent yet.
 
 ## License
 

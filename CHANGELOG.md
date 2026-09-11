@@ -3,6 +3,8 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Docs: next-features backlog** — ranked Sentinel / hypervisor / Fabric
+  follow-ups after Set 15 + FC/CH parity ([`docs/NEXT-FEATURES.md`](docs/NEXT-FEATURES.md)).
 - **Secure Containers Set 15** — directional attachment health for
   `fluxvm_pod_ingress` (`pod_ingress_required` / `pod_ingress_attached` on
   `NativeAttachmentStatus`; aggregate `attached` requires both hooks when

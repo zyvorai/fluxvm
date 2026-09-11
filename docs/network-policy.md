@@ -4,6 +4,14 @@ FluxVM is not a CNI. This document is the supported **CNP-shaped** policy
 subset that compiles onto **Network Fabric (GA; dataplane schema v4)** pins
 under `/sys/fs/bpf/fluxvm`.
 
+> **Not the same plane as Kubernetes NetworkPolicy.** Sentinel Secure
+> Containers Sets 13–15 compile `networking.k8s.io/v1 NetworkPolicy` into
+> Pod-scoped VM-edge policy (schema v2 / `fluxvm_prules`) via
+> `fluxvm-networkpolicy-controller` — see
+> [secure-containers-set14.md](secure-containers-set14.md) and
+> [secure-containers-set15.md](secure-containers-set15.md). This file covers
+> Fabric CNP/group policy for disposable VMs, not that controller.
+
 Coexistence with a node CNI (`mode=cilium`) is separate — see
 [ebpf-cilium.md](ebpf-cilium.md). That mode only *checks* the agent socket;
 FluxVM never writes foreign private BPF maps.

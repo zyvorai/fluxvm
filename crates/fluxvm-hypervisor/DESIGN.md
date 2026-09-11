@@ -193,17 +193,19 @@ for agent sandboxes and functions.
 
 ## 11. Implementation phases
 
-| Phase | Deliverable |
-|---|---|
-| 0 | This repo: KVM VM + memory + vCPU + PIO/MMIO buses |
-| 1 | Serial + tiny 16-bit/64-bit test payload |
-| 2 | linux-loader + boot_params + RSI; virtio-console next |
-| 3 | virtio-blk + virtio-net TAP (blk done; denser benches next) |
-| 4 | vhost-net + multi-queue + rate limit |
-| 5 | balloon, vsock, seccomp jailer |
-| 6 | ACPI + virtio-pci + OVMF + Windows |
+| Phase | Deliverable | Status |
+|---|---|---|
+| 0 | KVM VM + memory + vCPU + PIO/MMIO buses | **Done** |
+| 1 | Serial + tiny 16-bit/64-bit test payload | **Done** |
+| 2 | linux-loader + boot_params / PVH; serial console | **Done** |
+| 3 | virtio-blk + virtio-net TAP | **Done** |
+| 4 | vhost-net open + rate limits (`--net/blk-mbit-limit`); multi-queue bind still follow-up | **Partial** |
+| 5 | balloon, vsock, rng, irqfd, seccomp jailer | **Done** |
+| 6 | Minimal ACPI + PCI ECAM + Windows/UEFI path | **Partial** (ACPI/ECAM yes; full virtio-pci BAR / Windows → CH SoT) |
 
-Do not start phase 6 until Linux boots and iperf is sane.
+Boot hang past `init_zbud` is **resolved** (Firecracker-matched TSS/MSRs/FPU/LAPIC/serial). Lab snapshots: `FLUXKVM1` v2. See [README.md](README.md), [docs/kvm-density.md](../../docs/kvm-density.md), [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md).
+
+Do not expand Windows/PCI until Linux boot + net benches stay green.
 
 ## 12. What we will not implement
 

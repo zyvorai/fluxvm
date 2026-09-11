@@ -25,7 +25,7 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 | OCI → template export | Yes |
 | **Redis shared sandbox index** (`FLUXVM_SANDBOX_STATE_URL`) | Yes |
 | `/console` ops UI | Yes |
-| **Benchmarks** — `scripts/bench-sandbox.sh`, [docs/benchmarks/README.md](../benchmarks/README.md) | Yes |
+| **Benchmarks** — `scripts/bench-sandbox.sh`, [docs/benchmarks/README.md](benchmarks/README.md) | Yes |
 
 ### Dataplane (summary)
 
@@ -59,9 +59,10 @@ plus [architecture](../README.md#network-fabric-architecture-how-it-works).
 
 ## Remaining (optional hardening)
 
-- Production-grade virtio **device live-state** inside in-tree KVM snapshots (watermark only today; Firecracker remains production snap format)
+- **Production-grade virtio device live-state** inside in-tree KVM snapshots (watermark only today; Firecracker remains production snap format)
 - Hubble SID attribution for VM traffic beyond agent CEP enrichment
 - Optional: scrape `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`) from Prometheus
+- Ranked backlog (Sentinel Set 16 candidates, vhost bind, etc.): [NEXT-FEATURES.md](NEXT-FEATURES.md)
 
 **Resolved:** in-tree KVM late-boot hang (`init_zbud`) — fixed by matching Firecracker/CH TSS, boot MSRs, FPU, LAPIC lint, and serial irqfd/THRE semantics. Linux guests now mount `root=/dev/vda` (auto `virtio_mmio.device=` cmdline) through `/sbin/init`. See [`crates/fluxvm-hypervisor/README.md`](../crates/fluxvm-hypervisor/README.md).
 

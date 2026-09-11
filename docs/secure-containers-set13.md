@@ -96,9 +96,17 @@ Dataplane schema v7 added `fluxvm_pid4_port`/`fluxvm_pid6_port`: a peer with no 
 
 ## Next protocol step
 
-What remains, in priority order:
+> Most of the items below were closed by [Set 14](secure-containers-set14.md)
+> (directional CIDR+L4 / `except` / SCTP / separate ingress object) and
+> [Set 15](secure-containers-set15.md) (attachment health + observer).
+> Remaining product work is tracked in [NEXT-FEATURES.md](NEXT-FEATURES.md).
 
-1. **Live multi-node reconciliation/conformance test.** Everything above is validated at the unit and single-host-kernel level; a real cluster test (live Pods, a real `NetworkPolicy` object, asserted actual connectivity) has not yet run.
-2. **CIDR + `except`.** An LPM-trie entry cannot represent Kubernetes' `except` subtraction; a CIDR peer with `except` still falls back to exact-address approximation.
-3. **CIDR combined with a port restriction.** The port-scoped maps have no CIDR dimension; a `ports`-restricted rule with an `ipBlock` peer still falls back to exact-address approximation, never a real CIDR entry.
-4. **More than 8 port ranges per peer+protocol.** `FLUXVM_MAX_PORT_RANGES` is a fixed kernel array; the excess is denied and reported unsupported rather than silently dropped, but is not yet representable at all.
+Historical priority list (pre–Set 14):
+
+1. **Live multi-node reconciliation/conformance test.** Single-node live
+   reconciliation landed in Set 14's `test-networkpolicy-live.sh`; multi-node
+   dataplane conformance remains open.
+2. **CIDR + `except`.** Closed by Set 14 recursive CIDR subtraction.
+3. **CIDR combined with a port restriction.** Closed by Set 14 `fluxvm_prules`.
+4. **More than 8 port ranges / 64 rich rules.** Still a verifier-budget limit
+   (Set 14 follow-up #1).

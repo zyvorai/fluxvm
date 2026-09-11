@@ -224,4 +224,11 @@ live TCP handshake; tracked as a follow-up.
 4. run a focused upstream-style NetworkPolicy conformance matrix across Cilium
    and at least one non-Cilium CNI, ideally as a genuine multi-node
    conformance suite rather than single-node reconciliation checks;
-5. expose per-direction Pod-policy verdict counters and rule-hit identity.
+5. ~~expose per-direction Pod-policy verdict counters and rule-hit identity~~
+   — **partially Set 15**: Policy Observer exports shared `fluxvm_ppstat` +
+   hook/rule pressure; true per-direction counters and rule-hit identity remain
+   open ([secure-containers-set15.md](secure-containers-set15.md));
+6. prove the live stateful conntrack-bypass path under a real TCP handshake
+   (implemented; smoke covers rule match, not CT reply bypass).
+
+Ranked product backlog: [NEXT-FEATURES.md](NEXT-FEATURES.md).

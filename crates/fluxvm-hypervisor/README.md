@@ -60,6 +60,8 @@ One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for g
 - Full virtio-pci BAR wiring / Windows production path → cloud-hypervisor SoT (P2 follow-up).
 - virtio-fs, live migration, CPU/device hotplug → demand-driven P3 stubs (`Unsupported` until product needs them).
 
+Lab density / packing: [docs/kvm-density.md](../../docs/kvm-density.md). Gaps: [docs/agent-sandbox-gaps.md](../../docs/agent-sandbox-gaps.md). Ranked next work: [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md). Design notes: [DESIGN.md](DESIGN.md).
+
 ## Study (do not reinvent)
 
 - [Firecracker](https://github.com/firecracker-microvm/firecracker) — Linux microVM SoT

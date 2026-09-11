@@ -2,8 +2,9 @@
 
 Node-local Prometheus exporter for Secure Containers NetworkPolicy enforcement.
 It does not modify policy or kernel maps. It reads FluxVM-owned bpffs pins and
-runtime metadata, verifies the directional TC/TCX hooks, and exports the
-existing Set 6S/13 per-Pod policy counters separately for ingress and egress.
+runtime metadata, verifies the directional TC hooks, and exports the
+existing Pod-policy counters (Set 14 shares one `fluxvm_ppstat` for both
+directions) plus hook/rule-pressure gauges.
 
 ## Metrics
 

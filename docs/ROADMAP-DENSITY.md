@@ -41,3 +41,6 @@ QEMU + `examples/windows-qga.json` remains the GA QGA path.
 Default `fluxvm_engine=firecracker` stays the production sandbox engine. In-tree
 KVM pause + `FLUXKVM1` v2 memory snapshot restore support lab warm-pool packing;
 Firecracker remains the production snapshot format.
+
+Ranked follow-ups (virtio live-state, vhost bind, Sentinel Set 16 candidates,
+Hubble SID): [NEXT-FEATURES.md](NEXT-FEATURES.md).

@@ -113,9 +113,9 @@ the FluxVM daemon's responsibility, not the controller Pod's.
 |---|---|---|
 | `--node-name` | `NODE_NAME` | required |
 | `--interval` | `RECONCILE_INTERVAL` | `5s` |
-| `--fluxvm-url` | `FLUXVM_URL` | `http://127.0.0.1:8080` |
+| `--fluxvm-url` | `FLUXVM_URL` | `http://127.0.0.1:7788` |
 | `--fluxvm-token-file` | `FLUXVM_TOKEN_FILE` | empty |
-| `--max-rules` | `MAX_RULES` | `512` |
+| `--max-rules` | `MAX_RULES` | `64` (kernel verifier cap for Set 14 `fluxvm_prules`) |
 | `--max-addresses` | `MAX_ADDRESSES` | `12000` (legacy compatibility) |
 | `--include-service-clusterips` | `INCLUDE_SERVICE_CLUSTERIPS` | `false` |
 | `--audit` | `POLICY_AUDIT` | `false` |
@@ -127,9 +127,10 @@ skip is explicit opt-in only.
 
 ## Production gate
 
-Set 14 materially closes the NetworkPolicy representation gaps from Set 13,
-but this source handoff does **not** claim live Kubernetes NetworkPolicy
-conformance. Before production enablement, run the provided live gate on a
-Linux KVM node with the real FluxVM TC objects, CNI, dual-stack traffic and
-policy transitions. See `docs/secure-containers-set14.md` and the release-kit
-`TEST_REPORT.md`.
+Set 14 closes NetworkPolicy representation gaps from Set 13; Set 15 adds
+directional attachment health and the read-only Policy Observer. This source
+handoff does **not** claim live multi-node Kubernetes NetworkPolicy
+conformance. Before production enablement, run the live gates on a Linux KVM
+node with the real FluxVM TC objects, CNI, dual-stack traffic and policy
+transitions. See `docs/secure-containers-set14.md`,
+`docs/secure-containers-set15.md`, and `docs/NEXT-FEATURES.md`.

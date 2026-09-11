@@ -92,13 +92,14 @@ Everything through Set 13 below, plus:
   [docs/secure-containers-set6s.md](secure-containers-set6s.md).
 - **Sentinel Set 13**: a standalone node-local `fluxvm-networkpolicy-controller`
   (dependency-free Go, DaemonSet, read-only RBAC) that compiles selected
-  egress `NetworkPolicy` objects into exact IPv4/IPv6 peer addresses and
-  reconciles them into Set 6S's Pod policy API, closing the "nothing
-  watches/resolves live `NetworkPolicy` objects" gap above. Address-only:
-  port-restricted rules are denied rather than widened, and errors/
-  address-limit overflow fail closed to deny-all. Ingress and L4/named-port
-  NetworkPolicy semantics are out of scope — see
-  [docs/secure-containers-set13.md](secure-containers-set13.md).
+  `NetworkPolicy` objects into FluxVM Pod policy. **Superseded for
+  ingress/CIDR/`endPort`/named-port/SCTP by Set 14** — see
+  [docs/secure-containers-set13.md](secure-containers-set13.md) and
+  [docs/secure-containers-set14.md](secure-containers-set14.md).
+- **Sentinel Set 15**: directional `fluxvm_pod_ingress` attachment health on
+  `NativeAttachmentStatus`, plus the read-only Policy Observer
+  (`tools/fluxvm-policy-observer`) — see
+  [docs/secure-containers-set15.md](secure-containers-set15.md).
 - restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay
   on the primary interface — see
   [docs/secure-containers-set6.md](secure-containers-set6.md)
@@ -354,3 +355,18 @@ guest OCI setup path after SELinux/libselinux preflight. It does not claim to
 retroactively relabel the already-mounted virtiofs rootfs. The lifecycle
 protocol also exposes VM-local cumulative security counters, which the shim logs
 on init-task delete. See [secure-containers-set11.md](secure-containers-set11.md).
+
+## Set 14 addendum — NetworkPolicy v2
+
+Set 14 replaces Set 13's exact-peer/exact-port model with directional CIDR+L4
+tuple rules (`ipBlock.except`, SCTP, named/`endPort` ports) and a separate
+`fluxvm_pod_ingress.bpf.o` sharing the main program's maps/conntrack. See
+[secure-containers-set14.md](secure-containers-set14.md).
+
+## Set 15 addendum — policy observability
+
+Set 15 makes `attachment_status()` fail unhealthy when Pod-ingress is pinned
+but its TC hook is missing, and ships the read-only Policy Observer
+(`tools/fluxvm-policy-observer`). See
+[secure-containers-set15.md](secure-containers-set15.md) and
+[NEXT-FEATURES.md](NEXT-FEATURES.md).

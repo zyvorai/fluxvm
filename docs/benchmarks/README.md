@@ -128,4 +128,4 @@ serve`.
 | Engine      | avg_create_ms | notes |
 |-------------|---------------|-------|
 | firecracker | **6905**      | production density engine; memory snapshots OK |
-| kvm         | **5783**      | lab only — pause/resume real; memory snapshots still FC-only |
+| kvm         | **5783**      | lab only — pause/resume + in-tree `FLUXKVM1` v2 memory snapshots (not FC-compatible) |

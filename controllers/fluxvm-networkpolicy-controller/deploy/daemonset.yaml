@@ -32,10 +32,10 @@ spec:
           imagePullPolicy: IfNotPresent
           args:
             - --node-name=$(NODE_NAME)
-            - --fluxvm-url=http://127.0.0.1:8080
+            - --fluxvm-url=http://127.0.0.1:7788
             - --interval=5s
             - --max-addresses=12000
-            - --max-rules=512
+            - --max-rules=64
             - --metrics-listen=:9090
           env:
             - name: NODE_NAME

@@ -106,14 +106,15 @@ against the real kernel verifier, and the rewritten
 `scripts/test-networkpolicy-live.sh` proves the new schema-v2 wire shape
 against a real single-node k3s cluster — see
 [secure-containers-set14.md](secure-containers-set14.md) for specifics,
-including the four eBPF verifier bugs found and fixed in the process. Still
-open: the live stateful-conntrack-bypass path between the egress and
-Pod-ingress programs is implemented but not yet proven with a live test; the
-per-VM rule cap is 64 (a kernel verifier resource limit, not an arbitrary
-choice — see Set 14's doc); and there is still no multi-node Pod-to-Pod
-dataplane conformance suite (the live test proves single-node reconciliation
-correctness, not cross-node connectivity) —
-[secure-containers-set13.md](secure-containers-set13.md). Sentinel
+including the four eBPF verifier bugs found and fixed in the process. Set 15
+adds directional `fluxvm_pod_ingress` attachment health and the read-only
+Sentinel Policy Observer (`tools/fluxvm-policy-observer`) —
+[secure-containers-set15.md](secure-containers-set15.md). Still open: the live
+stateful-conntrack-bypass path between the egress and Pod-ingress programs is
+implemented but not yet proven with a live TCP handshake; the per-VM rule
+cap is 64 (kernel verifier limit); multi-node Pod-to-Pod dataplane conformance
+is still missing — see [NEXT-FEATURES.md](NEXT-FEATURES.md) and
+[secure-containers-set14.md](secure-containers-set14.md). Sentinel
 in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
 policy automatically — every container is enforced fail-closed by default,
 but the shim does not yet forward Pod policy content per container. Sentinel
