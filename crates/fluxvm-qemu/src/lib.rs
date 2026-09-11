@@ -326,9 +326,10 @@ async fn spawn_virtiofsd_instances(
             "--shared-dir".to_string(),
             path_arg(&share.host_path),
         ];
-        if share.read_only {
-            args.push("--readonly".to_string());
-        }
+        // rust-vmm virtiofsd (common on Ubuntu/k3s hosts) has no --readonly /
+        // -o ro. Enforce read-only via guest fstab in the scheduler when
+        // share.read_only is set; do not pass a flag that aborts virtiofsd
+        // before it binds the vhost-user socket.
         let log = ctx.workspace.join(format!("virtiofsd-{i}.log"));
         let spawn_result = spawn_logged(&cfg.virtiofsd_binary, &args, &log)
             .await
