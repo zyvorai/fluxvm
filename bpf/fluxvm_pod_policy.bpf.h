@@ -156,7 +156,7 @@ struct {
     __type(key, __u32);
     __type(value, struct fluxvm_pod_rule);
 } fluxvm_prules SEC(".maps");
-\n/* FLUXVM_SECURE_CONTAINERS_SET19: 64-bit candidate bitmap. The existing
+/* FLUXVM_SECURE_CONTAINERS_SET19: 64-bit candidate bitmap. The existing
  * rule slot remains the source of truth; this map only skips slots that
  * cannot match direction/family/protocol, reducing prefix work and map
  * lookups without changing rule semantics or rule-hit identity. */

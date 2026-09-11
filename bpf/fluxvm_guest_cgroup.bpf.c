@@ -77,7 +77,7 @@ struct fluxvm_cid6_key {
     __u64 cgroup_id;
     __u8 address[16];
 };
-\n/* FLUXVM_SECURE_CONTAINERS_SET19: CIDR/direction mirror of host Pod policy. */
+/* FLUXVM_SECURE_CONTAINERS_SET19: CIDR/direction mirror of host Pod policy. */
 struct fluxvm_crule_key { __u64 cgroup_id; __u32 slot; __u32 reserved; };
 struct fluxvm_crule_value { __u8 direction; __u8 family; __u8 prefix_len; __u8 reserved; __u8 address[16]; };
 
@@ -105,7 +105,7 @@ struct {
     __type(key, struct fluxvm_cid6_key);
     __type(value, __u32);
 } fluxvm_cid6 SEC(".maps");
-\nstruct {
+struct {
     __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 65536);
     __type(key, struct fluxvm_crule_key); __type(value, struct fluxvm_crule_value);
 } fluxvm_crules SEC(".maps");
