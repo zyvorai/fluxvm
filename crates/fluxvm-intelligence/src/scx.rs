@@ -20,8 +20,8 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{DEFAULT_PIN_ROOT, vm_key};
 use crate::topology::{self, SteeringAction};
+use crate::{DEFAULT_PIN_ROOT, vm_key};
 
 pub const SCX_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_SCX_PIN_ROOT: &str = "/sys/fs/bpf/fluxvm/scx";
@@ -169,7 +169,10 @@ pub fn probe(pin_root: &Path) -> ScxProbe {
         blockers.push("kernel does not expose /sys/kernel/sched_ext/state; CONFIG_SCHED_CLASS_EXT or a sufficiently new kernel is required".into());
     }
     if !Path::new("/sys/kernel/btf/vmlinux").exists() {
-        blockers.push("kernel BTF is missing; target-specific sched_ext CO-RE object cannot be verified".into());
+        blockers.push(
+            "kernel BTF is missing; target-specific sched_ext CO-RE object cannot be verified"
+                .into(),
+        );
     }
     if !bpftool {
         blockers.push("bpftool is required for task-profile/stat map control".into());
@@ -184,7 +187,10 @@ pub fn probe(pin_root: &Path) -> ScxProbe {
         blockers.push("target-kernel fluxvm_scx.bpf.o is not installed".into());
     }
     if state == "enabled" && current_ops.as_deref() != Some("fluxvm_scx") {
-        blockers.push(format!("another sched_ext scheduler is already active: {}", current_ops.clone().unwrap_or_else(|| "unknown".into())));
+        blockers.push(format!(
+            "another sched_ext scheduler is already active: {}",
+            current_ops.clone().unwrap_or_else(|| "unknown".into())
+        ));
     }
     if !topology_maps {
         warnings.push("Set-8 topology maps are not loaded; planner will preserve each vCPU's current allowed CPU set instead of deriving NUMA/IRQ placement".into());
@@ -220,8 +226,12 @@ pub fn build_plan(
     let threads = topology::discover_vcpus(pid)?;
     let (base_weight, base_slice, base_target) = class.defaults();
     let mut weight = weight_override.unwrap_or(base_weight);
-    let mut slice_ns = slice_us_override.unwrap_or(base_slice / 1_000).saturating_mul(1_000);
-    let target_ns = latency_target_us_override.unwrap_or(base_target / 1_000).saturating_mul(1_000);
+    let mut slice_ns = slice_us_override
+        .unwrap_or(base_slice / 1_000)
+        .saturating_mul(1_000);
+    let target_ns = latency_target_us_override
+        .unwrap_or(base_target / 1_000)
+        .saturating_mul(1_000);
     if !(25..=400).contains(&weight) {
         bail!("weight must be 25..=400");
     }
@@ -254,8 +264,13 @@ pub fn build_plan(
 
     let mut cpu_for_tid = BTreeMap::<u32, u32>::new();
     let topology_source;
-    match topology::snapshot(id, pid, None, Path::new(topology::DEFAULT_TOPOLOGY_PIN_ROOT))
-        .and_then(|s| topology::plan(&s))
+    match topology::snapshot(
+        id,
+        pid,
+        None,
+        Path::new(topology::DEFAULT_TOPOLOGY_PIN_ROOT),
+    )
+    .and_then(|s| topology::plan(&s))
     {
         Ok(plan) => {
             for action in plan.actions {
@@ -277,23 +292,38 @@ pub fn build_plan(
     for thread in threads {
         let old = task_state(thread.tid)?;
         if !matches!(old.policy, 0 | 3 | 5 | SCHED_EXT_POLICY) {
-            bail!("vCPU tid {} uses scheduler policy {}; refusing to override RT/deadline policy", thread.tid, old.policy);
+            bail!(
+                "vCPU tid {} uses scheduler policy {}; refusing to override RT/deadline policy",
+                thread.tid,
+                old.policy
+            );
         }
         let allowed = parse_cpu_list(&old.cpus)?;
         if allowed.is_empty() {
             bail!("vCPU tid {} has empty CPU affinity", thread.tid);
         }
         let proposed = cpu_for_tid.get(&thread.tid).copied();
-        let target_cpu = proposed.filter(|c| allowed.contains(c)).unwrap_or(allowed[0]);
+        let target_cpu = proposed
+            .filter(|c| allowed.contains(c))
+            .unwrap_or(allowed[0]);
         let mut rationale = Vec::new();
         if proposed == Some(target_cpu) {
             rationale.push("CPU selected by Set-8 NUMA/IRQ topology planner and still permitted by the task's current affinity".into());
         } else if proposed.is_some() {
             rationale.push("Set-8 proposed CPU is outside the task's current allowed affinity/cpuset; kept the first currently allowed CPU".into());
         } else {
-            rationale.push("Set-8 topology plan unavailable; kept the first CPU from the current affinity".into());
+            rationale.push(
+                "Set-8 topology plan unavailable; kept the first CPU from the current affinity"
+                    .into(),
+            );
         }
-        rationale.push(format!("class {:?}: weight={}, slice={:.3} ms, queue-latency target={:.3} ms", class, weight, slice_ns as f64 / 1e6, target_ns as f64 / 1e6));
+        rationale.push(format!(
+            "class {:?}: weight={}, slice={:.3} ms, queue-latency target={:.3} ms",
+            class,
+            weight,
+            slice_ns as f64 / 1e6,
+            target_ns as f64 / 1e6
+        ));
         tasks.push(ScxTaskPlan {
             tid: thread.tid,
             vcpu: thread.vcpu,
@@ -326,7 +356,10 @@ pub fn apply_plan(plan: &ScxPlan, pin_root: &Path, state_root: &Path) -> Result<
     fs::create_dir_all(state_root)?;
     let receipt_path = receipt_path(state_root, plan.vm_id);
     if receipt_path.exists() {
-        bail!("{} already has an active sched_ext receipt; rollback it before applying another plan", plan.vm_id);
+        bail!(
+            "{} already has an active sched_ext receipt; rollback it before applying another plan",
+            plan.vm_id
+        );
     }
     for task in &plan.tasks {
         preflight_task(plan.pid, task)?;
@@ -350,7 +383,10 @@ pub fn apply_plan(plan: &ScxPlan, pin_root: &Path, state_root: &Path) -> Result<
         if started {
             let _ = stop_scheduler(pin_root);
         }
-        bail!("required sched_ext maps are missing after scheduler attach under {}", pin_root.display());
+        bail!(
+            "required sched_ext maps are missing after scheduler attach under {}",
+            pin_root.display()
+        );
     }
     let zero_stats = vec![0u8; 88];
     if let Err(err) = bpftool_update(&stats_map, &plan.vm_key.to_ne_bytes(), &zero_stats) {
@@ -374,7 +410,9 @@ pub fn apply_plan(plan: &ScxPlan, pin_root: &Path, state_root: &Path) -> Result<
             if started {
                 let _ = stop_scheduler(pin_root);
             }
-            return Err(err.context("sched_ext apply failed; already-converted vCPUs were rolled back best-effort"));
+            return Err(err.context(
+                "sched_ext apply failed; already-converted vCPUs were rolled back best-effort",
+            ));
         }
         applied.push(task);
     }
@@ -396,7 +434,9 @@ pub fn apply_plan(plan: &ScxPlan, pin_root: &Path, state_root: &Path) -> Result<
         if started {
             let _ = stop_scheduler(pin_root);
         }
-        return Err(err.context("persisting sched_ext receipt; converted vCPUs were rolled back best-effort"));
+        return Err(err.context(
+            "persisting sched_ext receipt; converted vCPUs were rolled back best-effort",
+        ));
     }
     Ok(receipt)
 }
@@ -410,7 +450,11 @@ pub fn rollback(id: Uuid, pin_root: &Path, state_root: &Path) -> Result<()> {
 
     for task in &receipt.plan.tasks {
         if tgid_of(task.tid) != Some(receipt.plan.pid) {
-            bail!("refuse rollback: tid {} no longer belongs to VMM tgid {}; this may be PID reuse", task.tid, receipt.plan.pid);
+            bail!(
+                "refuse rollback: tid {} no longer belongs to VMM tgid {}; this may be PID reuse",
+                task.tid,
+                receipt.plan.pid
+            );
         }
     }
     for task in receipt.plan.tasks.iter().rev() {
@@ -469,7 +513,9 @@ pub fn active_ids(state_root: &Path) -> Result<Vec<Uuid>> {
     for ent in fs::read_dir(state_root)? {
         let ent = ent?;
         let name = ent.file_name().to_string_lossy().to_string();
-        let Some(raw) = name.strip_suffix(".receipt.json") else { continue; };
+        let Some(raw) = name.strip_suffix(".receipt.json") else {
+            continue;
+        };
         if let Ok(id) = raw.parse::<Uuid>() {
             ids.push(id);
         }
@@ -487,23 +533,40 @@ pub fn status(id: Uuid, pin_root: &Path, state_root: &Path) -> Result<ScxStatus>
     let mut findings = Vec::new();
     if let Some(s) = &stats {
         if s.latency_violations > 0 {
-            findings.push(format!("{} queue-latency target violation(s) observed", s.latency_violations));
+            findings.push(format!(
+                "{} queue-latency target violation(s) observed",
+                s.latency_violations
+            ));
         }
         if s.queue_delay_max_ns >= 5_000_000 {
-            findings.push(format!("max sched_ext queue delay is {:.2} ms", s.queue_delay_max_ns as f64 / 1e6));
+            findings.push(format!(
+                "max sched_ext queue delay is {:.2} ms",
+                s.queue_delay_max_ns as f64 / 1e6
+            ));
         }
         if s.fallback_enqueues > 0 {
-            findings.push(format!("{} SCHED_EXT enqueue(s) had no valid FluxVM task profile", s.fallback_enqueues));
+            findings.push(format!(
+                "{} SCHED_EXT enqueue(s) had no valid FluxVM task profile",
+                s.fallback_enqueues
+            ));
         }
     }
     if receipt.is_some() && p.sched_ext_state != "enabled" {
         findings.push("receipt exists but sched_ext is not currently enabled; kernel fallback is active and rollback should reconcile task policy/affinity".into());
     }
-    Ok(ScxStatus { schema_version: SCX_SCHEMA_VERSION, vm_id: id, probe: p, receipt, stats, findings })
+    Ok(ScxStatus {
+        schema_version: SCX_SCHEMA_VERSION,
+        vm_id: id,
+        probe: p,
+        receipt,
+        stats,
+        findings,
+    })
 }
 
 pub fn stream_events(id: Uuid, pin_root: &Path, seconds: u64, limit: usize) -> Result<()> {
-    let helper = env::var("FLUXVM_SCX_EVENTS").unwrap_or_else(|_| "/usr/libexec/fluxvm/fluxvm-scx-events".into());
+    let helper = env::var("FLUXVM_SCX_EVENTS")
+        .unwrap_or_else(|_| "/usr/libexec/fluxvm/fluxvm-scx-events".into());
     let status = Command::new(helper)
         .args([
             pin_root.display().to_string(),
@@ -523,7 +586,10 @@ pub fn prometheus(id: Uuid, pin_root: &Path) -> Result<String> {
     let mut out = String::from("# FluxVM Sentinel Set 11E sched_ext\n");
     macro_rules! metric {
         ($name:literal, $value:expr) => {
-            out.push_str(&format!(concat!($name, "{{vm_id=\"{}\"}} {}\n"), id, $value));
+            out.push_str(&format!(
+                concat!($name, "{{vm_id=\"{}\"}} {}\n"),
+                id, $value
+            ));
         };
     }
     metric!("fluxvm_scx_enqueues_total", s.enqueues);
@@ -543,7 +609,10 @@ pub fn verify_object() -> Result<()> {
     let object = object_path();
     let out = Command::new(&helper).arg("verify").arg(&object).output()?;
     if !out.status.success() {
-        bail!("sched_ext object verification failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "sched_ext object verification failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -576,15 +645,29 @@ fn validate_plan(plan: &ScxPlan) -> Result<()> {
 
 fn preflight_task(tgid: u32, task: &ScxTaskPlan) -> Result<()> {
     if tgid_of(task.tid) != Some(tgid) {
-        bail!("tid {} no longer belongs to VMM tgid {}; possible restart or TID reuse", task.tid, tgid);
+        bail!(
+            "tid {} no longer belongs to VMM tgid {}; possible restart or TID reuse",
+            task.tid,
+            tgid
+        );
     }
     let now = task_state(task.tid)?;
     if now != task.old {
-        bail!("tid {} scheduling state drifted since plan: planned {:?}, current {:?}", task.tid, task.old, now);
+        bail!(
+            "tid {} scheduling state drifted since plan: planned {:?}, current {:?}",
+            task.tid,
+            task.old,
+            now
+        );
     }
     let allowed = parse_cpu_list(&now.cpus)?;
     if !allowed.contains(&task.target_cpu) {
-        bail!("tid {} target CPU {} is no longer allowed by current affinity {}", task.tid, task.target_cpu, now.cpus);
+        bail!(
+            "tid {} target CPU {} is no longer allowed by current affinity {}",
+            task.tid,
+            task.target_cpu,
+            now.cpus
+        );
     }
     Ok(())
 }
@@ -593,11 +676,16 @@ fn start_scheduler(pin_root: &Path) -> Result<()> {
     let helper = loader_helper();
     let object = object_path();
     let out = Command::new(&helper)
-        .arg("start").arg(&object).arg(pin_root)
+        .arg("start")
+        .arg(&object)
+        .arg(pin_root)
         .output()
         .with_context(|| format!("running {helper}"))?;
     if !out.status.success() {
-        bail!("sched_ext loader start failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "sched_ext loader start failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     let p = probe(pin_root);
     if p.sched_ext_state != "enabled" || p.current_ops.as_deref() != Some("fluxvm_scx") {
@@ -609,20 +697,28 @@ fn start_scheduler(pin_root: &Path) -> Result<()> {
 
 fn stop_scheduler(pin_root: &Path) -> Result<()> {
     let helper = loader_helper();
-    let out = Command::new(&helper)
-        .arg("stop").arg(pin_root)
-        .output()?;
+    let out = Command::new(&helper).arg("stop").arg(pin_root).output()?;
     if !out.status.success() {
-        bail!("sched_ext loader stop failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "sched_ext loader stop failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
 
 fn task_state(tid: u32) -> Result<TaskSchedulerState> {
     let helper = taskctl_helper();
-    let out = Command::new(&helper).arg("get").arg(tid.to_string()).output()?;
+    let out = Command::new(&helper)
+        .arg("get")
+        .arg(tid.to_string())
+        .output()?;
     if !out.status.success() {
-        bail!("task scheduler query failed for tid {}: {}", tid, String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "task scheduler query failed for tid {}: {}",
+            tid,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     serde_json::from_slice(&out.stdout).context("decoding fluxvm-scx-taskctl JSON")
 }
@@ -630,10 +726,17 @@ fn task_state(tid: u32) -> Result<TaskSchedulerState> {
 fn set_ext(tid: u32, cpu: u32) -> Result<()> {
     let helper = taskctl_helper();
     let out = Command::new(&helper)
-        .arg("set-ext").arg(tid.to_string()).arg(cpu.to_string())
+        .arg("set-ext")
+        .arg(tid.to_string())
+        .arg(cpu.to_string())
         .output()?;
     if !out.status.success() {
-        bail!("setting tid {} to SCHED_EXT/cpu {} failed: {}", tid, cpu, String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "setting tid {} to SCHED_EXT/cpu {} failed: {}",
+            tid,
+            cpu,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -648,7 +751,11 @@ fn restore_task(state: &TaskSchedulerState) -> Result<()> {
         .arg(&state.cpus)
         .output()?;
     if !out.status.success() {
-        bail!("restoring tid {} failed: {}", state.tid, String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "restoring tid {} failed: {}",
+            state.tid,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
@@ -684,8 +791,12 @@ fn read_stats(id: Uuid, pin_root: &Path) -> Result<ScxVmStats> {
     }
     let wanted = vm_key(id);
     for row in dump_rows(&map)? {
-        let Some(key) = value_bytes(row.get("key")) else { continue; };
-        let Some(value) = value_bytes(row.get("value")) else { continue; };
+        let Some(key) = value_bytes(row.get("key")) else {
+            continue;
+        };
+        let Some(value) = value_bytes(row.get("value")) else {
+            continue;
+        };
         if key.len() < 8 || value.len() < 88 {
             continue;
         }
@@ -743,7 +854,10 @@ fn ensure_pid(pid: u32) -> Result<()> {
 
 fn tgid_of(tid: u32) -> Option<u32> {
     let text = fs::read_to_string(format!("/proc/{tid}/status")).ok()?;
-    text.lines().find_map(|line| line.strip_prefix("Tgid:").and_then(|v| v.trim().parse().ok()))
+    text.lines().find_map(|line| {
+        line.strip_prefix("Tgid:")
+            .and_then(|v| v.trim().parse().ok())
+    })
 }
 
 fn parse_cpu_list(input: &str) -> Result<Vec<u32>> {
@@ -766,7 +880,9 @@ fn parse_cpu_list(input: &str) -> Result<Vec<u32>> {
 
 fn bpftool_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
     let mut cmd = Command::new("bpftool");
-    cmd.args(["map", "update", "pinned"]).arg(map).args(["key", "hex"]);
+    cmd.args(["map", "update", "pinned"])
+        .arg(map)
+        .args(["key", "hex"]);
     for byte in key {
         cmd.arg(format!("{byte:02x}"));
     }
@@ -777,14 +893,20 @@ fn bpftool_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
     cmd.arg("any");
     let out = cmd.output()?;
     if !out.status.success() {
-        bail!("bpftool update {} failed: {}", map.display(), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "bpftool update {} failed: {}",
+            map.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(())
 }
 
 fn bpftool_delete(map: &Path, key: &[u8]) -> Result<()> {
     let mut cmd = Command::new("bpftool");
-    cmd.args(["map", "delete", "pinned"]).arg(map).args(["key", "hex"]);
+    cmd.args(["map", "delete", "pinned"])
+        .arg(map)
+        .args(["key", "hex"]);
     for byte in key {
         cmd.arg(format!("{byte:02x}"));
     }
@@ -804,18 +926,25 @@ fn dump_rows(map: &Path) -> Result<Vec<Value>> {
         .arg(map)
         .output()?;
     if !out.status.success() {
-        bail!("bpftool dump {} failed: {}", map.display(), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "bpftool dump {} failed: {}",
+            map.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     serde_json::from_slice(&out.stdout).context("decoding bpftool JSON")
 }
 
 fn value_bytes(value: Option<&Value>) -> Option<Vec<u8>> {
     match value? {
-        Value::Array(items) => items.iter().map(|item| match item {
-            Value::Number(n) => n.as_u64().filter(|v| *v <= 255).map(|v| v as u8),
-            Value::String(s) => u8::from_str_radix(s.trim_start_matches("0x"), 16).ok(),
-            _ => None,
-        }).collect(),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Number(n) => n.as_u64().filter(|v| *v <= 255).map(|v| v as u8),
+                Value::String(s) => u8::from_str_radix(s.trim_start_matches("0x"), 16).ok(),
+                _ => None,
+            })
+            .collect(),
         Value::Object(object) => object.get("bytes").and_then(|v| value_bytes(Some(v))),
         _ => None,
     }
@@ -830,7 +959,11 @@ fn no_receipts(root: &Path) -> Result<bool> {
         return Ok(true);
     }
     for ent in fs::read_dir(root)? {
-        if ent?.file_name().to_string_lossy().ends_with(".receipt.json") {
+        if ent?
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".receipt.json")
+        {
             return Ok(false);
         }
     }
@@ -842,7 +975,8 @@ fn loader_helper() -> String {
 }
 
 fn taskctl_helper() -> String {
-    env::var("FLUXVM_SCX_TASKCTL").unwrap_or_else(|_| "/usr/libexec/fluxvm/fluxvm-scx-taskctl".into())
+    env::var("FLUXVM_SCX_TASKCTL")
+        .unwrap_or_else(|_| "/usr/libexec/fluxvm/fluxvm-scx-taskctl".into())
 }
 
 fn object_path() -> String {
@@ -873,7 +1007,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 fn unix_seconds() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -882,7 +1019,12 @@ mod tests {
 
     #[test]
     fn class_defaults_are_bounded() {
-        for class in [ScxClass::Latency, ScxClass::Balanced, ScxClass::Throughput, ScxClass::Background] {
+        for class in [
+            ScxClass::Latency,
+            ScxClass::Balanced,
+            ScxClass::Throughput,
+            ScxClass::Background,
+        ] {
             let (weight, slice, target) = class.defaults();
             assert!((25..=400).contains(&weight));
             assert!((100_000..=10_000_000).contains(&slice));
@@ -903,7 +1045,12 @@ mod tests {
             vcpu: 0,
             comm: "CPU 0/KVM".into(),
             target_cpu: 0,
-            old: TaskSchedulerState { tid: 1, policy: 0, priority: 0, cpus: "0".into() },
+            old: TaskSchedulerState {
+                tid: 1,
+                policy: 0,
+                priority: 0,
+                cpus: "0".into(),
+            },
             weight: 100,
             slice_ns: 1_000_000,
             latency_target_ns: 5_000_000,

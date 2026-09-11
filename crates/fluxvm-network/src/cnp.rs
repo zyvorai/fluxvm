@@ -181,9 +181,7 @@ pub fn apply_cnp(cfg: &Config, policy: CiliumNetworkPolicy) -> Result<SecurityGr
     let group = compile(&policy)?;
     let group = upsert_group(cfg, group)?;
     let mut store = load_store(cfg)?;
-    store
-        .policies
-        .insert(policy.metadata.name.clone(), policy);
+    store.policies.insert(policy.metadata.name.clone(), policy);
     save_store(cfg, &store)?;
     Ok(group)
 }
@@ -314,7 +312,9 @@ pub fn expand_port(protocol: &str, port: &str) -> Result<Vec<String>> {
         }
         return Ok((start..=end).map(|p| format!("{proto}/{p}")).collect());
     }
-    let n: u16 = port.parse().with_context(|| format!("invalid port {port}"))?;
+    let n: u16 = port
+        .parse()
+        .with_context(|| format!("invalid port {port}"))?;
     if n == 0 {
         bail!("port must be 1..65535");
     }
@@ -376,7 +376,13 @@ mod tests {
 
     #[test]
     fn named_ports_expand() {
-        assert_eq!(expand_port("TCP", "https").unwrap(), vec!["tcp/443".to_string()]);
-        assert_eq!(expand_port("UDP", "dns").unwrap(), vec!["udp/53".to_string()]);
+        assert_eq!(
+            expand_port("TCP", "https").unwrap(),
+            vec!["tcp/443".to_string()]
+        );
+        assert_eq!(
+            expand_port("UDP", "dns").unwrap(),
+            vec!["udp/53".to_string()]
+        );
     }
 }

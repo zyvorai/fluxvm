@@ -28,7 +28,10 @@ pub fn desired_pod(vm: &MicroVM, request_kvm_device: bool) -> Pod {
     // this Pod — requesting spec.memoryMiB here double-counts the node.
     let mut requests = BTreeMap::new();
     requests.insert("cpu".into(), Quantity(crate::policy::SHADOW_CPU.into()));
-    requests.insert("memory".into(), Quantity(crate::policy::SHADOW_MEMORY.into()));
+    requests.insert(
+        "memory".into(),
+        Quantity(crate::policy::SHADOW_MEMORY.into()),
+    );
     if request_kvm_device {
         requests.insert("fluxvm.dev/kvm".into(), Quantity("1".into()));
     }
@@ -45,7 +48,10 @@ pub fn desired_pod(vm: &MicroVM, request_kvm_device: bool) -> Pod {
             name: "shadow".into(),
             image: Some(PAUSE_IMAGE.into()),
             image_pull_policy: Some("IfNotPresent".into()),
-            resources: Some(ResourceRequirements { requests: Some(requests), ..Default::default() }),
+            resources: Some(ResourceRequirements {
+                requests: Some(requests),
+                ..Default::default()
+            }),
             ..Default::default()
         }],
         ..Default::default()
@@ -70,7 +76,10 @@ pub fn desired_pod(vm: &MicroVM, request_kvm_device: bool) -> Pod {
 }
 
 pub fn bound_node(pod: &Pod) -> Option<String> {
-    pod.spec.as_ref().and_then(|s| s.node_name.clone()).filter(|n| !n.is_empty())
+    pod.spec
+        .as_ref()
+        .and_then(|s| s.node_name.clone())
+        .filter(|n| !n.is_empty())
 }
 
 #[cfg(test)]
@@ -79,9 +88,23 @@ mod tests {
     use crate::crd::MicroVMSpec;
     #[test]
     fn shadow_requests_tiny_budget() {
-        let vm = MicroVM::new("sandbox-42", MicroVMSpec { image: "/img".into(), vcpus: 4, memory_mib: 4096, ..Default::default() });
+        let vm = MicroVM::new(
+            "sandbox-42",
+            MicroVMSpec {
+                image: "/img".into(),
+                vcpus: 4,
+                memory_mib: 4096,
+                ..Default::default()
+            },
+        );
         let pod = desired_pod(&vm, true);
-        let req = pod.spec.as_ref().unwrap().containers[0].resources.as_ref().unwrap().requests.as_ref().unwrap();
+        let req = pod.spec.as_ref().unwrap().containers[0]
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
         assert_eq!(req.get("cpu").unwrap().0, crate::policy::SHADOW_CPU);
         assert_eq!(req.get("memory").unwrap().0, crate::policy::SHADOW_MEMORY);
         assert_eq!(req.get("fluxvm.dev/kvm").unwrap().0, "1");

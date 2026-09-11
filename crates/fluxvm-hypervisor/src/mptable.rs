@@ -72,7 +72,7 @@ struct MpIoApic {
 
 #[repr(C, packed)]
 struct MpIoInterrupt {
-    entry_type: u8, // 3
+    entry_type: u8,     // 3
     interrupt_type: u8, // 0 = INT
     flags: u16,
     source_bus_id: u8,
@@ -135,8 +135,8 @@ pub fn write_mptable(mem: &mut GuestMemory, num_cpus: u8) -> Result<()> {
             local_apic_id: i,
             local_apic_version: 0x14,
             cpu_flags: if i == 0 { 0b11 } else { 0b01 }, // enable + BSP for 0
-            cpu_signature: 0x600, // generic
-            feature_flags: 0x201, // FPU + APIC
+            cpu_signature: 0x600,                        // generic
+            feature_flags: 0x201,                        // FPU + APIC
             reserved: [0, 0],
         };
         table.extend_from_slice(as_bytes(&cpu));

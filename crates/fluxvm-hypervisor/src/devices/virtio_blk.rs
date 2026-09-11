@@ -104,7 +104,11 @@ fn walk_chain(mem: &GuestMemory, desc_base: u64, head: u16) -> Result<DescChain>
     Ok(DescChain { head, parts })
 }
 
-fn process_request(mem: &mut GuestMemory, backend: &BlockBackend, chain: &DescChain) -> Result<u32> {
+fn process_request(
+    mem: &mut GuestMemory,
+    backend: &BlockBackend,
+    chain: &DescChain,
+) -> Result<u32> {
     if chain.parts.len() < 2 {
         return Ok(0);
     }
@@ -138,8 +142,7 @@ fn process_request(mem: &mut GuestMemory, backend: &BlockBackend, chain: &DescCh
                     break;
                 }
                 let mut buf = vec![0u8; len as usize];
-                if file.seek(SeekFrom::Start(offset)).is_err()
-                    || file.read_exact(&mut buf).is_err()
+                if file.seek(SeekFrom::Start(offset)).is_err() || file.read_exact(&mut buf).is_err()
                 {
                     // Short read at EOF: zero-fill remainder.
                     let _ = file.seek(SeekFrom::Start(offset));

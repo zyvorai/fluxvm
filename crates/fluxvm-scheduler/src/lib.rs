@@ -1443,9 +1443,7 @@ impl VmManager {
             vm.status = VmStatus::Running;
             vm.error = None;
             if let Some(ref ns) = vm.netns {
-                if let Err(e) =
-                    fluxvm_network::netns::repair_named_netns(ns, launch.pid).await
-                {
+                if let Err(e) = fluxvm_network::netns::repair_named_netns(ns, launch.pid).await {
                     tracing::warn!(
                         vm = %id,
                         netns = %ns,
@@ -1527,7 +1525,8 @@ impl VmManager {
         // is confirmed dead by this point either way (graceful exit,
         // terminate_pid, or it just never had one to begin with).
         if let Some(cgroup_path) = vm.cgroup_path.take() {
-            let _ = fluxvm_network::qemu_cgroup::detach(&self.cfg.sandbox.dataplane, id, &cgroup_path);
+            let _ =
+                fluxvm_network::qemu_cgroup::detach(&self.cfg.sandbox.dataplane, id, &cgroup_path);
             if let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(cgroup_path) {
                 if let Err(e) = mgr.remove() {
                     tracing::warn!(vm = %id, error = %e, "failed to remove VM cgroup");
@@ -1802,7 +1801,11 @@ impl VmManager {
                         }
                         vm.netns = None;
                         if let Some(cgroup_path) = vm.cgroup_path.take() {
-                            let _ = fluxvm_network::qemu_cgroup::detach(&self.cfg.sandbox.dataplane, vm.id, &cgroup_path);
+                            let _ = fluxvm_network::qemu_cgroup::detach(
+                                &self.cfg.sandbox.dataplane,
+                                vm.id,
+                                &cgroup_path,
+                            );
                             if let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(cgroup_path) {
                                 let _ = mgr.remove();
                             }

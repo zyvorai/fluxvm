@@ -422,12 +422,7 @@ pub async fn repair_named_netns(netns: &str, pid: u32) -> Result<()> {
     let netns = netns.to_string();
     let ok = run_checked(
         "ip",
-        &[
-            "netns".into(),
-            "exec".into(),
-            netns.clone(),
-            "true".into(),
-        ],
+        &["netns".into(), "exec".into(), netns.clone(), "true".into()],
     )
     .await
     .is_ok();
@@ -453,17 +448,9 @@ pub async fn repair_named_netns(netns: &str, pid: u32) -> Result<()> {
     })
     .await
     .context("repair_named_netns worker panicked")??;
-    run_checked(
-        "ip",
-        &[
-            "netns".into(),
-            "exec".into(),
-            netns,
-            "true".into(),
-        ],
-    )
-    .await
-    .context("named netns still unusable after repair")?;
+    run_checked("ip", &["netns".into(), "exec".into(), netns, "true".into()])
+        .await
+        .context("named netns still unusable after repair")?;
     Ok(())
 }
 

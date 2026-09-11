@@ -10,7 +10,10 @@ use fluxvm_core::{
 };
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
-use std::{path::{Path, PathBuf}, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -179,12 +182,16 @@ enum QgaCommand {
 #[derive(Subcommand)]
 enum CnpCommand {
     List,
-    Get { name: String },
+    Get {
+        name: String,
+    },
     Apply {
         #[arg(long)]
         spec: PathBuf,
     },
-    Delete { name: String },
+    Delete {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -198,9 +205,13 @@ enum DataplaneCommand {
     Ipcache,
     RefreshDns,
     /// Show the VM-edge migration gate and schema generation.
-    MigrationState { id: Uuid },
+    MigrationState {
+        id: Uuid,
+    },
     /// Freeze creation of new flows while preserving established conntrack.
-    MigrationQuiesce { id: Uuid },
+    MigrationQuiesce {
+        id: Uuid,
+    },
     /// Export a migration-consistent conntrack/observability snapshot.
     MigrationExport {
         id: Uuid,
@@ -214,7 +225,9 @@ enum DataplaneCommand {
         input: PathBuf,
     },
     /// Re-enable new flows after destination cutover, or cancel source quiesce.
-    MigrationResume { id: Uuid },
+    MigrationResume {
+        id: Uuid,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,7 +266,9 @@ enum HubbleCommand {
 #[derive(Subcommand)]
 enum GroupCommand {
     List,
-    Get { name: String },
+    Get {
+        name: String,
+    },
     Set {
         name: String,
         #[arg(long)]
@@ -277,7 +292,9 @@ enum GroupCommand {
         #[arg(long)]
         max_egress_pps: Option<u32>,
     },
-    Delete { name: String },
+    Delete {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -382,9 +399,7 @@ async fn main() -> Result<()> {
                     "OIDC bearer JWT validation enabled alongside static tokens"
                 );
             } else if cfg.auth.oidc_issuer.is_some() {
-                tracing::warn!(
-                    "auth.oidc_issuer set without auth.oidc_audience — OIDC disabled"
-                );
+                tracing::warn!("auth.oidc_issuer set without auth.oidc_audience — OIDC disabled");
             }
             m.start_reaper();
             m.spawn_autopause_loop();
@@ -450,12 +465,8 @@ async fn main() -> Result<()> {
             )?;
             let pod_policy = m.pod_network_policy(id).await?;
             let flows = m.network_flows(id, 256).await?;
-            let reasons = fluxvm_network::ebpf::drop_reasons(
-                &m.cfg.sandbox.dataplane,
-                id,
-                256,
-            )
-            .unwrap_or_default();
+            let reasons = fluxvm_network::ebpf::drop_reasons(&m.cfg.sandbox.dataplane, id, 256)
+                .unwrap_or_default();
             let report = fluxvm_intelligence::diagnose_vm_with_reasons(
                 &snapshot,
                 &policy,
@@ -465,7 +476,12 @@ async fn main() -> Result<()> {
             );
             println!("{}", serde_json::to_string_pretty(&report)?);
         }
-        Command::Trace { id, seconds, limit, output } => {
+        Command::Trace {
+            id,
+            seconds,
+            limit,
+            output,
+        } => {
             m.get(id).await?;
             let pin_root = std::env::var("FLUXVM_INTEL_PIN_ROOT")
                 .map(PathBuf::from)
@@ -473,7 +489,11 @@ async fn main() -> Result<()> {
             let events = fluxvm_intelligence::trace_events(id, &pin_root, seconds, limit)?;
             match output.to_ascii_lowercase().as_str() {
                 "json" => println!("{}", serde_json::to_string_pretty(&events)?),
-                "jsonl" => for event in events { println!("{}", serde_json::to_string(&event)?); },
+                "jsonl" => {
+                    for event in events {
+                        println!("{}", serde_json::to_string(&event)?);
+                    }
+                }
                 other => anyhow::bail!("unsupported trace output {other:?}; use json or jsonl"),
             }
         }
@@ -589,7 +609,10 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&m.list_cnp().await?)?);
             }
             CnpCommand::Get { name } => {
-                println!("{}", serde_json::to_string_pretty(&m.get_cnp(&name).await?)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.get_cnp(&name).await?)?
+                );
             }
             CnpCommand::Apply { spec } => {
                 let raw = std::fs::read_to_string(&spec)?;
@@ -653,14 +676,20 @@ async fn main() -> Result<()> {
                 println!("{{\"refreshed\":{n}}}");
             }
             DataplaneCommand::MigrationState { id } => {
-                println!("{}", serde_json::to_string_pretty(
-                    &fluxvm_network::migration_state::status(&m.cfg, id)?
-                )?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fluxvm_network::migration_state::status(
+                        &m.cfg, id
+                    )?)?
+                );
             }
             DataplaneCommand::MigrationQuiesce { id } => {
-                println!("{}", serde_json::to_string_pretty(
-                    &fluxvm_network::migration_state::quiesce(&m.cfg, id)?
-                )?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fluxvm_network::migration_state::quiesce(
+                        &m.cfg, id
+                    )?)?
+                );
             }
             DataplaneCommand::MigrationExport { id, output } => {
                 let snapshot = fluxvm_network::migration_state::export_snapshot(&m.cfg, id)?;
@@ -674,14 +703,20 @@ async fn main() -> Result<()> {
             DataplaneCommand::MigrationRestore { id, input } => {
                 let snapshot: fluxvm_network::migration_state::VmNetworkStateSnapshot =
                     serde_json::from_slice(&std::fs::read(input)?)?;
-                println!("{}", serde_json::to_string_pretty(
-                    &fluxvm_network::migration_state::restore_snapshot(&m.cfg, id, &snapshot)?
-                )?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &fluxvm_network::migration_state::restore_snapshot(&m.cfg, id, &snapshot)?
+                    )?
+                );
             }
             DataplaneCommand::MigrationResume { id } => {
-                println!("{}", serde_json::to_string_pretty(
-                    &fluxvm_network::migration_state::resume(&m.cfg, id)?
-                )?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&fluxvm_network::migration_state::resume(
+                        &m.cfg, id
+                    )?)?
+                );
             }
         },
         Command::Identity { command } => match command {
@@ -825,9 +860,9 @@ async fn build_mtls_config(
         .context("build rustls ServerConfig")?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    Ok(axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(
-        config,
-    )))
+    Ok(axum_server::tls_rustls::RustlsConfig::from_config(
+        Arc::new(config),
+    ))
 }
 
 async fn print_hubble_observe(
@@ -838,10 +873,12 @@ async fn print_hubble_observe(
     verdict: &str,
     protocol: &str,
 ) -> Result<()> {
-    use fluxvm_network::packetflow::{filter_views, render_flows, FlowOutput};
+    use fluxvm_network::packetflow::{FlowOutput, filter_views, render_flows};
     let mut views = m.hubble_observe_views(limit).await?;
     views = filter_views(views, Some(verdict), Some(protocol));
-    let mode = if std::env::var("NO_COLOR").map(|v| !v.is_empty()).unwrap_or(false)
+    let mode = if std::env::var("NO_COLOR")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
         && output.eq_ignore_ascii_case("color")
     {
         FlowOutput::Plain

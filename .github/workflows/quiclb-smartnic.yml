@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Host packages
-        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev bpftool pkg-config libsystemd-dev libhivex-dev iproute2 iputils-ping ethtool
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config libsystemd-dev libhivex-dev iproute2 iputils-ping ethtool
       - name: Rust tests
         run: cargo test -p fluxvm-intelligence quiclb
       - name: Build QUIC LB

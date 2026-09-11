@@ -119,7 +119,7 @@ pub fn render() -> String {
 
 /// Serve Prometheus text on `addr` (e.g. `127.0.0.1:9108`).
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
-    use axum::{routing::get, Router};
+    use axum::{Router, routing::get};
     let app = Router::new().route("/metrics", get(|| async { render() }));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "MicroVM Prometheus metrics listening");

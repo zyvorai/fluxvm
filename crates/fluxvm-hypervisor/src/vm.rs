@@ -207,10 +207,7 @@ impl VirtualMachine {
         let (vsock, vsock_backend) = match (&cfg.vsock_cid, &cfg.vsock_uds) {
             (Some(cid), Some(uds)) => match VsockBackend::new(uds, *cid) {
                 Ok(be) => {
-                    notes.push(format!(
-                        "virtio-vsock cid={cid} uds={}",
-                        uds.display()
-                    ));
+                    notes.push(format!("virtio-vsock cid={cid} uds={}", uds.display()));
                     let mmio = Arc::new(VirtioMmio::vsock(MMIO_VSOCK_WINDOW, *cid, 7));
                     bus.add_mmio(mmio.clone());
                     (Some(mmio), Some(Arc::new(be)))
@@ -259,7 +256,10 @@ impl VirtualMachine {
         let vhost = if cfg.vhost_net {
             match VhostNet::open() {
                 Ok(v) => {
-                    notes.push("vhost-net opened (/dev/vhost-net); queues still userspace until full bind".into());
+                    notes.push(
+                        "vhost-net opened (/dev/vhost-net); queues still userspace until full bind"
+                            .into(),
+                    );
                     Some(v)
                 }
                 Err(e) => {
@@ -556,7 +556,10 @@ impl VirtualMachine {
                         }
                         serial_injected = true;
                         fed = true;
-                        eprintln!("[kvm] serial inject {} bytes after userspace", payload.len());
+                        eprintln!(
+                            "[kvm] serial inject {} bytes after userspace",
+                            payload.len()
+                        );
                     }
                 }
             }
@@ -743,9 +746,8 @@ impl VirtualMachine {
                     break;
                 }
                 ffi::KVM_EXIT_FAIL_ENTRY => {
-                    let reason = unsafe {
-                        std::ptr::read_unaligned(kvm.vcpus[0].run.add(32) as *const u64)
-                    };
+                    let reason =
+                        unsafe { std::ptr::read_unaligned(kvm.vcpus[0].run.add(32) as *const u64) };
                     stop.store(true, Ordering::Relaxed);
                     return Err(FluxError::Hypervisor(format!(
                         "KVM_EXIT_FAIL_ENTRY reason={reason:#x}"

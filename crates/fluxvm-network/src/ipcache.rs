@@ -7,7 +7,7 @@
 //! Remote (ClusterMesh-like) entries use [`Uuid::nil`] as `vm_id` so Fabric can
 //! fan peer CIDRs into local compile without a local VM.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use fluxvm_core::config::Config;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io::Write, net::IpAddr, path::PathBuf};
@@ -170,12 +170,7 @@ mod tests {
     fn remote_upsert_replace_and_delete() {
         let dir = tempdir().unwrap();
         let cfg = cfg_at(dir.path());
-        let n = upsert_remote(
-            &cfg,
-            1001,
-            &["10.1.0.5/32".into(), "10.1.0.6/32".into()],
-        )
-        .unwrap();
+        let n = upsert_remote(&cfg, 1001, &["10.1.0.5/32".into(), "10.1.0.6/32".into()]).unwrap();
         assert_eq!(n, 2);
         let listed = list(&cfg).unwrap();
         assert_eq!(listed.len(), 2);

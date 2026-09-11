@@ -29,13 +29,7 @@ fn used_push(
 fn fill_random(buf: &mut [u8]) {
     #[cfg(target_os = "linux")]
     {
-        let _ = unsafe {
-            libc::getrandom(
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                0,
-            )
-        };
+        let _ = unsafe { libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
     }
     #[cfg(not(target_os = "linux"))]
     {

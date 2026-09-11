@@ -6,8 +6,8 @@
 //! Long-lived mode: JSON-over-UDS control API (`--api-sock`).
 //! Demo mode: freestanding netboot guest (legacy CLI flags).
 
-pub mod api;
 pub mod acpi;
+pub mod api;
 pub mod backend;
 pub mod boot;
 pub mod bus;

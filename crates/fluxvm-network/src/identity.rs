@@ -35,18 +35,34 @@ pub fn reserved_identities() -> Vec<IdentityInfo> {
         info(RESERVED_UNKNOWN, "reserved:unknown", &["reserved:unknown"]),
         info(RESERVED_HOST, "reserved:host", &["reserved:host"]),
         info(RESERVED_WORLD, "reserved:world", &["reserved:world"]),
-        info(RESERVED_UNMANAGED, "reserved:unmanaged", &["reserved:unmanaged"]),
+        info(
+            RESERVED_UNMANAGED,
+            "reserved:unmanaged",
+            &["reserved:unmanaged"],
+        ),
         info(RESERVED_HEALTH, "reserved:health", &["reserved:health"]),
         info(RESERVED_INIT, "reserved:init", &["reserved:init"]),
-        info(RESERVED_REMOTE_NODE, "reserved:remote-node", &["reserved:remote-node"]),
+        info(
+            RESERVED_REMOTE_NODE,
+            "reserved:remote-node",
+            &["reserved:remote-node"],
+        ),
         info(
             RESERVED_KUBE_APISERVER,
             "reserved:kube-apiserver",
             &["reserved:kube-apiserver"],
         ),
         info(RESERVED_INGRESS, "reserved:ingress", &["reserved:ingress"]),
-        info(RESERVED_WORLD_IPV4, "reserved:world-ipv4", &["reserved:world-ipv4"]),
-        info(RESERVED_WORLD_IPV6, "reserved:world-ipv6", &["reserved:world-ipv6"]),
+        info(
+            RESERVED_WORLD_IPV4,
+            "reserved:world-ipv4",
+            &["reserved:world-ipv4"],
+        ),
+        info(
+            RESERVED_WORLD_IPV6,
+            "reserved:world-ipv6",
+            &["reserved:world-ipv6"],
+        ),
     ]
 }
 

@@ -47,15 +47,27 @@ jobs:
   fluxvm-network:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: formatting
+        working-directory: fluxvm
         run: cargo fmt --all -- --check
       - name: fluxvm-network tests
+        working-directory: fluxvm
         run: cargo test --locked -p fluxvm-network
       - name: compile dependent API/core
+        working-directory: fluxvm
         run: cargo check --locked -p fluxvm-network -p fluxvm-core -p fluxvm-api
       - name: clippy
+        working-directory: fluxvm
         run: cargo clippy --locked -p fluxvm-network -- -D warnings

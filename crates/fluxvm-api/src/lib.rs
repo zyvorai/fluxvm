@@ -257,13 +257,31 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/stats", get(vm_stats))
         .route("/v1/vms/{id}/network/stats", get(vm_network_stats))
         .route("/v1/vms/{id}/network/flows", get(vm_network_flows))
-        .route("/v1/vms/{id}/network/drop-reasons", get(vm_network_drop_reasons))
+        .route(
+            "/v1/vms/{id}/network/drop-reasons",
+            get(vm_network_drop_reasons),
+        )
         .route("/v1/vms/{id}/network/status", get(vm_network_status))
-        .route("/v1/vms/{id}/network/migration/state", get(vm_network_migration_state))
-        .route("/v1/vms/{id}/network/migration/quiesce", post(vm_network_migration_quiesce))
-        .route("/v1/vms/{id}/network/migration/export", get(vm_network_migration_export))
-        .route("/v1/vms/{id}/network/migration/restore", post(vm_network_migration_restore))
-        .route("/v1/vms/{id}/network/migration/resume", post(vm_network_migration_resume))
+        .route(
+            "/v1/vms/{id}/network/migration/state",
+            get(vm_network_migration_state),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/quiesce",
+            post(vm_network_migration_quiesce),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/export",
+            get(vm_network_migration_export),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/restore",
+            post(vm_network_migration_restore),
+        )
+        .route(
+            "/v1/vms/{id}/network/migration/resume",
+            post(vm_network_migration_resume),
+        )
         .route(
             "/v1/vms/{id}/network/services/stats",
             get(vm_network_service_stats),
@@ -293,21 +311,63 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/services/status", get(network_service_status))
         .route("/v1/network/services/stats", get(network_service_stats))
         .route("/v1/network/services/health", get(network_service_health))
-        .route("/v1/network/services/health/reconcile", post(reconcile_network_service_health))
-        .route("/v1/network/services/conntrack/gc", post(gc_network_service_conntrack))
-        .route("/v1/network/services/pressure/reconcile", post(reconcile_network_service_pressure))
-        .route("/v1/network/services/advertisements", get(network_service_advertisements))
+        .route(
+            "/v1/network/services/health/reconcile",
+            post(reconcile_network_service_health),
+        )
+        .route(
+            "/v1/network/services/conntrack/gc",
+            post(gc_network_service_conntrack),
+        )
+        .route(
+            "/v1/network/services/pressure/reconcile",
+            post(reconcile_network_service_pressure),
+        )
+        .route(
+            "/v1/network/services/advertisements",
+            get(network_service_advertisements),
+        )
         .route("/v1/network/services/flows", get(network_service_flows))
-        .route("/v1/network/services/telemetry/export", post(export_network_service_telemetry))
-        .route("/v1/network/services/policies", get(list_network_service_policies).post(upsert_network_service_policy))
-        .route("/v1/network/services/policies/reconcile", post(reconcile_network_service_policies))
-        .route("/v1/network/services/{name}/policy", get(get_network_service_policy).delete(delete_network_service_policy))
-        .route("/v1/network/services/{name}/l7/envoy", get(network_service_envoy_contract))
-        .route("/v1/network/services/{name}/conntrack/export", get(export_network_service_conntrack))
-        .route("/v1/network/services/{name}/conntrack/import", post(import_network_service_conntrack))
-        .route("/v1/network/services/{name}/conntrack/delta", get(export_network_service_conntrack_delta))
-        .route("/v1/network/services/{name}/conntrack/delta/import", post(import_network_service_conntrack_delta))
-        .route("/v1/network/services/{name}/conntrack/delta/ack", post(ack_network_service_conntrack_delta))
+        .route(
+            "/v1/network/services/telemetry/export",
+            post(export_network_service_telemetry),
+        )
+        .route(
+            "/v1/network/services/policies",
+            get(list_network_service_policies).post(upsert_network_service_policy),
+        )
+        .route(
+            "/v1/network/services/policies/reconcile",
+            post(reconcile_network_service_policies),
+        )
+        .route(
+            "/v1/network/services/{name}/policy",
+            get(get_network_service_policy).delete(delete_network_service_policy),
+        )
+        .route(
+            "/v1/network/services/{name}/l7/envoy",
+            get(network_service_envoy_contract),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/export",
+            get(export_network_service_conntrack),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/import",
+            post(import_network_service_conntrack),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/delta",
+            get(export_network_service_conntrack_delta),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/delta/import",
+            post(import_network_service_conntrack_delta),
+        )
+        .route(
+            "/v1/network/services/{name}/conntrack/delta/ack",
+            post(ack_network_service_conntrack_delta),
+        )
         .route(
             "/v1/network/services/{name}",
             get(get_network_service).delete(delete_network_service),
@@ -322,10 +382,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/observe", get(network_observe))
         .route("/v1/network/health", get(network_health))
         .route("/v1/network/ipcache", get(network_ipcache))
-        .route(
-            "/v1/network/ipcache/remote",
-            post(upsert_remote_ipcache),
-        )
+        .route("/v1/network/ipcache/remote", post(upsert_remote_ipcache))
         .route(
             "/v1/network/ipcache/remote/{identity}",
             delete(delete_remote_ipcache),
@@ -1175,7 +1232,9 @@ async fn vm_network_migration_state(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
     m.get(id).await?;
-    Ok(Json(json!(fluxvm_network::migration_state::status(&m.cfg, id)?)))
+    Ok(Json(json!(fluxvm_network::migration_state::status(
+        &m.cfg, id
+    )?)))
 }
 
 async fn vm_network_migration_quiesce(
@@ -1185,7 +1244,9 @@ async fn vm_network_migration_quiesce(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     m.get(id).await?;
-    Ok(Json(json!(fluxvm_network::migration_state::quiesce(&m.cfg, id)?)))
+    Ok(Json(json!(fluxvm_network::migration_state::quiesce(
+        &m.cfg, id
+    )?)))
 }
 
 async fn vm_network_migration_export(
@@ -1195,7 +1256,9 @@ async fn vm_network_migration_export(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     m.get(id).await?;
-    Ok(Json(json!(fluxvm_network::migration_state::export_snapshot(&m.cfg, id)?)))
+    Ok(Json(json!(
+        fluxvm_network::migration_state::export_snapshot(&m.cfg, id)?
+    )))
 }
 
 async fn vm_network_migration_restore(
@@ -1206,9 +1269,9 @@ async fn vm_network_migration_restore(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     m.get(id).await?;
-    Ok(Json(json!(fluxvm_network::migration_state::restore_snapshot(
-        &m.cfg, id, &snapshot
-    )?)))
+    Ok(Json(json!(
+        fluxvm_network::migration_state::restore_snapshot(&m.cfg, id, &snapshot)?
+    )))
 }
 
 async fn vm_network_migration_resume(
@@ -1218,7 +1281,9 @@ async fn vm_network_migration_resume(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     m.get(id).await?;
-    Ok(Json(json!(fluxvm_network::migration_state::resume(&m.cfg, id)?)))
+    Ok(Json(json!(fluxvm_network::migration_state::resume(
+        &m.cfg, id
+    )?)))
 }
 
 async fn get_vm_network_policy(
@@ -1246,7 +1311,9 @@ async fn network_service_status(
 async fn network_service_stats(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({"interfaces": fluxvm_network::service::host_stats(&m.cfg)?})))
+    Ok(Json(
+        json!({"interfaces": fluxvm_network::service::host_stats(&m.cfg)?}),
+    ))
 }
 
 async fn network_service_health(
@@ -1260,7 +1327,9 @@ async fn reconcile_network_service_health(
     Extension(role): Extension<Role>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    Ok(Json(json!(fluxvm_network::service::reconcile_health(&m.cfg).await?)))
+    Ok(Json(json!(
+        fluxvm_network::service::reconcile_health(&m.cfg).await?
+    )))
 }
 
 async fn gc_network_service_conntrack(
@@ -1284,7 +1353,9 @@ async fn reconcile_network_service_pressure(
 async fn network_service_advertisements(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!(fluxvm_network::service::advertisement_snapshot(&m.cfg)?)))
+    Ok(Json(json!(
+        fluxvm_network::service::advertisement_snapshot(&m.cfg)?
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -1321,7 +1392,9 @@ async fn export_network_service_conntrack(
     State(m): State<Arc<VmManager>>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!(fluxvm_network::service::export_conntrack(&m.cfg, &name)?)))
+    Ok(Json(json!(fluxvm_network::service::export_conntrack(
+        &m.cfg, &name
+    )?)))
 }
 
 async fn import_network_service_conntrack(
@@ -1353,12 +1426,14 @@ async fn export_network_service_conntrack_delta(
     Query(q): Query<ServiceDeltaQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    Ok(Json(json!(fluxvm_network::service::export_conntrack_delta(
-        &m.cfg,
-        &name,
-        q.after_seq.unwrap_or(0),
-        q.max_entries.unwrap_or(1024),
-    )?)))
+    Ok(Json(json!(
+        fluxvm_network::service::export_conntrack_delta(
+            &m.cfg,
+            &name,
+            q.after_seq.unwrap_or(0),
+            q.max_entries.unwrap_or(1024),
+        )?
+    )))
 }
 
 async fn import_network_service_conntrack_delta(
@@ -1368,9 +1443,9 @@ async fn import_network_service_conntrack_delta(
     Json(batch): Json<fluxvm_network::service::ConntrackDeltaBatch>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    Ok(Json(json!(fluxvm_network::service::import_conntrack_delta(
-        &m.cfg, &name, &batch
-    )?)))
+    Ok(Json(json!(
+        fluxvm_network::service::import_conntrack_delta(&m.cfg, &name, &batch)?
+    )))
 }
 
 async fn ack_network_service_conntrack_delta(
@@ -1381,7 +1456,9 @@ async fn ack_network_service_conntrack_delta(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(fluxvm_network::service::ack_conntrack_delta(
-        &m.cfg, &name, req.ack_seq
+        &m.cfg,
+        &name,
+        req.ack_seq
     )?)))
 }
 
@@ -2429,7 +2506,9 @@ mod tests {
 async fn list_network_service_policies(
     State(m): State<Arc<VmManager>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!({"items": fluxvm_network::service_policy::list(&m.cfg)?})))
+    Ok(Json(
+        json!({"items": fluxvm_network::service_policy::list(&m.cfg)?}),
+    ))
 }
 
 async fn upsert_network_service_policy(
@@ -2446,7 +2525,9 @@ async fn reconcile_network_service_policies(
     Extension(role): Extension<Role>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    Ok(Json(json!({"items": fluxvm_network::service_policy::reconcile(&m.cfg)?})))
+    Ok(Json(
+        json!({"items": fluxvm_network::service_policy::reconcile(&m.cfg)?}),
+    ))
 }
 
 async fn get_network_service_policy(
@@ -2455,7 +2536,10 @@ async fn get_network_service_policy(
 ) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicySpec>> {
     match fluxvm_network::service_policy::get(&m.cfg, &name)? {
         Some(spec) => Ok(Json(spec)),
-        None => Err(ApiError { status: StatusCode::NOT_FOUND, message: format!("service policy '{name}' not found") }),
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service policy '{name}' not found"),
+        }),
     }
 }
 
@@ -2466,7 +2550,10 @@ async fn delete_network_service_policy(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     if !fluxvm_network::service_policy::delete(&m.cfg, &name)? {
-        return Err(ApiError { status: StatusCode::NOT_FOUND, message: format!("service policy '{name}' not found") });
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service policy '{name}' not found"),
+        });
     }
     Ok(Json(json!({"deleted": name})))
 }
@@ -2475,5 +2562,7 @@ async fn network_service_envoy_contract(
     State(m): State<Arc<VmManager>>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<fluxvm_network::service_policy::EnvoyRedirectContract>> {
-    Ok(Json(fluxvm_network::service_policy::envoy_contract(&m.cfg, &name)?))
+    Ok(Json(fluxvm_network::service_policy::envoy_contract(
+        &m.cfg, &name,
+    )?))
 }

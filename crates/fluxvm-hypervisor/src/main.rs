@@ -109,9 +109,7 @@ async fn real_main() -> anyhow::Result<()> {
     {
         eprintln!("[ok] guest reached userspace (in-tree KVM)");
         Ok(())
-    } else if log.contains("VFS: Mounted root")
-        || log.contains("Freeing unused kernel memory")
-    {
+    } else if log.contains("VFS: Mounted root") || log.contains("Freeing unused kernel memory") {
         eprintln!("[ok] guest reached root/init (in-tree KVM)");
         Ok(())
     } else if log.contains("Linux version") {

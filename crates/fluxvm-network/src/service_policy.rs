@@ -89,7 +89,9 @@ pub struct ServicePolicySpec {
     pub l7: Option<L7Policy>,
 }
 
-fn default_enabled() -> bool { true }
+fn default_enabled() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServicePolicyStatus {
@@ -132,17 +134,23 @@ fn catalog_path(cfg: &Config) -> PathBuf {
 
 fn load_catalog(cfg: &Config) -> Result<Vec<ServicePolicySpec>> {
     let path = catalog_path(cfg);
-    if !path.exists() { return Ok(Vec::new()); }
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
     let mut specs: Vec<ServicePolicySpec> = serde_json::from_slice(&fs::read(&path)?)
         .with_context(|| format!("parsing service policy catalog {}", path.display()))?;
-    for spec in &specs { validate_syntax(spec)?; }
-    specs.sort_by(|a,b| a.service.cmp(&b.service));
+    for spec in &specs {
+        validate_syntax(spec)?;
+    }
+    specs.sort_by(|a, b| a.service.cmp(&b.service));
     Ok(specs)
 }
 
 fn save_catalog(cfg: &Config, specs: &[ServicePolicySpec]) -> Result<()> {
     let path = catalog_path(cfg);
-    if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let tmp = path.with_extension("json.tmp");
     let mut f = fs::File::create(&tmp)?;
     f.write_all(&serde_json::to_vec_pretty(specs)?)?;
@@ -151,7 +159,9 @@ fn save_catalog(cfg: &Config, specs: &[ServicePolicySpec]) -> Result<()> {
     Ok(())
 }
 
-pub fn list(cfg: &Config) -> Result<Vec<ServicePolicySpec>> { load_catalog(cfg) }
+pub fn list(cfg: &Config) -> Result<Vec<ServicePolicySpec>> {
+    load_catalog(cfg)
+}
 
 pub fn get(cfg: &Config, name: &str) -> Result<Option<ServicePolicySpec>> {
     Ok(load_catalog(cfg)?.into_iter().find(|p| p.service == name))
@@ -166,16 +176,26 @@ pub fn validate_syntax(spec: &ServicePolicySpec) -> Result<()> {
     }
     let allow: HashSet<u32> = spec.allow_identities.iter().copied().collect();
     let deny: HashSet<u32> = spec.deny_identities.iter().copied().collect();
-    if allow.len() != spec.allow_identities.len() { bail!("duplicate allow identity"); }
-    if deny.len() != spec.deny_identities.len() { bail!("duplicate deny identity"); }
-    if allow.iter().any(|id| deny.contains(id)) { bail!("an identity cannot be both allowed and denied"); }
-    if allow.contains(&0) || deny.contains(&0) { bail!("identity 0 is reserved/unresolved"); }
+    if allow.len() != spec.allow_identities.len() {
+        bail!("duplicate allow identity");
+    }
+    if deny.len() != spec.deny_identities.len() {
+        bail!("duplicate deny identity");
+    }
+    if allow.iter().any(|id| deny.contains(id)) {
+        bail!("an identity cannot be both allowed and denied");
+    }
+    if allow.contains(&0) || deny.contains(&0) {
+        bail!("identity 0 is reserved/unresolved");
+    }
     if let Some(l7) = &spec.l7 {
         if l7.authorities.len() > MAX_L7_ITEMS || l7.path_prefixes.len() > MAX_L7_ITEMS {
             bail!("L7 authorities/path_prefixes are bounded to {MAX_L7_ITEMS} entries each");
         }
         for authority in &l7.authorities {
-            if authority.is_empty() || authority.len() > 253 { bail!("invalid L7 authority length"); }
+            if authority.is_empty() || authority.len() > 253 {
+                bail!("invalid L7 authority length");
+            }
         }
         for prefix in &l7.path_prefixes {
             if prefix.is_empty() || prefix.len() > 1024 || !prefix.starts_with('/') {
@@ -183,8 +203,12 @@ pub fn validate_syntax(spec: &ServicePolicySpec) -> Result<()> {
             }
         }
         if matches!(l7.mode, L7Mode::Enforce) {
-            if l7.proxy_ifindex == 0 { bail!("L7 enforce requires proxy_ifindex > 0"); }
-            if l7.bypass_mark == 0 { bail!("L7 enforce requires a non-zero bypass_mark"); }
+            if l7.proxy_ifindex == 0 {
+                bail!("L7 enforce requires proxy_ifindex > 0");
+            }
+            if l7.bypass_mark == 0 {
+                bail!("L7 enforce requires a non-zero bypass_mark");
+            }
         }
     }
     Ok(())
@@ -209,9 +233,12 @@ pub fn upsert(cfg: &Config, spec: ServicePolicySpec) -> Result<ServicePolicyStat
     validate_against_service(cfg, &spec)?;
     let previous = load_catalog(cfg)?;
     let mut desired = previous.clone();
-    if let Some(old) = desired.iter_mut().find(|p| p.service == spec.service) { *old = spec.clone(); }
-    else { desired.push(spec.clone()); }
-    desired.sort_by(|a,b| a.service.cmp(&b.service));
+    if let Some(old) = desired.iter_mut().find(|p| p.service == spec.service) {
+        *old = spec.clone();
+    } else {
+        desired.push(spec.clone());
+    }
+    desired.sort_by(|a, b| a.service.cmp(&b.service));
     save_catalog(cfg, &desired)?;
     if let Err(e) = reconcile(cfg) {
         save_catalog(cfg, &previous)?;
@@ -226,7 +253,9 @@ pub fn delete(cfg: &Config, name: &str) -> Result<bool> {
     let mut desired = previous.clone();
     let before = desired.len();
     desired.retain(|p| p.service != name);
-    if desired.len() == before { return Ok(false); }
+    if desired.len() == before {
+        return Ok(false);
+    }
     save_catalog(cfg, &desired)?;
     if let Err(e) = reconcile(cfg) {
         save_catalog(cfg, &previous)?;
@@ -269,7 +298,10 @@ pub fn envoy_contract(cfg: &Config, name: &str) -> Result<EnvoyRedirectContract>
         proxy_ifindex: l7.as_ref().map(|v| v.proxy_ifindex).unwrap_or(0),
         bypass_mark: l7.as_ref().map(|v| v.bypass_mark).unwrap_or(0),
         preserve_original_destination: true,
-        authorities: l7.as_ref().map(|v| v.authorities.clone()).unwrap_or_default(),
+        authorities: l7
+            .as_ref()
+            .map(|v| v.authorities.clone())
+            .unwrap_or_default(),
         path_prefixes: l7.map(|v| v.path_prefixes).unwrap_or_default(),
     })
 }
@@ -307,7 +339,9 @@ pub(crate) fn reconcile_after_service_sync(cfg: &Config) -> Result<Vec<ServicePo
     let compiled = compile(cfg, &live)?;
     let dirs = service_map_dirs(cfg);
     for dir in dirs {
-        if !dir.join("fluxvm_spol").exists() { continue; }
+        if !dir.join("fluxvm_spol").exists() {
+            continue;
+        }
         set_guard(&dir, true)?;
         let applied = (|| -> Result<()> {
             replace_map(&dir.join("fluxvm_spol"), &compiled.service_values)?;
@@ -318,7 +352,8 @@ pub(crate) fn reconcile_after_service_sync(cfg: &Config) -> Result<Vec<ServicePo
         if let Err(e) = applied {
             // Keep guard closed: a partially compiled identity policy must not
             // become a fail-open dataplane.
-            return Err(e).with_context(|| format!("reconciling service policy maps in {}", dir.display()));
+            return Err(e)
+                .with_context(|| format!("reconciling service policy maps in {}", dir.display()));
         }
         set_guard(&dir, false)?;
     }
@@ -340,8 +375,12 @@ fn compile(cfg: &Config, specs: &[ServicePolicySpec]) -> Result<CompiledPolicy> 
 
         if spec.enabled {
             let mut flags = POLICY_F_ENABLED;
-            if matches!(spec.default_action, PolicyDefaultAction::Deny) { flags |= POLICY_F_DEFAULT_DENY; }
-            if spec.audit_only { flags |= POLICY_F_AUDIT; }
+            if matches!(spec.default_action, PolicyDefaultAction::Deny) {
+                flags |= POLICY_F_DEFAULT_DENY;
+            }
+            if spec.audit_only {
+                flags |= POLICY_F_AUDIT;
+            }
             let mut proxy_ifindex = 0u32;
             let mut bypass_mark = 0u32;
             if let Some(l7) = &spec.l7 {
@@ -360,10 +399,19 @@ fn compile(cfg: &Config, specs: &[ServicePolicySpec]) -> Result<CompiledPolicy> 
             out.service_values.insert(sid.to_ne_bytes().to_vec(), value);
 
             for entry in &entries {
-                if !allow.contains(&entry.identity) && !deny.contains(&entry.identity) { continue; }
-                let ip: IpAddr = entry.ip.parse().with_context(|| format!("invalid ipcache address {:?}", entry.ip))?;
+                if !allow.contains(&entry.identity) && !deny.contains(&entry.identity) {
+                    continue;
+                }
+                let ip: IpAddr = entry
+                    .ip
+                    .parse()
+                    .with_context(|| format!("invalid ipcache address {:?}", entry.ip))?;
                 resolved.insert(entry.identity);
-                let verdict = if deny.contains(&entry.identity) { VERDICT_DENY } else { VERDICT_ALLOW };
+                let verdict = if deny.contains(&entry.identity) {
+                    VERDICT_DENY
+                } else {
+                    VERDICT_ALLOW
+                };
                 let mut key = sid.to_ne_bytes().to_vec();
                 match ip {
                     IpAddr::V4(ip) => {
@@ -379,18 +427,30 @@ fn compile(cfg: &Config, specs: &[ServicePolicySpec]) -> Result<CompiledPolicy> 
                 }
             }
         }
-        let unresolved: Vec<u32> = allow.union(&deny).filter(|id| !resolved.contains(id)).copied().collect();
-        out.statuses.insert(spec.service.clone(), ServicePolicyStatus {
-            schema_version: SERVICE_POLICY_SCHEMA_VERSION,
-            program_generation: SERVICE_PROGRAM_GENERATION,
-            service: spec.service.clone(),
-            service_id: sid,
-            enabled: spec.enabled,
-            compiled_ipv4: v4,
-            compiled_ipv6: v6,
-            unresolved_identities: unresolved,
-            l7_ready: spec.enabled && spec.l7.as_ref().map(|l| !matches!(l.mode, L7Mode::Enforce) || l.proxy_ifindex != 0).unwrap_or(true),
-        });
+        let unresolved: Vec<u32> = allow
+            .union(&deny)
+            .filter(|id| !resolved.contains(id))
+            .copied()
+            .collect();
+        out.statuses.insert(
+            spec.service.clone(),
+            ServicePolicyStatus {
+                schema_version: SERVICE_POLICY_SCHEMA_VERSION,
+                program_generation: SERVICE_PROGRAM_GENERATION,
+                service: spec.service.clone(),
+                service_id: sid,
+                enabled: spec.enabled,
+                compiled_ipv4: v4,
+                compiled_ipv6: v6,
+                unresolved_identities: unresolved,
+                l7_ready: spec.enabled
+                    && spec
+                        .l7
+                        .as_ref()
+                        .map(|l| !matches!(l.mode, L7Mode::Enforce) || l.proxy_ifindex != 0)
+                        .unwrap_or(true),
+            },
+        );
         let _ = svc; // validation above intentionally binds policy to a real service.
     }
     Ok(out)
@@ -402,12 +462,22 @@ fn service_map_dirs(cfg: &Config) -> Vec<PathBuf> {
     if let Ok(entries) = fs::read_dir(&vm_root) {
         for entry in entries.flatten() {
             let p = entry.path().join("service/maps");
-            if p.is_dir() { dirs.push(p); }
+            if p.is_dir() {
+                dirs.push(p);
+            }
         }
     }
     for iface in &cfg.sandbox.dataplane.service.north_south_interfaces {
-        let p = cfg.sandbox.dataplane.pin_root.join("service-host").join(iface).join("maps");
-        if p.is_dir() { dirs.push(p); }
+        let p = cfg
+            .sandbox
+            .dataplane
+            .pin_root
+            .join("service-host")
+            .join(iface)
+            .join("maps");
+        if p.is_dir() {
+            dirs.push(p);
+        }
     }
     dirs.sort();
     dirs.dedup();
@@ -423,55 +493,100 @@ fn set_guard(map_dir: &Path, closed: bool) -> Result<()> {
 }
 
 fn replace_map(map: &Path, desired: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<()> {
-    if !map.exists() { bail!("required v6 policy map {} is not pinned", map.display()); }
+    if !map.exists() {
+        bail!("required v6 policy map {} is not pinned", map.display());
+    }
     for key in bpftool_keys(map)? {
         bpftool_delete(map, &key)?;
     }
-    for (key, value) in desired { bpftool_update(map, key, value)?; }
+    for (key, value) in desired {
+        bpftool_update(map, key, value)?;
+    }
     Ok(())
 }
 
 fn bpftool_keys(map: &Path) -> Result<Vec<Vec<u8>>> {
-    let out = Command::new("bpftool").args(["-j", "map", "dump", "pinned"]).arg(map).output()
+    let out = Command::new("bpftool")
+        .args(["-j", "map", "dump", "pinned"])
+        .arg(map)
+        .output()
         .with_context(|| format!("running bpftool for {}", map.display()))?;
-    if !out.status.success() { bail!("bpftool map dump failed for {}: {}", map.display(), String::from_utf8_lossy(&out.stderr)); }
+    if !out.status.success() {
+        bail!(
+            "bpftool map dump failed for {}: {}",
+            map.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     let root: Value = serde_json::from_slice(&out.stdout)?;
     let mut keys = Vec::new();
-    for entry in root.as_array().context("bpftool map dump must return an array")? {
+    for entry in root
+        .as_array()
+        .context("bpftool map dump must return an array")?
+    {
         keys.push(json_bytes(&entry["key"])?);
     }
     Ok(keys)
 }
 
 fn json_bytes(v: &Value) -> Result<Vec<u8>> {
-    let arr = v.as_array().context("bpftool byte field must be an array")?;
-    arr.iter().map(|x| {
-        if let Some(n) = x.as_u64() { return u8::try_from(n).context("bpftool byte out of range"); }
-        let s = x.as_str().context("bpftool byte must be number or hex string")?.trim_start_matches("0x");
-        u8::from_str_radix(s, 16).context("invalid bpftool hex byte")
-    }).collect()
+    let arr = v
+        .as_array()
+        .context("bpftool byte field must be an array")?;
+    arr.iter()
+        .map(|x| {
+            if let Some(n) = x.as_u64() {
+                return u8::try_from(n).context("bpftool byte out of range");
+            }
+            let s = x
+                .as_str()
+                .context("bpftool byte must be number or hex string")?
+                .trim_start_matches("0x");
+            u8::from_str_radix(s, 16).context("invalid bpftool hex byte")
+        })
+        .collect()
 }
 
-fn hex_args(bytes: &[u8]) -> Vec<String> { bytes.iter().map(|b| format!("{b:02x}")).collect() }
+fn hex_args(bytes: &[u8]) -> Vec<String> {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn bpftool_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
     let mut cmd = Command::new("bpftool");
-    cmd.args(["map", "update", "pinned"]).arg(map).arg("key").arg("hex");
+    cmd.args(["map", "update", "pinned"])
+        .arg(map)
+        .arg("key")
+        .arg("hex");
     cmd.args(hex_args(key));
     cmd.args(["value", "hex"]);
     cmd.args(hex_args(value));
     cmd.arg("any");
     let out = cmd.output()?;
-    if !out.status.success() { bail!("bpftool map update {} failed: {}", map.display(), String::from_utf8_lossy(&out.stderr)); }
+    if !out.status.success() {
+        bail!(
+            "bpftool map update {} failed: {}",
+            map.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     Ok(())
 }
 
 fn bpftool_delete(map: &Path, key: &[u8]) -> Result<()> {
     let mut cmd = Command::new("bpftool");
-    cmd.args(["map", "delete", "pinned"]).arg(map).arg("key").arg("hex");
+    cmd.args(["map", "delete", "pinned"])
+        .arg(map)
+        .arg("key")
+        .arg("hex");
     cmd.args(hex_args(key));
     let out = cmd.output()?;
-    if !out.status.success() { bail!("bpftool map delete {} failed: {}", map.display(), String::from_utf8_lossy(&out.stderr)); }
+    if !out.status.success() {
+        bail!(
+            "bpftool map delete {} failed: {}",
+            map.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
     Ok(())
 }
 
@@ -482,8 +597,13 @@ mod tests {
     #[test]
     fn rejects_identity_overlap() {
         let spec = ServicePolicySpec {
-            service: "web".into(), enabled: true, default_action: PolicyDefaultAction::Deny,
-            allow_identities: vec![1001], deny_identities: vec![1001], audit_only: false, l7: None,
+            service: "web".into(),
+            enabled: true,
+            default_action: PolicyDefaultAction::Deny,
+            allow_identities: vec![1001],
+            deny_identities: vec![1001],
+            audit_only: false,
+            l7: None,
         };
         assert!(validate_syntax(&spec).is_err());
     }
@@ -491,10 +611,20 @@ mod tests {
     #[test]
     fn enforce_requires_proxy_and_mark() {
         let spec = ServicePolicySpec {
-            service: "web".into(), enabled: true, default_action: PolicyDefaultAction::Allow,
-            allow_identities: vec![], deny_identities: vec![], audit_only: false,
-            l7: Some(L7Policy { protocol: L7Protocol::Http, mode: L7Mode::Enforce,
-                proxy_ifindex: 0, bypass_mark: 0, authorities: vec![], path_prefixes: vec![] }),
+            service: "web".into(),
+            enabled: true,
+            default_action: PolicyDefaultAction::Allow,
+            allow_identities: vec![],
+            deny_identities: vec![],
+            audit_only: false,
+            l7: Some(L7Policy {
+                protocol: L7Protocol::Http,
+                mode: L7Mode::Enforce,
+                proxy_ifindex: 0,
+                bypass_mark: 0,
+                authorities: vec![],
+                path_prefixes: vec![],
+            }),
         };
         assert!(validate_syntax(&spec).is_err());
     }

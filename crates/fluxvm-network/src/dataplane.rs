@@ -270,7 +270,9 @@ pub fn load_pod_policy(cfg: &Config, id: Uuid) -> Result<Option<PodNetworkPolicy
 pub fn save_pod_policy(cfg: &Config, id: Uuid, policy: &PodNetworkPolicy) -> Result<()> {
     crate::ebpf::validate_pod_policy(policy)?;
     let path = pod_policy_path(cfg, id);
-    let parent = path.parent().context("Pod network policy path has no parent")?;
+    let parent = path
+        .parent()
+        .context("Pod network policy path has no parent")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("creating Pod network policy directory {}", parent.display()))?;
     let tmp = path.with_extension("json.tmp");
@@ -353,7 +355,11 @@ pub fn apply_sandbox_policy(
         Some(uid) => crate::pod_identity::pod_id_for(cfg, uid)?,
         None => 0,
     };
-    let pod_policy = if pod_id != 0 { load_pod_policy(cfg, id)? } else { None };
+    let pod_policy = if pod_id != 0 {
+        load_pod_policy(cfg, id)?
+    } else {
+        None
+    };
     let dp = &cfg.sandbox.dataplane;
     let base_policy = effective_policy(cfg, id)?;
     let base_fingerprint = policy_fingerprint(&base_policy)?;
@@ -495,11 +501,9 @@ pub fn reconfigure_sandbox_policy(
             let status = crate::ebpf::attachment_status(dp, id)?;
             // Service attach and (when needed) TC repair both need an iface:
             // prefer the caller's edge, else the currently attached one.
-            let iface = iface
-                .or(status.interface.as_deref())
-                .context(
-                    "native policy update needs a host-visible VM interface to repair attachment",
-                )?;
+            let iface = iface.or(status.interface.as_deref()).context(
+                "native policy update needs a host-visible VM interface to repair attachment",
+            )?;
             if status.attached {
                 crate::ebpf::reconfigure(dp, &policy, id)?;
             } else {
@@ -508,7 +512,11 @@ pub fn reconfigure_sandbox_policy(
                 // identity/policy `apply_sandbox_policy`/`set_pod_network_policy`
                 // last associated with this VM instead of dropping it on a repair.
                 let pod_id = crate::ebpf::read_pod_id(id);
-                let pod_policy = if pod_id != 0 { load_pod_policy(cfg, id)? } else { None };
+                let pod_policy = if pod_id != 0 {
+                    load_pod_policy(cfg, id)?
+                } else {
+                    None
+                };
                 crate::ebpf::apply(dp, &policy, id, iface, pod_id, pod_policy.as_ref())?;
             }
             crate::ebpf::commit_policy_fingerprint(id, base_fingerprint)?;
@@ -624,8 +632,19 @@ pub fn ensure_sandbox_policy(
     // Reconcile/heal path: no fresh pod_uid, preserve the VM's existing
     // Pod association (see reconfigure_sandbox_policy's identical comment).
     let repair_pod_id = crate::ebpf::read_pod_id(id);
-    let repair_pod_policy = if repair_pod_id != 0 { load_pod_policy(cfg, id)? } else { None };
-    crate::ebpf::apply(dp, &policy, id, iface, repair_pod_id, repair_pod_policy.as_ref())?;
+    let repair_pod_policy = if repair_pod_id != 0 {
+        load_pod_policy(cfg, id)?
+    } else {
+        None
+    };
+    crate::ebpf::apply(
+        dp,
+        &policy,
+        id,
+        iface,
+        repair_pod_id,
+        repair_pod_policy.as_ref(),
+    )?;
     crate::ebpf::commit_policy_fingerprint(id, desired_fingerprint)?;
     crate::service::ensure_for_vm(cfg, id, iface)?;
     Ok(true)
@@ -637,7 +656,11 @@ pub fn ensure_sandbox_policy(
 /// resolve a Kubernetes `NetworkPolicy` object into peer addresses; that
 /// translation is expected to live in a separate controller/watcher that
 /// calls this once it has resolved concrete peer IPs.
-pub fn set_pod_network_policy(cfg: &Config, id: Uuid, policy: Option<PodNetworkPolicy>) -> Result<()> {
+pub fn set_pod_network_policy(
+    cfg: &Config,
+    id: Uuid,
+    policy: Option<PodNetworkPolicy>,
+) -> Result<()> {
     let dp = &cfg.sandbox.dataplane;
     if dp.mode == DataplaneMode::Legacy {
         anyhow::bail!("Pod-scoped network policy requires native eBPF mode");

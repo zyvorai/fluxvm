@@ -14,8 +14,13 @@ pub const SHADOW_MEMORY: &str = "32Mi";
 
 /// Converted MicroVMs are a status projection. fluxvm-kube owns the VMM.
 /// The MicroVM node agent must not POST /v1/vms for them.
-pub fn node_agent_should_drive(annotations: Option<&std::collections::BTreeMap<String, String>>) -> bool {
-    match annotations.and_then(|a| a.get(ANN_DRIVEN_BY)).map(String::as_str) {
+pub fn node_agent_should_drive(
+    annotations: Option<&std::collections::BTreeMap<String, String>>,
+) -> bool {
+    match annotations
+        .and_then(|a| a.get(ANN_DRIVEN_BY))
+        .map(String::as_str)
+    {
         Some(DRIVEN_BY_FLUXVM_KUBE) => false,
         _ => true,
     }

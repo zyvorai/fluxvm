@@ -12,11 +12,9 @@
 //! - tenant: `fluxvm_tenant` | `tenant` | `org`
 //! - actor: `preferred_username` | `email` | `sub`
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use fluxvm_core::config::Role;
-use jsonwebtoken::{
-    decode, decode_header, jwk::JwkSet, Algorithm, DecodingKey, Validation,
-};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header, jwk::JwkSet};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,9 +61,7 @@ impl OidcValidator {
 
     pub async fn validate(&self, token: &str) -> Result<OidcIdentity> {
         let header = decode_header(token).context("OIDC JWT header")?;
-        let kid = header
-            .kid
-            .ok_or_else(|| anyhow!("OIDC JWT missing kid"))?;
+        let kid = header.kid.ok_or_else(|| anyhow!("OIDC JWT missing kid"))?;
 
         let (alg, key) = self.decoding_key(&kid).await?;
         let mut validation = Validation::new(alg);

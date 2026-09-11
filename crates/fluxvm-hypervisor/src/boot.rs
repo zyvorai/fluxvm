@@ -114,13 +114,13 @@ fn prepare_linux_raw(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> 
 
 #[cfg(target_os = "linux")]
 fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
+    use crate::ffi;
     use linux_loader::configurator::linux::LinuxBootConfigurator;
     use linux_loader::configurator::{BootConfigurator, BootParams};
     use linux_loader::loader::bootparam::boot_params;
     use linux_loader::loader::bzimage::BzImage;
     use linux_loader::loader::elf::Elf;
     use linux_loader::loader::{KernelLoader, KernelLoaderResult};
-    use crate::ffi;
     use std::fs::File;
     use vm_memory::{GuestAddress, GuestMemoryMmap, GuestRegionMmap, MmapRegion};
 
@@ -244,9 +244,8 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
 
     let zero_page = GuestAddress(memory::BOOT_PARAMS_ADDR);
     let boot_cfg = BootParams::new::<boot_params>(&params, zero_page);
-    LinuxBootConfigurator::write_bootparams::<GuestMemoryMmap<()>>(&boot_cfg, &gm).map_err(|e| {
-        FluxError::Boot(format!("write_bootparams: {e}"))
-    })?;
+    LinuxBootConfigurator::write_bootparams::<GuestMemoryMmap<()>>(&boot_cfg, &gm)
+        .map_err(|e| FluxError::Boot(format!("write_bootparams: {e}")))?;
     // 64-bit bzImage entry is kernel_load + 0x200; ELF uses kernel_load as entry.
     let entry_rip = if loader_result.setup_header.is_some() {
         loader_result.kernel_load.0 + 0x200
@@ -468,9 +467,8 @@ fn write_minimal_boot_params(mem: &mut GuestMemory, cfg: &VmConfig, initrd_len: 
 }
 
 fn prepare_windows(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
-    let mut notes = vec![
-        "Windows path: OVMF/CLOUDHV.fd + ACPI + virtio-pci (cloud-hypervisor SoT)".into(),
-    ];
+    let mut notes =
+        vec!["Windows path: OVMF/CLOUDHV.fd + ACPI + virtio-pci (cloud-hypervisor SoT)".into()];
 
     // CH-style: write ACPI early so firmware can find RSDP.
     match crate::acpi::write_tables(mem, cfg.cpus) {

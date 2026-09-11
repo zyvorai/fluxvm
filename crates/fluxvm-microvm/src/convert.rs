@@ -9,7 +9,10 @@ use futures::StreamExt;
 use kube::{
     Api, Client, Resource, ResourceExt,
     api::PostParams,
-    runtime::{controller::{Action, Controller}, watcher},
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
 };
 use std::{sync::Arc, time::Duration};
 
@@ -24,12 +27,18 @@ pub async fn run(client: Client) {
     let ctx = Arc::new(client);
     tracing::info!("starting DisposableVm → MicroVM conversion controller");
     Controller::new(api, watcher::Config::default())
-        .run(reconcile, |_o, e, _c| {
-            tracing::warn!(error = %e, "convert reconcile failed");
-            Action::requeue(Duration::from_secs(15))
-        }, ctx)
+        .run(
+            reconcile,
+            |_o, e, _c| {
+                tracing::warn!(error = %e, "convert reconcile failed");
+                Action::requeue(Duration::from_secs(15))
+            },
+            ctx,
+        )
         .for_each(|res| async move {
-            if let Err(e) = res { tracing::warn!(error = %e, "convert error"); }
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "convert error");
+            }
         })
         .await;
 }
@@ -87,29 +96,36 @@ mod tests {
     use fluxvm_kube::crd::DisposableVmSpec;
     #[test]
     fn copies_node_and_forces_persist() {
-        let mut dvm = DisposableVm::new("legacy", DisposableVmSpec {
-            node: Some("worker-1".into()),
-            backend: "qemu".into(),
-            image: "/img.qcow2".into(),
-            vcpus: 2,
-            memory_mib: 2048,
-            disk_size_gib: None,
-            network_mode: "none".into(),
-            bridge: None,
-            tap_name: None,
-            mac: None,
-            netns: false,
-            parent: None,
-            macvtap_mode: None,
-            storage: "default".into(),
-            ttl_seconds: Some(600),
-        });
+        let mut dvm = DisposableVm::new(
+            "legacy",
+            DisposableVmSpec {
+                node: Some("worker-1".into()),
+                backend: "qemu".into(),
+                image: "/img.qcow2".into(),
+                vcpus: 2,
+                memory_mib: 2048,
+                disk_size_gib: None,
+                network_mode: "none".into(),
+                bridge: None,
+                tap_name: None,
+                mac: None,
+                netns: false,
+                parent: None,
+                macvtap_mode: None,
+                storage: "default".into(),
+                ttl_seconds: Some(600),
+            },
+        );
         dvm.meta_mut().namespace = Some("default".into());
         let mvm = disposable_to_microvm(&dvm);
         assert_eq!(mvm.spec.node_name.as_deref(), Some("worker-1"));
         assert!(mvm.spec.persist);
         assert_eq!(mvm.spec.ttl_seconds, Some(600));
-        let anns = mvm.meta().annotations.as_ref().expect("converted annotations");
+        let anns = mvm
+            .meta()
+            .annotations
+            .as_ref()
+            .expect("converted annotations");
         assert!(!crate::policy::node_agent_should_drive(Some(anns)));
     }
 }

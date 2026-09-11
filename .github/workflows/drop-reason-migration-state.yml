@@ -38,7 +38,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libbpf-dev bpftool iproute2 libsystemd-dev libhivex-dev pkg-config
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang llvm libbpf-dev linux-tools-common linux-tools-generic iproute2 libsystemd-dev libhivex-dev pkg-config
       - name: Rust tests
         working-directory: fluxvm
         run: cargo test -p fluxvm-network -p fluxvm-intelligence -p fluxvm-api -p fluxvm-cli

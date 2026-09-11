@@ -424,9 +424,7 @@ impl Default for AuthConfig {
 impl AuthConfig {
     /// OIDC JWT path is enabled when both issuer and audience are set.
     pub fn oidc_enabled(&self) -> bool {
-        self.oidc_issuer
-            .as_ref()
-            .is_some_and(|s| !s.is_empty())
+        self.oidc_issuer.as_ref().is_some_and(|s| !s.is_empty())
             && self.oidc_audience.as_ref().is_some_and(|s| !s.is_empty())
     }
 

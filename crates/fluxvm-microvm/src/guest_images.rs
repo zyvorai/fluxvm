@@ -11,7 +11,10 @@ use futures::StreamExt;
 use kube::{
     Api, Client, ResourceExt,
     api::{Patch, PatchParams},
-    runtime::{controller::{Action, Controller}, watcher},
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
 };
 use std::{sync::Arc, time::Duration};
 

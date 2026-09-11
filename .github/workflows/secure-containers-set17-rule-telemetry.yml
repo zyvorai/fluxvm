@@ -34,16 +34,34 @@ jobs:
   dataplane:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt,clippy
-      - run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev bpftool iproute2
-      - run: cargo fmt --all -- --check
-      - run: cargo test --locked -p fluxvm-network
-      - run: cargo clippy --locked -p fluxvm-network -- -D warnings
-      - run: ./scripts/build-ebpf.sh /tmp/fluxvm-bpf
-      - run: test -s /tmp/fluxvm-bpf/fluxvm_tc.bpf.o && test -s /tmp/fluxvm-bpf/fluxvm_pod_ingress.bpf.o
+      - name: Install eBPF build deps
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic iproute2
+      - name: formatting
+        working-directory: fluxvm
+        run: cargo fmt --all -- --check
+      - name: fluxvm-network tests
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-network
+      - name: clippy
+        working-directory: fluxvm
+        run: cargo clippy --locked -p fluxvm-network -- -D warnings
+      - name: Build eBPF objects
+        working-directory: fluxvm
+        run: ./scripts/build-ebpf.sh /tmp/fluxvm-bpf
+      - name: Verify Set 17 objects
+        run: test -s /tmp/fluxvm-bpf/fluxvm_tc.bpf.o && test -s /tmp/fluxvm-bpf/fluxvm_pod_ingress.bpf.o
       - name: Probe kernel BPF availability
         run: |
           set -e
@@ -52,4 +70,6 @@ jobs:
             exit 0
           fi
           echo 'BPF verifier is available; object loading remains covered by the project smoke test on privileged lab runners.'
-      - run: bash -n scripts/test-networkpolicy-stateful-set17.sh
+      - name: Shell syntax
+        working-directory: fluxvm
+        run: bash -n scripts/test-networkpolicy-stateful-set17.sh

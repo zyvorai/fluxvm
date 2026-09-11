@@ -11,7 +11,13 @@ use crate::service;
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::Config;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, ffi::CString, os::fd::RawFd, os::unix::ffi::OsStrExt, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    ffi::CString,
+    os::fd::RawFd,
+    os::unix::ffi::OsStrExt,
+    path::{Path, PathBuf},
+};
 
 const BPF_OBJ_GET: libc::c_long = 7;
 const BPF_MAP_LOOKUP_AND_DELETE_ELEM: libc::c_long = 21;
@@ -64,30 +70,47 @@ struct BpfMapElemAttr {
 
 struct MapFd(RawFd);
 impl Drop for MapFd {
-    fn drop(&mut self) { unsafe { libc::close(self.0); } }
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.0);
+        }
+    }
 }
 
-pub fn drain_service_events(cfg: &Config, name: &str, max_events: usize) -> Result<HaEventDrainReport> {
+pub fn drain_service_events(
+    cfg: &Config,
+    name: &str,
+    max_events: usize,
+) -> Result<HaEventDrainReport> {
     let spec = service::get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
     let requested_sid = service::service_id(&spec.name);
     let service_names: HashMap<u32, String> = service::list(cfg)?
         .into_iter()
         .map(|spec| (service::service_id(&spec.name), spec.name))
         .collect();
-    let mut report = HaEventDrainReport { service: name.to_string(), ..Default::default() };
+    let mut report = HaEventDrainReport {
+        service: name.to_string(),
+        ..Default::default()
+    };
     let mut remaining = max_events.clamp(1, 65_536);
 
     // `fluxvm_haq` is shared by every service on an interface. Popping is
     // destructive, so every valid event must be dispatched to its owning
     // service journal even when this drain was triggered by another service.
     for map_dir in host_map_dirs(cfg) {
-        if remaining == 0 { break; }
+        if remaining == 0 {
+            break;
+        }
         let queue = map_dir.join("fluxvm_haq");
-        if !queue.exists() { continue; }
+        if !queue.exists() {
+            continue;
+        }
         report.queue_maps += 1;
         let fd = obj_get(&queue)?;
         while remaining > 0 {
-            let Some(raw) = pop_queue(fd.0)? else { break; };
+            let Some(raw) = pop_queue(fd.0)? else {
+                break;
+            };
             remaining -= 1;
             match parse_event(&raw) {
                 Ok(event) => {
@@ -96,8 +119,12 @@ pub fn drain_service_events(cfg: &Config, name: &str, max_events: usize) -> Resu
                         continue;
                     };
                     service::append_ha_delta_event(
-                        cfg, owner, event.operation, event.map,
-                        &event.key_hex, event.value_hex.as_deref(),
+                        cfg,
+                        owner,
+                        event.operation,
+                        event.map,
+                        &event.key_hex,
+                        event.value_hex.as_deref(),
                     )?;
                     if event.service_id == requested_sid {
                         report.drained += 1;
@@ -118,13 +145,19 @@ pub fn queue_drop_count(cfg: &Config, name: &str) -> Result<u64> {
     let mut total = 0u64;
     for map_dir in host_map_dirs(cfg) {
         let map = map_dir.join("fluxvm_hadrop");
-        if !map.exists() { continue; }
+        if !map.exists() {
+            continue;
+        }
         let out = std::process::Command::new("bpftool")
-            .args(["-j", "map", "lookup", "pinned"]).arg(&map)
-            .arg("key").arg("hex")
+            .args(["-j", "map", "lookup", "pinned"])
+            .arg(&map)
+            .arg("key")
+            .arg("hex")
             .args(sid.to_ne_bytes().iter().map(|b| format!("{b:02x}")))
             .output()?;
-        if !out.status.success() { continue; }
+        if !out.status.success() {
+            continue;
+        }
         let value: serde_json::Value = serde_json::from_slice(&out.stdout)?;
         if let Some(v) = value.get("value") {
             total = total.saturating_add(sum_percpu_u64(v)?);
@@ -140,37 +173,77 @@ fn sum_percpu_u64(value: &serde_json::Value) -> Result<u64> {
             let mut total = 0u64;
             for cpu in arr {
                 let bytes = json_bytes(cpu)?;
-                if bytes.len() >= 8 { total = total.saturating_add(u64::from_ne_bytes(bytes[..8].try_into().unwrap())); }
+                if bytes.len() >= 8 {
+                    total =
+                        total.saturating_add(u64::from_ne_bytes(bytes[..8].try_into().unwrap()));
+                }
             }
             return Ok(total);
         }
         let bytes = json_bytes(value)?;
-        if bytes.len() >= 8 { return Ok(u64::from_ne_bytes(bytes[..8].try_into().unwrap())); }
+        if bytes.len() >= 8 {
+            return Ok(u64::from_ne_bytes(bytes[..8].try_into().unwrap()));
+        }
     }
     Ok(0)
 }
 
 fn json_bytes(v: &serde_json::Value) -> Result<Vec<u8>> {
-    let arr = v.as_array().context("bpftool byte field must be an array")?;
-    arr.iter().map(|x| {
-        if let Some(n) = x.as_u64() { return u8::try_from(n).context("bpftool byte out of range"); }
-        let s = x.as_str().context("bpftool byte must be number or hex string")?.trim_start_matches("0x");
-        u8::from_str_radix(s, 16).context("invalid bpftool hex byte")
-    }).collect()
+    let arr = v
+        .as_array()
+        .context("bpftool byte field must be an array")?;
+    arr.iter()
+        .map(|x| {
+            if let Some(n) = x.as_u64() {
+                return u8::try_from(n).context("bpftool byte out of range");
+            }
+            let s = x
+                .as_str()
+                .context("bpftool byte must be number or hex string")?
+                .trim_start_matches("0x");
+            u8::from_str_radix(s, 16).context("invalid bpftool hex byte")
+        })
+        .collect()
 }
 
 fn host_map_dirs(cfg: &Config) -> Vec<PathBuf> {
-    cfg.sandbox.dataplane.service.north_south_interfaces.iter()
-        .map(|iface| cfg.sandbox.dataplane.pin_root.join("service-host").join(iface).join("maps"))
+    cfg.sandbox
+        .dataplane
+        .service
+        .north_south_interfaces
+        .iter()
+        .map(|iface| {
+            cfg.sandbox
+                .dataplane
+                .pin_root
+                .join("service-host")
+                .join(iface)
+                .join("maps")
+        })
         .filter(|p| p.is_dir())
         .collect()
 }
 
 fn obj_get(path: &Path) -> Result<MapFd> {
     let c = CString::new(path.as_os_str().as_bytes()).context("BPF pin path contains NUL")?;
-    let attr = BpfObjGetAttr { pathname: c.as_ptr() as u64, bpf_fd: 0, file_flags: 0, path_fd: 0 };
-    let fd = unsafe { libc::syscall(libc::SYS_bpf, BPF_OBJ_GET, &attr, std::mem::size_of::<BpfObjGetAttr>()) };
-    if fd < 0 { return Err(std::io::Error::last_os_error()).with_context(|| format!("BPF_OBJ_GET {}", path.display())); }
+    let attr = BpfObjGetAttr {
+        pathname: c.as_ptr() as u64,
+        bpf_fd: 0,
+        file_flags: 0,
+        path_fd: 0,
+    };
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_bpf,
+            BPF_OBJ_GET,
+            &attr,
+            std::mem::size_of::<BpfObjGetAttr>(),
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("BPF_OBJ_GET {}", path.display()));
+    }
     Ok(MapFd(fd as RawFd))
 }
 
@@ -191,9 +264,13 @@ fn pop_queue(fd: RawFd) -> Result<Option<[u8; EVENT_SIZE]>> {
             std::mem::size_of::<BpfMapElemAttr>(),
         )
     };
-    if rc == 0 { return Ok(Some(value)); }
+    if rc == 0 {
+        return Ok(Some(value));
+    }
     let err = std::io::Error::last_os_error();
-    if err.raw_os_error() == Some(libc::ENOENT) { return Ok(None); }
+    if err.raw_os_error() == Some(libc::ENOENT) {
+        return Ok(None);
+    }
     Err(err).context("BPF_MAP_LOOKUP_AND_DELETE_ELEM fluxvm_haq")
 }
 
@@ -225,15 +302,22 @@ fn parse_event(raw: &[u8; EVENT_SIZE]) -> Result<ParsedEvent> {
         map,
         key_hex: encode_hex(key),
         value_hex: if matches!(op, service::HaDeltaOperation::Upsert) {
-            if value_len == 0 { bail!("HA upsert event has no value"); }
+            if value_len == 0 {
+                bail!("HA upsert event has no value");
+            }
             Some(encode_hex(value))
-        } else { None },
+        } else {
+            None
+        },
     })
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes { use std::fmt::Write as _; let _ = write!(out, "{b:02x}"); }
+    for b in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
     out
 }
 
@@ -245,10 +329,15 @@ mod tests {
     fn parses_128_byte_fct4_event() {
         let mut raw = [0u8; EVENT_SIZE];
         raw[8..12].copy_from_slice(&42u32.to_ne_bytes());
-        raw[16] = OP_UPSERT; raw[17] = MAP_FCT4; raw[18] = 4; raw[19] = 6;
-        raw[20] = 16; raw[21] = 24;
-        raw[EVENT_HEADER..EVENT_HEADER+16].copy_from_slice(&[1u8;16]);
-        raw[EVENT_HEADER+EVENT_KEY_MAX..EVENT_HEADER+EVENT_KEY_MAX+24].copy_from_slice(&[2u8;24]);
+        raw[16] = OP_UPSERT;
+        raw[17] = MAP_FCT4;
+        raw[18] = 4;
+        raw[19] = 6;
+        raw[20] = 16;
+        raw[21] = 24;
+        raw[EVENT_HEADER..EVENT_HEADER + 16].copy_from_slice(&[1u8; 16]);
+        raw[EVENT_HEADER + EVENT_KEY_MAX..EVENT_HEADER + EVENT_KEY_MAX + 24]
+            .copy_from_slice(&[2u8; 24]);
         let e = parse_event(&raw).unwrap();
         assert_eq!(e.service_id, 42);
         assert_eq!(e.map, "fluxvm_fct4");
