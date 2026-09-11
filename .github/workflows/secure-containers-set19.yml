@@ -1,0 +1,31 @@
+name: secure-containers-set19
+on:
+  pull_request:
+    paths:
+      - "bpf/**"
+      - "crates/fluxvm-network/**"
+      - "crates/fluxvm-container-*/**"
+      - "tools/fluxvm-policy-observer/**"
+      - "controllers/fluxvm-networkpolicy-controller/**"
+      - "scripts/**"
+      - "docs/**"
+jobs:
+  rust-bpf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: {components: "rustfmt,clippy"}
+      - run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev bpftool linux-libc-dev
+      - run: cargo fmt --all -- --check
+      - run: cargo test --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim
+      - run: cargo clippy --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim -- -D warnings
+      - run: scripts/build-ebpf.sh
+      - run: scripts/build-ebpf-guest.sh
+  controller:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: "1.23"}
+      - run: cd controllers/fluxvm-networkpolicy-controller && go test -count=1 ./... && go test -race -count=1 ./... && go vet ./...

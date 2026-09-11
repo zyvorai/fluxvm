@@ -57,8 +57,8 @@ use containerd_shim_protos::{
     ttrpc::{self, r#async::TtrpcContext},
 };
 use fluxvm_container_protocol::{
-    ContainerIo, ContainerRequest, ContainerResponse, ContainerStats, ContainerStatus,
-    IoStreamAttach, IoStreamKind, ResourceLimits,
+    ContainerIo, ContainerNetworkPolicy, ContainerNetworkRule, ContainerRequest, ContainerResponse,
+    ContainerStats, ContainerStatus, IoStreamAttach, IoStreamKind, ResourceLimits,
 };
 use fluxvm_core::model::{VmRecord, VmStatus};
 use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
@@ -115,6 +115,31 @@ struct RuntimeConfig {
     vfio_require_iommu_group: bool,
     guest_device_allow: Vec<String>,
     device_unplug_timeout_secs: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+struct PodPolicyWire {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(default)]
+    default_deny: bool,
+    #[serde(default)]
+    audit_mode: bool,
+    #[serde(default)]
+    allow_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    deny_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    egress_isolated: bool,
+    #[serde(default)]
+    ingress_isolated: bool,
+    #[serde(default)]
+    rules: Vec<PodRuleWire>,
+}
+#[derive(Clone, Debug, Deserialize)]
+struct PodRuleWire {
+    direction: String,
+    cidr: String,
 }
 
 impl Default for RuntimeConfig {
@@ -2597,6 +2622,97 @@ impl Service {
         tokio::time::sleep(Duration::from_millis(75)).await;
     }
 
+    async fn guest_network_policy(
+        &self,
+        vm: &VmRecord,
+    ) -> AnyResult<Option<ContainerNetworkPolicy>> {
+        let url = format!(
+            "{}/v1/vms/{}/network/pod-policy",
+            self.cfg.api_url.trim_end_matches('/'),
+            vm.id
+        );
+        let mut req = self.http.get(url);
+        if let Some(token) = &self.cfg.api_token {
+            req = req.bearer_auth(token);
+        }
+        let response = req
+            .send()
+            .await
+            .context("fetching Pod policy for guest mirror")?;
+        if !response.status().is_success() {
+            bail!("Pod-policy GET returned {}", response.status());
+        }
+        let Some(p) = response.json::<Option<PodPolicyWire>>().await? else {
+            return Ok(Some(ContainerNetworkPolicy {
+                default_allow: true,
+                audit_mode: false,
+                allow_addresses: Vec::new(),
+                deny_addresses: Vec::new(),
+                schema_version: 2,
+                ingress_isolated: false,
+                egress_isolated: false,
+                rules: Vec::new(),
+            }));
+        };
+        let mut rules = Vec::new();
+        for r in p.rules {
+            if !rules
+                .iter()
+                .any(|x: &ContainerNetworkRule| x.direction == r.direction && x.cidr == r.cidr)
+            {
+                rules.push(ContainerNetworkRule {
+                    direction: r.direction,
+                    cidr: r.cidr,
+                });
+            }
+        }
+        Ok(Some(ContainerNetworkPolicy {
+            default_allow: !p.default_deny,
+            audit_mode: p.audit_mode,
+            allow_addresses: p.allow_addresses,
+            deny_addresses: p.deny_addresses,
+            schema_version: p.schema_version,
+            ingress_isolated: p.ingress_isolated,
+            egress_isolated: p.egress_isolated,
+            rules,
+        }))
+    }
+
+    fn spawn_network_policy_watch(&self, vm: VmRecord, id: String) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let mut last: Option<ContainerNetworkPolicy> = None;
+            loop {
+                if !service.tasks.read().await.contains_key(&id) {
+                    break;
+                }
+                match service.guest_network_policy(&vm).await {
+                    Ok(Some(policy)) if last.as_ref() != Some(&policy) => {
+                        match service
+                            .call_agent_direct(
+                                &vm,
+                                ContainerRequest::UpdateNetworkPolicy {
+                                    id: id.clone(),
+                                    policy: policy.clone(),
+                                },
+                            )
+                            .await
+                        {
+                            Ok(ContainerResponse::NetworkPolicyUpdated) => last = Some(policy),
+                            Ok(other) => {
+                                warn!("unexpected guest network-policy response: {other:?}")
+                            }
+                            Err(e) => warn!("guest network-policy sync failed for {id}: {e:#}"),
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!("Pod-policy mirror fetch failed for {id}: {e:#}"),
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        });
+    }
+
     async fn call_agent_direct(
         &self,
         vm: &VmRecord,
@@ -2877,6 +2993,9 @@ impl Task for Service {
             };
         let is_sandbox = req.id == self.group;
         let share_process_namespace = config_requests_shared_pid_ns(&config_json);
+        // Set 19: fetch the current host Pod policy before Create. Failure is
+        // fail-closed because None keeps Set 8S's deny-non-loopback default.
+        let guest_network_policy = self.guest_network_policy(&vm).await.unwrap_or(None);
         let response = match self
             .call_agent(
                 &vm,
@@ -2886,13 +3005,8 @@ impl Task for Service {
                     io,
                     is_sandbox,
                     share_process_namespace,
-                    // Set 8S: not yet wired to fetch the Pod's Set 6S
-                    // network policy and mirror it per-container (see
-                    // docs/secure-containers-set8s.md) -- every container
-                    // still gets Set 8S's fail-closed-by-default enforcement
-                    // attached, just with an empty (deny-non-loopback)
-                    // policy until that wiring lands.
-                    network_policy: None,
+                    // FLUXVM_SECURE_CONTAINERS_SET19: initial guest mirror.
+                    network_policy: guest_network_policy,
                 },
             )
             .await
@@ -2967,6 +3081,7 @@ impl Task for Service {
         );
         self.persist_runtime_state().await.map_err(rpc_other)?;
         self.spawn_oom_watch(vm.clone(), req.id.clone());
+        self.spawn_network_policy_watch(vm.clone(), req.id.clone());
         self.send_event(TaskCreate {
             container_id: req.id.clone(),
             bundle: req.bundle.clone(),

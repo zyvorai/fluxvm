@@ -353,44 +353,91 @@ static __always_inline int parse_ports4(
     return 0;
 }
 
-// v3 intentionally supports direct TCP/UDP after the IPv6 base header.
-// Extension-header walking is not verifier-portable across the minimum
-// kernel set we target. With an L4 allowlist enabled, such packets fail
-// closed; L3-only IPv6 CIDR policy still works normally.
-static __always_inline int parse_ports6(
-    struct ipv6hdr *ip6,
-    void *data_end,
-    __u16 *sport,
-    __u16 *dport)
+/* FLUXVM_SECURE_CONTAINERS_SET19: verifier-bounded IPv6 extension walk. */
+#define FLUXVM_IPV6_MAX_EXT 6
+struct fluxvm_ipv6_opt_min { __u8 nexthdr; __u8 hdrlen; };
+struct fluxvm_ipv6_frag_min { __u8 nexthdr; __u8 reserved; __be16 frag_off; __be32 identification; };
+struct fluxvm_ipv6_l4_info {
+    __u8 protocol;
+    __u8 fragmented;
+    __u8 non_first_fragment;
+    __u8 parsed_ports;
+    __u16 offset;
+    __u16 sport;
+    __u16 dport;
+};
+
+static __always_inline int fluxvm_parse_ipv6_l4(struct ipv6hdr *ip6, void *data_end,
+                                                struct fluxvm_ipv6_l4_info *info)
 {
-    void *l4 = (void *)(ip6 + 1);
-    if (ip6->nexthdr == IPPROTO_TCP) {
-        struct tcphdr *tcp = l4;
-        if ((void *)(tcp + 1) > data_end)
-            return -1;
-        *sport = bpf_ntohs(tcp->source);
-        *dport = bpf_ntohs(tcp->dest);
-        return 1;
+    __u32 off = sizeof(*ip6);
+    __u8 next = ip6->nexthdr;
+    __builtin_memset(info, 0, sizeof(*info));
+#pragma unroll
+    for (int i = 0; i < FLUXVM_IPV6_MAX_EXT; i++) {
+        if (next == 0 || next == 43 || next == 60) {
+            struct fluxvm_ipv6_opt_min *h = (void *)ip6 + off;
+            if ((void *)(h + 1) > data_end) return -1;
+            __u32 len = ((__u32)h->hdrlen + 1u) * 8u;
+            if (len < 8 || off + len > 512 || (void *)ip6 + off + len > data_end) return -1;
+            next = h->nexthdr; off += len; continue;
+        }
+        if (next == 44) {
+            struct fluxvm_ipv6_frag_min *h = (void *)ip6 + off;
+            if ((void *)(h + 1) > data_end) return -1;
+            __u16 frag = bpf_ntohs(h->frag_off);
+            info->fragmented = 1;
+            next = h->nexthdr; off += 8;
+            if (frag & 0xfff8) { info->non_first_fragment = 1; break; }
+            continue;
+        }
+        if (next == 51) {
+            struct fluxvm_ipv6_opt_min *h = (void *)ip6 + off;
+            if ((void *)(h + 1) > data_end) return -1;
+            __u32 len = ((__u32)h->hdrlen + 2u) * 4u;
+            if (len < 8 || off + len > 512 || (void *)ip6 + off + len > data_end) return -1;
+            next = h->nexthdr; off += len; continue;
+        }
+        break;
     }
-    if (ip6->nexthdr == IPPROTO_UDP) {
-        struct udphdr *udp = l4;
-        if ((void *)(udp + 1) > data_end)
-            return -1;
-        *sport = bpf_ntohs(udp->source);
-        *dport = bpf_ntohs(udp->dest);
-        return 1;
+    info->protocol = next;
+    info->offset = (__u16)off;
+    if (info->non_first_fragment || next == 50 || next == 59) return 0;
+    void *l4 = (void *)ip6 + off;
+    if (next == IPPROTO_TCP) {
+        struct tcphdr *tcp = l4; if ((void *)(tcp + 1) > data_end) return -1;
+        info->sport=bpf_ntohs(tcp->source); info->dport=bpf_ntohs(tcp->dest); info->parsed_ports=1;
+    } else if (next == IPPROTO_UDP) {
+        struct udphdr *udp = l4; if ((void *)(udp + 1) > data_end) return -1;
+        info->sport=bpf_ntohs(udp->source); info->dport=bpf_ntohs(udp->dest); info->parsed_ports=1;
+    } else if (next == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp=l4; if ((void *)(sctp + 1) > data_end) return -1;
+        info->sport=bpf_ntohs(sctp->source); info->dport=bpf_ntohs(sctp->dest); info->parsed_ports=1;
     }
-    if (ip6->nexthdr == IPPROTO_SCTP) {
-        struct fluxvm_sctphdr_min *sctp = l4;
-        if ((void *)(sctp + 1) > data_end)
-            return -1;
-        *sport = bpf_ntohs(sctp->source);
-        *dport = bpf_ntohs(sctp->dest);
-        return 1;
-    }
-    *sport = 0;
-    *dport = 0;
     return 0;
+}
+
+static __always_inline int fluxvm_ipv6_new_flow(struct ipv6hdr *ip6, void *data_end,
+                                                 const struct fluxvm_ipv6_l4_info *info)
+{
+    if (info->fragmented) return 1;
+    void *l4 = (void *)ip6 + info->offset;
+    if (info->protocol == IPPROTO_TCP) {
+        struct tcphdr *tcp=l4; if ((void *)(tcp+1)>data_end) return 1; return tcp->syn && !tcp->ack;
+    }
+    if (info->protocol == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp=l4; if ((void *)(sctp+1)>data_end) return 1; return sctp->vtag == 0;
+    }
+    return 0;
+}
+
+static __always_inline int fluxvm_ipv6_ndp(struct ipv6hdr *ip6, void *data_end,
+                                            const struct fluxvm_ipv6_l4_info *info)
+{
+    if (info->protocol != IPPROTO_ICMPV6 || info->non_first_fragment) return 0;
+    struct icmp6hdr *icmp6=(void *)ip6 + info->offset;
+    if ((void *)(icmp6+1)>data_end) return 0;
+    return icmp6->icmp6_type==133 || icmp6->icmp6_type==134 || icmp6->icmp6_type==135 || icmp6->icmp6_type==136;
 }
 
 static __always_inline int is_dhcp4(__u8 protocol, __u16 sport, __u16 dport)
@@ -1038,146 +1085,63 @@ static __always_inline int handle_ipv4(
 }
 
 static __always_inline int handle_ipv6(
-    struct __sk_buff *skb,
-    struct iface_config *cfg,
-    void *data,
-    void *data_end)
+    struct __sk_buff *skb, struct iface_config *cfg, void *data, void *data_end)
 {
-    struct ethhdr *eth = data;
-    struct ipv6hdr *ip6 = (void *)(eth + 1);
-    if ((void *)(ip6 + 1) > data_end)
-        return TC_ACT_SHOT;
-
-    __u16 sport = 0;
-    __u16 dport = 0;
-    __u32 sample = cfg->sample_rate & 0x7fffffffu;
-    __u32 audit = cfg->sample_rate >> 31;
-    int parsed_l4 = parse_ports6(ip6, data_end, &sport, &dport);
-    if (parsed_l4 < 0) {
-        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
-        record_reason6(skb, cfg->identity, ip6, 0, 0,
-                       FLUXVM_REASON_MALFORMED_L4, FLUXVM_REASON_ACTION_DROP);
+    struct ethhdr *eth=data; struct ipv6hdr *ip6=(void *)(eth+1);
+    if ((void *)(ip6+1)>data_end) return TC_ACT_SHOT;
+    struct fluxvm_ipv6_l4_info li={};
+    __u32 sample=cfg->sample_rate & 0x7fffffffu, audit=cfg->sample_rate >> 31;
+    if (fluxvm_parse_ipv6_l4(ip6,data_end,&li)<0) {
+        count(cfg->identity,FLUXVM_VERDICT_DROP,skb->len);
+        record_reason_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,0,0,ip6->nexthdr,FLUXVM_REASON_MALFORMED_L4,FLUXVM_REASON_ACTION_DROP);
         return TC_ACT_SHOT;
     }
-
-    // NDP and DHCPv6 remain bootstrap-exempt so address maintenance survives
-    // source quiesce and destination restore.
-    if (is_ipv6_ndp(ip6, data_end) || is_dhcp6(ip6->nexthdr, sport, dport)) {
-        count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
-        record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_ALLOW, sample);
+    __u16 sport=li.sport,dport=li.dport; __u8 proto=li.protocol;
+    if (fluxvm_ipv6_ndp(ip6,data_end,&li) || is_dhcp6(proto,sport,dport)) {
+        count(cfg->identity,FLUXVM_VERDICT_ALLOW,skb->len);
+        record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,FLUXVM_VERDICT_ALLOW,sample);
         return TC_ACT_OK;
     }
-
-    struct flow_key ctkey = {
-        .identity = cfg->identity,
-        .sport = sport,
-        .dport = dport,
-        .protocol = ip6->nexthdr,
-        .verdict = 0,
-        .family = FLUXVM_AF_INET6,
-        .pad = 0,
-    };
-    __builtin_memcpy(ctkey.src, ip6->saddr.in6_u.u6_addr8, 16);
-    __builtin_memcpy(ctkey.dst, ip6->daddr.in6_u.u6_addr8, 16);
-    if (!transport_opens_new_flow6(ip6, data_end) && ct_hit(&ctkey)) {
-        if (!rate_allowed(cfg, skb->len)) {
-            record_reason6(skb, cfg->identity, ip6, sport, dport,
-                           FLUXVM_REASON_RATE_LIMIT,
-                           audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
-            if (audit) {
-                count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
-                record_flow6(skb, cfg->identity, ip6, sport, dport,
-                             FLUXVM_VERDICT_DROP, sample);
-                return TC_ACT_OK;
+    struct flow_key ctkey={.identity=cfg->identity,.sport=sport,.dport=dport,.protocol=proto,.family=FLUXVM_AF_INET6};
+    __builtin_memcpy(ctkey.src,ip6->saddr.in6_u.u6_addr8,16); __builtin_memcpy(ctkey.dst,ip6->daddr.in6_u.u6_addr8,16);
+    if (!li.fragmented && !fluxvm_ipv6_new_flow(ip6,data_end,&li) && ct_hit(&ctkey)) {
+        if (!rate_allowed(cfg,skb->len)) {
+            record_reason_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,FLUXVM_REASON_RATE_LIMIT,audit?FLUXVM_REASON_ACTION_AUDIT:FLUXVM_REASON_ACTION_DROP);
+            if (!audit) {
+                count(cfg->identity,FLUXVM_VERDICT_DROP,skb->len);
+                record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,FLUXVM_VERDICT_DROP,sample);
+                return TC_ACT_SHOT;
             }
-            count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
-            record_flow6(skb, cfg->identity, ip6, sport, dport,
-                         FLUXVM_VERDICT_DROP, sample);
-            return TC_ACT_SHOT;
         }
-        count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
-        record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_ALLOW, sample);
+        count(cfg->identity,FLUXVM_VERDICT_ALLOW,skb->len);
+        record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,FLUXVM_VERDICT_ALLOW,sample); return TC_ACT_OK;
+    }
+    __u32 reason=migration_block_reason(cfg->identity);
+    if (reason!=FLUXVM_REASON_NONE) { count(cfg->identity,FLUXVM_VERDICT_DROP,skb->len); record_reason_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,reason,FLUXVM_REASON_ACTION_DROP); return TC_ACT_SHOT; }
+    if (any_deny6(skb->ifindex,cfg->identity,&ip6->daddr)) reason=FLUXVM_REASON_EXPLICIT_CIDR_DENY;
+    int has_policy=cfg->enforce_cidr || cfg->enforce_l4;
+    int allowed=reason==FLUXVM_REASON_NONE && (has_policy ? 1 : cfg->default_allow!=0);
+    if (!has_policy && !allowed && reason==FLUXVM_REASON_NONE) reason=FLUXVM_REASON_DEFAULT_DENY;
+    if (allowed && cfg->allow_icmp && proto==IPPROTO_ICMPV6) {
+        if (!li.fragmented) ct_learn(&ctkey);
+        count(cfg->identity,FLUXVM_VERDICT_ALLOW,skb->len);
+        record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,FLUXVM_VERDICT_ALLOW,sample);
         return TC_ACT_OK;
     }
-    __u32 migration_reason = migration_block_reason(cfg->identity);
-    if (migration_reason != FLUXVM_REASON_NONE) {
-        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
-        record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_DROP, sample);
-        record_reason6(skb, cfg->identity, ip6, sport, dport,
-                       migration_reason, FLUXVM_REASON_ACTION_DROP);
-        return TC_ACT_SHOT;
-    }
-
-    if (any_deny6(skb->ifindex, cfg->identity, &ip6->daddr)) {
-        record_reason6(skb, cfg->identity, ip6, sport, dport,
-                       FLUXVM_REASON_EXPLICIT_CIDR_DENY,
-                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
-        if (audit) {
-            count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
-            record_flow6(skb, cfg->identity, ip6, sport, dport,
-                         FLUXVM_VERDICT_DROP, sample);
-            return TC_ACT_OK;
-        }
-        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
-        record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_DROP, sample);
-        return TC_ACT_SHOT;
-    }
-    if (cfg->allow_icmp && ip6->nexthdr == IPPROTO_ICMPV6) {
-        count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
-        record_flow6(skb, cfg->identity, ip6, sport, dport,
-                     FLUXVM_VERDICT_ALLOW, sample);
-        ct_learn(&ctkey);
-        return TC_ACT_OK;
-    }
-    int has_policy = cfg->enforce_cidr || cfg->enforce_l4;
-    int allowed = has_policy ? 1 : (cfg->default_allow != 0);
-    __u32 deny_reason = (!has_policy && !allowed)
-        ? FLUXVM_REASON_DEFAULT_DENY : FLUXVM_REASON_NONE;
-    if (cfg->enforce_cidr &&
-        !any_cidr6(skb->ifindex, cfg->identity, &ip6->daddr)) {
-        allowed = 0;
-        deny_reason = FLUXVM_REASON_CIDR_MISS;
-    }
-    if (allowed && cfg->enforce_l4 &&
-        !(parsed_l4 > 0 && any_l4(skb->ifindex, cfg->identity, ip6->nexthdr, dport))) {
-        allowed = 0;
-        deny_reason = FLUXVM_REASON_L4_MISS;
-    }
+    if (allowed && cfg->enforce_cidr && !any_cidr6(skb->ifindex,cfg->identity,&ip6->daddr)) { allowed=0; reason=FLUXVM_REASON_CIDR_MISS; }
+    if (allowed && cfg->enforce_l4 && !any_l4(skb->ifindex,cfg->identity,proto,dport)) { allowed=0; reason=FLUXVM_REASON_L4_MISS; }
     if (cfg->pod_id && allowed) {
-        int pod_verdict = fluxvm_pod_policy_verdict6_tuple(
-            cfg->pod_id, FLUXVM_POD_DIR_EGRESS,
-            ip6->daddr.in6_u.u6_addr8, ip6->nexthdr, dport);
-        if (pod_verdict == FLUXVM_POD_VERDICT_DENY) {
-            allowed = 0;
-            deny_reason = FLUXVM_REASON_POD_POLICY_DENY;
-        } else if (pod_verdict == FLUXVM_POD_VERDICT_AUDIT) {
-            record_reason6(skb, cfg->identity, ip6, sport, dport,
-                           FLUXVM_REASON_POD_POLICY_DENY,
-                           FLUXVM_REASON_ACTION_AUDIT);
-        }
+        int pv=fluxvm_pod_policy_verdict6_tuple(cfg->pod_id,FLUXVM_POD_DIR_EGRESS,ip6->daddr.in6_u.u6_addr8,proto,dport);
+        if (pv==FLUXVM_POD_VERDICT_DENY) { allowed=0; reason=FLUXVM_REASON_POD_POLICY_DENY; }
+        else if (pv==FLUXVM_POD_VERDICT_AUDIT) record_reason_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,FLUXVM_REASON_POD_POLICY_DENY,FLUXVM_REASON_ACTION_AUDIT);
     }
-    if (allowed && !rate_allowed(cfg, skb->len)) {
-        allowed = 0;
-        deny_reason = FLUXVM_REASON_RATE_LIMIT;
-    }
-    if (!allowed) {
-        record_reason6(skb, cfg->identity, ip6, sport, dport,
-                       deny_reason,
-                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
-    }
-    if (!allowed && audit)
-        allowed = 1;
-    if (allowed)
-        ct_learn(&ctkey);
-
-    __u8 verdict = allowed ? FLUXVM_VERDICT_ALLOW : FLUXVM_VERDICT_DROP;
-    count(cfg->identity, verdict, skb->len);
-    record_flow6(skb, cfg->identity, ip6, sport, dport, verdict, sample);
-    return allowed ? TC_ACT_OK : TC_ACT_SHOT;
+    if (allowed && !rate_allowed(cfg,skb->len)) { allowed=0; reason=FLUXVM_REASON_RATE_LIMIT; }
+    if (!allowed) record_reason_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,reason,audit?FLUXVM_REASON_ACTION_AUDIT:FLUXVM_REASON_ACTION_DROP);
+    if (!allowed && audit) allowed=1;
+    if (allowed && !li.fragmented) ct_learn(&ctkey);
+    __u8 verdict=allowed?FLUXVM_VERDICT_ALLOW:FLUXVM_VERDICT_DROP;
+    count(cfg->identity,verdict,skb->len); record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ctkey.src,ctkey.dst,sport,dport,proto,verdict,sample);
+    return allowed?TC_ACT_OK:TC_ACT_SHOT;
 }
 
 SEC("tc")

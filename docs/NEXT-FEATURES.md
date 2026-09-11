@@ -1,14 +1,11 @@
 # Next features (ranked)
 
-Living backlog after Secure Containers Set 18 (EndpointSlice-aware Service
-VIP policy), Set 17 (rule-attributed NetworkPolicy telemetry) and Set 16
-(conntrack revocation safety + VM-level SCTP), plus Sentinel's operational
-tooling — Set 12E (GA certification / evidence gates), Set 13E (migration
-orchestrator), Set 14E (stateful upgrade manager), Set 15E (fleet rollout +
-canary controller), Set 16E (fleet drift & SLO guard), Set 17E (release
-admission / preflight) — and in-tree KVM
-FC/CH parity (P0–P2). Prefer closing proven gates over inventing new wire
-formats.
+Living backlog after Secure Containers Set 19 (GA completion candidate:
+schema-v10, `fluxvm_pridx`, IPv6 extension walk, guest policy mirror, Observer
+ops) plus Sets 16–18, and Sentinel's operational tooling — Set 12E (GA
+certification), Set 13E–17E (migrate/upgrade/fleet/drift/admission) — and
+in-tree KVM FC/CH parity (P0–P2). Prefer closing proven gates over inventing
+new wire formats.
 
 ## Sentinel / Secure Containers (highest leverage)
 
@@ -18,10 +15,10 @@ formats.
 | **S2** | Multi-node NetworkPolicy conformance | Single-node reconcile is proven; production needs Cilium + ≥1 other CNI, real Pod-to-Pod allow/deny | set14 #4, set13 |
 | **S3** | True per-direction counters + rule-hit identity | **Implemented by Set 17** with optional `fluxvm_prhit` (no schema-v8 ABI bump); live production scrape remains a gate | set14 #5, set15, set17 |
 | **S4** | EndpointSlice-aware Service VIP policy | **Implemented by Set 18** (EndpointSlice routing proof for opt-in ClusterIP mode); live k8s gate remains optional evidence | set14 #3, set18 |
-| **S5** | Indexed LPM/L4 (or verifier-budget raise) | 64-rule linear `fluxvm_prules` scan may become p99-costly | set14 #1 |
-| **S6** | IPv6 extension-header walking | Incomplete IPv6 L4 parse under verifier budget; also blocks SCTP behind IPv6 extension headers (set16) | set14 #2, set16 |
-| **S7** | Wire Set 8S guest cgroup policy from Pod Set 6S/14 | Containers fail-closed locally but do not inherit Pod policy content | PRODUCTION |
-| **S8** | Policy Observer prod sizing + Prometheus scrape | Observer is read-only; needs realistic VM/rule load + scrape wiring | set15 |
+| **S5** | Indexed LPM/L4 (or verifier-budget raise) | **Implemented by Set 19** via `fluxvm_pridx` candidate bitmap over the existing 64 `fluxvm_prules` slots (`fluxvm_prules` remains authoritative) | set14 #1, set19 |
+| **S6** | IPv6 extension-header walking | **Implemented by Set 19** (schema-v10 bounded walk in both TC directions; fragments never conntrack-learned) | set14 #2, set16, set19 |
+| **S7** | Wire Set 8S guest cgroup policy from Pod Set 6S/14 | **Implemented by Set 19** (create-time + live CIDR/direction mirror; host TC remains protocol/port SoT) | PRODUCTION, set19 |
+| **S8** | Policy Observer prod sizing + Prometheus scrape | **Partially by Set 19** (schema-v10 recognition, ServiceMonitor example, sizing model); real RSS/scrape evidence remains a lab gate | set15, set19 |
 | **S9** | Kata P0/P1 gates (OCI fixtures, Multus, hostPath broker, NOTIF_ADDFD, TTY churn, warm-pool claim) | RuntimeClass is not Kata-equivalent yet | secure-containers.md |
 | **S10** | Real multi-node fleet rollout run | `fluxvm-fleet` (set15e) is validated against a single loopback-simulated "node" via a local ssh shim; no run has exercised genuinely separate hosts, real SSH host-key trust, or a real multi-node canary/wave/rollback sequence | set15e |
 | **S11** | Migration orchestrator against a real attached VM | `fluxvm-migrate` (set13e) was proven against the real `fluxvm dataplane migration-*` CLI surface and its own real failure/rollback path, but not yet against a VM with a live dataplane actually attached, so `migration-export`/`-restore` were never exercised end to end | set13e |
@@ -45,16 +42,14 @@ formats.
 
 ## Suggested next implementation set
 
-Set 18 closed S4 (EndpointSlice-backed Service VIP admission). Set 17 closed
-S3 with optional `fluxvm_prhit` (Set 15 shared-counter fallback retained).
-S1 and S2 remain open exactly as described above. Prefer a thin,
-evidence-first follow-up rather than another schema rewrite:
+Set 19 closed code-side S5–S7 and advanced S8; Sets 17–18 remain for S3–S4.
+**S1, S2, S9–S11** remain evidence/lab gates — prefer the fail-hard
+`scripts/secure-containers-ga-gate-set19.sh` runner over another schema rewrite:
 
-1. live CT-bypass + revocation TCP proof script against a real Secure
-   Containers Pod (S1);
-2. document + CI gate for multi-node NP smoke where lab allows (S2 starter);
-3. production Prometheus scrape of Set 17 directional/rule metrics (S3 live
-   gate / S8).
+1. live CT-bypass + revocation TCP proof against a real Secure Containers Pod (S1);
+2. multi-node NP smoke + second CNI where lab allows (S2);
+3. real RSS/scrape of Set 17/19 Observer metrics (S8 live);
+4. Kata / multi-host fleet / attached-migration proofs (S9–S11).
 
 Hypervisor work should stay Firecracker/CH-matched (no novel device models):
 prefer **H1** or **H3** over inventing P3 features.

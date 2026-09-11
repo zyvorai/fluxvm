@@ -33,10 +33,10 @@ use aya::{
 };
 use clap::Parser;
 use fluxvm_container_protocol::{
-    CgroupEvents, ContainerEnvelope, ContainerIo, ContainerNetworkPolicy, ContainerRequest,
-    ContainerResponse, ContainerStats, ContainerStatus, DEFAULT_CONTAINER_AGENT_PORT,
-    DEFAULT_CONTAINER_STREAM_PORT, IoStreamAck, IoStreamAttach, IoStreamKind, MAX_MESSAGE_BYTES,
-    ResourceLimits, SecurityStats, decode_line, encode_line,
+    CgroupEvents, ContainerEnvelope, ContainerIo, ContainerNetworkPolicy, ContainerNetworkRule,
+    ContainerRequest, ContainerResponse, ContainerStats, ContainerStatus,
+    DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, IoStreamAck, IoStreamAttach,
+    IoStreamKind, MAX_MESSAGE_BYTES, ResourceLimits, SecurityStats, decode_line, encode_line,
 };
 use serde_json::Value;
 use std::{
@@ -811,6 +811,11 @@ fn dispatch(request: ContainerRequest) -> Result<ContainerResponse> {
         ContainerRequest::ConfigureSandboxResources { resources } => {
             configure_sandbox_resources(&resources)?;
             Ok(ContainerResponse::SandboxResourcesConfigured)
+        }
+        ContainerRequest::UpdateNetworkPolicy { id, policy } => {
+            let path = container_cgroup(&id)?;
+            configure_container_policy(cgroup_id_for(&path)?, Some(&policy))?;
+            Ok(ContainerResponse::NetworkPolicyUpdated)
         }
         ContainerRequest::Create {
             id,
@@ -2986,6 +2991,10 @@ fn create_container_cgroup(id: &str, resources: &ResourceLimits) -> Result<PathB
 const FLUXVM_CPOL_ENABLED: u64 = 1 << 0;
 const FLUXVM_CPOL_DEFAULT_ALLOW: u64 = 1 << 1;
 const FLUXVM_CPOL_AUDIT: u64 = 1 << 2;
+const FLUXVM_CPOL_RICH: u64 = 1 << 3;
+const FLUXVM_CPOL_EGRESS_ISOLATED: u64 = 1 << 4;
+const FLUXVM_CPOL_INGRESS_ISOLATED: u64 = 1 << 5;
+const FLUXVM_MAX_CRULES: usize = 64;
 const FLUXVM_CPEER_ALLOW: u32 = 1;
 const FLUXVM_CPEER_DENY: u32 = 2;
 
@@ -3014,6 +3023,25 @@ struct Cid6Key {
     address: [u8; 16],
 }
 unsafe impl aya::Pod for Cid6Key {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CruleKey {
+    cgroup_id: u64,
+    slot: u32,
+    reserved: u32,
+}
+unsafe impl aya::Pod for CruleKey {}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CruleValue {
+    direction: u8,
+    family: u8,
+    prefix_len: u8,
+    reserved: u8,
+    address: [u8; 16],
+}
+unsafe impl aya::Pod for CruleValue {}
 
 struct GuestEbpfState {
     bpf: Ebpf,
@@ -3097,76 +3125,153 @@ fn attach_guest_network_policy(cgroup_path: &Path) -> Result<()> {
 /// Populates (or, with `policy: None`, installs an enabled-but-empty entry
 /// for) `cgroup_id`'s policy. Must run after a successful
 /// `attach_guest_network_policy` for the same container.
+fn parse_container_cidr(rule: &ContainerNetworkRule) -> Result<(u8, u8, [u8; 16])> {
+    let (ip, prefix) = rule
+        .cidr
+        .split_once('/')
+        .context("container policy CIDR needs /prefix")?;
+    let ip: IpAddr = ip.parse().context("invalid container policy IP")?;
+    let prefix: u8 = prefix.parse().context("invalid container policy prefix")?;
+    let mut addr = [0u8; 16];
+    match ip {
+        IpAddr::V4(v) => {
+            if (prefix > 32) {
+                bail!("IPv4 prefix >32")
+            };
+            addr[..4].copy_from_slice(&v.octets());
+            Ok((4, prefix, addr))
+        }
+        IpAddr::V6(v) => {
+            if (prefix > 128) {
+                bail!("IPv6 prefix >128")
+            };
+            addr = v.octets();
+            Ok((6, prefix, addr))
+        }
+    }
+}
+
 fn configure_container_policy(
     cgroup_id: u64,
     policy: Option<&ContainerNetworkPolicy>,
 ) -> Result<()> {
     let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
     let state = guard.as_mut().context("guest eBPF not attached yet")?;
-
     let mut flags = FLUXVM_CPOL_ENABLED;
+    let mut count = 0u32;
     if let Some(p) = policy {
         if p.default_allow {
-            flags |= FLUXVM_CPOL_DEFAULT_ALLOW;
-        }
+            flags |= FLUXVM_CPOL_DEFAULT_ALLOW
+        };
         if p.audit_mode {
-            flags |= FLUXVM_CPOL_AUDIT;
+            flags |= FLUXVM_CPOL_AUDIT
+        };
+        if p.schema_version >= 2 {
+            flags |= FLUXVM_CPOL_RICH;
+            if p.egress_isolated {
+                flags |= FLUXVM_CPOL_EGRESS_ISOLATED
+            };
+            if p.ingress_isolated {
+                flags |= FLUXVM_CPOL_INGRESS_ISOLATED
+            };
+            count = p.rules.len().min(FLUXVM_MAX_CRULES) as u32;
         }
     }
-
     {
-        let cpol_map = state
+        let map = state
             .bpf
             .map_mut("fluxvm_cpol")
             .context("fluxvm_cpol map not found")?;
-        let mut cpol: aya::maps::HashMap<_, u64, u64> = aya::maps::HashMap::try_from(cpol_map)?;
-        cpol.insert(cgroup_id, flags, 0)
-            .context("writing fluxvm_cpol entry")?;
+        let mut pol: aya::maps::HashMap<_, u64, u64> = aya::maps::HashMap::try_from(map)?;
+        pol.insert(cgroup_id, flags | ((count as u64) << 32), 0)?;
     }
-
+    if let Some(map) = state.bpf.map_mut("fluxvm_crules") {
+        let mut rules: aya::maps::HashMap<_, CruleKey, CruleValue> =
+            aya::maps::HashMap::try_from(map)?;
+        for slot in 0..FLUXVM_MAX_CRULES {
+            let _ = rules.remove(&CruleKey {
+                cgroup_id,
+                slot: slot as u32,
+                reserved: 0,
+            });
+        }
+        if let Some(p) = policy {
+            if p.schema_version >= 2 {
+                for (slot, r) in p.rules.iter().take(FLUXVM_MAX_CRULES).enumerate() {
+                    let direction = match r.direction.as_str() {
+                        "egress" => 1,
+                        "ingress" => 2,
+                        _ => bail!("invalid guest policy direction"),
+                    };
+                    let (family, prefix_len, address) = parse_container_cidr(r)?;
+                    rules.insert(
+                        CruleKey {
+                            cgroup_id,
+                            slot: slot as u32,
+                            reserved: 0,
+                        },
+                        CruleValue {
+                            direction,
+                            family,
+                            prefix_len,
+                            reserved: 0,
+                            address,
+                        },
+                        0,
+                    )?;
+                }
+            }
+        }
+    }
     let Some(policy) = policy else { return Ok(()) };
-
+    if policy.schema_version >= 2 {
+        return Ok(());
+    }
     {
-        let cid4_map = state
+        let map = state
             .bpf
             .map_mut("fluxvm_cid4")
             .context("fluxvm_cid4 map not found")?;
-        let mut cid4: aya::maps::HashMap<_, Cid4Key, u32> = aya::maps::HashMap::try_from(cid4_map)?;
-        for (addrs, verdict) in [
+        let mut m: aya::maps::HashMap<_, Cid4Key, u32> = aya::maps::HashMap::try_from(map)?;
+        for (addrs, v) in [
             (&policy.allow_addresses, FLUXVM_CPEER_ALLOW),
             (&policy.deny_addresses, FLUXVM_CPEER_DENY),
         ] {
             for addr in addrs {
                 if let IpAddr::V4(v4) = addr {
-                    let key = Cid4Key {
-                        cgroup_id,
-                        address: v4.octets(),
-                        reserved: 0,
-                    };
-                    cid4.insert(key, verdict, 0)
-                        .context("writing fluxvm_cid4 entry")?;
+                    m.insert(
+                        Cid4Key {
+                            cgroup_id,
+                            address: v4.octets(),
+                            reserved: 0,
+                        },
+                        v,
+                        0,
+                    )?;
                 }
             }
         }
     }
     {
-        let cid6_map = state
+        let map = state
             .bpf
             .map_mut("fluxvm_cid6")
             .context("fluxvm_cid6 map not found")?;
-        let mut cid6: aya::maps::HashMap<_, Cid6Key, u32> = aya::maps::HashMap::try_from(cid6_map)?;
-        for (addrs, verdict) in [
+        let mut m: aya::maps::HashMap<_, Cid6Key, u32> = aya::maps::HashMap::try_from(map)?;
+        for (addrs, v) in [
             (&policy.allow_addresses, FLUXVM_CPEER_ALLOW),
             (&policy.deny_addresses, FLUXVM_CPEER_DENY),
         ] {
             for addr in addrs {
                 if let IpAddr::V6(v6) = addr {
-                    let key = Cid6Key {
-                        cgroup_id,
-                        address: v6.octets(),
-                    };
-                    cid6.insert(key, verdict, 0)
-                        .context("writing fluxvm_cid6 entry")?;
+                    m.insert(
+                        Cid6Key {
+                            cgroup_id,
+                            address: v6.octets(),
+                        },
+                        v,
+                        0,
+                    )?;
                 }
             }
         }
@@ -3183,6 +3288,17 @@ fn forget_container_policy(cgroup_id: u64) {
     let mut guard = guest_ebpf_cell().lock().expect("guest eBPF poisoned");
     let Some(state) = guard.as_mut() else { return };
 
+    if let Some(map) = state.bpf.map_mut("fluxvm_crules") {
+        if let Ok(mut rules) = aya::maps::HashMap::<_, CruleKey, CruleValue>::try_from(map) {
+            for slot in 0..FLUXVM_MAX_CRULES {
+                let _ = rules.remove(&CruleKey {
+                    cgroup_id,
+                    slot: slot as u32,
+                    reserved: 0,
+                });
+            }
+        }
+    }
     if let Some(map) = state.bpf.map_mut("fluxvm_cpol") {
         if let Ok(mut cpol) = aya::maps::HashMap::<_, u64, u64>::try_from(map) {
             let _ = cpol.remove(&cgroup_id);

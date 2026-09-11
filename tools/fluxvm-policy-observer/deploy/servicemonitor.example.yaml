@@ -1,0 +1,14 @@
+# Optional Prometheus Operator integration; annotations on the DaemonSet already support vanilla Prometheus.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: fluxvm-policy-observer
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fluxvm-policy-observer
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s

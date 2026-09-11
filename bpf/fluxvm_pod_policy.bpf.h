@@ -156,6 +156,24 @@ struct {
     __type(key, __u32);
     __type(value, struct fluxvm_pod_rule);
 } fluxvm_prules SEC(".maps");
+\n/* FLUXVM_SECURE_CONTAINERS_SET19: 64-bit candidate bitmap. The existing
+ * rule slot remains the source of truth; this map only skips slots that
+ * cannot match direction/family/protocol, reducing prefix work and map
+ * lookups without changing rule semantics or rule-hit identity. */
+struct fluxvm_pod_rule_index_key {
+    __u32 pod_id;
+    __u8 direction;
+    __u8 family;
+    __u8 protocol; /* 0 is the wildcard-protocol bucket */
+    __u8 reserved;
+};
+_Static_assert(sizeof(struct fluxvm_pod_rule_index_key) == 8, "pod rule index key ABI");
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 512);
+    __type(key, struct fluxvm_pod_rule_index_key);
+    __type(value, __u64);
+} fluxvm_pridx SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -334,10 +352,23 @@ fluxvm_pod_policy_rich_verdict(
     if (count > FLUXVM_MAX_POD_RULE)
         count = FLUXVM_MAX_POD_RULE;
 
+    struct fluxvm_pod_rule_index_key ikey = {
+        .pod_id = pod_id, .direction = direction, .family = family,
+        .protocol = protocol, .reserved = 0,
+    };
+    __u64 candidates = 0;
+    __u64 *mask = bpf_map_lookup_elem(&fluxvm_pridx, &ikey);
+    if (mask) candidates |= *mask;
+    ikey.protocol = 0;
+    mask = bpf_map_lookup_elem(&fluxvm_pridx, &ikey);
+    if (mask) candidates |= *mask;
+
 #pragma clang loop unroll(disable)
     for (__u32 i = 0; i < FLUXVM_MAX_POD_RULE; i++) {
         if (i >= count)
             break;
+        if (!(candidates & (1ULL << i)))
+            continue;
         __u32 key = i;
         struct fluxvm_pod_rule *r = bpf_map_lookup_elem(&fluxvm_prules, &key);
         if (fluxvm_rule_matches(r, pod_id, direction, family, peer,
