@@ -101,8 +101,12 @@ pub const KVM_CAP_TSC_DEADLINE_TIMER: c_ulong = 72;
 pub const KVM_GET_VCPU_MMAP_SIZE: c_ulong = 0xae04;
 pub const KVM_CREATE_VCPU: c_ulong = 0xae41;
 pub const KVM_SET_USER_MEMORY_REGION: c_ulong = 0x4020_ae46;
+/// `_IO(KVMIO, 0x47)` — Intel hosts need a 3-page TSS region with irqchip.
+pub const KVM_SET_TSS_ADDR: c_ulong = 0xae47;
 pub const KVM_CREATE_IRQCHIP: c_ulong = 0xae60;
 pub const KVM_IRQ_LINE: c_ulong = 0x4008_ae61;
+/// `sizeof(struct kvm_irqfd)` == 32 — Firecracker wires COM1 via this (GSI 4).
+pub const KVM_IRQFD: c_ulong = 0x4020_ae76;
 /// `sizeof(struct kvm_pit_config)` == 64
 pub const KVM_CREATE_PIT2: c_ulong = 0x4040_ae77;
 pub const KVM_RUN: c_ulong = 0xae80;
@@ -110,6 +114,13 @@ pub const KVM_GET_REGS: c_ulong = 0x8090_ae81;
 pub const KVM_SET_REGS: c_ulong = 0x4090_ae82;
 pub const KVM_GET_SREGS: c_ulong = 0x8138_ae83;
 pub const KVM_SET_SREGS: c_ulong = 0x4138_ae84;
+/// Header-only `_IOW(KVMIO, 0x89, struct kvm_msrs)` — buffer holds `nmsrs` entries.
+pub const KVM_SET_MSRS: c_ulong = 0x4008_ae89;
+/// `sizeof(struct kvm_fpu)` == 416 (`_IOW(KVMIO, 0x8d, struct kvm_fpu)`).
+pub const KVM_SET_FPU: c_ulong = 0x41a0_ae8d;
+/// `sizeof(struct kvm_lapic_state)` == 0x400.
+pub const KVM_GET_LAPIC: c_ulong = 0x8400_ae8e;
+pub const KVM_SET_LAPIC: c_ulong = 0x4400_ae8f;
 /// `sizeof(struct kvm_cpuid2)` header only (8); buffer must hold `nent` entries.
 pub const KVM_GET_SUPPORTED_CPUID: c_ulong = 0xc008_ae05;
 pub const KVM_SET_CPUID2: c_ulong = 0x4008_ae90;

@@ -1,121 +1,135 @@
-# FluxVM Kubernetes NetworkPolicy Controller — Secure Containers Set 13
+# FluxVM Kubernetes NetworkPolicy Controller — Secure Containers Set 14
 
-A small, node-local control-plane bridge that turns Kubernetes **egress** `NetworkPolicy` selection into FluxVM Set 6S `PodNetworkPolicy` state.
+Set 14 upgrades Sentinel from Set 13's mostly address-oriented egress bridge to
+a **directional CIDR + L4 Kubernetes NetworkPolicy compiler** for FluxVM Secure
+Containers.
 
-Set 6S already provides the VM-edge eBPF mechanism and the API:
+The node-local controller still maps Kubernetes Pod UIDs to
+`VmRecord.request.pod_uid`, but it now emits Pod policy schema v2:
 
-```text
-POST /v1/vms/{id}/network/pod-policy
+```json
 {
+  "schema_version": 2,
   "default_deny": true,
   "audit_mode": false,
-  "allow_addresses": ["10.42.1.20", "fd00::20"],
-  "deny_addresses": []
+  "egress_isolated": true,
+  "ingress_isolated": true,
+  "rules": [
+    {"direction":"egress","cidr":"10.42.2.19/32","protocol":"TCP","port_start":443,"port_end":443},
+    {"direction":"ingress","cidr":"10.42.3.0/24","protocol":"TCP","port_start":8080,"port_end":8090}
+  ]
 }
 ```
 
-What was missing was the controller that continuously resolves Kubernetes selectors into the exact peer addresses that mechanism expects. Set 13 supplies that piece without modifying the containerd shim or the hot VM runtime path.
+Rules are ORed. Peer CIDR, protocol and port interval inside one rule are ANDed.
+An empty protocol with `0..0` ports means all protocols and ports. A protocol
+with `0..0` ports means all ports of that protocol.
 
-## Architecture
+## What Set 14 adds
 
-```text
-Kubernetes API
-   │
-   ├── Pods / Pod IPs / labels / nodeName
-   ├── Namespaces / labels
-   ├── Services / ClusterIPs (optional conservative mode)
-   └── networking.k8s.io/v1 NetworkPolicy
-            │
-            ▼
-fluxvm-networkpolicy-controller (one per node)
-   │  maps Pod UID to local FluxVM VM.request.pod_uid
-   │  compiles union of selected egress allow rules
-   │
-   └── FluxVM node API
-       GET    /v1/vms
-       GET    /v1/vms/{id}/network/pod-policy
-       POST   /v1/vms/{id}/network/pod-policy
-       DELETE /v1/vms/{id}/network/pod-policy
-                    │
-                    ▼
-             Set 6S VM-edge eBPF maps
-```
+- independent Kubernetes **Ingress** and **Egress** isolation;
+- selector resolution across Pods and Namespaces for both directions;
+- native IPv4/IPv6 CIDRs rather than expanding broad `ipBlock` ranges to known
+  addresses;
+- exact `ipBlock.except` subtraction into disjoint allowed prefixes;
+- TCP, UDP and SCTP;
+- numeric ports and inclusive `endPort` ranges;
+- named ingress ports resolved against the target Pod;
+- named egress ports resolved per selected destination Pod, keeping each
+  destination address bound to its own named-port number;
+- additive union across every NetworkPolicy selecting a Pod;
+- bounded `--max-rules` fail-closed compilation;
+- the optional conservative Service ClusterIP rule from Set 13;
+- rollout-safe legacy fields so an older Set 6S/13 node over-denies instead of
+  silently bypassing a directional Set 14 policy.
 
-The controller runs as a `hostNetwork` DaemonSet so `127.0.0.1` is the node's FluxVM API, filters target Pods by its own `spec.nodeName`, and still reads peer Pods cluster-wide so namespace/pod selectors resolve correctly.
+## Dataplane model
 
-## Security semantics
+Set 14 preserves Set 6S exact-address maps and the already-merged Set 13 exact
+peer+TCP/UDP-port maps. Pod policy schema v2 adds a bounded `fluxvm_prules` map.
+The existing VM-edge program enforces egress. A second `fluxvm_pod_ingress`
+classifier is attached to TC egress on the host-visible VM edge, which is
+host-to-guest traffic in the FluxVM topology.
 
-The compiler intentionally never turns a Kubernetes restriction into a broader FluxVM allow. The current Set 6S `PodNetworkPolicy` schema is address-only, so exact Kubernetes semantics are possible for selector-based destination peers and `/32` or `/128` `ipBlock` peers. Unsupported dimensions are handled as a stricter subset:
+The ingress program reuses the existing `fluxvm_ct` map. This keeps policy
+stateful in both directions: replies to an allowed guest-initiated flow pass a
+restrictive ingress policy, and replies to an allowed ingress-initiated flow
+pass a restrictive egress policy.
 
-- any egress rule with `ports` is **not** converted into an all-port allow; the rule contributes no addresses and is reported as unsupported;
-- broad `ipBlock` CIDRs are approximated only to currently known Pod/Service addresses inside the CIDR (respecting `except`); unknown external addresses remain denied;
-- ingress policy is not compiled in Set 13 because the current Pod policy contract does not encode direction;
-- if an isolated Pod's compiled address set exceeds `--max-addresses`, the controller applies deny-all and reports an error;
-- if compilation fails after the Pod is known to be egress-isolated, the returned safe policy is deny-all rather than a stale/wider allow;
-- if a Pod is no longer selected by any egress-isolating policy, an old FluxVM Pod policy is cleared;
-- if a VM's Pod UID disappears from the Kubernetes snapshot entirely, Set 13 leaves its existing policy in place rather than widening a potentially still-running stale VM during teardown.
+FluxVM-owned maps remain private to the VM and do not mutate Cilium-private
+maps. The extra TC egress filter uses preference `49153`, handle `2`; the
+existing VM-edge filter keeps its previous ownership slot.
 
-Kubernetes `NetworkPolicy` allow rules are additive, so multiple policies selecting the same Pod are unioned. An egress rule with no `to` and no `ports` allows all destinations and therefore produces `default_deny=false`.
+## Security behavior
 
-`--audit` is available as an operator-level controller flag, but audit mode is intentionally not the default because it is log-and-allow rather than enforcement. Set 13 deliberately does not provide Pod annotations that disable or downgrade policy: workload authors must not be able to bypass enforcement by editing their own Pod metadata.
+The compiler never widens an unsupported rule. Important fail-closed cases:
 
-## Service ClusterIPs
+- an unresolvable named port contributes no allow tuple;
+- named egress ports require selector-resolved destination Pods; an unrestricted
+  or `ipBlock` peer cannot safely supply a destination Pod's named port;
+- malformed CIDRs, invalid `except`, invalid port ranges and rule-limit overflow
+  cause a safe deny result;
+- a disappeared Kubernetes Pod UID does not trigger a teardown-time widening;
+- an isolated Pod that becomes unmanaged has generated policy cleared only when
+  the Pod is still present and is no longer selected by isolation policy.
 
-`--include-service-clusterips` is off by default. When enabled, a Service ClusterIP is added only if the Service has a selector, it resolves to at least one currently active Pod, and **every** currently active Pod selected by that Service is already an allowed peer. This avoids widening a narrow Pod selector through a broader Service selector. Services with manual EndpointSlices cannot be proven safe from Service selectors alone and are therefore not included by this mechanism.
+ARP, DHCPv4/DHCPv6 and IPv6 NDP are bootstrap-exempt at the VM edge. Direct
+IPv6 extension-header L4 walking is not added in this set; the final live
+conformance gate must include those corner cases.
 
 ## Build and test
 
-The controller has **zero non-standard-library Go dependencies**.
+The controller has no third-party Go module dependencies.
 
 ```bash
 cd controllers/fluxvm-networkpolicy-controller
+gofmt -w cmd internal
 go test ./...
 go test -race ./...
 go vet ./...
-CGO_ENABLED=0 go build ./cmd/fluxvm-networkpolicy-controller
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/fluxvm-networkpolicy-controller
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build ./cmd/fluxvm-networkpolicy-controller
 ```
 
-Or:
-
-```bash
-make test vet race build
-```
+The Set 14 release kit also supplies Rust/eBPF CI gates for the changed FluxVM
+network crate and both VM-edge BPF objects.
 
 ## Deploy
 
-Build/push the image, update the image reference in `deploy/daemonset.yaml`, then:
+Build/push the image and then:
 
 ```bash
 kubectl apply -k controllers/fluxvm-networkpolicy-controller/deploy
 ```
 
-If FluxVM requires bearer authentication, create a Secret from a token, mount it into the DaemonSet, and pass `--fluxvm-token-file`. The example Secret contains a placeholder only; never commit a real token.
-
-Health and observability are exposed on port 9090:
-
-- `/healthz` — process liveness;
-- `/readyz` — at least one recent successful reconcile;
-- `/metrics` — Prometheus text metrics for reconciles, API errors, managed Pods, applied/cleared policies and unsupported rule counts.
+The DaemonSet is non-privileged and uses `hostNetwork` only so the controller
+can reach the node-local FluxVM API at `127.0.0.1`. It needs read-only access to
+Pods, Namespaces, Services and NetworkPolicies. Kernel eBPF attachment remains
+the FluxVM daemon's responsibility, not the controller Pod's.
 
 ## Configuration
-
-Key flags/environment variables:
 
 | Flag | Environment | Default |
 |---|---|---|
 | `--node-name` | `NODE_NAME` | required |
 | `--interval` | `RECONCILE_INTERVAL` | `5s` |
-| `--fluxvm-url` | `FLUXVM_URL` | `http://127.0.0.1:7788` |
+| `--fluxvm-url` | `FLUXVM_URL` | `http://127.0.0.1:8080` |
 | `--fluxvm-token-file` | `FLUXVM_TOKEN_FILE` | empty |
-| `--max-addresses` | `MAX_ADDRESSES` | `12000` |
+| `--max-rules` | `MAX_RULES` | `512` |
+| `--max-addresses` | `MAX_ADDRESSES` | `12000` (legacy compatibility) |
 | `--include-service-clusterips` | `INCLUDE_SERVICE_CLUSTERIPS` | `false` |
 | `--audit` | `POLICY_AUDIT` | `false` |
 | `--metrics-listen` | `METRICS_LISTEN` | `:9090` |
 
-Kubernetes API URL/token/CA default to the standard in-cluster ServiceAccount environment and projected token paths. Both Kubernetes and FluxVM HTTPS clients verify TLS by default; insecure-skip flags are explicit opt-ins only.
+Kubernetes API URL/token/CA default to the standard in-cluster ServiceAccount
+values. Kubernetes and FluxVM HTTPS verify certificates by default; insecure
+skip is explicit opt-in only.
 
-## Deliberate Set 13 boundaries
+## Production gate
 
-This is not presented as full Kubernetes `NetworkPolicy` conformance. Address-only Set 6S policy cannot exactly encode L4 ports, named ports, ingress direction, arbitrary external CIDRs, `endPort`, SCTP-specific behavior, or policy semantics requiring EndpointSlice state. Set 13 reports these limitations and fails stricter where enforcement cannot be represented without widening access.
-
-The natural next protocol step is to extend FluxVM `PodNetworkPolicy` to direction + CIDR + L4 tuples and then have this controller compile the full Kubernetes model without those approximations.
+Set 14 materially closes the NetworkPolicy representation gaps from Set 13,
+but this source handoff does **not** claim live Kubernetes NetworkPolicy
+conformance. Before production enablement, run the provided live gate on a
+Linux KVM node with the real FluxVM TC objects, CNI, dual-stack traffic and
+policy transitions. See `docs/secure-containers-set14.md` and the release-kit
+`TEST_REPORT.md`.

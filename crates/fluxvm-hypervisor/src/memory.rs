@@ -8,9 +8,33 @@ use std::ptr::NonNull;
 
 pub const MMIO_WINDOW: u64 = 0xFEB0_0000;
 pub const KERNEL_LOAD_ADDR: u64 = 0x0020_0000;
+/// Linux zero-page / boot_params GPA (also Firecracker `ZERO_PAGE_START`).
 pub const BOOT_PARAMS_ADDR: u64 = 0x0000_7000;
 pub const INITRD_ADDR: u64 = 0x0400_0000;
 pub const GUEST_STACK: u64 = 0x0080_0000;
+
+// ---- x86_64 guest layout (match Firecracker / cloud-hypervisor) ----
+/// `hvm_start_info` for PVH (`Firecracker::PVH_INFO_START`).
+pub const PVH_INFO_START: u64 = 0x6000;
+/// PVH module list (`Firecracker::MODLIST_START`).
+pub const MODLIST_START: u64 = 0x6040;
+/// PVH memmap table (`Firecracker::MEMMAP_START`); overlaps zero-page GPA
+/// because the two boot paths are mutually exclusive.
+pub const MEMMAP_START: u64 = 0x7000;
+/// Start of high usable RAM.
+pub const HIMEM_START: u64 = 0x0010_0000;
+/// EBDA-ish system-data window start (MP table, etc.).
+pub const SYSTEM_MEM_START: u64 = 0x0009_fc00;
+/// RSDP placeholder address; system reserved runs `[SYSTEM_MEM_START, RSDP_ADDR)`.
+pub const RSDP_ADDR: u64 = 0x000e_0000;
+pub const SYSTEM_MEM_SIZE: u64 = RSDP_ADDR - SYSTEM_MEM_START;
+pub const IOAPIC_ADDR: u64 = 0xfec0_0000;
+/// PCIe ECAM window reserved in e820/memmap (Firecracker layout).
+pub const PCI_MMCONFIG_SIZE: u64 = 256 << 20;
+pub const PCI_MMCONFIG_START: u64 = IOAPIC_ADDR - PCI_MMCONFIG_SIZE;
+/// Three-page Intel VT-x quirk region (`Firecracker::KVM_TSS_ADDRESS`).
+/// Must sit outside guest RAM / MMIO slots; required with in-kernel irqchip.
+pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
 
 pub struct GuestMemory {
     ptr: NonNull<u8>,

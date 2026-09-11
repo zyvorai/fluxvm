@@ -6,21 +6,32 @@ on:
   pull_request:
     paths:
       - 'controllers/fluxvm-networkpolicy-controller/**'
-      - 'docs/secure-containers-set13.md'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'bpf/fluxvm_pod_ingress.bpf.c'
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'crates/fluxvm-network/src/dataplane.rs'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'scripts/build-ebpf.sh'
+      - 'docs/secure-containers-set14.md'
       - '.github/workflows/secure-containers-networkpolicy-controller.yml'
   push:
     branches: [main]
     paths:
       - 'controllers/fluxvm-networkpolicy-controller/**'
-      - 'docs/secure-containers-set13.md'
-      - '.github/workflows/secure-containers-networkpolicy-controller.yml'
+      - 'bpf/fluxvm_pod_policy.bpf.h'
+      - 'bpf/fluxvm_pod_ingress.bpf.c'
+      - 'bpf/fluxvm_tc.bpf.c'
+      - 'crates/fluxvm-network/src/dataplane.rs'
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'scripts/build-ebpf.sh'
+      - 'docs/secure-containers-set14.md'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  test:
+  controller:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -31,13 +42,37 @@ jobs:
         with:
           go-version: '1.23.x'
           cache-dependency-path: controllers/fluxvm-networkpolicy-controller/go.mod
-      - name: Format check
+      - name: Format
         run: test -z "$(gofmt -l cmd internal)"
+      - name: Test
+        run: go test ./...
+      - name: Race
+        run: go test -race ./...
       - name: Vet
         run: go vet ./...
-      - name: Unit and integration tests
-        run: go test ./...
-      - name: Race detector
-        run: go test -race ./...
-      - name: Static Linux build
-        run: CGO_ENABLED=0 go build -trimpath -o /tmp/fluxvm-networkpolicy-controller ./cmd/fluxvm-networkpolicy-controller
+      - name: Static binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w -X main.version=set14' -o /tmp/controller-amd64 ./cmd/fluxvm-networkpolicy-controller
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags='-s -w -X main.version=set14' -o /tmp/controller-arm64 ./cmd/fluxvm-networkpolicy-controller
+  dataplane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Install eBPF build deps
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev bpftool iproute2
+      - name: Rust format/check/tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked -p fluxvm-network
+          cargo check --locked -p fluxvm-core -p fluxvm-network -p fluxvm-api
+          cargo clippy --locked -p fluxvm-network -- -D warnings
+      - name: Build eBPF objects
+        run: ./scripts/build-ebpf.sh /tmp/fluxvm-bpf
+      - name: Verify Set 14 objects
+        run: |
+          test -s /tmp/fluxvm-bpf/fluxvm_tc.bpf.o
+          test -s /tmp/fluxvm-bpf/fluxvm_pod_ingress.bpf.o
+          bpftool btf dump file /tmp/fluxvm-bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pod_rule

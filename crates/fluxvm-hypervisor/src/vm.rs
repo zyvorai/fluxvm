@@ -239,6 +239,10 @@ impl VirtualMachine {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
         let kvm = Arc::new(KvmVm::create(&self.mem, num_cpus)?);
+        // Firecracker: register_irq(serial.interrupt_evt(), COM1_GSI=4).
+        if let Some(fd) = self.serial.interrupt_evt() {
+            kvm.register_irqfd(fd, self.serial.irq)?;
+        }
         if let Some(cpu) = restore {
             // Snapshot/restore is BSP-only; extending it to N vCPUs is
             // separate, out-of-scope follow-up work. Under SMP the APs
@@ -287,9 +291,8 @@ impl VirtualMachine {
         for idx in 1..num_cpus as usize {
             let kvm = kvm.clone();
             let bus = self.bus.clone();
-            let serial = self.serial.clone();
             let stop = stop.clone();
-            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &serial, &stop));
+            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &stop));
         }
 
         let mut gdb_cmd_rx: Option<Receiver<GdbCmd>> = None;
@@ -433,9 +436,7 @@ impl VirtualMachine {
                     }
                 }
             }
-            if fed && this.serial.irq_pending() {
-                let _ = kvm.pulse_irq(this.serial.irq);
-            }
+            let _ = fed;
 
             let reason = kvm.run_once(0)?;
             exits += 1;
@@ -465,9 +466,8 @@ impl VirtualMachine {
                         this.bus.pio_read(port, &mut buf)?;
                         kvm.set_io_data(0, off, &buf);
                     }
-                    if this.serial.irq_pending() {
-                        let _ = kvm.pulse_irq(this.serial.irq);
-                    }
+                    // Serial IRQ is edge-triggered via KVM_IRQFD (FC/CH), not
+                    // re-pulsed on every PIO while still pending.
                 }
                 ffi::KVM_EXIT_MMIO => {
                     let (addr, data, _len, is_write) = kvm.mmio_info(0);
@@ -623,7 +623,7 @@ impl VirtualMachine {
 /// Secondary-vCPU (AP) run loop. See the comment in `run_until` for the
 /// scope boundary: register-level PIO/MMIO only, no virtio queue-notify
 /// processing (that stays BSP-only).
-fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, serial: &Serial16550, stop: &AtomicBool) {
+fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, stop: &AtomicBool) {
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -647,9 +647,6 @@ fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, serial: &Serial16550, stop: &Atomi
                     let mut buf = vec![0u8; n];
                     let _ = bus.pio_read(port, &mut buf);
                     kvm.set_io_data(idx, off, &buf);
-                }
-                if serial.irq_pending() {
-                    let _ = kvm.pulse_irq(serial.irq);
                 }
             }
             ffi::KVM_EXIT_MMIO => {

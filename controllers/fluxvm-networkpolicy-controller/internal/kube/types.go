@@ -28,16 +28,13 @@ type Pod struct {
 }
 
 type PodSpec struct {
-	NodeName   string      `json:"nodeName"`
-	Containers []Container `json:"containers"`
+	NodeName       string      `json:"nodeName"`
+	Containers     []Container `json:"containers"`
+	InitContainers []Container `json:"initContainers"`
 }
 
-// Container/ContainerPort model only the fields Set 13's named-port
-// resolution needs. The Kubernetes API server already returns this data on
-// every `/api/v1/pods` list response `internal/kube/client.go` makes --
-// decoding it costs no new API call, it was simply unused until named-port
-// support needed it.
 type Container struct {
+	Name  string          `json:"name"`
 	Ports []ContainerPort `json:"ports"`
 }
 
@@ -81,18 +78,18 @@ type NetworkPolicy struct {
 type NetworkPolicySpec struct {
 	PodSelector LabelSelector              `json:"podSelector"`
 	PolicyTypes []string                   `json:"policyTypes"`
-	Egress      []NetworkPolicyEgressRule  `json:"egress"`
 	Ingress     []NetworkPolicyIngressRule `json:"ingress"`
-}
-
-type NetworkPolicyEgressRule struct {
-	Ports []NetworkPolicyPort `json:"ports"`
-	To    []NetworkPolicyPeer `json:"to"`
+	Egress      []NetworkPolicyEgressRule  `json:"egress"`
 }
 
 type NetworkPolicyIngressRule struct {
 	Ports []NetworkPolicyPort `json:"ports"`
 	From  []NetworkPolicyPeer `json:"from"`
+}
+
+type NetworkPolicyEgressRule struct {
+	Ports []NetworkPolicyPort `json:"ports"`
+	To    []NetworkPolicyPeer `json:"to"`
 }
 
 type NetworkPolicyPort struct {
@@ -144,6 +141,29 @@ func PodAddresses(p Pod) []string {
 	return out
 }
 
+func NamedContainerPorts(p Pod, name, protocol string) []uint16 {
+	seen := map[uint16]struct{}{}
+	var out []uint16
+	for _, c := range append(append([]Container(nil), p.Spec.Containers...), p.Spec.InitContainers...) {
+		for _, cp := range c.Ports {
+			cpProto := cp.Protocol
+			if cpProto == "" {
+				cpProto = "TCP"
+			}
+			if cp.Name != name || !equalFoldASCII(cpProto, protocol) || cp.ContainerPort <= 0 || cp.ContainerPort > 65535 {
+				continue
+			}
+			port := uint16(cp.ContainerPort)
+			if _, ok := seen[port]; ok {
+				continue
+			}
+			seen[port] = struct{}{}
+			out = append(out, port)
+		}
+	}
+	return out
+}
+
 func MatchesSelector(labels map[string]string, selector LabelSelector) bool {
 	for key, want := range selector.MatchLabels {
 		got, ok := labels[key]
@@ -159,8 +179,6 @@ func MatchesSelector(labels map[string]string, selector LabelSelector) bool {
 				return false
 			}
 		case "NotIn":
-			// Kubernetes set-based NotIn, like !=, also matches objects where
-			// the key is absent.
 			if exists && contains(req.Values, got) {
 				return false
 			}
@@ -186,4 +204,23 @@ func contains(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func equalFoldASCII(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		ca, cb := a[i], b[i]
+		if ca >= 'a' && ca <= 'z' {
+			ca -= 'a' - 'A'
+		}
+		if cb >= 'a' && cb <= 'z' {
+			cb -= 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }
