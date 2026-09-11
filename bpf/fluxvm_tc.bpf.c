@@ -27,6 +27,16 @@
 #define FLUXVM_AF_INET6      6
 #define FLUXVM_RATE_WINDOW_NS 1000000000ULL
 
+/* Set 16: lightweight established-flow timeouts. TCP/SCTP intentionally
+ * retain idle state longer than UDP; a policy update still invalidates the
+ * whole per-VM table synchronously from userspace (see ebpf.rs's
+ * reconfigure()/configure_pod_policy(), which clear fluxvm_ct before
+ * writing new allow state). */
+#define FLUXVM_CT_TCP_TIMEOUT_NS  (2ULL * 60ULL * 60ULL * 1000000000ULL)
+#define FLUXVM_CT_SCTP_TIMEOUT_NS (2ULL * 60ULL * 60ULL * 1000000000ULL)
+#define FLUXVM_CT_UDP_TIMEOUT_NS  (120ULL * 1000000000ULL)
+#define FLUXVM_CT_OTHER_TIMEOUT_NS (30ULL * 1000000000ULL)
+
 #define FLUXVM_REASON_NONE                 0
 #define FLUXVM_REASON_MALFORMED_L4         1
 #define FLUXVM_REASON_FRAGMENTED_L4        2
@@ -90,10 +100,16 @@ struct l4_key {
 
 /* Set 14: minimal SCTP common-header prefix; only source/destination ports
  * are needed for NetworkPolicy L4 matching. Avoid a distro-specific
- * linux/sctp.h ABI. */
+ * linux/sctp.h ABI. Set 16 extends this with verification_tag: a zero vtag
+ * marks an SCTP INIT chunk's containing packet, needed to distinguish a
+ * genuinely new association from traffic reusing an old 5-tuple (see
+ * transport_opens_new_flow4/6 below). checksum is kept only to match the
+ * real header's field order/size; nothing here reads it. */
 struct fluxvm_sctphdr_min {
     __be16 source;
     __be16 dest;
+    __be32 vtag;
+    __be32 checksum;
 };
 
 struct stat_key {
@@ -125,6 +141,15 @@ struct flow_value {
     __u64 bytes;
     __u64 last_seen_ns;
 };
+
+/* Set 16: state stored in fluxvm_ct. The old one-byte value could only
+ * answer "have I ever seen this tuple?" and therefore never expired --
+ * once a flow was learned, its established-flow bypass lived until LRU
+ * eviction, even after a policy tightened enough to newly deny it. */
+struct ct_state {
+    __u64 last_seen_ns;
+};
+_Static_assert(sizeof(struct ct_state) == 8, "conntrack state ABI");
 
 struct drop_reason_key {
     struct flow_key flow;
@@ -251,7 +276,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 32768);
     __type(key, struct flow_key);
-    __type(value, __u8);
+    __type(value, struct ct_state);
 } fluxvm_ct SEC(".maps");
 
 struct {
@@ -481,13 +506,72 @@ static __always_inline int cidr_denied6(__u32 identity, const struct in6_addr *d
     return cidr_lookup6(&fluxvm_deny6, identity, daddr);
 }
 
+static __always_inline __u64 ct_timeout_ns(__u8 protocol)
+{
+    if (protocol == IPPROTO_TCP)
+        return FLUXVM_CT_TCP_TIMEOUT_NS;
+    if (protocol == IPPROTO_SCTP)
+        return FLUXVM_CT_SCTP_TIMEOUT_NS;
+    if (protocol == IPPROTO_UDP)
+        return FLUXVM_CT_UDP_TIMEOUT_NS;
+    return FLUXVM_CT_OTHER_TIMEOUT_NS;
+}
+
 static __always_inline int ct_hit(const struct flow_key *probe)
 {
     struct flow_key key = *probe;
     key.verdict = 0;
     key.pad = 0;
-    __u8 *hit = bpf_map_lookup_elem(&fluxvm_ct, &key);
-    return hit != 0;
+    struct ct_state *state = bpf_map_lookup_elem(&fluxvm_ct, &key);
+    if (!state)
+        return 0;
+    __u64 now = bpf_ktime_get_ns();
+    __u64 timeout = ct_timeout_ns(key.protocol);
+    if (state->last_seen_ns == 0 || now - state->last_seen_ns > timeout) {
+        bpf_map_delete_elem(&fluxvm_ct, &key);
+        return 0;
+    }
+    state->last_seen_ns = now;
+    return 1;
+}
+
+/* Do not let an old established-flow entry authorize a brand-new TCP/SCTP
+ * connection that happens to reuse the same 5-tuple. TCP initial SYN and
+ * SCTP INIT (verification tag zero) always go through current policy. */
+static __always_inline int transport_opens_new_flow4(struct iphdr *iph, void *data_end)
+{
+    void *l4 = (void *)iph + (iph->ihl * 4);
+    if (iph->protocol == IPPROTO_TCP) {
+        struct tcphdr *tcp = l4;
+        if ((void *)(tcp + 1) > data_end)
+            return 1;
+        return tcp->syn && !tcp->ack;
+    }
+    if (iph->protocol == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp = l4;
+        if ((void *)(sctp + 1) > data_end)
+            return 1;
+        return sctp->vtag == 0;
+    }
+    return 0;
+}
+
+static __always_inline int transport_opens_new_flow6(struct ipv6hdr *ip6, void *data_end)
+{
+    void *l4 = (void *)(ip6 + 1);
+    if (ip6->nexthdr == IPPROTO_TCP) {
+        struct tcphdr *tcp = l4;
+        if ((void *)(tcp + 1) > data_end)
+            return 1;
+        return tcp->syn && !tcp->ack;
+    }
+    if (ip6->nexthdr == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp = l4;
+        if ((void *)(sctp + 1) > data_end)
+            return 1;
+        return sctp->vtag == 0;
+    }
+    return 0;
 }
 
 static __always_inline void ct_learn(const struct flow_key *probe)
@@ -495,8 +579,8 @@ static __always_inline void ct_learn(const struct flow_key *probe)
     struct flow_key key = *probe;
     key.verdict = 0;
     key.pad = 0;
-    __u8 one = 1;
-    bpf_map_update_elem(&fluxvm_ct, &key, &one, BPF_ANY);
+    struct ct_state state = {.last_seen_ns = bpf_ktime_get_ns()};
+    bpf_map_update_elem(&fluxvm_ct, &key, &state, BPF_ANY);
 }
 
 static __always_inline __u32 migration_block_reason(__u32 identity)
@@ -851,7 +935,7 @@ static __always_inline int handle_ipv4(
     };
     __builtin_memcpy(ctkey.src, src, 16);
     __builtin_memcpy(ctkey.dst, dst, 16);
-    if (ct_hit(&ctkey)) {
+    if (!transport_opens_new_flow4(iph, data_end) && ct_hit(&ctkey)) {
         // Conntrack is a policy-continuity shortcut, not a QoS bypass.
         // Keep applying the live rate ceiling to established flows.
         if (!rate_allowed(cfg, skb->len)) {
@@ -996,7 +1080,7 @@ static __always_inline int handle_ipv6(
     };
     __builtin_memcpy(ctkey.src, ip6->saddr.in6_u.u6_addr8, 16);
     __builtin_memcpy(ctkey.dst, ip6->daddr.in6_u.u6_addr8, 16);
-    if (ct_hit(&ctkey)) {
+    if (!transport_opens_new_flow6(ip6, data_end) && ct_hit(&ctkey)) {
         if (!rate_allowed(cfg, skb->len)) {
             record_reason6(skb, cfg->identity, ip6, sport, dport,
                            FLUXVM_REASON_RATE_LIMIT,

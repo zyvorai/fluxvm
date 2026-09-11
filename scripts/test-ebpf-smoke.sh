@@ -532,7 +532,13 @@ send_sctp() {
   ip netns exec "$NSB" python3 - "$1" "$SCTP_PROTO" "$SCTP_PORT" <<'PY'
 import socket, struct, sys
 dst, proto, port = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-payload = struct.pack("!HH", 44444, port) + b"\xde\xad\xbe\xef"
+# Full 12-byte SCTP common header (source, dest, verification tag,
+# checksum) -- Set 16 extends bpf/fluxvm_tc.bpf.c's fluxvm_sctphdr_min to
+# this same size (needed for its vtag==0 anti-replay check), so
+# parse_ports4's bounds check now requires all 12 bytes present, not just
+# the 4-byte port pair this test used to send. vtag=0 mimics a genuine
+# SCTP INIT chunk; checksum is left zero since nothing inspects it.
+payload = struct.pack("!HHII", 44444, port, 0, 0) + b"\xde\xad\xbe\xef"
 s = socket.socket(socket.AF_INET, socket.SOCK_RAW, proto)
 s.sendto(payload, (dst, 0))
 PY
@@ -550,9 +556,9 @@ try:
     # A raw IPPROTO socket's recvfrom always includes the IP header (see
     # raw(7)) -- skip past it (IHL is the low nibble of the first byte,
     # in 4-byte words) before checking our marker, which sits right after
-    # the 4-byte source/dest port fields we sent as the SCTP payload.
+    # the full 12-byte SCTP common header we sent as the payload.
     ihl = (data[0] & 0x0f) * 4
-    marker = data[ihl + 4:ihl + 8]
+    marker = data[ihl + 12:ihl + 16]
     print("received" if marker == b"\xde\xad\xbe\xef" else "other")
 except socket.timeout:
     print("timeout")
