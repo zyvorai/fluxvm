@@ -92,7 +92,7 @@ static __always_inline __u64 ct_timeout_ns(__u8 protocol)
 
 /* Do not let an old established-flow entry authorize a brand-new TCP/SCTP
  * connection that happens to reuse the same 5-tuple. Mirrors
- * fluxvm_tc.bpf.c's transport_opens_new_flow4/6. */
+ * fluxvm_tc.bpf.c's transport_opens_new_flow4; IPv6 uses fluxvm_ipv6_new_flow. */
 static __always_inline int transport_opens_new_flow4(struct iphdr *ip, void *data_end)
 {
     void *l4 = (void *)ip + ip->ihl * 4;
@@ -103,24 +103,6 @@ static __always_inline int transport_opens_new_flow4(struct iphdr *ip, void *dat
         return tcp->syn && !tcp->ack;
     }
     if (ip->protocol == IPPROTO_SCTP) {
-        struct fluxvm_sctphdr_min *sctp = l4;
-        if ((void *)(sctp + 1) > data_end)
-            return 1;
-        return sctp->vtag == 0;
-    }
-    return 0;
-}
-
-static __always_inline int transport_opens_new_flow6(struct ipv6hdr *ip, void *data_end)
-{
-    void *l4 = (void *)(ip + 1);
-    if (ip->nexthdr == IPPROTO_TCP) {
-        struct tcphdr *tcp = l4;
-        if ((void *)(tcp + 1) > data_end)
-            return 1;
-        return tcp->syn && !tcp->ack;
-    }
-    if (ip->nexthdr == IPPROTO_SCTP) {
         struct fluxvm_sctphdr_min *sctp = l4;
         if ((void *)(sctp + 1) > data_end)
             return 1;
@@ -281,19 +263,6 @@ static __always_inline int is_dhcp6(__u8 protocol, __u16 sport, __u16 dport)
     return (sport == 546 && dport == 547) || (sport == 547 && dport == 546);
 }
 
-static __always_inline int is_ipv6_ndp(struct ipv6hdr *ip, void *data_end)
-{
-    if (ip->nexthdr != IPPROTO_ICMPV6)
-        return 0;
-    struct icmp6hdr *icmp6 = (void *)(ip + 1);
-    if ((void *)(icmp6 + 1) > data_end)
-        return 0;
-    return icmp6->icmp6_type == 133 ||
-           icmp6->icmp6_type == 134 ||
-           icmp6->icmp6_type == 135 ||
-           icmp6->icmp6_type == 136;
-}
-
 /*
  * Build the guest -> remote tuple corresponding to an ingress packet.
  * That is exactly the tuple the main egress program stores in fluxvm_ct.
@@ -313,23 +282,6 @@ static __always_inline void reverse_key4(
     key->dport = sport;
     key->protocol = ip->protocol;
     key->family = FLUXVM_AF_INET;
-}
-
-static __always_inline void reverse_key6(
-    struct flow_key *key,
-    __u32 identity,
-    struct ipv6hdr *ip,
-    __u16 sport,
-    __u16 dport)
-{
-    __builtin_memset(key, 0, sizeof(*key));
-    key->identity = identity;
-    __builtin_memcpy(key->src, ip->daddr.in6_u.u6_addr8, 16);
-    __builtin_memcpy(key->dst, ip->saddr.in6_u.u6_addr8, 16);
-    key->sport = dport;
-    key->dport = sport;
-    key->protocol = ip->nexthdr;
-    key->family = FLUXVM_AF_INET6;
 }
 
 static __always_inline int reverse_ct_hit(struct flow_key *key)

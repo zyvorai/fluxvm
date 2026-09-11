@@ -103,7 +103,7 @@ struct l4_key {
  * linux/sctp.h ABI. Set 16 extends this with verification_tag: a zero vtag
  * marks an SCTP INIT chunk's containing packet, needed to distinguish a
  * genuinely new association from traffic reusing an old 5-tuple (see
- * transport_opens_new_flow4/6 below). checksum is kept only to match the
+ * transport_opens_new_flow4 / fluxvm_ipv6_new_flow below). checksum is kept only to match the
  * real header's field order/size; nothing here reads it. */
 struct fluxvm_sctphdr_min {
     __be16 source;
@@ -454,19 +454,6 @@ static __always_inline int is_dhcp6(__u8 protocol, __u16 sport, __u16 dport)
     return (sport == 546 && dport == 547) || (sport == 547 && dport == 546);
 }
 
-static __always_inline int is_ipv6_ndp(struct ipv6hdr *ip6, void *data_end)
-{
-    if (ip6->nexthdr != IPPROTO_ICMPV6)
-        return 0;
-    struct icmp6hdr *icmp6 = (void *)(ip6 + 1);
-    if ((void *)(icmp6 + 1) > data_end)
-        return 0;
-    return icmp6->icmp6_type == 133 || // Router Solicitation
-           icmp6->icmp6_type == 134 || // Router Advertisement
-           icmp6->icmp6_type == 135 || // Neighbor Solicitation
-           icmp6->icmp6_type == 136;   // Neighbor Advertisement
-}
-
 static __always_inline int rate_allowed(
     const struct iface_config *cfg,
     __u32 bytes)
@@ -595,24 +582,6 @@ static __always_inline int transport_opens_new_flow4(struct iphdr *iph, void *da
         return tcp->syn && !tcp->ack;
     }
     if (iph->protocol == IPPROTO_SCTP) {
-        struct fluxvm_sctphdr_min *sctp = l4;
-        if ((void *)(sctp + 1) > data_end)
-            return 1;
-        return sctp->vtag == 0;
-    }
-    return 0;
-}
-
-static __always_inline int transport_opens_new_flow6(struct ipv6hdr *ip6, void *data_end)
-{
-    void *l4 = (void *)(ip6 + 1);
-    if (ip6->nexthdr == IPPROTO_TCP) {
-        struct tcphdr *tcp = l4;
-        if ((void *)(tcp + 1) > data_end)
-            return 1;
-        return tcp->syn && !tcp->ack;
-    }
-    if (ip6->nexthdr == IPPROTO_SCTP) {
         struct fluxvm_sctphdr_min *sctp = l4;
         if ((void *)(sctp + 1) > data_end)
             return 1;
@@ -822,21 +791,6 @@ static __always_inline void record_flow4(
                     iph->protocol, verdict, sample_rate);
 }
 
-static __always_inline void record_flow6(
-    struct __sk_buff *skb,
-    __u32 identity,
-    struct ipv6hdr *ip6,
-    __u16 sport,
-    __u16 dport,
-    __u8 verdict,
-    __u32 sample_rate)
-{
-    record_flow_raw(skb, identity, FLUXVM_AF_INET6,
-                    ip6->saddr.in6_u.u6_addr8,
-                    ip6->daddr.in6_u.u6_addr8,
-                    sport, dport, ip6->nexthdr, verdict, sample_rate);
-}
-
 static __always_inline void record_reason_raw(
     struct __sk_buff *skb,
     __u32 identity,
@@ -897,21 +851,6 @@ static __always_inline void record_reason4(
     __builtin_memcpy(dst, &iph->daddr, 4);
     record_reason_raw(skb, identity, FLUXVM_AF_INET, src, dst, sport, dport,
                       iph->protocol, reason, action);
-}
-
-static __always_inline void record_reason6(
-    struct __sk_buff *skb,
-    __u32 identity,
-    struct ipv6hdr *ip6,
-    __u16 sport,
-    __u16 dport,
-    __u32 reason,
-    __u32 action)
-{
-    record_reason_raw(skb, identity, FLUXVM_AF_INET6,
-                      ip6->saddr.in6_u.u6_addr8,
-                      ip6->daddr.in6_u.u6_addr8,
-                      sport, dport, ip6->nexthdr, reason, action);
 }
 
 static __always_inline int handle_ipv4(
