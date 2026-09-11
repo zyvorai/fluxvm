@@ -1,6 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use axum::{
     Extension, Json, Router,
     body::Body,
@@ -12,7 +13,10 @@ use axum::{
 };
 use fluxvm_core::{
     config::{Role, constant_time_eq},
-    model::{BackendKind, ClaimOverrides, CreateVmRequest, PoolSpec, VmRecord, VmStatus},
+    model::{
+        BackendKind, ClaimOverrides, CreateVmRequest, MigrationReceiverInfo,
+        MigrationReceiverRequest, PoolSpec, VmRecord, VmStatus,
+    },
 };
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
@@ -246,6 +250,18 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/migration/start", post(start_migration))
         .route("/v1/vms/{id}/migration/status", get(migration_status))
         .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
+        .route(
+            "/v1/migration/receivers",
+            post(create_migration_receiver),
+        )
+        .route(
+            "/v1/migration/receivers/{id}",
+            get(get_migration_receiver).delete(abort_migration_receiver),
+        )
+        .route(
+            "/v1/migration/receivers/{id}/activate",
+            post(activate_migration_receiver),
+        )
         .route("/v1/vms/{id}/stop", post(stop_vm))
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
@@ -439,6 +455,7 @@ fn render_metrics(vms: &[VmRecord]) -> String {
         VmStatus::Paused,
         VmStatus::Stopped,
         VmStatus::Failed,
+        VmStatus::Receiving,
     ] {
         let count = vms.iter().filter(|v| v.status == status).count();
         out.push_str(&format!(
@@ -534,6 +551,7 @@ fn status_label(s: VmStatus) -> &'static str {
         VmStatus::Paused => "paused",
         VmStatus::Stopped => "stopped",
         VmStatus::Failed => "failed",
+        VmStatus::Receiving => "receiving",
     }
 }
 
@@ -954,6 +972,53 @@ async fn cancel_migration(
 ) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
     require_admin(role)?;
     Ok(Json(m.cancel_migration(id).await?))
+}
+
+async fn create_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<MigrationReceiverRequest>,
+) -> ApiResult<(StatusCode, Json<MigrationReceiverInfo>)> {
+    require_admin(role)?;
+    let (record, port) = m.create_receiver(req).await?;
+    let expires_at = record
+        .expires_at
+        .context("receiver record missing expires_at")?;
+    Ok((
+        StatusCode::CREATED,
+        Json(MigrationReceiverInfo {
+            id: record.id,
+            status: record.status,
+            port,
+            expires_at,
+        }),
+    ))
+}
+
+async fn get_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<VmRecord>> {
+    Ok(Json(m.get(id).await?))
+}
+
+async fn activate_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<VmRecord>> {
+    require_admin(role)?;
+    Ok(Json(m.activate_receiver(id).await?))
+}
+
+async fn abort_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.abort_receiver(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -2208,6 +2273,7 @@ mod tests {
                 hugepages: None,
                 vfio_devices: vec![],
                 pod_uid: None,
+                migration_incoming: false,
             },
             guest_cid: None,
             jail_path: None,

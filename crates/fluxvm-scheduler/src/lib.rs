@@ -8,8 +8,8 @@ use fluxvm_core::{
     config::Config,
     metrics,
     model::{
-        BackendKind, ClaimOverrides, CloudInitSpec, CreateVmRequest, NetworkSpec, PoolRecord,
-        PoolSpec, StorageBackend, VmRecord, VmStatus,
+        BackendKind, ClaimOverrides, CloudInitSpec, CreateVmRequest, MigrationReceiverRequest,
+        NetworkSpec, PoolRecord, PoolSpec, StorageBackend, VmRecord, VmStatus,
     },
     process,
 };
@@ -35,6 +35,11 @@ const GRACEFUL_SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_se
 /// raw-disk clone, took under a minute) — the cost of guessing wrong is a
 /// legitimately-slow create getting cut off, so this errs long.
 const STUCK_CREATING_GRACE: Duration = Duration::seconds(300);
+
+/// Default TTL for an unclaimed migration receiver before the existing
+/// TTL reaper (`start_reaper`) reclaims it via a plain `delete()` -- see
+/// `MigrationReceiverRequest.receiver_ttl_seconds`.
+const DEFAULT_RECEIVER_TTL_SECS: u64 = 300;
 
 pub fn backend(kind: BackendKind) -> Result<Box<dyn VmBackend>> {
     Ok(match kind {
@@ -142,6 +147,54 @@ fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
     }
     if !p.allow_extra_args && !req.extra_args.is_empty() {
         bail!("policy forbids extra_args (set policy.allow_extra_args = true to permit)");
+    }
+    Ok(())
+}
+
+/// Up-front, pure-function validation for `VmManager::create_receiver`,
+/// factored out so it's testable without a real `Arc<VmManager>`/tokio
+/// runtime/QEMU process -- same reasoning that keeps `validate_policy` a
+/// free function. Storage contract v1 requires shared storage (no disk
+/// copy) and a stable, explicit guest network identity, so this rejects
+/// anything that can't satisfy either: non-qemu backends (only QEMU has
+/// live migration wired up at all), non-default storage (no `-incoming`
+/// launch path for CephRbd/LvmThin/Nbd today), and any network mode other
+/// than `Tap`/`Macvtap` with an explicit `mac` (the destination device
+/// config must match the source's migrated device state exactly, and
+/// `User`/SLIRP has no stable identity to migrate at all).
+fn validate_receiver_spec(spec: &CreateVmRequest, disk_path: &std::path::Path, cfg: &Config) -> Result<()> {
+    if spec.backend != BackendKind::Qemu {
+        bail!(
+            "migration receivers support qemu only (backend={:?})",
+            spec.backend
+        );
+    }
+    if spec.storage != StorageBackend::Default {
+        bail!(
+            "migration receiver storage contract v1 requires StorageBackend::Default (got {:?})",
+            spec.storage
+        );
+    }
+    let mac_ok = matches!(
+        &spec.network,
+        NetworkSpec::Tap { mac: Some(_), .. } | NetworkSpec::Macvtap { mac: Some(_), .. }
+    );
+    if !mac_ok {
+        bail!(
+            "migration receiver requires NetworkSpec::Tap or Macvtap with an explicit mac (guest network identity must match the source)"
+        );
+    }
+    if !disk_path.exists() {
+        bail!("disk_path does not exist: {}", disk_path.display());
+    }
+    if let Some(dirs) = &cfg.policy.allowed_image_dirs {
+        if !dirs.iter().any(|d| disk_path.starts_with(d)) {
+            bail!(
+                "disk_path {} is not under any policy allowed_image_dirs {:?}",
+                disk_path.display(),
+                dirs
+            );
+        }
     }
     Ok(())
 }
@@ -1317,6 +1370,194 @@ impl VmManager {
         }
     }
 
+    // ZYVOR_RUNTIME_BOUNDARY_V1: target-side of node-local migration
+    // (storage contract v1: shared storage only, no disk copy). Deliberately
+    // NOT folded into `create()` -- a separate function beats threading new
+    // conditionals through `create()`'s already-dense pipeline for a launch
+    // mode (`-incoming defer`, no image provisioning, no cloud-init seed)
+    // that diverges from a normal cold boot in several places at once.
+    pub async fn create_receiver(
+        self: &Arc<Self>,
+        req: MigrationReceiverRequest,
+    ) -> Result<(VmRecord, u16)> {
+        let spec = req.spec;
+        validate_receiver_spec(&spec, &req.disk_path, &self.cfg)?;
+        validate_policy(&spec, &self.cfg)?;
+
+        let id = Uuid::new_v4();
+        let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
+        fs::create_dir_all(&workspace)?;
+        let log_path = workspace.join("console.log");
+        let ttl = req.receiver_ttl_seconds.unwrap_or(DEFAULT_RECEIVER_TTL_SECS);
+        let expires_at = Some(Utc::now() + Duration::seconds(ttl as i64));
+
+        // A free ephemeral port, allocated the same way this codebase's only
+        // other free-port precedent does (fluxvm-container-agent's tests):
+        // bind port 0, read back what the kernel assigned, drop the
+        // listener, hand the bare number to QEMU. There is a small window
+        // between dropping this listener and QEMU's own `migrate-incoming`
+        // bind where another process on the same host could grab the same
+        // port -- acceptable at the lab scale this is scoped to, not
+        // something to build a multi-tenant-safe port broker around yet.
+        let port = {
+            let listener = std::net::TcpListener::bind("0.0.0.0:0")?;
+            listener.local_addr()?.port()
+        };
+
+        let placeholder = VmRecord {
+            id,
+            name: spec.name.clone(),
+            backend: spec.backend,
+            status: VmStatus::Receiving,
+            pid: None,
+            created_at: Utc::now(),
+            expires_at,
+            workspace: workspace.clone(),
+            disk: req.disk_path.clone(),
+            seed_disk: None,
+            tap_name: None,
+            control_socket: None,
+            log_path: log_path.clone(),
+            error: None,
+            request: spec.clone(),
+            guest_cid: None,
+            jail_path: None,
+            vsock_socket: None,
+            qga_socket: None,
+            cgroup_path: None,
+            netns: None,
+            lvm_lv: None,
+            nbd_pid: None,
+            virtiofsd_pids: Vec::new(),
+            dhcp_leasefile: None,
+            guest_ip: None,
+        };
+        let mut record = self
+            .store
+            .insert_with_cid(placeholder, false, FIRST_GUEST_CID)
+            .await?;
+
+        let result: Result<()> = async {
+            let network = fluxvm_network::prepare(&self.cfg, id, &spec.network).await?;
+            let dataplane_if = fluxvm_network::dataplane_interface(id, &network);
+            record.tap_name = network.tap_name.clone();
+            record.netns = network.netns.clone();
+            record.dhcp_leasefile = network.dhcp_leasefile.clone();
+            record.guest_ip = network.guest_ip.clone();
+
+            let guest_cidr_for_policy = network
+                .guest_cidr
+                .clone()
+                .or_else(|| record.guest_ip.as_ref().map(|ip| format!("{ip}/32")));
+            let allow_cidrs = if self.cfg.sandbox.egress_allow_domains.is_empty() {
+                vec![]
+            } else {
+                fluxvm_network::egress::resolve_allow_cidrs(&self.cfg.sandbox.egress_allow_domains)
+                    .await
+            };
+            if let Err(e) = fluxvm_network::dataplane::apply_sandbox_policy(
+                &self.cfg,
+                id,
+                dataplane_if.as_deref(),
+                guest_cidr_for_policy.as_deref(),
+                &allow_cidrs,
+                spec.pod_uid.as_deref(),
+            ) {
+                if self.cfg.sandbox.dataplane.required
+                    || self.cfg.sandbox.dataplane.mode != fluxvm_core::config::DataplaneMode::Legacy
+                {
+                    return Err(e).context("applying VM dataplane before receiver launch");
+                }
+                tracing::warn!(vm = %id, error = %e, "VM dataplane apply failed");
+            }
+
+            let ctx = LaunchContext {
+                id,
+                workspace: workspace.clone(),
+                disk: req.disk_path.clone(),
+                seed_disk: None,
+                log_path: log_path.clone(),
+                network,
+                guest_cid: None,
+                vsock_socket: None,
+                disk_format: fluxvm_image::storage::disk_format(spec.backend, spec.storage),
+                nbd_export: None,
+            };
+            // One-shot launch override, never persisted onto `spec` itself
+            // (which is stored on the record as `request` for later ordinary
+            // starts) -- same contract as `start_impl`'s `loadvm_tag` clone.
+            let mut launch_req = spec.clone();
+            launch_req.migration_incoming = true;
+            let launch = backend(spec.backend)?
+                .launch(&self.cfg, &launch_req, &ctx)
+                .await?;
+            record.pid = Some(launch.pid);
+            record.control_socket = launch.control_socket.clone();
+            self.attach_cgroup(id, launch.pid, &mut record, &spec.vfio_devices);
+
+            // Arm the incoming listener now that QEMU is actually up.
+            fluxvm_qemu::migrate_incoming(&self.cfg, &record, &format!("tcp:0.0.0.0:{port}"))
+                .await?;
+            Ok(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
+            if let Some(tap) = &record.tap_name {
+                let _ = fluxvm_network::cleanup(
+                    &self.cfg.state_dir,
+                    id,
+                    &spec.network,
+                    tap,
+                    record.netns.as_deref(),
+                )
+                .await;
+            }
+            record.status = VmStatus::Failed;
+            record.error = Some(format!("{e:#}"));
+            self.store.update(record.clone()).await?;
+            return Err(e);
+        }
+        self.store.update(record.clone()).await?;
+        Ok((record, port))
+    }
+
+    /// Bookkeeping only -- QEMU itself already resumed guest execution the
+    /// moment its incoming migration stream completed (no `-S`/pause flag
+    /// was passed), so there is nothing further to send it here. This just
+    /// catches FluxVM's own stored status up with a fact QEMU already
+    /// knows, once the caller has independently confirmed (via this VM's
+    /// own `migration_status`) that the transfer actually finished.
+    pub async fn activate_receiver(&self, id: Uuid) -> Result<VmRecord> {
+        let mut vm = self.get(id).await?;
+        if vm.status != VmStatus::Receiving {
+            bail!("{id} is not a pending migration receiver (status={:?})", vm.status);
+        }
+        let status = fluxvm_qemu::migration_status(&self.cfg, &vm).await?;
+        if status.phase != fluxvm_core::model::MigrationPhase::Completed {
+            bail!(
+                "cannot activate {id}: destination migration phase is {:?}, not completed",
+                status.phase
+            );
+        }
+        vm.status = VmStatus::Running;
+        vm.expires_at = None;
+        self.store.update(vm.clone()).await?;
+        Ok(vm)
+    }
+
+    /// `delete()` is already fully generic on `pid.is_some()`, not on
+    /// `status` -- so aborting an unclaimed receiver needs no new cleanup
+    /// code of its own.
+    pub async fn abort_receiver(&self, id: Uuid) -> Result<()> {
+        let vm = self.get(id).await?;
+        if vm.status != VmStatus::Receiving {
+            bail!("{id} is not a pending migration receiver (status={:?})", vm.status);
+        }
+        self.delete(id).await
+    }
+
     /// Save full VM state so a later [`Self::start_from_snapshot`] can restore it.
     /// QEMU uses an internal `savevm` tag on the VM disk; Cloud Hypervisor writes
     /// a snapshot directory under `<workspace>/snapshots/<tag>/`.
@@ -2163,6 +2404,7 @@ mod tests {
             hugepages: None,
             vfio_devices: vec![],
             pod_uid: None,
+            migration_incoming: false,
         }
     }
 
@@ -2354,5 +2596,73 @@ mod tests {
             "/var/lib/fluxvm/images/base.qcow2",
         );
         assert!(validate_policy(&inside, &cfg).is_ok());
+    }
+
+    fn tap_req_with_mac() -> CreateVmRequest {
+        let mut r = req(BackendKind::Qemu, None, None);
+        r.network = NetworkSpec::Tap {
+            tap_name: None,
+            bridge: Some("virbr0".into()),
+            mac: Some("52:54:00:aa:bb:01".into()),
+            netns: false,
+        };
+        r
+    }
+
+    #[test]
+    fn create_receiver_rejects_non_qemu_backend() {
+        let mut r = tap_req_with_mac();
+        r.backend = BackendKind::Firecracker;
+        let cfg = Config::default();
+        let err = validate_receiver_spec(&r, std::path::Path::new("/dev/null"), &cfg).unwrap_err();
+        assert!(format!("{err:#}").contains("qemu only"));
+    }
+
+    #[test]
+    fn create_receiver_rejects_missing_mac() {
+        let mut r = tap_req_with_mac();
+        r.network = NetworkSpec::Tap {
+            tap_name: None,
+            bridge: Some("virbr0".into()),
+            mac: None,
+            netns: false,
+        };
+        let cfg = Config::default();
+        let err = validate_receiver_spec(&r, std::path::Path::new("/dev/null"), &cfg).unwrap_err();
+        assert!(format!("{err:#}").contains("explicit mac"));
+    }
+
+    #[test]
+    fn create_receiver_rejects_user_network_mode() {
+        let mut r = tap_req_with_mac();
+        r.network = NetworkSpec::User { forwards: vec![] };
+        let cfg = Config::default();
+        assert!(validate_receiver_spec(&r, std::path::Path::new("/dev/null"), &cfg).is_err());
+    }
+
+    #[test]
+    fn create_receiver_rejects_nondefault_storage() {
+        let mut r = tap_req_with_mac();
+        r.storage = StorageBackend::CephRbd;
+        let cfg = Config::default();
+        let err = validate_receiver_spec(&r, std::path::Path::new("/dev/null"), &cfg).unwrap_err();
+        assert!(format!("{err:#}").contains("StorageBackend::Default"));
+    }
+
+    #[test]
+    fn create_receiver_rejects_missing_disk_path() {
+        let r = tap_req_with_mac();
+        let cfg = Config::default();
+        let err =
+            validate_receiver_spec(&r, std::path::Path::new("/nonexistent/root.qcow2"), &cfg)
+                .unwrap_err();
+        assert!(format!("{err:#}").contains("does not exist"));
+    }
+
+    #[test]
+    fn create_receiver_accepts_valid_tap_spec() {
+        let r = tap_req_with_mac();
+        let cfg = Config::default();
+        assert!(validate_receiver_spec(&r, std::path::Path::new("/dev/null"), &cfg).is_ok());
     }
 }
