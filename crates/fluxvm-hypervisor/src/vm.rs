@@ -335,6 +335,7 @@ impl VirtualMachine {
             None,
             None,
             gdb,
+            true,
         )
     }
 
@@ -345,6 +346,7 @@ impl VirtualMachine {
         snap_rx: Option<Receiver<SnapCmd>>,
         restore: Option<CpuSnapshot>,
         gdb: Option<GdbSetup>,
+        exit_on_boot_marker: bool,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -761,17 +763,29 @@ impl VirtualMachine {
                     }
                 }
             }
-            if serial_log.contains("NETWORK IS UP")
-                || serial_log.contains("NET TIMEOUT")
-                || serial_log.contains("FLUXVM_STDIN_OK")
-                || serial_log.contains("login:")
-                || serial_log.contains("Run /sbin/init")
-                || serial_log.contains("Kernel panic")
-                // Fallbacks when no stdin inject is configured.
-                || (inject.is_none()
-                    && (serial_log.contains("FLUXVM_USERSPACE_OK")
-                        || serial_log.contains("FLUXVM_PROMPT_READY")
-                        || serial_log.contains("can't access tty")))
+            // Demo/smoke-test convenience only (CLI `--guest` path via
+            // run()/run_with_gdb()): stop as soon as boot visibly reaches
+            // one of these milestones, so a quick manual test doesn't have
+            // to wait for the full deadline. A real VM launched through the
+            // control-plane API (guest.rs) must NOT stop here -- reaching
+            // "Run /sbin/init" is the *start* of a long-lived sandbox's
+            // life, not a reason to freeze its vCPU forever. Confirmed live:
+            // before this guard existed, every control-plane-launched VM's
+            // execution silently and permanently halted the instant the
+            // guest kernel logged "Run /sbin/init", indistinguishable from
+            // a genuine hang from the caller's perspective.
+            if exit_on_boot_marker
+                && (serial_log.contains("NETWORK IS UP")
+                    || serial_log.contains("NET TIMEOUT")
+                    || serial_log.contains("FLUXVM_STDIN_OK")
+                    || serial_log.contains("login:")
+                    || serial_log.contains("Run /sbin/init")
+                    || serial_log.contains("Kernel panic")
+                    // Fallbacks when no stdin inject is configured.
+                    || (inject.is_none()
+                        && (serial_log.contains("FLUXVM_USERSPACE_OK")
+                            || serial_log.contains("FLUXVM_PROMPT_READY")
+                            || serial_log.contains("can't access tty"))))
             {
                 break;
             }

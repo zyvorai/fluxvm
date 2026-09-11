@@ -220,7 +220,9 @@ pub async fn start_kvm(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle
     let thread = std::thread::spawn(move || {
         match VirtualMachine::from_boot_config(vm_cfg) {
             Ok(vm) => {
-                if let Err(e) = vm.run_until(stop_thread, paused_thread, Some(snap_rx), None, None) {
+                if let Err(e) =
+                    vm.run_until(stop_thread, paused_thread, Some(snap_rx), None, None, false)
+                {
                     eprintln!("[kvm-engine] run error: {e}");
                 }
             }
@@ -264,9 +266,14 @@ pub async fn start_kvm_from_snapshot(
                     eprintln!("[kvm-engine] load mem failed: {e}");
                     return;
                 }
-                if let Err(e) =
-                    vm.run_until(stop_thread, paused_thread, Some(snap_rx), Some(cpu), None)
-                {
+                if let Err(e) = vm.run_until(
+                    stop_thread,
+                    paused_thread,
+                    Some(snap_rx),
+                    Some(cpu),
+                    None,
+                    false,
+                ) {
                     eprintln!("[kvm-engine] restored run error: {e}");
                 }
             }
