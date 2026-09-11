@@ -1693,12 +1693,21 @@ fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
         return Ok(None);
     };
     if let Some(arches) = seccomp.get("architectures").and_then(Value::as_array) {
-        for arch in arches.iter().filter_map(Value::as_str) {
-            if arch != "SCMP_ARCH_X86_64" {
-                bail!(
-                    "unsupported OCI seccomp architecture {arch:?}; FluxVM Set 11 currently enforces native x86_64 only"
-                );
-            }
+        // OCI runtime-default profiles list several arches (X86, X32, X86_64,
+        // …). FluxVM guests are x86_64-only, so ignore foreign arches instead
+        // of failing the whole container — busybox/pause otherwise never start.
+        let has_native = arches
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|arch| arch == "SCMP_ARCH_X86_64");
+        if !arches.is_empty() && !has_native {
+            bail!(
+                "OCI seccomp architectures {:?} do not include SCMP_ARCH_X86_64; FluxVM Set 11 currently enforces native x86_64 only",
+                arches
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+            );
         }
     }
     let default_action = seccomp_action(
@@ -5234,6 +5243,27 @@ mod tests {
         let profile = parse_seccomp_profile(&config).unwrap().unwrap();
         assert!(seccomp_profile_uses_notify(&profile));
         assert_eq!(profile.rules[0].action, SCMP_ACT_NOTIFY);
+    }
+
+    #[test]
+    fn ignores_non_native_seccomp_architectures_when_x86_64_present() {
+        let config = serde_json::json!({
+            "linux": {"seccomp": {
+                "defaultAction": "SCMP_ACT_ALLOW",
+                "architectures": ["SCMP_ARCH_X86", "SCMP_ARCH_X86_64", "SCMP_ARCH_X32"],
+                "syscalls": [{"names": ["mkdir"], "action": "SCMP_ACT_ERRNO"}]
+            }}
+        });
+        let profile = parse_seccomp_profile(&config).unwrap().unwrap();
+        assert_eq!(profile.rules.len(), 1);
+        let only_x86 = serde_json::json!({
+            "linux": {"seccomp": {
+                "defaultAction": "SCMP_ACT_ALLOW",
+                "architectures": ["SCMP_ARCH_X86"],
+                "syscalls": [{"names": ["mkdir"], "action": "SCMP_ACT_ERRNO"}]
+            }}
+        });
+        assert!(parse_seccomp_profile(&only_x86).is_err());
     }
 
     #[test]
