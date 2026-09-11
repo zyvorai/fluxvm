@@ -56,7 +56,78 @@ _Static_assert(sizeof(struct flow_key) == 44, "flow key ABI");
 struct fluxvm_sctphdr_min {
     __be16 source;
     __be16 dest;
+    __be32 vtag;
+    __be32 checksum;
 };
+
+/* Set 16: state stored in fluxvm_ct. Must stay byte-for-byte identical to
+ * fluxvm_tc.bpf.c's own struct ct_state -- both objects bind the same
+ * pinned map instance (see sync_pod_ingress_attachment in ebpf.rs), so a
+ * mismatched value size/layout here would fail at load time. */
+struct ct_state {
+    __u64 last_seen_ns;
+};
+_Static_assert(sizeof(struct ct_state) == 8, "conntrack state ABI");
+
+/* Set 16: TCP/SCTP timeouts mirror fluxvm_tc.bpf.c's own; a UDP/"other"
+ * timeout isn't needed here since this program only ever calls ct_hit on
+ * entries the main egress program itself learned for TCP/SCTP flows it
+ * chose to fast-path, but keeping all four keeps ct_timeout_ns identical
+ * between the two objects rather than a narrower, easy-to-drift copy. */
+#define FLUXVM_CT_TCP_TIMEOUT_NS  (2ULL * 60ULL * 60ULL * 1000000000ULL)
+#define FLUXVM_CT_SCTP_TIMEOUT_NS (2ULL * 60ULL * 60ULL * 1000000000ULL)
+#define FLUXVM_CT_UDP_TIMEOUT_NS  (120ULL * 1000000000ULL)
+#define FLUXVM_CT_OTHER_TIMEOUT_NS (30ULL * 1000000000ULL)
+
+static __always_inline __u64 ct_timeout_ns(__u8 protocol)
+{
+    if (protocol == IPPROTO_TCP)
+        return FLUXVM_CT_TCP_TIMEOUT_NS;
+    if (protocol == IPPROTO_SCTP)
+        return FLUXVM_CT_SCTP_TIMEOUT_NS;
+    if (protocol == IPPROTO_UDP)
+        return FLUXVM_CT_UDP_TIMEOUT_NS;
+    return FLUXVM_CT_OTHER_TIMEOUT_NS;
+}
+
+/* Do not let an old established-flow entry authorize a brand-new TCP/SCTP
+ * connection that happens to reuse the same 5-tuple. Mirrors
+ * fluxvm_tc.bpf.c's transport_opens_new_flow4/6. */
+static __always_inline int transport_opens_new_flow4(struct iphdr *ip, void *data_end)
+{
+    void *l4 = (void *)ip + ip->ihl * 4;
+    if (ip->protocol == IPPROTO_TCP) {
+        struct tcphdr *tcp = l4;
+        if ((void *)(tcp + 1) > data_end)
+            return 1;
+        return tcp->syn && !tcp->ack;
+    }
+    if (ip->protocol == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp = l4;
+        if ((void *)(sctp + 1) > data_end)
+            return 1;
+        return sctp->vtag == 0;
+    }
+    return 0;
+}
+
+static __always_inline int transport_opens_new_flow6(struct ipv6hdr *ip, void *data_end)
+{
+    void *l4 = (void *)(ip + 1);
+    if (ip->nexthdr == IPPROTO_TCP) {
+        struct tcphdr *tcp = l4;
+        if ((void *)(tcp + 1) > data_end)
+            return 1;
+        return tcp->syn && !tcp->ack;
+    }
+    if (ip->nexthdr == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp = l4;
+        if ((void *)(sctp + 1) > data_end)
+            return 1;
+        return sctp->vtag == 0;
+    }
+    return 0;
+}
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -70,7 +141,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 32768);
     __type(key, struct flow_key);
-    __type(value, __u8);
+    __type(value, struct ct_state);
 } fluxvm_ct SEC(".maps");
 
 static __always_inline int parse_ports4(
@@ -212,14 +283,23 @@ static __always_inline void reverse_key6(
 
 static __always_inline int reverse_ct_hit(struct flow_key *key)
 {
-    __u8 *hit = bpf_map_lookup_elem(&fluxvm_ct, key);
-    return hit != 0;
+    struct ct_state *state = bpf_map_lookup_elem(&fluxvm_ct, key);
+    if (!state)
+        return 0;
+    __u64 now = bpf_ktime_get_ns();
+    __u64 timeout = ct_timeout_ns(key->protocol);
+    if (state->last_seen_ns == 0 || now - state->last_seen_ns > timeout) {
+        bpf_map_delete_elem(&fluxvm_ct, key);
+        return 0;
+    }
+    state->last_seen_ns = now;
+    return 1;
 }
 
 static __always_inline void reverse_ct_learn(struct flow_key *key)
 {
-    __u8 one = 1;
-    bpf_map_update_elem(&fluxvm_ct, key, &one, BPF_ANY);
+    struct ct_state state = {.last_seen_ns = bpf_ktime_get_ns()};
+    bpf_map_update_elem(&fluxvm_ct, key, &state, BPF_ANY);
 }
 
 SEC("tc")
@@ -259,7 +339,7 @@ int fluxvm_pod_ingress(struct __sk_buff *skb)
 
         struct flow_key reverse = {};
         reverse_key4(&reverse, cfg->identity, ip, sport, dport);
-        if (!fragmented && reverse_ct_hit(&reverse))
+        if (!fragmented && !transport_opens_new_flow4(ip, data_end) && reverse_ct_hit(&reverse))
             return TC_ACT_OK;
 
         int verdict = fluxvm_pod_policy_verdict4_tuple(
@@ -287,7 +367,7 @@ int fluxvm_pod_ingress(struct __sk_buff *skb)
 
         struct flow_key reverse = {};
         reverse_key6(&reverse, cfg->identity, ip, sport, dport);
-        if (reverse_ct_hit(&reverse))
+        if (!transport_opens_new_flow6(ip, data_end) && reverse_ct_hit(&reverse))
             return TC_ACT_OK;
 
         int verdict = fluxvm_pod_policy_verdict6_tuple(

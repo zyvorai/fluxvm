@@ -1045,7 +1045,12 @@ mod tests {
         cfg.state_dir = tmp.path().to_path_buf();
         let id = Uuid::new_v4();
         let policy = VmNetworkPolicy {
-            allow_ports: vec!["sctp/443".into()],
+            // Set 16 legitimately added VM-level "sctp/PORT" support, so
+            // that string is no longer a valid example of a rejected L4
+            // rule -- "gre/443" (a real IP protocol FluxVM has never
+            // supported here) exercises the same "unsupported protocol"
+            // rejection path this test is actually about.
+            allow_ports: vec!["gre/443".into()],
             ..VmNetworkPolicy::default()
         };
         assert!(save_policy(&cfg, id, &policy).is_err());

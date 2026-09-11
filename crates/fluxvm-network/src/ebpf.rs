@@ -37,7 +37,14 @@ const IPPROTO_ICMPV6: u8 = 58;
 /// blows the kernel verifier's `BPF_COMPLEXITY_LIMIT_JMP_SEQ` (8192 jumps)
 /// when present in both the v4 and v6 paths of one program.
 const MAX_POD_RULES: usize = 64;
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 8;
+/// Set 16: schema v9 changes `fluxvm_ct`'s value from one byte (a bare "have
+/// I ever seen this tuple" flag that never expired) to a timestamp-bearing
+/// `struct ct_state`, and adds SYN/SCTP-INIT anti-replay checks alongside
+/// it. Both `fluxvm_tc.bpf.o` and the separate `fluxvm_pod_ingress.bpf.o`
+/// declare their own copy of this map and must agree on its value size, so
+/// a v8 object cannot be mixed with v9 userspace code that assumes the new
+/// layout -- bump the version rather than silently reinterpreting bytes.
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -384,6 +391,15 @@ pub fn reconfigure(
     // dies mid-update, the next reconcile sees an unsynchronized policy and
     // repairs it instead of trusting a stale marker.
     invalidate_policy_fingerprint(id)?;
+    // Set 16: an established-flow entry is a policy-continuity shortcut. A
+    // policy change must revoke that shortcut before any allow map changes,
+    // otherwise a tuple admitted by the previous policy could bypass a newly
+    // tightened policy until the schema v9 timeout (or, on an older object,
+    // never, since v8's fluxvm_ct entries had no expiry at all).
+    let ct_map = map_dir.join("fluxvm_ct");
+    if ct_map.exists() {
+        clear_map(&ct_map).context("invalidating established flows before VM policy update")?;
+    }
     configure_maps(&map_dir, ifindex, identity, pod_id, policy, true)?;
     info!(
         %id,
@@ -417,6 +433,25 @@ pub fn configure_pod_policy(
     let map_dir = vm_pin_dir(&cfg.pin_root, id).join("maps");
     if !map_dir.join("fluxvm_pspol").exists() {
         bail!("VM {id} eBPF dataplane is not attached (or predates Set 6S); attach before setting Pod policy");
+    }
+    // Set 16: schema v9 changed fluxvm_ct's value layout (see
+    // DATAPLANE_SCHEMA_VERSION's doc comment). Refuse to program a live
+    // pre-v9 VM's Pod policy rather than silently mismatching; FluxVM's
+    // normal reconcile path reattaches the current object, after which this
+    // same call succeeds.
+    let schema = read_schema_version(&vm_meta_dir(id));
+    if schema != Some(DATAPLANE_SCHEMA_VERSION) {
+        bail!(
+            "VM {id} uses eBPF schema {:?}, expected {}; reattach before setting Pod policy",
+            schema, DATAPLANE_SCHEMA_VERSION
+        );
+    }
+    // Set 16: see reconfigure()'s identical comment -- a Pod policy update is
+    // also a policy tightening that a stale established-flow entry must not
+    // be able to outlive.
+    let ct_map = map_dir.join("fluxvm_ct");
+    if ct_map.exists() {
+        clear_map(&ct_map).context("invalidating established flows before Pod policy update")?;
     }
     configure_pod_maps(&map_dir, pod_id, policy)?;
     let iface = read_recorded_iface(id)
@@ -1549,9 +1584,10 @@ fn parse_port_rule(raw: &str) -> Result<PortRule> {
     let protocol = match proto.trim().to_ascii_lowercase().as_str() {
         "tcp" => IPPROTO_TCP,
         "udp" => IPPROTO_UDP,
+        "sctp" => IPPROTO_SCTP,
         "icmp" => IPPROTO_ICMP,
         "icmp6" | "icmpv6" => IPPROTO_ICMPV6,
-        other => bail!("unsupported L4 protocol {other:?}; use tcp, udp, icmp, or icmp6"),
+        other => bail!("unsupported L4 protocol {other:?}; use tcp, udp, sctp, icmp, or icmp6"),
     };
     let port: u16 = port
         .trim()
@@ -1901,7 +1937,10 @@ mod tests {
             PortRule { protocol: IPPROTO_ICMP, port: 8 }
         );
         assert!(parse_port_rule("tcp/0").is_err());
-        assert!(parse_port_rule("sctp/443").is_err());
+        assert_eq!(
+            parse_port_rule("sctp/443").unwrap(),
+            PortRule { protocol: IPPROTO_SCTP, port: 443 }
+        );
     }
 
     #[test]

@@ -95,7 +95,13 @@ objects into a versioned directional CIDR+L4 tuple Pod policy schema
 numeric and named TCP/UDP/SCTP ports, `endPort` ranges, real recursive CIDR
 subtraction for `ipBlock.except` (no approximation fallback), and a separate
 Pod-ingress eBPF program that shares the main program's conntrack table for
-a stateful return-traffic fast path (dataplane schema v8). Build/test/
+a stateful return-traffic fast path (dataplane schema v9 — Set 16 changed
+the shared conntrack table's value from a one-byte, never-expiring presence
+marker to a timestamped entry with a per-protocol idle timeout, and made a
+VM/Pod policy update clear it synchronously so a tightened policy can never
+be bypassed by a stale established-flow entry; TCP SYN/SCTP INIT packets
+always re-evaluate current policy rather than taking the established-flow
+shortcut, closing a same-5-tuple replay gap). Build/test/
 verifier validation for Set 14 is real (workspace `cargo build`/`test`, both
 BPF objects load through the real kernel verifier with confirmed shared map
 IDs, full Go build/vet/test/race/gofmt/cross-build gate), and so is live
@@ -109,12 +115,19 @@ against a real single-node k3s cluster — see
 including the four eBPF verifier bugs found and fixed in the process. Set 15
 adds directional `fluxvm_pod_ingress` attachment health and the read-only
 Sentinel Policy Observer (`tools/fluxvm-policy-observer`) —
-[secure-containers-set15.md](secure-containers-set15.md). Still open: the live
-stateful-conntrack-bypass path between the egress and Pod-ingress programs is
-implemented but not yet proven with a live TCP handshake; the per-VM rule
-cap is 64 (kernel verifier limit); multi-node Pod-to-Pod dataplane conformance
-is still missing — see [NEXT-FEATURES.md](NEXT-FEATURES.md) and
-[secure-containers-set14.md](secure-containers-set14.md). Sentinel
+[secure-containers-set15.md](secure-containers-set15.md). Set 16's schema-v9
+conntrack revocation-safety was verifier-loaded and its `ct_state` write
+confirmed for real (a real ping's learned entry decodes as a plausible
+`last_seen_ns` timestamp via bpftool's BTF-aware dump), and VM-level
+`allow_ports` now also accepts `sctp/PORT` — see
+[secure-containers-set16.md](secure-containers-set16.md). Still open: the live
+stateful-conntrack-bypass path between the egress and Pod-ingress programs,
+and Set 16's own timeout expiry/anti-replay behavior, are implemented but not
+yet proven with a live TCP handshake or wall-clock timing test; the per-VM
+rule cap is 64 (kernel verifier limit); multi-node Pod-to-Pod dataplane
+conformance is still missing — see [NEXT-FEATURES.md](NEXT-FEATURES.md),
+[secure-containers-set14.md](secure-containers-set14.md), and
+[secure-containers-set16.md](secure-containers-set16.md). Sentinel
 in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
 policy automatically — every container is enforced fail-closed by default,
 but the shim does not yet forward Pod policy content per container. Sentinel
