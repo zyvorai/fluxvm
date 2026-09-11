@@ -488,13 +488,13 @@ func selectedNamespaces(policyNamespace string, selector *kube.LabelSelector, na
 // NetworkPolicy peer. This replaces Set 14's selector-only approximation.
 //
 // The proof is intentionally fail closed:
-//   * selectorless Services are not inferred from a podSelector peer;
-//   * a Service with no usable EndpointSlice backend gets no VIP rule;
-//   * an endpoint without a Pod targetRef, an unknown Pod UID, selector
+//   - selectorless Services are not inferred from a podSelector peer;
+//   - a Service with no usable EndpointSlice backend gets no VIP rule;
+//   - an endpoint without a Pod targetRef, an unknown Pod UID, selector
 //     drift, or an address that does not belong to that Pod invalidates only
 //     that address family of the Service;
-//   * Ready==nil is routable per discovery/v1 semantics;
-//   * serving+terminating is also treated as potentially routable because
+//   - Ready==nil is routable per discovery/v1 semantics;
+//   - serving+terminating is also treated as potentially routable because
 //     Service proxies may use draining endpoints when no normal endpoint is
 //     available.
 func includeEndpointSliceServiceVIPs(snapshot Snapshot, namespaces, peerPods map[string]struct{}, cidrs map[string]struct{}) {
