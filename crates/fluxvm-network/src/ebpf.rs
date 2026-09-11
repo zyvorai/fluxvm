@@ -114,6 +114,10 @@ pub struct NativeAttachmentStatus {
     pub pin_dir: String,
     pub schema_version: Option<u32>,
     pub schema_compatible: bool,
+    /// Set 15: the schema-v8 object carries a second program for Pod ingress.
+    /// `attached` is healthy only when every required directional hook is live.
+    pub pod_ingress_required: bool,
+    pub pod_ingress_attached: bool,
     /// Fingerprint of the durable control-plane policy that was last fully
     /// committed to the kernel maps. `None` means an update may have been
     /// interrupted and reconcile must repair it.
@@ -428,13 +432,14 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
     let policy_fingerprint = read_policy_fingerprint(&meta_dir);
     let owned_program_id = read_owned_program_id(id)
         .or_else(|| pinned_program_id(&prog_pin).ok());
+    // FLUXVM_SECURE_CONTAINERS_SET15: directional attachment health.
     let tcx_link = tcx::link_pin(&vm_dir);
     let tcx_program_id = if tcx_link.exists() {
         tcx::status(&tcx_link).ok().and_then(|status| status.prog_id)
     } else {
         None
     };
-    let attached = if let (Some(iface), Some(owned_program_id)) =
+    let egress_attached = if let (Some(iface), Some(owned_program_id)) =
         (iface.as_deref(), owned_program_id)
     {
         schema_compatible
@@ -444,6 +449,39 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
     } else {
         false
     };
+
+    // Set 14 attaches fluxvm_pod_ingress as a separate, lazily-loaded object
+    // (only when a Pod's policy actually isolates ingress), bound at TC
+    // *egress* with its own reserved pref/handle (49153/2) -- never TCX,
+    // unlike the main guest-egress program. Before Set 15,
+    // attachment_status() ignored this second hook entirely, so a deleted
+    // ingress-policy filter could leave Kubernetes ingress policy
+    // unenforced while the VM was reported healthy. Treat a present
+    // program pin as required and verify its exact owned program id at
+    // that host-side egress hook, mirroring
+    // detach_pod_ingress_filter_in_vm_dir's own ownership check.
+    let pod_ingress_prog_pin = vm_dir.join("progs/fluxvm_pod_ingress");
+    let pod_ingress_required = pod_ingress_prog_pin.exists();
+    let pod_ingress_owned_program_id = if pod_ingress_required {
+        pinned_program_id(&pod_ingress_prog_pin).ok()
+    } else {
+        None
+    };
+    let pod_ingress_attached = if let (Some(iface), Some(program_id)) =
+        (iface.as_deref(), pod_ingress_owned_program_id)
+    {
+        schema_compatible
+            && Command::new("tc")
+                .args(["filter", "show", "dev", iface, "egress", "pref", "49153"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2))
+                == Some(program_id)
+    } else {
+        false
+    };
+    let attached = egress_attached && (!pod_ingress_required || pod_ingress_attached);
     Ok(NativeAttachmentStatus {
         attached,
         interface: iface,
@@ -451,6 +489,8 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
         pin_dir: vm_dir.display().to_string(),
         schema_version,
         schema_compatible,
+        pod_ingress_required,
+        pod_ingress_attached,
         policy_fingerprint,
     })
 }
