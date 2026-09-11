@@ -1,0 +1,26 @@
+name: Sentinel Migration Orchestrator
+on:
+  pull_request:
+    paths: ['tools/fluxvm_migration_orchestrator.py','tools/tests/test_fluxvm_migration_orchestrator.py','scripts/*migration-orchestrator*','docs/sentinel-migration-orchestrator.md','schemas/migration-plan.schema.json','.github/workflows/sentinel-migration-orchestrator.yml']
+  push:
+    branches: [main]
+    paths: ['tools/fluxvm_migration_orchestrator.py','tools/tests/test_fluxvm_migration_orchestrator.py','scripts/*migration-orchestrator*','docs/sentinel-migration-orchestrator.md','schemas/migration-plan.schema.json']
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/test-migration-orchestrator-static.sh
+      - name: Systemd unit syntax
+        run: |
+          sudo install -D -m755 tools/fluxvm_migration_orchestrator.py /usr/local/libexec/fluxvm/fluxvm-migrate
+          systemd-analyze verify packaging/systemd/fluxvm-migration-observer.service packaging/systemd/fluxvm-migration-reconcile.service packaging/systemd/fluxvm-migration-reconcile.timer
+  lab-host:
+    if: ${{ vars.FLUXVM_MIGRATION_PRIVILEGED_CI == '1' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-migration]
+    steps:
+      - uses: actions/checkout@v4
+      - env: {FLUXVM_MIGRATION_HOST_TEST: '1', FLUXVM_MIGRATION_PLAN: '${{ vars.FLUXVM_MIGRATION_TEST_PLAN }}'}
+        run: sudo -E scripts/test-migration-orchestrator-host.sh

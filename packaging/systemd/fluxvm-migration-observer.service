@@ -1,0 +1,15 @@
+[Unit]
+Description=FluxVM migration transaction observer
+After=network-online.target
+[Service]
+Type=simple
+ExecStart=/usr/local/libexec/fluxvm/fluxvm-migrate --state-root /var/lib/fluxvm/migrations serve --listen 127.0.0.1:7797
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/fluxvm/migrations
+[Install]
+WantedBy=multi-user.target
