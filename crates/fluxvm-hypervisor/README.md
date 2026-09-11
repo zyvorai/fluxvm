@@ -51,6 +51,63 @@ cargo build --release
 # needs a host with KVM to actually run a guest
 ```
 
+## Boot protocols
+
+Two boot paths for Linux guests, chosen automatically per kernel:
+
+- **PVH** (preferred): if the kernel ELF carries a PVH entry-point note
+  (most modern x86_64 `vmlinux` builds do), the vCPU is entered in 32-bit
+  protected mode with paging off, and the kernel's own `startup_32`/
+  `startup_64` code builds its own page tables and makes the 32-to-64-bit
+  transition itself — the same as a real PVH-aware hypervisor (Xen) or
+  cloud-hypervisor. This sidesteps an entire class of bug that hand-rolled
+  guest page-table/GDT construction is prone to.
+- **Direct 64-bit boot** (fallback): for kernels without a PVH note, we
+  build an identity-mapped page table and GDT ourselves and jump straight
+  into the kernel's 64-bit entry point.
+
+## SMP
+
+Real multi-vCPU support: one KVM vCPU per `--cpus`, each on its own OS
+thread. APs are explicitly parked in `KVM_MP_STATE_UNINITIALIZED` right
+after creation and block inside `KVM_RUN` until the guest's own real
+INIT-SIPI-SIPI sequence arrives, handled entirely by KVM's in-kernel
+LAPIC — no userspace SIPI emulation needed. AP threads service
+register-level PIO/MMIO traps; virtio queue-notify processing (touches
+guest RAM) stays pinned to the BSP, the same scope boundary many minimal
+VMMs use.
+
+## Debugging: gdbstub
+
+`--gdb <addr:port>` starts a minimal GDB remote-serial-protocol stub for
+live guest inspection — useful for diagnosing a hung or misbehaving boot:
+
+```bash
+fluxvm-hypervisor --guest linux --kernel vmlinux --disk rootfs.img --gdb 127.0.0.1:1234
+# in another shell:
+gdb -ex 'target remote 127.0.0.1:1234'
+```
+
+Supports register reads (`info registers`), memory reads (`x`/`m`,
+translated through the guest's own page tables when paging is active),
+break-in on connect or Ctrl-C, and software breakpoints (`break *addr`)
+via `KVM_SET_GUEST_DEBUG`. Deliberately narrow scope — no register/memory
+writes, no single-step — this is a tool for answering "where exactly is
+the guest stuck", not a full interactive debugger.
+
+## Known limitations
+
+- **Boot hang on some guests**: a Linux 5.10 guest deterministically
+  hangs late in boot (around the `workingset_init`/`init_zbud` initcalls)
+  in what traces to a page-fault-related loop. Confirmed *not* caused by
+  boot-time CPU/paging setup — the hang is identical under both the PVH
+  and direct-64-bit boot paths, which rules out hand-rolled page tables/
+  GDT/long-mode setup as the cause. Most likely in device emulation
+  (virtio/PIT/timer) or memory declaration; not yet root-caused. Use
+  `--gdb` (see above) to continue the investigation.
+- Snapshot/restore (`kvm_snap.rs`) is single-vCPU only; extending it to
+  capture all vCPUs under SMP is unimplemented follow-up work.
+
 ## Next real projects to study (do not reinvent)
 
 - [rust-vmm](https://github.com/rust-vmm)

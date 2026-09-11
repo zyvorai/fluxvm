@@ -62,6 +62,13 @@ plus [architecture](../README.md#network-fabric-architecture-how-it-works).
 - Production-grade in-tree KVM guests (full virtio device live-state in snapshots)
 - Hubble SID attribution for VM traffic beyond agent CEP enrichment
 - Optional: scrape `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`) from Prometheus
+- **In-tree KVM (`fluxvm_engine = "kvm"`) boot hang**: some Linux guests
+  hang deterministically late in boot (confirmed not caused by CPU/
+  paging setup — identical under both PVH and direct-64-bit boot).
+  Real SMP (`--cpus N`) and PVH boot are implemented and working; a
+  `--gdb` debugging stub (register/memory inspection + breakpoints) is
+  available for continuing the investigation. See
+  [`crates/fluxvm-hypervisor/README.md`](../crates/fluxvm-hypervisor/README.md#known-limitations).
 
 Shipped: concurrent density (`scripts/bench-density.sh`), Cilium-agent CEP
 identity enrich (no private maps), in-tree KVM `FLUXKVM1` memory snapshots,
