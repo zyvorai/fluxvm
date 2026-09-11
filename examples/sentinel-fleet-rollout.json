@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "rollout_id": "sentinel-2026-09-11-a",
+  "node_upgrade_plan": "/srv/releases/sentinel-upgrade-plan.json",
+  "remote_upgrade_plan": "/var/lib/fluxvm/sentinel-upgrades/fleet-plan.json",
+  "sudo": true,
+  "nodes": [
+    {
+      "name": "edge-a1",
+      "host": "10.20.0.11",
+      "user": "fluxvm",
+      "labels": {
+        "zone": "a",
+        "role": "compute"
+      }
+    },
+    {
+      "name": "edge-a2",
+      "host": "10.20.0.12",
+      "user": "fluxvm",
+      "labels": {
+        "zone": "a",
+        "role": "compute"
+      }
+    },
+    {
+      "name": "edge-b1",
+      "host": "10.20.1.11",
+      "user": "fluxvm",
+      "labels": {
+        "zone": "b",
+        "role": "compute"
+      }
+    }
+  ],
+  "strategy": {
+    "canary": 1,
+    "wave_size": 2,
+    "max_parallel": 2,
+    "max_failures": 0,
+    "dwell_seconds": 60,
+    "rollback_failed_wave": true,
+    "require_canary_approval": true
+  },
+  "post_checks": [
+    [
+      "systemctl",
+      "is-active",
+      "fluxvm"
+    ],
+    [
+      "fluxvm-upgrade",
+      "--help"
+    ]
+  ]
+}

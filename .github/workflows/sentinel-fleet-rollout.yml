@@ -1,0 +1,26 @@
+name: Sentinel Fleet Rollout Set 15E
+on:
+  pull_request:
+    paths: ['tools/fluxvm_fleet_rollout.py','tools/tests/test_fluxvm_fleet_rollout.py','scripts/*fleet-rollout*','schemas/sentinel-fleet-rollout.schema.json','docs/sentinel-fleet-rollout.md','.github/workflows/sentinel-fleet-rollout.yml']
+  push:
+    branches: [main]
+    paths: ['tools/fluxvm_fleet_rollout.py','tools/tests/test_fluxvm_fleet_rollout.py','scripts/*fleet-rollout*','schemas/sentinel-fleet-rollout.schema.json','docs/sentinel-fleet-rollout.md']
+  workflow_dispatch:
+permissions: { contents: read }
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static + unit gates
+        run: scripts/test-sentinel-fleet-rollout-static.sh
+  lab:
+    if: ${{ vars.FLUXVM_FLEET_E2E == '1' }}
+    runs-on: [self-hosted, linux, fluxvm-fleet-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fleet inventory gate
+        env:
+          FLUXVM_FLEET_E2E: '1'
+          FLUXVM_FLEET_PLAN: /etc/fluxvm/fleet-rollout.json
+        run: sudo -E scripts/test-sentinel-fleet-rollout-host.sh

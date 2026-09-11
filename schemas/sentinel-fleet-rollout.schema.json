@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "allow_insecure_host_key": {
+      "type": "boolean"
+    },
+    "node_timeout_seconds": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "node_upgrade_plan": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "nodes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "identity_file": {
+            "type": "string"
+          },
+          "labels": {
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "port": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "host"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "post_checks": {
+      "items": {
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1,
+        "type": "array"
+      },
+      "type": "array"
+    },
+    "remote_upgrade_plan": {
+      "type": "string"
+    },
+    "rollout_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "strategy": {
+      "additionalProperties": false,
+      "properties": {
+        "canary": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "dwell_seconds": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "max_failures": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_parallel": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "require_canary_approval": {
+          "type": "boolean"
+        },
+        "rollback_failed_wave": {
+          "type": "boolean"
+        },
+        "wave_size": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "sudo": {
+      "type": "boolean"
+    },
+    "upgrade_binary": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "rollout_id",
+    "node_upgrade_plan",
+    "nodes"
+  ],
+  "title": "FluxVM Sentinel Fleet Rollout",
+  "type": "object"
+}
