@@ -1,0 +1,54 @@
+{
+  "afxdp": {
+    "destination_plan": "/etc/fluxvm/afxdp/payments-dst.json",
+    "enabled": true,
+    "optional": true,
+    "source_plan": "/etc/fluxvm/afxdp/payments-src.json"
+  },
+  "automatic_rollback": true,
+  "destination": {
+    "host": "hyper-b.example.net",
+    "strict_host_key": true,
+    "sudo": true,
+    "user": "fluxvm"
+  },
+  "migration_id": "payments-vm-20260911-001",
+  "quiclb": {
+    "instance_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "optional": true
+  },
+  "schema_version": 1,
+  "scx": {
+    "destination_plan": "/etc/fluxvm/scx/payments-dst.json",
+    "enabled": true,
+    "optional": true,
+    "source_plan": "/etc/fluxvm/scx/payments-src.json"
+  },
+  "source": {
+    "host": "hyper-a.example.net",
+    "strict_host_key": true,
+    "sudo": true,
+    "user": "fluxvm"
+  },
+  "topology": {
+    "destination_plan": "/etc/fluxvm/topology/payments-dst.json",
+    "enabled": true,
+    "optional": true,
+    "source_plan": "/etc/fluxvm/topology/payments-src.json"
+  },
+  "vm_id": "11111111-2222-4333-8444-555555555555",
+  "vmm": {
+    "migrate_argv": [
+      "/usr/local/libexec/fluxvm/fluxvm-migration-driver",
+      "migrate",
+      "{vm_id}",
+      "--destination",
+      "tcp:hyper-b.example.net:4444"
+    ],
+    "rollback_argv": [
+      "/usr/local/libexec/fluxvm/fluxvm-migration-driver",
+      "return",
+      "{vm_id}"
+    ]
+  }
+}

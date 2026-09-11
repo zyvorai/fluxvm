@@ -90,15 +90,29 @@ enforcing-SELinux mount label are still open.
 Sentinel Pod-scoped network policy (Set 6S) automatically enforcing
 Kubernetes `NetworkPolicy` objects — a standalone `fluxvm-networkpolicy-
 controller` DaemonSet compiles both egress and ingress `NetworkPolicy`
-objects into Set 6S's Pod policy API (Set 13), including exact numeric and
-named TCP/UDP ports, `endPort` ranges (capped at 8 per peer+protocol), and
-real CIDR entries for broad `ipBlock` peers (dataplane schema v8), all
-proven against a real kernel via `scripts/test-ebpf-smoke.sh`'s live
-namespace/BPF-object test. Still open: a CIDR peer combined with `except` or
-with a `ports` restriction still falls back to exact-address approximation
-rather than a real CIDR entry, more than 8 port ranges per peer+protocol are
-denied rather than representable, and it has not yet run a live-cluster
-reconciliation or multi-node Pod-to-Pod conformance suite —
+objects into a versioned directional CIDR+L4 tuple Pod policy schema
+(Set 14, superseding Set 13's exact-peer/exact-port design), including exact
+numeric and named TCP/UDP/SCTP ports, `endPort` ranges, real recursive CIDR
+subtraction for `ipBlock.except` (no approximation fallback), and a separate
+Pod-ingress eBPF program that shares the main program's conntrack table for
+a stateful return-traffic fast path (dataplane schema v8). Build/test/
+verifier validation for Set 14 is real (workspace `cargo build`/`test`, both
+BPF objects load through the real kernel verifier with confirmed shared map
+IDs, full Go build/vet/test/race/gofmt/cross-build gate), and so is live
+validation: the rewritten `scripts/test-ebpf-smoke.sh` exercises the unified
+`fluxvm_prules` rich CIDR+L4 tuple rules (including SCTP) and the separate
+shared-map `fluxvm_pod_ingress.bpf.o` object in real network namespaces
+against the real kernel verifier, and the rewritten
+`scripts/test-networkpolicy-live.sh` proves the new schema-v2 wire shape
+against a real single-node k3s cluster — see
+[secure-containers-set14.md](secure-containers-set14.md) for specifics,
+including the four eBPF verifier bugs found and fixed in the process. Still
+open: the live stateful-conntrack-bypass path between the egress and
+Pod-ingress programs is implemented but not yet proven with a live test; the
+per-VM rule cap is 64 (a kernel verifier resource limit, not an arbitrary
+choice — see Set 14's doc); and there is still no multi-node Pod-to-Pod
+dataplane conformance suite (the live test proves single-node reconciliation
+correctness, not cross-node connectivity) —
 [secure-containers-set13.md](secure-containers-set13.md). Sentinel
 in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
 policy automatically — every container is enforced fail-closed by default,

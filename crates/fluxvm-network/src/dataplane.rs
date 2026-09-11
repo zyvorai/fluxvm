@@ -84,69 +84,15 @@ impl Default for VmNetworkPolicy {
     }
 }
 
-/// Set 6S: Kubernetes-Pod-identity-scoped network policy, additive on top of
-/// a VM's own `VmNetworkPolicy` (CIDR/L4/rate). Peers are individual
-/// addresses (matching Service Fabric's `fluxvm_sid4/6` model), not CIDRs --
-/// a selector/CIDR-to-address resolver (e.g. a Kubernetes `NetworkPolicy`
-/// watcher translating pod-selector matches to peer Pod IPs) is expected to
-/// populate this, not `fluxvm_tc.bpf.c` itself.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PodNetworkPolicy {
-    /// A peer with no explicit allow/deny entry is denied when true. When
-    /// false (default), an unlisted peer is allowed -- Set 6S's policy is
-    /// opt-in restrictive, not opt-in permissive, so a Pod with no policy
-    /// configured at all behaves exactly as it did before this Set (see
-    /// `configure_pod_maps`'s `policy: None` no-op case).
-    #[serde(default)]
-    pub default_deny: bool,
-    /// Log-and-allow instead of drop, same semantics as
-    /// `VmNetworkPolicy::audit_mode`.
-    #[serde(default)]
-    pub audit_mode: bool,
-    #[serde(default)]
-    pub allow_addresses: Vec<IpAddr>,
-    #[serde(default)]
-    pub deny_addresses: Vec<IpAddr>,
-    /// Set 13: peers allowed only on specific protocol+port tuples, for
-    /// Kubernetes `NetworkPolicy` egress rules that carry a `ports` list. A
-    /// peer address here is ignored if it also appears in `allow_addresses`
-    /// -- an address-wide allow always wins, matching Kubernetes'
-    /// union-of-rules semantics (one unrestricted rule makes every port
-    /// reachable regardless of a separate, more specific rule). Named ports
-    /// and `endPort` ranges are not representable and must not be lowered
-    /// into this list by a compiler; deny those port entries instead.
-    #[serde(default)]
-    pub allow_port_rules: Vec<PodPeerPortRule>,
-    /// Schema v8: peers allowed via a CIDR prefix rather than an exact
-    /// address, for a Kubernetes `NetworkPolicy` `ipBlock` peer whose CIDR
-    /// is not a host route. Checked as a fallback tier after
-    /// `allow_addresses` misses (an exact address entry always wins over a
-    /// broader CIDR covering it, though in practice a compiler should never
-    /// emit both for the same peer).
-    #[serde(default)]
-    pub allow_cidrs: Vec<PodPeerCidr>,
-    /// Schema v8: peers allowed on a protocol-scoped inclusive port range,
-    /// for a Kubernetes `NetworkPolicy` `ports` entry carrying `endPort`.
-    /// Checked as a fallback tier after `allow_port_rules` misses. Capped at
-    /// `fluxvm_pod_policy.bpf.h`'s `FLUXVM_MAX_PORT_RANGES` (8) per
-    /// `(address, protocol)` pair -- a compiler emitting more than that for
-    /// one peer must deny the excess rather than silently drop it.
-    #[serde(default)]
-    pub port_ranges: Vec<PodPeerPortRange>,
-    /// Schema v8: the Pod-ingress-direction counterpart to this struct's own
-    /// egress-direction fields, for Kubernetes `NetworkPolicy` `ingress`
-    /// rules. `None` means no ingress policy configured (allow, same
-    /// unconfigured-is-allow default as the egress side) -- a distinct state
-    /// from `Some(PodIngressPolicy::default())`, which is an *empty*
-    /// configured policy (`default_deny: false` by that struct's own
-    /// `Default`, so still allow-all, but explicitly present so a later
-    /// reconcile can tell "no policy selects this Pod" apart from "a policy
-    /// selects it but grants nothing beyond default").
-    #[serde(default)]
-    pub ingress: Option<PodIngressPolicy>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/// Set 14 directional Kubernetes-Pod policy. The Set 6S exact-address and
+/// Set 13 exact peer+port fields remain wire-compatible for rolling upgrades;
+/// schema_version=2 activates CIDR/L4 tuple rules and independent
+/// ingress/egress isolation, replacing Set 6S/13's single flat
+/// allow/deny-address model with a unified rule union checked by
+/// `bpf/fluxvm_pod_policy.bpf.h`'s `fluxvm_prules` map. See
+/// `crate::ebpf::validate_pod_policy` for the wire-shape invariants this
+/// type does not enforce on its own.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
 pub enum PodPolicyProtocol {
     Tcp,
@@ -170,48 +116,65 @@ pub struct PodPeerPortRule {
     pub port: u16,
 }
 
-/// Schema v8: a CIDR-based peer allow, keyed into
-/// `fluxvm_pid4_cidr`/`fluxvm_pid6_cidr` (`bpf/fluxvm_pod_policy.bpf.h`).
-/// `prefix_len` is validated against `addr`'s family (0-32 for IPv4, 0-128
-/// for IPv6) at write time by `crate::ebpf::configure_pod_maps`, not here --
-/// this type is a plain wire/storage shape.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct PodPeerCidr {
-    pub addr: IpAddr,
-    pub prefix_len: u8,
+/// Set 14: one OR-clause in the Kubernetes allow union. Rules are ORed
+/// against each other; the fields inside one rule are ANDed. An empty
+/// `protocol` with `port_start == port_end == 0` means "all L4
+/// protocols/ports" for that peer CIDR. `direction` is `"ingress"` or
+/// `"egress"` (validated by `crate::ebpf::validate_pod_policy`, not by
+/// this type -- it's a plain wire/storage shape, matching `PodPeerPortRule`'s
+/// own convention from Set 13).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PodPolicyRule {
+    pub direction: String,
+    pub cidr: String,
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub port_start: u16,
+    #[serde(default)]
+    pub port_end: u16,
 }
 
-/// Schema v8: a protocol-scoped inclusive port range for one peer address,
-/// keyed into `fluxvm_pid4_port_range`/`fluxvm_pid6_port_range`. `start` and
-/// `end` are both inclusive, matching Kubernetes `NetworkPolicyPort`'s own
-/// `port`/`endPort` semantics.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub struct PodPeerPortRange {
-    pub address: IpAddr,
-    pub protocol: PodPolicyProtocol,
-    pub start: u16,
-    pub end: u16,
-}
-
-/// Schema v8: Pod-ingress-direction policy, the counterpart to
-/// `PodNetworkPolicy`'s own egress-direction fields. No `deny_addresses`
-/// field -- Kubernetes `NetworkPolicyIngressRule` has no deny concept,
-/// unlike `PodNetworkPolicy.deny_addresses` which predates Set 13 and
-/// exists for reasons specific to the egress side.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PodIngressPolicy {
+pub struct PodNetworkPolicy {
+    /// 0/1 (or omitted): legacy Set 6S/13 exact-address/port ABI, unchanged.
+    /// >=2: this policy's `rules` are authoritative and the legacy
+    /// `allow_addresses`/`allow_port_rules` fields are ignored by
+    /// `configure_pod_maps`, even if still present for a rolling-upgrade
+    /// reader.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// A peer with no explicit allow entry is denied when true. Set
+    /// unconditionally whenever either direction is isolated (see
+    /// `Compile()`'s own comment in the Go controller): an older Set 6S/13
+    /// dataplane that doesn't understand `rules` at all still over-denies
+    /// on a schema_version=2 policy instead of silently treating an
+    /// ingress-only isolation as "no policy, allow all".
     #[serde(default)]
     pub default_deny: bool,
+    /// Log-and-allow instead of drop, same semantics as
+    /// `VmNetworkPolicy::audit_mode`.
     #[serde(default)]
     pub audit_mode: bool,
     #[serde(default)]
     pub allow_addresses: Vec<IpAddr>,
     #[serde(default)]
-    pub allow_cidrs: Vec<PodPeerCidr>,
+    pub deny_addresses: Vec<IpAddr>,
+    /// Set 13 compatibility field, superseded by `rules` at
+    /// schema_version>=2 -- kept so an older controller's wire format still
+    /// parses.
     #[serde(default)]
     pub allow_port_rules: Vec<PodPeerPortRule>,
     #[serde(default)]
-    pub port_ranges: Vec<PodPeerPortRange>,
+    pub egress_isolated: bool,
+    #[serde(default)]
+    pub ingress_isolated: bool,
+    /// Set 14: the directional CIDR/L4 rule union. Only meaningful at
+    /// schema_version>=2. Bounded by
+    /// `crate::ebpf::MAX_POD_RULES`/`bpf/fluxvm_pod_policy.bpf.h`'s
+    /// `FLUXVM_MAX_POD_RULE`.
+    #[serde(default)]
+    pub rules: Vec<PodPolicyRule>,
 }
 
 pub fn default_policy(cfg: &Config) -> VmNetworkPolicy {
@@ -298,12 +261,14 @@ pub fn load_pod_policy(cfg: &Config, id: Uuid) -> Result<Option<PodNetworkPolicy
     }
     let raw = fs::read_to_string(&path)
         .with_context(|| format!("reading Pod network policy {}", path.display()))?;
-    Ok(Some(serde_json::from_str(&raw).with_context(|| {
-        format!("parsing Pod network policy {}", path.display())
-    })?))
+    let policy: PodNetworkPolicy = serde_json::from_str(&raw)
+        .with_context(|| format!("parsing Pod network policy {}", path.display()))?;
+    crate::ebpf::validate_pod_policy(&policy)?;
+    Ok(Some(policy))
 }
 
 pub fn save_pod_policy(cfg: &Config, id: Uuid, policy: &PodNetworkPolicy) -> Result<()> {
+    crate::ebpf::validate_pod_policy(policy)?;
     let path = pod_policy_path(cfg, id);
     let parent = path.parent().context("Pod network policy path has no parent")?;
     fs::create_dir_all(parent)
@@ -1013,38 +978,64 @@ mod tests {
         let json = r#"{"default_deny":true,"audit_mode":false,"allow_addresses":["10.0.0.20"],"deny_addresses":[]}"#;
         let policy: PodNetworkPolicy = serde_json::from_str(json).unwrap();
         assert!(policy.allow_port_rules.is_empty());
-        assert!(policy.allow_cidrs.is_empty());
-        assert!(policy.port_ranges.is_empty());
-        assert!(policy.ingress.is_none());
+        assert_eq!(policy.schema_version, 0);
+        assert!(policy.rules.is_empty());
+        assert!(!policy.ingress_isolated);
+        assert!(!policy.egress_isolated);
     }
 
     #[test]
-    fn pod_policy_round_trip_includes_schema_v8_fields() {
+    fn pod_policy_round_trip_includes_schema_v2_rules() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.state_dir = tmp.path().to_path_buf();
         let id = Uuid::new_v4();
         let policy = PodNetworkPolicy {
+            schema_version: 2,
             default_deny: true,
-            allow_cidrs: vec![PodPeerCidr {
-                addr: "10.0.1.0".parse().unwrap(),
-                prefix_len: 24,
-            }],
-            port_ranges: vec![PodPeerPortRange {
-                address: "10.0.0.30".parse().unwrap(),
-                protocol: PodPolicyProtocol::Tcp,
-                start: 8000,
-                end: 8010,
-            }],
-            ingress: Some(PodIngressPolicy {
-                default_deny: true,
-                allow_addresses: vec!["10.0.0.40".parse().unwrap()],
-                ..Default::default()
-            }),
+            ingress_isolated: true,
+            egress_isolated: true,
+            rules: vec![
+                PodPolicyRule {
+                    direction: "egress".into(),
+                    cidr: "10.0.1.0/24".into(),
+                    protocol: String::new(),
+                    port_start: 0,
+                    port_end: 0,
+                },
+                PodPolicyRule {
+                    direction: "ingress".into(),
+                    cidr: "10.0.0.30/32".into(),
+                    protocol: "TCP".into(),
+                    port_start: 8000,
+                    port_end: 8010,
+                },
+            ],
             ..Default::default()
         };
         save_pod_policy(&cfg, id, &policy).unwrap();
         assert_eq!(load_pod_policy(&cfg, id).unwrap(), Some(policy));
+    }
+
+    #[test]
+    fn pod_policy_rejects_invalid_rule_direction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.state_dir = tmp.path().to_path_buf();
+        let id = Uuid::new_v4();
+        let policy = PodNetworkPolicy {
+            schema_version: 2,
+            rules: vec![PodPolicyRule {
+                direction: "sideways".into(),
+                cidr: "10.0.0.0/24".into(),
+                protocol: String::new(),
+                port_start: 0,
+                port_end: 0,
+            }],
+            ..Default::default()
+        };
+        assert!(save_pod_policy(&cfg, id, &policy).is_err());
+        assert!(pod_policy_path(&cfg, id).exists().eq(&false));
     }
 
     #[test]

@@ -1,0 +1,9 @@
+[Unit]
+Description=Check FluxVM for stale/incomplete migration transactions
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/fluxvm/fluxvm-migrate --state-root /var/lib/fluxvm/migrations reconcile --stale-minutes 15
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/fluxvm/migrations

@@ -1,0 +1,9 @@
+[Unit]
+Description=Periodic FluxVM migration journal reconciliation
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+[Install]
+WantedBy=timers.target

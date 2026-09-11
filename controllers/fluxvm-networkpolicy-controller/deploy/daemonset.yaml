@@ -28,13 +28,14 @@ spec:
       terminationGracePeriodSeconds: 10
       containers:
         - name: controller
-          image: ghcr.io/zyvorai/fluxvm-networkpolicy-controller:v0.1.0
+          image: ghcr.io/zyvorai/fluxvm-networkpolicy-controller:v0.2.0
           imagePullPolicy: IfNotPresent
           args:
             - --node-name=$(NODE_NAME)
-            - --fluxvm-url=http://127.0.0.1:7788
+            - --fluxvm-url=http://127.0.0.1:8080
             - --interval=5s
             - --max-addresses=12000
+            - --max-rules=512
             - --metrics-listen=:9090
           env:
             - name: NODE_NAME

@@ -3,19 +3,20 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Live single-node Kubernetes reconciliation test for
-# fluxvm-networkpolicy-controller (Set 13 completion). Unlike the compiler's
-# own Go unit tests (hand-built kube.Pod/kube.NetworkPolicy Go structs) and
-# the eBPF-side scripts/test-ebpf-smoke.sh (a real kernel, but synthetic map
-# entries), this proves the controller's Kubernetes-facing half end-to-end
-# against a genuinely live cluster: real Pods with real container specs and
-# real Kubernetes-assigned IPs, real `networking.k8s.io/v1 NetworkPolicy`
-# objects decoded from the real API server's actual JSON shape, and the
-# controller's real reconcile loop (list/select/compile/apply) running
-# unmodified. Two fake VMs are mapped to the two test Pods so both
-# directions get a real assertion: the client Pod's compiled *egress*
-# policy proves a named port resolves against the real *peer* (server)
-# Pod's own container spec; the server Pod's compiled *ingress* policy
-# proves numeric-port ingress resolves against the real client Pod IP.
+# fluxvm-networkpolicy-controller (Set 14 NetworkPolicy v2). Unlike the
+# compiler's own Go unit tests (hand-built kube.Pod/kube.NetworkPolicy Go
+# structs) and the eBPF-side scripts/test-ebpf-smoke.sh (a real kernel, but
+# synthetic map entries), this proves the controller's Kubernetes-facing
+# half end-to-end against a genuinely live cluster: real Pods with real
+# container specs and real Kubernetes-assigned IPs, real
+# `networking.k8s.io/v1 NetworkPolicy` objects decoded from the real API
+# server's actual JSON shape, and the controller's real reconcile loop
+# (list/select/compile/apply) running unmodified. Two fake VMs are mapped
+# to the two test Pods so both directions get a real assertion: the client
+# Pod's compiled *egress* schema-v2 rule proves a named port resolves
+# against the real *peer* (server) Pod's own container spec; the server
+# Pod's compiled *ingress* schema-v2 rule proves numeric-port ingress
+# resolves against the real client Pod IP as a /32 CIDR tuple.
 #
 # What is intentionally NOT real here: the FluxVM side. Running actual
 # Secure Containers VMs inside a throwaway k3s test cluster is out of scope
@@ -235,7 +236,7 @@ echo "-- building and running fluxvm-networkpolicy-controller --"
 if [[ -n "${CONTROLLER_BIN:-}" ]]; then
   # go.mod pins `go 1.23`; a host whose installed `go` is older and has no
   # network access to auto-download that toolchain (a pre-existing
-  # environment gap, unrelated to Set 13) can't `go build` this locally --
+  # environment gap, unrelated to Set 14) can't `go build` this locally --
   # set CONTROLLER_BIN to a binary cross-compiled elsewhere instead.
   cp "$CONTROLLER_BIN" "$TMP/fluxvm-networkpolicy-controller"
   chmod +x "$TMP/fluxvm-networkpolicy-controller"
@@ -272,38 +273,51 @@ if [[ ! -s "$TMP/policies/$SERVER_VM.json" || ! -s "$TMP/policies/$CLIENT_VM.jso
   exit 1
 fi
 
-echo "-- asserting the live-compiled policies --"
+echo "-- asserting the live-compiled schema-v2 policies --"
 python3 - "$TMP/policies/$SERVER_VM.json" "$TMP/policies/$CLIENT_VM.json" "$SERVER_IP" "$CLIENT_IP" <<'PY'
 import json, sys
 server_policy_path, client_policy_path, server_ip, client_ip = sys.argv[1:5]
 server_policy = json.load(open(server_policy_path))
 client_policy = json.load(open(client_policy_path))
 
-# Server Pod: no egress-isolating policy selects it -> egress unrestricted.
-assert server_policy["default_deny"] is False, server_policy
-assert not server_policy.get("allow_port_rules"), server_policy
-# server-ingress selects it: allow from the real client Pod IP on the
-# numeric port 8080 the ingress rule names directly.
-ingress = server_policy["ingress"]
-assert ingress is not None and ingress["default_deny"] is True, server_policy
-assert ingress["allow_port_rules"] == [
-    {"address": client_ip, "protocol": "tcp", "port": 8080}
-], f"expected ingress allow from real client Pod IP on port 8080: {ingress}"
+def rules(policy):
+    return policy.get("rules") or []
+
+# Server Pod: only server-ingress selects it. Set 14 emits a directional
+# schema-v2 policy: ingress_isolated, default_deny (legacy roll-forward
+# bit), and one ingress CIDR+L4 tuple for the real client Pod IP / TCP 8080.
+assert server_policy.get("schema_version") == 2, server_policy
+assert server_policy["default_deny"] is True, server_policy
+assert server_policy.get("ingress_isolated") is True, server_policy
+assert not server_policy.get("egress_isolated"), server_policy
+assert rules(server_policy) == [
+    {
+        "direction": "ingress",
+        "cidr": f"{client_ip}/32",
+        "protocol": "TCP",
+        "port_start": 8080,
+        "port_end": 8080,
+    }
+], f"expected ingress allow from real client Pod IP on port 8080: {server_policy}"
 
 # Client Pod: client-egress selects it with a *named* port ("http"),
 # which must resolve against the real *peer* (server) Pod's own container
 # spec -- proving this is genuinely live, not a synthetic fixture, since
 # the mapping from "http" -> 8080 only exists in the server Pod object
 # Kubernetes itself returned.
+assert client_policy.get("schema_version") == 2, client_policy
 assert client_policy["default_deny"] is True, client_policy
-assert client_policy["allow_port_rules"] == [
-    {"address": server_ip, "protocol": "tcp", "port": 8080}
+assert client_policy.get("egress_isolated") is True, client_policy
+assert not client_policy.get("ingress_isolated"), client_policy
+assert rules(client_policy) == [
+    {
+        "direction": "egress",
+        "cidr": f"{server_ip}/32",
+        "protocol": "TCP",
+        "port_start": 8080,
+        "port_end": 8080,
+    }
 ], f"expected named port 'http' to resolve to 8080 against the real server Pod: {client_policy}"
-# No ingress-isolating policy selects the client Pod -> `ingress` stays
-# nil/null on the wire, same "unconfigured means allow" semantics as a
-# PodNetworkPolicy with no Pod policy configured at all (see
-# crates/fluxvm-network/src/dataplane.rs's PodNetworkPolicy.ingress doc).
-assert client_policy.get("ingress") is None, client_policy
 
-print("live NetworkPolicy reconciliation test: PASS")
+print("live NetworkPolicy reconciliation test (Set 14 schema v2): PASS")
 PY

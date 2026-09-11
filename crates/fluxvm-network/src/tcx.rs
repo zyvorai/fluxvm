@@ -53,54 +53,22 @@ pub struct Status {
     pub link_type: Option<u32>,
 }
 
-/// Set 13 (schema v8): which TCX hook a program is attached at.
-/// `fluxvm_egress` (VM-egress enforcement) has always used `Ingress` --
-/// host-side ingress on a Pod VM's tap is traffic *leaving* the VM. The new
-/// `fluxvm_pod_ingress` program (Pod-ingress enforcement) needs `Egress` --
-/// host-side egress is traffic *entering* the VM. Threaded through to
-/// `tools/fluxvm-tcx.c`'s optional trailing `[ingress|egress]` argument;
-/// omitting it there defaults to `Ingress`, so every pre-Set-13 caller of
-/// this module's `attach`/`probe` (which always pass `Direction::Ingress`)
-/// is unaffected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Ingress,
-    Egress,
-}
-
-impl Direction {
-    fn as_arg(self) -> &'static str {
-        match self {
-            Direction::Ingress => "ingress",
-            Direction::Egress => "egress",
-        }
-    }
-}
-
 pub fn link_pin(vm_dir: &Path) -> std::path::PathBuf {
     vm_dir.join("links/tcx_ingress")
 }
 
-/// Set 13: the second, Pod-ingress-direction TCX link pin, parallel to
-/// `link_pin` above. Kept as its own function (not a `Direction` parameter
-/// on `link_pin`) so every pre-Set-13 call site naming `link_pin(vm_dir)`
-/// keeps compiling unchanged.
-pub fn ingress_link_pin(vm_dir: &Path) -> std::path::PathBuf {
-    vm_dir.join("links/tcx_pod_ingress")
+pub fn probe(iface: &str) -> Result<Status> {
+    run_json(&["probe", iface])
 }
 
-pub fn probe(iface: &str, direction: Direction) -> Result<Status> {
-    run_json(&["probe", iface, direction.as_arg()])
-}
-
-pub fn attach(iface: &str, program_pin: &Path, link_pin: &Path, direction: Direction) -> Result<Status> {
+pub fn attach(iface: &str, program_pin: &Path, link_pin: &Path) -> Result<Status> {
     let program_pin = program_pin
         .to_str()
         .context("TCX program pin path is not UTF-8")?;
     let link_pin = link_pin
         .to_str()
         .context("TCX link pin path is not UTF-8")?;
-    run_json(&["attach", iface, program_pin, link_pin, direction.as_arg()])
+    run_json(&["attach", iface, program_pin, link_pin])
 }
 
 pub fn update(program_pin: &Path, link_pin: &Path, old_program_pin: Option<&Path>) -> Result<()> {

@@ -1,0 +1,26 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=FluxVM Sentinel stale upgrade transaction reconciler
+After=local-fs.target
+ConditionPathExists=/usr/libexec/fluxvm/fluxvm-upgrade
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/fluxvm/fluxvm-upgrade reconcile --stale-minutes 15
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fluxvm/sentinel-upgrades -/sys/fs/bpf/fluxvm
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+UMask=0077

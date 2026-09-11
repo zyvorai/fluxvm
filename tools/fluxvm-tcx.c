@@ -22,34 +22,12 @@ static void usage(const char *argv0)
 {
     fprintf(stderr,
             "usage:\n"
-            "  %s probe  <iface> [ingress|egress]\n"
-            "  %s attach <iface> <program-pin> <link-pin> [ingress|egress]\n"
+            "  %s probe  <iface>\n"
+            "  %s attach <iface> <program-pin> <link-pin>\n"
             "  %s update <program-pin> <link-pin> [old-program-pin]\n"
             "  %s status <link-pin>\n"
             "  %s detach <link-pin>\n",
             argv0, argv0, argv0, argv0, argv0);
-}
-
-// Set 13 (schema v8): Pod-ingress-direction enforcement needs a second TCX
-// link on the same interface, at BPF_TCX_EGRESS (host-side egress = traffic
-// entering the VM) rather than BPF_TCX_INGRESS (the only direction this
-// helper supported before -- host-side ingress = VM egress, used by every
-// other FluxVM eBPF consumer). `update`/`status`/`detach` operate on an
-// already-created link fd and need no direction argument; only `probe` and
-// `attach` create/query against a specific hook. Omitting the argument
-// keeps the pre-Set-13 ingress-only behavior unchanged for every existing
-// caller.
-static int parse_direction(const char *raw, enum bpf_attach_type *out)
-{
-    if (!raw || strcmp(raw, "ingress") == 0) {
-        *out = BPF_TCX_INGRESS;
-        return 0;
-    }
-    if (strcmp(raw, "egress") == 0) {
-        *out = BPF_TCX_EGRESS;
-        return 0;
-    }
-    return -EINVAL;
 }
 
 static int neg_errno_or(int rc)
@@ -98,7 +76,7 @@ static int ifindex_of(const char *iface)
     return (int)ifindex;
 }
 
-static int query_tcx(int ifindex, enum bpf_attach_type direction, __u64 *revision, __u32 *count)
+static int query_tcx(int ifindex, __u64 *revision, __u32 *count)
 {
     // A FluxVM-owned VM edge should have at most one TCX program, but keep
     // enough room to coexist with operator instrumentation. Supplying arrays
@@ -114,7 +92,7 @@ static int query_tcx(int ifindex, enum bpf_attach_type direction, __u64 *revisio
     opts.link_ids = link_ids;
     opts.prog_attach_flags = prog_flags;
     opts.link_attach_flags = link_flags;
-    int rc = bpf_prog_query_opts(ifindex, direction, &opts);
+    int rc = bpf_prog_query_opts(ifindex, BPF_TCX_INGRESS, &opts);
     if (rc)
         return neg_errno_or(rc);
     if (revision)
@@ -124,17 +102,14 @@ static int query_tcx(int ifindex, enum bpf_attach_type direction, __u64 *revisio
     return 0;
 }
 
-static int cmd_probe(const char *iface, const char *direction_arg)
+static int cmd_probe(const char *iface)
 {
-    enum bpf_attach_type direction;
-    if (parse_direction(direction_arg, &direction))
-        return -EINVAL;
     int ifindex = ifindex_of(iface);
     if (ifindex < 0)
         return ifindex;
     __u64 revision = 0;
     __u32 count = 0;
-    int rc = query_tcx(ifindex, direction, &revision, &count);
+    int rc = query_tcx(ifindex, &revision, &count);
     if (rc)
         return rc;
     printf("{\"supported\":true,\"ifindex\":%d,\"revision\":%llu,\"program_count\":%u}\n",
@@ -142,11 +117,8 @@ static int cmd_probe(const char *iface, const char *direction_arg)
     return 0;
 }
 
-static int cmd_attach(const char *iface, const char *program_pin, const char *link_pin, const char *direction_arg)
+static int cmd_attach(const char *iface, const char *program_pin, const char *link_pin)
 {
-    enum bpf_attach_type direction;
-    if (parse_direction(direction_arg, &direction))
-        return -EINVAL;
     int ifindex = ifindex_of(iface);
     if (ifindex < 0)
         return ifindex;
@@ -156,7 +128,7 @@ static int cmd_attach(const char *iface, const char *program_pin, const char *li
 
     __u64 before_revision = 0;
     __u32 before_count = 0;
-    int rc = query_tcx(ifindex, direction, &before_revision, &before_count);
+    int rc = query_tcx(ifindex, &before_revision, &before_count);
     if (rc) {
         close(prog_fd);
         return rc;
@@ -165,7 +137,7 @@ static int cmd_attach(const char *iface, const char *program_pin, const char *li
     struct bpf_link_create_opts opts = {};
     opts.sz = sizeof(opts);
     opts.tcx.expected_revision = before_revision;
-    int link_fd = bpf_link_create(prog_fd, ifindex, direction, &opts);
+    int link_fd = bpf_link_create(prog_fd, ifindex, BPF_TCX_INGRESS, &opts);
     if (link_fd < 0) {
         rc = neg_errno_or(link_fd);
         close(prog_fd);
@@ -194,7 +166,7 @@ static int cmd_attach(const char *iface, const char *program_pin, const char *li
 
     __u64 revision = 0;
     __u32 count = 0;
-    rc = query_tcx(ifindex, direction, &revision, &count);
+    rc = query_tcx(ifindex, &revision, &count);
     if (rc) {
         unlink(link_pin);
         goto fail_link;
@@ -295,10 +267,10 @@ static int cmd_detach(const char *link_pin)
 int main(int argc, char **argv)
 {
     int rc = -EINVAL;
-    if ((argc == 3 || argc == 4) && strcmp(argv[1], "probe") == 0)
-        rc = cmd_probe(argv[2], argc == 4 ? argv[3] : NULL);
-    else if ((argc == 5 || argc == 6) && strcmp(argv[1], "attach") == 0)
-        rc = cmd_attach(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : NULL);
+    if (argc == 3 && strcmp(argv[1], "probe") == 0)
+        rc = cmd_probe(argv[2]);
+    else if (argc == 5 && strcmp(argv[1], "attach") == 0)
+        rc = cmd_attach(argv[2], argv[3], argv[4]);
     else if ((argc == 4 || argc == 5) && strcmp(argv[1], "update") == 0)
         rc = cmd_update(argv[2], argv[3], argc == 5 ? argv[4] : NULL);
     else if (argc == 3 && strcmp(argv[1], "status") == 0)
