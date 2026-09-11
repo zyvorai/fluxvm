@@ -4,7 +4,10 @@
 //! Advertise `fluxvm.dev/kvm` on this node so shadow Pods can request a slot.
 
 use k8s_openapi::api::core::v1::Node;
-use kube::{Api, Client, api::{Patch, PatchParams}};
+use kube::{
+    Api, Client,
+    api::{Patch, PatchParams},
+};
 
 pub async fn advertise(client: &Client, node_name: &str, slots: u32) -> Result<(), kube::Error> {
     let nodes: Api<Node> = Api::all(client.clone());
@@ -14,6 +17,8 @@ pub async fn advertise(client: &Client, node_name: &str, slots: u32) -> Result<(
             "allocatable": { "fluxvm.dev/kvm": slots.to_string() }
         }
     });
-    nodes.patch_status(node_name, &PatchParams::default(), &Patch::Merge(patch)).await?;
+    nodes
+        .patch_status(node_name, &PatchParams::default(), &Patch::Merge(patch))
+        .await?;
     Ok(())
 }

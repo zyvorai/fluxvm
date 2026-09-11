@@ -194,8 +194,12 @@ pub fn remove(cfg: &XdpConfig) -> Result<()> {
                 run(
                     "ip",
                     &[
-                        "link".into(), "set".into(), "dev".into(), iface.into(),
-                        "xdp".into(), "off".into(),
+                        "link".into(),
+                        "set".into(),
+                        "dev".into(),
+                        iface.into(),
+                        "xdp".into(),
+                        "off".into(),
                     ],
                 )
                 .context("detaching FluxVM-owned XDP program")?;
@@ -229,15 +233,16 @@ pub fn remove(cfg: &XdpConfig) -> Result<()> {
 fn attachment_is_ours(cfg: &XdpConfig, expected_iface: &str) -> Result<bool> {
     let root = cfg.pin_root.join("xdp");
     let meta = xdp_meta_dir();
-    let iface = read_xdp_marker(&meta, &root, "iface")
-        .map(|s| s.trim().to_string());
+    let iface = read_xdp_marker(&meta, &root, "iface").map(|s| s.trim().to_string());
     if iface.as_deref() != Some(expected_iface) {
         return Ok(false);
     }
     let owned_id = read_xdp_marker(&meta, &root, "prog_id")
         .and_then(|s| s.trim().parse::<u32>().ok())
         .or_else(|| pinned_program_id(&root.join("progs/fluxvm_xdp_guard")).ok());
-    let Some(owned_id) = owned_id else { return Ok(false) };
+    let Some(owned_id) = owned_id else {
+        return Ok(false);
+    };
     let (attached, current_id) = interface_xdp_state(expected_iface)?;
     Ok(attached && current_id == Some(owned_id))
 }
@@ -308,9 +313,12 @@ fn pinned_program_id(path: &Path) -> Result<u32> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let json: Value = serde_json::from_slice(&out.stdout).context("parsing bpftool program JSON")?;
+    let json: Value =
+        serde_json::from_slice(&out.stdout).context("parsing bpftool program JSON")?;
     let object = if let Some(array) = json.as_array() {
-        array.first().context("bpftool returned an empty program array")?
+        array
+            .first()
+            .context("bpftool returned an empty program array")?
     } else {
         &json
     };
@@ -329,7 +337,9 @@ fn validate_block_cidrs(cidrs: &[String]) -> Result<()> {
 }
 
 fn parse_ip_cidr(raw: &str) -> Result<IpCidr> {
-    let (ip, prefix) = raw.split_once('/').context("XDP CIDR must include /prefix")?;
+    let (ip, prefix) = raw
+        .split_once('/')
+        .context("XDP CIDR must include /prefix")?;
     let ip: IpAddr = ip.parse()?;
     let prefix: u8 = prefix.parse()?;
     match ip {
@@ -338,15 +348,26 @@ fn parse_ip_cidr(raw: &str) -> Result<IpCidr> {
                 bail!("IPv4 prefix must be <= 32");
             }
             let raw = u32::from(ip);
-            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
-            Ok(IpCidr::V4(Ipv4Cidr { network: Ipv4Addr::from(raw & mask), prefix }))
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            Ok(IpCidr::V4(Ipv4Cidr {
+                network: Ipv4Addr::from(raw & mask),
+                prefix,
+            }))
         }
         IpAddr::V6(ip) => {
             if prefix > 128 {
                 bail!("IPv6 prefix must be <= 128");
             }
             let raw = u128::from_be_bytes(ip.octets());
-            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
             Ok(IpCidr::V6(Ipv6Cidr {
                 network: Ipv6Addr::from((raw & mask).to_be_bytes()),
                 prefix,
@@ -372,7 +393,9 @@ fn sync_block_map(map: &Path, desired: &[Vec<u8>]) -> Result<()> {
         );
     }
     let root: Value = serde_json::from_slice(&out.stdout).context("parsing XDP map JSON")?;
-    let entries = root.as_array().context("bpftool XDP map dump must be an array")?;
+    let entries = root
+        .as_array()
+        .context("bpftool XDP map dump must be an array")?;
     let mut existing = Vec::with_capacity(entries.len());
     for entry in entries {
         existing.push(json_bytes(&entry["key"])?);
@@ -386,8 +409,12 @@ fn sync_block_map(map: &Path, desired: &[Vec<u8>]) -> Result<()> {
             continue;
         }
         let mut args = vec![
-            "map".into(), "delete".into(), "pinned".into(), map.display().to_string(),
-            "key".into(), "hex".into(),
+            "map".into(),
+            "delete".into(),
+            "pinned".into(),
+            map.display().to_string(),
+            "key".into(),
+            "hex".into(),
         ];
         args.extend(key.iter().map(|b| format!("{b:02x}")));
         run("bpftool", &args)?;
@@ -427,8 +454,12 @@ fn json_bytes(v: &Value) -> Result<Vec<u8>> {
 
 fn bpftool_map_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
     let mut args = vec![
-        "map".into(), "update".into(), "pinned".into(), map.display().to_string(),
-        "key".into(), "hex".into(),
+        "map".into(),
+        "update".into(),
+        "pinned".into(),
+        map.display().to_string(),
+        "key".into(),
+        "hex".into(),
     ];
     args.extend(key.iter().map(|b| format!("{b:02x}")));
     args.push("value".into());
@@ -499,7 +530,10 @@ mod tests {
     fn modern_iproute2_xdp_shape_is_understood() {
         let json = serde_json::json!({"xdp":{"mode":2,"prog":{"id":77,"name":"guard"}}});
         let xdp = &json["xdp"];
-        let id = xdp.get("prog").and_then(|p| p.get("id")).and_then(Value::as_u64);
+        let id = xdp
+            .get("prog")
+            .and_then(|p| p.get("id"))
+            .and_then(Value::as_u64);
         assert_eq!(id, Some(77));
     }
 }

@@ -1,20 +1,23 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-pub mod guard;
-pub mod qos;
-pub mod shield;
-pub mod tcpintel;
-pub mod netintel;
-pub mod memprof;
-pub mod topology;
 pub mod afxdp;
+pub mod guard;
+pub mod memprof;
+pub mod netintel;
+pub mod qos;
 pub mod quiclb;
 pub mod scx;
+pub mod shield;
+pub mod tcpintel;
+pub mod topology;
 
 use anyhow::{Context, Result, anyhow, bail};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
-use fluxvm_network::{dataplane::{PodNetworkPolicy, VmNetworkPolicy}, ebpf::{DropReasonRecord, FlowRecord}};
+use fluxvm_network::{
+    dataplane::{PodNetworkPolicy, VmNetworkPolicy},
+    ebpf::{DropReasonRecord, FlowRecord},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -194,9 +197,12 @@ pub fn vm_key(id: Uuid) -> u64 {
 
 pub fn probe(pin_root: &Path) -> FeatureProbe {
     let event = |sub: &str| {
-        ["/sys/kernel/tracing/events", "/sys/kernel/debug/tracing/events"]
-            .iter()
-            .any(|root| Path::new(root).join(sub).exists())
+        [
+            "/sys/kernel/tracing/events",
+            "/sys/kernel/debug/tracing/events",
+        ]
+        .iter()
+        .any(|root| Path::new(root).join(sub).exists())
     };
     FeatureProbe {
         schema_version: INTELLIGENCE_SCHEMA_VERSION,
@@ -225,12 +231,18 @@ pub fn probe(pin_root: &Path) -> FeatureProbe {
 }
 
 pub fn register_record(record: &VmRecord, pin_root: &Path) -> Result<Vec<u32>> {
-    let pid = record.pid.ok_or_else(|| anyhow!("VM {} has no VMM pid", record.id))?;
+    let pid = record
+        .pid
+        .ok_or_else(|| anyhow!("VM {} has no VMM pid", record.id))?;
     let tids = register_raw(record.id, pid, pin_root)?;
     if let Some(cgroup) = record.cgroup_path.as_deref() {
         let map = pin_root.join("maps/tracked_cgroups");
         if map.exists() {
-            let cgroup = if cgroup.is_absolute() { cgroup.to_path_buf() } else { Path::new("/sys/fs/cgroup").join(cgroup) };
+            let cgroup = if cgroup.is_absolute() {
+                cgroup.to_path_buf()
+            } else {
+                Path::new("/sys/fs/cgroup").join(cgroup)
+            };
             if let Ok(meta) = fs::metadata(cgroup) {
                 let _ = bpftool_update_u64_u64(&map, meta.ino(), vm_key(record.id));
             }
@@ -264,7 +276,9 @@ pub fn unregister_raw(id: Uuid, pid: Option<u32>, pin_root: &Path) -> Result<()>
     if let Some(pid) = pid {
         let _ = bpftool_delete_u32(&maps.join("tracked_tgids"), pid);
         if let Ok(tids) = task_ids(pid) {
-            for tid in tids { let _ = bpftool_delete_u32(&maps.join("tracked_tids"), tid); }
+            for tid in tids {
+                let _ = bpftool_delete_u32(&maps.join("tracked_tids"), tid);
+            }
         }
     }
     let _ = bpftool_delete_u64(&maps.join("vm_stats"), key);
@@ -272,11 +286,12 @@ pub fn unregister_raw(id: Uuid, pid: Option<u32>, pin_root: &Path) -> Result<()>
     Ok(())
 }
 
-
 pub fn unregister_exact(id: Uuid, pid: u32, tids: &[u32], pin_root: &Path) -> Result<()> {
     let maps = pin_root.join("maps");
     let _ = bpftool_delete_u32(&maps.join("tracked_tgids"), pid);
-    for tid in tids { let _ = bpftool_delete_u32(&maps.join("tracked_tids"), *tid); }
+    for tid in tids {
+        let _ = bpftool_delete_u32(&maps.join("tracked_tids"), *tid);
+    }
     let key = vm_key(id);
     let _ = bpftool_delete_u64(&maps.join("vm_stats"), key);
     let _ = clear_vm_aux_maps(pin_root, key);
@@ -285,12 +300,16 @@ pub fn unregister_exact(id: Uuid, pid: u32, tids: &[u32], pin_root: &Path) -> Re
 
 pub fn unregister_stale_tids(tids: &[u32], pin_root: &Path) -> Result<()> {
     let map = pin_root.join("maps/tracked_tids");
-    for tid in tids { let _ = bpftool_delete_u32(&map, *tid); }
+    for tid in tids {
+        let _ = bpftool_delete_u32(&map, *tid);
+    }
     Ok(())
 }
 
 pub fn snapshot_record(record: &VmRecord, pin_root: &Path) -> Result<VmRuntimeSnapshot> {
-    let pid = record.pid.ok_or_else(|| anyhow!("VM {} has no VMM pid", record.id))?;
+    let pid = record
+        .pid
+        .ok_or_else(|| anyhow!("VM {} has no VMM pid", record.id))?;
     let tids = if probe(pin_root).maps_loaded {
         register_record(record, pin_root).unwrap_or_else(|_| task_ids(pid).unwrap_or_default())
     } else {
@@ -311,8 +330,19 @@ pub fn snapshot_record(record: &VmRecord, pin_root: &Path) -> Result<VmRuntimeSn
 pub fn snapshot_raw(id: Uuid, pid: u32, pin_root: &Path) -> Result<VmRuntimeSnapshot> {
     let tids = if probe(pin_root).maps_loaded {
         register_raw(id, pid, pin_root).unwrap_or_else(|_| task_ids(pid).unwrap_or_default())
-    } else { task_ids(pid).unwrap_or_default() };
-    snapshot_parts(id, "raw-target", "unknown", "running", pid, None, tids, pin_root)
+    } else {
+        task_ids(pid).unwrap_or_default()
+    };
+    snapshot_parts(
+        id,
+        "raw-target",
+        "unknown",
+        "running",
+        pid,
+        None,
+        tids,
+        pin_root,
+    )
 }
 
 fn snapshot_parts(
@@ -326,9 +356,17 @@ fn snapshot_parts(
     pin_root: &Path,
 ) -> Result<VmRuntimeSnapshot> {
     let p = probe(pin_root);
-    let kernel = if p.maps_loaded { read_kernel_stats(pin_root, vm_key(id)).unwrap_or_default() } else { KernelVmStats::default() };
+    let kernel = if p.maps_loaded {
+        read_kernel_stats(pin_root, vm_key(id)).unwrap_or_default()
+    } else {
+        KernelVmStats::default()
+    };
     let process = read_proc_stats(pid).unwrap_or_default();
-    let pressure = cgroup_path.map(read_pressure).transpose().unwrap_or(None).unwrap_or_default();
+    let pressure = cgroup_path
+        .map(read_pressure)
+        .transpose()
+        .unwrap_or(None)
+        .unwrap_or_default();
     let flight = if p.flight_maps_loaded {
         read_flight_snapshot(pin_root, vm_key(id)).ok()
     } else {
@@ -336,33 +374,62 @@ fn snapshot_parts(
     };
     let mut findings = Vec::new();
     if kernel.runnable_delay_max_ns >= 10_000_000 {
-        findings.push(format!("high vCPU/thread runnable delay: {:.2} ms max", kernel.runnable_delay_max_ns as f64 / 1_000_000.0));
+        findings.push(format!(
+            "high vCPU/thread runnable delay: {:.2} ms max",
+            kernel.runnable_delay_max_ns as f64 / 1_000_000.0
+        ));
     }
     if process.major_faults > 0 {
-        findings.push(format!("VMM has {} major page faults", process.major_faults));
+        findings.push(format!(
+            "VMM has {} major page faults",
+            process.major_faults
+        ));
     }
     if pressure.cpu_some_avg10.unwrap_or(0.0) >= 10.0 {
-        findings.push(format!("CPU pressure avg10 is {:.2}%", pressure.cpu_some_avg10.unwrap_or(0.0)));
+        findings.push(format!(
+            "CPU pressure avg10 is {:.2}%",
+            pressure.cpu_some_avg10.unwrap_or(0.0)
+        ));
     }
     if pressure.io_full_avg10.unwrap_or(0.0) >= 1.0 {
-        findings.push(format!("full I/O pressure avg10 is {:.2}%", pressure.io_full_avg10.unwrap_or(0.0)));
+        findings.push(format!(
+            "full I/O pressure avg10 is {:.2}%",
+            pressure.io_full_avg10.unwrap_or(0.0)
+        ));
     }
     if let Some(flight) = &flight {
         if flight.counters.ringbuf_lost > 0 {
-            findings.push(format!("Flight Recorder dropped {} live event(s) because the ring buffer was full", flight.counters.ringbuf_lost));
+            findings.push(format!(
+                "Flight Recorder dropped {} live event(s) because the ring buffer was full",
+                flight.counters.ringbuf_lost
+            ));
         }
-        let block_max = flight.latency.iter().filter(|b| b.kind == "block-io").map(|b| b.max_ns).max().unwrap_or(0);
+        let block_max = flight
+            .latency
+            .iter()
+            .filter(|b| b.kind == "block-io")
+            .map(|b| b.max_ns)
+            .max()
+            .unwrap_or(0);
         if block_max >= 20_000_000 {
-            findings.push(format!("slow VM-attributed block I/O observed: {:.2} ms max", block_max as f64 / 1_000_000.0));
+            findings.push(format!(
+                "slow VM-attributed block I/O observed: {:.2} ms max",
+                block_max as f64 / 1_000_000.0
+            ));
         }
     }
     if !p.maps_loaded {
-        findings.push("eBPF intelligence maps are not loaded; showing procfs/cgroup fallback only".into());
+        findings.push(
+            "eBPF intelligence maps are not loaded; showing procfs/cgroup fallback only".into(),
+        );
     } else if !p.ready_for_kvm() {
         findings.push("KVM tracepoints unavailable; scheduler telemetry remains usable".into());
     }
     if p.maps_loaded && !p.flight_maps_loaded {
-        findings.push("Flight Recorder maps are unavailable; runtime-intelligence object predates schema v2".into());
+        findings.push(
+            "Flight Recorder maps are unavailable; runtime-intelligence object predates schema v2"
+                .into(),
+        );
     }
     Ok(VmRuntimeSnapshot {
         schema_version: INTELLIGENCE_SCHEMA_VERSION,
@@ -391,12 +458,18 @@ pub fn read_kernel_stats(pin_root: &Path, wanted: u64) -> Result<KernelVmStats> 
         .output()
         .with_context(|| format!("running bpftool for {}", path.display()))?;
     if !out.status.success() {
-        bail!("bpftool map dump failed: {}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "bpftool map dump failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
-    let rows: Vec<Value> = serde_json::from_slice(&out.stdout).context("parsing bpftool map JSON")?;
+    let rows: Vec<Value> =
+        serde_json::from_slice(&out.stdout).context("parsing bpftool map JSON")?;
     for row in rows {
         let key = decode_scalar_or_hex_u64(row.get("key"));
-        if key != Some(wanted) { continue; }
+        if key != Some(wanted) {
+            continue;
+        }
         if let Some(Value::Object(v)) = row.get("value") {
             return Ok(KernelVmStats {
                 kvm_exits: json_u64(v.get("kvm_exits")).unwrap_or(0),
@@ -408,8 +481,11 @@ pub fn read_kernel_stats(pin_root: &Path, wanted: u64) -> Result<KernelVmStats> 
                 last_event_ns: json_u64(v.get("last_event_ns")).unwrap_or(0),
             });
         }
-        let bytes = decode_hex_field(row.get("value")).ok_or_else(|| anyhow!("vm_stats value is not supported bpftool JSON"))?;
-        if bytes.len() < 64 { bail!("vm_stats value too short: {}", bytes.len()); }
+        let bytes = decode_hex_field(row.get("value"))
+            .ok_or_else(|| anyhow!("vm_stats value is not supported bpftool JSON"))?;
+        if bytes.len() < 64 {
+            bail!("vm_stats value too short: {}", bytes.len());
+        }
         return Ok(KernelVmStats {
             kvm_exits: le_u64(&bytes[0..8]).unwrap_or(0),
             guest_run_ns: le_u64(&bytes[8..16]).unwrap_or(0),
@@ -425,9 +501,13 @@ pub fn read_kernel_stats(pin_root: &Path, wanted: u64) -> Result<KernelVmStats> 
 
 pub fn task_ids(pid: u32) -> Result<Vec<u32>> {
     let mut tids = BTreeSet::new();
-    for ent in fs::read_dir(format!("/proc/{pid}/task")).with_context(|| format!("reading /proc/{pid}/task"))? {
+    for ent in fs::read_dir(format!("/proc/{pid}/task"))
+        .with_context(|| format!("reading /proc/{pid}/task"))?
+    {
         let ent = ent?;
-        if let Ok(tid) = ent.file_name().to_string_lossy().parse::<u32>() { tids.insert(tid); }
+        if let Ok(tid) = ent.file_name().to_string_lossy().parse::<u32>() {
+            tids.insert(tid);
+        }
     }
     Ok(tids.into_iter().collect())
 }
@@ -458,22 +538,32 @@ pub fn trace_events(
     let helper = std::env::var("FLUXVM_FLIGHT_READER")
         .unwrap_or_else(|_| "/usr/libexec/fluxvm/fluxvm-flight-reader".into());
     let args = vec![
-        "--map".to_string(), map.display().to_string(),
-        "--vm-key".to_string(), vm_key(id).to_string(),
-        "--seconds".to_string(), seconds.clamp(1, 3600).to_string(),
-        "--limit".to_string(), limit.clamp(1, 10000).to_string(),
+        "--map".to_string(),
+        map.display().to_string(),
+        "--vm-key".to_string(),
+        vm_key(id).to_string(),
+        "--seconds".to_string(),
+        seconds.clamp(1, 3600).to_string(),
+        "--limit".to_string(),
+        limit.clamp(1, 10000).to_string(),
     ];
     let out = Command::new(&helper)
         .args(&args)
         .output()
         .with_context(|| format!("running Flight Recorder reader {helper}"))?;
     if !out.status.success() {
-        bail!("Flight Recorder reader failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "Flight Recorder reader failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
-    let text = String::from_utf8(out.stdout).context("Flight Recorder reader emitted non-UTF8 output")?;
+    let text =
+        String::from_utf8(out.stdout).context("Flight Recorder reader emitted non-UTF8 output")?;
     text.lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str::<FlightEvent>(line).context("decoding Flight Recorder JSONL"))
+        .map(|line| {
+            serde_json::from_str::<FlightEvent>(line).context("decoding Flight Recorder JSONL")
+        })
         .collect()
 }
 
@@ -488,11 +578,21 @@ fn read_kvm_exit_hist(path: &Path, wanted: u64) -> Result<Vec<KvmExitReasonStat>
                 json_u64(key.get("reason")).unwrap_or(0) as u32,
             )
         } else {
-            let Some(raw) = decode_hex_field(row.get("key")) else { continue; };
-            if raw.len() < 16 { continue; }
-            (le_u64(&raw[0..8]).unwrap_or(0), le_u32(&raw[8..12]).unwrap_or(0), le_u32(&raw[12..16]).unwrap_or(0))
+            let Some(raw) = decode_hex_field(row.get("key")) else {
+                continue;
+            };
+            if raw.len() < 16 {
+                continue;
+            }
+            (
+                le_u64(&raw[0..8]).unwrap_or(0),
+                le_u32(&raw[8..12]).unwrap_or(0),
+                le_u32(&raw[12..16]).unwrap_or(0),
+            )
         };
-        if vm_key != wanted { continue; }
+        if vm_key != wanted {
+            continue;
+        }
         let value = flight_value_from_row(row.get("value"));
         out.push(KvmExitReasonStat {
             vcpu_tid,
@@ -503,7 +603,12 @@ fn read_kvm_exit_hist(path: &Path, wanted: u64) -> Result<Vec<KvmExitReasonStat>
             max_guest_ns: value.max_ns,
         });
     }
-    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.vcpu_tid.cmp(&b.vcpu_tid)).then_with(|| a.reason.cmp(&b.reason)));
+    out.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.vcpu_tid.cmp(&b.vcpu_tid))
+            .then_with(|| a.reason.cmp(&b.reason))
+    });
     Ok(out)
 }
 
@@ -518,11 +623,21 @@ fn read_latency_hist(path: &Path, wanted: u64) -> Result<Vec<LatencyBucket>> {
                 json_u64(key.get("bucket")).unwrap_or(0) as u32,
             )
         } else {
-            let Some(raw) = decode_hex_field(row.get("key")) else { continue; };
-            if raw.len() < 16 { continue; }
-            (le_u64(&raw[0..8]).unwrap_or(0), le_u32(&raw[8..12]).unwrap_or(0), le_u32(&raw[12..16]).unwrap_or(0))
+            let Some(raw) = decode_hex_field(row.get("key")) else {
+                continue;
+            };
+            if raw.len() < 16 {
+                continue;
+            }
+            (
+                le_u64(&raw[0..8]).unwrap_or(0),
+                le_u32(&raw[8..12]).unwrap_or(0),
+                le_u32(&raw[12..16]).unwrap_or(0),
+            )
         };
-        if vm_key != wanted { continue; }
+        if vm_key != wanted {
+            continue;
+        }
         let value = flight_value_from_row(row.get("value"));
         out.push(LatencyBucket {
             kind: latency_kind_label(kind).into(),
@@ -542,13 +657,25 @@ fn read_flight_counts(path: &Path, wanted: u64) -> Result<FlightCounters> {
     let mut out = FlightCounters::default();
     for row in rows {
         let (vm_key, kind) = if let Some(Value::Object(key)) = row.get("key") {
-            (json_u64(key.get("vm_key")).unwrap_or(0), json_u64(key.get("kind")).unwrap_or(0) as u32)
+            (
+                json_u64(key.get("vm_key")).unwrap_or(0),
+                json_u64(key.get("kind")).unwrap_or(0) as u32,
+            )
         } else {
-            let Some(raw) = decode_hex_field(row.get("key")) else { continue; };
-            if raw.len() < 12 { continue; }
-            (le_u64(&raw[0..8]).unwrap_or(0), le_u32(&raw[8..12]).unwrap_or(0))
+            let Some(raw) = decode_hex_field(row.get("key")) else {
+                continue;
+            };
+            if raw.len() < 12 {
+                continue;
+            }
+            (
+                le_u64(&raw[0..8]).unwrap_or(0),
+                le_u32(&raw[8..12]).unwrap_or(0),
+            )
         };
-        if vm_key != wanted { continue; }
+        if vm_key != wanted {
+            continue;
+        }
         let value = decode_scalar_or_hex_u64(row.get("value")).unwrap_or(0);
         match kind {
             1 => out.block_started = value,
@@ -586,22 +713,35 @@ fn bpftool_rows(path: &Path) -> Result<Vec<Value>> {
         .output()
         .with_context(|| format!("running bpftool for {}", path.display()))?;
     if !out.status.success() {
-        bail!("bpftool map dump {} failed: {}", path.display(), String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "bpftool map dump {} failed: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     serde_json::from_slice(&out.stdout).context("parsing Flight Recorder bpftool JSON")
 }
 
 fn latency_kind_label(kind: u32) -> &'static str {
-    match kind { 1 => "kvm-run", 2 => "runnable", 3 => "block-io", _ => "unknown" }
+    match kind {
+        1 => "kvm-run",
+        2 => "runnable",
+        3 => "block-io",
+        _ => "unknown",
+    }
 }
 
 fn latency_upper_bound_ns(bucket: u32) -> Option<u64> {
-    if bucket >= 24 { return None; }
+    if bucket >= 24 {
+        return None;
+    }
     Some(1000u64.saturating_mul(1u64 << bucket))
 }
 
 fn kvm_exit_reason_label(reason: u32) -> &'static str {
-    if !cfg!(target_arch = "x86_64") { return "architecture-specific"; }
+    if !cfg!(target_arch = "x86_64") {
+        return "architecture-specific";
+    }
     match reason {
         0 => "exception-or-nmi",
         1 => "external-interrupt",
@@ -623,12 +763,20 @@ fn kvm_exit_reason_label(reason: u32) -> &'static str {
 fn discover_vhost_tids(vmm_pid: u32) -> Vec<u32> {
     let prefix = format!("vhost-{vmm_pid}");
     let mut out = Vec::new();
-    let Ok(proc) = fs::read_dir("/proc") else { return out; };
+    let Ok(proc) = fs::read_dir("/proc") else {
+        return out;
+    };
     for ent in proc.flatten() {
-        let Ok(tid) = ent.file_name().to_string_lossy().parse::<u32>() else { continue; };
-        let Ok(comm) = fs::read_to_string(ent.path().join("comm")) else { continue; };
+        let Ok(tid) = ent.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(comm) = fs::read_to_string(ent.path().join("comm")) else {
+            continue;
+        };
         let comm = comm.trim();
-        if comm == prefix || comm.starts_with(&(prefix.clone() + "-")) { out.push(tid); }
+        if comm == prefix || comm.starts_with(&(prefix.clone() + "-")) {
+            out.push(tid);
+        }
     }
     out
 }
@@ -642,62 +790,111 @@ fn clear_vm_aux_maps(pin_root: &Path, wanted: u64) -> Result<()> {
 }
 
 fn clear_scalar_value_map(path: &Path, wanted: u64) -> Result<()> {
-    if !path.exists() { return Ok(()); }
+    if !path.exists() {
+        return Ok(());
+    }
     for row in bpftool_rows(path)? {
         let value = decode_scalar_or_hex_u64(row.get("value")).unwrap_or(0);
-        if value != wanted { continue; }
-        if let Some(key) = map_key_bytes(row.get("key"), 8) { let _ = bpftool_delete_bytes(path, &key); }
+        if value != wanted {
+            continue;
+        }
+        if let Some(key) = map_key_bytes(row.get("key"), 8) {
+            let _ = bpftool_delete_bytes(path, &key);
+        }
     }
     Ok(())
 }
 
 fn clear_struct_vm_map(path: &Path, wanted: u64, key_len: usize) -> Result<()> {
-    if !path.exists() { return Ok(()); }
+    if !path.exists() {
+        return Ok(());
+    }
     for row in bpftool_rows(path)? {
         let key = if let Some(raw) = decode_hex_field(row.get("key")) {
             raw
         } else if let Some(Value::Object(obj)) = row.get("key") {
             let vm = json_u64(obj.get("vm_key")).unwrap_or(0);
-            if vm != wanted { continue; }
+            if vm != wanted {
+                continue;
+            }
             let mut raw = vm.to_le_bytes().to_vec();
-            raw.extend((json_u64(obj.get("kind")).or_else(|| json_u64(obj.get("vcpu_tid"))).unwrap_or(0) as u32).to_le_bytes());
-            raw.extend((json_u64(obj.get("bucket")).or_else(|| json_u64(obj.get("reason"))).unwrap_or(0) as u32).to_le_bytes());
+            raw.extend(
+                (json_u64(obj.get("kind"))
+                    .or_else(|| json_u64(obj.get("vcpu_tid")))
+                    .unwrap_or(0) as u32)
+                    .to_le_bytes(),
+            );
+            raw.extend(
+                (json_u64(obj.get("bucket"))
+                    .or_else(|| json_u64(obj.get("reason")))
+                    .unwrap_or(0) as u32)
+                    .to_le_bytes(),
+            );
             raw
-        } else { continue; };
-        if key.len() < key_len || le_u64(&key[..8]) != Some(wanted) { continue; }
+        } else {
+            continue;
+        };
+        if key.len() < key_len || le_u64(&key[..8]) != Some(wanted) {
+            continue;
+        }
         let _ = bpftool_delete_bytes(path, &key[..key_len]);
     }
     Ok(())
 }
 
 fn map_key_bytes(v: Option<&Value>, width: usize) -> Option<Vec<u8>> {
-    if let Some(raw) = decode_hex_field(v) { return (raw.len() >= width).then(|| raw[..width].to_vec()); }
+    if let Some(raw) = decode_hex_field(v) {
+        return (raw.len() >= width).then(|| raw[..width].to_vec());
+    }
     let scalar = decode_scalar_or_hex_u64(v)?;
     Some(scalar.to_le_bytes()[..width].to_vec())
 }
 
 fn bpftool_delete_bytes(map: &Path, key: &[u8]) -> Result<()> {
-    let mut args = vec!["map".into(), "delete".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
+    let mut args = vec![
+        "map".into(),
+        "delete".into(),
+        "pinned".into(),
+        map.display().to_string(),
+        "key".into(),
+        "hex".into(),
+    ];
     args.extend(key.iter().map(|b| format!("{b:02x}")));
     run_bpftool(&args)
 }
 
 fn read_proc_stats(pid: u32) -> Result<ProcVmStats> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
-    let close = stat.rfind(')').ok_or_else(|| anyhow!("malformed /proc/{pid}/stat"))?;
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| anyhow!("malformed /proc/{pid}/stat"))?;
     let fields: Vec<&str> = stat[close + 2..].split_whitespace().collect();
     // fields[0] is stat field 3 (state); minflt=10, majflt=12, utime=14, stime=15.
-    let parse = |idx: usize| fields.get(idx).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+    let parse = |idx: usize| {
+        fields
+            .get(idx)
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
     let mut out = ProcVmStats {
-        minor_faults: parse(7), major_faults: parse(9), user_ticks: parse(11), system_ticks: parse(12), ..Default::default()
+        minor_faults: parse(7),
+        major_faults: parse(9),
+        user_ticks: parse(11),
+        system_ticks: parse(12),
+        ..Default::default()
     };
     let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
     for line in status.lines() {
         let mut it = line.split_whitespace();
         match it.next().unwrap_or("") {
             "Threads:" => out.threads = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
-            "voluntary_ctxt_switches:" => out.voluntary_context_switches = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
-            "nonvoluntary_ctxt_switches:" => out.involuntary_context_switches = it.next().and_then(|s| s.parse().ok()).unwrap_or(0),
+            "voluntary_ctxt_switches:" => {
+                out.voluntary_context_switches = it.next().and_then(|s| s.parse().ok()).unwrap_or(0)
+            }
+            "nonvoluntary_ctxt_switches:" => {
+                out.involuntary_context_switches =
+                    it.next().and_then(|s| s.parse().ok()).unwrap_or(0)
+            }
             _ => {}
         }
     }
@@ -714,62 +911,141 @@ fn read_proc_stats(pid: u32) -> Result<ProcVmStats> {
 }
 
 fn read_pressure(cgroup_path: &Path) -> Result<PressureStats> {
-    let base = if cgroup_path.is_absolute() { cgroup_path.to_path_buf() } else { Path::new("/sys/fs/cgroup").join(cgroup_path) };
+    let base = if cgroup_path.is_absolute() {
+        cgroup_path.to_path_buf()
+    } else {
+        Path::new("/sys/fs/cgroup").join(cgroup_path)
+    };
     let cpu = read_pressure_file(&base.join("cpu.pressure"));
     let mem = read_pressure_file(&base.join("memory.pressure"));
     let io = read_pressure_file(&base.join("io.pressure"));
     Ok(PressureStats {
         cpu_some_avg10: cpu.get("some").copied(),
-        memory_some_avg10: mem.get("some").copied(), memory_full_avg10: mem.get("full").copied(),
-        io_some_avg10: io.get("some").copied(), io_full_avg10: io.get("full").copied(),
+        memory_some_avg10: mem.get("some").copied(),
+        memory_full_avg10: mem.get("full").copied(),
+        io_some_avg10: io.get("some").copied(),
+        io_full_avg10: io.get("full").copied(),
     })
 }
 
 fn read_pressure_file(path: &Path) -> BTreeMap<String, f64> {
     let mut out = BTreeMap::new();
-    let Ok(s) = fs::read_to_string(path) else { return out; };
+    let Ok(s) = fs::read_to_string(path) else {
+        return out;
+    };
     for line in s.lines() {
         let mut parts = line.split_whitespace();
-        let Some(kind) = parts.next() else { continue; };
+        let Some(kind) = parts.next() else {
+            continue;
+        };
         for item in parts {
-            if let Some(v) = item.strip_prefix("avg10=").and_then(|v| v.parse::<f64>().ok()) { out.insert(kind.into(), v); }
+            if let Some(v) = item
+                .strip_prefix("avg10=")
+                .and_then(|v| v.parse::<f64>().ok())
+            {
+                out.insert(kind.into(), v);
+            }
         }
     }
     out
 }
 
 fn command_exists(name: &str) -> bool {
-    Command::new("sh").args(["-c", &format!("command -v {name} >/dev/null 2>&1")]).status().is_ok_and(|s| s.success())
+    Command::new("sh")
+        .args(["-c", &format!("command -v {name} >/dev/null 2>&1")])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 fn kernel_symbol_exists(name: &str) -> bool {
-    fs::read_to_string("/proc/kallsyms")
-        .ok()
-        .is_some_and(|s| s.lines().any(|line| line.split_whitespace().last() == Some(name)))
+    fs::read_to_string("/proc/kallsyms").ok().is_some_and(|s| {
+        s.lines()
+            .any(|line| line.split_whitespace().last() == Some(name))
+    })
 }
-fn require_map(path: &Path) -> Result<()> { if path.exists() { Ok(()) } else { bail!("required pinned map missing: {}", path.display()) } }
+fn require_map(path: &Path) -> Result<()> {
+    if path.exists() {
+        Ok(())
+    } else {
+        bail!("required pinned map missing: {}", path.display())
+    }
+}
 fn run_bpftool(args: &[String]) -> Result<()> {
-    let out = Command::new("bpftool").args(args).output().context("running bpftool")?;
-    if out.status.success() { Ok(()) } else { bail!("bpftool failed: {}", String::from_utf8_lossy(&out.stderr)) }
+    let out = Command::new("bpftool")
+        .args(args)
+        .output()
+        .context("running bpftool")?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        bail!("bpftool failed: {}", String::from_utf8_lossy(&out.stderr))
+    }
 }
 fn bpftool_update_u32_u64(map: &Path, key: u32, value: u64) -> Result<()> {
-    let mut args = vec!["map".into(), "update".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
-    args.extend(le_bytes(key as u64, 4)); args.push("value".into()); args.push("hex".into()); args.extend(le_bytes(value, 8)); run_bpftool(&args)
+    let mut args = vec![
+        "map".into(),
+        "update".into(),
+        "pinned".into(),
+        map.display().to_string(),
+        "key".into(),
+        "hex".into(),
+    ];
+    args.extend(le_bytes(key as u64, 4));
+    args.push("value".into());
+    args.push("hex".into());
+    args.extend(le_bytes(value, 8));
+    run_bpftool(&args)
 }
 fn bpftool_update_u64_u64(map: &Path, key: u64, value: u64) -> Result<()> {
-    let mut args = vec!["map".into(), "update".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
-    args.extend(le_bytes(key, 8)); args.push("value".into()); args.push("hex".into()); args.extend(le_bytes(value, 8)); run_bpftool(&args)
+    let mut args = vec![
+        "map".into(),
+        "update".into(),
+        "pinned".into(),
+        map.display().to_string(),
+        "key".into(),
+        "hex".into(),
+    ];
+    args.extend(le_bytes(key, 8));
+    args.push("value".into());
+    args.push("hex".into());
+    args.extend(le_bytes(value, 8));
+    run_bpftool(&args)
 }
 fn bpftool_delete_u32(map: &Path, key: u32) -> Result<()> {
-    if !map.exists() { return Ok(()); }
-    let mut args = vec!["map".into(), "delete".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
-    args.extend(le_bytes(key as u64, 4)); run_bpftool(&args)
+    if !map.exists() {
+        return Ok(());
+    }
+    let mut args = vec![
+        "map".into(),
+        "delete".into(),
+        "pinned".into(),
+        map.display().to_string(),
+        "key".into(),
+        "hex".into(),
+    ];
+    args.extend(le_bytes(key as u64, 4));
+    run_bpftool(&args)
 }
 fn bpftool_delete_u64(map: &Path, key: u64) -> Result<()> {
-    if !map.exists() { return Ok(()); }
-    let mut args = vec!["map".into(), "delete".into(), "pinned".into(), map.display().to_string(), "key".into(), "hex".into()];
-    args.extend(le_bytes(key, 8)); run_bpftool(&args)
+    if !map.exists() {
+        return Ok(());
+    }
+    let mut args = vec![
+        "map".into(),
+        "delete".into(),
+        "pinned".into(),
+        map.display().to_string(),
+        "key".into(),
+        "hex".into(),
+    ];
+    args.extend(le_bytes(key, 8));
+    run_bpftool(&args)
 }
-fn le_bytes(value: u64, width: usize) -> Vec<String> { value.to_le_bytes()[..width].iter().map(|b| format!("{b:02x}")).collect() }
+fn le_bytes(value: u64, width: usize) -> Vec<String> {
+    value.to_le_bytes()[..width]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 fn decode_hex_field(v: Option<&Value>) -> Option<Vec<u8>> {
     match v? {
         Value::Array(a) => a
@@ -787,22 +1063,56 @@ fn decode_hex_field(v: Option<&Value>) -> Option<Vec<u8>> {
 fn json_u64(v: Option<&Value>) -> Option<u64> {
     match v? {
         Value::Number(n) => n.as_u64(),
-        Value::String(s) => s.parse().ok().or_else(|| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()),
+        Value::String(s) => s
+            .parse()
+            .ok()
+            .or_else(|| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()),
         _ => None,
     }
 }
 fn decode_scalar_or_hex_u64(v: Option<&Value>) -> Option<u64> {
-    if let Some(n) = json_u64(v) { return Some(n); }
+    if let Some(n) = json_u64(v) {
+        return Some(n);
+    }
     if let Some(Value::Object(o)) = v {
-        if let Some(n) = o.values().find_map(|x| json_u64(Some(x))) { return Some(n); }
+        if let Some(n) = o.values().find_map(|x| json_u64(Some(x))) {
+            return Some(n);
+        }
     }
     decode_hex_field(v).and_then(|b| le_u64(&b))
 }
-fn le_u32(bytes: &[u8]) -> Option<u32> { if bytes.len() < 4 { None } else { Some(u32::from_le_bytes(bytes[..4].try_into().ok()?)) } }
-fn le_u64(bytes: &[u8]) -> Option<u64> { if bytes.len() < 8 { None } else { Some(u64::from_le_bytes(bytes[..8].try_into().ok()?)) } }
-fn backend_label(v: BackendKind) -> &'static str { match v { BackendKind::Qemu => "qemu", BackendKind::CloudHypervisor => "cloud-hypervisor", BackendKind::Firecracker => "firecracker", BackendKind::FluxVm => "flux-vm", BackendKind::Auto => "auto" } }
-fn status_label(v: VmStatus) -> &'static str { match v { VmStatus::Creating => "creating", VmStatus::Running => "running", VmStatus::Paused => "paused", VmStatus::Stopped => "stopped", VmStatus::Failed => "failed" } }
-
+fn le_u32(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < 4 {
+        None
+    } else {
+        Some(u32::from_le_bytes(bytes[..4].try_into().ok()?))
+    }
+}
+fn le_u64(bytes: &[u8]) -> Option<u64> {
+    if bytes.len() < 8 {
+        None
+    } else {
+        Some(u64::from_le_bytes(bytes[..8].try_into().ok()?))
+    }
+}
+fn backend_label(v: BackendKind) -> &'static str {
+    match v {
+        BackendKind::Qemu => "qemu",
+        BackendKind::CloudHypervisor => "cloud-hypervisor",
+        BackendKind::Firecracker => "firecracker",
+        BackendKind::FluxVm => "flux-vm",
+        BackendKind::Auto => "auto",
+    }
+}
+fn status_label(v: VmStatus) -> &'static str {
+    match v {
+        VmStatus::Creating => "creating",
+        VmStatus::Running => "running",
+        VmStatus::Paused => "paused",
+        VmStatus::Stopped => "stopped",
+        VmStatus::Failed => "failed",
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DropEvidence {
@@ -943,13 +1253,20 @@ pub fn diagnose_vm_with_reasons(
         if snapshot.findings.is_empty() {
             "No current FluxVM runtime or VM-edge drop finding in the sampled state.".to_string()
         } else {
-            format!("No VM-edge drops found; {} runtime finding(s) remain.", snapshot.findings.len())
+            format!(
+                "No VM-edge drops found; {} runtime finding(s) remain.",
+                snapshot.findings.len()
+            )
         }
     } else {
         let top = &findings[0];
         format!(
             "{} VM-edge finding(s); top cause {} at {} ({} packet(s)); {} kernel reason record(s).",
-            findings.len(), top.code, top.stage, top.evidence.packets, kernel.len()
+            findings.len(),
+            top.code,
+            top.stage,
+            top.evidence.packets,
+            kernel.len()
         )
     };
 
@@ -1066,14 +1383,16 @@ fn explain_drop(
         bytes: flow.bytes,
         last_seen_ns: flow.last_seen_ns,
     };
-    let mk = |stage: &str, code: &str, confidence: &str, explanation: String, suggestion: &str| DropFinding {
-        stage: stage.into(),
-        code: code.into(),
-        confidence: confidence.into(),
-        explanation,
-        suggestion: suggestion.into(),
-        audit_only: policy.audit_mode || pod_policy.is_some_and(|p| p.audit_mode),
-        evidence: evidence.clone(),
+    let mk = |stage: &str, code: &str, confidence: &str, explanation: String, suggestion: &str| {
+        DropFinding {
+            stage: stage.into(),
+            code: code.into(),
+            confidence: confidence.into(),
+            explanation,
+            suggestion: suggestion.into(),
+            audit_only: policy.audit_mode || pod_policy.is_some_and(|p| p.audit_mode),
+            evidence: evidence.clone(),
+        }
     };
 
     if let Some(ip) = dst {
@@ -1095,7 +1414,10 @@ fn explain_drop(
             "vm-policy/cidr-allowlist",
             "cidr-not-allowed",
             "exact",
-            format!("{} does not match the configured destination CIDR allowlist.", flow.destination),
+            format!(
+                "{} does not match the configured destination CIDR allowlist.",
+                flow.destination
+            ),
             "Add the smallest required destination CIDR, or fix service/DNS resolution so traffic targets an allowed address.",
         );
     }
@@ -1107,7 +1429,8 @@ fn explain_drop(
             "exact",
             format!(
                 "protocol {} destination port {} is outside the VM L4 allowlist.",
-                protocol_name(flow.protocol), flow.destination_port
+                protocol_name(flow.protocol),
+                flow.destination_port
             ),
             "Permit only the required protocol/port pair in allow_ports.",
         );
@@ -1119,7 +1442,10 @@ fn explain_drop(
                 "pod-policy/peer-deny",
                 "pod-explicit-deny",
                 "exact",
-                format!("{} is explicitly denied by the Pod-identity peer policy.", flow.destination),
+                format!(
+                    "{} is explicitly denied by the Pod-identity peer policy.",
+                    flow.destination
+                ),
                 "Update the Pod peer policy/selector resolution if this peer should be reachable.",
             );
         }
@@ -1128,7 +1454,10 @@ fn explain_drop(
                 "pod-policy/default-deny",
                 "pod-peer-not-allowed",
                 "exact",
-                format!("{} is not in the Pod-identity allow set while default_deny is enabled.", flow.destination),
+                format!(
+                    "{} is not in the Pod-identity allow set while default_deny is enabled.",
+                    flow.destination
+                ),
                 "Add the intended peer through the Kubernetes policy resolver rather than weakening the VM-wide policy.",
             );
         }
@@ -1149,12 +1478,17 @@ fn explain_drop(
             "vm-policy/rate",
             "rate-limit-possible",
             "probable",
-            "The flow passes visible CIDR/L4/Pod checks and this VM has an eBPF rate ceiling.".into(),
+            "The flow passes visible CIDR/L4/Pod checks and this VM has an eBPF rate ceiling."
+                .into(),
             "Inspect fluxvm network stats and traffic rate; raise the ceiling only after confirming sustained legitimate demand.",
         );
     }
 
-    if !policy.groups.is_empty() || !policy.labels.is_empty() || !policy.entities.is_empty() || !policy.allow_fqdns.is_empty() {
+    if !policy.groups.is_empty()
+        || !policy.labels.is_empty()
+        || !policy.entities.is_empty()
+        || !policy.allow_fqdns.is_empty()
+    {
         return mk(
             "compiled-policy",
             "compiled-policy-possible",
@@ -1168,7 +1502,8 @@ fn explain_drop(
         "vm-edge",
         "unclassified-drop",
         "probable",
-        "The sampled flow is marked drop but no visible static policy branch uniquely explains it.".into(),
+        "The sampled flow is marked drop but no visible static policy branch uniquely explains it."
+            .into(),
         "Check the effective policy, Pod policy, rate state, attachment generation, and service dataplane health; kernel reason codes are the next ABI extension.",
     )
 }
@@ -1186,7 +1521,9 @@ fn protocol_name(proto: u8) -> &'static str {
 fn l4_allowed(flow: &FlowRecord, rules: &[String]) -> bool {
     let wanted = protocol_name(flow.protocol);
     rules.iter().any(|rule| {
-        let Some((proto, port)) = rule.split_once('/') else { return false; };
+        let Some((proto, port)) = rule.split_once('/') else {
+            return false;
+        };
         if !proto.trim().eq_ignore_ascii_case(wanted) {
             return false;
         }
@@ -1195,20 +1532,34 @@ fn l4_allowed(flow: &FlowRecord, rules: &[String]) -> bool {
 }
 
 fn ip_in_cidr(ip: IpAddr, cidr: &str) -> bool {
-    let Some((network, prefix)) = cidr.split_once('/') else { return false; };
-    let Ok(network) = network.parse::<IpAddr>() else { return false; };
-    let Ok(prefix) = prefix.parse::<u8>() else { return false; };
+    let Some((network, prefix)) = cidr.split_once('/') else {
+        return false;
+    };
+    let Ok(network) = network.parse::<IpAddr>() else {
+        return false;
+    };
+    let Ok(prefix) = prefix.parse::<u8>() else {
+        return false;
+    };
     match (ip, network) {
         (IpAddr::V4(ip), IpAddr::V4(net)) if prefix <= 32 => {
             let ip = u32::from_be_bytes(ip.octets());
             let net = u32::from_be_bytes(net.octets());
-            let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
             (ip & mask) == (net & mask)
         }
         (IpAddr::V6(ip), IpAddr::V6(net)) if prefix <= 128 => {
             let ip = u128::from_be_bytes(ip.octets());
             let net = u128::from_be_bytes(net.octets());
-            let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
             (ip & mask) == (net & mask)
         }
         _ => false,
@@ -1221,19 +1572,35 @@ mod tests {
     #[test]
     fn vm_key_is_stable_and_nonzero() {
         let id = Uuid::parse_str("12345678-1234-5678-9abc-def012345678").unwrap();
-        assert_eq!(vm_key(id), vm_key(id)); assert_ne!(vm_key(id), 0);
+        assert_eq!(vm_key(id), vm_key(id));
+        assert_ne!(vm_key(id), 0);
     }
     #[test]
     fn pressure_parser_handles_avg10() {
         let d = tempfile::tempdir().unwrap();
-        fs::write(d.path().join("cpu.pressure"), "some avg10=12.50 avg60=1.0 avg300=0.1 total=42\n").unwrap();
-        fs::write(d.path().join("memory.pressure"), "some avg10=2.25 avg60=1 avg300=1 total=1\nfull avg10=0.50 avg60=0 avg300=0 total=1\n").unwrap();
-        fs::write(d.path().join("io.pressure"), "some avg10=3.00 avg60=1 avg300=1 total=1\nfull avg10=1.25 avg60=0 avg300=0 total=1\n").unwrap();
+        fs::write(
+            d.path().join("cpu.pressure"),
+            "some avg10=12.50 avg60=1.0 avg300=0.1 total=42\n",
+        )
+        .unwrap();
+        fs::write(
+            d.path().join("memory.pressure"),
+            "some avg10=2.25 avg60=1 avg300=1 total=1\nfull avg10=0.50 avg60=0 avg300=0 total=1\n",
+        )
+        .unwrap();
+        fs::write(
+            d.path().join("io.pressure"),
+            "some avg10=3.00 avg60=1 avg300=1 total=1\nfull avg10=1.25 avg60=0 avg300=0 total=1\n",
+        )
+        .unwrap();
         let p = read_pressure(d.path()).unwrap();
-        assert_eq!(p.cpu_some_avg10, Some(12.5)); assert_eq!(p.io_full_avg10, Some(1.25));
+        assert_eq!(p.cpu_some_avg10, Some(12.5));
+        assert_eq!(p.io_full_avg10, Some(1.25));
     }
     #[test]
-    fn byte_encoding_is_little_endian() { assert_eq!(le_bytes(0x01020304, 4), vec!["04","03","02","01"]); }
+    fn byte_encoding_is_little_endian() {
+        assert_eq!(le_bytes(0x01020304, 4), vec!["04", "03", "02", "01"]);
+    }
     #[test]
     fn cidr_matching_is_dual_stack() {
         assert!(ip_in_cidr("10.4.5.6".parse().unwrap(), "10.4.0.0/16"));
@@ -1242,55 +1609,225 @@ mod tests {
     }
     #[test]
     fn detective_identifies_exact_l4_drop() {
-        let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
-        let policy=VmNetworkPolicy{allow_ports:vec!["tcp/443".into()],..Default::default()};
-        let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:80,protocol:6,verdict:"drop".into(),packets:7,bytes:700,last_seen_ns:1};
-        let d=diagnose_vm(&snap,&policy,None,&[flow]);
-        assert_eq!(d.drop_findings[0].code,"l4-not-allowed");
-        assert_eq!(d.drop_findings[0].confidence,"exact");
+        let id = Uuid::new_v4();
+        let snap = VmRuntimeSnapshot {
+            schema_version: 1,
+            vm_id: id,
+            vm_key: vm_key(id),
+            name: "t".into(),
+            backend: "qemu".into(),
+            status: "running".into(),
+            pid: 1,
+            tracked_tids: vec![],
+            ebpf_active: true,
+            kernel: Default::default(),
+            process: Default::default(),
+            pressure: Default::default(),
+            network: None,
+            flight: None,
+            findings: vec![],
+        };
+        let policy = VmNetworkPolicy {
+            allow_ports: vec!["tcp/443".into()],
+            ..Default::default()
+        };
+        let flow = FlowRecord {
+            identity: 1,
+            family: 4,
+            source: "10.0.0.2".into(),
+            destination: "1.1.1.1".into(),
+            source_port: 1234,
+            destination_port: 80,
+            protocol: 6,
+            verdict: "drop".into(),
+            packets: 7,
+            bytes: 700,
+            last_seen_ns: 1,
+        };
+        let d = diagnose_vm(&snap, &policy, None, &[flow]);
+        assert_eq!(d.drop_findings[0].code, "l4-not-allowed");
+        assert_eq!(d.drop_findings[0].confidence, "exact");
     }
     #[test]
     fn detective_prefers_exact_default_deny_over_rate_hint() {
-        let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
-        let policy=VmNetworkPolicy{default_allow:false,max_egress_pps:Some(100),..Default::default()};
-        let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,verdict:"drop".into(),packets:1,bytes:64,last_seen_ns:1};
-        let d=diagnose_vm(&snap,&policy,None,&[flow]);
-        assert_eq!(d.drop_findings[0].code,"default-deny");
-        assert_eq!(d.drop_findings[0].confidence,"exact");
+        let id = Uuid::new_v4();
+        let snap = VmRuntimeSnapshot {
+            schema_version: 1,
+            vm_id: id,
+            vm_key: vm_key(id),
+            name: "t".into(),
+            backend: "qemu".into(),
+            status: "running".into(),
+            pid: 1,
+            tracked_tids: vec![],
+            ebpf_active: true,
+            kernel: Default::default(),
+            process: Default::default(),
+            pressure: Default::default(),
+            network: None,
+            flight: None,
+            findings: vec![],
+        };
+        let policy = VmNetworkPolicy {
+            default_allow: false,
+            max_egress_pps: Some(100),
+            ..Default::default()
+        };
+        let flow = FlowRecord {
+            identity: 1,
+            family: 4,
+            source: "10.0.0.2".into(),
+            destination: "1.1.1.1".into(),
+            source_port: 1234,
+            destination_port: 443,
+            protocol: 6,
+            verdict: "drop".into(),
+            packets: 1,
+            bytes: 64,
+            last_seen_ns: 1,
+        };
+        let d = diagnose_vm(&snap, &policy, None, &[flow]);
+        assert_eq!(d.drop_findings[0].code, "default-deny");
+        assert_eq!(d.drop_findings[0].confidence, "exact");
     }
     #[test]
     fn audit_only_explicit_deny_is_not_critical() {
-        let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
-        let policy=VmNetworkPolicy{deny_cidrs:vec!["1.1.1.1/32".into()],audit_mode:true,..Default::default()};
-        let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,verdict:"drop".into(),packets:1,bytes:64,last_seen_ns:1};
-        let d=diagnose_vm(&snap,&policy,None,&[flow]);
+        let id = Uuid::new_v4();
+        let snap = VmRuntimeSnapshot {
+            schema_version: 1,
+            vm_id: id,
+            vm_key: vm_key(id),
+            name: "t".into(),
+            backend: "qemu".into(),
+            status: "running".into(),
+            pid: 1,
+            tracked_tids: vec![],
+            ebpf_active: true,
+            kernel: Default::default(),
+            process: Default::default(),
+            pressure: Default::default(),
+            network: None,
+            flight: None,
+            findings: vec![],
+        };
+        let policy = VmNetworkPolicy {
+            deny_cidrs: vec!["1.1.1.1/32".into()],
+            audit_mode: true,
+            ..Default::default()
+        };
+        let flow = FlowRecord {
+            identity: 1,
+            family: 4,
+            source: "10.0.0.2".into(),
+            destination: "1.1.1.1".into(),
+            source_port: 1234,
+            destination_port: 443,
+            protocol: 6,
+            verdict: "drop".into(),
+            packets: 1,
+            bytes: 64,
+            last_seen_ns: 1,
+        };
+        let d = diagnose_vm(&snap, &policy, None, &[flow]);
         assert!(d.drop_findings[0].audit_only);
-        assert_eq!(d.severity,"warning");
+        assert_eq!(d.severity, "warning");
     }
     #[test]
     fn kernel_reason_overrides_policy_inference() {
-        let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
-        let policy=VmNetworkPolicy{max_egress_pps:Some(10),..Default::default()};
-        let flow=FlowRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,verdict:"drop".into(),packets:3,bytes:192,last_seen_ns:2};
-        let reason=DropReasonRecord{identity:1,family:4,source:flow.source.clone(),destination:flow.destination.clone(),source_port:1234,destination_port:443,protocol:6,reason_code:6,reason:"rate-limit".into(),action:"drop".into(),packets:3,bytes:192,last_seen_ns:2};
-        let d=diagnose_vm_with_reasons(&snap,&policy,None,&[flow],&[reason]);
-        assert_eq!(d.kernel_reason_records,1);
-        assert_eq!(d.drop_findings[0].code,"rate-limit");
-        assert_eq!(d.drop_findings[0].confidence,"exact-kernel");
+        let id = Uuid::new_v4();
+        let snap = VmRuntimeSnapshot {
+            schema_version: 1,
+            vm_id: id,
+            vm_key: vm_key(id),
+            name: "t".into(),
+            backend: "qemu".into(),
+            status: "running".into(),
+            pid: 1,
+            tracked_tids: vec![],
+            ebpf_active: true,
+            kernel: Default::default(),
+            process: Default::default(),
+            pressure: Default::default(),
+            network: None,
+            flight: None,
+            findings: vec![],
+        };
+        let policy = VmNetworkPolicy {
+            max_egress_pps: Some(10),
+            ..Default::default()
+        };
+        let flow = FlowRecord {
+            identity: 1,
+            family: 4,
+            source: "10.0.0.2".into(),
+            destination: "1.1.1.1".into(),
+            source_port: 1234,
+            destination_port: 443,
+            protocol: 6,
+            verdict: "drop".into(),
+            packets: 3,
+            bytes: 192,
+            last_seen_ns: 2,
+        };
+        let reason = DropReasonRecord {
+            identity: 1,
+            family: 4,
+            source: flow.source.clone(),
+            destination: flow.destination.clone(),
+            source_port: 1234,
+            destination_port: 443,
+            protocol: 6,
+            reason_code: 6,
+            reason: "rate-limit".into(),
+            action: "drop".into(),
+            packets: 3,
+            bytes: 192,
+            last_seen_ns: 2,
+        };
+        let d = diagnose_vm_with_reasons(&snap, &policy, None, &[flow], &[reason]);
+        assert_eq!(d.kernel_reason_records, 1);
+        assert_eq!(d.drop_findings[0].code, "rate-limit");
+        assert_eq!(d.drop_findings[0].confidence, "exact-kernel");
     }
 
     #[test]
     fn migration_reason_is_warning_not_critical() {
-        let id=Uuid::new_v4();
-        let snap=VmRuntimeSnapshot{schema_version:1,vm_id:id,vm_key:vm_key(id),name:"t".into(),backend:"qemu".into(),status:"running".into(),pid:1,tracked_tids:vec![],ebpf_active:true,kernel:Default::default(),process:Default::default(),pressure:Default::default(),network:None,flight:None,findings:vec![]};
-        let reason=DropReasonRecord{identity:1,family:4,source:"10.0.0.2".into(),destination:"1.1.1.1".into(),source_port:1234,destination_port:443,protocol:6,reason_code:9,reason:"migration-quiesce".into(),action:"drop".into(),packets:1,bytes:64,last_seen_ns:1};
-        let d=diagnose_vm_with_reasons(&snap,&VmNetworkPolicy::default(),None,&[],&[reason]);
-        assert_eq!(d.severity,"warning");
-        assert_eq!(d.drop_findings[0].stage,"migration/quiesce");
+        let id = Uuid::new_v4();
+        let snap = VmRuntimeSnapshot {
+            schema_version: 1,
+            vm_id: id,
+            vm_key: vm_key(id),
+            name: "t".into(),
+            backend: "qemu".into(),
+            status: "running".into(),
+            pid: 1,
+            tracked_tids: vec![],
+            ebpf_active: true,
+            kernel: Default::default(),
+            process: Default::default(),
+            pressure: Default::default(),
+            network: None,
+            flight: None,
+            findings: vec![],
+        };
+        let reason = DropReasonRecord {
+            identity: 1,
+            family: 4,
+            source: "10.0.0.2".into(),
+            destination: "1.1.1.1".into(),
+            source_port: 1234,
+            destination_port: 443,
+            protocol: 6,
+            reason_code: 9,
+            reason: "migration-quiesce".into(),
+            action: "drop".into(),
+            packets: 1,
+            bytes: 64,
+            last_seen_ns: 1,
+        };
+        let d = diagnose_vm_with_reasons(&snap, &VmNetworkPolicy::default(), None, &[], &[reason]);
+        assert_eq!(d.severity, "warning");
+        assert_eq!(d.drop_findings[0].stage, "migration/quiesce");
     }
 
     #[test]
@@ -1303,7 +1840,14 @@ mod tests {
     #[test]
     fn flight_value_parser_accepts_btf_json() {
         let row = serde_json::json!({"count": 7, "total_ns": 9000, "max_ns": 4000});
-        assert_eq!(flight_value_from_row(Some(&row)), FlightValue { count: 7, total_ns: 9000, max_ns: 4000 });
+        assert_eq!(
+            flight_value_from_row(Some(&row)),
+            FlightValue {
+                count: 7,
+                total_ns: 9000,
+                max_ns: 4000
+            }
+        );
     }
 
     #[test]
@@ -1314,5 +1858,4 @@ mod tests {
         }
         assert!(!kvm_exit_reason_label(0xffff).is_empty());
     }
-
 }

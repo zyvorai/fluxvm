@@ -195,8 +195,7 @@ pub fn restore_snapshot(
     }
     mark_restoring(cfg, id)?;
     let maps = vm_map_dir(cfg, id);
-    replace_map(&maps.join("fluxvm_ct"), &snapshot.conntrack)
-        .context("restoring VM conntrack")?;
+    replace_map(&maps.join("fluxvm_ct"), &snapshot.conntrack).context("restoring VM conntrack")?;
     if maps.join("fluxvm_flows").exists() {
         replace_map(&maps.join("fluxvm_flows"), &snapshot.flows)
             .context("restoring VM flow history")?;
@@ -217,7 +216,10 @@ pub fn validate_snapshot(id: Uuid, snapshot: &VmNetworkStateSnapshot) -> Result<
         );
     }
     if snapshot.vm_id != id {
-        bail!("snapshot VM {} does not match destination VM {id}", snapshot.vm_id);
+        bail!(
+            "snapshot VM {} does not match destination VM {id}",
+            snapshot.vm_id
+        );
     }
     let expected_identity = ebpf::identity_for(id);
     if snapshot.identity != expected_identity {
@@ -291,12 +293,19 @@ fn require_map(path: &Path) -> Result<()> {
     if path.exists() {
         Ok(())
     } else {
-        bail!("required FluxVM BPF map is not pinned at {}", path.display())
+        bail!(
+            "required FluxVM BPF map is not pinned at {}",
+            path.display()
+        )
     }
 }
 
 fn dump_map_if_present(path: &Path) -> Result<Vec<RawMapEntry>> {
-    if path.exists() { dump_map(path) } else { Ok(Vec::new()) }
+    if path.exists() {
+        dump_map(path)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn dump_map(path: &Path) -> Result<Vec<RawMapEntry>> {
@@ -317,7 +326,9 @@ fn dump_map(path: &Path) -> Result<Vec<RawMapEntry>> {
 }
 
 fn parse_dump_json(root: &Value) -> Result<Vec<RawMapEntry>> {
-    let rows = root.as_array().context("bpftool map dump must be an array")?;
+    let rows = root
+        .as_array()
+        .context("bpftool map dump must be an array")?;
     rows.iter()
         .map(|row| {
             Ok(RawMapEntry {
@@ -416,7 +427,11 @@ fn run_bpftool(args: &[String]) -> Result<()> {
     if out.status.success() {
         Ok(())
     } else {
-        bail!("bpftool {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim())
+        bail!(
+            "bpftool {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
     }
 }
 
@@ -434,7 +449,10 @@ mod tests {
         assert_eq!(DataplaneMigrationPhase::Running.kernel_value(), 0);
         assert_eq!(DataplaneMigrationPhase::Quiescing.kernel_value(), 1);
         assert_eq!(DataplaneMigrationPhase::Restoring.kernel_value(), 2);
-        assert_eq!(DataplaneMigrationPhase::from_kernel(77), DataplaneMigrationPhase::Running);
+        assert_eq!(
+            DataplaneMigrationPhase::from_kernel(77),
+            DataplaneMigrationPhase::Running
+        );
     }
 
     #[test]

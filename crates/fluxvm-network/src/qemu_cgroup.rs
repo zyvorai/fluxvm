@@ -10,7 +10,11 @@
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::DataplaneConfig;
-use std::{fs, os::unix::fs::MetadataExt, path::{Path, PathBuf}};
+use std::{
+    fs,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 use crate::ebpf::{bpftool_map_update, require_bpftool, run, vm_pin_dir};
@@ -73,7 +77,10 @@ fn collect_device_rules(vfio_devices: &[String]) -> Result<Vec<(u32, u32)>> {
     for path in ["/dev/kvm", "/dev/vhost-vsock", "/dev/net/tun"] {
         match resolve_device(path)? {
             Some(rule) => rules.push(rule),
-            None => tracing::warn!(path, "Set 7S device-cgroup allowlist target does not exist on this host"),
+            None => tracing::warn!(
+                path,
+                "Set 7S device-cgroup allowlist target does not exist on this host"
+            ),
         }
     }
     for bdf in vfio_devices {
@@ -110,7 +117,12 @@ fn encode_device_rules(rules: &[(u32, u32)]) -> Vec<u8> {
 /// `VmManager::attach_cgroup` already treats cgroup creation itself) — this
 /// is defense-in-depth layered on top of the cgroup, not the cgroup/VM
 /// launch itself, so a failure should be logged, not fail the VM.
-pub fn attach(cfg: &DataplaneConfig, id: Uuid, cgroup_path: &Path, vfio_devices: &[String]) -> Result<()> {
+pub fn attach(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+    cgroup_path: &Path,
+    vfio_devices: &[String],
+) -> Result<()> {
     require_bpftool()?;
     let obj_dir = cfg
         .bpf_object
@@ -131,18 +143,21 @@ pub fn attach(cfg: &DataplaneConfig, id: Uuid, cgroup_path: &Path, vfio_devices:
     let _ = detach_inner(&pin_dir, cgroup_path);
     let prog_dir = pin_dir.join("progs");
     let map_dir = pin_dir.join("maps");
-    fs::create_dir_all(&prog_dir)
-        .with_context(|| format!("creating {}", prog_dir.display()))?;
+    fs::create_dir_all(&prog_dir).with_context(|| format!("creating {}", prog_dir.display()))?;
     fs::create_dir_all(&map_dir).with_context(|| format!("creating {}", map_dir.display()))?;
 
     let device_pin = prog_dir.join("fluxvm_qemu_device");
     if let Err(e) = run(
         "bpftool",
         &[
-            "prog".into(), "load".into(),
-            device_obj.display().to_string(), device_pin.display().to_string(),
-            "type".into(), "cgroup/dev".into(),
-            "pinmaps".into(), map_dir.display().to_string(),
+            "prog".into(),
+            "load".into(),
+            device_obj.display().to_string(),
+            device_pin.display().to_string(),
+            "type".into(),
+            "cgroup/dev".into(),
+            "pinmaps".into(),
+            map_dir.display().to_string(),
         ],
     ) {
         let _ = fs::remove_dir_all(&pin_dir);
@@ -156,7 +171,11 @@ pub fn attach(cfg: &DataplaneConfig, id: Uuid, cgroup_path: &Path, vfio_devices:
             return Err(e);
         }
     };
-    if let Err(e) = bpftool_map_update(&map_dir.join("fluxvm_qemu_dev"), &0u32.to_ne_bytes(), &encode_device_rules(&rules)) {
+    if let Err(e) = bpftool_map_update(
+        &map_dir.join("fluxvm_qemu_dev"),
+        &0u32.to_ne_bytes(),
+        &encode_device_rules(&rules),
+    ) {
         let _ = fs::remove_dir_all(&pin_dir);
         return Err(e).context("populating fluxvm_qemu_dev");
     }
@@ -165,9 +184,12 @@ pub fn attach(cfg: &DataplaneConfig, id: Uuid, cgroup_path: &Path, vfio_devices:
     if let Err(e) = run(
         "bpftool",
         &[
-            "prog".into(), "load".into(),
-            egress_obj.display().to_string(), egress_pin.display().to_string(),
-            "type".into(), "cgroup_skb/egress".into(),
+            "prog".into(),
+            "load".into(),
+            egress_obj.display().to_string(),
+            egress_pin.display().to_string(),
+            "type".into(),
+            "cgroup_skb/egress".into(),
         ],
     ) {
         let _ = fs::remove_dir_all(&pin_dir);
@@ -177,8 +199,12 @@ pub fn attach(cfg: &DataplaneConfig, id: Uuid, cgroup_path: &Path, vfio_devices:
     if let Err(e) = run(
         "bpftool",
         &[
-            "cgroup".into(), "attach".into(), cgroup_path.display().to_string(),
-            "device".into(), "pinned".into(), device_pin.display().to_string(),
+            "cgroup".into(),
+            "attach".into(),
+            cgroup_path.display().to_string(),
+            "device".into(),
+            "pinned".into(),
+            device_pin.display().to_string(),
         ],
     ) {
         let _ = fs::remove_dir_all(&pin_dir);
@@ -187,15 +213,23 @@ pub fn attach(cfg: &DataplaneConfig, id: Uuid, cgroup_path: &Path, vfio_devices:
     if let Err(e) = run(
         "bpftool",
         &[
-            "cgroup".into(), "attach".into(), cgroup_path.display().to_string(),
-            "egress".into(), "pinned".into(), egress_pin.display().to_string(),
+            "cgroup".into(),
+            "attach".into(),
+            cgroup_path.display().to_string(),
+            "egress".into(),
+            "pinned".into(),
+            egress_pin.display().to_string(),
         ],
     ) {
         let _ = run(
             "bpftool",
             &[
-                "cgroup".into(), "detach".into(), cgroup_path.display().to_string(),
-                "device".into(), "pinned".into(), device_pin.display().to_string(),
+                "cgroup".into(),
+                "detach".into(),
+                cgroup_path.display().to_string(),
+                "device".into(),
+                "pinned".into(),
+                device_pin.display().to_string(),
             ],
         );
         let _ = fs::remove_dir_all(&pin_dir);
@@ -214,14 +248,21 @@ pub fn detach(cfg: &DataplaneConfig, id: Uuid, cgroup_path: &Path) -> Result<()>
 
 fn detach_inner(pin_dir: &Path, cgroup_path: &Path) -> Result<()> {
     let prog_dir = pin_dir.join("progs");
-    for (attach_type, name) in [("device", "fluxvm_qemu_device"), ("egress", "fluxvm_qemu_egress")] {
+    for (attach_type, name) in [
+        ("device", "fluxvm_qemu_device"),
+        ("egress", "fluxvm_qemu_egress"),
+    ] {
         let pin = prog_dir.join(name);
         if pin.exists() {
             let _ = run(
                 "bpftool",
                 &[
-                    "cgroup".into(), "detach".into(), cgroup_path.display().to_string(),
-                    attach_type.into(), "pinned".into(), pin.display().to_string(),
+                    "cgroup".into(),
+                    "detach".into(),
+                    cgroup_path.display().to_string(),
+                    attach_type.into(),
+                    "pinned".into(),
+                    pin.display().to_string(),
                 ],
             );
         }

@@ -226,8 +226,11 @@ pub fn apply(
         // reset it to unconfigured. `None` (no persisted policy yet) leaves
         // it as a safe/allow no-op, same as an unconfigured VM-level policy.
         configure_pod_maps(&map_dir, pod_id, pod_policy)?;
-        fs::write(meta_dir.join("schema_version"), DATAPLANE_SCHEMA_VERSION.to_string())
-            .context("recording FluxVM eBPF schema version")?;
+        fs::write(
+            meta_dir.join("schema_version"),
+            DATAPLANE_SCHEMA_VERSION.to_string(),
+        )
+        .context("recording FluxVM eBPF schema version")?;
 
         let tcx_preference = TcxPreference::from_env()?;
         if tcx_preference != TcxPreference::Off {
@@ -355,11 +358,7 @@ pub fn remove(cfg: &DataplaneConfig, id: Uuid) -> Result<()> {
 /// operation. We first switch its interface config to deny-all, then replace
 /// policy maps, then publish the final config. A failed update therefore
 /// creates at worst a short over-deny window, never an allow-all gap.
-pub fn reconfigure(
-    cfg: &DataplaneConfig,
-    policy: &VmNetworkPolicy,
-    id: Uuid,
-) -> Result<()> {
+pub fn reconfigure(cfg: &DataplaneConfig, policy: &VmNetworkPolicy, id: Uuid) -> Result<()> {
     require_bpftool()?;
     // Reconfigure mutates pinned maps in place; it is independent of whether
     // the program is attached by TCX or the legacy clsact path.
@@ -375,7 +374,8 @@ pub fn reconfigure(
     if schema != Some(DATAPLANE_SCHEMA_VERSION) {
         bail!(
             "VM {id} uses eBPF schema {:?}, expected {}; reattach before reconfigure",
-            schema, DATAPLANE_SCHEMA_VERSION
+            schema,
+            DATAPLANE_SCHEMA_VERSION
         );
     }
     let iface = fs::read_to_string(meta_dir.join("iface"))
@@ -432,7 +432,9 @@ pub fn configure_pod_policy(
     }
     let map_dir = vm_pin_dir(&cfg.pin_root, id).join("maps");
     if !map_dir.join("fluxvm_pspol").exists() {
-        bail!("VM {id} eBPF dataplane is not attached (or predates Set 6S); attach before setting Pod policy");
+        bail!(
+            "VM {id} eBPF dataplane is not attached (or predates Set 6S); attach before setting Pod policy"
+        );
     }
     // Set 16: schema v9 changed fluxvm_ct's value layout (see
     // DATAPLANE_SCHEMA_VERSION's doc comment). Refuse to program a live
@@ -443,7 +445,8 @@ pub fn configure_pod_policy(
     if schema != Some(DATAPLANE_SCHEMA_VERSION) {
         bail!(
             "VM {id} uses eBPF schema {:?}, expected {}; reattach before setting Pod policy",
-            schema, DATAPLANE_SCHEMA_VERSION
+            schema,
+            DATAPLANE_SCHEMA_VERSION
         );
     }
     // Set 16: see reconfigure()'s identical comment -- a Pod policy update is
@@ -467,25 +470,25 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
     let schema_version = read_schema_version(&meta_dir);
     let schema_compatible = schema_version == Some(DATAPLANE_SCHEMA_VERSION);
     let policy_fingerprint = read_policy_fingerprint(&meta_dir);
-    let owned_program_id = read_owned_program_id(id)
-        .or_else(|| pinned_program_id(&prog_pin).ok());
+    let owned_program_id = read_owned_program_id(id).or_else(|| pinned_program_id(&prog_pin).ok());
     // FLUXVM_SECURE_CONTAINERS_SET15: directional attachment health.
     let tcx_link = tcx::link_pin(&vm_dir);
     let tcx_program_id = if tcx_link.exists() {
-        tcx::status(&tcx_link).ok().and_then(|status| status.prog_id)
+        tcx::status(&tcx_link)
+            .ok()
+            .and_then(|status| status.prog_id)
     } else {
         None
     };
-    let egress_attached = if let (Some(iface), Some(owned_program_id)) =
-        (iface.as_deref(), owned_program_id)
-    {
-        schema_compatible
-            && prog_pin.exists()
-            && (tcx_program_id == Some(owned_program_id)
-                || tc_filter_program_id(iface).ok().flatten() == Some(owned_program_id))
-    } else {
-        false
-    };
+    let egress_attached =
+        if let (Some(iface), Some(owned_program_id)) = (iface.as_deref(), owned_program_id) {
+            schema_compatible
+                && prog_pin.exists()
+                && (tcx_program_id == Some(owned_program_id)
+                    || tc_filter_program_id(iface).ok().flatten() == Some(owned_program_id))
+        } else {
+            false
+        };
 
     // Set 14 attaches fluxvm_pod_ingress as a separate, lazily-loaded object
     // (only when a Pod's policy actually isolates ingress), bound at TC
@@ -504,20 +507,21 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
     } else {
         None
     };
-    let pod_ingress_attached = if let (Some(iface), Some(program_id)) =
-        (iface.as_deref(), pod_ingress_owned_program_id)
-    {
-        schema_compatible
-            && Command::new("tc")
-                .args(["filter", "show", "dev", iface, "egress", "pref", "49153"])
-                .output()
-                .ok()
-                .filter(|out| out.status.success())
-                .and_then(|out| parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2))
-                == Some(program_id)
-    } else {
-        false
-    };
+    let pod_ingress_attached =
+        if let (Some(iface), Some(program_id)) = (iface.as_deref(), pod_ingress_owned_program_id) {
+            schema_compatible
+                && Command::new("tc")
+                    .args(["filter", "show", "dev", iface, "egress", "pref", "49153"])
+                    .output()
+                    .ok()
+                    .filter(|out| out.status.success())
+                    .and_then(|out| {
+                        parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2)
+                    })
+                    == Some(program_id)
+        } else {
+            false
+        };
     let attached = egress_attached && (!pod_ingress_required || pod_ingress_attached);
     Ok(NativeAttachmentStatus {
         attached,
@@ -574,7 +578,9 @@ pub fn reconcile_orphan_pins(cfg: &DataplaneConfig, live_ids: &[Uuid]) -> Result
             }
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            let Ok(id) = Uuid::parse_str(name) else { continue };
+            let Ok(id) = Uuid::parse_str(name) else {
+                continue;
+            };
             if !live_ids.contains(&id) && !candidates.contains(&id) {
                 candidates.push(id);
             }
@@ -629,9 +635,7 @@ pub fn invalidate_policy_fingerprint(id: Uuid) -> Result<()> {
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).with_context(|| {
-            format!("invalidating policy fingerprint for VM {id}")
-        }),
+        Err(e) => Err(e).with_context(|| format!("invalidating policy fingerprint for VM {id}")),
     }
 }
 
@@ -667,7 +671,9 @@ pub fn remove_best_effort(id: Uuid) -> Result<()> {
 }
 
 fn detach_tc_filter(id: Uuid, owned_program_id: Option<u32>) {
-    let Some(iface) = read_recorded_iface(id) else { return };
+    let Some(iface) = read_recorded_iface(id) else {
+        return;
+    };
     match tc_filter_program_id(&iface) {
         Ok(Some(current)) => {
             // The interface name is recorded for this VM's pin metadata, so the
@@ -737,12 +743,18 @@ fn read_recorded_iface(id: Uuid) -> Option<String> {
     for root in [
         PathBuf::from("/sys/fs/bpf/fluxvm"),
         std::env::var("FLUXVM_BPF_PIN_ROOT")
-            .ok().map(PathBuf::from).unwrap_or_default(),
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_default(),
     ] {
-        if root.as_os_str().is_empty() { continue; }
+        if root.as_os_str().is_empty() {
+            continue;
+        }
         if let Ok(iface) = fs::read_to_string(vm_pin_dir(&root, id).join("iface")) {
             let iface = iface.trim();
-            if !iface.is_empty() { return Some(iface.to_string()); }
+            if !iface.is_empty() {
+                return Some(iface.to_string());
+            }
         }
     }
     None
@@ -794,16 +806,13 @@ pub fn drop_reasons(
 
 pub fn validate_policy(policy: &VmNetworkPolicy) -> Result<()> {
     for cidr in &policy.allow_cidrs {
-        parse_ip_cidr(cidr)
-            .with_context(|| format!("invalid eBPF allow CIDR {cidr:?}"))?;
+        parse_ip_cidr(cidr).with_context(|| format!("invalid eBPF allow CIDR {cidr:?}"))?;
     }
     for cidr in &policy.deny_cidrs {
-        parse_ip_cidr(cidr)
-            .with_context(|| format!("invalid eBPF deny CIDR {cidr:?}"))?;
+        parse_ip_cidr(cidr).with_context(|| format!("invalid eBPF deny CIDR {cidr:?}"))?;
     }
     for rule in &policy.allow_ports {
-        parse_port_rule(rule)
-            .with_context(|| format!("invalid eBPF L4 rule {rule:?}"))?;
+        parse_port_rule(rule).with_context(|| format!("invalid eBPF L4 rule {rule:?}"))?;
     }
     if let Some(mbps) = policy.max_egress_mbps {
         let _ = mbps_to_bytes_per_second(mbps)?;
@@ -844,7 +853,8 @@ pub fn validate_pod_policy(policy: &PodNetworkPolicy) -> Result<()> {
                 {
                     bail!(
                         "Pod rule {i} has invalid port interval {}..{}",
-                        rule.port_start, rule.port_end
+                        rule.port_start,
+                        rule.port_end
                     );
                 }
             }
@@ -933,12 +943,7 @@ fn configure_maps(
         .transpose()?
         .unwrap_or(0);
     let rate_packets = policy.max_egress_pps.map(u64::from).unwrap_or(0);
-    let packed_sample = policy.sample_rate
-        | if policy.audit_mode {
-            1u32 << 31
-        } else {
-            0
-        };
+    let packed_sample = policy.sample_rate | if policy.audit_mode { 1u32 << 31 } else { 0 };
 
     let gid_map = map_dir.join("fluxvm_gid");
     if gid_map.exists() {
@@ -968,7 +973,11 @@ fn configure_maps(
 /// -- `fluxvm_tc.bpf.c` treats a missing `fluxvm_pspol` entry as allow, so
 /// this intentionally leaves the map empty rather than writing a
 /// default-enabled-but-empty entry).
-fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPolicy>) -> Result<()> {
+fn configure_pod_maps(
+    map_dir: &Path,
+    pod_id: u32,
+    policy: Option<&PodNetworkPolicy>,
+) -> Result<()> {
     if pod_id == 0 {
         return Ok(());
     }
@@ -1001,8 +1010,12 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
         let _ = run(
             "bpftool",
             &[
-                "map".into(), "delete".into(), "pinned".into(),
-                pspol_map.display().to_string(), "key".into(), "hex".into(),
+                "map".into(),
+                "delete".into(),
+                "pinned".into(),
+                pspol_map.display().to_string(),
+                "key".into(),
+                "hex".into(),
             ]
             .into_iter()
             .chain(hex_args(&key))
@@ -1084,7 +1097,13 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
         for (slot, rule) in policy.rules.iter().enumerate() {
             update_pod_rule(&prules_map, slot as u32, pod_id, rule)?;
         }
-        update_pod_policy(&pspol_map, pod_id, flags, policy.rules.len() as u32, policy.schema_version)
+        update_pod_policy(
+            &pspol_map,
+            pod_id,
+            flags,
+            policy.rules.len() as u32,
+            policy.schema_version,
+        )
     } else {
         for addr in &policy.allow_addresses {
             update_pod_peer(&pid4_map, &pid6_map, pod_id, *addr, 1)?;
@@ -1094,7 +1113,15 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
         }
         if pid4_port_map.exists() && pid6_port_map.exists() {
             for rule in &policy.allow_port_rules {
-                update_pod_peer_port(&pid4_port_map, &pid6_port_map, pod_id, rule.address, rule.protocol, rule.port, 1)?;
+                update_pod_peer_port(
+                    &pid4_port_map,
+                    &pid6_port_map,
+                    pod_id,
+                    rule.address,
+                    rule.protocol,
+                    rule.port,
+                    1,
+                )?;
             }
         }
         update_pod_policy(&pspol_map, pod_id, flags, 0, policy.schema_version)
@@ -1136,7 +1163,13 @@ fn update_pod_rule(map: &Path, slot: u32, pod_id: u32, rule: &PodPolicyRule) -> 
     bpftool_map_update(map, &slot.to_ne_bytes(), &value)
 }
 
-fn update_pod_policy(map: &Path, pod_id: u32, flags: u32, rule_count: u32, schema_version: u32) -> Result<()> {
+fn update_pod_policy(
+    map: &Path,
+    pod_id: u32,
+    flags: u32,
+    rule_count: u32,
+    schema_version: u32,
+) -> Result<()> {
     let key = pod_id.to_ne_bytes();
     let mut value = Vec::with_capacity(16);
     value.extend_from_slice(&flags.to_ne_bytes());
@@ -1220,15 +1253,21 @@ fn clear_pod_scoped_map(map: &Path, pod_id: u32, addr_len: usize) -> Result<()> 
         return Ok(());
     }
     let root = bpftool_json_dump(map)?;
-    let entries = root.as_array().context("bpftool map dump must be an array")?;
+    let entries = root
+        .as_array()
+        .context("bpftool map dump must be an array")?;
     for entry in entries {
         let key = json_bytes(&entry["key"])?;
         if key.len() != 4 + addr_len || key[..4] != pod_id.to_ne_bytes() {
             continue;
         }
         let mut args = vec![
-            "map".into(), "delete".into(), "pinned".into(),
-            map.display().to_string(), "key".into(), "hex".into(),
+            "map".into(),
+            "delete".into(),
+            "pinned".into(),
+            map.display().to_string(),
+            "key".into(),
+            "hex".into(),
         ];
         args.extend(hex_args(&key));
         run("bpftool", &args)?;
@@ -1293,7 +1332,9 @@ fn mbps_to_bytes_per_second(mbps: u32) -> Result<u64> {
 
 fn clear_map(map: &Path) -> Result<()> {
     let root = bpftool_json_dump(map)?;
-    let entries = root.as_array().context("bpftool map dump must be an array")?;
+    let entries = root
+        .as_array()
+        .context("bpftool map dump must be an array")?;
     for entry in entries {
         let key = json_bytes(&entry["key"])?;
         let mut args = vec![
@@ -1375,7 +1416,9 @@ fn bpftool_json_dump(map: &Path) -> Result<Value> {
 }
 
 fn parse_stats_json(root: &Value) -> Result<DataplaneStats> {
-    let entries = root.as_array().context("bpftool stats JSON must be an array")?;
+    let entries = root
+        .as_array()
+        .context("bpftool stats JSON must be an array")?;
     let mut out = DataplaneStats::default();
     for entry in entries {
         let key = json_bytes(&entry["key"])?;
@@ -1390,8 +1433,10 @@ fn parse_stats_json(root: &Value) -> Result<DataplaneStats> {
             for cpu in values {
                 let raw = json_bytes(&cpu["value"])?;
                 if raw.len() >= 16 {
-                    packets = packets.saturating_add(u64::from_ne_bytes(raw[0..8].try_into().unwrap()));
-                    bytes = bytes.saturating_add(u64::from_ne_bytes(raw[8..16].try_into().unwrap()));
+                    packets =
+                        packets.saturating_add(u64::from_ne_bytes(raw[0..8].try_into().unwrap()));
+                    bytes =
+                        bytes.saturating_add(u64::from_ne_bytes(raw[8..16].try_into().unwrap()));
                 }
             }
         } else if let Some(value) = entry.get("value") {
@@ -1414,7 +1459,9 @@ fn parse_stats_json(root: &Value) -> Result<DataplaneStats> {
 }
 
 fn parse_flows_json(root: &Value) -> Result<Vec<FlowRecord>> {
-    let entries = root.as_array().context("bpftool flow JSON must be an array")?;
+    let entries = root
+        .as_array()
+        .context("bpftool flow JSON must be an array")?;
     let mut out = Vec::with_capacity(entries.len());
     for entry in entries {
         let key = json_bytes(&entry["key"])?;
@@ -1434,8 +1481,17 @@ fn parse_flows_json(root: &Value) -> Result<Vec<FlowRecord>> {
         let bytes = u64::from_ne_bytes(value[8..16].try_into().unwrap());
         let last_seen_ns = u64::from_ne_bytes(value[16..24].try_into().unwrap());
         out.push(FlowRecord {
-            identity, family, source, destination, source_port, destination_port,
-            protocol, verdict, packets, bytes, last_seen_ns,
+            identity,
+            family,
+            source,
+            destination,
+            source_port,
+            destination_port,
+            protocol,
+            verdict,
+            packets,
+            bytes,
+            last_seen_ns,
         });
     }
     Ok(out)
@@ -1558,7 +1614,9 @@ fn parse_ip_cidr(raw: &str) -> Result<IpCidr> {
         .split_once('/')
         .with_context(|| format!("CIDR {raw:?} must include /prefix"))?;
     let ip: IpAddr = ip.parse().with_context(|| format!("invalid IP {ip:?}"))?;
-    let prefix: u8 = prefix.parse().with_context(|| format!("invalid prefix in {raw:?}"))?;
+    let prefix: u8 = prefix
+        .parse()
+        .with_context(|| format!("invalid prefix in {raw:?}"))?;
     match ip {
         IpAddr::V4(ip) => Ok(IpCidr::V4(normalize_ipv4(ip, prefix)?)),
         IpAddr::V6(ip) => Ok(IpCidr::V6(normalize_ipv6(ip, prefix)?)),
@@ -1577,8 +1635,15 @@ fn normalize_ipv4(ip: Ipv4Addr, prefix: u8) -> Result<Ipv4Cidr> {
         bail!("IPv4 prefix must be <= 32, got {prefix}");
     }
     let raw_ip = u32::from(ip);
-    let mask = if prefix == 0 { 0 } else { u32::MAX << (32 - prefix) };
-    Ok(Ipv4Cidr { network: Ipv4Addr::from(raw_ip & mask), prefix })
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Ok(Ipv4Cidr {
+        network: Ipv4Addr::from(raw_ip & mask),
+        prefix,
+    })
 }
 
 fn normalize_ipv6(ip: Ipv6Addr, prefix: u8) -> Result<Ipv6Cidr> {
@@ -1586,8 +1651,15 @@ fn normalize_ipv6(ip: Ipv6Addr, prefix: u8) -> Result<Ipv6Cidr> {
         bail!("IPv6 prefix must be <= 128, got {prefix}");
     }
     let raw = u128::from_be_bytes(ip.octets());
-    let mask = if prefix == 0 { 0 } else { u128::MAX << (128 - prefix) };
-    Ok(Ipv6Cidr { network: Ipv6Addr::from((raw & mask).to_be_bytes()), prefix })
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    };
+    Ok(Ipv6Cidr {
+        network: Ipv6Addr::from((raw & mask).to_be_bytes()),
+        prefix,
+    })
 }
 
 fn parse_port_rule(raw: &str) -> Result<PortRule> {
@@ -1714,7 +1786,10 @@ fn sync_pod_ingress_attachment(
     ensure_clsact(iface)?;
     let object = cfg.bpf_object.with_file_name("fluxvm_pod_ingress.bpf.o");
     if !object.exists() {
-        bail!("Set 14 ingress object does not exist at {}", object.display());
+        bail!(
+            "Set 14 ingress object does not exist at {}",
+            object.display()
+        );
     }
     let pin = vm_pin_dir(&cfg.pin_root, id).join("progs/fluxvm_pod_ingress");
     detach_pod_ingress_filter(cfg, id);
@@ -1741,7 +1816,10 @@ fn sync_pod_ingress_attachment(
     for name in maps {
         let path = map_dir.join(name);
         if !path.exists() {
-            bail!("required Set 14 ingress shared map missing: {}", path.display());
+            bail!(
+                "required Set 14 ingress shared map missing: {}",
+                path.display()
+            );
         }
         args.extend([
             "map".into(),
@@ -1755,9 +1833,19 @@ fn sync_pod_ingress_attachment(
     run(
         "tc",
         &[
-            "filter".into(), "add".into(), "dev".into(), iface.into(), "egress".into(),
-            "pref".into(), "49153".into(), "handle".into(), "2".into(), "bpf".into(),
-            "da".into(), "pinned".into(), pin.display().to_string(),
+            "filter".into(),
+            "add".into(),
+            "dev".into(),
+            iface.into(),
+            "egress".into(),
+            "pref".into(),
+            "49153".into(),
+            "handle".into(),
+            "2".into(),
+            "bpf".into(),
+            "da".into(),
+            "pinned".into(),
+            pin.display().to_string(),
         ],
     )
     .context("attaching Set 14 Pod ingress TC program")?;
@@ -1782,14 +1870,22 @@ fn detach_pod_ingress_filter_in_vm_dir(id: Uuid, vm_dir: &Path) {
             .output();
         if let (Some(owned), Ok(out)) = (owned, out) {
             if out.status.success()
-                && parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2) == Some(owned)
+                && parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2)
+                    == Some(owned)
             {
                 let _ = run(
                     "tc",
                     &[
-                        "filter".into(), "del".into(), "dev".into(), iface,
-                        "egress".into(), "pref".into(), "49153".into(),
-                        "handle".into(), "2".into(), "bpf".into(),
+                        "filter".into(),
+                        "del".into(),
+                        "dev".into(),
+                        iface,
+                        "egress".into(),
+                        "pref".into(),
+                        "49153".into(),
+                        "handle".into(),
+                        "2".into(),
+                        "bpf".into(),
                     ],
                 );
             }
@@ -1843,9 +1939,13 @@ pub(crate) fn pinned_program_id(path: &Path) -> Result<u32> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    let value: Value = serde_json::from_slice(&out.stdout).context("parsing pinned program JSON")?;
+    let value: Value =
+        serde_json::from_slice(&out.stdout).context("parsing pinned program JSON")?;
     let object = value.as_array().and_then(|a| a.first()).unwrap_or(&value);
-    let id = object.get("id").and_then(Value::as_u64).context("pinned program JSON missing id")?;
+    let id = object
+        .get("id")
+        .and_then(Value::as_u64)
+        .context("pinned program JSON missing id")?;
     u32::try_from(id).context("BPF program id does not fit u32")
 }
 
@@ -1854,7 +1954,15 @@ pub(crate) fn pinned_program_id(path: &Path) -> Result<u32> {
 /// the same preference is never mistaken for ours.
 fn tc_filter_program_id(iface: &str) -> Result<Option<u32>> {
     let out = Command::new("tc")
-        .args(["filter", "show", "dev", iface, "ingress", "pref", TC_PRIORITY])
+        .args([
+            "filter",
+            "show",
+            "dev",
+            iface,
+            "ingress",
+            "pref",
+            TC_PRIORITY,
+        ])
         .output()
         .context("querying FluxVM TC filter")?;
     if !out.status.success() {
@@ -1936,24 +2044,39 @@ mod tests {
     fn l4_rules_parse() {
         assert_eq!(
             parse_port_rule("tcp/443").unwrap(),
-            PortRule { protocol: 6, port: 443 }
+            PortRule {
+                protocol: 6,
+                port: 443
+            }
         );
         assert_eq!(
             parse_port_rule("UDP/53").unwrap(),
-            PortRule { protocol: 17, port: 53 }
+            PortRule {
+                protocol: 17,
+                port: 53
+            }
         );
         assert_eq!(
             parse_port_rule("icmp/0").unwrap(),
-            PortRule { protocol: IPPROTO_ICMP, port: 0 }
+            PortRule {
+                protocol: IPPROTO_ICMP,
+                port: 0
+            }
         );
         assert_eq!(
             parse_port_rule("icmp/8").unwrap(),
-            PortRule { protocol: IPPROTO_ICMP, port: 8 }
+            PortRule {
+                protocol: IPPROTO_ICMP,
+                port: 8
+            }
         );
         assert!(parse_port_rule("tcp/0").is_err());
         assert_eq!(
             parse_port_rule("sctp/443").unwrap(),
-            PortRule { protocol: IPPROTO_SCTP, port: 443 }
+            PortRule {
+                protocol: IPPROTO_SCTP,
+                port: 443
+            }
         );
     }
 
@@ -1961,14 +2084,21 @@ mod tests {
     fn drop_reason_parser_decodes_schema_v6_key() {
         let identity = 42u32;
         let mut key = identity.to_ne_bytes().to_vec();
-        key.extend([10, 0, 0, 2]); key.extend([0; 12]);
-        key.extend([1, 1, 1, 1]); key.extend([0; 12]);
+        key.extend([10, 0, 0, 2]);
+        key.extend([0; 12]);
+        key.extend([1, 1, 1, 1]);
+        key.extend([0; 12]);
         key.extend(12345u16.to_ne_bytes());
         key.extend(443u16.to_ne_bytes());
         key.extend([6, 0, 4, 0]);
         key.extend(7u32.to_ne_bytes());
         key.extend(0u32.to_ne_bytes());
-        let value = [3u64.to_ne_bytes(), 192u64.to_ne_bytes(), 99u64.to_ne_bytes()].concat();
+        let value = [
+            3u64.to_ne_bytes(),
+            192u64.to_ne_bytes(),
+            99u64.to_ne_bytes(),
+        ]
+        .concat();
         let parsed = parse_drop_reasons_json(&json!([{"key": key, "value": value}])).unwrap();
         assert_eq!(parsed[0].reason, "rate-limit");
         assert_eq!(parsed[0].action, "drop");
@@ -2007,7 +2137,9 @@ mod tests {
 
     #[test]
     fn stats_parser_aggregates_per_cpu_values() {
-        fn u32b(v: u32) -> Vec<u8> { v.to_ne_bytes().to_vec() }
+        fn u32b(v: u32) -> Vec<u8> {
+            v.to_ne_bytes().to_vec()
+        }
         fn statv(packets: u64, bytes: u64) -> Vec<u8> {
             [packets.to_ne_bytes(), bytes.to_ne_bytes()].concat()
         }
@@ -2042,7 +2174,12 @@ mod tests {
         key4.extend(43210u16.to_ne_bytes());
         key4.extend(443u16.to_ne_bytes());
         key4.extend([6, 1, 4, 0]);
-        let value = [4u64.to_ne_bytes(), 2048u64.to_ne_bytes(), 12345u64.to_ne_bytes()].concat();
+        let value = [
+            4u64.to_ne_bytes(),
+            2048u64.to_ne_bytes(),
+            12345u64.to_ne_bytes(),
+        ]
+        .concat();
 
         let src6: Ipv6Addr = "2001:db8::10".parse().unwrap();
         let dst6: Ipv6Addr = "2001:db8::20".parse().unwrap();
@@ -2073,7 +2210,8 @@ mod tests {
         let text = "filter protocol all pref 49152 bpf chain 0\n\
 filter protocol all pref 49152 bpf chain 0 handle 0x1 direct-action not_in_hw id 191 tag deadbeef\n";
         assert_eq!(parse_tc_program_id(text), Some(191));
-        let other = "filter protocol all pref 49152 bpf chain 0 handle 0x2 direct-action not_in_hw id 200";
+        let other =
+            "filter protocol all pref 49152 bpf chain 0 handle 0x2 direct-action not_in_hw id 200";
         assert_eq!(parse_tc_program_id(other), None);
     }
 
@@ -2083,7 +2221,10 @@ filter protocol all pref 49152 bpf chain 0 handle 0x1 direct-action not_in_hw id
             IpCidr::V6(c) => c,
             _ => panic!("expected IPv6"),
         };
-        assert_eq!(c.network, "2001:db8:abcd:1234::".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(
+            c.network,
+            "2001:db8:abcd:1234::".parse::<Ipv6Addr>().unwrap()
+        );
         assert_eq!(c.prefix, 64);
         assert!(parse_ip_cidr("2001:db8::1/129").is_err());
     }

@@ -43,9 +43,15 @@ pub enum GdbCmd {
     /// Patch a software breakpoint (`0xCC`) at a *virtual* address,
     /// remembering the original byte for `ClearBreakpoint`. Arms
     /// `KVM_SET_GUEST_DEBUG` on first use.
-    SetBreakpoint { addr: u64, reply: SyncSender<bool> },
+    SetBreakpoint {
+        addr: u64,
+        reply: SyncSender<bool>,
+    },
     /// Restore the original byte at a previously set breakpoint.
-    ClearBreakpoint { addr: u64, reply: SyncSender<bool> },
+    ClearBreakpoint {
+        addr: u64,
+        reply: SyncSender<bool>,
+    },
 }
 
 /// OS thread id of the BSP vCPU thread (so break-in can signal it) plus
@@ -165,7 +171,12 @@ fn resume(kvm: &KvmVm, paused: &AtomicBool) {
 /// periodically in case the first signal arrived before the thread was
 /// ready to receive it. Gives up after a few seconds so a connect against
 /// an already-dead VM doesn't hang the gdbstub thread forever.
-fn wait_paused(kvm: &KvmVm, control: &GdbControl, paused: &AtomicBool, cmd_tx: &SyncSender<GdbCmd>) -> bool {
+fn wait_paused(
+    kvm: &KvmVm,
+    control: &GdbControl,
+    paused: &AtomicBool,
+    cmd_tx: &SyncSender<GdbCmd>,
+) -> bool {
     for _ in 0..50 {
         let (tx, rx) = sync_channel(1);
         if cmd_tx.send(GdbCmd::GetRegs(tx)).is_err() {
@@ -314,14 +325,18 @@ fn dispatch(
     if let Some(rest) = body.strip_prefix("Z0,") {
         let addr = u64::from_str_radix(rest.split(',').next()?, 16).ok()?;
         let (tx, rx) = sync_channel(1);
-        cmd_tx.send(GdbCmd::SetBreakpoint { addr, reply: tx }).ok()?;
+        cmd_tx
+            .send(GdbCmd::SetBreakpoint { addr, reply: tx })
+            .ok()?;
         let ok = rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false);
         return Some(if ok { "OK".into() } else { String::new() });
     }
     if let Some(rest) = body.strip_prefix("z0,") {
         let addr = u64::from_str_radix(rest.split(',').next()?, 16).ok()?;
         let (tx, rx) = sync_channel(1);
-        cmd_tx.send(GdbCmd::ClearBreakpoint { addr, reply: tx }).ok()?;
+        cmd_tx
+            .send(GdbCmd::ClearBreakpoint { addr, reply: tx })
+            .ok()?;
         let _ = rx.recv_timeout(Duration::from_secs(2));
         return Some("OK".into());
     }
@@ -424,7 +439,13 @@ pub fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
 /// resulting int3 back via `KVM_EXIT_DEBUG` instead of forwarding it into
 /// the guest's own IDT. Called on the BSP vCPU thread from run_until's
 /// pause-service loop.
-pub fn set_breakpoint(mem: &mut GuestMemory, kvm: &KvmVm, control: &GdbControl, cr3: u64, addr: u64) -> bool {
+pub fn set_breakpoint(
+    mem: &mut GuestMemory,
+    kvm: &KvmVm,
+    control: &GdbControl,
+    cr3: u64,
+    addr: u64,
+) -> bool {
     if !control.debug_armed.swap(true, Ordering::SeqCst) && kvm.enable_guest_debug(0).is_err() {
         control.debug_armed.store(false, Ordering::SeqCst);
         return false;

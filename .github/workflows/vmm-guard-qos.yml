@@ -32,7 +32,7 @@ jobs:
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Dependencies
-        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev pkg-config libsystemd-dev libhivex-dev bpftool python3-yaml
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev pkg-config libsystemd-dev libhivex-dev linux-tools-common linux-tools-generic python3-yaml
       - name: Cargo tests
         working-directory: fluxvm
         run: cargo test -p fluxvm-intelligence

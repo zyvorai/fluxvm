@@ -43,7 +43,6 @@ pub struct ContainerIo {
     pub streaming: bool,
 }
 
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum IoStreamKind {
@@ -247,16 +246,26 @@ pub enum ContainerRequest {
         #[serde(default)]
         all: bool,
     },
-    Pause { id: String },
-    Resume { id: String },
+    Pause {
+        id: String,
+    },
+    Resume {
+        id: String,
+    },
     Wait {
         id: String,
         #[serde(default)]
         exec_id: Option<String>,
     },
-    Pids { id: String },
-    Stats { id: String },
-    CgroupEvents { id: String },
+    Pids {
+        id: String,
+    },
+    Stats {
+        id: String,
+    },
+    CgroupEvents {
+        id: String,
+    },
     /// Return monotonic guest-agent security counters.
     SecurityStats,
     UpdateResources {
@@ -307,8 +316,12 @@ pub enum ContainerResponse {
         #[serde(default)]
         container_identity: u32,
     },
-    Started { pid: u32 },
-    ExecStarted { pid: u32 },
+    Started {
+        pid: u32,
+    },
+    ExecStarted {
+        pid: u32,
+    },
     State {
         id: String,
         #[serde(default)]
@@ -324,10 +337,18 @@ pub enum ContainerResponse {
         exit_code: i32,
         exited_at_unix_nano: i64,
     },
-    Pids { pids: Vec<u32> },
-    Stats { stats: ContainerStats },
-    CgroupEvents { events: CgroupEvents },
-    SecurityStats { stats: SecurityStats },
+    Pids {
+        pids: Vec<u32>,
+    },
+    Stats {
+        stats: ContainerStats,
+    },
+    CgroupEvents {
+        events: CgroupEvents,
+    },
+    SecurityStats {
+        stats: SecurityStats,
+    },
     ResourcesUpdated,
     PtyResized,
     IoClosed,
@@ -339,7 +360,9 @@ pub enum ContainerResponse {
         exit_code: i32,
         exited_at_unix_nano: i64,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 pub fn encode_line<T: Serialize>(value: &T) -> serde_json::Result<String> {
@@ -380,7 +403,11 @@ mod tests {
         assert_eq!(back.token.as_deref(), Some("secret"));
         assert!(matches!(
             back.request,
-            ContainerRequest::Create { is_sandbox: true, share_process_namespace: false, .. }
+            ContainerRequest::Create {
+                is_sandbox: true,
+                share_process_namespace: false,
+                ..
+            }
         ));
     }
 
@@ -404,7 +431,10 @@ mod tests {
         };
         let line = encode_line(&req).unwrap();
         let back: ContainerEnvelope = decode_line(&line).unwrap();
-        assert!(matches!(back.request, ContainerRequest::UpdateResources { .. }));
+        assert!(matches!(
+            back.request,
+            ContainerRequest::UpdateResources { .. }
+        ));
     }
 
     #[test]
@@ -418,7 +448,11 @@ mod tests {
         let back: ContainerResponse = decode_line(&line).unwrap();
         assert!(matches!(
             back,
-            ContainerResponse::Deleted { pid: 42, exit_code: 137, .. }
+            ContainerResponse::Deleted {
+                pid: 42,
+                exit_code: 137,
+                ..
+            }
         ));
     }
 
@@ -445,13 +479,20 @@ mod tests {
         };
         let line = encode_line(&response).unwrap();
         let back: ContainerResponse = decode_line(&line).unwrap();
-        assert!(matches!(back, ContainerResponse::Exited { exit_code: 0, .. }));
+        assert!(matches!(
+            back,
+            ContainerResponse::Exited { exit_code: 0, .. }
+        ));
     }
 
     #[test]
     fn cgroup_events_round_trip() {
         let response = ContainerResponse::CgroupEvents {
-            events: CgroupEvents { oom: 2, oom_kill: 1, ..Default::default() },
+            events: CgroupEvents {
+                oom: 2,
+                oom_kill: 1,
+                ..Default::default()
+            },
         };
         let line = encode_line(&response).unwrap();
         let back: ContainerResponse = decode_line(&line).unwrap();
@@ -476,11 +517,15 @@ mod tests {
     #[test]
     fn security_stats_round_trip() {
         let response = ContainerResponse::SecurityStats {
-            stats: SecurityStats { seccomp_notify_denied: 2, ..Default::default() },
+            stats: SecurityStats {
+                seccomp_notify_denied: 2,
+                ..Default::default()
+            },
         };
         let line = encode_line(&response).unwrap();
         let back: ContainerResponse = decode_line(&line).unwrap();
-        assert!(matches!(back, ContainerResponse::SecurityStats { stats } if stats.seccomp_notify_denied == 2));
+        assert!(
+            matches!(back, ContainerResponse::SecurityStats { stats } if stats.seccomp_notify_denied == 2)
+        );
     }
-
 }

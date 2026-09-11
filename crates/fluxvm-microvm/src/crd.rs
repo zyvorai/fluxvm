@@ -65,11 +65,21 @@ pub struct MicroVMSpec {
     pub service_port: Option<i32>,
 }
 
-fn default_backend() -> String { "qemu".into() }
-fn default_vcpus() -> u8 { 2 }
-fn default_memory_mib() -> u64 { 2048 }
-fn default_network_mode() -> String { "none".into() }
-fn default_storage() -> String { "default".into() }
+fn default_backend() -> String {
+    "qemu".into()
+}
+fn default_vcpus() -> u8 {
+    2
+}
+fn default_memory_mib() -> u64 {
+    2048
+}
+fn default_network_mode() -> String {
+    "none".into()
+}
+fn default_storage() -> String {
+    "default".into()
+}
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -125,8 +135,12 @@ pub struct MicroVMJobSpec {
     pub ttl_seconds_after_finished: Option<u64>,
     pub template: MicroVMSpec,
 }
-fn default_one() -> u32 { 1 }
-fn default_backoff() -> u32 { 3 }
+fn default_one() -> u32 {
+    1
+}
+fn default_backoff() -> u32 {
+    3
+}
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -233,7 +247,8 @@ mod tests {
     fn defaults_are_disposable() {
         let spec: MicroVMSpec = serde_json::from_value(serde_json::json!({
             "image": "/var/lib/fluxvm/images/ubuntu.qcow2"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!spec.persist);
         assert_eq!(spec.backend, "qemu");
         assert_eq!(spec.vcpus, 2);

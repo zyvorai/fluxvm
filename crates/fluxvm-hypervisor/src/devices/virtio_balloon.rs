@@ -27,7 +27,12 @@ fn used_push(
     Ok(())
 }
 
-fn process_pfns(mem: &mut GuestMemory, q_idx: usize, st: &mut VirtioState, inflate: bool) -> Result<u32> {
+fn process_pfns(
+    mem: &mut GuestMemory,
+    q_idx: usize,
+    st: &mut VirtioState,
+    inflate: bool,
+) -> Result<u32> {
     let q = &mut st.queues[q_idx];
     if q.ready == 0 || q.num == 0 {
         return Ok(0);

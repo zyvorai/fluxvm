@@ -42,13 +42,18 @@ pub enum Error {
 
 pub async fn run(client: Client, request_kvm_device: bool) {
     let api: Api<MicroVM> = Api::all(client.clone());
-    let ctx = Arc::new(Context { client: client.clone(), request_kvm_device });
+    let ctx = Arc::new(Context {
+        client: client.clone(),
+        request_kvm_device,
+    });
     tracing::info!("starting MicroVM cluster controller");
     Controller::new(api, watcher::Config::default())
         .owns(Api::<Pod>::all(client), watcher::Config::default())
         .run(reconcile, error_policy, ctx)
         .for_each(|res| async move {
-            if let Err(e) = res { tracing::warn!(error = %e, "microvm controller error"); }
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "microvm controller error");
+            }
         })
         .await;
 }
@@ -61,7 +66,9 @@ async fn reconcile(obj: Arc<MicroVM>, ctx: Arc<Context>) -> Result<Action, Error
             FinalizerEvent::Apply(obj) => apply(&obj, &api, &ctx).await,
             FinalizerEvent::Cleanup(obj) => cleanup(&obj, &ctx).await,
         }
-    }).await.map_err(Error::Finalizer)
+    })
+    .await
+    .map_err(Error::Finalizer)
 }
 
 fn error_policy(_obj: Arc<MicroVM>, err: &Error, _ctx: Arc<Context>) -> Action {
@@ -89,12 +96,19 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
         if status.runtime.node.as_deref() != Some(node.as_str()) {
             status.runtime.node = Some(node);
         }
-        if status.runtime.uuid.is_none() && status.phase != "Provisioning" && status.phase != "Running" {
+        if status.runtime.uuid.is_none()
+            && status.phase != "Provisioning"
+            && status.phase != "Running"
+        {
             status.phase = "Scheduled".into();
             status.message = Some("shadow pod bound; waiting for node agent".into());
         }
     } else if status.runtime.uuid.is_none() {
-        let phase = pod.as_ref().and_then(|p| p.status.as_ref()).and_then(|s| s.phase.clone()).unwrap_or_else(|| "Pending".into());
+        let phase = pod
+            .as_ref()
+            .and_then(|p| p.status.as_ref())
+            .and_then(|s| s.phase.clone())
+            .unwrap_or_else(|| "Pending".into());
         if phase == "Failed" {
             status.phase = "Unschedulable".into();
             status.message = Some("shadow pod failed to schedule".into());
@@ -135,14 +149,23 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
 }
 
 async fn cleanup(obj: &MicroVM, ctx: &Context) -> Result<Action, ReconcileError> {
-    if obj.status.as_ref().and_then(|s| s.runtime.uuid.as_deref()).is_some() {
+    if obj
+        .status
+        .as_ref()
+        .and_then(|s| s.runtime.uuid.as_deref())
+        .is_some()
+    {
         return Ok(Action::requeue(Duration::from_secs(5)));
     }
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
-    let _ = pods.delete(&shadow_name(obj), &DeleteParams::default()).await;
+    let _ = pods
+        .delete(&shadow_name(obj), &DeleteParams::default())
+        .await;
     let slices: Api<EndpointSlice> = Api::namespaced(ctx.client.clone(), &ns);
-    let _ = slices.delete(&format!("mvm-{}", obj.name_any()), &DeleteParams::default()).await;
+    let _ = slices
+        .delete(&format!("mvm-{}", obj.name_any()), &DeleteParams::default())
+        .await;
     Ok(Action::await_change())
 }
 
@@ -162,7 +185,10 @@ async fn ensure_endpointslice(client: &Client, vm: &MicroVM, ip: &str) -> Result
             ..Default::default()
         },
         address_type: "IPv4".into(),
-        endpoints: vec![Endpoint { addresses: vec![ip.to_string()], ..Default::default() }],
+        endpoints: vec![Endpoint {
+            addresses: vec![ip.to_string()],
+            ..Default::default()
+        }],
         ports: Some(vec![EndpointPort {
             port: Some(port),
             protocol: Some("TCP".into()),
@@ -180,14 +206,24 @@ async fn ensure_endpointslice(client: &Client, vm: &MicroVM, ip: &str) -> Result
                     "endpoints": [{"addresses": [ip]}],
                     "ports": [{"port": port, "protocol": "TCP", "name": "guest"}]
                 })),
-            ).await?;
+            )
+            .await?;
             Ok(())
         }
         Err(e) => Err(e),
     }
 }
 
-async fn patch_status(api: &Api<MicroVM>, name: &str, status: MicroVMStatus) -> Result<(), kube::Error> {
-    api.patch_status(name, &PatchParams::default(), &Patch::Merge(serde_json::json!({ "status": status }))).await?;
+async fn patch_status(
+    api: &Api<MicroVM>,
+    name: &str,
+    status: MicroVMStatus,
+) -> Result<(), kube::Error> {
+    api.patch_status(
+        name,
+        &PatchParams::default(),
+        &Patch::Merge(serde_json::json!({ "status": status })),
+    )
+    .await?;
     Ok(())
 }

@@ -6,7 +6,10 @@ use futures::StreamExt;
 use kube::{
     Api, Client, Resource, ResourceExt,
     api::{ListParams, ObjectMeta, Patch, PatchParams, PostParams},
-    runtime::{controller::{Action, Controller}, watcher},
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
 };
 use std::{sync::Arc, time::Duration};
 
@@ -21,13 +24,26 @@ pub async fn run(client: Client) {
     let ctx = Arc::new(client);
     tracing::info!("starting MicroVMJob controller");
     Controller::new(api, watcher::Config::default())
-        .run(reconcile, |_o, e, _c| { tracing::warn!(error = %e, "job failed"); Action::requeue(Duration::from_secs(15)) }, ctx)
-        .for_each(|res| async move { if let Err(e) = res { tracing::warn!(error = %e, "job error"); } })
+        .run(
+            reconcile,
+            |_o, e, _c| {
+                tracing::warn!(error = %e, "job failed");
+                Action::requeue(Duration::from_secs(15))
+            },
+            ctx,
+        )
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "job error");
+            }
+        })
         .await;
 }
 
 async fn reconcile(obj: Arc<MicroVMJob>, client: Arc<Client>) -> Result<Action, Error> {
-    if obj.meta().deletion_timestamp.is_some() { return Ok(Action::await_change()); }
+    if obj.meta().deletion_timestamp.is_some() {
+        return Ok(Action::await_change());
+    }
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let vms: Api<MicroVM> = Api::namespaced(client.as_ref().clone(), &ns);
     let jobs: Api<MicroVMJob> = Api::namespaced(client.as_ref().clone(), &ns);
@@ -54,7 +70,11 @@ async fn reconcile(obj: Arc<MicroVMJob>, client: Arc<Client>) -> Result<Action, 
             child.metadata = ObjectMeta {
                 name: Some(child_name.clone()),
                 namespace: Some(ns.clone()),
-                labels: Some([(LABEL_JOB.to_string(), obj.name_any())].into_iter().collect()),
+                labels: Some(
+                    [(LABEL_JOB.to_string(), obj.name_any())]
+                        .into_iter()
+                        .collect(),
+                ),
                 owner_references: obj.controller_owner_ref(&()).map(|o| vec![o]),
                 ..Default::default()
             };
@@ -65,7 +85,13 @@ async fn reconcile(obj: Arc<MicroVMJob>, client: Arc<Client>) -> Result<Action, 
             }
         }
     }
-    let phase = if succeeded >= want { "Succeeded" } else if failed > obj.spec.backoff_limit { "Failed" } else { "Running" };
+    let phase = if succeeded >= want {
+        "Succeeded"
+    } else if failed > obj.spec.backoff_limit {
+        "Failed"
+    } else {
+        "Running"
+    };
     jobs.patch_status(
         &obj.name_any(),
         &PatchParams::default(),

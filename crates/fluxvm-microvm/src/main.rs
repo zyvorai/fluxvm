@@ -12,7 +12,10 @@ use fluxvm_microvm::{
 use kube::CustomResourceExt;
 
 #[derive(Parser)]
-#[command(name = "fluxvm-microvm", about = "FluxVM MicroVM — Kubernetes-native disposable compute (not KubeVirt)")]
+#[command(
+    name = "fluxvm-microvm",
+    about = "FluxVM MicroVM — Kubernetes-native disposable compute (not KubeVirt)"
+)]
 struct Cli {
     #[arg(long)]
     print_crd: bool,
@@ -50,9 +53,17 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&crds)?);
         return Ok(());
     }
-    let client = kube::Client::try_default().await.context("connecting to Kubernetes")?;
-    match cli.command.unwrap_or(Command::Controller { request_kvm: false, convert: false }) {
-        Command::Controller { request_kvm, convert: do_convert } => {
+    let client = kube::Client::try_default()
+        .await
+        .context("connecting to Kubernetes")?;
+    match cli.command.unwrap_or(Command::Controller {
+        request_kvm: false,
+        convert: false,
+    }) {
+        Command::Controller {
+            request_kvm,
+            convert: do_convert,
+        } => {
             spawn_metrics();
             let c1 = client.clone();
             let c2 = client.clone();
@@ -67,7 +78,8 @@ async fn main() -> Result<()> {
         Command::NodeAgent { kvm_slots } => {
             spawn_metrics();
             let node_name = std::env::var("NODE_NAME").context("NODE_NAME is required")?;
-            let base_url = std::env::var("FLUXVM_URL").unwrap_or_else(|_| "http://127.0.0.1:7788".into());
+            let base_url =
+                std::env::var("FLUXVM_URL").unwrap_or_else(|_| "http://127.0.0.1:7788".into());
             let token = std::env::var("FLUXVM_TOKEN").ok();
             if kvm_slots > 0 {
                 if let Err(e) = capacity::advertise(&client, &node_name, kvm_slots).await {

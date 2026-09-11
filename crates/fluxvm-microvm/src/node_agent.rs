@@ -10,7 +10,10 @@ use futures::StreamExt;
 use kube::{
     Api, Client, Resource, ResourceExt,
     api::{Patch, PatchParams},
-    runtime::{controller::{Action, Controller}, watcher},
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
 };
 use std::{sync::Arc, time::Duration};
 
@@ -31,17 +34,32 @@ pub enum Error {
     Flux(String),
 }
 impl From<anyhow::Error> for Error {
-    fn from(e: anyhow::Error) -> Self { Self::Flux(format!("{e:#}")) }
+    fn from(e: anyhow::Error) -> Self {
+        Self::Flux(format!("{e:#}"))
+    }
 }
 
 pub async fn run(client: Client, fluxvm: FluxVMClient, node_name: String) {
     let api: Api<MicroVM> = Api::all(client.clone());
-    let ctx = Arc::new(Context { client, fluxvm, node_name });
+    let ctx = Arc::new(Context {
+        client,
+        fluxvm,
+        node_name,
+    });
     tracing::info!(node = %ctx.node_name, "starting MicroVM node agent");
     Controller::new(api, watcher::Config::default())
-        .run(reconcile, |_o, e, _c| { tracing::warn!(error = %e, "node agent failed"); Action::requeue(ERROR) }, ctx)
+        .run(
+            reconcile,
+            |_o, e, _c| {
+                tracing::warn!(error = %e, "node agent failed");
+                Action::requeue(ERROR)
+            },
+            ctx,
+        )
         .for_each(|res| async move {
-            if let Err(e) = res { tracing::warn!(error = %e, "node agent error"); }
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "node agent error");
+            }
         })
         .await;
 }
@@ -51,9 +69,12 @@ async fn reconcile(obj: Arc<MicroVM>, ctx: Arc<Context>) -> Result<Action, Error
         tracing::debug!(vm = %obj.name_any(), "skip: driven by fluxvm-kube");
         return Ok(Action::await_change());
     }
-    let mine = obj.status.as_ref().and_then(|s| s.runtime.node.as_deref()) == Some(ctx.node_name.as_str())
+    let mine = obj.status.as_ref().and_then(|s| s.runtime.node.as_deref())
+        == Some(ctx.node_name.as_str())
         || obj.spec.node_name.as_deref() == Some(ctx.node_name.as_str());
-    if !mine { return Ok(Action::await_change()); }
+    if !mine {
+        return Ok(Action::await_change());
+    }
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let api: Api<MicroVM> = Api::namespaced(ctx.client.clone(), &ns);
     if obj.meta().deletion_timestamp.is_some() {
@@ -102,7 +123,9 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
             &obj.namespace().unwrap_or_else(|| "default".into()),
             pool,
         );
-        ctx.fluxvm.claim_pool(&pool_name, &name, obj.spec.ttl_seconds).await?
+        ctx.fluxvm
+            .claim_pool(&pool_name, &name, obj.spec.ttl_seconds)
+            .await?
     } else {
         status.phase = "Provisioning".into();
         let mut spec = obj.spec.clone();
@@ -123,12 +146,23 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
     };
     if obj.spec.command.is_some() && status.phase == "Running" && !status.command_ran {
         let cmd = obj.spec.command.as_deref().unwrap();
-        match ctx.fluxvm.exec(&id, cmd, obj.spec.command_timeout_seconds).await {
+        match ctx
+            .fluxvm
+            .exec(&id, cmd, obj.spec.command_timeout_seconds)
+            .await
+        {
             Ok(out) => {
                 status.command_ran = true;
-                status.command_exit = out.get("exit_code").and_then(|v| v.as_i64()).map(|i| i as i32);
+                status.command_exit = out
+                    .get("exit_code")
+                    .and_then(|v| v.as_i64())
+                    .map(|i| i as i32);
                 if !obj.spec.persist {
-                    status.phase = if status.command_exit.unwrap_or(0) == 0 { "Succeeded".into() } else { "Failed".into() };
+                    status.phase = if status.command_exit.unwrap_or(0) == 0 {
+                        "Succeeded".into()
+                    } else {
+                        "Failed".into()
+                    };
                     let _ = ctx.fluxvm.delete_vm(&id).await;
                     status.runtime.uuid = None;
                 }
@@ -170,10 +204,7 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
             }
         } else if let Some(created) = obj.meta().creation_timestamp.as_ref() {
             // Fallback when annotation missing (agent saw create before controller).
-            if let Ok(d) = chrono::Utc::now()
-                .signed_duration_since(created.0)
-                .to_std()
-            {
+            if let Ok(d) = chrono::Utc::now().signed_duration_since(created.0).to_std() {
                 crate::metrics::observe_schedule_to_running(d);
             }
         }
@@ -188,9 +219,10 @@ async fn resolve_image(client: &Client, ns: Option<&str>, image: &str) -> Result
     }
     let namespace = ns.unwrap_or("default");
     let api: Api<GuestImage> = Api::namespaced(client.clone(), namespace);
-    let img = api.get(image).await.map_err(|e| {
-        Error::Flux(format!("GuestImage {namespace}/{image}: {e}"))
-    })?;
+    let img = api
+        .get(image)
+        .await
+        .map_err(|e| Error::Flux(format!("GuestImage {namespace}/{image}: {e}")))?;
     guest_image_host_path(&img).ok_or_else(|| {
         Error::Flux(format!(
             "GuestImage {namespace}/{image} is not Ready on this node (stage with GuestKit)"
@@ -198,7 +230,16 @@ async fn resolve_image(client: &Client, ns: Option<&str>, image: &str) -> Result
     })
 }
 
-async fn patch_status(api: &Api<MicroVM>, name: &str, status: MicroVMStatus) -> Result<(), kube::Error> {
-    api.patch_status(name, &PatchParams::default(), &Patch::Merge(serde_json::json!({ "status": status }))).await?;
+async fn patch_status(
+    api: &Api<MicroVM>,
+    name: &str,
+    status: MicroVMStatus,
+) -> Result<(), kube::Error> {
+    api.patch_status(
+        name,
+        &PatchParams::default(),
+        &Patch::Merge(serde_json::json!({ "status": status })),
+    )
+    .await?;
     Ok(())
 }

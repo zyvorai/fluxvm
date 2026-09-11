@@ -39,10 +39,10 @@ jobs:
       - name: Install eBPF build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev bpftool iproute2 pkg-config libsystemd-dev libhivex-dev
+          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic iproute2 pkg-config libsystemd-dev libhivex-dev
       - name: Rust format
         working-directory: fluxvm
-        run: cargo fmt --all -- --check
+        run: ./scripts/ci-fmt-check.sh
       - name: Affected Rust tests
         working-directory: fluxvm
         run: cargo test -p fluxvm-intelligence -p fluxvm-cli
@@ -76,7 +76,7 @@ jobs:
       - name: Install eBPF runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev bpftool iproute2 pkg-config libsystemd-dev libhivex-dev
+          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic iproute2 pkg-config libsystemd-dev libhivex-dev
       - name: Privileged Flight Recorder smoke
         working-directory: fluxvm
         run: sudo --preserve-env=PATH ./scripts/test-flight-recorder-host.sh

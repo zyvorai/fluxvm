@@ -85,9 +85,8 @@ pub fn apply(cfg: &JailerConfig) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn chroot_into(root: &Path) -> Result<()> {
     use std::ffi::CString;
-    let c = CString::new(root.as_os_str().as_encoded_bytes()).map_err(|_| {
-        FluxError::Hypervisor("jailer chroot path contains NUL".into())
-    })?;
+    let c = CString::new(root.as_os_str().as_encoded_bytes())
+        .map_err(|_| FluxError::Hypervisor("jailer chroot path contains NUL".into()))?;
     if unsafe { libc::chroot(c.as_ptr()) } != 0 {
         return Err(FluxError::Hypervisor(format!(
             "chroot {}: {}",
@@ -108,8 +107,7 @@ fn chroot_into(root: &Path) -> Result<()> {
 fn enter_cgroup(path: &str) -> Result<()> {
     let procs = format!("{path}/cgroup.procs");
     let pid = std::process::id().to_string();
-    std::fs::write(&procs, pid).map_err(|e| {
-        FluxError::Hypervisor(format!("jailer cgroup {procs}: {e}"))
-    })?;
+    std::fs::write(&procs, pid)
+        .map_err(|e| FluxError::Hypervisor(format!("jailer cgroup {procs}: {e}")))?;
     Ok(())
 }

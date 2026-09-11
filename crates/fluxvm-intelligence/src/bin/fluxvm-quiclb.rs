@@ -1,18 +1,198 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
-use anyhow::{Result,anyhow,bail};
-use axum::{extract::{Path as AxPath,State},http::StatusCode,response::{IntoResponse,Response},routing::get,Json,Router};
-use fluxvm_intelligence::quiclb::{self,AffinitySnapshot,QuicLbPlan,QuicLbSpec};
+use anyhow::{Result, anyhow, bail};
+use axum::{
+    Json, Router,
+    extract::{Path as AxPath, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use fluxvm_intelligence::quiclb::{self, AffinitySnapshot, QuicLbPlan, QuicLbSpec};
 use serde_json::json;
-use std::{env,fs,net::SocketAddr,path::PathBuf,sync::Arc};
+use std::{env, fs, net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::net::TcpListener;
 use uuid::Uuid;
-#[derive(Clone)]struct ApiState{state_root:Arc<PathBuf>}
-fn usage()->&'static str{"usage:\n  fluxvm-quiclb probe <iface>\n  fluxvm-quiclb plan <spec.json> [plan.json]\n  fluxvm-quiclb apply <plan.json> [--ack-hardware-offload]\n  fluxvm-quiclb status <instance-uuid>\n  fluxvm-quiclb list\n  fluxvm-quiclb events <instance-uuid> [seconds] [limit]\n  fluxvm-quiclb affinity-export <instance-uuid> <file>\n  fluxvm-quiclb affinity-import <instance-uuid> <file>\n  fluxvm-quiclb remove <instance-uuid>\n  fluxvm-quiclb metrics <instance-uuid>\n  fluxvm-quiclb serve [listen]"}
-#[tokio::main]async fn main()->Result<()>{let a:Vec<String>=env::args().collect();let pin=PathBuf::from(env::var("FLUXVM_QUICLB_PIN_ROOT").unwrap_or_else(|_|quiclb::DEFAULT_QUICLB_PIN_ROOT.into()));let state=PathBuf::from(env::var("FLUXVM_QUICLB_STATE_ROOT").unwrap_or_else(|_|quiclb::DEFAULT_QUICLB_STATE_ROOT.into()));match a.get(1).map(String::as_str){Some("probe")=>{if a.len()!=3{bail!(usage())}println!("{}",serde_json::to_string_pretty(&quiclb::smartnic_probe(&a[2])?)?)}Some("plan")=>{if a.len()<3||a.len()>4{bail!(usage())}let s:QuicLbSpec=serde_json::from_slice(&fs::read(&a[2])?)?;let p=quiclb::build_plan(&s)?;let b=serde_json::to_vec_pretty(&p)?;if let Some(o)=a.get(3){fs::write(o,&b)?}println!("{}",String::from_utf8(b)?)}Some("apply")=>{if a.len()<3||a.len()>4{bail!(usage())}let ack=a.get(3).map(String::as_str)==Some("--ack-hardware-offload");if a.len()==4&&!ack{bail!(usage())}let p:QuicLbPlan=serde_json::from_slice(&fs::read(&a[2])?)?;println!("{}",serde_json::to_string_pretty(&quiclb::apply(&p,&pin,&state,ack)?)?)}Some("status")=>{if a.len()!=3{bail!(usage())}println!("{}",serde_json::to_string_pretty(&quiclb::status(parse_id(a.get(2))?,&state)?)?)}Some("list")=>{if a.len()!=2{bail!(usage())}println!("{}",serde_json::to_string_pretty(&quiclb::list_statuses(&state)?)?)}Some("events")=>{if a.len()<3||a.len()>5{bail!(usage())}quiclb::stream_events(parse_id(a.get(2))?,a.get(3).and_then(|x|x.parse().ok()).unwrap_or(5),a.get(4).and_then(|x|x.parse().ok()).unwrap_or(128),&state)?}Some("affinity-export")=>{if a.len()!=4{bail!(usage())}let id=parse_id(a.get(2))?;let snap=quiclb::export_affinity(id,&state)?;fs::write(&a[3],serde_json::to_vec_pretty(&snap)?)?;println!("{}",serde_json::to_string_pretty(&snap)?)},Some("affinity-import")=>{if a.len()!=4{bail!(usage())}let id=parse_id(a.get(2))?;let snap:AffinitySnapshot=serde_json::from_slice(&fs::read(&a[3])?)?;let n=quiclb::import_affinity(id,&snap,&state)?;println!("{{\"imported\":{n}}}")},Some("remove")=>{if a.len()!=3{bail!(usage())}quiclb::remove(parse_id(a.get(2))?,&state)?;println!("{{\"ok\":true}}")},Some("metrics")=>{if a.len()!=3{bail!(usage())}print!("{}",quiclb::prometheus(&quiclb::status(parse_id(a.get(2))?,&state)?))},Some("serve")=>{if a.len()>3{bail!(usage())}serve(a.get(2).map(String::as_str).unwrap_or("127.0.0.1:7796").parse()?,state).await?},_=>bail!(usage())}Ok(())}
-fn parse_id(v:Option<&String>)->Result<Uuid>{Ok(v.ok_or_else(||anyhow!(usage()))?.parse()?)}
-async fn serve(addr:SocketAddr,state_root:PathBuf)->Result<()>{let s=ApiState{state_root:Arc::new(state_root)};let app=Router::new().route("/healthz",get(health)).route("/v1/quiclb/status",get(all)).route("/v1/quiclb/instances/{id}",get(one)).route("/metrics",get(metrics)).with_state(s);let l=TcpListener::bind(addr).await?;axum::serve(l,app).await?;Ok(())}
-async fn health()->Json<serde_json::Value>{Json(json!({"ok":true,"schema":quiclb::QUICLB_SCHEMA_VERSION}))}
-async fn all(State(s):State<ApiState>)->Response{match quiclb::list_statuses(&s.state_root){Ok(v)=>Json(v).into_response(),Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()).into_response()}}
-async fn one(State(s):State<ApiState>,AxPath(id):AxPath<Uuid>)->Response{match quiclb::status(id,&s.state_root){Ok(v)=>Json(v).into_response(),Err(e)=>(StatusCode::NOT_FOUND,e.to_string()).into_response()}}
-async fn metrics(State(s):State<ApiState>)->Response{match quiclb::list_statuses(&s.state_root){Ok(v)=>{let mut o=String::new();for x in v{o.push_str(&quiclb::prometheus(&x));}(StatusCode::OK,[("content-type","text/plain; version=0.0.4; charset=utf-8")],o).into_response()},Err(e)=>(StatusCode::INTERNAL_SERVER_ERROR,e.to_string()).into_response()}}
+#[derive(Clone)]
+struct ApiState {
+    state_root: Arc<PathBuf>,
+}
+fn usage() -> &'static str {
+    "usage:\n  fluxvm-quiclb probe <iface>\n  fluxvm-quiclb plan <spec.json> [plan.json]\n  fluxvm-quiclb apply <plan.json> [--ack-hardware-offload]\n  fluxvm-quiclb status <instance-uuid>\n  fluxvm-quiclb list\n  fluxvm-quiclb events <instance-uuid> [seconds] [limit]\n  fluxvm-quiclb affinity-export <instance-uuid> <file>\n  fluxvm-quiclb affinity-import <instance-uuid> <file>\n  fluxvm-quiclb remove <instance-uuid>\n  fluxvm-quiclb metrics <instance-uuid>\n  fluxvm-quiclb serve [listen]"
+}
+#[tokio::main]
+async fn main() -> Result<()> {
+    let a: Vec<String> = env::args().collect();
+    let pin = PathBuf::from(
+        env::var("FLUXVM_QUICLB_PIN_ROOT")
+            .unwrap_or_else(|_| quiclb::DEFAULT_QUICLB_PIN_ROOT.into()),
+    );
+    let state = PathBuf::from(
+        env::var("FLUXVM_QUICLB_STATE_ROOT")
+            .unwrap_or_else(|_| quiclb::DEFAULT_QUICLB_STATE_ROOT.into()),
+    );
+    match a.get(1).map(String::as_str) {
+        Some("probe") => {
+            if a.len() != 3 {
+                bail!(usage())
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&quiclb::smartnic_probe(&a[2])?)?
+            )
+        }
+        Some("plan") => {
+            if a.len() < 3 || a.len() > 4 {
+                bail!(usage())
+            }
+            let s: QuicLbSpec = serde_json::from_slice(&fs::read(&a[2])?)?;
+            let p = quiclb::build_plan(&s)?;
+            let b = serde_json::to_vec_pretty(&p)?;
+            if let Some(o) = a.get(3) {
+                fs::write(o, &b)?
+            }
+            println!("{}", String::from_utf8(b)?)
+        }
+        Some("apply") => {
+            if a.len() < 3 || a.len() > 4 {
+                bail!(usage())
+            }
+            let ack = a.get(3).map(String::as_str) == Some("--ack-hardware-offload");
+            if a.len() == 4 && !ack {
+                bail!(usage())
+            }
+            let p: QuicLbPlan = serde_json::from_slice(&fs::read(&a[2])?)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&quiclb::apply(&p, &pin, &state, ack)?)?
+            )
+        }
+        Some("status") => {
+            if a.len() != 3 {
+                bail!(usage())
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&quiclb::status(parse_id(a.get(2))?, &state)?)?
+            )
+        }
+        Some("list") => {
+            if a.len() != 2 {
+                bail!(usage())
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&quiclb::list_statuses(&state)?)?
+            )
+        }
+        Some("events") => {
+            if a.len() < 3 || a.len() > 5 {
+                bail!(usage())
+            }
+            quiclb::stream_events(
+                parse_id(a.get(2))?,
+                a.get(3).and_then(|x| x.parse().ok()).unwrap_or(5),
+                a.get(4).and_then(|x| x.parse().ok()).unwrap_or(128),
+                &state,
+            )?
+        }
+        Some("affinity-export") => {
+            if a.len() != 4 {
+                bail!(usage())
+            }
+            let id = parse_id(a.get(2))?;
+            let snap = quiclb::export_affinity(id, &state)?;
+            fs::write(&a[3], serde_json::to_vec_pretty(&snap)?)?;
+            println!("{}", serde_json::to_string_pretty(&snap)?)
+        }
+        Some("affinity-import") => {
+            if a.len() != 4 {
+                bail!(usage())
+            }
+            let id = parse_id(a.get(2))?;
+            let snap: AffinitySnapshot = serde_json::from_slice(&fs::read(&a[3])?)?;
+            let n = quiclb::import_affinity(id, &snap, &state)?;
+            println!("{{\"imported\":{n}}}")
+        }
+        Some("remove") => {
+            if a.len() != 3 {
+                bail!(usage())
+            }
+            quiclb::remove(parse_id(a.get(2))?, &state)?;
+            println!("{{\"ok\":true}}")
+        }
+        Some("metrics") => {
+            if a.len() != 3 {
+                bail!(usage())
+            }
+            print!(
+                "{}",
+                quiclb::prometheus(&quiclb::status(parse_id(a.get(2))?, &state)?)
+            )
+        }
+        Some("serve") => {
+            if a.len() > 3 {
+                bail!(usage())
+            }
+            serve(
+                a.get(2)
+                    .map(String::as_str)
+                    .unwrap_or("127.0.0.1:7796")
+                    .parse()?,
+                state,
+            )
+            .await?
+        }
+        _ => bail!(usage()),
+    }
+    Ok(())
+}
+fn parse_id(v: Option<&String>) -> Result<Uuid> {
+    Ok(v.ok_or_else(|| anyhow!(usage()))?.parse()?)
+}
+async fn serve(addr: SocketAddr, state_root: PathBuf) -> Result<()> {
+    let s = ApiState {
+        state_root: Arc::new(state_root),
+    };
+    let app = Router::new()
+        .route("/healthz", get(health))
+        .route("/v1/quiclb/status", get(all))
+        .route("/v1/quiclb/instances/{id}", get(one))
+        .route("/metrics", get(metrics))
+        .with_state(s);
+    let l = TcpListener::bind(addr).await?;
+    axum::serve(l, app).await?;
+    Ok(())
+}
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({"ok":true,"schema":quiclb::QUICLB_SCHEMA_VERSION}))
+}
+async fn all(State(s): State<ApiState>) -> Response {
+    match quiclb::list_statuses(&s.state_root) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+async fn one(State(s): State<ApiState>, AxPath(id): AxPath<Uuid>) -> Response {
+    match quiclb::status(id, &s.state_root) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+async fn metrics(State(s): State<ApiState>) -> Response {
+    match quiclb::list_statuses(&s.state_root) {
+        Ok(v) => {
+            let mut o = String::new();
+            for x in v {
+                o.push_str(&quiclb::prometheus(&x));
+            }
+            (
+                StatusCode::OK,
+                [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+                o,
+            )
+                .into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}

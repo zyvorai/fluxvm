@@ -213,7 +213,10 @@ impl KvmVm {
                 &mut pit as *mut _ as *mut c_void,
             ) < 0
             {
-                eprintln!("[kvm] KVM_CREATE_PIT2 optional failed (errno {})", ffi::flux_errno());
+                eprintln!(
+                    "[kvm] KVM_CREATE_PIT2 optional failed (errno {})",
+                    ffi::flux_errno()
+                );
             } else {
                 eprintln!("[kvm] PIT2 created");
             }
@@ -230,11 +233,7 @@ impl KvmVm {
                 // also its initial APIC id -- must match the id
                 // mptable::write_mptable already writes per-processor
                 // entry (mptable.rs's `local_apic_id: i`).
-                let vcpu_fd = ffi::flux_ioctl(
-                    vm_fd,
-                    ffi::KVM_CREATE_VCPU,
-                    id as *mut c_void,
-                );
+                let vcpu_fd = ffi::flux_ioctl(vm_fd, ffi::KVM_CREATE_VCPU, id as *mut c_void);
                 if vcpu_fd < 0 {
                     return Err(FluxError::Hypervisor(format!("KVM_CREATE_VCPU id={id}")));
                 }
@@ -269,9 +268,7 @@ impl KvmVm {
                         &mut mp_state as *mut _ as *mut c_void,
                     ) < 0
                     {
-                        return Err(FluxError::Hypervisor(format!(
-                            "KVM_SET_MP_STATE id={id}"
-                        )));
+                        return Err(FluxError::Hypervisor(format!("KVM_SET_MP_STATE id={id}")));
                     }
                 }
                 vcpus.push(VcpuHandle {
@@ -700,7 +697,7 @@ impl KvmVm {
         sregs.cr3 = cr3;
         sregs.cr4 = 0x20; // PAE
         sregs.efer = 0x500; // LME | LMA
-        // BSP local APIC enabled at the default MMIO address.
+                            // BSP local APIC enabled at the default MMIO address.
         sregs.apic_base = 0xfee0_0000 | (1 << 11) | (1 << 8); // enable + BSP
 
         if unsafe {

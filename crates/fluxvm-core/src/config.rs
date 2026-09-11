@@ -388,7 +388,7 @@ impl TlsConfig {
 /// Empty `tokens` with `require` false keeps local-dev open (admin). When
 /// `require` is true, or when listen is non-loopback and tokens are empty,
 /// the API refuses to serve mutating routes without tokens (fail-closed).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     pub tokens: Vec<ApiToken>,
@@ -408,25 +408,10 @@ pub struct AuthConfig {
     pub oidc_audience: Option<String>,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            tokens: Vec::new(),
-            require: false,
-            max_vms_per_token: None,
-            max_memory_mib_per_token: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-        }
-    }
-}
-
 impl AuthConfig {
     /// OIDC JWT path is enabled when both issuer and audience are set.
     pub fn oidc_enabled(&self) -> bool {
-        self.oidc_issuer
-            .as_ref()
-            .is_some_and(|s| !s.is_empty())
+        self.oidc_issuer.as_ref().is_some_and(|s| !s.is_empty())
             && self.oidc_audience.as_ref().is_some_and(|s| !s.is_empty())
     }
 

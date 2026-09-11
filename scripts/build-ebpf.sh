@@ -41,7 +41,13 @@ fi
 # Service programs exceed clang 18's default 512-byte BPF stack verifier view;
 # raise the compile-time stack size so Maglev/NAT/policy frames fit (runtime
 # verifier still enforces the kernel limit via per-CPU scratch where needed).
-SERVICE_CFLAGS=("${CFLAGS[@]}" -mllvm -bpf-stack-size=768)
+# Older clang (e.g. bookworm in the container image) rejects the flag.
+SERVICE_CFLAGS=("${CFLAGS[@]}")
+if "$CLANG" -target bpf -mllvm -bpf-stack-size=768 -x c -c /dev/null -o /dev/null 2>/dev/null; then
+  SERVICE_CFLAGS+=(-mllvm -bpf-stack-size=768)
+else
+  echo "note: clang lacks -bpf-stack-size; building service objects with default stack view" >&2
+fi
 
 for src in fluxvm_tc fluxvm_pod_ingress fluxvm_xdp fluxvm_intelligence fluxvm_qemu_device fluxvm_qemu_egress; do
   "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"

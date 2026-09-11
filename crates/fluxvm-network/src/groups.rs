@@ -241,9 +241,15 @@ pub fn merge_group_policy(
 ) -> Result<(VmNetworkPolicy, Vec<u32>)> {
     let membership = resolve_membership(cfg, &policy)?;
     for g in &membership.matched {
-        policy.allow_cidrs.extend(g.policy.allow_cidrs.iter().cloned());
-        policy.deny_cidrs.extend(g.policy.deny_cidrs.iter().cloned());
-        policy.allow_ports.extend(g.policy.allow_ports.iter().cloned());
+        policy
+            .allow_cidrs
+            .extend(g.policy.allow_cidrs.iter().cloned());
+        policy
+            .deny_cidrs
+            .extend(g.policy.deny_cidrs.iter().cloned());
+        policy
+            .allow_ports
+            .extend(g.policy.allow_ports.iter().cloned());
         if !g.policy.default_allow {
             policy.default_allow = false;
         }

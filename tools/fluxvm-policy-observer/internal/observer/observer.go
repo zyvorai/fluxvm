@@ -88,8 +88,8 @@ type VMState struct {
 	EgressStats      DirectionStats
 	IngressStats     DirectionStats
 	DirectionalStats bool
-	RuleHits          []RuleHit
-	RuleEntries       map[string]int
+	RuleHits         []RuleHit
+	RuleEntries      map[string]int
 	Errors           []string
 }
 
@@ -361,16 +361,15 @@ func addStat(s *DirectionStats, b []byte) {
 	s.Audited += nativeU64(b[16:24])
 }
 
-
 const ruleMissIndex = ^uint32(0)
 
 type ruleDescriptor struct {
-    direction string
-    family    string
-    protocol  string
-    cidr      string
-    portStart uint16
-    portEnd   uint16
+	direction string
+	family    string
+	protocol  string
+	cidr      string
+	portStart uint16
+	portEnd   uint16
 }
 
 // ruleTelemetry reads Set 17's optional fluxvm_prhit map. A missing map means
@@ -379,121 +378,161 @@ type ruleDescriptor struct {
 // reported as a scrape error and also falls back rather than fabricating
 // directional zeros.
 func (c Collector) ruleTelemetry(ctx context.Context, hitPath, rulePath string, pod uint32, st *VMState) (egress, ingress DirectionStats, hits []RuleHit, ok bool) {
-    if _, err := os.Stat(hitPath); err != nil {
-        return egress, ingress, nil, false
-    }
-    hitDoc := c.dumpMap(ctx, hitPath, st)
-    if hitDoc == nil {
-        return egress, ingress, nil, false
-    }
-    ruleDoc := c.dumpMap(ctx, rulePath, st)
-    egress, ingress, hits = parseRuleTelemetry(hitDoc, ruleDoc, pod)
-    return egress, ingress, hits, true
+	if _, err := os.Stat(hitPath); err != nil {
+		return egress, ingress, nil, false
+	}
+	hitDoc := c.dumpMap(ctx, hitPath, st)
+	if hitDoc == nil {
+		return egress, ingress, nil, false
+	}
+	ruleDoc := c.dumpMap(ctx, rulePath, st)
+	egress, ingress, hits = parseRuleTelemetry(hitDoc, ruleDoc, pod)
+	return egress, ingress, hits, true
 }
 
 func parseRuleTelemetry(hitDoc, ruleDoc []byte, pod uint32) (egress, ingress DirectionStats, hits []RuleHit) {
-    rules := map[uint32]ruleDescriptor{}
-    var ruleEntries []map[string]any
-    if json.Unmarshal(ruleDoc, &ruleEntries) == nil {
-        for _, e := range ruleEntries {
-            key := bytesFromJSON(e["key"])
-            value := bytesFromJSON(e["value"])
-            if len(key) < 4 || len(value) < 28 || nativeU32(value[:4]) != pod {
-                continue
-            }
-            rules[nativeU32(key[:4])] = decodeRuleDescriptor(value)
-        }
-    }
+	rules := map[uint32]ruleDescriptor{}
+	var ruleEntries []map[string]any
+	if json.Unmarshal(ruleDoc, &ruleEntries) == nil {
+		for _, e := range ruleEntries {
+			key := bytesFromJSON(e["key"])
+			value := bytesFromJSON(e["value"])
+			if len(key) < 4 || len(value) < 28 || nativeU32(value[:4]) != pod {
+				continue
+			}
+			rules[nativeU32(key[:4])] = decodeRuleDescriptor(value)
+		}
+	}
 
-    var hitEntries []map[string]any
-    if json.Unmarshal(hitDoc, &hitEntries) != nil {
-        return egress, ingress, nil
-    }
-    for _, e := range hitEntries {
-        key := bytesFromJSON(e["key"])
-        if len(key) < 12 || nativeU32(key[:4]) != pod {
-            continue
-        }
-        idx := nativeU32(key[4:8])
-        direction := directionName(key[8])
-        verdict := verdictName(key[9])
-        packets := perCPUU64(e)
-        if direction == "unknown" || verdict == "unknown" {
-            continue
-        }
-        target := &egress
-        if direction == "ingress" {
-            target = &ingress
-        }
-        switch verdict {
-        case "allow":
-            target.Allowed += packets
-        case "drop":
-            target.Dropped += packets
-        case "audit":
-            target.Audited += packets
-        }
-        hit := RuleHit{RuleIndex: idx, Matched: idx != ruleMissIndex, Direction: direction, Verdict: verdict, Packets: packets}
-        if d, found := rules[idx]; found {
-            hit.Family, hit.Protocol, hit.CIDR = d.family, d.protocol, d.cidr
-            hit.PortStart, hit.PortEnd = d.portStart, d.portEnd
-        }
-        hits = append(hits, hit)
-    }
-    sort.Slice(hits, func(i, j int) bool {
-        if hits[i].Direction != hits[j].Direction { return hits[i].Direction < hits[j].Direction }
-        if hits[i].RuleIndex != hits[j].RuleIndex { return hits[i].RuleIndex < hits[j].RuleIndex }
-        return hits[i].Verdict < hits[j].Verdict
-    })
-    return egress, ingress, hits
+	var hitEntries []map[string]any
+	if json.Unmarshal(hitDoc, &hitEntries) != nil {
+		return egress, ingress, nil
+	}
+	for _, e := range hitEntries {
+		key := bytesFromJSON(e["key"])
+		if len(key) < 12 || nativeU32(key[:4]) != pod {
+			continue
+		}
+		idx := nativeU32(key[4:8])
+		direction := directionName(key[8])
+		verdict := verdictName(key[9])
+		packets := perCPUU64(e)
+		if direction == "unknown" || verdict == "unknown" {
+			continue
+		}
+		target := &egress
+		if direction == "ingress" {
+			target = &ingress
+		}
+		switch verdict {
+		case "allow":
+			target.Allowed += packets
+		case "drop":
+			target.Dropped += packets
+		case "audit":
+			target.Audited += packets
+		}
+		hit := RuleHit{RuleIndex: idx, Matched: idx != ruleMissIndex, Direction: direction, Verdict: verdict, Packets: packets}
+		if d, found := rules[idx]; found {
+			hit.Family, hit.Protocol, hit.CIDR = d.family, d.protocol, d.cidr
+			hit.PortStart, hit.PortEnd = d.portStart, d.portEnd
+		}
+		hits = append(hits, hit)
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		if hits[i].Direction != hits[j].Direction {
+			return hits[i].Direction < hits[j].Direction
+		}
+		if hits[i].RuleIndex != hits[j].RuleIndex {
+			return hits[i].RuleIndex < hits[j].RuleIndex
+		}
+		return hits[i].Verdict < hits[j].Verdict
+	})
+	return egress, ingress, hits
 }
 
 func perCPUU64(entry map[string]any) uint64 {
-    var out uint64
-    if values, ok := entry["values"].([]any); ok {
-        for _, item := range values {
-            m, _ := item.(map[string]any)
-            out += nativeU64(bytesFromJSON(m["value"]))
-        }
-        return out
-    }
-    return nativeU64(bytesFromJSON(entry["value"]))
+	var out uint64
+	if values, ok := entry["values"].([]any); ok {
+		for _, item := range values {
+			m, _ := item.(map[string]any)
+			out += nativeU64(bytesFromJSON(m["value"]))
+		}
+		return out
+	}
+	return nativeU64(bytesFromJSON(entry["value"]))
 }
 
 func decodeRuleDescriptor(v []byte) ruleDescriptor {
-    if len(v) < 28 { return ruleDescriptor{} }
-    d := ruleDescriptor{
-        direction: directionName(v[4]),
-        family: familyName(v[5]),
-        protocol: protocolName(v[6]),
-        portStart: nativeU16(v[8:10]),
-        portEnd: nativeU16(v[10:12]),
-    }
-    prefix := v[7]
-    switch v[5] {
-    case 4:
-        var raw [4]byte
-        copy(raw[:], v[12:16])
-        d.cidr = netip.PrefixFrom(netip.AddrFrom4(raw), int(prefix)).Masked().String()
-    case 6:
-        var raw [16]byte
-        copy(raw[:], v[12:28])
-        d.cidr = netip.PrefixFrom(netip.AddrFrom16(raw), int(prefix)).Masked().String()
-    }
-    return d
+	if len(v) < 28 {
+		return ruleDescriptor{}
+	}
+	d := ruleDescriptor{
+		direction: directionName(v[4]),
+		family:    familyName(v[5]),
+		protocol:  protocolName(v[6]),
+		portStart: nativeU16(v[8:10]),
+		portEnd:   nativeU16(v[10:12]),
+	}
+	prefix := v[7]
+	switch v[5] {
+	case 4:
+		var raw [4]byte
+		copy(raw[:], v[12:16])
+		d.cidr = netip.PrefixFrom(netip.AddrFrom4(raw), int(prefix)).Masked().String()
+	case 6:
+		var raw [16]byte
+		copy(raw[:], v[12:28])
+		d.cidr = netip.PrefixFrom(netip.AddrFrom16(raw), int(prefix)).Masked().String()
+	}
+	return d
 }
 
 func directionName(v byte) string {
-    switch v { case 1: return "egress"; case 2: return "ingress"; default: return "unknown" }
+	switch v {
+	case 1:
+		return "egress"
+	case 2:
+		return "ingress"
+	default:
+		return "unknown"
+	}
 }
 func verdictName(v byte) string {
-    switch v { case 0: return "drop"; case 1: return "allow"; case 2: return "audit"; default: return "unknown" }
+	switch v {
+	case 0:
+		return "drop"
+	case 1:
+		return "allow"
+	case 2:
+		return "audit"
+	default:
+		return "unknown"
+	}
 }
 func familyName(v byte) string {
-    switch v { case 4: return "ipv4"; case 6: return "ipv6"; default: return "unknown" }
+	switch v {
+	case 4:
+		return "ipv4"
+	case 6:
+		return "ipv6"
+	default:
+		return "unknown"
+	}
 }
 func protocolName(v byte) string {
-    switch v { case 0: return "any"; case 6: return "tcp"; case 17: return "udp"; case 132: return "sctp"; default: return strconv.Itoa(int(v)) }
+	switch v {
+	case 0:
+		return "any"
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	case 132:
+		return "sctp"
+	default:
+		return strconv.Itoa(int(v))
+	}
 }
 
 // policyState decodes struct fluxvm_pod_policy's flags word for the given

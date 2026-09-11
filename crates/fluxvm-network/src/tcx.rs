@@ -103,7 +103,9 @@ pub fn status(link_pin: &Path) -> Result<Status> {
                 .args(["-j", "link", "show", "pinned"])
                 .arg(link_pin)
                 .output()
-                .with_context(|| format!("TCX helper failed ({helper_error:#}); running bpftool link show"))?;
+                .with_context(|| {
+                    format!("TCX helper failed ({helper_error:#}); running bpftool link show")
+                })?;
             if !out.status.success() {
                 bail!(
                     "TCX helper failed ({helper_error:#}); bpftool status failed: {}",
@@ -115,11 +117,20 @@ pub fn status(link_pin: &Path) -> Result<Status> {
             Ok(Status {
                 mode: "tcx".into(),
                 ifindex: None,
-                link_id: value.get("id").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()),
-                prog_id: value.get("prog_id").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()),
+                link_id: value
+                    .get("id")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
+                prog_id: value
+                    .get("prog_id")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
                 revision: None,
                 program_count: None,
-                link_type: value.get("type").and_then(|v| v.as_u64()).and_then(|v| u32::try_from(v).ok()),
+                link_type: value
+                    .get("type")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok()),
             })
         }
     }
@@ -135,10 +146,16 @@ pub fn detach(link_pin: &Path) -> Result<()> {
 
 fn helper() -> String {
     if let Ok(path) = std::env::var("FLUXVM_TCX_HELPER") {
-        if !path.trim().is_empty() { return path; }
+        if !path.trim().is_empty() {
+            return path;
+        }
     }
     let installed = "/usr/libexec/fluxvm/fluxvm-tcx";
-    if Path::new(installed).exists() { installed.into() } else { "fluxvm-tcx".into() }
+    if Path::new(installed).exists() {
+        installed.into()
+    } else {
+        "fluxvm-tcx".into()
+    }
 }
 
 fn run_json<T: for<'de> Deserialize<'de>>(args: &[&str]) -> Result<T> {
@@ -155,9 +172,8 @@ fn run_json<T: for<'de> Deserialize<'de>>(args: &[&str]) -> Result<T> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    serde_json::from_slice(&out.stdout).with_context(|| {
-        format!("parsing JSON from {} {}", helper, args.join(" "))
-    })
+    serde_json::from_slice(&out.stdout)
+        .with_context(|| format!("parsing JSON from {} {}", helper, args.join(" ")))
 }
 
 #[cfg(test)]

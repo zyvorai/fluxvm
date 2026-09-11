@@ -35,7 +35,8 @@ jobs:
       # exact gap; we need it too since we build guestkit as a dependency.
       - name: Install system dependencies
         # libhivex-dev: guestkit registry-write (Windows offline hive edits / agent-inject)
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev
+        # clang/llvm/libbpf-dev: fluxvm-container-agent build.rs compiles guest eBPF
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

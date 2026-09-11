@@ -11,7 +11,7 @@
 //! endpoint metadata from the Cilium agent Unix API (`/var/run/cilium/cilium.sock`)
 //! to enrich CEP-*shaped* views. Soft-fail when the agent is absent.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -89,7 +89,10 @@ struct CiliumAddr {
 /// Prefer matching an existing CEP by guest IPv4; otherwise look up identities
 /// whose labels contain every FluxVM label. Returns `Ok(None)` when the agent
 /// has no match (caller keeps the FluxVM hash identity).
-pub fn resolve_identity(labels: &[String], guest_ip: Option<&str>) -> Result<Option<AgentIdentity>> {
+pub fn resolve_identity(
+    labels: &[String],
+    guest_ip: Option<&str>,
+) -> Result<Option<AgentIdentity>> {
     if !Path::new(CILIUM_SOCK).exists() {
         return Ok(None);
     }
@@ -148,7 +151,10 @@ fn lookup_identity_by_labels(want: &[String]) -> Result<Option<AgentIdentity>> {
     let body = agent_get("/v1/identity")?;
     let ids: Vec<CiliumIdentity> = serde_json::from_str(&body).unwrap_or_default();
     for id in ids {
-        if want.iter().all(|w| id.labels.iter().any(|l| l == w || l.ends_with(w))) {
+        if want
+            .iter()
+            .all(|w| id.labels.iter().any(|l| l == w || l.ends_with(w)))
+        {
             return Ok(Some(AgentIdentity {
                 id: id.id as u32,
                 labels: id.labels,
@@ -159,8 +165,8 @@ fn lookup_identity_by_labels(want: &[String]) -> Result<Option<AgentIdentity>> {
 }
 
 fn agent_get(path: &str) -> Result<String> {
-    let mut stream = UnixStream::connect(CILIUM_SOCK)
-        .with_context(|| format!("connecting to {CILIUM_SOCK}"))?;
+    let mut stream =
+        UnixStream::connect(CILIUM_SOCK).with_context(|| format!("connecting to {CILIUM_SOCK}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
     let req = format!(
@@ -178,9 +184,16 @@ fn agent_get(path: &str) -> Result<String> {
         bail!("malformed Cilium agent HTTP response");
     };
     let (header, body) = text.split_at(idx + 4);
-    let status_ok = header.lines().next().map(|l| l.contains(" 200 ")).unwrap_or(false);
+    let status_ok = header
+        .lines()
+        .next()
+        .map(|l| l.contains(" 200 "))
+        .unwrap_or(false);
     if !status_ok {
-        bail!("Cilium agent HTTP error: {}", header.lines().next().unwrap_or(""));
+        bail!(
+            "Cilium agent HTTP error: {}",
+            header.lines().next().unwrap_or("")
+        );
     }
     Ok(body.to_string())
 }

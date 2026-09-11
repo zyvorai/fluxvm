@@ -46,7 +46,9 @@ mod tests {
 
     #[test]
     fn paths_and_urls_are_direct() {
-        assert!(looks_like_direct_image("/var/lib/fluxvm/images/ubuntu.qcow2"));
+        assert!(looks_like_direct_image(
+            "/var/lib/fluxvm/images/ubuntu.qcow2"
+        ));
         assert!(looks_like_direct_image("https://images.zyvor.dev/x.qcow2"));
         assert!(looks_like_direct_image("rootfs.ext4"));
         assert!(!looks_like_direct_image("ubuntu-24-04"));

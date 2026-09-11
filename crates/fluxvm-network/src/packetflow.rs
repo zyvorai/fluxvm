@@ -127,9 +127,8 @@ pub fn build_hops(
     proto: &str,
     dport: u16,
 ) -> Vec<PacketHop> {
-    let policy = format!(
-        "FluxVM Network Fabric eBPF  proto={proto} dport={dport} verdict={verdict}"
-    );
+    let policy =
+        format!("FluxVM Network Fabric eBPF  proto={proto} dport={dport} verdict={verdict}");
     let cilium = matches!(dataplane_mode.to_ascii_lowercase().as_str(), "cilium");
     let mut hops = Vec::new();
     let push = |hops: &mut Vec<PacketHop>, name: &str, role: &str, detail: &str| {
@@ -145,12 +144,7 @@ pub fn build_hops(
         TrafficDirection::Egress => {
             push(&mut hops, vm_name, "guest", "virtio-net in guest namespace");
             push(&mut hops, "tap", "l2", "host TAP/veth pair");
-            push(
-                &mut hops,
-                "tc-clsact",
-                "dataplane",
-                &policy,
-            );
+            push(&mut hops, "tc-clsact", "dataplane", &policy);
             if cilium {
                 push(
                     &mut hops,
@@ -160,10 +154,20 @@ pub fn build_hops(
                 );
             }
             push(&mut hops, "uplink", "host", "bridge / underlay toward peer");
-            push(&mut hops, "peer", "identity", "reserved:world or remote identity");
+            push(
+                &mut hops,
+                "peer",
+                "identity",
+                "reserved:world or remote identity",
+            );
         }
         TrafficDirection::Ingress => {
-            push(&mut hops, "peer", "identity", "reserved:world or remote identity");
+            push(
+                &mut hops,
+                "peer",
+                "identity",
+                "reserved:world or remote identity",
+            );
             push(&mut hops, "uplink", "host", "bridge / underlay from peer");
             if cilium {
                 push(
@@ -320,7 +324,11 @@ pub fn render_line(view: &PacketFlowView, output: FlowOutput) -> String {
         "{time} {verdict:<10} {dir:<7} {proto} {src} {arrow} {dst}  {ids}  {counters}  {vm}",
         time = paint(color, DIM, &view.time),
         verdict = verdict_style(&view.verdict, color),
-        dir = paint(color, MAGENTA, &format!("{:?}", view.direction).to_uppercase()),
+        dir = paint(
+            color,
+            MAGENTA,
+            &format!("{:?}", view.direction).to_uppercase()
+        ),
         proto = paint(
             color,
             CYAN,
@@ -342,11 +350,7 @@ pub fn render_line(view: &PacketFlowView, output: FlowOutput) -> String {
             CYAN,
             &format!("{}→{}", view.source.identity, view.destination.identity)
         ),
-        counters = paint(
-            color,
-            DIM,
-            &format!("{}p/{}B", view.packets, view.bytes)
-        ),
+        counters = paint(color, DIM, &format!("{}p/{}B", view.packets, view.bytes)),
         vm = view.source.pod_name.as_deref().unwrap_or("-"),
     )
 }
@@ -475,7 +479,13 @@ mod tests {
     #[test]
     fn builds_egress_path_with_ebpf_and_optional_cilium() {
         let rec = sample_rec("allow");
-        let view = from_flow_record(&rec, &["app=web".into()], Some("web-1"), Some("10.0.0.2"), "ebpf");
+        let view = from_flow_record(
+            &rec,
+            &["app=web".into()],
+            Some("web-1"),
+            Some("10.0.0.2"),
+            "ebpf",
+        );
         assert_eq!(view.verdict, "FORWARDED");
         assert_eq!(view.direction, TrafficDirection::Egress);
         assert_eq!(view.protocol, "tcp");
@@ -509,7 +519,10 @@ mod tests {
         let color = render_detailed(&view, FlowOutput::Color);
         let plain = render_detailed(&view, FlowOutput::Plain);
         assert!(color.contains("\x1b["), "color mode must emit ANSI");
-        assert!(!plain.contains("\x1b["), "plain/normal mode must be raw text");
+        assert!(
+            !plain.contains("\x1b["),
+            "plain/normal mode must be raw text"
+        );
         assert!(plain.contains("packet path:"));
         assert!(plain.contains("tc-clsact"));
         assert!(plain.contains("POLICY_DENIED"));
