@@ -418,6 +418,55 @@ pub fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
     Some((pte & PADDR_MASK) | (vaddr & 0xfff))
 }
 
+/// TEMP (Bug 2 investigation): like `virt_to_phys` but prints the raw
+/// entry at every level instead of stopping at the first not-present one,
+/// to distinguish "genuinely not-present" from "present but wrong".
+pub fn debug_walk(mem: &GuestMemory, cr3: u64, vaddr: u64) {
+    let idx = |shift: u32| (vaddr >> shift) & 0x1ff;
+    eprintln!("[walk] vaddr={vaddr:#x} cr3={cr3:#x}");
+    let Some(pml4e) = read_phys_u64(mem, (cr3 & PADDR_MASK) + idx(39) * 8) else {
+        eprintln!("[walk] pml4e: unreadable (phys out of range)");
+        return;
+    };
+    eprintln!("[walk] pml4e={pml4e:#x} present={}", pml4e & PAGE_PRESENT != 0);
+    if pml4e & PAGE_PRESENT == 0 {
+        return;
+    }
+    let Some(pdpte) = read_phys_u64(mem, (pml4e & PADDR_MASK) + idx(30) * 8) else {
+        eprintln!("[walk] pdpte: unreadable (phys out of range)");
+        return;
+    };
+    eprintln!(
+        "[walk] pdpte={pdpte:#x} present={} ps={}",
+        pdpte & PAGE_PRESENT != 0,
+        pdpte & PAGE_PS != 0
+    );
+    if pdpte & PAGE_PRESENT == 0 || pdpte & PAGE_PS != 0 {
+        return;
+    }
+    let Some(pde) = read_phys_u64(mem, (pdpte & PADDR_MASK) + idx(21) * 8) else {
+        eprintln!("[walk] pde: unreadable (phys out of range)");
+        return;
+    };
+    eprintln!(
+        "[walk] pde={pde:#x} present={} ps={}",
+        pde & PAGE_PRESENT != 0,
+        pde & PAGE_PS != 0
+    );
+    if pde & PAGE_PRESENT == 0 || pde & PAGE_PS != 0 {
+        return;
+    }
+    let Some(pte) = read_phys_u64(mem, (pde & PADDR_MASK) + idx(12) * 8) else {
+        eprintln!("[walk] pte: unreadable (phys out of range)");
+        return;
+    };
+    eprintln!(
+        "[walk] pte={pte:#x} present={} phys={:#x}",
+        pte & PAGE_PRESENT != 0,
+        (pte & PADDR_MASK) | (vaddr & 0xfff)
+    );
+}
+
 /// Patches a software breakpoint (`0xCC`/int3) at a virtual address,
 /// remembering the original byte in `control.breakpoints` so it can be
 /// restored later. Arms `KVM_SET_GUEST_DEBUG` (once) so KVM reports the

@@ -346,6 +346,13 @@ impl VirtualMachine {
                                     "[gdbstub] cr0={:#x} cr2={:#x} cr3={:#x} cr4={:#x}",
                                     r.cr0, r.cr2, r.cr3, r.cr4
                                 );
+                                // TEMP: walk the guest's own page tables for
+                                // the exact faulting CR2, to see whether the
+                                // walk terminates at a not-present entry or
+                                // resolves to something unexpected.
+                                if r.cr2 != 0 {
+                                    gdbstub::debug_walk(&this.mem, r.cr3, r.cr2);
+                                }
                                 // TEMP: dump the actual e820 table as the
                                 // guest kernel parsed it from the zero
                                 // page, to check for a discrepancy against
