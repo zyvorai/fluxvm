@@ -3,7 +3,7 @@
 
 use crate::error::{FluxError, Result};
 use crate::ffi;
-use crate::memory::GuestMemory;
+use crate::memory::{self, GuestMemory};
 use std::os::raw::{c_char, c_void};
 
 #[repr(C)]
@@ -156,6 +156,20 @@ impl KvmVm {
             {
                 return Err(FluxError::Hypervisor("KVM_SET_USER_MEMORY_REGION".into()));
             }
+            // Intel VT-x quirk: with an in-kernel irqchip, KVM needs a
+            // three-page TSS region in guest phys that does not overlap
+            // RAM/MMIO. Firecracker / cloud-hypervisor both call this
+            // before CREATE_IRQCHIP; omitting it on this host (Xeon
+            // E-2336) left the guest hanging inside late initcalls
+            // (init_zbud) while the same kernel booted under FC/CH.
+            if ffi::flux_ioctl(
+                vm_fd,
+                ffi::KVM_SET_TSS_ADDR,
+                memory::KVM_TSS_ADDRESS as *mut c_void,
+            ) < 0
+            {
+                return Err(FluxError::Hypervisor("KVM_SET_TSS_ADDR".into()));
+            }
             // Real in-kernel LAPIC/IOAPIC/PIC. This is what makes real SMP
             // possible without any userspace INIT-SIPI emulation below: a
             // freshly created non-BSP vCPU on a VM with an irqchip starts
@@ -275,6 +289,10 @@ impl KvmVm {
             };
             for id in 0..num_cpus as usize {
                 this.setup_cpuid(id)?;
+                // Firecracker / cloud-hypervisor per-vCPU boot triad.
+                this.setup_boot_msrs(id)?;
+                this.setup_fpu(id)?;
+                this.set_lint(id)?;
             }
             Ok(this)
         }
@@ -282,6 +300,201 @@ impl KvmVm {
 
     pub fn num_cpus(&self) -> usize {
         self.vcpus.len()
+    }
+
+    /// Firecracker `create_boot_msr_entries` / CH `boot_msr_entries` — exact
+    /// 11-entry list, applied on every vCPU before first `KVM_RUN`.
+    fn setup_boot_msrs(&self, idx: usize) -> Result<()> {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct KvmMsrEntry {
+            index: u32,
+            reserved: u32,
+            data: u64,
+        }
+        #[repr(C)]
+        struct KvmMsrs {
+            nmsrs: u32,
+            pad: u32,
+            entries: [KvmMsrEntry; 11],
+        }
+        // Indices from arch/x86/include/asm/msr-index.h (same as FC/CH).
+        let entries = [
+            KvmMsrEntry {
+                index: 0x0000_0174, // MSR_IA32_SYSENTER_CS
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0x0000_0175, // MSR_IA32_SYSENTER_ESP
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0x0000_0176, // MSR_IA32_SYSENTER_EIP
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0xc000_0081, // MSR_STAR
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0xc000_0083, // MSR_CSTAR
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0xc000_0102, // MSR_KERNEL_GS_BASE
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0xc000_0084, // MSR_SYSCALL_MASK
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0xc000_0082, // MSR_LSTAR
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0x0000_0010, // MSR_IA32_TSC
+                reserved: 0,
+                data: 0,
+            },
+            KvmMsrEntry {
+                index: 0x0000_01a0, // MSR_IA32_MISC_ENABLE
+                reserved: 0,
+                data: 0x1, // FAST_STRING
+            },
+            KvmMsrEntry {
+                index: 0x0000_02ff, // MSR_MTRRdefType
+                reserved: 0,
+                data: (1 << 11) | 0x6, // enable + write-back
+            },
+        ];
+        let mut msrs = KvmMsrs {
+            nmsrs: entries.len() as u32,
+            pad: 0,
+            entries,
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_MSRS,
+                &mut msrs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!("KVM_SET_MSRS vcpu{idx}")));
+        }
+        Ok(())
+    }
+
+    /// Firecracker / CH `setup_fpu`: fcw=0x37f, mxcsr=0x1f80.
+    fn setup_fpu(&self, idx: usize) -> Result<()> {
+        // linux/kvm.h `struct kvm_fpu` (same fields Firecracker writes).
+        #[repr(C)]
+        struct KvmFpu {
+            fpr: [[u8; 16]; 8],
+            fcw: u16,
+            fsw: u16,
+            ftwx: u8,
+            pad1: u8,
+            last_opcode: u16,
+            last_ip: u64,
+            last_dp: u64,
+            xmm: [[u8; 16]; 16],
+            mxcsr: u32,
+            pad2: u32,
+        }
+        let mut fpu = unsafe { std::mem::zeroed::<KvmFpu>() };
+        fpu.fcw = 0x37f;
+        fpu.mxcsr = 0x1f80;
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_FPU,
+                &mut fpu as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!("KVM_SET_FPU vcpu{idx}")));
+        }
+        Ok(())
+    }
+
+    /// Firecracker / CH `set_lint`: LVT0=EXTINT, LVT1=NMI.
+    fn set_lint(&self, idx: usize) -> Result<()> {
+        const APIC_LVT0: usize = 0x350;
+        const APIC_LVT1: usize = 0x360;
+        const APIC_MODE_EXTINT: u32 = 0x7;
+        const APIC_MODE_NMI: u32 = 0x4;
+        let mut regs = [0u8; 0x400];
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_GET_LAPIC,
+                regs.as_mut_ptr() as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!("KVM_GET_LAPIC vcpu{idx}")));
+        }
+        let patch = |regs: &mut [u8], off: usize, mode: u32| {
+            let mut v = u32::from_le_bytes(regs[off..off + 4].try_into().unwrap());
+            v = (v & !0x700) | (mode << 8);
+            regs[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        patch(&mut regs, APIC_LVT0, APIC_MODE_EXTINT);
+        patch(&mut regs, APIC_LVT1, APIC_MODE_NMI);
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_LAPIC,
+                regs.as_mut_ptr() as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!("KVM_SET_LAPIC vcpu{idx}")));
+        }
+        Ok(())
+    }
+
+    /// Firecracker `register_irq` — bind an eventfd to a GSI via `KVM_IRQFD`.
+    pub fn register_irqfd(&self, eventfd: i32, gsi: u32) -> Result<()> {
+        #[repr(C)]
+        struct KvmIrqfd {
+            fd: u32,
+            gsi: u32,
+            flags: u32,
+            resamplefd: u32,
+            pad: [u8; 16],
+        }
+        let mut irqfd = KvmIrqfd {
+            fd: eventfd as u32,
+            gsi,
+            flags: 0,
+            resamplefd: 0,
+            pad: [0; 16],
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vm_fd,
+                ffi::KVM_IRQFD,
+                &mut irqfd as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!(
+                "KVM_IRQFD gsi={gsi} fd={eventfd}"
+            )));
+        }
+        eprintln!("[kvm] irqfd gsi={gsi} fd={eventfd}");
+        Ok(())
     }
 
     /// Expose host-supported CPUID leaves to the guest, patched with this

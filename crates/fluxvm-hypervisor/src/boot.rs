@@ -223,20 +223,6 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     LinuxBootConfigurator::write_bootparams::<GuestMemoryMmap<()>>(&boot_cfg, &gm).map_err(|e| {
         FluxError::Boot(format!("write_bootparams: {e}"))
     })?;
-    // TEMP: verify the write landed, hypervisor-side, before the guest
-    // ever runs (rules out any guest-side explanation).
-    {
-        let mut nent = [0u8; 1];
-        let _ = mem.read_at(memory::BOOT_PARAMS_ADDR + 0x1e8, &mut nent);
-        eprintln!(
-            "[diag] post-write_bootparams e820_entries in mem={} (params.e820_entries={})",
-            nent[0], params.e820_entries
-        );
-    }
-    // `gm` is a view over `mem`'s own backing memory (see above), so the
-    // zero page write above already landed directly in real guest RAM --
-    // no separate copy back into `mem` needed.
-
     // 64-bit bzImage entry is kernel_load + 0x200; ELF uses kernel_load as entry.
     let entry_rip = if loader_result.setup_header.is_some() {
         loader_result.kernel_load.0 + 0x200
@@ -258,9 +244,12 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
 
 /// Builds the `hvm_start_info` + memory map (+ initrd module, if any) PVH
 /// boot needs and writes them into real guest RAM via
-/// `PvhBootConfigurator`. Addresses reuse the same low-memory scratch
-/// area as the direct-boot zero page (they're mutually exclusive per
-/// boot, so there's no conflict).
+/// `PvhBootConfigurator`.
+///
+/// Memory map layout matches Firecracker (and the same idea as
+/// cloud-hypervisor): low RAM, an explicit system reserved window for the
+/// MP table / EBDA range, a PCI MMCONFIG reserved window, then himem.
+/// PVH struct GPAs also match FC: start_info @ 0x6000, memmap @ 0x7000.
 #[cfg(target_os = "linux")]
 fn configure_pvh_boot(
     mem: &mut GuestMemory,
@@ -273,26 +262,35 @@ fn configure_pvh_boot(
     use linux_loader::configurator::{BootConfigurator, BootParams};
     use linux_loader::loader::elf::start_info::{
         hvm_memmap_table_entry, hvm_modlist_entry, hvm_start_info, XEN_HVM_MEMMAP_TYPE_RAM,
-        XEN_HVM_START_MAGIC_VALUE,
+        XEN_HVM_MEMMAP_TYPE_RESERVED, XEN_HVM_START_MAGIC_VALUE,
     };
     use vm_memory::{Address, GuestAddress};
 
-    const START_INFO_GPA: u64 = memory::BOOT_PARAMS_ADDR; // 0x7000
-    const MEMMAP_GPA: u64 = 0x0000_7100;
-    const MODLIST_GPA: u64 = 0x0000_7200;
-    const HIMEM: u64 = 0x0010_0000;
-
     let mem_size = mem.len() as u64;
-    let mut memmap = vec![hvm_memmap_table_entry {
-        addr: 0,
-        size: 0x0009_fc00,
-        type_: XEN_HVM_MEMMAP_TYPE_RAM,
-        reserved: 0,
-    }];
-    if mem_size > HIMEM {
+    let mut memmap = vec![
+        hvm_memmap_table_entry {
+            addr: 0,
+            size: memory::SYSTEM_MEM_START,
+            type_: XEN_HVM_MEMMAP_TYPE_RAM,
+            reserved: 0,
+        },
+        hvm_memmap_table_entry {
+            addr: memory::SYSTEM_MEM_START,
+            size: memory::SYSTEM_MEM_SIZE,
+            type_: XEN_HVM_MEMMAP_TYPE_RESERVED,
+            reserved: 0,
+        },
+        hvm_memmap_table_entry {
+            addr: memory::PCI_MMCONFIG_START,
+            size: memory::PCI_MMCONFIG_SIZE,
+            type_: XEN_HVM_MEMMAP_TYPE_RESERVED,
+            reserved: 0,
+        },
+    ];
+    if mem_size > memory::HIMEM_START {
         memmap.push(hvm_memmap_table_entry {
-            addr: HIMEM,
-            size: mem_size - HIMEM,
+            addr: memory::HIMEM_START,
+            size: mem_size - memory::HIMEM_START,
             type_: XEN_HVM_MEMMAP_TYPE_RAM,
             reserved: 0,
         });
@@ -313,60 +311,77 @@ fn configure_pvh_boot(
         magic: XEN_HVM_START_MAGIC_VALUE,
         version: 1,
         cmdline_paddr: CMDLINE_GPA,
-        memmap_paddr: MEMMAP_GPA,
+        memmap_paddr: memory::MEMMAP_START,
         memmap_entries: memmap.len() as u32,
         ..Default::default()
     };
     if !modules.is_empty() {
         start_info.nr_modules = modules.len() as u32;
-        start_info.modlist_paddr = MODLIST_GPA;
+        start_info.modlist_paddr = memory::MODLIST_START;
     }
 
-    let mut boot_params = BootParams::new::<hvm_start_info>(&start_info, GuestAddress(START_INFO_GPA));
-    boot_params.set_sections::<hvm_memmap_table_entry>(&memmap, GuestAddress(MEMMAP_GPA));
+    let mut boot_params =
+        BootParams::new::<hvm_start_info>(&start_info, GuestAddress(memory::PVH_INFO_START));
+    boot_params.set_sections::<hvm_memmap_table_entry>(&memmap, GuestAddress(memory::MEMMAP_START));
     if !modules.is_empty() {
-        boot_params.set_modules::<hvm_modlist_entry>(&modules, GuestAddress(MODLIST_GPA));
+        boot_params.set_modules::<hvm_modlist_entry>(&modules, GuestAddress(memory::MODLIST_START));
     }
     PvhBootConfigurator::write_bootparams::<vm_memory::GuestMemoryMmap<()>>(&boot_params, gm)
         .map_err(|e| FluxError::Boot(format!("PVH write_bootparams: {e}")))?;
-    let _ = mem; // written through `gm`, which is a direct view over `mem`'s own backing memory.
+    let _ = mem; // written through `gm`, a direct view over `mem`'s backing.
 
     notes.push(format!(
-        "PVH boot: entry={:#x} start_info={:#x} memmap_entries={}",
+        "PVH boot: entry={:#x} start_info={:#x} memmap_entries={} (Firecracker layout)",
         pvh_entry.raw_value(),
-        START_INFO_GPA,
+        memory::PVH_INFO_START,
         memmap.len()
     ));
 
     Ok(BootInfo {
         entry_rip: pvh_entry.raw_value(),
         boot_params_gpa: None,
-        pvh_start_info_gpa: Some(START_INFO_GPA),
+        pvh_start_info_gpa: Some(memory::PVH_INFO_START),
         notes,
     })
 }
 
 #[cfg(target_os = "linux")]
 fn fill_e820(params: &mut linux_loader::loader::bootparam::boot_params, mem_size: u64) {
-    // Firecracker-style layout: low conventional RAM + high memory from 1 MiB.
-    // A single 0..mem_size RAM entry makes some kernels try GB direct-map pages
-    // and exhaust early BRK (`alloc_low_pages`).
+    // Same Firecracker / cloud-hypervisor layout as configure_pvh_boot.
     const E820_RAM: u32 = 1;
-    const LOW_RAM: u64 = 0x0009_fc00;
-    const HIMEM: u64 = 0x0010_0000;
+    const E820_RESERVED: u32 = 2;
     params.e820_entries = 0;
-    if mem_size > 0 {
-        params.e820_table[0].addr = 0;
-        params.e820_table[0].size = LOW_RAM.min(mem_size);
-        params.e820_table[0].r#type = E820_RAM;
-        params.e820_entries = 1;
-    }
-    if mem_size > HIMEM {
+
+    let mut push = |addr: u64, size: u64, typ: u32| {
         let i = params.e820_entries as usize;
-        params.e820_table[i].addr = HIMEM;
-        params.e820_table[i].size = mem_size - HIMEM;
-        params.e820_table[i].r#type = E820_RAM;
+        if i >= params.e820_table.len() || size == 0 {
+            return;
+        }
+        params.e820_table[i].addr = addr;
+        params.e820_table[i].size = size;
+        params.e820_table[i].r#type = typ;
         params.e820_entries += 1;
+    };
+
+    push(0, memory::SYSTEM_MEM_START.min(mem_size), E820_RAM);
+    if mem_size > memory::SYSTEM_MEM_START {
+        push(
+            memory::SYSTEM_MEM_START,
+            memory::SYSTEM_MEM_SIZE.min(mem_size.saturating_sub(memory::SYSTEM_MEM_START)),
+            E820_RESERVED,
+        );
+    }
+    push(
+        memory::PCI_MMCONFIG_START,
+        memory::PCI_MMCONFIG_SIZE,
+        E820_RESERVED,
+    );
+    if mem_size > memory::HIMEM_START {
+        push(
+            memory::HIMEM_START,
+            mem_size - memory::HIMEM_START,
+            E820_RAM,
+        );
     }
 }
 
@@ -386,17 +401,27 @@ fn write_minimal_boot_params(mem: &mut GuestMemory, cfg: &VmConfig, initrd_len: 
         page[0x218..0x21c].copy_from_slice(&(memory::INITRD_ADDR as u32).to_le_bytes());
         page[0x21c..0x220].copy_from_slice(&initrd_len.to_le_bytes());
     }
-    // Firecracker-style e820 (see fill_e820): two RAM regions.
+    // Firecracker-style e820 (see fill_e820).
     let mem_size = mem.len() as u64;
-    let low = 0x9fc00u64.min(mem_size);
-    page[0x1e8] = if mem_size > 0x100000 { 2 } else { 1 };
-    page[0x2d0..0x2d8].copy_from_slice(&0u64.to_le_bytes());
-    page[0x2d8..0x2e0].copy_from_slice(&low.to_le_bytes());
-    page[0x2e0..0x2e4].copy_from_slice(&1u32.to_le_bytes()); // E820_RAM
-    if mem_size > 0x100000 {
-        page[0x2e4..0x2ec].copy_from_slice(&0x100000u64.to_le_bytes());
-        page[0x2ec..0x2f4].copy_from_slice(&(mem_size - 0x100000).to_le_bytes());
-        page[0x2f4..0x2f8].copy_from_slice(&1u32.to_le_bytes());
+    let mut entries: Vec<(u64, u64, u32)> = Vec::new();
+    entries.push((0, memory::SYSTEM_MEM_START.min(mem_size), 1));
+    if mem_size > memory::SYSTEM_MEM_START {
+        entries.push((
+            memory::SYSTEM_MEM_START,
+            memory::SYSTEM_MEM_SIZE.min(mem_size.saturating_sub(memory::SYSTEM_MEM_START)),
+            2,
+        ));
+    }
+    entries.push((memory::PCI_MMCONFIG_START, memory::PCI_MMCONFIG_SIZE, 2));
+    if mem_size > memory::HIMEM_START {
+        entries.push((memory::HIMEM_START, mem_size - memory::HIMEM_START, 1));
+    }
+    page[0x1e8] = entries.len() as u8;
+    for (i, (addr, size, typ)) in entries.into_iter().enumerate() {
+        let off = 0x2d0 + i * 20;
+        page[off..off + 8].copy_from_slice(&addr.to_le_bytes());
+        page[off + 8..off + 16].copy_from_slice(&size.to_le_bytes());
+        page[off + 16..off + 20].copy_from_slice(&typ.to_le_bytes());
     }
     mem.write_at(memory::BOOT_PARAMS_ADDR, &page)
 }
