@@ -75,6 +75,33 @@ images — not only the dataplane.
 - [ ] Persisted `fleet-nodes.json`
 - [ ] Placement uses residual CPU/memory
 
+## 7. Sentinel operations tooling
+
+Not the same "fleet" as section 6 above — `fluxvm-fleet` here is a
+multi-node *rollout orchestrator* for Sentinel's own eBPF/controller
+components, unrelated to `fluxvm-agent`'s VM-placement fleet.
+
+- [ ] `fluxvm-migrate` (Set 13E): crash-resumable per-VM migration
+      transactions wrapping the real `fluxvm dataplane migration-*` CLI —
+      real CLI integration and real failure/rollback proven; not yet run
+      against a VM with a live dataplane actually attached
+      ([sentinel-migration-orchestrator.md](sentinel-migration-orchestrator.md))
+- [ ] `fluxvm-upgrade` (Set 14E): crash-resumable per-node component
+      upgrades with eBPF map snapshot/restore across a reload — a real
+      transaction against a real pinned BPF map proven end to end on the
+      lab host, including three bugs (`bpftool` JSON field-name/encoding
+      mismatches, an unhandled `PermissionError` in `probe`) found and
+      fixed during that validation, not just claimed
+      ([sentinel-stateful-upgrades.md](sentinel-stateful-upgrades.md))
+- [ ] `fluxvm-fleet` (Set 15E): canary-first multi-node rollout wrapping
+      `fluxvm-upgrade` per node — real SSH-shaped single-node and 2-node
+      canary-approval runs proven via a local `ssh` shim on the lab host,
+      including two real bugs found and fixed (a canary-approval-gate
+      bypass on resume, and a `remote()` stdin bug that always wrote an
+      empty file to the target node); a genuinely multi-host run with real
+      SSH trust between separate machines has not been done
+      ([sentinel-fleet-rollout.md](sentinel-fleet-rollout.md))
+
 ## Do not ship yet as “done”
 
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
