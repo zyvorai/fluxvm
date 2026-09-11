@@ -18,10 +18,9 @@ const QMP_TIMEOUT: Duration = Duration::from_secs(10);
 /// `savevm` writes guest RAM+device state into the qcow2 — can take well over
 /// 10s on multi-GB cloud images, so use a longer budget than other QMP ops.
 const QMP_SAVEVM_TIMEOUT: Duration = Duration::from_secs(120);
-/// How long to wait for each `virtiofsd` to create its listening socket
-/// before giving up and launching QEMU anyway (which would then fail to
-/// connect with a clear error, rather than this hanging indefinitely).
-const VIRTIOFSD_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long to wait for each `virtiofsd` listening socket to accept
+/// connections before failing the launch (QEMU is a vhost-user client).
+const VIRTIOFSD_SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 /// DIMM slots reserved for memory hotplug when `req.max_memory_mib` isn't
 /// set. Each `device_add pc-dimm` (one per hotplug-memory call) consumes
 /// one slot regardless of its size, so this caps hotplug *calls*, not
@@ -309,6 +308,9 @@ async fn spawn_virtiofsd_instances(
     let mut sockets = Vec::new();
     for (i, share) in req.shared_folders.iter().enumerate() {
         let socket = ctx.workspace.join(format!("virtiofs-{i}.sock"));
+        // Stale sockets from a previous failed launch make exists()/connect
+        // race: the path is present but nothing accepts → Connection refused.
+        let _ = tokio::fs::remove_file(&socket).await;
         let tag = format!("fs{i}");
         let mut args = vec![
             // Ubuntu/systemd hosts often fail virtiofsd's default namespace
@@ -347,13 +349,46 @@ async fn spawn_virtiofsd_instances(
             kill_pids(&pids);
             anyhow::bail!("virtiofsd for shared_folders[{i}] exited before PID was available");
         };
-        // virtiofsd creates its listening socket asynchronously after
-        // startup; QEMU connects as the vhost-user client and needs it to
-        // already exist. Not finding it within the timeout isn't fatal
-        // here — QEMU will fail to connect with its own clear error, which
-        // beats hanging this launch indefinitely on a stuck virtiofsd.
+        // QEMU connects as the vhost-user *client*. Do not probe with
+        // UnixStream::connect — that can consume virtiofsd's single accept.
+        // Stale sockets (path present, nothing listening) caused Connection
+        // refused; we unlink before spawn and wait for a *new* path while
+        // the child is still alive.
         let deadline = tokio::time::Instant::now() + VIRTIOFSD_SOCKET_TIMEOUT;
-        while !socket.exists() && tokio::time::Instant::now() < deadline {
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                kill_pids(&pids);
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
+                }
+                anyhow::bail!(
+                    "virtiofsd for shared_folders[{i}] socket {} not ready within {:?}; see {}",
+                    socket.display(),
+                    VIRTIOFSD_SOCKET_TIMEOUT,
+                    log.display()
+                );
+            }
+            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            if !alive {
+                kill_pids(&pids);
+                anyhow::bail!(
+                    "virtiofsd for shared_folders[{i}] exited before socket was ready; see {}",
+                    log.display()
+                );
+            }
+            if socket.exists() {
+                // Brief settle so bind/listen completes after the inode appears.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+                if !still_alive {
+                    kill_pids(&pids);
+                    anyhow::bail!(
+                        "virtiofsd for shared_folders[{i}] exited right after creating socket; see {}",
+                        log.display()
+                    );
+                }
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         pids.push(pid);

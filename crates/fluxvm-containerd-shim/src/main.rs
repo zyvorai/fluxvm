@@ -3955,10 +3955,7 @@ async fn run_command(program: &str, args: &[String]) -> AnyResult<()> {
 
 async fn run_command_best_effort(program: &str, args: &[String]) {
     let bin = resolve_host_bin(program);
-    let _ = tokio::process::Command::new(&bin)
-        .args(args)
-        .output()
-        .await;
+    let _ = tokio::process::Command::new(&bin).args(args).output().await;
 }
 
 async fn command_output(program: &str, args: &[String]) -> AnyResult<String> {
