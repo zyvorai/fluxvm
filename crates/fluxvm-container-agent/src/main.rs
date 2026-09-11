@@ -1775,11 +1775,16 @@ fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
                         .get("value")
                         .and_then(Value::as_u64)
                         .context("seccomp argument value is required")?;
-                    let value_two = arg.get("valueTwo").and_then(Value::as_u64).unwrap_or(0);
-                    if op == SCMP_CMP_MASKED_EQ && arg.get("valueTwo").is_none() {
-                        bail!("SCMP_CMP_MASKED_EQ requires OCI seccomp argument valueTwo");
-                    }
-                    if op != SCMP_CMP_MASKED_EQ && arg.get("valueTwo").is_some() {
+                    // OCI marks valueTwo omitempty — profiles often omit it when
+                    // the mask is 0. Accept valueTwo / value2, defaulting to 0.
+                    let value_two = arg
+                        .get("valueTwo")
+                        .or_else(|| arg.get("value2"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    if op != SCMP_CMP_MASKED_EQ
+                        && arg.get("valueTwo").or_else(|| arg.get("value2")).is_some()
+                    {
                         bail!("seccomp argument valueTwo is valid only with SCMP_CMP_MASKED_EQ");
                     }
                     args.push(SeccompArg {
@@ -5177,7 +5182,7 @@ mod tests {
           }]}}
         }"#
             )
-            .is_err()
+            .is_ok()
         );
     }
 
