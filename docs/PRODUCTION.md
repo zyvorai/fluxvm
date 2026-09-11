@@ -110,6 +110,12 @@ components, unrelated to `fluxvm-agent`'s VM-placement fleet.
       empty file to the target node); a genuinely multi-host run with real
       SSH trust between separate machines has not been done
       ([sentinel-fleet-rollout.md](sentinel-fleet-rollout.md))
+- [ ] `fluxvm-fleet-guard` (Set 16E): continuous observe-only fleet drift /
+      SLO verification with policy-gated remediation, evidence journals, and
+      systemd timer wiring after Set 15E rollout — static/unit gates proven;
+      disposable multi-host smoke remains opt-in behind
+      `FLUXVM_FLEET_GUARD_HOST_TEST`
+      ([sentinel-fleet-drift-slo-guard.md](sentinel-fleet-drift-slo-guard.md))
 
 ## Do not ship yet as “done”
 

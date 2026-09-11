@@ -5,8 +5,9 @@ VIP policy), Set 17 (rule-attributed NetworkPolicy telemetry) and Set 16
 (conntrack revocation safety + VM-level SCTP), plus Sentinel's operational
 tooling — Set 12E (GA certification / evidence gates), Set 13E (migration
 orchestrator), Set 14E (stateful upgrade manager), Set 15E (fleet rollout +
-canary controller) — and in-tree KVM FC/CH parity (P0–P2). Prefer closing
-proven gates over inventing new wire formats.
+canary controller), Set 16E (fleet drift & SLO guard) — and in-tree KVM
+FC/CH parity (P0–P2). Prefer closing proven gates over inventing new wire
+formats.
 
 ## Sentinel / Secure Containers (highest leverage)
 
