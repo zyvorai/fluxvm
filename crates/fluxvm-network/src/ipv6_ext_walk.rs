@@ -81,7 +81,7 @@ pub fn walk_ipv6_extensions(
                 return WalkOutcome::L4 {
                     protocol: hdr,
                     payload_off: off,
-                }
+                };
             }
         }
     }
