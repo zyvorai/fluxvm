@@ -270,6 +270,18 @@ pub async fn migration_cancel(socket: &Path, timeout: Duration) -> Result<Migrat
     migration_status(socket, timeout).await
 }
 
+/// Arms a QEMU process started with `-incoming defer` to actually begin
+/// listening on `uri` for an incoming migration stream. Must be called
+/// after the process is up (this function itself tolerates the same
+/// connect-before-QMP-is-ready window as every other `execute` caller, via
+/// `handshake_retrying`) and before the source's `migrate` command is sent
+/// against a matching URI -- see `VmManager::create_receiver`.
+pub async fn migrate_incoming(socket: &Path, uri: &str, timeout: Duration) -> Result<()> {
+    validate_migration_uri(uri)?;
+    execute(socket, "migrate-incoming", Some(json!({"uri": uri})), timeout).await?;
+    Ok(())
+}
+
 /// Save VM state to an internal snapshot tagged `name` on the VM's disk
 /// (pairs with QEMU `-loadvm` / `start_from_snapshot`).
 pub async fn savevm(socket: &Path, name: &str, timeout: Duration) -> Result<Value> {
@@ -481,5 +493,59 @@ mod migration_contract_tests {
         for state in ["postcopy-active", "postcopy-paused", "postcopy-recover"] {
             assert_eq!(migration_phase(state), MigrationPhase::PostcopyActive);
         }
+    }
+
+    #[test]
+    fn migrate_incoming_rejects_shell_backed_uri() {
+        let err = tokio_test_block_on(migrate_incoming(
+            std::path::Path::new("/nonexistent/qmp.sock"),
+            "exec:ssh host nc 4444",
+            Duration::from_millis(50),
+        ));
+        assert!(err.is_err());
+        assert!(format!("{:#}", err.unwrap_err()).contains("unsupported migration URI"));
+    }
+
+    #[tokio::test]
+    async fn migrate_incoming_sends_the_expected_qmp_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read_half);
+
+            write_half
+                .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                .await
+                .unwrap();
+            let mut caps = String::new();
+            reader.read_line(&mut caps).await.unwrap();
+            write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+
+            let mut req = String::new();
+            reader.read_line(&mut req).await.unwrap();
+            let req: Value = serde_json::from_str(&req).unwrap();
+            assert_eq!(req["execute"], "migrate-incoming");
+            assert_eq!(req["arguments"]["uri"], "tcp:0.0.0.0:12345");
+            write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+        });
+
+        migrate_incoming(&path, "tcp:0.0.0.0:12345", Duration::from_secs(5))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    /// `migrate_incoming` is used from a sync test above (URI validation
+    /// happens before any socket I/O, so it doesn't need a real runtime) --
+    /// a tiny helper keeps that test a plain `#[test]` rather than dragging
+    /// in `#[tokio::test]` just for a code path that never awaits anything.
+    fn tokio_test_block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(f)
     }
 }

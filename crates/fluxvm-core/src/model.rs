@@ -298,6 +298,27 @@ pub struct CreateVmRequest {
     /// `None` for every non-Secure-Containers VM, matching today's behavior.
     #[serde(default)]
     pub pod_uid: Option<String>,
+    /// One-shot receiver-mode launch override, set ONLY by
+    /// `VmManager::create_receiver` on its own internal launch-time clone of
+    /// the receiver's spec -- never set by a caller directly, never
+    /// persisted onto a `VmRecord`'s stored `CreateVmRequest` (same
+    /// one-shot contract as `loadvm_tag` above). When true,
+    /// `fluxvm_qemu::build_args` appends `-incoming defer` instead of a
+    /// normal boot and opens `disk` with `file.locking=off`.
+    ///
+    /// Safety: `file.locking=off` is only ever needed on the RECEIVING side
+    /// of a migration. QEMU's image locking is a per-opener, cooperative
+    /// check (fcntl OFD locks) -- a process that opens with
+    /// `file.locking=off` never takes or checks that lock, so it is never
+    /// blocked by another still running QEMU process's (the source's)
+    /// default `locking=on` lock. The source therefore needs no change at
+    /// all; this field is intentionally never exposed for a normal
+    /// `create()`/`start()` request. This is safe ONLY because a receiver
+    /// process makes no I/O of its own against `disk` until QEMU's own
+    /// incoming-migration stream actually completes -- it is not a general
+    /// statement that two QEMU processes may safely share a qcow2 file.
+    #[serde(default)]
+    pub migration_incoming: bool,
 }
 fn default_vcpus() -> u8 {
     2

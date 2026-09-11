@@ -192,6 +192,7 @@ impl VmManager {
             hugepages: None,
             vfio_devices: vec![],
             pod_uid: None,
+            migration_incoming: false,
         };
         tokio::fs::write(tdir.join("spec.json"), serde_json::to_vec_pretty(&spec)?).await?;
         Ok(TemplateInfo {

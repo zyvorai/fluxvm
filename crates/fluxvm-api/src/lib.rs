@@ -1,6 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::Context;
 use axum::{
     Extension, Json, Router,
     body::Body,
@@ -12,7 +13,10 @@ use axum::{
 };
 use fluxvm_core::{
     config::{Role, constant_time_eq},
-    model::{BackendKind, ClaimOverrides, CreateVmRequest, PoolSpec, VmRecord, VmStatus},
+    model::{
+        BackendKind, ClaimOverrides, CreateVmRequest, MigrationReceiverInfo,
+        MigrationReceiverRequest, PoolSpec, VmRecord, VmStatus,
+    },
 };
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
@@ -439,6 +443,7 @@ fn render_metrics(vms: &[VmRecord]) -> String {
         VmStatus::Paused,
         VmStatus::Stopped,
         VmStatus::Failed,
+        VmStatus::Receiving,
     ] {
         let count = vms.iter().filter(|v| v.status == status).count();
         out.push_str(&format!(
@@ -534,6 +539,7 @@ fn status_label(s: VmStatus) -> &'static str {
         VmStatus::Paused => "paused",
         VmStatus::Stopped => "stopped",
         VmStatus::Failed => "failed",
+        VmStatus::Receiving => "receiving",
     }
 }
 
@@ -2208,6 +2214,7 @@ mod tests {
                 hugepages: None,
                 vfio_devices: vec![],
                 pod_uid: None,
+                migration_incoming: false,
             },
             guest_cid: None,
             jail_path: None,

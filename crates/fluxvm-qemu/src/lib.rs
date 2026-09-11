@@ -67,11 +67,26 @@ pub fn build_args(
         Some(socket) => format!("file=nbd:unix:{},if=virtio,format=raw", socket.display()),
         // writeback (not cache=none) so QMP `savevm` / internal snapshots work on
         // CoW overlays — O_DIRECT hangs human-monitor-command savevm indefinitely.
-        None => format!(
-            "file={},if=virtio,format={},cache=writeback",
-            path_arg(&ctx.disk),
-            ctx.disk_format
-        ),
+        None => {
+            // `file.locking=off` is only ever added on the receiving side
+            // of a migration (`req.migration_incoming`) -- see that
+            // field's doc comment on `CreateVmRequest` for why only the
+            // receiver needs this, never the source. Must be
+            // `file.locking=` (targeting the nested file-protocol driver),
+            // not bare `locking=` -- with an explicit `format=qcow2`, QEMU
+            // parses `-drive` as a qcow2 block driver wrapping a `file`
+            // protocol driver, and `locking` is a property of the *file*
+            // driver only ("Block format 'qcow2' does not support the
+            // option 'locking'" is the exact rejection a bare `locking=`
+            // produces).
+            let locking = if req.migration_incoming { ",file.locking=off" } else { "" };
+            format!(
+                "file={},if=virtio,format={}{},cache=writeback",
+                path_arg(&ctx.disk),
+                ctx.disk_format,
+                locking,
+            )
+        }
     };
     // Reserve hotplug headroom by default so `device_add` (CPU) and
     // `device_add pc-dimm` (memory) have somewhere to land -- found live:
@@ -293,6 +308,13 @@ pub fn build_args(
     if let Some(tag) = &req.loadvm_tag {
         a.extend(["-loadvm".into(), tag.clone()]);
     }
+    // Boots straight into a migration-incoming listener instead of a normal
+    // cold boot -- see CreateVmRequest.migration_incoming's doc comment for
+    // why this is a one-shot override, set only by
+    // VmManager::create_receiver, never persisted onto the stored request.
+    if req.migration_incoming {
+        a.extend(["-incoming".into(), "defer".into()]);
+    }
     Ok(a)
 }
 
@@ -467,6 +489,10 @@ pub async fn migration_cancel(
     qmp::migration_cancel(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
 }
 
+pub async fn migrate_incoming(_cfg: &Config, vm: &VmRecord, uri: &str) -> Result<()> {
+    qmp::migrate_incoming(&vm.workspace.join("qmp.sock"), uri, QMP_TIMEOUT).await
+}
+
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was
 /// running. Pairs with `-loadvm` / [`VmManager::start_from_snapshot`].
 pub async fn snapshot_save(_cfg: &Config, vm: &VmRecord, name: &str) -> Result<()> {
@@ -519,6 +545,7 @@ mod tests {
             hugepages: None,
             vfio_devices: vec![],
             pod_uid: None,
+            migration_incoming: false,
         }
     }
 
@@ -591,6 +618,32 @@ mod tests {
             .position(|a| a == "-loadvm")
             .expect("missing -loadvm flag");
         assert_eq!(args[idx + 1], "hibernate-20260101");
+    }
+
+    #[test]
+    fn no_incoming_flag_or_locking_off_when_migration_incoming_unset() {
+        let args = build_args(&req(2048), &ctx(), &[]).unwrap();
+        assert!(!args.iter().any(|a| a == "-incoming"));
+        let drive = args
+            .iter()
+            .position(|a| a == "-drive")
+            .map(|i| &args[i + 1])
+            .expect("missing -drive flag");
+        assert!(!drive.contains("locking=off"));
+    }
+
+    #[test]
+    fn appends_incoming_defer_and_locking_off_when_migration_incoming_set() {
+        let mut r = req(2048);
+        r.migration_incoming = true;
+        let args = build_args(&r, &ctx(), &[]).unwrap();
+        assert!(args.windows(2).any(|w| w == ["-incoming", "defer"]));
+        let drive = args
+            .iter()
+            .position(|a| a == "-drive")
+            .map(|i| &args[i + 1])
+            .expect("missing -drive flag");
+        assert!(drive.contains("file.locking=off"));
     }
 
     #[test]
