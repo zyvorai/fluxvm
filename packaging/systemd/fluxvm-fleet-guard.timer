@@ -1,0 +1,11 @@
+[Unit]
+Description=Run FluxVM Sentinel fleet guard every five minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
