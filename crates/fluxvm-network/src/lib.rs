@@ -12,6 +12,7 @@ pub mod groups;
 pub mod identity;
 pub mod ipam;
 pub mod ipcache;
+pub mod ipv6_ext_walk;
 pub mod migration_state;
 pub mod netns;
 pub mod packetflow;

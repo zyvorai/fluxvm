@@ -1,0 +1,158 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+name: Secure Containers Coverage
+
+on:
+  pull_request:
+    paths:
+      - 'bpf/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-container-*/**'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'scripts/**'
+      - 'docs/secure-containers*.md'
+      - 'docs/NEXT-FEATURES.md'
+      - 'docs/PRODUCTION.md'
+      - 'tools/fluxvm_*.py'
+      - 'tools/tests/**'
+      - 'benchmarks/sentinel-ga-budgets.json'
+      - '.github/workflows/secure-containers-coverage.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'bpf/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-container-*/**'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'scripts/**'
+      - 'docs/secure-containers*.md'
+      - '.github/workflows/secure-containers-coverage.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  matrix-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-use-case-matrix.sh
+
+  go-controller:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23' }
+      - name: gofmt
+        run: |
+          cd controllers/fluxvm-networkpolicy-controller
+          test -z "$(gofmt -l .)"
+      - name: test
+        run: |
+          cd controllers/fluxvm-networkpolicy-controller
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+          go vet ./...
+
+  go-observer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.23' }
+      - name: gofmt
+        run: |
+          cd tools/fluxvm-policy-observer
+          test -z "$(gofmt -l .)"
+      - name: test
+        run: |
+          cd tools/fluxvm-policy-observer
+          go test -count=1 ./...
+          go test -race -count=1 ./...
+          go vet ./...
+
+  observer-sizing:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: sizing model JSON
+        run: |
+          python3 scripts/benchmark-policy-observer-set19.py --vms 100 --rules 16 > /tmp/sizing.json
+          python3 - <<'PY'
+          import json
+          d=json.load(open('/tmp/sizing.json'))
+          for k in ('vms','rules_per_vm','estimated_metric_series','estimated_exposition_bytes','estimated_percpu_counter_bytes'):
+              assert k in d and d[k] is not None, k
+          assert d['vms']==100 and d['rules_per_vm']==16
+          print('observer sizing OK', d)
+          PY
+
+  rust-crates:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: 'rustfmt,clippy' }
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic pkg-config
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+      - run: cargo test --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim
+      - run: cargo clippy --locked -p fluxvm-network -p fluxvm-container-protocol -- -D warnings
+
+  ebpf-objects:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+      - run: scripts/build-ebpf.sh
+      - run: scripts/build-ebpf-guest.sh
+      - name: object smoke
+        run: |
+          test -s bpf/fluxvm_tc.bpf.o
+          test -s bpf/fluxvm_pod_ingress.bpf.o
+          test -s dist/bpf/fluxvm_guest_cgroup.bpf.o
+          test -s dist/bpf/fluxvm_guest_lsm.bpf.o
+          if bpftool version >/dev/null 2>&1; then
+            bpftool btf dump file bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pridx || \
+              llvm-objdump -t bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
+          else
+            llvm-objdump -t bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
+          fi
+
+  shell-contracts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n scripts
+        run: |
+          set -euo pipefail
+          for f in scripts/test-networkpolicy*.sh \
+                   scripts/test-sentinel-*.sh \
+                   scripts/secure-containers-ga-gate-set19.sh \
+                   scripts/check-use-case-matrix.sh; do
+            [[ -e "$f" ]] || continue
+            bash -n "$f"
+          done
+          echo 'shell syntax OK'
+      - name: EndpointSlice RBAC
+        run: grep -q endpointslices controllers/fluxvm-networkpolicy-controller/deploy/rbac.yaml
+
+  sentinel-python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck iproute2 ethtool linux-tools-common linux-tools-generic
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+      - run: scripts/test-sentinel-ga-static.sh
+      - run: scripts/test-sentinel-fleet-guard-static.sh
+      - run: scripts/test-sentinel-release-admission-static.sh
