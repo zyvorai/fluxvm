@@ -59,6 +59,7 @@ func (s *Store) WritePrometheus(w io.Writer) {
 		p.gauge("fluxvm_sentinel_dataplane_schema_version", "Recorded FluxVM eBPF dataplane schema version.", base, float64(vm.SchemaVersion))
 		p.gauge("fluxvm_sentinel_dataplane_schema_compatible", "1 when the observer recognizes this dataplane schema.", base, boolf(vm.SchemaCompatible))
 		p.gauge("fluxvm_sentinel_observer_vm_scrape_ok", "1 when all sources for this VM were collected without error.", base, boolf(len(vm.Errors) == 0))
+		p.gauge("fluxvm_sentinel_policy_directional_counters", "1 when Set 17 rule telemetry provides true per-direction Pod-policy counters; 0 means Set 15 shared-counter fallback.", base, boolf(vm.DirectionalStats))
 		dirs := []struct {
 			name   string
 			hook   observer.HookState
@@ -79,6 +80,18 @@ func (s *Store) WritePrometheus(w io.Writer) {
 			}{{"allow", d.stats.Allowed}, {"drop", d.stats.Dropped}, {"audit", d.stats.Audited}} {
 				vl := `{direction="` + d.name + `",pod_id="` + pod + `",verdict="` + v.name + `",vm="` + vmLabel + `"}`
 				p.counter("fluxvm_sentinel_policy_packets_total", "Packets evaluated by the Pod policy dataplane, partitioned by direction and verdict.", vl, v.value)
+			}
+		}
+		for _, hit := range vm.RuleHits {
+			ruleIndex := strconv.FormatUint(uint64(hit.RuleIndex), 10)
+			if !hit.Matched {
+				ruleIndex = "miss"
+			}
+			l := `{direction="` + escape(hit.Direction) + `",pod_id="` + pod + `",rule_index="` + escape(ruleIndex) + `",verdict="` + escape(hit.Verdict) + `",vm="` + vmLabel + `"}`
+			p.counter("fluxvm_sentinel_policy_rule_packets_total", "Packets attributed to an exact rich rule or the default-deny/audit miss sentinel.", l, hit.Packets)
+			if hit.Matched {
+				info := `{cidr="` + escape(hit.CIDR) + `",direction="` + escape(hit.Direction) + `",family="` + escape(hit.Family) + `",pod_id="` + pod + `",port_end="` + strconv.FormatUint(uint64(hit.PortEnd), 10) + `",port_start="` + strconv.FormatUint(uint64(hit.PortStart), 10) + `",protocol="` + escape(hit.Protocol) + `",rule_index="` + escape(ruleIndex) + `",vm="` + vmLabel + `"}`
+				p.gauge("fluxvm_sentinel_policy_rule_info", "Current rich-rule identity for a Set 17 rule-hit slot.", info, 1)
 			}
 		}
 		keys := make([]string, 0, len(vm.RuleEntries))

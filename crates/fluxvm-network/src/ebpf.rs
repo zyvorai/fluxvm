@@ -987,6 +987,10 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
     // that asked for CIDR/L4 tuple rules presumably wants to know they did
     // not take effect.
     let prules_map = map_dir.join("fluxvm_prules");
+    // FLUXVM_SECURE_CONTAINERS_SET17: optional rule-attributed telemetry.
+    // It is deliberately not part of the schema-v8 policy ABI; old objects
+    // simply do not pin it and Set 15 observer fallback remains valid.
+    let prhit_map = map_dir.join("fluxvm_prhit");
     if !pspol_map.exists() {
         // Older fluxvm_tc.bpf.o predating Set 6S; nothing to configure.
         return Ok(());
@@ -1006,6 +1010,9 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
         );
         if prules_map.exists() {
             let _ = clear_map(&prules_map);
+        }
+        if prhit_map.exists() {
+            let _ = clear_map(&prhit_map);
         }
         return Ok(());
     };
@@ -1062,6 +1069,12 @@ fn configure_pod_maps(map_dir: &Path, pod_id: u32, policy: Option<&PodNetworkPol
     }
     if prules_map.exists() {
         clear_map(&prules_map)?;
+    }
+    // Rule slots are reused on every policy compile. Reset their counters
+    // before publishing a different rule set so an index can never inherit
+    // traffic history from the rule that previously occupied that slot.
+    if prhit_map.exists() {
+        clear_map(&prhit_map)?;
     }
 
     if rich {
@@ -1714,6 +1727,7 @@ fn sync_pod_ingress_attachment(
         "fluxvm_pid6_port",
         "fluxvm_prules",
         "fluxvm_ppstat",
+        "fluxvm_prhit",
         "fluxvm_ct",
     ];
     let mut args = vec![

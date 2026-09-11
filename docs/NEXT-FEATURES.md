@@ -9,7 +9,7 @@ Living backlog after Secure Containers Set 15 and in-tree KVM FC/CH parity
 |---|---|---|---|
 | **S1** | Live stateful conntrack-bypass proof | Path is implemented; smoke does not yet prove reply traffic skips ingress under a real TCP handshake | set14, PRODUCTION |
 | **S2** | Multi-node NetworkPolicy conformance | Single-node reconcile is proven; production needs Cilium + ≥1 other CNI, real Pod-to-Pod allow/deny | set14 #4, set13 |
-| **S3** | True per-direction counters + rule-hit identity | Set 15 exports shared `fluxvm_ppstat`; operators still cannot attribute drops to a rule/direction | set14 #5, set15 |
+| **S3** | True per-direction counters + rule-hit identity | **Implemented by Set 17** with optional `fluxvm_prhit`; live production scrape remains a gate | set14 #5, set15, set17 |
 | **S4** | EndpointSlice-aware Service VIP policy | Optional ClusterIP mode is selector-conservative; EndpointSlice closes Service-IP parity | set14 #3 |
 | **S5** | Indexed LPM/L4 (or verifier-budget raise) | 64-rule linear `fluxvm_prules` scan may become p99-costly | set14 #1 |
 | **S6** | IPv6 extension-header walking | Incomplete IPv6 L4 parse under verifier budget | set14 #2 |
