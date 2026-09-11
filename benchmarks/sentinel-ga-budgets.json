@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "baseline": {
+      "required_capabilities": ["cgroup_v2", "bpffs", "kernel_btf"],
+      "optional_capabilities": ["bpf_lsm", "tcx", "xdp", "sched_ext", "af_xdp"],
+      "budgets": {
+        "vm_boot_p95_ms": {"max": 5000.0},
+        "vm_runnable_p99_ms": {"max": 10.0},
+        "block_io_p99_ms": {"max": 25.0},
+        "network_rtt_p99_ms": {"max": 5.0},
+        "packet_loss_pct": {"max": 0.1},
+        "throughput_gbps": {"min": 1.0},
+        "migration_downtime_p95_ms": {"max": 500.0},
+        "ebpf_ringbuf_loss_pct": {"max": 0.01}
+      }
+    },
+    "performance": {
+      "required_capabilities": ["cgroup_v2", "bpffs", "kernel_btf", "tcx", "xdp"],
+      "optional_capabilities": ["bpf_lsm", "sched_ext", "af_xdp"],
+      "budgets": {
+        "vm_boot_p95_ms": {"max": 2500.0},
+        "vm_runnable_p99_ms": {"max": 5.0},
+        "block_io_p99_ms": {"max": 10.0},
+        "network_rtt_p99_ms": {"max": 2.0},
+        "packet_loss_pct": {"max": 0.02},
+        "throughput_gbps": {"min": 5.0},
+        "migration_downtime_p95_ms": {"max": 250.0},
+        "ebpf_ringbuf_loss_pct": {"max": 0.001}
+      }
+    },
+    "strict": {
+      "required_capabilities": ["cgroup_v2", "bpffs", "kernel_btf", "bpf_lsm", "tcx", "xdp", "sched_ext"],
+      "optional_capabilities": ["af_xdp"],
+      "budgets": {
+        "vm_boot_p95_ms": {"max": 1500.0},
+        "vm_runnable_p99_ms": {"max": 2.0},
+        "block_io_p99_ms": {"max": 5.0},
+        "network_rtt_p99_ms": {"max": 1.0},
+        "packet_loss_pct": {"max": 0.005},
+        "throughput_gbps": {"min": 10.0},
+        "migration_downtime_p95_ms": {"max": 100.0},
+        "ebpf_ringbuf_loss_pct": {"max": 0.0001}
+      }
+    }
+  }
+}
