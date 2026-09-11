@@ -60,10 +60,23 @@ use std::{
 
 const TOKEN_FILE_PATH: &str = "/etc/fluxvm-guest-agent.token";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup/fluxvm-containers";
+/// Best-effort crash breadcrumb for gated-child `_exit(126)` paths. Written
+/// both under the virtiofs pod share (host-visible) and at `/agent-die.txt`
+/// after pivot_root (also host-visible via the container rootfs share).
+const AGENT_DIE_SHARE: &str = "/run/fluxvm/pod/agent-die.txt";
+const AGENT_DIE_ROOT: &str = "/agent-die.txt";
 /// Set 6: env var gating `CLONE_NEWUSER`. Off by default — see
 /// docs/secure-containers-set6r.md for the rationale (virtiofs uid/gid ACL
 /// interaction, and sequencing with the in-guest LSM identity model).
 const USERNS_ENV: &str = "FLUXVM_CONTAINER_USERNS";
+
+fn die126(reason: &str) -> ! {
+    let _ = std::fs::write(AGENT_DIE_SHARE, reason);
+    let _ = std::fs::write(AGENT_DIE_ROOT, reason);
+    // Also try under /tmp for pre-pivot visibility on the guest rootfs.
+    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", reason);
+    unsafe { libc::_exit(126) }
+}
 
 /// Set 6: per-container Linux namespace file descriptors, recorded so
 /// sibling containers (sandbox-sharing) and later `Exec` calls can join
@@ -2156,7 +2169,24 @@ unsafe fn dlsym_required<T: Copy>(handle: *mut libc::c_void, name: &[u8]) -> Res
     Ok(unsafe { std::mem::transmute_copy(&ptr) })
 }
 
-fn apply_seccomp(profile: &SeccompProfile, notify_socket: Option<RawFd>) -> Result<()> {
+fn open_libseccomp() -> Result<*mut libc::c_void> {
+    let name = CString::new("libseccomp.so.2")?;
+    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+    if handle.is_null() {
+        bail!("OCI seccomp requested but libseccomp.so.2 is not installed in the guest");
+    }
+    Ok(handle)
+}
+
+/// Load an OCI seccomp filter. `handle` must already be a live `dlopen` of
+/// `libseccomp.so.2` (caller closes it). Used after `pivot_root`/`chroot` so
+/// RuntimeDefault can block `mount`/`pivot_root` without breaking sandbox setup;
+/// the library is pinned in the process before the rootfs switch.
+fn apply_seccomp_on_handle(
+    handle: *mut libc::c_void,
+    profile: &SeccompProfile,
+    notify_socket: Option<RawFd>,
+) -> Result<()> {
     type Init = unsafe extern "C" fn(u32) -> *mut libc::c_void;
     type Release = unsafe extern "C" fn(*mut libc::c_void);
     type Resolve = unsafe extern "C" fn(*const libc::c_char) -> libc::c_int;
@@ -2173,80 +2203,79 @@ fn apply_seccomp(profile: &SeccompProfile, notify_socket: Option<RawFd>) -> Resu
     if needs_notify != notify_socket.is_some() {
         bail!("seccomp notify listener bootstrap state does not match the OCI filter");
     }
-    let name = CString::new("libseccomp.so.2")?;
-    let handle = unsafe { libc::dlopen(name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-    if handle.is_null() {
-        bail!("OCI seccomp requested but libseccomp.so.2 is not installed in the guest");
+    let init: Init = unsafe { dlsym_required(handle, b"seccomp_init\0")? };
+    let release: Release = unsafe { dlsym_required(handle, b"seccomp_release\0")? };
+    let resolve: Resolve = unsafe { dlsym_required(handle, b"seccomp_syscall_resolve_name\0")? };
+    let rule_add_array: RuleAddArray = unsafe { dlsym_required(handle, b"seccomp_rule_add_array\0")? };
+    let load: Load = unsafe { dlsym_required(handle, b"seccomp_load\0")? };
+    let notify_fd_fn: Option<NotifyFd> = if needs_notify {
+        Some(unsafe { dlsym_required(handle, b"seccomp_notify_fd\0")? })
+    } else {
+        None
+    };
+    let ctx = unsafe { init(profile.default_action) };
+    if ctx.is_null() {
+        bail!("seccomp_init failed");
     }
-    let result = (|| -> Result<()> {
-        let init: Init = unsafe { dlsym_required(handle, b"seccomp_init\0")? };
-        let release: Release = unsafe { dlsym_required(handle, b"seccomp_release\0")? };
-        let resolve: Resolve =
-            unsafe { dlsym_required(handle, b"seccomp_syscall_resolve_name\0")? };
-        let rule_add_array: RuleAddArray =
-            unsafe { dlsym_required(handle, b"seccomp_rule_add_array\0")? };
-        let load: Load = unsafe { dlsym_required(handle, b"seccomp_load\0")? };
-        let notify_fd_fn: Option<NotifyFd> = if needs_notify {
-            Some(unsafe { dlsym_required(handle, b"seccomp_notify_fd\0")? })
-        } else {
-            None
-        };
-        let ctx = unsafe { init(profile.default_action) };
-        if ctx.is_null() {
-            bail!("seccomp_init failed");
-        }
-        let apply = (|| -> Result<()> {
-            for rule in &profile.rules {
-                let cmps: Vec<ScmpArgCmp> = rule
-                    .args
-                    .iter()
-                    .map(|arg| ScmpArgCmp {
-                        arg: arg.index,
-                        op: arg.op,
-                        datum_a: arg.value,
-                        datum_b: arg.value_two,
-                    })
-                    .collect();
-                for name in &rule.names {
-                    let c = CString::new(name.as_bytes())?;
-                    let nr = unsafe { resolve(c.as_ptr()) };
-                    if nr < 0 {
-                        bail!("unknown seccomp syscall {name:?}");
-                    }
-                    let ptr = if cmps.is_empty() {
-                        std::ptr::null()
-                    } else {
-                        cmps.as_ptr()
-                    };
-                    let rc =
-                        unsafe { rule_add_array(ctx, rule.action, nr, cmps.len() as u32, ptr) };
-                    if rc != 0 {
-                        bail!("seccomp_rule_add_array({name}) failed: {rc}");
-                    }
+    let apply = (|| -> Result<()> {
+        for rule in &profile.rules {
+            let cmps: Vec<ScmpArgCmp> = rule
+                .args
+                .iter()
+                .map(|arg| ScmpArgCmp {
+                    arg: arg.index,
+                    op: arg.op,
+                    datum_a: arg.value,
+                    datum_b: arg.value_two,
+                })
+                .collect();
+            for name in &rule.names {
+                let c = CString::new(name.as_bytes())?;
+                let nr = unsafe { resolve(c.as_ptr()) };
+                // Runtime-default profiles include legacy 32-bit names
+                // (chown32, etc.). libseccomp on pure x86_64 returns <0 for
+                // those — runc skips them; failing closed here breaks every
+                // CRI pause container.
+                if nr < 0 {
+                    continue;
+                }
+                let ptr = if cmps.is_empty() {
+                    std::ptr::null()
+                } else {
+                    cmps.as_ptr()
+                };
+                let rc = unsafe { rule_add_array(ctx, rule.action, nr, cmps.len() as u32, ptr) };
+                if rc != 0 {
+                    bail!("seccomp_rule_add_array({name}) failed: {rc}");
                 }
             }
-            let rc = unsafe { load(ctx) };
-            if rc != 0 {
-                bail!("seccomp_load failed: {rc}");
-            }
-            if let (Some(notify_fd_fn), Some(socket)) = (notify_fd_fn, notify_socket) {
-                let fd = unsafe { notify_fd_fn(ctx) };
-                if fd < 0 {
-                    bail!("seccomp_notify_fd failed after loading notify filter: {fd}");
-                }
-                // Transfer the listener before releasing the filter context or
-                // dlclosing libseccomp. This keeps the bootstrap path tiny and
-                // ensures any later NOTIFY-triggering cleanup syscall already
-                // has a live supervisor on the other end.
-                send_fd(socket, fd)?;
-            }
-            Ok(())
-        })();
-        unsafe {
-            release(ctx);
         }
-        apply
+        let rc = unsafe { load(ctx) };
+        if rc != 0 {
+            bail!("seccomp_load failed: {rc}");
+        }
+        if let (Some(notify_fd_fn), Some(socket)) = (notify_fd_fn, notify_socket) {
+            let fd = unsafe { notify_fd_fn(ctx) };
+            if fd < 0 {
+                bail!("seccomp_notify_fd failed after loading notify filter: {fd}");
+            }
+            // Transfer the listener before releasing the filter context or
+            // dlclosing libseccomp. This keeps the bootstrap path tiny and
+            // ensures any later NOTIFY-triggering cleanup syscall already
+            // has a live supervisor on the other end.
+            send_fd(socket, fd)?;
+        }
+        Ok(())
     })();
+    unsafe {
+        release(ctx);
+    }
+    apply
+}
+
+fn apply_seccomp(profile: &SeccompProfile, notify_socket: Option<RawFd>) -> Result<()> {
+    let handle = open_libseccomp()?;
+    let result = apply_seccomp_on_handle(handle, profile, notify_socket);
     unsafe {
         libc::dlclose(handle);
     }
@@ -2329,7 +2358,18 @@ fn validate_lsm_string(kind: &str, value: &str) -> Result<()> {
 }
 
 fn apply_apparmor_on_exec(profile: &str) -> Result<()> {
-    if profile.is_empty() {
+    if profile.is_empty() || profile == "unconfined" {
+        return Ok(());
+    }
+    // CRI injects host AppArmor profile names (loaded on the node, not in the
+    // guest kernel). Kata-style VMs treat those defaults as unconfined inside
+    // the sandbox; custom profiles still fail closed below.
+    const HOST_ONLY_DEFAULTS: &[&str] = &[
+        "cri-containerd.apparmor.d",
+        "runtime/default",
+        "docker-default",
+    ];
+    if HOST_ONLY_DEFAULTS.contains(&profile) {
         return Ok(());
     }
     validate_lsm_string("apparmorProfile", profile)?;
@@ -4334,10 +4374,19 @@ fn open_container_namespaces(pid: libc::pid_t, include_user: bool) -> ContainerN
 /// through Set 5. Must run inside a process that has already unshared
 /// `CLONE_NEWNS` (a private copy of the mount table) — the bind-mount and
 /// pivot below are otherwise visible to every other member of the caller's
-/// mount namespace. Async-signal-safe: no allocation, called only from a
-/// freshly forked, single-threaded, pre-`execve` child.
+/// mount namespace. Called only from a freshly forked, single-threaded,
+/// pre-`execve` child.
+///
+/// On failure, writes `pivot_root:<step>:errno=N` under the virtiofs share.
 unsafe fn pivot_root_into(rootfs: &CString) -> bool {
     unsafe {
+        let fail = |step: &str| -> bool {
+            let err = *libc::__errno_location();
+            let msg = format!("pivot_root:{step}:errno={err}");
+            let _ = std::fs::write(AGENT_DIE_SHARE, &msg);
+            let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
+            false
+        };
         // Detach mount propagation before touching anything, so pivoting
         // never leaks back into whatever peer group "/" belonged to.
         if libc::mount(
@@ -4348,7 +4397,7 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
             std::ptr::null(),
         ) != 0
         {
-            return false;
+            return fail("ms_private");
         }
         // pivot_root(2) requires new_root to be a mount point; bind-mounting
         // it onto itself makes an ordinary directory qualify.
@@ -4360,63 +4409,55 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
             std::ptr::null(),
         ) != 0
         {
-            return false;
+            return fail("ms_bind_rootfs");
         }
         if libc::chdir(rootfs.as_ptr()) != 0 {
-            return false;
+            return fail("chdir_rootfs");
         }
-        // Build "<rootfs>/.fluxvm-pivot-old\0" on the stack (no heap alloc --
-        // this runs single-threaded right after fork(), and this process may
-        // have inherited a locked malloc arena from a sibling thread that
-        // held it at fork time, so allocating here would risk a hang of its
-        // own). Bail rather than truncate if it doesn't fit.
-        const OLD_SUFFIX: &[u8] = b"/.fluxvm-pivot-old\0";
-        let root_bytes = rootfs.as_bytes(); // no NUL
-        if root_bytes.len() + OLD_SUFFIX.len() > libc::PATH_MAX as usize {
-            return false;
-        }
-        let mut old_root_buf = [0u8; libc::PATH_MAX as usize];
-        old_root_buf[..root_bytes.len()].copy_from_slice(root_bytes);
-        old_root_buf[root_bytes.len()..root_bytes.len() + OLD_SUFFIX.len()]
-            .copy_from_slice(OLD_SUFFIX);
-        let old_root_ptr = old_root_buf.as_ptr().cast::<libc::c_char>();
-        if libc::mkdir(old_root_ptr, 0o700) != 0 && *libc::__errno_location() != libc::EEXIST {
-            return false;
+        // put_old must live under new_root. CRI pause containers set
+        // `root.readonly=true`, which remounts the virtiofs rootfs RO before
+        // Start — mkdir then returns EROFS. Remount the bind RW just long
+        // enough to create put_old (runc/crun do the same for RO roots).
+        if libc::mkdir(c".fluxvm-pivot-old".as_ptr(), 0o700) != 0 {
+            let err = *libc::__errno_location();
+            if err == libc::EROFS || err == libc::EACCES {
+                if libc::mount(
+                    std::ptr::null(),
+                    c".".as_ptr(),
+                    std::ptr::null(),
+                    (libc::MS_REMOUNT | libc::MS_BIND) as libc::c_ulong,
+                    std::ptr::null(),
+                ) != 0
+                {
+                    return fail("remount_rw_for_put_old");
+                }
+                if libc::mkdir(c".fluxvm-pivot-old".as_ptr(), 0o700) != 0
+                    && *libc::__errno_location() != libc::EEXIST
+                {
+                    return fail("mkdir_put_old_after_rw");
+                }
+            } else if err != libc::EEXIST {
+                return fail("mkdir_put_old");
+            }
         }
         // Standard pivot_root(2) recipe (matches runc/crun): new_root and
-        // put_old are different directories, not new_root pivoted into
-        // itself. A self-pivot (new_root == put_old, then MNT_DETACH the
-        // resulting "." mount) was tried first and reproduced a real,
-        // reliably-hit hang: the container's first read through a
-        // virtiofs-backed rootfs after such a self-pivot got stuck in
-        // kernel state D (uninterruptible sleep) and never made progress,
-        // confirmed to not be a virtiofs data/availability problem (the
-        // identical file read cleanly and fast from the guest's default
-        // mount namespace at the same moment) or a general host-load issue
-        // (reproduced consistently, including under light load). Suspected:
-        // a virtiofs-specific interaction with lazily detaching the old
-        // root when it and the new root are mounted at the exact same
-        // path/dentry. This explicit-put_old form sidesteps that shape
-        // entirely, at the cost of needing exactly one directory created
-        // (and removed) inside the new root.
-        if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), old_root_ptr) != 0 {
-            return false;
+        // put_old are different directories. Avoid self-pivot on virtiofs
+        // (previously hung reads in D-state); see prior comments in git history.
+        if libc::syscall(
+            libc::SYS_pivot_root,
+            c".".as_ptr(),
+            c".fluxvm-pivot-old".as_ptr(),
+        ) != 0
+        {
+            return fail("syscall_pivot_root");
         }
         if libc::chdir(c"/".as_ptr()) != 0 {
-            return false;
+            return fail("chdir_slash");
         }
-        // put_old is now reachable at this path under the new root. Lazily
-        // detach it so the old root tree stops being reachable at all, then
-        // remove the now-empty mount point directory.
-        let old_root_rel = &OLD_SUFFIX[..OLD_SUFFIX.len() - 1]; // keep leading '/', drop NUL for building the relative form below
-        let mut rel_buf = [0u8; libc::PATH_MAX as usize];
-        rel_buf[..old_root_rel.len()].copy_from_slice(old_root_rel);
-        rel_buf[old_root_rel.len()] = 0;
-        let old_root_rel_ptr = rel_buf.as_ptr().cast::<libc::c_char>();
-        if libc::umount2(old_root_rel_ptr, libc::MNT_DETACH) != 0 {
-            return false;
+        if libc::umount2(c".fluxvm-pivot-old".as_ptr(), libc::MNT_DETACH) != 0 {
+            return fail("umount_put_old");
         }
-        let _ = libc::rmdir(old_root_rel_ptr);
+        let _ = libc::rmdir(c".fluxvm-pivot-old".as_ptr());
         // A private mount namespace inherits whatever /proc was mounted at
         // unshare time, which reflects the wrong PID namespace once this
         // container's init lands in its own (or a joined) PID namespace.
@@ -4428,7 +4469,7 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
             std::ptr::null(),
         ) != 0
         {
-            return false;
+            return fail("mount_proc");
         }
         true
     }
@@ -4727,32 +4768,94 @@ fn spawn_gated(
 
             let mut byte = [0u8; 1];
             if libc::read(gate[0], byte.as_mut_ptr().cast(), 1) != 1 {
-                libc::_exit(126);
+                die126("gate_read");
             }
             libc::close(gate[0]);
             if let Some(profile) = spec.apparmor_profile.as_deref() {
-                if apply_apparmor_on_exec(profile).is_err() {
-                    libc::_exit(126);
+                if let Err(e) = apply_apparmor_on_exec(profile) {
+                    let msg = format!("apparmor:{e:#}");
+                    let _ = std::fs::write(AGENT_DIE_SHARE, &msg);
+                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
+                    unsafe { libc::_exit(126) }
                 }
             }
             if let Some(label) = spec.selinux_label.as_deref() {
                 if apply_selinux_on_exec(label).is_err() {
-                    libc::_exit(126);
+                    die126("selinux");
                 }
             }
+            // Pin libseccomp while the guest root is still visible. RuntimeDefault
+            // blocks mount/pivot_root, so the filter must load *after* pivot —
+            // but pause/busybox rootfs has no libseccomp.so.2 for a post-pivot
+            // dlopen. Keeping the DSO mapped across the root switch matches
+            // runc's order (setup mounts, then seccomp).
+            let seccomp_handle = if spec.seccomp.is_some() {
+                match open_libseccomp() {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        let msg = format!("seccomp_lib:{e:#}");
+                        let _ = std::fs::write(AGENT_DIE_SHARE, &msg);
+                        let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
+                        if let Some(pair) = notify_pair {
+                            libc::close(pair[1]);
+                        }
+                        unsafe { libc::_exit(126) }
+                    }
+                }
+            } else {
+                None
+            };
             if creates_mount_ns {
                 if !pivot_root_into(&rootfs) {
-                    libc::_exit(126);
+                    // pivot_root_into already wrote a detailed breadcrumb.
+                    if let Some(h) = seccomp_handle {
+                        libc::dlclose(h);
+                    }
+                    unsafe { libc::_exit(126) }
                 }
             } else if !joined_mount_ns && libc::chroot(rootfs.as_ptr()) != 0 {
                 // Only reachable if a container's own mount-namespace fd
                 // could not be recorded at create time (see
                 // `open_container_namespaces`) — fall back to a bare chroot
                 // rather than running this exec fully unconfined.
-                libc::_exit(126);
+                if let Some(h) = seccomp_handle {
+                    libc::dlclose(h);
+                }
+                die126("chroot");
+            }
+            if let Some(profile) = spec.seccomp.as_ref() {
+                // NO_NEW_PRIVS is required for seccomp_load without CAP_SYS_ADMIN
+                // and is idempotent with the later OCI noNewPrivileges bit.
+                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                    if let Some(h) = seccomp_handle {
+                        libc::dlclose(h);
+                    }
+                    die126("seccomp_no_new_privs");
+                }
+                let notify_socket = notify_pair.map(|pair| pair[1]);
+                let Some(handle) = seccomp_handle else {
+                    die126("seccomp_handle");
+                };
+                if let Err(e) = apply_seccomp_on_handle(handle, profile, notify_socket) {
+                    let msg = format!("seccomp:{e:#}");
+                    let _ = std::fs::write(AGENT_DIE_SHARE, &msg);
+                    let _ = std::fs::write(AGENT_DIE_ROOT, &msg);
+                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
+                    libc::dlclose(handle);
+                    if let Some(fd) = notify_socket {
+                        libc::close(fd);
+                    }
+                    unsafe { libc::_exit(126) }
+                }
+                libc::dlclose(handle);
+                if let Some(fd) = notify_socket {
+                    libc::close(fd);
+                }
+            } else if let Some(pair) = notify_pair {
+                libc::close(pair[1]);
             }
             if libc::chdir(cwd.as_ptr()) != 0 {
-                libc::_exit(126);
+                die126("chdir");
             }
 
             if let Some(mask) = spec.umask {
@@ -4764,7 +4867,7 @@ fn spawn_gated(
                     rlim_max: limit.hard,
                 };
                 if libc::setrlimit(limit.resource as _, &value) != 0 {
-                    libc::_exit(126);
+                    die126("setrlimit");
                 }
             }
 
@@ -4779,50 +4882,33 @@ fn spawn_gated(
                 groups.as_ptr()
             };
             if libc::setgroups(groups.len(), group_ptr) != 0 {
-                libc::_exit(126);
+                die126("setgroups");
             }
             if let Some(caps) = spec.capabilities.as_ref() {
                 if drop_bounding_capabilities(caps).is_err() {
-                    libc::_exit(126);
+                    die126("drop_bounding_caps");
                 }
                 if spec.uid != 0
                     && (caps.permitted != 0 || caps.effective != 0 || caps.ambient != 0)
                     && libc::prctl(libc::PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0
                 {
-                    libc::_exit(126);
+                    die126("prctl_keepcaps");
                 }
             }
             if libc::setgid(spec.gid) != 0 {
-                libc::_exit(126);
+                die126("setgid");
             }
             if libc::setuid(spec.uid) != 0 {
-                libc::_exit(126);
+                die126("setuid");
             }
             if let Some(caps) = spec.capabilities.as_ref() {
                 if set_process_capabilities(caps).is_err() {
-                    libc::_exit(126);
+                    die126("set_process_caps");
                 }
                 let _ = libc::prctl(libc::PR_SET_KEEPCAPS, 0, 0, 0, 0);
             }
             if spec.no_new_privileges && libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                libc::_exit(126);
-            }
-            if let Some(profile) = spec.seccomp.as_ref() {
-                if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
-                    libc::_exit(126);
-                }
-                let notify_socket = notify_pair.map(|pair| pair[1]);
-                if apply_seccomp(profile, notify_socket).is_err() {
-                    if let Some(fd) = notify_socket {
-                        libc::close(fd);
-                    }
-                    libc::_exit(126);
-                }
-                if let Some(fd) = notify_socket {
-                    libc::close(fd);
-                }
-            } else if let Some(pair) = notify_pair {
-                libc::close(pair[1]);
+                die126("no_new_privs");
             }
 
             let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|v| v.as_ptr()).collect();
