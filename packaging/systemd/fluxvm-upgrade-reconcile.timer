@@ -1,0 +1,14 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+[Unit]
+Description=Periodically reconcile stale FluxVM Sentinel upgrades
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=fluxvm-upgrade-reconcile.service
+
+[Install]
+WantedBy=timers.target

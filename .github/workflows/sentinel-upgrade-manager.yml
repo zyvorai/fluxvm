@@ -1,0 +1,58 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+name: Sentinel Stateful Upgrade Manager
+
+on:
+  pull_request:
+    paths:
+      - 'tools/fluxvm_upgrade_manager.py'
+      - 'tools/tests/test_fluxvm_upgrade_manager.py'
+      - 'scripts/test-sentinel-upgrade-manager-*.sh'
+      - 'scripts/install-sentinel-upgrade-manager.sh'
+      - 'schemas/sentinel-upgrade-plan.schema.json'
+      - 'examples/sentinel-upgrade-plan.json'
+      - 'packaging/systemd/fluxvm-upgrade-reconcile.*'
+      - 'docs/sentinel-stateful-upgrades.md'
+      - '.github/workflows/sentinel-upgrade-manager.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/fluxvm_upgrade_manager.py'
+      - 'scripts/test-sentinel-upgrade-manager-*.sh'
+      - 'schemas/sentinel-upgrade-plan.schema.json'
+      - 'packaging/systemd/fluxvm-upgrade-reconcile.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static and transaction tests
+        run: ./scripts/test-sentinel-upgrade-manager-static.sh
+      - name: Shell syntax
+        run: |
+          bash -n scripts/install-sentinel-upgrade-manager.sh
+          bash -n scripts/test-sentinel-upgrade-manager-static.sh
+          bash -n scripts/test-sentinel-upgrade-manager-host.sh
+      - name: systemd unit validation
+        run: |
+          sudo install -d /usr/libexec/fluxvm
+          sudo install -m 0755 tools/fluxvm_upgrade_manager.py /usr/libexec/fluxvm/fluxvm-upgrade
+          sudo mkdir -p /var/lib/fluxvm/sentinel-upgrades /sys/fs/bpf/fluxvm
+          systemd-analyze verify packaging/systemd/fluxvm-upgrade-reconcile.service packaging/systemd/fluxvm-upgrade-reconcile.timer
+      - name: Probe smoke
+        run: python3 tools/fluxvm_upgrade_manager.py probe examples/sentinel-upgrade-plan.json
+
+  privileged-lab:
+    if: ${{ vars.FLUXVM_UPGRADE_DESTRUCTIVE_E2E == '1' }}
+    runs-on: [self-hosted, linux, x64, fluxvm-ebpf-lab]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Destructive map roundtrip
+        env:
+          FLUXVM_UPGRADE_DESTRUCTIVE_E2E: '1'
+        run: sudo -E ./scripts/test-sentinel-upgrade-manager-host.sh
