@@ -85,6 +85,26 @@ struct fluxvm_pod_policy_stat {
     __u64 audited;
 };
 
+/* FLUXVM_SECURE_CONTAINERS_SET17
+ * Rule-attributed directional telemetry for the Set 14 rich-rule path.
+ * `rule_index == FLUXVM_POD_RULE_MISS` means an isolated direction reached
+ * the default deny/audit result without matching any allow rule. The map is
+ * additive: old schema-v8 control planes ignore it and the policy wire/map
+ * ABIs above stay unchanged. Per-CPU values avoid atomic contention on a
+ * hot VM edge; userspace aggregates CPUs at scrape time. */
+#define FLUXVM_POD_RULE_MISS 0xffffffffu
+struct fluxvm_pod_rule_hit_key {
+    __u32 pod_id;
+    __u32 rule_index;
+    __u8 direction;
+    __u8 verdict;
+    __u16 reserved;
+};
+
+struct fluxvm_pod_rule_hit_value {
+    __u64 packets;
+};
+
 _Static_assert(sizeof(struct fluxvm_pod_policy) == 16, "pod policy ABI");
 _Static_assert(sizeof(struct fluxvm_pid4_key) == 8, "pod pid4 ABI");
 _Static_assert(sizeof(struct fluxvm_pid6_key) == 20, "pod pid6 ABI");
@@ -92,6 +112,8 @@ _Static_assert(sizeof(struct fluxvm_pid4_port_key) == 12, "pod pid4 port ABI");
 _Static_assert(sizeof(struct fluxvm_pid6_port_key) == 24, "pod pid6 port ABI");
 _Static_assert(sizeof(struct fluxvm_pod_rule) == 28, "pod rich rule ABI");
 _Static_assert(sizeof(struct fluxvm_pod_policy_stat) == 24, "pod policy stat ABI");
+_Static_assert(sizeof(struct fluxvm_pod_rule_hit_key) == 12, "pod rule-hit key ABI");
+_Static_assert(sizeof(struct fluxvm_pod_rule_hit_value) == 8, "pod rule-hit value ABI");
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -142,6 +164,15 @@ struct {
     __type(value, struct fluxvm_pod_policy_stat);
 } fluxvm_ppstat SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
+    /* 64 allow slots plus per-direction miss outcomes leave ample headroom
+     * without turning telemetry into an unbounded cardinality source. */
+    __uint(max_entries, 256);
+    __type(key, struct fluxvm_pod_rule_hit_key);
+    __type(value, struct fluxvm_pod_rule_hit_value);
+} fluxvm_prhit SEC(".maps");
+
 static __always_inline struct fluxvm_pod_policy_stat *
 fluxvm_ppstat_for(__u32 pod_id)
 {
@@ -167,6 +198,29 @@ fluxvm_count_pod_policy(__u32 pod_id, int verdict)
         s->dropped += 1;
     else if (verdict == 2)
         s->audited += 1;
+}
+
+static __always_inline void
+fluxvm_count_pod_rule_hit(
+    __u32 pod_id,
+    __u32 rule_index,
+    __u8 direction,
+    __u8 verdict)
+{
+    struct fluxvm_pod_rule_hit_key key = {
+        .pod_id = pod_id,
+        .rule_index = rule_index,
+        .direction = direction,
+        .verdict = verdict,
+    };
+    struct fluxvm_pod_rule_hit_value *v =
+        bpf_map_lookup_elem(&fluxvm_prhit, &key);
+    if (v) {
+        v->packets += 1;
+        return;
+    }
+    struct fluxvm_pod_rule_hit_value initial = {.packets = 1};
+    bpf_map_update_elem(&fluxvm_prhit, &key, &initial, BPF_NOEXIST);
 }
 
 static __always_inline int
@@ -289,15 +343,21 @@ fluxvm_pod_policy_rich_verdict(
         if (fluxvm_rule_matches(r, pod_id, direction, family, peer,
                                 protocol, dport)) {
             fluxvm_count_pod_policy(pod_id, 0);
+            fluxvm_count_pod_rule_hit(
+                pod_id, i, direction, FLUXVM_POD_VERDICT_ALLOW);
             return FLUXVM_POD_VERDICT_ALLOW;
         }
     }
 
     if (p->flags & FLUXVM_PSPOL_AUDIT) {
         fluxvm_count_pod_policy(pod_id, 2);
+        fluxvm_count_pod_rule_hit(
+            pod_id, FLUXVM_POD_RULE_MISS, direction, FLUXVM_POD_VERDICT_AUDIT);
         return FLUXVM_POD_VERDICT_AUDIT;
     }
     fluxvm_count_pod_policy(pod_id, 1);
+    fluxvm_count_pod_rule_hit(
+        pod_id, FLUXVM_POD_RULE_MISS, direction, FLUXVM_POD_VERDICT_DENY);
     return FLUXVM_POD_VERDICT_DENY;
 }
 

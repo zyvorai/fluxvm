@@ -1,10 +1,11 @@
 # Next features (ranked)
 
-Living backlog after Secure Containers Set 16 (conntrack revocation safety +
-VM-level SCTP) and Sentinel's operational tooling trio — Set 13E (migration
-orchestrator), Set 14E (stateful upgrade manager), Set 15E (fleet rollout +
-canary controller) — plus in-tree KVM FC/CH parity (P0–P2). Prefer closing
-proven gates over inventing new wire formats.
+Living backlog after Secure Containers Set 17 (rule-attributed NetworkPolicy
+telemetry) and Set 16 (conntrack revocation safety + VM-level SCTP), plus
+Sentinel's operational tooling trio — Set 13E (migration orchestrator),
+Set 14E (stateful upgrade manager), Set 15E (fleet rollout + canary
+controller) — and in-tree KVM FC/CH parity (P0–P2). Prefer closing proven
+gates over inventing new wire formats.
 
 ## Sentinel / Secure Containers (highest leverage)
 
@@ -12,7 +13,7 @@ proven gates over inventing new wire formats.
 |---|---|---|---|
 | **S1** | Live stateful conntrack-bypass proof under a real TCP handshake | Bidirectional bypass (set14) and revocation-safe expiry/anti-replay (set16) are both implemented; nothing has yet proven a real handshake crosses a restrictive opposite-direction policy, that a tightened policy revokes an established flow before a new one, or that the SYN/INIT anti-replay check actually fires against live traffic | set14, set16, PRODUCTION |
 | **S2** | Multi-node NetworkPolicy conformance | Single-node reconcile is proven; production needs Cilium + ≥1 other CNI, real Pod-to-Pod allow/deny | set14 #4, set13 |
-| **S3** | True per-direction counters + rule-hit identity | Set 15 exports shared `fluxvm_ppstat`; operators still cannot attribute drops to a rule/direction. Set 16 confirmed this is now architectural, not just unimplemented: the Pod-ingress object shares the same counter and flags record as egress, so a real per-direction split needs a dataplane ABI change, not just an exporter change | set14 #5, set15, set16 |
+| **S3** | True per-direction counters + rule-hit identity | **Implemented by Set 17** with optional `fluxvm_prhit` (no schema-v8 ABI bump); live production scrape remains a gate | set14 #5, set15, set17 |
 | **S4** | EndpointSlice-aware Service VIP policy | Optional ClusterIP mode is selector-conservative; EndpointSlice closes Service-IP parity | set14 #3 |
 | **S5** | Indexed LPM/L4 (or verifier-budget raise) | 64-rule linear `fluxvm_prules` scan may become p99-costly | set14 #1 |
 | **S6** | IPv6 extension-header walking | Incomplete IPv6 L4 parse under verifier budget; also blocks SCTP behind IPv6 extension headers (set16) | set14 #2, set16 |
@@ -41,18 +42,16 @@ proven gates over inventing new wire formats.
 
 ## Suggested next implementation set
 
-Set 16 landed as conntrack revocation safety (timeout expiry + anti-replay)
-and VM-level SCTP, not the S1/S3/S2-starter combination this section
-previously proposed — S1, S2 and S3 are all still open exactly as described
-above. If continuing the Secure Containers numbering, **Set 17** should be a
-thin, evidence-first set closing one of those rather than another schema
-rewrite:
+Set 17 closed S3 with optional `fluxvm_prhit` rule-attributed directional
+telemetry (Set 15 shared-counter fallback retained). S1 and S2 remain open
+exactly as described above. Prefer a thin, evidence-first follow-up rather
+than another schema rewrite:
 
 1. live CT-bypass + revocation TCP proof script against a real Secure
    Containers Pod (S1);
 2. document + CI gate for multi-node NP smoke where lab allows (S2 starter);
-3. a real per-direction counter/flags split, if S3's architectural
-   implication (a dataplane ABI change) is accepted as worth taking.
+3. production Prometheus scrape of Set 17 directional/rule metrics (S3 live
+   gate / S8).
 
 Hypervisor work should stay Firecracker/CH-matched (no novel device models):
 prefer **H1** or **H3** over inventing P3 features.
