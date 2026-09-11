@@ -1,0 +1,33 @@
+name: Sentinel Release Admission
+
+on:
+  pull_request:
+    paths:
+      - 'tools/fluxvm_release_admission.py'
+      - 'tools/tests/test_fluxvm_release_admission.py'
+      - 'schemas/sentinel-release-admission.schema.json'
+      - 'examples/sentinel-release-admission.json'
+      - 'scripts/*sentinel-release-admission*'
+      - 'docs/sentinel-release-admission.md'
+      - '.github/workflows/sentinel-release-admission.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/fluxvm_release_admission.py'
+      - 'tools/tests/test_fluxvm_release_admission.py'
+      - 'schemas/sentinel-release-admission.schema.json'
+      - 'scripts/*sentinel-release-admission*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static and unit gates
+        run: ./scripts/test-sentinel-release-admission-static.sh
+      - name: Host smoke
+        run: ./scripts/test-sentinel-release-admission-host.sh

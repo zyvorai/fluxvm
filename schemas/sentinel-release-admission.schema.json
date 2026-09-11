@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zyvor.dev/schemas/sentinel-release-admission.schema.json",
+  "title": "FluxVM Sentinel Set 17E Release Admission Plan",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "admission_id", "candidate", "nodes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "admission_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "candidate": {
+      "type": "object",
+      "required": ["release_id", "artifact_path", "artifact_sha256"],
+      "properties": {
+        "release_id": {"type": "string", "minLength": 1},
+        "artifact_path": {"type": "string", "minLength": 1},
+        "artifact_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "manifest_path": {"type": "string"},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        "state_abis": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "path"],
+        "properties": {
+          "name": {"type": "string"},
+          "kind": {"enum": ["json", "evidence-dir"]},
+          "path": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+          "document": {"type": "string"},
+          "assertions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["pointer", "op"],
+              "properties": {
+                "pointer": {"type": "string"},
+                "op": {"enum": ["eq", "ne", "lt", "le", "gt", "ge", "contains", "matches"]},
+                "value": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "nodes": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "required": ["name", "host"],
+        "properties": {
+          "name": {"type": "string"}, "host": {"type": "string"}, "user": {"type": "string"},
+          "port": {"type": "integer", "minimum": 1, "maximum": 65535}, "identity_file": {"type": "string"},
+          "cohort": {"type": "string"}, "arch": {"type": "string"}, "kernel_regex": {"type": "string"},
+          "required_capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+        }
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "properties": {
+        "allow_missing_current_state_abi": {"type": "boolean"},
+        "allowed_from_state_abis": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "required_capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "min_reachable_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "min_compatible_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "max_unreachable_nodes": {"type": "integer", "minimum": 0},
+        "min_nodes_per_cohort": {"type": "integer", "minimum": 1},
+        "require_each_cohort_compatible": {"type": "boolean"},
+        "max_parallel": {"type": "integer", "minimum": 1},
+        "probe_timeout_seconds": {"type": "number", "minimum": 1},
+        "admission_ttl_seconds": {"type": "integer", "minimum": 60, "maximum": 604800}
+      }
+    },
+    "evidence_signing_key": {"type": "string"},
+    "allow_insecure_host_key": {"type": "boolean"}
+  }
+}
