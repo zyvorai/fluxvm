@@ -76,7 +76,7 @@ jobs:
             linux-tools-common linux-tools-generic
           # Azure GH runners need the matching kernel tools package for a real bpftool binary.
           sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
-          bpftool version
+          bpftool version || echo 'bpftool still stubbed for this kernel; verify step will use llvm-objdump fallback'
       - name: Rust format/check/tests
         working-directory: fluxvm
         run: |
