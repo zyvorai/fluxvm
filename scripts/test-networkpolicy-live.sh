@@ -234,7 +234,7 @@ curl -sf "http://127.0.0.1:$MOCK_PORT/v1/vms" >/dev/null || { echo "mock FluxVM 
 
 echo "-- building and running fluxvm-networkpolicy-controller --"
 if [[ -n "${CONTROLLER_BIN:-}" ]]; then
-  # go.mod pins `go 1.23`; a host whose installed `go` is older and has no
+  # go.mod pins `go 1.27`; a host whose installed `go` is older and has no
   # network access to auto-download that toolchain (a pre-existing
   # environment gap, unrelated to Set 14) can't `go build` this locally --
   # set CONTROLLER_BIN to a binary cross-compiled elsewhere instead.

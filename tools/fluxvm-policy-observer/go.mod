@@ -1,3 +1,3 @@
 module github.com/zyvorai/fluxvm/tools/fluxvm-policy-observer
 
-go 1.23
+go 1.27
