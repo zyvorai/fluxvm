@@ -24,17 +24,23 @@ var version = "dev"
 
 func main() {
 	var (
-		nodeName          = flag.String("node-name", env("NODE_NAME", ""), "Kubernetes node name managed by this controller")
-		interval          = flag.Duration("interval", envDuration("RECONCILE_INTERVAL", 5*time.Second), "full reconciliation interval")
-		kubeURL           = flag.String("kube-api", env("KUBE_API", ""), "Kubernetes API URL; defaults to in-cluster service")
-		kubeToken         = flag.String("kube-token-file", env("KUBE_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"), "Kubernetes bearer token file")
-		kubeCA            = flag.String("kube-ca-file", env("KUBE_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"), "Kubernetes CA bundle")
-		kubeInsecure      = flag.Bool("kube-insecure-skip-verify", envBool("KUBE_INSECURE_SKIP_VERIFY", false), "skip Kubernetes TLS verification (not recommended)")
-		fluxURL           = flag.String("fluxvm-url", env("FLUXVM_URL", "http://127.0.0.1:7788"), "node-local FluxVM API URL")
-		fluxToken         = flag.String("fluxvm-token-file", env("FLUXVM_TOKEN_FILE", ""), "FluxVM bearer token file")
-		fluxCA            = flag.String("fluxvm-ca-file", env("FLUXVM_CA_FILE", ""), "FluxVM CA bundle for HTTPS")
-		fluxInsecure      = flag.Bool("fluxvm-insecure-skip-verify", envBool("FLUXVM_INSECURE_SKIP_VERIFY", false), "skip FluxVM TLS verification (not recommended)")
-		maxAddresses      = flag.Int("max-addresses", envInt("MAX_ADDRESSES", 12000), "maximum exact allow-address entries per Pod")
+		nodeName     = flag.String("node-name", env("NODE_NAME", ""), "Kubernetes node name managed by this controller")
+		interval     = flag.Duration("interval", envDuration("RECONCILE_INTERVAL", 5*time.Second), "full reconciliation interval")
+		kubeURL      = flag.String("kube-api", env("KUBE_API", ""), "Kubernetes API URL; defaults to in-cluster service")
+		kubeToken    = flag.String("kube-token-file", env("KUBE_TOKEN_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/token"), "Kubernetes bearer token file")
+		kubeCA       = flag.String("kube-ca-file", env("KUBE_CA_FILE", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"), "Kubernetes CA bundle")
+		kubeInsecure = flag.Bool("kube-insecure-skip-verify", envBool("KUBE_INSECURE_SKIP_VERIFY", false), "skip Kubernetes TLS verification (not recommended)")
+		fluxURL      = flag.String("fluxvm-url", env("FLUXVM_URL", "http://127.0.0.1:7788"), "node-local FluxVM API URL")
+		fluxToken    = flag.String("fluxvm-token-file", env("FLUXVM_TOKEN_FILE", ""), "FluxVM bearer token file")
+		fluxCA       = flag.String("fluxvm-ca-file", env("FLUXVM_CA_FILE", ""), "FluxVM CA bundle for HTTPS")
+		fluxInsecure = flag.Bool("fluxvm-insecure-skip-verify", envBool("FLUXVM_INSECURE_SKIP_VERIFY", false), "skip FluxVM TLS verification (not recommended)")
+		maxAddresses = flag.Int("max-addresses", envInt("MAX_ADDRESSES", 12000), "legacy Set 13 address-limit compatibility knob")
+		// 64, not the kit's original 512: bpf/fluxvm_pod_policy.bpf.h's
+		// FLUXVM_MAX_POD_RULE is capped at 64 because a 512-iteration
+		// non-unrolled scan in fluxvm_pod_policy_rich_verdict blows the
+		// kernel verifier's BPF_COMPLEXITY_LIMIT_JMP_SEQ (8192 jumps) when
+		// present in both the v4 and v6 paths of one program.
+		maxRules          = flag.Int("max-rules", envInt("MAX_RULES", 64), "maximum Set 14 directional CIDR/L4 tuple rules per Pod")
 		includeServiceIPs = flag.Bool("include-service-clusterips", envBool("INCLUDE_SERVICE_CLUSTERIPS", false), "conservatively include ClusterIPs whose selected backends are all allowed peers")
 		globalAudit       = flag.Bool("audit", envBool("POLICY_AUDIT", false), "set generated FluxVM Pod policies to audit/log-and-allow mode")
 		metricsAddr       = flag.String("metrics-listen", env("METRICS_LISTEN", ":9090"), "health/readiness/metrics listen address")
@@ -81,7 +87,7 @@ func main() {
 
 	ctrl := &controller.Controller{
 		Kube: kubeClient, FluxVM: fluxClient, Metrics: m, Logger: logger,
-		NodeName: *nodeName, Interval: *interval, MaxAddresses: *maxAddresses,
+		NodeName: *nodeName, Interval: *interval, MaxAddresses: *maxAddresses, MaxRules: *maxRules,
 		IncludeServiceClusterIPs: *includeServiceIPs, GlobalAudit: *globalAudit,
 	}
 	logger.Info("starting FluxVM NetworkPolicy controller", "version", version, "node", *nodeName, "interval", interval.String(), "fluxvm_url", *fluxURL)

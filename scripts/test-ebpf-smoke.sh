@@ -3,7 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Privileged kernel smoke for Network Fabric v3.
 # Covers: TC attach, fail-closed policy, IPv4/IPv6 CIDRs, L4 policy,
-# fixed-window PPS limiting, flow/stats maps, and IPv4/IPv6 XDP blocking.
+# fixed-window PPS limiting, flow/stats maps, IPv4/IPv6 XDP blocking, Set 6S/
+# 13 exact Pod-scoped identity/port policy, and Set 14's unified fluxvm_prules
+# rich CIDR+L4 tuple rules (including SCTP) enforced both by the main
+# fluxvm_egress program and by the separate fluxvm_pod_ingress.bpf.o object
+# loaded with shared pinned maps.
 set -euo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -16,12 +20,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OBJ_DIR="${1:-$ROOT/dist/bpf}"
 TC_OBJ="$OBJ_DIR/fluxvm_tc.bpf.o"
 XDP_OBJ="$OBJ_DIR/fluxvm_xdp.bpf.o"
+POD_ING_OBJ="$OBJ_DIR/fluxvm_pod_ingress.bpf.o"
 
 for cmd in bpftool tc ip python3 ping mount; do
   command -v "$cmd" >/dev/null || { echo "missing $cmd" >&2; exit 2; }
 done
 [[ -f "$TC_OBJ" ]] || { echo "missing $TC_OBJ" >&2; exit 2; }
 [[ -f "$XDP_OBJ" ]] || { echo "missing $XDP_OBJ" >&2; exit 2; }
+[[ -f "$POD_ING_OBJ" ]] || { echo "missing $POD_ING_OBJ" >&2; exit 2; }
 
 SUFFIX="$$"
 A="fvmta${SUFFIX}"; A="${A:0:15}"
@@ -71,7 +77,7 @@ ip netns exec "$NSB" ping -6 -q -c 1 -W 2 "$A6" >/dev/null
 # Keep bpffs and all pinned objects in one netns session. Some CI hosts
 # remount /sys on every `ip netns exec`, so separate invocations lose mounts.
 ip netns exec "$NSA" env \
-  TC_OBJ="$TC_OBJ" XDP_OBJ="$XDP_OBJ" A="$A" NSB="$NSB" \
+  TC_OBJ="$TC_OBJ" XDP_OBJ="$XDP_OBJ" POD_ING_OBJ="$POD_ING_OBJ" A="$A" NSB="$NSB" \
   A4="$A4" B4="$B4" A6="$A6" B6="$B6" PIN="$PIN" BPFFS="$BPFFS" \
   TC_PREF="$TC_PREF" IDENTITY="$IDENTITY" \
   bash -euo pipefail <<'INNER'
@@ -132,36 +138,39 @@ print(" ".join(f"{b:02x}" for b in raw))
 PY
 }
 
-pod4_range_key() {
-  # Matches struct fluxvm_pid4_range_key in bpf/fluxvm_pod_policy.bpf.h:
-  # pod_id, address, protocol, pad0, pad1 (u16). Schema v8.
-  # Args: pod_id ip protocol
-  python3 - "$1" "$2" "$3" <<'PY'
-import ipaddress, struct, sys
-pod_id, ip, protocol = int(sys.argv[1]), sys.argv[2], int(sys.argv[3])
-raw = struct.pack("=I", pod_id) + ipaddress.IPv4Address(ip).packed + struct.pack("=BBH", protocol, 0, 0)
-print(" ".join(f"{b:02x}" for b in raw))
-PY
-}
-
-port_range_set_value() {
-  # Matches struct fluxvm_port_range_set in bpf/fluxvm_pod_policy.bpf.h:
-  # count(u8) + 3 pad bytes + up to FLUXVM_MAX_PORT_RANGES (8) (start,end)
-  # u16 pairs, host order. Schema v8. Args: start end
-  python3 - "$1" "$2" <<'PY'
-import struct, sys
-start, end = int(sys.argv[1]), int(sys.argv[2])
-raw = struct.pack("=BBBB", 1, 0, 0, 0) + struct.pack("=HH", start, end) + b"\x00" * 28
-print(" ".join(f"{b:02x}" for b in raw))
-PY
-}
-
 pod_policy_value() {
-  # u32 flags + 3*u32 reserved, matching struct fluxvm_pod_policy in
-  # bpf/fluxvm_pod_policy.bpf.h. Arg: flags
-  python3 - "$1" <<'PY'
+  # Matches struct fluxvm_pod_policy in bpf/fluxvm_pod_policy.bpf.h: flags
+  # (u32), reserved0 (u32, Set 14 rich-rule count), reserved1 (u32, Set 14
+  # wire schema version), reserved2 (u32, still spare). Args: flags
+  # [rule_count=0] [schema_version=0]
+  python3 - "$@" <<'PY'
 import struct, sys
-print(" ".join(f"{b:02x}" for b in struct.pack("=IIII", int(sys.argv[1]), 0, 0, 0)))
+flags = int(sys.argv[1])
+rule_count = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+schema_version = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+print(" ".join(f"{b:02x}" for b in struct.pack("=IIII", flags, rule_count, schema_version, 0)))
+PY
+}
+
+pod_rule_value() {
+  # Matches struct fluxvm_pod_rule in bpf/fluxvm_pod_policy.bpf.h: pod_id
+  # (u32), direction/family/protocol/prefix_len (u8 each), port_start/
+  # port_end (u16 each), address[16]. 28 bytes total, no padding (every
+  # field already falls on its natural alignment). Args: pod_id direction
+  # family protocol prefix_len port_start port_end address
+  python3 - "$@" <<'PY'
+import ipaddress, struct, sys
+pod_id, direction, family, protocol, prefix_len, port_start, port_end, addr = sys.argv[1:9]
+pod_id, direction, family = int(pod_id), int(direction), int(family)
+protocol, prefix_len = int(protocol), int(prefix_len)
+port_start, port_end = int(port_start), int(port_end)
+if family == 4:
+    raw_addr = ipaddress.IPv4Address(addr).packed + b"\x00" * 12
+else:
+    raw_addr = ipaddress.IPv6Address(addr).packed
+raw = struct.pack("=IBBBBHH", pod_id, direction, family, protocol, prefix_len, port_start, port_end) + raw_addr
+assert len(raw) == 28, len(raw)
+print(" ".join(f"{b:02x}" for b in raw))
 PY
 }
 
@@ -266,14 +275,12 @@ mkdir -p "$BPFFS"
 mount -t bpf bpf "$BPFFS"
 mkdir -p "$PIN/tc/progs" "$PIN/tc/maps" "$PIN/xdp/progs" "$PIN/xdp/maps"
 
-# Schema v8: fluxvm_tc.bpf.o now carries a second SEC("tc") program,
-# fluxvm_pod_ingress (Pod-ingress-direction enforcement). Plain `bpftool
-# prog load` pins only the first program section it finds in ELF order --
-# with two SEC("tc") entries in one object, that is no longer reliably
-# fluxvm_egress. `loadall` pins every program in the object by its own
-# function name, matching crates/fluxvm-network/src/ebpf.rs's own fix for
-# the identical hazard.
-bpftool prog loadall "$TC_OBJ" "$PIN/tc/progs" \
+# fluxvm_tc.bpf.o carries exactly one SEC("tc") program again under Set 14
+# -- the separate Pod-ingress object (fluxvm_pod_ingress.bpf.o) is loaded
+# on demand later in this script, sharing this object's pinned maps, the
+# same way crates/fluxvm-network/src/ebpf.rs's sync_pod_ingress_attachment
+# does for a real VM.
+bpftool prog load "$TC_OBJ" "$PIN/tc/progs/fluxvm_egress" \
   type classifier pinmaps "$PIN/tc/maps"
 IFINDEX="$(cat "/sys/class/net/$A/ifindex")"
 IFKEY="$(hex_u32 "$IFINDEX")"
@@ -443,68 +450,200 @@ expect_ping4
 bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_port" key hex $PORTKEY4
 expect_no_ping4
 
-# Schema v8: with both the address-wide fluxvm_pid4 entry and the exact
-# fluxvm_pid4_port entry gone, a peer with no fluxvm_pid4_cidr hit either
-# still falls through correctly, and a CIDR entry covering the peer resolves
-# the same way an exact address would. lpm_prefix=56 == 32 (pod_id bits,
-# always fully matched) + 24 (a /24 covering $A4).
-CIDR4="$(lpm4_key 56 "$POD_ID" "$A4")"
-# shellcheck disable=SC2086
-bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_cidr" key hex $CIDR4 value hex $ONE
-expect_ping4
-# shellcheck disable=SC2086
-bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_cidr" key hex $CIDR4
-expect_no_ping4
+# ---- Set 14: unified fluxvm_prules rich directional CIDR+L4 tuple rules ----
+FLUXVM_PSPOL_RICH_RULES=8
+FLUXVM_PSPOL_EGRESS_ISOLATED=16
+FLUXVM_PSPOL_INGRESS_ISOLATED=32
+SCHEMA_V2=2
+RULE_SLOT="$(hex_u32 0)"
 
-# Schema v8: endPort range fallback. A range that does not cover the
-# packet's own port (ICMP's port is always 0, same reasoning as the exact
-# wrong-port case above) still misses; a range that does cover it resolves.
-RANGEKEY4="$(pod4_range_key "$POD_ID" "$A4" 1)"
-WRONGRANGE="$(port_range_set_value 100 200)"
+# Egress, CIDR-only rule (protocol=any): an isolated Pod with zero rules
+# denies everything (Kubernetes semantics for an egress-isolating policy
+# with no matching allow rule); a /24 rule covering $A4 then allows the
+# ICMP ping through the real fluxvm_prules scan, not an approximation.
+RICH_EGRESS_FLAGS=$((FLUXVM_PSPOL_ENABLED | FLUXVM_PSPOL_RICH_RULES | FLUXVM_PSPOL_EGRESS_ISOLATED))
+RICH_EMPTY="$(pod_policy_value "$RICH_EGRESS_FLAGS" 0 "$SCHEMA_V2")"
 # shellcheck disable=SC2086
-bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_port_range" key hex $RANGEKEY4 value hex $WRONGRANGE
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY value hex $RICH_EMPTY
 expect_no_ping4
-RIGHTRANGE="$(port_range_set_value 0 10)"
+CIDR_RULE="$(pod_rule_value "$POD_ID" 1 4 0 24 0 0 "$A4")"
 # shellcheck disable=SC2086
-bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_port_range" key hex $RANGEKEY4 value hex $RIGHTRANGE
+bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $CIDR_RULE
+RICH_ONE="$(pod_policy_value "$RICH_EGRESS_FLAGS" 1 "$SCHEMA_V2")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY value hex $RICH_ONE
 expect_ping4
-# shellcheck disable=SC2086
-bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_port_range" key hex $RANGEKEY4
-expect_no_ping4
+bpftool -j map dump pinned "$PIN/tc/maps/fluxvm_ppstat" | grep -q 'key'
 
+# Protocol+port scoping at the same rule slot: narrowing the rule to
+# tcp/18080 leaves both ICMP and tcp/18081 denied while tcp/18080 is
+# allowed -- proves the tuple's protocol and port fields are enforced, not
+# just the CIDR.
+python3 - <<'PY' &
+import socket, threading, time
+
+def serve(port):
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("10.77.0.1", port)); s.listen(8); s.settimeout(0.25)
+    until = time.time() + 8
+    while time.time() < until:
+        try:
+            c, _ = s.accept(); c.close()
+        except socket.timeout:
+            pass
+    s.close()
+for p in (18080, 18081):
+    threading.Thread(target=serve, args=(p,), daemon=True).start()
+time.sleep(8)
+PY
+SERVER_PID=$!
+sleep 0.4
+TCP_RULE="$(pod_rule_value "$POD_ID" 1 4 6 32 18080 18080 "$A4")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $TCP_RULE
+expect_no_ping4
+ip netns exec "$NSB" python3 - <<'PY'
+import socket
+s = socket.create_connection(("10.77.0.1", 18080), 1); s.close()
+PY
+if ip netns exec "$NSB" python3 - <<'PY'
+import socket
+s = socket.create_connection(("10.77.0.1", 18081), 1); s.close()
+PY
+then
+  echo "expected tcp/18081 to be blocked by the Set 14 rich rule" >&2
+  exit 1
+fi
+kill "$SERVER_PID" 2>/dev/null || true
+wait "$SERVER_PID" 2>/dev/null || true
+
+# SCTP: a raw minimal SCTP common header (source/dest port only, no real
+# association) proves fluxvm_tc.bpf.c's IPPROTO_SCTP parse_ports4 branch
+# extracts ports correctly and that the rich rule's protocol field actually
+# discriminates SCTP from TCP, not just "any L4". A raw AF_INET/SOCK_RAW
+# listener bound to that protocol number receives a copy of any
+# locally-delivered packet with it regardless of whether the host has a
+# real SCTP association -- it only sees the packet at all if the TC
+# program let it through first.
+SCTP_PROTO=132
+SCTP_PORT=19090
+SCTP_RESULT="/tmp/fluxvm-smoke-sctp-result-$$"
+send_sctp() {
+  ip netns exec "$NSB" python3 - "$1" "$SCTP_PROTO" "$SCTP_PORT" <<'PY'
+import socket, struct, sys
+dst, proto, port = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+payload = struct.pack("!HH", 44444, port) + b"\xde\xad\xbe\xef"
+s = socket.socket(socket.AF_INET, socket.SOCK_RAW, proto)
+s.sendto(payload, (dst, 0))
+PY
+}
+sctp_probe() {
+  local expect="$1"
+  : > "$SCTP_RESULT"
+  python3 - "$SCTP_PROTO" > "$SCTP_RESULT" <<'PY' &
+import socket, sys
+proto = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_RAW, proto)
+s.settimeout(2)
+try:
+    data, _ = s.recvfrom(4096)
+    # A raw IPPROTO socket's recvfrom always includes the IP header (see
+    # raw(7)) -- skip past it (IHL is the low nibble of the first byte,
+    # in 4-byte words) before checking our marker, which sits right after
+    # the 4-byte source/dest port fields we sent as the SCTP payload.
+    ihl = (data[0] & 0x0f) * 4
+    marker = data[ihl + 4:ihl + 8]
+    print("received" if marker == b"\xde\xad\xbe\xef" else "other")
+except socket.timeout:
+    print("timeout")
+PY
+  local pid=$!
+  sleep 0.3
+  send_sctp "$A4"
+  wait "$pid" 2>/dev/null || true
+  local got
+  got="$(cat "$SCTP_RESULT")"
+  if [[ "$expect" == "allow" && "$got" != "received" ]]; then
+    echo "expected SCTP packet to be allowed by the Set 14 SCTP rule (got: $got)" >&2
+    exit 1
+  fi
+  if [[ "$expect" == "deny" && "$got" == "received" ]]; then
+    echo "expected SCTP packet to be blocked before an SCTP rule exists" >&2
+    exit 1
+  fi
+}
+sctp_probe deny
+SCTP_RULE="$(pod_rule_value "$POD_ID" 1 4 "$SCTP_PROTO" 32 "$SCTP_PORT" "$SCTP_PORT" "$A4")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $SCTP_RULE
+sctp_probe allow
+
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT
 # shellcheck disable=SC2086
 bpftool map delete pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY
 tc filter del dev "$A" ingress pref "$TC_PREF" handle 1 bpf
 
-# Schema v8: Pod-ingress-direction enforcement (fluxvm_pod_ingress,
-# attached at the tc *egress* hook -- traffic leaving $A back toward $NSB,
-# which for an ICMP round trip is the echo *reply* $A's kernel generates in
-# response to $NSB's request. Blocking that reply fails the same `ping`
-# round trip expect_ping4/expect_no_ping4 already assert on, so those
-# helpers double as the assertion here with no changes needed -- only which
-# packet actually gets dropped differs, not how the test observes it.
-# fluxvm_egress's own pod policy is left unconfigured (no fluxvm_pspol
-# entry, deleted just above) so only the new ingress-direction maps
-# determine the outcome below.
-tc filter add dev "$A" egress pref "$TC_PREF" handle 1 bpf da \
+# ---- Set 14: separate fluxvm_pod_ingress.bpf.o object, shared pinned maps ----
+# Loaded on demand (as crates/fluxvm-network/src/ebpf.rs's
+# sync_pod_ingress_attachment does for a real VM), binding its map
+# references by name to this object's already-pinned maps rather than
+# introducing a second, independent set of Pod policy maps. Traffic leaving
+# $A back toward $NSB -- for an ICMP round trip, the echo *reply* $A's
+# kernel generates in response to $NSB's request -- is what this program
+# inspects; blocking that reply fails the same expect_ping4/expect_no_ping4
+# helpers already used above.
+bpftool prog load "$POD_ING_OBJ" "$PIN/tc/progs/fluxvm_pod_ingress" type classifier \
+  map name fluxvm_id pinned "$PIN/tc/maps/fluxvm_id" \
+  map name fluxvm_pspol pinned "$PIN/tc/maps/fluxvm_pspol" \
+  map name fluxvm_pid4 pinned "$PIN/tc/maps/fluxvm_pid4" \
+  map name fluxvm_pid6 pinned "$PIN/tc/maps/fluxvm_pid6" \
+  map name fluxvm_pid4_port pinned "$PIN/tc/maps/fluxvm_pid4_port" \
+  map name fluxvm_pid6_port pinned "$PIN/tc/maps/fluxvm_pid6_port" \
+  map name fluxvm_prules pinned "$PIN/tc/maps/fluxvm_prules" \
+  map name fluxvm_ppstat pinned "$PIN/tc/maps/fluxvm_ppstat" \
+  map name fluxvm_ct pinned "$PIN/tc/maps/fluxvm_ct"
+# Confirm real map sharing, not just a same-named coincidence: every map id
+# the ingress program reports must already appear in fluxvm_egress's list.
+python3 - "$PIN/tc/progs/fluxvm_egress" "$PIN/tc/progs/fluxvm_pod_ingress" <<'PY'
+import json, subprocess, sys
+egress, ingress = sys.argv[1], sys.argv[2]
+def map_ids(pin):
+    out = subprocess.check_output(["bpftool", "-j", "prog", "show", "pinned", pin], text=True)
+    obj = json.loads(out)
+    obj = obj[0] if isinstance(obj, list) else obj
+    return set(obj.get("map_ids", []))
+shared = map_ids(ingress)
+if not shared or not shared.issubset(map_ids(egress)):
+    sys.exit("fluxvm_pod_ingress map_ids are not a subset of fluxvm_egress's")
+PY
+tc filter add dev "$A" egress pref 49153 handle 2 bpf da \
   pinned "$PIN/tc/progs/fluxvm_pod_ingress"
-tc filter show dev "$A" egress pref "$TC_PREF" | grep -q 'bpf'
-expect_ping4
+tc filter show dev "$A" egress pref 49153 | grep -q 'bpf'
+
+# Same rich-rule mechanics as the egress test above, but direction=INGRESS
+# (2) and matched against the echo reply's source address ($A4, the "remote
+# peer" as seen from the guest's perspective).
+RICH_INGRESS_FLAGS=$((FLUXVM_PSPOL_ENABLED | FLUXVM_PSPOL_RICH_RULES | FLUXVM_PSPOL_INGRESS_ISOLATED))
+RICH_EMPTY_IN="$(pod_policy_value "$RICH_INGRESS_FLAGS" 0 "$SCHEMA_V2")"
 # shellcheck disable=SC2086
-bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol_in" key hex $POD_POLICY_KEY value hex $POD_POLICY_VALUE
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY value hex $RICH_EMPTY_IN
 expect_no_ping4
-PODKEY4_IN="$(pod4_key "$POD_ID" "$A4")"
+INGRESS_RULE="$(pod_rule_value "$POD_ID" 2 4 0 32 0 0 "$A4")"
 # shellcheck disable=SC2086
-bpftool map update pinned "$PIN/tc/maps/fluxvm_pid4_in" key hex $PODKEY4_IN value hex $ONE
+bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $INGRESS_RULE
+RICH_ONE_IN="$(pod_policy_value "$RICH_INGRESS_FLAGS" 1 "$SCHEMA_V2")"
+# shellcheck disable=SC2086
+bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY value hex $RICH_ONE_IN
 expect_ping4
-bpftool -j map dump pinned "$PIN/tc/maps/fluxvm_ppstat_in" | grep -q 'key'
-# shellcheck disable=SC2086
-bpftool map delete pinned "$PIN/tc/maps/fluxvm_pid4_in" key hex $PODKEY4_IN
-expect_no_ping4
+bpftool -j map dump pinned "$PIN/tc/maps/fluxvm_ppstat" | grep -q 'key'
 
 # shellcheck disable=SC2086
-bpftool map delete pinned "$PIN/tc/maps/fluxvm_pspol_in" key hex $POD_POLICY_KEY
-tc filter del dev "$A" egress pref "$TC_PREF" handle 1 bpf
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT
+# shellcheck disable=SC2086
+bpftool map delete pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY
+tc filter del dev "$A" egress pref 49153 handle 2 bpf
 INNER
 
-echo "FluxVM Network Fabric v3 TC/IPv4/IPv6/L4/rate/XDP kernel smoke test passed"
+echo "FluxVM Network Fabric v3 TC/IPv4/IPv6/L4/rate/XDP/Set-14-Pod-policy kernel smoke test passed"
+echo "not covered here: live stateful conntrack bypass between the egress and Pod-ingress programs (tracked follow-up, see docs/secure-containers-set14.md)"

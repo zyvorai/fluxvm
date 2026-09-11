@@ -41,6 +41,7 @@ type Controller struct {
 	NodeName                 string
 	Interval                 time.Duration
 	MaxAddresses             int
+	MaxRules                 int
 	IncludeServiceClusterIPs bool
 	GlobalAudit              bool
 }
@@ -149,6 +150,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 
 		compiled, compileErr := policy.Compile(pod, snapshot, policy.Options{
 			MaxAddresses:             c.MaxAddresses,
+			MaxRules:                 c.MaxRules,
 			IncludeServiceClusterIPs: c.IncludeServiceClusterIPs,
 			GlobalAudit:              c.GlobalAudit,
 		})
@@ -158,7 +160,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		}
 		if compileErr != nil {
 			// Compile returns a safe deny-all policy whenever it can identify
-			// the target as egress-isolated but cannot represent the rules.
+			// the target as NetworkPolicy-isolated but cannot represent the rules.
 			// Apply that policy rather than leaving a potentially stale wider
 			// policy in place.
 			c.Logger.Error("NetworkPolicy compile error; applying safe deny", "pod", pod.Metadata.Namespace+"/"+pod.Metadata.Name, "error", compileErr)
@@ -219,8 +221,10 @@ func (c *Controller) applyIfChanged(ctx context.Context, pod kube.Pod, vm fluxvm
 		"vm_id", vm.ID,
 		"default_deny", desired.DefaultDeny,
 		"audit", desired.AuditMode,
-		"allow_addresses", len(desired.AllowAddresses),
-		"allow_port_rules", len(desired.AllowPortRules),
+		"schema_version", desired.SchemaVersion,
+		"ingress_isolated", desired.IngressIsolated,
+		"egress_isolated", desired.EgressIsolated,
+		"tuple_rules", len(desired.Rules),
 		"selected_policies", strings.Join(compiled.SelectedPolicies, ","))
 	return nil
 }

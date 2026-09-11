@@ -1,5 +1,12 @@
 # Secure Containers Set 13 — Kubernetes NetworkPolicy control plane
 
+> **Superseded for ingress/CIDR/`endPort`/named-port behavior by [Set 14](secure-containers-set14.md)**,
+> which replaces this document's exact-peer/exact-port model with a versioned
+> directional CIDR+L4 tuple rule schema, real `ipBlock.except` subtraction,
+> SCTP, and a separate stateful Pod-ingress program. The rest of this
+> document — why a separate controller, the overall reconciliation loop, and
+> Service-VIP handling — still applies unchanged.
+
 Set 13 closes the control-plane gap left intentionally open by Sentinel Set 6S. The VM-edge dataplane already accepts a Pod-scoped policy containing `default_deny`, `audit_mode`, exact IPv4/IPv6 allow addresses and exact deny addresses. Set 13 adds the Kubernetes controller that continuously derives that state from `networking.k8s.io/v1 NetworkPolicy`.
 
 ## Why this is a separate controller

@@ -1,0 +1,41 @@
+# Example only. Adjust labels, namespaces and ports for your workloads.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fluxvm-secure-container-web
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: secure-web
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              access: frontend
+      ports:
+        - protocol: TCP
+          port: https
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+            except:
+              - 10.10.0.0/16
+      ports:
+        - protocol: TCP
+          port: 8000
+          endPort: 8010
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              access: dns
+          podSelector:
+            matchLabels:
+              app: dns
+      ports:
+        - protocol: UDP
+          port: 53
