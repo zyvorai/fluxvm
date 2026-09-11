@@ -1,0 +1,14 @@
+[Unit]
+Description=FluxVM Sentinel fleet rollout reconciliation
+After=network-online.target
+ConditionPathExists=/etc/fluxvm/fleet-rollout.json
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/fluxvm/fluxvm-fleet --state-dir /var/lib/fluxvm/sentinel-fleet-rollouts status /etc/fluxvm/fleet-rollout.json
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/fluxvm/sentinel-fleet-rollouts
