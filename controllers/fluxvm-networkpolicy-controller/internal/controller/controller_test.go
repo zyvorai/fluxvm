@@ -62,16 +62,16 @@ func TestReconcileAppliesSamePolicyToDuplicatePodVMs(t *testing.T) {
 	np := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "db-egress", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{To: []kube.NetworkPolicyPeer{{PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"role": "db"}}}}}}}}
 	uid := "uid-web"
 	ff := &fakeFlux{vms: []fluxvm.VMRecord{{ID: "vm-a", Request: fluxvm.VMRequest{PodUID: &uid}}, {ID: "vm-b", Request: fluxvm.VMRequest{PodUID: &uid}}}, policies: map[string]*fluxvm.PodNetworkPolicy{}}
-	c := &Controller{Kube: &fakeKube{pods: []kube.Pod{target, peer}, np: []kube.NetworkPolicy{np}}, FluxVM: ff, Metrics: metrics.New(), NodeName: "node-a", MaxAddresses: 100}
+	c := &Controller{Kube: &fakeKube{pods: []kube.Pod{target, peer}, np: []kube.NetworkPolicy{np}}, FluxVM: ff, Metrics: metrics.New(), NodeName: "node-a", MaxRules: 100}
 	if err := c.Reconcile(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(ff.set) != 2 {
 		t.Fatalf("set=%+v", ff.set)
 	}
-	want := []string{"10.0.0.20"}
+	want := []fluxvm.PodPolicyRule{{Direction: "egress", CIDR: "10.0.0.20/32"}}
 	for _, id := range []string{"vm-a", "vm-b"} {
-		if !reflect.DeepEqual(ff.set[id].AllowAddresses, want) {
+		if !reflect.DeepEqual(ff.set[id].Rules, want) {
 			t.Fatalf("%s=%+v", id, ff.set[id])
 		}
 	}
@@ -98,13 +98,13 @@ func TestCompileErrorStillAppliesDenyAll(t *testing.T) {
 	np := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "many", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{To: []kube.NetworkPolicyPeer{{PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"role": "peer"}}}}}}}}
 	uid := "uid-web"
 	ff := &fakeFlux{vms: []fluxvm.VMRecord{{ID: "vm-a", Request: fluxvm.VMRequest{PodUID: &uid}}}, policies: map[string]*fluxvm.PodNetworkPolicy{}}
-	c := &Controller{Kube: &fakeKube{pods: []kube.Pod{target, peer1, peer2}, np: []kube.NetworkPolicy{np}}, FluxVM: ff, Metrics: metrics.New(), NodeName: "node-a", MaxAddresses: 1}
+	c := &Controller{Kube: &fakeKube{pods: []kube.Pod{target, peer1, peer2}, np: []kube.NetworkPolicy{np}}, FluxVM: ff, Metrics: metrics.New(), NodeName: "node-a", MaxRules: 1}
 	err := c.Reconcile(context.Background())
 	if err == nil {
 		t.Fatal("expected reconciliation error")
 	}
 	p, ok := ff.set["vm-a"]
-	if !ok || !p.DefaultDeny || len(p.AllowAddresses) != 0 {
+	if !ok || !p.DefaultDeny || !p.IngressIsolated || !p.EgressIsolated || len(p.Rules) != 0 {
 		t.Fatalf("safe deny not applied: %+v", ff.set)
 	}
 }

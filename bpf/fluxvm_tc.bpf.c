@@ -88,6 +88,14 @@ struct l4_key {
     __u8 pad;
 };
 
+/* Set 14: minimal SCTP common-header prefix; only source/destination ports
+ * are needed for NetworkPolicy L4 matching. Avoid a distro-specific
+ * linux/sctp.h ABI. */
+struct fluxvm_sctphdr_min {
+    __be16 source;
+    __be16 dest;
+};
+
 struct stat_key {
     __u32 identity;
     __u32 verdict;
@@ -307,6 +315,14 @@ static __always_inline int parse_ports4(
         *dport = bpf_ntohs(udp->dest);
         return 1;
     }
+    if (iph->protocol == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp = l4;
+        if ((void *)(sctp + 1) > data_end)
+            return -1;
+        *sport = bpf_ntohs(sctp->source);
+        *dport = bpf_ntohs(sctp->dest);
+        return 1;
+    }
     *sport = 0;
     *dport = 0;
     return 0;
@@ -337,6 +353,14 @@ static __always_inline int parse_ports6(
             return -1;
         *sport = bpf_ntohs(udp->source);
         *dport = bpf_ntohs(udp->dest);
+        return 1;
+    }
+    if (ip6->nexthdr == IPPROTO_SCTP) {
+        struct fluxvm_sctphdr_min *sctp = l4;
+        if ((void *)(sctp + 1) > data_end)
+            return -1;
+        *sport = bpf_ntohs(sctp->source);
+        *dport = bpf_ntohs(sctp->dest);
         return 1;
     }
     *sport = 0;
@@ -898,7 +922,8 @@ static __always_inline int handle_ipv4(
     // Set 6S remains additive. Schema v6 preserves Pod audit as an exact
     // kernel reason instead of losing it behind the boolean compatibility API.
     if (cfg->pod_id && allowed) {
-        int pod_verdict = fluxvm_pod_policy_verdict4(cfg->pod_id, iph->daddr, iph->protocol, dport);
+        int pod_verdict = fluxvm_pod_policy_verdict4_tuple(
+            cfg->pod_id, FLUXVM_POD_DIR_EGRESS, iph->daddr, iph->protocol, dport);
         if (pod_verdict == FLUXVM_POD_VERDICT_DENY) {
             allowed = 0;
             deny_reason = FLUXVM_REASON_POD_POLICY_DENY;
@@ -1039,8 +1064,9 @@ static __always_inline int handle_ipv6(
         deny_reason = FLUXVM_REASON_L4_MISS;
     }
     if (cfg->pod_id && allowed) {
-        int pod_verdict = fluxvm_pod_policy_verdict6(
-            cfg->pod_id, ip6->daddr.in6_u.u6_addr8, ip6->nexthdr, dport);
+        int pod_verdict = fluxvm_pod_policy_verdict6_tuple(
+            cfg->pod_id, FLUXVM_POD_DIR_EGRESS,
+            ip6->daddr.in6_u.u6_addr8, ip6->nexthdr, dport);
         if (pod_verdict == FLUXVM_POD_VERDICT_DENY) {
             allowed = 0;
             deny_reason = FLUXVM_REASON_POD_POLICY_DENY;
@@ -1068,89 +1094,6 @@ static __always_inline int handle_ipv6(
     count(cfg->identity, verdict, skb->len);
     record_flow6(skb, cfg->identity, ip6, sport, dport, verdict, sample);
     return allowed ? TC_ACT_OK : TC_ACT_SHOT;
-}
-
-/* Set 13 schema v8: Pod-ingress-direction enforcement. Attached at the tc
- * *egress* hook (host-side egress on a Pod VM's tap = traffic *entering*
- * the VM) -- a genuinely new attach point alongside the existing
- * `fluxvm_egress` program below, which remains ingress-hook-only (VM
- * egress) and untouched by this addition. Deliberately minimal: no
- * VM-level CIDR/L4/rate/conntrack re-implementation here, only the
- * Set 6S/13 Pod-ingress-policy check via fluxvm_pod_ingress_policy_verdict4/6
- * (bpf/fluxvm_pod_policy.bpf.h). Shares `fluxvm_id` with `fluxvm_egress`
- * (same compiled object, same pinned map instance) so it resolves the same
- * `pod_id` for a given ifindex with no new plumbing. Matches
- * `handle_ipv4`/`handle_ipv6`'s own existing treatment of non-TCP/UDP
- * traffic for their pod-policy check (see those functions' `pod_verdict`
- * calls below): protocol/port are still passed through for ICMP and any
- * other non-TCP/UDP protocol (port forced to 0 by `parse_ports4/6`, just
- * like the egress side), so a Pod-ingress policy consistently covers the
- * same traffic the existing egress-direction Pod policy already does,
- * rather than silently exempting a whole protocol class this hook alone
- * would otherwise leave unenforced. Only a genuinely malformed L4 header
- * (parse failure, not "no L4 to parse") or a fragmented packet is left
- * unexamined here, both matching how `handle_ipv4`/`handle_ipv6` treat
- * their own L4 parse failures. A pod_id with no `fluxvm_pspol_in` entry --
- * true for every VM until Set 13's controller compiles a real ingress
- * NetworkPolicy for it -- is a complete no-op regardless. */
-static __always_inline int handle_pod_ingress_ipv4(struct iface_config *cfg, void *data, void *data_end)
-{
-    struct ethhdr *eth = data;
-    struct iphdr *iph = (void *)(eth + 1);
-    if ((void *)(iph + 1) > data_end || iph->ihl < 5)
-        return TC_ACT_OK;
-    if ((void *)iph + (iph->ihl * 4) > data_end)
-        return TC_ACT_OK;
-    __u16 frag = bpf_ntohs(iph->frag_off);
-    if ((frag & 0x3fff) != 0)
-        return TC_ACT_OK;
-    __u16 sport = 0, dport = 0;
-    if (parse_ports4(iph, data_end, &sport, &dport) < 0)
-        return TC_ACT_OK;
-    int verdict = fluxvm_pod_ingress_policy_verdict4(cfg->pod_id, iph->saddr, iph->protocol, dport);
-    return verdict == FLUXVM_POD_VERDICT_DENY ? TC_ACT_SHOT : TC_ACT_OK;
-}
-
-static __always_inline int handle_pod_ingress_ipv6(struct iface_config *cfg, void *data, void *data_end)
-{
-    struct ethhdr *eth = data;
-    struct ipv6hdr *ip6 = (void *)(eth + 1);
-    if ((void *)(ip6 + 1) > data_end)
-        return TC_ACT_OK;
-    __u16 sport = 0, dport = 0;
-    if (parse_ports6(ip6, data_end, &sport, &dport) < 0)
-        return TC_ACT_OK;
-    int verdict = fluxvm_pod_ingress_policy_verdict6(cfg->pod_id, ip6->saddr.in6_u.u6_addr8, ip6->nexthdr, dport);
-    return verdict == FLUXVM_POD_VERDICT_DENY ? TC_ACT_SHOT : TC_ACT_OK;
-}
-
-SEC("tc")
-int fluxvm_pod_ingress(struct __sk_buff *skb)
-{
-    __u32 ifindex = skb->ifindex;
-    struct iface_config *cfg = bpf_map_lookup_elem(&fluxvm_id, &ifindex);
-    // Unlike fluxvm_egress, a missing cfg or pod_id == 0 allows rather than
-    // fails closed: this is new infrastructure being attached to every
-    // Pod VM's tap regardless of whether Secure Containers / Set 13 Pod
-    // policy is in use, and it must be a strict no-op for every VM that
-    // predates this Set or has no ingress policy configured, matching
-    // fluxvm_pod_policy_verdict4/6's own "unconfigured Pod policy must not
-    // turn an otherwise-allowed packet into a silent drop" invariant.
-    if (!cfg || !cfg->pod_id)
-        return TC_ACT_OK;
-
-    void *data = (void *)(long)skb->data;
-    void *data_end = (void *)(long)skb->data_end;
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end)
-        return TC_ACT_OK;
-
-    __u16 eth_proto = bpf_ntohs(eth->h_proto);
-    if (eth_proto == ETH_P_IP)
-        return handle_pod_ingress_ipv4(cfg, data, data_end);
-    if (eth_proto == ETH_P_IPV6)
-        return handle_pod_ingress_ipv6(cfg, data, data_end);
-    return TC_ACT_OK;
 }
 
 SEC("tc")
