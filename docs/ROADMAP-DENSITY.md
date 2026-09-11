@@ -3,7 +3,7 @@
 Three tracks deferred from the host-local production bar. Phase-1 foundations
 ship in-tree; Phase 2b now enriches CEP views from the Cilium agent HTTP API
 (no private-map writes). In-tree KVM memory snapshots use the lab-only
-`FLUXKVM1` format (not Firecracker-compatible).
+`FLUXKVM1` **v2** format (all vCPUs; not Firecracker-compatible).
 
 ## 1. Cilium-native VM endpoints / Hubble
 
@@ -34,9 +34,10 @@ QEMU + `examples/windows-qga.json` remains the GA QGA path.
 | **2** | Real virtio-blk MMIO + rootfs attach (`cfg.disk`); cmdline virtio_mmio.device slots | **Done** |
 | **3a** | linux-loader + platform + virtio-blk + console stdin; lab userspace / stdin smoke | **Done** (`FLUXVM_USERSPACE_OK` / `FLUXVM_STDIN_OK`) |
 | **3b** | Real in-tree KVM **pause/resume** (park vCPU; no `KVM_RUN` while paused) | **Done** (`scripts/test-kvm-pause-smoke.sh`) |
-| **3c** | Memory snapshot / restore + warm-pool density claims on kvm | **Done** (lab `FLUXKVM1` mmap dump + regs/sregs; not FC-compatible) — `scripts/test-kvm-snapshot-smoke.sh` |
+| **3c** | Memory snapshot / restore + warm-pool density claims on kvm | **Done** (lab `FLUXKVM1` **v2**: all vCPUs + watermark; not FC-compatible) — `scripts/test-kvm-snapshot-smoke.sh` |
 | **3d** | `FLUXVM_KVM_LOCK_MEM=1` (MAP_POPULATE + mlock) | **Done** — [kvm-density.md](kvm-density.md) |
+| **3e** | FC/CH parity: TSS/MSRs/FPU/LAPIC/serial irqfd; vsock/balloon/rng; ACPI; jailer; auto mmio cmdline | **Done** — guests reach `/sbin/init` |
 
 Default `fluxvm_engine=firecracker` stays the production sandbox engine. In-tree
-KVM pause + `FLUXKVM1` memory snapshot restore support lab warm-pool packing;
+KVM pause + `FLUXKVM1` v2 memory snapshot restore support lab warm-pool packing;
 Firecracker remains the production snapshot format.

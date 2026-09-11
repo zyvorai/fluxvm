@@ -71,30 +71,32 @@ KVM in-kernel PIC / IOAPIC / PIT / LAPIC stay in the kernel. Userspace does
 
 ## 5. Device model
 
-### Always (Linux microVM)
+### Always (Linux microVM) — implemented in-tree
 
-| Device        | Backend              | Notes                          |
-|---------------|----------------------|--------------------------------|
-| virtio-net    | TAP / vhost-net      | one queue pair per vCPU ideal  |
-| virtio-blk    | raw file / raw disk  | io_uring for host I/O          |
-| virtio-console| PTY / stdio          | earlyprintk + getty            |
-| serial 16550  | stdio                | fallback, tiny                 |
-| virtio-rng    | /dev/urandom         |                            |
-| virtio-balloon| KVM balloon / madvise| give RAM back to host          |
-| virtio-vsock  | host vsock           | guest↔host sockets             |
+| Device         | Backend                         | Notes                                      |
+|----------------|---------------------------------|--------------------------------------------|
+| virtio-net     | TAP + optional `/dev/vhost-net` | `KVM_IRQFD`; rate limit via `--net-mbit-limit` |
+| virtio-blk     | raw file                        | `KVM_IRQFD`; `--blk-mbit-limit`            |
+| serial 16550   | stdio                           | COM1 GSI 4 irqfd (vm-superio / CH semantics) |
+| virtio-rng     | `getrandom`                     | on by default (`--no-rng` to disable)      |
+| virtio-balloon | `madvise(DONTNEED)` / touch      | on by default (`--no-balloon`)             |
+| virtio-vsock   | host UDS (`--vsock-uds`)        | Firecracker unix model; CID via `--vsock-cid` |
 
-### Extra for Windows
+Cmdline discovery: VMM appends `virtio_mmio.device=<size>@<base>:<irq>` like Firecracker.
 
-| Device        | Why                                          |
-|---------------|----------------------------------------------|
-| UEFI (OVMF)   | Windows will not boot a raw kernel           |
-| ACPI tables   | MADT, FADT, DSDT with virtio PCI or MMIO     |
-| virtio-pci    | virtio-win drivers expect PCI virtio         |
-| RTC / HPET    | timekeeping                                  |
-| QEMU fw_cfg or similar | optional boot args                 |
+### Extra for Windows (cloud-hypervisor SoT)
 
-Firecracker **does not** support Windows. If Windows is a hard requirement,
-clone Cloud Hypervisor’s machine model, not Firecracker’s.
+| Device        | Status                                                |
+|---------------|-------------------------------------------------------|
+| UEFI firmware | `--firmware` / `--guest windows` loads image          |
+| ACPI tables   | RSDP/XSDT/FADT/MADT written; full DSDT/AML follow-up  |
+| PCI ECAM      | `--pci` reserves MMCONFIG; virtio-pci BARs follow-up  |
+
+### Demand-driven (P3 stubs)
+
+virtio-fs, live migration, CPU/device hotplug — modules return `Unsupported`
+until product requires them (SoT = cloud-hypervisor).
+
 
 ## 6. Networking
 

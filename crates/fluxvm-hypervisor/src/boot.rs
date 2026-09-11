@@ -22,6 +22,30 @@ pub struct BootInfo {
 
 pub const CMDLINE_GPA: u64 = 0x0002_0000;
 
+/// Firecracker-style cmdline append for virtio-over-MMIO devices.
+///
+/// On x86_64 there is no DT discovery: the guest only probes devices listed as
+/// `virtio_mmio.device=<size>@<base>:<irq>` (see Firecracker `add_virtio_device_to_cmdline`).
+pub fn append_virtio_mmio_cmdline(
+    cmdline: &str,
+    devices: &[(u64 /* base */, u64 /* len */, u32 /* irq */)],
+) -> String {
+    let mut cmd = cmdline.trim().to_string();
+    for &(base, len, irq) in devices {
+        let already = cmd.contains(&format!("@{base:#x}:"))
+            || cmd.contains(&format!("@0x{base:08x}:"))
+            || cmd.contains(&format!("@0x{base:x}:"));
+        if already {
+            continue;
+        }
+        if !cmd.is_empty() {
+            cmd.push(' ');
+        }
+        cmd.push_str(&format!("virtio_mmio.device={len:#x}@{base:#x}:{irq}"));
+    }
+    cmd
+}
+
 pub fn prepare(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
     match cfg.guest {
         GuestKind::Linux => prepare_linux(mem, cfg),
@@ -195,7 +219,7 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
     if let linux_loader::loader::elf::PvhBootCapability::PvhEntryPresent(pvh_entry) =
         loader_result.pvh_boot_cap
     {
-        return configure_pvh_boot(mem, &gm, pvh_entry, initrd_len, notes);
+        return configure_pvh_boot(mem, &gm, pvh_entry, initrd_len, notes, cfg);
     }
 
     let mut params = boot_params::default();
@@ -257,6 +281,7 @@ fn configure_pvh_boot(
     pvh_entry: vm_memory::GuestAddress,
     initrd_len: u32,
     mut notes: Vec<String>,
+    cfg: &VmConfig,
 ) -> Result<BootInfo> {
     use linux_loader::configurator::pvh::PvhBootConfigurator;
     use linux_loader::configurator::{BootConfigurator, BootParams};
@@ -265,6 +290,21 @@ fn configure_pvh_boot(
         XEN_HVM_MEMMAP_TYPE_RESERVED, XEN_HVM_START_MAGIC_VALUE,
     };
     use vm_memory::{Address, GuestAddress};
+
+    let rsdp_paddr = if cfg.acpi {
+        match crate::acpi::write_tables(mem, cfg.cpus) {
+            Ok(a) => {
+                notes.push(format!("ACPI RSDP at GPA {a:#x} (Firecracker-style)"));
+                a
+            }
+            Err(e) => {
+                notes.push(format!("ACPI write failed: {e}"));
+                0
+            }
+        }
+    } else {
+        0
+    };
 
     let mem_size = mem.len() as u64;
     let mut memmap = vec![
@@ -313,6 +353,7 @@ fn configure_pvh_boot(
         cmdline_paddr: CMDLINE_GPA,
         memmap_paddr: memory::MEMMAP_START,
         memmap_entries: memmap.len() as u32,
+        rsdp_paddr,
         ..Default::default()
     };
     if !modules.is_empty() {
@@ -428,19 +469,25 @@ fn write_minimal_boot_params(mem: &mut GuestMemory, cfg: &VmConfig, initrd_len: 
 
 fn prepare_windows(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
     let mut notes = vec![
-        "Windows path: OVMF + ACPI + virtio-pci + virtio-win drivers".into(),
-        "Not a Firecracker-class boot. Mirror Cloud Hypervisor.".into(),
+        "Windows path: OVMF/CLOUDHV.fd + ACPI + virtio-pci (cloud-hypervisor SoT)".into(),
     ];
+
+    // CH-style: write ACPI early so firmware can find RSDP.
+    match crate::acpi::write_tables(mem, cfg.cpus) {
+        Ok(rsdp) => notes.push(format!("ACPI RSDP at {rsdp:#x}")),
+        Err(e) => notes.push(format!("ACPI write failed: {e}")),
+    }
 
     if let Some(path) = cfg.firmware.as_ref().or(cfg.kernel.as_ref()) {
         if path.exists() {
             let bytes = std::fs::read(path)?;
+            // Load below 4GiB top like a simplified pflash image mapping.
             let gpa = 0x0100_0000u64;
             if gpa as usize + bytes.len() < mem.len() {
                 mem.write_at(gpa, &bytes)?;
             }
             notes.push(format!(
-                "loaded firmware {} ({} bytes)",
+                "loaded firmware {} ({} bytes) at {gpa:#x}",
                 path.display(),
                 bytes.len()
             ));
@@ -451,6 +498,7 @@ fn prepare_windows(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
         notes.push("no --firmware provided (dry-run ok)".into());
     }
 
+    notes.push("Enable --pci for ECAM window; full virtio-pci BARs are P2 follow-up".into());
     notes.push(acpi_requirements().into());
 
     Ok(BootInfo {
@@ -491,4 +539,23 @@ pub fn build_identity_page_tables(mem: &mut GuestMemory) -> Result<u64> {
     }
     mem.write_at(PD3, &pd3)?;
     Ok(PML4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_virtio_mmio_cmdline;
+
+    #[test]
+    fn append_virtio_mmio_cmdline_adds_and_dedups() {
+        let once = append_virtio_mmio_cmdline("console=ttyS0", &[(0xfeb0_0000, 0x200, 5)]);
+        assert!(once.contains("virtio_mmio.device=0x200@0xfeb00000:5"));
+        let twice = append_virtio_mmio_cmdline(&once, &[(0xfeb0_0000, 0x200, 5)]);
+        assert_eq!(once, twice);
+        let both = append_virtio_mmio_cmdline(
+            "console=ttyS0 root=/dev/vda",
+            &[(0xfeb0_0000, 0x200, 5), (0xfeb0_0200, 0x200, 6)],
+        );
+        assert!(both.contains("@0xfeb00000:5"));
+        assert!(both.contains("@0xfeb00200:6"));
+    }
 }

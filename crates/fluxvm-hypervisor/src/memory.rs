@@ -52,11 +52,17 @@ impl GuestMemory {
             ));
         }
         let dense = std::env::var("FLUXVM_KVM_LOCK_MEM").ok().as_deref() == Some("1");
+        let huge = std::env::var("FLUXVM_HUGEPAGES").ok().as_deref() == Some("1");
         let mut flags = ffi::MAP_SHARED | ffi::MAP_ANONYMOUS;
         if dense {
             flags |= ffi::MAP_POPULATE;
         } else {
             flags |= ffi::MAP_NORESERVE;
+        }
+        // Firecracker-style optional hugepage backing.
+        #[cfg(target_os = "linux")]
+        if huge {
+            flags |= libc::MAP_HUGETLB as i32;
         }
         let p = unsafe {
             ffi::mmap(
@@ -134,6 +140,36 @@ impl GuestMemory {
 
     pub fn write_u16(&mut self, gpa: u64, v: u16) -> Result<()> {
         self.write_at(gpa, &v.to_le_bytes())
+    }
+
+    /// Firecracker balloon inflate: discard host backing for a guest page.
+    pub fn advise_dontneed(&self, gpa: u64, len: usize) {
+        let start = gpa as usize;
+        if start.saturating_add(len) > self.len {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let _ = libc::madvise(
+                self.ptr.as_ptr().add(start) as *mut libc::c_void,
+                len,
+                libc::MADV_DONTNEED,
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (start, len);
+    }
+
+    /// Balloon deflate: force page present again.
+    pub fn touch_page(&self, gpa: u64) {
+        let start = gpa as usize;
+        if start + 1 > self.len {
+            return;
+        }
+        unsafe {
+            let p = self.ptr.as_ptr().add(start);
+            std::ptr::read_volatile(p);
+        }
     }
 }
 

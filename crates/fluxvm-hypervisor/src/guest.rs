@@ -301,20 +301,23 @@ fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
             .unwrap_or_else(|| "02:00:AC:10:00:02".into()),
         vhost_net: true,
         net_queues: 1,
-        cmdline: cfg
-            .kernel_args
-            .clone()
-            .unwrap_or_else(|| {
-        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
-                 virtio_mmio.device=0x200@0xfeb00000:5 \
-                 virtio_mmio.device=0x200@0xfeb00200:6"
-                    .into()
-            }),
+        cmdline: cfg.kernel_args.clone().unwrap_or_else(|| {
+            "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw"
+                .into()
+        }),
         firmware: None,
         net_mbit_limit: 0,
+        blk_mbit_limit: 0,
         dry_run: false,
         print_host_net: false,
         gdb: None,
+        vsock_cid: cfg.vsock_cid,
+        vsock_uds: cfg.vsock_uds.clone(),
+        balloon: true,
+        rng: true,
+        acpi: true,
+        pci: false,
+        jailer: cfg.seccomp, // pair seccomp boots with jailer when requested
     })
 }
 

@@ -202,6 +202,7 @@ pub fn handle_notify(
     st: &mut VirtioState,
     backend: &BlockBackend,
     _qsel: u32,
+    limiter: Option<&crate::devices::rate_limiter::RateLimiter>,
 ) -> Result<u32> {
     let q = &mut st.queues[0];
     if q.ready == 0 || q.num == 0 {
@@ -216,6 +217,13 @@ pub fn handle_notify(
         let slot = (q.last_avail as u32) % q.num;
         let head = mem.read_u16(q.avail + 4 + slot as u64 * 2)?;
         let chain = walk_chain(mem, q.desc, head)?;
+        // Rough size estimate for rate limiting.
+        let bytes: u64 = chain.parts.iter().map(|(_, l, _)| *l as u64).sum();
+        if let Some(lim) = limiter {
+            if !lim.consume(bytes) {
+                break;
+            }
+        }
         let written = process_request(mem, backend, &chain).unwrap_or(1);
         used_push(mem, q.used, q.num, chain.head, written)?;
         q.last_avail = q.last_avail.wrapping_add(1);

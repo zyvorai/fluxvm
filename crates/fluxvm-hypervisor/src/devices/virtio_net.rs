@@ -145,6 +145,7 @@ pub fn handle_notify(
     st: &mut VirtioState,
     tap: Option<&Tap>,
     qsel: u32,
+    limiter: Option<&crate::devices::rate_limiter::RateLimiter>,
 ) -> Result<u32> {
     if qsel != 1 {
         return Ok(0);
@@ -172,6 +173,11 @@ pub fn handle_notify(
         let slot = (st.queues[1].last_avail as u32) % qnum;
         let head = mem.read_u16(avail + 4 + slot as u64 * 2)?;
         let buf = gather(mem, desc, head)?;
+        if let Some(lim) = limiter {
+            if !lim.consume(buf.len() as u64) {
+                break;
+            }
+        }
         used_push(mem, used, qnum, head, buf.len() as u32)?;
         st.queues[1].last_avail = st.queues[1].last_avail.wrapping_add(1);
         let frame = if buf.len() > 12 { &buf[12..] } else { &[] };

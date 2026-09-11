@@ -3,6 +3,15 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **In-tree KVM FC/CH parity (P0–P2)** — virtio-mmio vsock/balloon/rng with
+  `KVM_IRQFD`; auto `virtio_mmio.device=` cmdline; token-bucket net/blk
+  rate limits; optional vhost-net open; ACPI RSDP/XSDT/FADT/MADT + PVH
+  `rsdp_paddr`; jailer (`--jailer` / `FLUXVM_JAILER`); PCI ECAM (`--pci`);
+  `FLUXKVM1` snapshot v2 (all vCPUs). P3 stubs for virtio-fs / migration /
+  hotplug. Boot hang past `init_zbud` resolved; guests mount `vda` and reach
+  `/sbin/init`. Docs: [`crates/fluxvm-hypervisor/README.md`](crates/fluxvm-hypervisor/README.md),
+  [`docs/agent-sandbox-gaps.md`](docs/agent-sandbox-gaps.md),
+  [`docs/kvm-density.md`](docs/kvm-density.md).
 - **Secure Containers Set 5** — authenticated VSOCK stdio streaming on port
   17779 (lifecycle stays on 17778); guest pipes for non-TTY I/O; real guest
   PTY for `terminal=true` init/exec with `ResizePty`/`CloseIO`; output drain

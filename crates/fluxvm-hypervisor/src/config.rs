@@ -27,10 +27,22 @@ pub struct VmConfig {
     pub cmdline: String,
     pub firmware: Option<PathBuf>,
     pub net_mbit_limit: u32,
+    pub blk_mbit_limit: u32,
     pub dry_run: bool,
     pub print_host_net: bool,
     /// `addr:port` to listen on for the minimal gdbstub (see `gdbstub.rs`).
     pub gdb: Option<String>,
+    /// Firecracker-style virtio-vsock (guest CID + host UDS).
+    pub vsock_cid: Option<u32>,
+    pub vsock_uds: Option<PathBuf>,
+    /// Attach virtio-balloon / virtio-rng (FC defaults for Linux microVMs).
+    pub balloon: bool,
+    pub rng: bool,
+    /// Write Firecracker-style ACPI tables + set PVH rsdp_paddr.
+    pub acpi: bool,
+    /// Enable PCI ECAM window (CH / FC `--enable-pci` prep).
+    pub pci: bool,
+    pub jailer: bool,
 }
 
 impl Default for VmConfig {
@@ -49,9 +61,17 @@ impl Default for VmConfig {
             cmdline: "console=ttyS0 reboot=k panic=1 pci=off".into(),
             firmware: None,
             net_mbit_limit: 0,
+            blk_mbit_limit: 0,
             dry_run: false,
             print_host_net: false,
             gdb: None,
+            vsock_cid: None,
+            vsock_uds: None,
+            balloon: true,
+            rng: true,
+            acpi: true,
+            pci: false,
+            jailer: false,
         }
     }
 }
@@ -91,6 +111,14 @@ impl VmConfig {
                 "--cmdline" => c.cmdline = req(&mut args, "--cmdline")?,
                 "--firmware" => c.firmware = Some(PathBuf::from(req(&mut args, "--firmware")?)),
                 "--net-mbit-limit" => c.net_mbit_limit = parse_next(&mut args, "--net-mbit-limit")?,
+                "--blk-mbit-limit" => c.blk_mbit_limit = parse_next(&mut args, "--blk-mbit-limit")?,
+                "--vsock-cid" => c.vsock_cid = Some(parse_next(&mut args, "--vsock-cid")?),
+                "--vsock-uds" => c.vsock_uds = Some(PathBuf::from(req(&mut args, "--vsock-uds")?)),
+                "--no-balloon" => c.balloon = false,
+                "--no-rng" => c.rng = false,
+                "--no-acpi" => c.acpi = false,
+                "--pci" => c.pci = true,
+                "--jailer" => c.jailer = true,
                 "--dry-run" => c.dry_run = true,
                 "--print-host-net" => c.print_host_net = true,
                 "--gdb" => c.gdb = Some(req(&mut args, "--gdb")?),

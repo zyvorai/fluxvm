@@ -5,17 +5,23 @@ use crate::boot;
 use crate::bus::Bus;
 use crate::config::VmConfig;
 use crate::devices::cmos::CmosRtc;
+use crate::devices::rate_limiter::RateLimiter;
 use crate::devices::serial::Serial16550;
 use crate::devices::virtio_blk::{self, BlockBackend};
-use crate::devices::virtio_mmio::{self, VirtioMmio};
+use crate::devices::virtio_mmio::{self, VirtioMmio, MMIO_LEN};
 use crate::devices::virtio_net::{self, VirtioNetConfig};
+use crate::devices::virtio_vsock::VsockBackend;
+use crate::devices::{virtio_balloon, virtio_rng, virtio_vsock};
 use crate::error::{FluxError, Result};
 use crate::ffi;
 use crate::gdbstub::{self, GdbCmd, GdbControl, GdbSetup};
+use crate::jailer::{self, JailerConfig};
 use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
 use crate::memory::{self, GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
+use crate::pci::PciEcam;
 use crate::tap::Tap;
+use crate::vhost::VhostNet;
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -24,8 +30,11 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-/// Second virtio-mmio slot (blk) after net at MMIO_WINDOW.
-pub const MMIO_BLK_WINDOW: u64 = MMIO_WINDOW + 0x200;
+/// Virtio-mmio slots (Firecracker-style sequential windows).
+pub const MMIO_BLK_WINDOW: u64 = MMIO_WINDOW + MMIO_LEN;
+pub const MMIO_VSOCK_WINDOW: u64 = MMIO_WINDOW + MMIO_LEN * 2;
+pub const MMIO_BALLOON_WINDOW: u64 = MMIO_WINDOW + MMIO_LEN * 3;
+pub const MMIO_RNG_WINDOW: u64 = MMIO_WINDOW + MMIO_LEN * 4;
 
 pub struct VirtualMachine {
     pub cfg: VmConfig,
@@ -35,13 +44,16 @@ pub struct VirtualMachine {
     pub net: Option<Arc<VirtioMmio>>,
     pub blk: Option<Arc<VirtioMmio>>,
     pub blk_backend: Option<Arc<BlockBackend>>,
+    pub vsock: Option<Arc<VirtioMmio>>,
+    pub vsock_backend: Option<Arc<VsockBackend>>,
+    pub balloon: Option<Arc<VirtioMmio>>,
+    pub rng: Option<Arc<VirtioMmio>>,
+    pub net_limiter: Arc<RateLimiter>,
+    pub blk_limiter: Arc<RateLimiter>,
     pub tap: Option<Tap>,
+    pub vhost: Option<VhostNet>,
     pub boot_rip: u64,
-    /// Linux zero-page GPA for RSI (64-bit direct-boot protocol). None for
-    /// Windows / netboot / PVH boot.
     pub boot_params_gpa: Option<u64>,
-    /// `hvm_start_info` GPA for PVH boot (see `boot::configure_pvh_boot`).
-    /// Mutually exclusive with `boot_params_gpa`.
     pub pvh_start_info_gpa: Option<u64>,
     pub notes: Vec<String>,
 }
@@ -95,7 +107,14 @@ impl VirtualMachine {
             net: Some(net),
             blk: None,
             blk_backend: None,
+            vsock: None,
+            vsock_backend: None,
+            balloon: None,
+            rng: None,
+            net_limiter: Arc::new(RateLimiter::unlimited()),
+            blk_limiter: Arc::new(RateLimiter::unlimited()),
             tap,
+            vhost: None,
             boot_rip: KERNEL_LOAD_ADDR,
             boot_params_gpa: None,
             pvh_start_info_gpa: None,
@@ -106,6 +125,28 @@ impl VirtualMachine {
     /// Boot from an external kernel/initrd (FluxVM `engine=kvm` path).
     pub fn from_boot_config(cfg: VmConfig) -> Result<Self> {
         cfg.validate()?;
+        let mut cfg = cfg;
+        // Firecracker: advertise every virtio-mmio device on the cmdline.
+        let mut mmio_devs = vec![(MMIO_WINDOW, MMIO_LEN, 5u32)];
+        if cfg.disk.is_some() {
+            mmio_devs.push((MMIO_BLK_WINDOW, MMIO_LEN, 6));
+        }
+        let mut next_irq = 7u32;
+        let mut next_base = MMIO_VSOCK_WINDOW;
+        if cfg.vsock_cid.is_some() && cfg.vsock_uds.is_some() {
+            mmio_devs.push((next_base, MMIO_LEN, next_irq));
+            next_base += MMIO_LEN;
+            next_irq += 1;
+        }
+        if cfg.balloon {
+            mmio_devs.push((MMIO_BALLOON_WINDOW, MMIO_LEN, 8));
+        }
+        if cfg.rng {
+            mmio_devs.push((MMIO_RNG_WINDOW, MMIO_LEN, 9));
+        }
+        let _ = (next_base, next_irq);
+        cfg.cmdline = boot::append_virtio_mmio_cmdline(&cfg.cmdline, &mmio_devs);
+
         let mut mem = GuestMemory::allocate(cfg.memory_bytes())?;
         let _cr3 = boot::build_identity_page_tables(&mut mem)?;
         let boot_info = boot::prepare(&mut mem, &cfg)?;
@@ -124,6 +165,13 @@ impl VirtualMachine {
         let serial = Arc::new(Serial16550::com1());
         bus.add_pio(serial.clone());
         bus.add_pio(Arc::new(CmosRtc::new()));
+        if cfg.pci {
+            bus.add_mmio(Arc::new(PciEcam::new()));
+            notes.push(format!(
+                "PCI ECAM at {:#x} (cloud-hypervisor / FC --enable-pci layout)",
+                memory::PCI_MMCONFIG_START
+            ));
+        }
 
         let mac = VirtioNetConfig::parse_mac(&cfg.mac).unwrap_or([0x02, 0, 0, 0, 0, 2]);
         let net = Arc::new(VirtioMmio::net(MMIO_WINDOW, mac));
@@ -156,6 +204,43 @@ impl VirtualMachine {
             (None, None)
         };
 
+        let (vsock, vsock_backend) = match (&cfg.vsock_cid, &cfg.vsock_uds) {
+            (Some(cid), Some(uds)) => match VsockBackend::new(uds, *cid) {
+                Ok(be) => {
+                    notes.push(format!(
+                        "virtio-vsock cid={cid} uds={}",
+                        uds.display()
+                    ));
+                    let mmio = Arc::new(VirtioMmio::vsock(MMIO_VSOCK_WINDOW, *cid, 7));
+                    bus.add_mmio(mmio.clone());
+                    (Some(mmio), Some(Arc::new(be)))
+                }
+                Err(e) => {
+                    notes.push(format!("virtio-vsock failed: {e}"));
+                    (None, None)
+                }
+            },
+            _ => (None, None),
+        };
+
+        let balloon = if cfg.balloon {
+            let mmio = Arc::new(VirtioMmio::balloon(MMIO_BALLOON_WINDOW, 8));
+            bus.add_mmio(mmio.clone());
+            notes.push("virtio-balloon attached".into());
+            Some(mmio)
+        } else {
+            None
+        };
+
+        let rng_dev = if cfg.rng {
+            let mmio = Arc::new(VirtioMmio::rng(MMIO_RNG_WINDOW, 9));
+            bus.add_mmio(mmio.clone());
+            notes.push("virtio-rng attached".into());
+            Some(mmio)
+        } else {
+            None
+        };
+
         let tap = if let Some(tap_name) = &cfg.tap {
             match Tap::open(tap_name, [192, 168, 100, 1]) {
                 Ok(t) => {
@@ -171,6 +256,24 @@ impl VirtualMachine {
             None
         };
 
+        let vhost = if cfg.vhost_net {
+            match VhostNet::open() {
+                Ok(v) => {
+                    notes.push("vhost-net opened (/dev/vhost-net); queues still userspace until full bind".into());
+                    Some(v)
+                }
+                Err(e) => {
+                    notes.push(format!("vhost-net fallback to userspace TAP: {e}"));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let net_limiter = Arc::new(RateLimiter::from_mbit(cfg.net_mbit_limit));
+        let blk_limiter = Arc::new(RateLimiter::from_mbit(cfg.blk_mbit_limit));
+
         Ok(Self {
             cfg,
             mem,
@@ -179,7 +282,14 @@ impl VirtualMachine {
             net: Some(net),
             blk,
             blk_backend,
+            vsock,
+            vsock_backend,
+            balloon,
+            rng: rng_dev,
+            net_limiter,
+            blk_limiter,
             tap,
+            vhost,
             boot_rip: boot_info.entry_rip,
             boot_params_gpa: boot_info.boot_params_gpa,
             pvh_start_info_gpa: boot_info.pvh_start_info_gpa,
@@ -243,15 +353,27 @@ impl VirtualMachine {
         if let Some(fd) = self.serial.interrupt_evt() {
             kvm.register_irqfd(fd, self.serial.irq)?;
         }
+        for dev in [&self.net, &self.blk, &self.vsock, &self.balloon, &self.rng]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(fd) = dev.interrupt_evt() {
+                kvm.register_irqfd(fd, dev.irq())?;
+            }
+        }
+        // Jailer after kvm/device fds are open (FC order: open resources, then drop privs).
+        let mut jail = JailerConfig::from_env();
+        if self.cfg.jailer {
+            jail.enabled = true;
+        }
+        jailer::apply(&jail)?;
         if let Some(cpu) = restore {
-            // Snapshot/restore is BSP-only; extending it to N vCPUs is
-            // separate, out-of-scope follow-up work. Under SMP the APs
-            // still come up fresh via a real SIPI, same as a normal boot.
-            kvm.set_sregs(0, cpu.sregs)?;
-            kvm.set_regs(0, cpu.regs)?;
+            kvm_snap::restore_vcpus(&kvm, &cpu)?;
             eprintln!(
-                "[kvm] restored FLUXKVM1 snapshot rip={:#x} cr3={:#x}",
-                cpu.regs.rip, cpu.sregs.cr3
+                "[kvm] restored FLUXKVM1 snapshot vcpus={} rip={:#x} cr3={:#x}",
+                cpu.all_vcpus.len(),
+                cpu.regs.rip,
+                cpu.sregs.cr3
             );
         } else if let Some(start_info_gpa) = self.pvh_start_info_gpa {
             // PVH: hand the kernel a bare 32-bit entry point and let its
@@ -486,12 +608,12 @@ impl VirtualMachine {
                                 &mut st,
                                 this.tap.as_ref(),
                                 q,
+                                Some(this.net_limiter.as_ref()),
                             ) {
                                 Ok(n) => {
                                     eprintln!("[net] processed q={q} frames={n}");
                                     drop(st);
                                     net.raise_vring_interrupt();
-                                    let _ = kvm.pulse_irq(net.irq());
                                 }
                                 Err(e) => eprintln!("[net] notify err {e}"),
                             }
@@ -505,14 +627,59 @@ impl VirtualMachine {
                                 &mut st,
                                 backend.as_ref(),
                                 q,
+                                Some(this.blk_limiter.as_ref()),
                             ) {
                                 Ok(n) => {
                                     eprintln!("[blk] processed q={q} reqs={n}");
                                     drop(st);
                                     blk.raise_vring_interrupt();
-                                    let _ = kvm.pulse_irq(blk.irq());
                                 }
                                 Err(e) => eprintln!("[blk] notify err {e}"),
+                            }
+                        }
+                    }
+                    if let Some(vsock) = &this.vsock {
+                        if let Some(q) = virtio_mmio::take_notify(&vsock.state) {
+                            let mut st = vsock.state.lock().unwrap();
+                            match virtio_vsock::handle_notify(&mut this.mem, &mut st, q) {
+                                Ok(n) => {
+                                    if n > 0 {
+                                        eprintln!("[vsock] processed q={q} pkts={n}");
+                                    }
+                                    drop(st);
+                                    vsock.raise_vring_interrupt();
+                                }
+                                Err(e) => eprintln!("[vsock] notify err {e}"),
+                            }
+                        }
+                    }
+                    if let Some(balloon) = &this.balloon {
+                        if let Some(q) = virtio_mmio::take_notify(&balloon.state) {
+                            let mut st = balloon.state.lock().unwrap();
+                            match virtio_balloon::handle_notify(&mut this.mem, &mut st, q) {
+                                Ok(n) => {
+                                    if n > 0 {
+                                        eprintln!("[balloon] q={q} bufs={n}");
+                                    }
+                                    drop(st);
+                                    balloon.raise_vring_interrupt();
+                                }
+                                Err(e) => eprintln!("[balloon] notify err {e}"),
+                            }
+                        }
+                    }
+                    if let Some(rng) = &this.rng {
+                        if let Some(q) = virtio_mmio::take_notify(&rng.state) {
+                            let mut st = rng.state.lock().unwrap();
+                            match virtio_rng::handle_notify(&mut this.mem, &mut st, q) {
+                                Ok(n) => {
+                                    if n > 0 {
+                                        eprintln!("[rng] q={q} bufs={n}");
+                                    }
+                                    drop(st);
+                                    rng.raise_vring_interrupt();
+                                }
+                                Err(e) => eprintln!("[rng] notify err {e}"),
                             }
                         }
                     }

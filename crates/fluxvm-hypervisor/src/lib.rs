@@ -7,6 +7,7 @@
 //! Demo mode: freestanding netboot guest (legacy CLI flags).
 
 pub mod api;
+pub mod acpi;
 pub mod backend;
 pub mod boot;
 pub mod bus;
@@ -17,17 +18,23 @@ pub mod error;
 pub mod ffi;
 pub mod gdbstub;
 pub mod guest;
+pub mod hotplug;
 pub mod hypervisor;
+pub mod jailer;
 pub mod kvm;
 pub mod kvm_snap;
 pub mod memory;
+pub mod migration;
 pub mod mptable;
 pub mod net;
+pub mod pci;
 pub mod seccomp;
 pub mod snapshot;
 pub mod state;
 pub mod tap;
 pub mod vcpu;
+pub mod vhost;
+pub mod virtio_fs;
 pub mod vm;
 
 pub use api::{ApiRequest, ApiResponse, BootConfig, SnapshotSpec};

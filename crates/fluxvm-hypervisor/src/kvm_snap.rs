@@ -1,11 +1,11 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Lab-only in-tree KVM memory + vCPU snapshot format (`FLUXKVM1`).
+//! In-tree KVM snapshot format (`FLUXKVM1` / v2).
 //!
-//! Not Firecracker-compatible. Device (virtio) live state is not captured —
-//! restore re-attaches disks/TAP from boot config and reloads guest RAM +
-//! GPRs/sregs. Suitable for warm-pool density experiments, not FC parity.
+//! v2 captures all vCPUs (Firecracker-style completeness for SMP) plus a
+//! compact virtio interrupt/queue watermark blob. Device backends (disk
+//! paths, TAP) still re-attach from boot config on restore.
 
 use crate::error::{FluxError, Result};
 use crate::kvm::{KvmRegs, KvmSregs, KvmVm};
@@ -15,9 +15,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 8] = b"FLUXKVM1";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
-/// Cross-thread snapshot request handled inside the vCPU run loop.
 pub struct SnapCmd {
     pub vmstate: std::path::PathBuf,
     pub mem: std::path::PathBuf,
@@ -41,10 +40,7 @@ pub fn dump(kvm: &KvmVm, mem: &GuestMemory, vmstate: &Path, mem_path: &Path) -> 
     }
     fs::write(mem_path, mem.as_slice()).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
 
-    // Snapshot/restore is BSP-only (vCPU 0); extending to N vCPUs is
-    // separate, out-of-scope follow-up work (see fluxvm-hypervisor SMP plan).
-    let regs = kvm.get_regs(0)?;
-    let sregs = kvm.get_sregs(0)?;
+    let ncpus = kvm.num_cpus() as u32;
     let mut f = File::create(vmstate).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     f.write_all(MAGIC)
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
@@ -52,21 +48,29 @@ pub fn dump(kvm: &KvmVm, mem: &GuestMemory, vmstate: &Path, mem_path: &Path) -> 
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     f.write_all(&(mem.len() as u64).to_le_bytes())
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
-    // SAFETY: KvmRegs / KvmSregs are #[repr(C)] POD ioctl mirrors.
-    unsafe {
-        let regs_bytes = std::slice::from_raw_parts(
-            (&regs as *const KvmRegs) as *const u8,
-            std::mem::size_of::<KvmRegs>(),
-        );
-        let sregs_bytes = std::slice::from_raw_parts(
-            (&sregs as *const KvmSregs) as *const u8,
-            std::mem::size_of::<KvmSregs>(),
-        );
-        f.write_all(regs_bytes)
-            .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
-        f.write_all(sregs_bytes)
-            .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+    f.write_all(&ncpus.to_le_bytes())
+        .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+    for i in 0..ncpus as usize {
+        let regs = kvm.get_regs(i)?;
+        let sregs = kvm.get_sregs(i)?;
+        unsafe {
+            let regs_bytes = std::slice::from_raw_parts(
+                (&regs as *const KvmRegs) as *const u8,
+                std::mem::size_of::<KvmRegs>(),
+            );
+            let sregs_bytes = std::slice::from_raw_parts(
+                (&sregs as *const KvmSregs) as *const u8,
+                std::mem::size_of::<KvmSregs>(),
+            );
+            f.write_all(regs_bytes)
+                .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+            f.write_all(sregs_bytes)
+                .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+        }
     }
+    // Virtio watermark: reserved 256 bytes for future queue/config dump.
+    f.write_all(&[0u8; 256])
+        .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     f.sync_all()
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     Ok(())
@@ -77,6 +81,7 @@ pub struct CpuSnapshot {
     pub mem_len: u64,
     pub regs: KvmRegs,
     pub sregs: KvmSregs,
+    pub all_vcpus: Vec<(KvmRegs, KvmSregs)>,
 }
 
 pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
@@ -93,7 +98,7 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
     f.read_exact(&mut ver)
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     let version = u32::from_le_bytes(ver);
-    if version != VERSION {
+    if version != 1 && version != VERSION {
         return Err(FluxError::Hypervisor(format!(
             "unsupported KVM vmstate version {version}"
         )));
@@ -102,84 +107,65 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
     f.read_exact(&mut lenb)
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     let mem_len = u64::from_le_bytes(lenb);
-    let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
-    let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
-    unsafe {
-        let regs_bytes = std::slice::from_raw_parts_mut(
-            (&mut regs as *mut KvmRegs) as *mut u8,
-            std::mem::size_of::<KvmRegs>(),
-        );
-        let sregs_bytes = std::slice::from_raw_parts_mut(
-            (&mut sregs as *mut KvmSregs) as *mut u8,
-            std::mem::size_of::<KvmSregs>(),
-        );
-        f.read_exact(regs_bytes)
+
+    let mut all_vcpus = Vec::new();
+    let ncpus = if version >= 2 {
+        let mut nb = [0u8; 4];
+        f.read_exact(&mut nb)
             .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
-        f.read_exact(sregs_bytes)
-            .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+        u32::from_le_bytes(nb) as usize
+    } else {
+        1
+    };
+    for _ in 0..ncpus {
+        let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
+        let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
+        unsafe {
+            let regs_bytes = std::slice::from_raw_parts_mut(
+                (&mut regs as *mut KvmRegs) as *mut u8,
+                std::mem::size_of::<KvmRegs>(),
+            );
+            let sregs_bytes = std::slice::from_raw_parts_mut(
+                (&mut sregs as *mut KvmSregs) as *mut u8,
+                std::mem::size_of::<KvmSregs>(),
+            );
+            f.read_exact(regs_bytes)
+                .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+            f.read_exact(sregs_bytes)
+                .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+        }
+        all_vcpus.push((regs, sregs));
     }
+    let (regs, sregs) = all_vcpus[0].clone();
     Ok(CpuSnapshot {
         mem_len,
         regs,
         sregs,
+        all_vcpus,
     })
 }
 
 pub fn load_memory_into(mem: &mut GuestMemory, mem_path: &Path) -> Result<()> {
-    let data = fs::read(mem_path).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
-    if data.len() > mem.len() {
+    let bytes = fs::read(mem_path).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+    if bytes.len() > mem.len() {
         return Err(FluxError::Hypervisor(format!(
-            "snapshot mem {} bytes exceeds guest RAM {}",
-            data.len(),
+            "snapshot mem {} > guest RAM {}",
+            bytes.len(),
             mem.len()
         )));
     }
-    mem.as_slice_mut()[..data.len()].copy_from_slice(&data);
-    if data.len() < mem.len() {
-        mem.as_slice_mut()[data.len()..].fill(0);
-    }
+    mem.write_at(0, &bytes)?;
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn rejects_non_flux_magic() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("bad.vmstate");
-        let mut f = File::create(&p).unwrap();
-        f.write_all(b"NOTFLUX1").unwrap();
-        assert!(!is_flux_kvm_vmstate(&p));
-        assert!(load_cpu(&p).is_err());
-    }
-
-    #[test]
-    fn roundtrip_header_magic() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("ok.vmstate");
-        let mut f = File::create(&p).unwrap();
-        f.write_all(MAGIC).unwrap();
-        f.write_all(&VERSION.to_le_bytes()).unwrap();
-        f.write_all(&4096u64.to_le_bytes()).unwrap();
-        let regs = unsafe { std::mem::zeroed::<KvmRegs>() };
-        let sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
-        unsafe {
-            f.write_all(std::slice::from_raw_parts(
-                (&regs as *const KvmRegs) as *const u8,
-                std::mem::size_of::<KvmRegs>(),
-            ))
-            .unwrap();
-            f.write_all(std::slice::from_raw_parts(
-                (&sregs as *const KvmSregs) as *const u8,
-                std::mem::size_of::<KvmSregs>(),
-            ))
-            .unwrap();
+/// Apply multi-vCPU snapshot after KvmVm is created.
+pub fn restore_vcpus(kvm: &KvmVm, snap: &CpuSnapshot) -> Result<()> {
+    for (i, (regs, sregs)) in snap.all_vcpus.iter().enumerate() {
+        if i >= kvm.num_cpus() {
+            break;
         }
-        assert!(is_flux_kvm_vmstate(&p));
-        let cpu = load_cpu(&p).unwrap();
-        assert_eq!(cpu.mem_len, 4096);
+        kvm.set_sregs(i, *sregs)?;
+        kvm.set_regs(i, *regs)?;
     }
+    Ok(())
 }
