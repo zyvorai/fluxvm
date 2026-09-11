@@ -601,7 +601,11 @@ impl Shim for Service {
     }
 
     async fn start_shim(&mut self, opts: StartOpts) -> Result<String, Error> {
-        let address = spawn(opts, &self.group, Vec::new()).await?;
+        // Ensure the child shim inherits TTRPC_ADDRESS (containerd ≥ 2.3 may
+        // omit it from the parent environment when using BootstrapParams).
+        let ttrpc = opts.ttrpc_address.clone();
+        let vars = vec![("TTRPC_ADDRESS", ttrpc.as_str())];
+        let address = spawn(opts, &self.group, vars).await?;
         Ok(address)
     }
 
@@ -1125,7 +1129,19 @@ impl Service {
                 Some(
                     prepare_cni_l2(&self.group, path, &self.cfg.cni_interface)
                         .await
-                        .context("preparing CNI L2 attachment")?,
+                        .map_err(|e| {
+                            let msg = format!("preparing CNI L2 attachment: {e:#}");
+                            warn!("{msg}");
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open("/tmp/fluxvm-shim-errors.log")
+                            {
+                                use std::io::Write;
+                                let _ = writeln!(f, "{msg}");
+                            }
+                            anyhow::anyhow!(msg)
+                        })?,
                 )
             } else {
                 None
@@ -3919,15 +3935,16 @@ fn valid_iface_name(name: &str) -> bool {
 }
 
 async fn run_command(program: &str, args: &[String]) -> AnyResult<()> {
-    let out = tokio::process::Command::new(program)
+    let bin = resolve_host_bin(program);
+    let out = tokio::process::Command::new(&bin)
         .args(args)
         .output()
         .await
-        .with_context(|| format!("starting {program}"))?;
+        .with_context(|| format!("starting {bin} ({program})"))?;
     if !out.status.success() {
         bail!(
             "{} {} failed ({}): {}",
-            program,
+            bin,
             args.join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
@@ -3937,28 +3954,48 @@ async fn run_command(program: &str, args: &[String]) -> AnyResult<()> {
 }
 
 async fn run_command_best_effort(program: &str, args: &[String]) {
-    let _ = tokio::process::Command::new(program)
+    let bin = resolve_host_bin(program);
+    let _ = tokio::process::Command::new(&bin)
         .args(args)
         .output()
         .await;
 }
 
 async fn command_output(program: &str, args: &[String]) -> AnyResult<String> {
-    let out = tokio::process::Command::new(program)
+    let bin = resolve_host_bin(program);
+    let out = tokio::process::Command::new(&bin)
         .args(args)
         .output()
         .await
-        .with_context(|| format!("starting {program}"))?;
+        .with_context(|| format!("starting {bin} ({program})"))?;
     if !out.status.success() {
         bail!(
             "{} {} failed ({}): {}",
-            program,
+            bin,
             args.join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Prefer absolute host paths so k3s's trimmed PATH / busybox tooling cannot
+/// make `nsenter`/`ip` spawn fail with a bare "starting nsenter" error.
+fn resolve_host_bin(program: &str) -> String {
+    for dir in [
+        "/usr/sbin",
+        "/usr/bin",
+        "/sbin",
+        "/bin",
+        "/var/lib/rancher/k3s/data/current/bin",
+    ] {
+        let candidate = format!("{dir}/{program}");
+        if std::path::Path::new(&candidate).exists() {
+            return candidate;
+        }
+    }
+    program.to_string()
 }
 
 fn parse_mac(raw: &str) -> AnyResult<String> {
@@ -5225,7 +5262,15 @@ mod tests {
 
 #[tokio::main]
 async fn main() {
-    run::<Service>(RUNTIME_ID, None).await;
+    // Secure Containers run workloads inside a FluxVM guest, not as host
+    // children of this shim. The default containerd-shim SIGCHLD reaper
+    // waitpid(-1) races with tokio::process (and CNI helpers), surfacing as
+    // "No child processes (os error 10)" when spawning `ip`/`nsenter`.
+    let cfg = Config {
+        no_reaper: true,
+        ..Config::default()
+    };
+    run::<Service>(RUNTIME_ID, Some(cfg)).await;
 }
 
 #[cfg(test)]
