@@ -378,8 +378,10 @@ async fn spawn_virtiofsd_instances(
                 );
             }
             if socket.exists() {
-                // Brief settle so bind/listen completes after the inode appears.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Brief settle so bind/listen completes after the inode appears,
+                // then re-check liveness — virtiofsd can create the socket and
+                // still exit (e.g. capability sync under NoNewPrivileges).
+                tokio::time::sleep(Duration::from_millis(250)).await;
                 let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
                 if !still_alive {
                     kill_pids(&pids);

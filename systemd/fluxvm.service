@@ -52,7 +52,12 @@ KillMode=process
 # enough on a kernel/systemd version that enforces this strictly.
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_CHROOT CAP_DAC_OVERRIDE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_CHROOT CAP_DAC_OVERRIDE
-NoNewPrivileges=true
+# virtiofsd (Secure Containers shared folders / Pod volumes) calls
+# capset(2) during startup ("failed to sync capabilities with the kernel"
+# under NoNewPrivileges=true). QEMU children inherit this setting; keeping
+# NNP would leave virtiofs sockets present but not accepting, so guests
+# die with Connection refused while the API still reports Running.
+NoNewPrivileges=false
 ProtectSystem=strict
 # Images may live under /home during lab deploys; read-only is enough.
 ProtectHome=read-only
@@ -63,7 +68,9 @@ PrivateTmp=true
 # /run/netns: per-VM network namespaces (NetworkSpec::Tap { netns: true })
 # persist as bind-mount targets there -- the standard iproute2/kernel
 # location, not something fluxvm can relocate.
-ReadWritePaths=/var/lib/fluxvm /run/fluxvm /var/lock /run/netns /sys/fs/bpf
+# /var/lib/kubelet: Secure Containers shim exports the current Pod's
+# volume roots (emptyDir/PVC) as extra virtiofs shares (fs1/fs2).
+ReadWritePaths=/var/lib/fluxvm /run/fluxvm /var/lock /run/netns /sys/fs/bpf /var/lib/kubelet
 
 [Install]
 WantedBy=multi-user.target
