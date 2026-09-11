@@ -570,7 +570,18 @@ impl Shim for Service {
     type T = Service;
 
     async fn new(_runtime_id: &str, args: &Flags, _config: &mut Config) -> Self {
-        let group = pod_group_from_bundle(&args.bundle)
+        // containerd's `shim start` usually omits `-bundle` and uses the
+        // container bundle as cwd. Without reading cwd, grouping falls back to
+        // `args.id` and every Pod container gets its own shim/socket — then
+        // Create cold-starts a second VM against `/proc/<guest-pid>/ns/net`.
+        let bundle = if args.bundle.is_empty() {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            args.bundle.clone()
+        };
+        let group = pod_group_from_bundle(&bundle)
             .await
             .unwrap_or_else(|| args.id.clone());
         let (event_tx, event_rx) = channel(128);
@@ -2808,6 +2819,9 @@ impl Service {
         if !should_publish {
             return;
         }
+        shim_diag(format!(
+            "publish TaskExit id={container_id} exec={exec_id:?} pid={pid} code={exit_code}"
+        ));
         self.send_event(TaskExit {
             container_id,
             id: exec_id.unwrap_or_default(),
@@ -2997,6 +3011,28 @@ impl Service {
     }
 }
 
+fn shim_diag(msg: impl AsRef<str>) {
+    let msg = msg.as_ref();
+    warn!("{msg}");
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/fluxvm-shim-create.log")
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{} {msg}", chrono_like_now());
+    }
+}
+
+fn chrono_like_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("ts={secs}")
+}
+
 #[async_trait]
 impl Task for Service {
     async fn create(
@@ -3004,15 +3040,24 @@ impl Task for Service {
         _ctx: &TtrpcContext,
         req: CreateTaskRequest,
     ) -> TtrpcResult<CreateTaskResponse> {
+        shim_diag(format!(
+            "create begin id={} group={} bundle={}",
+            req.id, self.group, req.bundle
+        ));
         let (vm, config_json, io, io_dir, device_claims) =
             match self.stage_rootfs_and_config(&req).await {
                 Ok(staged) => staged,
                 Err(e) => {
+                    shim_diag(format!("create stage_rootfs_and_config failed id={}: {e:#}", req.id));
                     self.cleanup_process_staging(&req.id, None).await;
                     return Err(rpc_other(e));
                 }
             };
         let is_sandbox = req.id == self.group;
+        shim_diag(format!(
+            "create staged id={} is_sandbox={} vm={}",
+            req.id, is_sandbox, vm.id
+        ));
         let share_process_namespace = config_requests_shared_pid_ns(&config_json);
         // Set 19: fetch the current host Pod policy before Create. Failure is
         // fail-closed because None keeps Set 8S's deny-non-loopback default.
@@ -3034,6 +3079,7 @@ impl Task for Service {
         {
             Ok(response) => response,
             Err(e) => {
+                shim_diag(format!("create call_agent failed id={}: {e:#}", req.id));
                 self.release_device_claims(&vm, &req.id, &device_claims)
                     .await;
                 self.cleanup_process_staging(&req.id, None).await;
@@ -3046,6 +3092,10 @@ impl Task for Service {
                 container_identity,
             } => (pid, container_identity),
             other => {
+                shim_diag(format!(
+                    "create unexpected agent response id={}: {other:?}",
+                    req.id
+                ));
                 self.release_device_claims(&vm, &req.id, &device_claims)
                     .await;
                 self.cleanup_process_staging(&req.id, None).await;
@@ -3064,6 +3114,7 @@ impl Task for Service {
             )
             .await
         {
+            shim_diag(format!("create attach_stream_relays failed id={}: {e:#}", req.id));
             let _ = self
                 .call_agent(
                     &vm,
@@ -3120,6 +3171,7 @@ impl Task for Service {
             ..Default::default()
         })
         .await;
+        shim_diag(format!("create ok id={} pid={}", req.id, pid));
         Ok(CreateTaskResponse {
             pid,
             ..Default::default()
@@ -3127,7 +3179,14 @@ impl Task for Service {
     }
 
     async fn start(&self, _ctx: &TtrpcContext, req: StartRequest) -> TtrpcResult<StartResponse> {
-        let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
+        shim_diag(format!(
+            "start begin id={} exec_id={:?}",
+            req.id, req.exec_id
+        ));
+        let vm = self.ensure_sandbox(None).await.map_err(|e| {
+            shim_diag(format!("start ensure_sandbox failed id={}: {e:#}", req.id));
+            rpc_other(e)
+        })?;
         let exec_id = if req.exec_id.is_empty() {
             None
         } else {
@@ -3142,10 +3201,16 @@ impl Task for Service {
                 },
             )
             .await
-            .map_err(rpc_other)?;
+            .map_err(|e| {
+                shim_diag(format!("start call_agent failed id={}: {e:#}", req.id));
+                rpc_other(e)
+            })?;
         let pid = match response {
             ContainerResponse::Started { pid } => pid,
-            other => return Err(rpc_other(format!("unexpected start response: {other:?}"))),
+            other => {
+                shim_diag(format!("start unexpected response id={}: {other:?}", req.id));
+                return Err(rpc_other(format!("unexpected start response: {other:?}")));
+            }
         };
         if let Some(exec_id_value) = exec_id.as_ref() {
             self.send_event(TaskExecStarted {
@@ -3164,6 +3229,7 @@ impl Task for Service {
             .await;
         }
         self.spawn_exit_watch(vm, req.id.clone(), exec_id, pid);
+        shim_diag(format!("start ok id={} pid={}", req.id, pid));
         Ok(StartResponse {
             pid,
             ..Default::default()
@@ -3225,6 +3291,10 @@ impl Task for Service {
     }
 
     async fn wait(&self, _ctx: &TtrpcContext, req: WaitRequest) -> TtrpcResult<WaitResponse> {
+        shim_diag(format!(
+            "wait begin id={} exec_id={:?}",
+            req.id, req.exec_id
+        ));
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() {
             None
@@ -3246,6 +3316,10 @@ impl Task for Service {
                 exit_code,
                 exited_at_unix_nano,
             } => {
+                shim_diag(format!(
+                    "wait exited id={} code={}",
+                    req.id, exit_code
+                ));
                 self.flush_stdio_after_exit(&req.id, exec_id.as_deref())
                     .await;
                 let pid = if let Some(exec) = exec_id.as_deref() {
@@ -3328,6 +3402,10 @@ impl Task for Service {
     }
 
     async fn delete(&self, _ctx: &TtrpcContext, req: DeleteRequest) -> TtrpcResult<DeleteResponse> {
+        shim_diag(format!(
+            "delete begin id={} exec_id={:?}",
+            req.id, req.exec_id
+        ));
         let vm = self.ensure_sandbox(None).await.map_err(rpc_other)?;
         let exec_id = if req.exec_id.is_empty() {
             None
@@ -5206,6 +5284,24 @@ mod tests {
         assert_eq!(
             pod_group_from_bundle(td.to_str().unwrap()).await.as_deref(),
             Some("pod123")
+        );
+        let _ = tokio::fs::remove_dir_all(td).await;
+    }
+
+    #[tokio::test]
+    async fn grouping_reads_runc_v2_group_annotation() {
+        let td = std::env::temp_dir().join(format!("fluxvm-shim-group-{}", std::process::id()));
+        let _ = tokio::fs::remove_dir_all(&td).await;
+        tokio::fs::create_dir_all(&td).await.unwrap();
+        tokio::fs::write(
+            td.join("config.json"),
+            r#"{"annotations":{"io.containerd.runc.v2.group":"sandbox-abc","io.kubernetes.cri.sandbox-id":"other"}}"#,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            pod_group_from_bundle(td.to_str().unwrap()).await.as_deref(),
+            Some("sandbox-abc")
         );
         let _ = tokio::fs::remove_dir_all(td).await;
     }
