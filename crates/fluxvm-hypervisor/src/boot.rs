@@ -283,6 +283,15 @@ fn configure_pvh_boot(
     const HIMEM: u64 = 0x0010_0000;
 
     let mem_size = mem.len() as u64;
+    // TEMP (bug 2 experiment): shrink the declared top of usable RAM by
+    // FLUXVM_MEM_RESERVE_MIB (default 0 = no change) to test whether the
+    // guest's direct-map PDPTE-not-present hang near the top of RAM is
+    // caused by something expecting a safety margin there.
+    let reserve_mib: u64 = std::env::var("FLUXVM_MEM_RESERVE_MIB")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mem_size = mem_size.saturating_sub(reserve_mib * 1024 * 1024);
     let mut memmap = vec![hvm_memmap_table_entry {
         addr: 0,
         size: 0x0009_fc00,
