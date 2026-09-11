@@ -94,15 +94,28 @@ jobs:
   rust-crates:
     runs-on: ubuntu-24.04
     steps:
+      # fluxvm-image → guestkit path dep requires sibling checkout layout.
       - uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
         with: { components: 'rustfmt,clippy' }
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic pkg-config
+      - name: System deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsystemd-dev libhivex-dev pkg-config \
+            clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic
           sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
-      - run: cargo test --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim
-      - run: cargo clippy --locked -p fluxvm-network -p fluxvm-container-protocol -- -D warnings
+      - name: cargo test
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim
+      - name: cargo clippy
+        working-directory: fluxvm
+        run: cargo clippy --locked -p fluxvm-network -p fluxvm-container-protocol -- -D warnings
 
   ebpf-objects:
     runs-on: ubuntu-24.04
@@ -116,15 +129,15 @@ jobs:
       - run: scripts/build-ebpf-guest.sh
       - name: object smoke
         run: |
-          test -s bpf/fluxvm_tc.bpf.o
-          test -s bpf/fluxvm_pod_ingress.bpf.o
+          test -s dist/bpf/fluxvm_tc.bpf.o
+          test -s dist/bpf/fluxvm_pod_ingress.bpf.o
           test -s dist/bpf/fluxvm_guest_cgroup.bpf.o
           test -s dist/bpf/fluxvm_guest_lsm.bpf.o
           if bpftool version >/dev/null 2>&1; then
-            bpftool btf dump file bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pridx || \
-              llvm-objdump -t bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
+            bpftool btf dump file dist/bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pridx || \
+              llvm-objdump -t dist/bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
           else
-            llvm-objdump -t bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
+            llvm-objdump -t dist/bpf/fluxvm_tc.bpf.o | grep -q fluxvm_pridx
           fi
 
   shell-contracts:
