@@ -801,7 +801,7 @@ fn decode_scalar_or_hex_u64(v: Option<&Value>) -> Option<u64> {
 fn le_u32(bytes: &[u8]) -> Option<u32> { if bytes.len() < 4 { None } else { Some(u32::from_le_bytes(bytes[..4].try_into().ok()?)) } }
 fn le_u64(bytes: &[u8]) -> Option<u64> { if bytes.len() < 8 { None } else { Some(u64::from_le_bytes(bytes[..8].try_into().ok()?)) } }
 fn backend_label(v: BackendKind) -> &'static str { match v { BackendKind::Qemu => "qemu", BackendKind::CloudHypervisor => "cloud-hypervisor", BackendKind::Firecracker => "firecracker", BackendKind::FluxVm => "flux-vm", BackendKind::Auto => "auto" } }
-fn status_label(v: VmStatus) -> &'static str { match v { VmStatus::Creating => "creating", VmStatus::Running => "running", VmStatus::Paused => "paused", VmStatus::Stopped => "stopped", VmStatus::Failed => "failed" } }
+fn status_label(v: VmStatus) -> &'static str { match v { VmStatus::Creating => "creating", VmStatus::Running => "running", VmStatus::Paused => "paused", VmStatus::Stopped => "stopped", VmStatus::Failed => "failed", VmStatus::Receiving => "receiving" } }
 
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

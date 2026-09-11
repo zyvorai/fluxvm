@@ -353,6 +353,7 @@ mod tests {
                 hugepages: None,
                 vfio_devices: vec![],
                 pod_uid: None,
+                migration_incoming: false,
             },
             guest_cid: None,
             jail_path: None,

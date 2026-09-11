@@ -298,6 +298,27 @@ pub struct CreateVmRequest {
     /// `None` for every non-Secure-Containers VM, matching today's behavior.
     #[serde(default)]
     pub pod_uid: Option<String>,
+    /// One-shot receiver-mode launch override, set ONLY by
+    /// `VmManager::create_receiver` on its own internal launch-time clone of
+    /// the receiver's spec -- never set by a caller directly, never
+    /// persisted onto a `VmRecord`'s stored `CreateVmRequest` (same
+    /// one-shot contract as `loadvm_tag` above). When true,
+    /// `fluxvm_qemu::build_args` appends `-incoming defer` instead of a
+    /// normal boot and opens `disk` with `file.locking=off`.
+    ///
+    /// Safety: `file.locking=off` is only ever needed on the RECEIVING side
+    /// of a migration. QEMU's image locking is a per-opener, cooperative
+    /// check (fcntl OFD locks) -- a process that opens with
+    /// `file.locking=off` never takes or checks that lock, so it is never
+    /// blocked by another still running QEMU process's (the source's)
+    /// default `locking=on` lock. The source therefore needs no change at
+    /// all; this field is intentionally never exposed for a normal
+    /// `create()`/`start()` request. This is safe ONLY because a receiver
+    /// process makes no I/O of its own against `disk` until QEMU's own
+    /// incoming-migration stream actually completes -- it is not a general
+    /// statement that two QEMU processes may safely share a qcow2 file.
+    #[serde(default)]
+    pub migration_incoming: bool,
 }
 fn default_vcpus() -> u8 {
     2
@@ -395,6 +416,44 @@ pub struct RuntimeCapabilities {
     pub snapshot: Vec<RuntimeSnapshotCapability>,
 }
 
+// ZYVOR_RUNTIME_BOUNDARY_V1: target-side of node-local migration, mirrors
+// docs/runtime-boundary-phase-2.md's "migration receiver" design, scoped
+// down to storage-contract v1 (shared storage only -- see `disk_path`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationReceiverRequest {
+    /// The full VM spec the destination will launch with once migration
+    /// completes -- deliberately the *same* `CreateVmRequest` shape used
+    /// to create the source VM (same `vcpus`/`memory_mib`/`max_vcpus`/
+    /// `max_memory_mib`/`network` with matching `mac`), so a caller can
+    /// hand this the source's own stored request unchanged as the easiest
+    /// way to guarantee the topology parity QEMU's migration stream
+    /// requires. `spec.migration_incoming` is ignored if the caller sets
+    /// it -- `create_receiver` always forces it on internally regardless.
+    pub spec: CreateVmRequest,
+    /// Absolute path to the disk file the source VM already has open --
+    /// NOT provisioned/copied (storage contract v1 requires shared
+    /// storage). Must already exist and be reachable from this daemon's
+    /// filesystem view.
+    pub disk_path: PathBuf,
+    /// How long an unclaimed receiver is allowed to sit waiting for a
+    /// migration before the existing TTL reaper reclaims it. Defaults to
+    /// 300s.
+    #[serde(default)]
+    pub receiver_ttl_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationReceiverInfo {
+    pub id: Uuid,
+    pub status: VmStatus,
+    /// Host/port the destination QEMU armed via `migrate-incoming` --
+    /// callers build the actual `MigrationStartRequest.destination` URI
+    /// from this (e.g. `tcp:<dest-host-reachable-ip>:<port>`); FluxVM does
+    /// not guess its own externally-routable address.
+    pub port: u16,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum VmStatus {
@@ -403,6 +462,15 @@ pub enum VmStatus {
     Paused,
     Stopped,
     Failed,
+    /// A QEMU process is up and listening for an incoming migration stream
+    /// (`-incoming defer` + QMP `migrate-incoming`) but has not yet
+    /// received/finished one -- see `VmManager::create_receiver`. Distinct
+    /// from `Creating` (which always resolves to `Running`/`Failed` as
+    /// `create()`'s very last step) because a receiver can legitimately
+    /// stay in this state for as long as its `expires_at` deadline allows,
+    /// waiting on a migration that is driven by a *different* VM's
+    /// `start_migration` call.
+    Receiving,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
