@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "admission_id": "sentinel-2026-09-11-r17",
+  "candidate": {
+    "release_id": "sentinel-17.0.0",
+    "artifact_path": "/srv/releases/fluxvm-sentinel-17.0.0.tar.zst",
+    "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "manifest_path": "/srv/releases/fluxvm-sentinel-17.0.0.json",
+    "manifest_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "state_abis": {
+      "network": "service-schema-v8",
+      "scheduler": "scx-v1",
+      "topology": "topology-v1"
+    }
+  },
+  "evidence": [
+    {
+      "name": "ga-strict",
+      "kind": "evidence-dir",
+      "path": "/srv/releases/evidence/strict-20260911",
+      "document": "run.json",
+      "assertions": [
+        {"pointer": "/status", "op": "eq", "value": "pass"},
+        {"pointer": "/metrics/network_p99_us", "op": "le", "value": 250},
+        {"pointer": "/metrics/migration_downtime_ms", "op": "le", "value": 500}
+      ]
+    }
+  ],
+  "nodes": [
+    {"name": "edge-a1", "host": "10.20.0.11", "user": "fluxvm", "cohort": "x86-prod", "arch": "x86_64", "kernel_regex": "6\\.(12|13)\\..*", "required_capabilities": ["kernel_btf", "bpftool", "kvm"]},
+    {"name": "edge-a2", "host": "10.20.0.12", "user": "fluxvm", "cohort": "x86-prod", "arch": "x86_64", "kernel_regex": "6\\.(12|13)\\..*", "required_capabilities": ["kernel_btf", "bpftool", "kvm"]}
+  ],
+  "compatibility": {
+    "allow_missing_current_state_abi": false,
+    "allowed_from_state_abis": {
+      "network": ["service-schema-v7"],
+      "scheduler": ["legacy", "scx-v0"],
+      "topology": ["topology-v1"]
+    }
+  },
+  "policy": {
+    "required_capabilities": ["cgroup_v2"],
+    "min_reachable_percent": 100,
+    "min_compatible_percent": 100,
+    "max_unreachable_nodes": 0,
+    "min_nodes_per_cohort": 1,
+    "require_each_cohort_compatible": true,
+    "max_parallel": 8,
+    "admission_ttl_seconds": 3600
+  }
+}

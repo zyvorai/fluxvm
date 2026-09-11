@@ -116,6 +116,11 @@ components, unrelated to `fluxvm-agent`'s VM-placement fleet.
       disposable multi-host smoke remains opt-in behind
       `FLUXVM_FLEET_GUARD_HOST_TEST`
       ([sentinel-fleet-drift-slo-guard.md](sentinel-fleet-drift-slo-guard.md))
+- [ ] `fluxvm-admit` (Set 17E): non-mutating pre-rollout release admission —
+      artifact/evidence integrity, strict-SSH capability probes, state-ABI
+      compatibility, cohort coverage, and short-lived tamper-evident admission
+      records — static/unit gates proven; never deploys or remediates
+      ([sentinel-release-admission.md](sentinel-release-admission.md))
 
 ## Do not ship yet as “done”
 
