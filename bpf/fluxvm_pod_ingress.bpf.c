@@ -284,23 +284,6 @@ static __always_inline void reverse_key4(
     key->family = FLUXVM_AF_INET;
 }
 
-static __always_inline void reverse_key6(
-    struct flow_key *key,
-    __u32 identity,
-    struct ipv6hdr *ip,
-    __u16 sport,
-    __u16 dport)
-{
-    __builtin_memset(key, 0, sizeof(*key));
-    key->identity = identity;
-    __builtin_memcpy(key->src, ip->daddr.in6_u.u6_addr8, 16);
-    __builtin_memcpy(key->dst, ip->saddr.in6_u.u6_addr8, 16);
-    key->sport = dport;
-    key->dport = sport;
-    key->protocol = ip->nexthdr;
-    key->family = FLUXVM_AF_INET6;
-}
-
 static __always_inline int reverse_ct_hit(struct flow_key *key)
 {
     struct ct_state *state = bpf_map_lookup_elem(&fluxvm_ct, key);
