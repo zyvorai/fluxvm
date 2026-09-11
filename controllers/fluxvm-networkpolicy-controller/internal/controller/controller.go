@@ -105,6 +105,28 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		c.Metrics.ReconcileDone(0, 0, 0, 0, 0, time.Since(started), false)
 		return fmt.Errorf("list Services: %w", err)
 	}
+	// FLUXVM_SECURE_CONTAINERS_SET18: avoid widening the Kubernetes interface
+	// used by existing controller test fakes. EndpointSlices are required only
+	// for the explicit Service-ClusterIP feature; the real kube.Client provides
+	// this stable discovery/v1 method.
+	var endpointSlices []kube.EndpointSlice
+	if c.IncludeServiceClusterIPs {
+		type endpointSliceLister interface {
+			EndpointSlices(context.Context) ([]kube.EndpointSlice, error)
+		}
+		lister, ok := c.Kube.(endpointSliceLister)
+		if !ok {
+			c.Metrics.APIError()
+			c.Metrics.ReconcileDone(0, 0, 0, 0, 0, time.Since(started), false)
+			return errors.New("Service ClusterIP inclusion requires Kubernetes EndpointSlice listing support")
+		}
+		endpointSlices, err = lister.EndpointSlices(ctx)
+		if err != nil {
+			c.Metrics.APIError()
+			c.Metrics.ReconcileDone(0, 0, 0, 0, 0, time.Since(started), false)
+			return fmt.Errorf("list EndpointSlices: %w", err)
+		}
+	}
 	networkPolicies, err := c.Kube.NetworkPolicies(ctx)
 	if err != nil {
 		c.Metrics.APIError()
@@ -118,7 +140,7 @@ func (c *Controller) Reconcile(ctx context.Context) error {
 		return fmt.Errorf("list FluxVM VMs: %w", err)
 	}
 
-	snapshot := policy.Snapshot{Pods: pods, Namespaces: namespaces, Services: services, NetworkPolicies: networkPolicies}
+	snapshot := policy.Snapshot{Pods: pods, Namespaces: namespaces, Services: services, EndpointSlices: endpointSlices, NetworkPolicies: networkPolicies}
 	vmsByPodUID := make(map[string][]fluxvm.VMRecord)
 	for _, vm := range vms {
 		if vm.Request.PodUID == nil || *vm.Request.PodUID == "" {

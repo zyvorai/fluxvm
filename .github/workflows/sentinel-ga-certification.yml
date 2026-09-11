@@ -35,7 +35,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install static test dependencies
-        run: sudo apt-get update && sudo apt-get install -y shellcheck bpftool iproute2 ethtool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck iproute2 ethtool linux-tools-common linux-tools-generic
+          # Azure GH runners need the matching kernel tools package for a real bpftool binary.
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+          bpftool version || echo 'bpftool still stubbed for this kernel; host gates tolerate that'
       - name: Static and unit gates
         run: scripts/test-sentinel-ga-static.sh
       - name: Non-destructive host recovery gates

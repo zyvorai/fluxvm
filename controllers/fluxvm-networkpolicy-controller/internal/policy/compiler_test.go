@@ -217,12 +217,15 @@ func TestUnrestrictedNamedEgressFailsClosedPerRule(t *testing.T) {
 	}
 }
 
-func TestConservativeServiceVIP(t *testing.T) {
+// FLUXVM_SECURE_CONTAINERS_SET18
+func TestEndpointSliceServiceVIP(t *testing.T) {
 	target := pod("app", "web", "u1", "n1", "10.0.0.10", map[string]string{"app": "web"})
 	dns := pod("infra", "dns", "u2", "n2", "10.10.0.2", map[string]string{"k8s-app": "dns"})
 	svc := kube.Service{Metadata: kube.ObjectMeta{Name: "dns", Namespace: "infra"}, Spec: kube.ServiceSpec{ClusterIP: "10.96.0.10", ClusterIPs: []string{"10.96.0.10"}, Selector: map[string]string{"k8s-app": "dns"}}}
+	ready := true
+	slice := kube.EndpointSlice{Metadata: kube.ObjectMeta{Name: "dns-a", Namespace: "infra", Labels: map[string]string{"kubernetes.io/service-name": "dns"}}, AddressType: "IPv4", Endpoints: []kube.Endpoint{{Addresses: []string{"10.10.0.2"}, Conditions: kube.EndpointConditions{Ready: &ready}, TargetRef: &kube.ObjectReference{Kind: "Pod", Namespace: "infra", Name: "dns", UID: "u2"}}}}
 	np := kube.NetworkPolicy{Metadata: kube.ObjectMeta{Name: "dns", Namespace: "app"}, Spec: kube.NetworkPolicySpec{PodSelector: kube.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, PolicyTypes: []string{"Egress"}, Egress: []kube.NetworkPolicyEgressRule{{To: []kube.NetworkPolicyPeer{{NamespaceSelector: &kube.LabelSelector{MatchLabels: map[string]string{"name": "infra"}}, PodSelector: &kube.LabelSelector{MatchLabels: map[string]string{"k8s-app": "dns"}}}}}}}}
-	r, err := Compile(target, Snapshot{Pods: []kube.Pod{target, dns}, Namespaces: []kube.Namespace{ns("app", map[string]string{"name": "app"}), ns("infra", map[string]string{"name": "infra"})}, Services: []kube.Service{svc}, NetworkPolicies: []kube.NetworkPolicy{np}}, Options{IncludeServiceClusterIPs: true})
+	r, err := Compile(target, Snapshot{Pods: []kube.Pod{target, dns}, Namespaces: []kube.Namespace{ns("app", map[string]string{"name": "app"}), ns("infra", map[string]string{"name": "infra"})}, Services: []kube.Service{svc}, EndpointSlices: []kube.EndpointSlice{slice}, NetworkPolicies: []kube.NetworkPolicy{np}}, Options{IncludeServiceClusterIPs: true})
 	if err != nil {
 		t.Fatal(err)
 	}

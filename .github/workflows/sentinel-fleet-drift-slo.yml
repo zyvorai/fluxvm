@@ -1,0 +1,38 @@
+name: Sentinel Fleet Drift and SLO Guard
+on:
+  pull_request:
+    paths:
+      - 'tools/fluxvm_fleet_guard.py'
+      - 'tools/tests/test_fluxvm_fleet_guard.py'
+      - 'docs/sentinel-fleet-drift-slo-guard.md'
+      - 'schemas/sentinel-fleet-guard.schema.json'
+      - 'examples/sentinel-fleet-guard.json'
+      - 'scripts/*sentinel-fleet-guard*'
+      - 'packaging/systemd/fluxvm-fleet-guard.*'
+      - '.github/workflows/sentinel-fleet-drift-slo.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'tools/fluxvm_fleet_guard.py'
+      - 'tools/tests/test_fluxvm_fleet_guard.py'
+      - 'scripts/*sentinel-fleet-guard*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Static and unit gates
+        run: sudo -E ./scripts/test-sentinel-fleet-guard-static.sh
+  host:
+    if: ${{ vars.FLUXVM_FLEET_GUARD_HOST_TEST == '1' }}
+    runs-on: [self-hosted, linux, fluxvm-fleet]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Disposable fleet smoke
+        env:
+          FLUXVM_FLEET_GUARD_HOST_TEST: '1'
+          FLUXVM_FLEET_GUARD_PLAN: ${{ vars.FLUXVM_FLEET_GUARD_PLAN }}
+        run: ./scripts/test-sentinel-fleet-guard-host.sh

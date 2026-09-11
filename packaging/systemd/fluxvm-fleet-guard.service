@@ -1,0 +1,16 @@
+[Unit]
+Description=FluxVM Sentinel fleet drift and SLO guard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/fluxvm/fluxvm-fleet-guard check /etc/fluxvm/sentinel-fleet-guard.json
+User=root
+Group=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/fluxvm/sentinel-fleet-guard
+UMask=0027

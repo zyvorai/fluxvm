@@ -14,6 +14,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "namespaces", "services"]
     verbs: ["get", "list"]
+  # FLUXVM_SECURE_CONTAINERS_SET18: required only when
+  # --include-service-clusterips is enabled; discovery/v1 EndpointSlices are
+  # the Service backend routing source of truth.
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list"]

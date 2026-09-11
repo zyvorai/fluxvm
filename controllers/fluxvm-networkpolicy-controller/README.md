@@ -104,7 +104,8 @@ kubectl apply -k controllers/fluxvm-networkpolicy-controller/deploy
 
 The DaemonSet is non-privileged and uses `hostNetwork` only so the controller
 can reach the node-local FluxVM API at `127.0.0.1`. It needs read-only access to
-Pods, Namespaces, Services and NetworkPolicies. Kernel eBPF attachment remains
+Pods, Namespaces, Services and NetworkPolicies, plus discovery/v1 EndpointSlices
+when `--include-service-clusterips` is enabled. Kernel eBPF attachment remains
 the FluxVM daemon's responsibility, not the controller Pod's.
 
 ## Configuration
@@ -134,3 +135,20 @@ conformance. Before production enablement, run the live gates on a Linux KVM
 node with the real FluxVM TC objects, CNI, dual-stack traffic and policy
 transitions. See `docs/secure-containers-set14.md`,
 `docs/secure-containers-set15.md`, and `docs/NEXT-FEATURES.md`.
+
+<!-- FLUXVM_SECURE_CONTAINERS_SET18 -->
+### EndpointSlice-aware Service ClusterIPs
+
+`--include-service-clusterips` remains explicit opt-in. Set 18 changes its
+safety proof: a Service VIP is emitted only when discovery/v1 EndpointSlices
+show at least one potentially routable backend for that IP family and every
+such backend resolves to a non-terminal Pod already selected by the
+NetworkPolicy peer. The endpoint address must also belong to that Pod and the
+Pod must still match the Service selector. Not-ready endpoints are ignored;
+`ready: null` follows Kubernetes' `true` semantics, while
+`serving: true, terminating: true` is treated as potentially routable for
+connection-draining fallback. Missing/unknown/external endpoints fail closed
+for that Service address family.
+
+The controller therefore needs `get,list` on
+`discovery.k8s.io/v1/endpointslices` when this option is enabled.

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "guard_id": "sentinel-prod-r2026-09",
+  "desired": {
+    "release_id": "r2026.09.11-1",
+    "artifact_sha256": "REPLACE_WITH_RELEASE_SHA256",
+    "state_abis": {"network": "schema-v8", "runtime-intelligence": "schema-v2"}
+  },
+  "nodes": [
+    {
+      "name": "edge-a",
+      "host": "10.20.0.11",
+      "cohort": "x86-prod",
+      "user": "fluxvm",
+      "health_checks": [{"name":"fluxvm-api","argv":["curl","-fsS","http://127.0.0.1:7788/healthz"]}],
+      "slo_checks": [{"name":"runtime-p99-ms","argv":["/usr/local/bin/read-fluxvm-p99-ms"],"op":"le","threshold":5.0}],
+      "quarantine_argv": ["/usr/local/sbin/fluxvm-node-quarantine","enable"]
+    }
+  ],
+  "policy": {
+    "mode": "observe",
+    "allow_actions": false,
+    "consecutive_failures": 3,
+    "max_actions_per_run": 1,
+    "max_actions_per_cohort": 1,
+    "max_unhealthy_nodes": 1,
+    "max_unhealthy_per_cohort": 1,
+    "max_unhealthy_percent": 20,
+    "max_parallel": 4
+  }
+}

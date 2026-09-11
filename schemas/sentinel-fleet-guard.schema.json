@@ -1,0 +1,13 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"FluxVM Sentinel Set 16E fleet guard plan",
+  "type":"object",
+  "required":["schema_version","guard_id","desired","nodes"],
+  "properties":{
+    "schema_version":{"const":1},
+    "guard_id":{"type":"string","pattern":"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "desired":{"type":"object","required":["release_id"],"properties":{"release_id":{"type":"string","minLength":1},"artifact_sha256":{"type":"string"},"state_abis":{"type":"object","additionalProperties":{"type":"string"}}}},
+    "nodes":{"type":"array","minItems":1,"items":{"type":"object","required":["name","host"],"properties":{"name":{"type":"string"},"host":{"type":"string"},"cohort":{"type":"string"},"health_checks":{"type":"array"},"slo_checks":{"type":"array"},"file_hashes":{"type":"array"},"quarantine_argv":{"type":"array","items":{"type":"string"}},"remediate_argv":{"type":"array","items":{"type":"string"}},"rollback_argv":{"type":"array","items":{"type":"string"}}}}},
+    "policy":{"type":"object","properties":{"mode":{"enum":["observe","quarantine","remediate","rollback"]},"allow_actions":{"type":"boolean"},"consecutive_failures":{"type":"integer","minimum":1},"max_actions_per_run":{"type":"integer","minimum":0},"max_actions_per_cohort":{"type":"integer","minimum":0},"max_unhealthy_nodes":{"type":"integer","minimum":0},"max_unhealthy_per_cohort":{"type":"integer","minimum":0},"max_unhealthy_percent":{"type":"number","minimum":0,"maximum":100},"max_parallel":{"type":"integer","minimum":1}}}
+  }
+}
