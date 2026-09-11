@@ -24,11 +24,12 @@
 
 use crate::kvm::{KvmRegs, KvmSregs, KvmVm};
 use crate::memory::GuestMemory;
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender};
-use std::sync::Arc;
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub enum GdbCmd {
@@ -39,17 +40,28 @@ pub enum GdbCmd {
         len: usize,
         reply: SyncSender<Vec<u8>>,
     },
+    /// Patch a software breakpoint (`0xCC`) at a *virtual* address,
+    /// remembering the original byte for `ClearBreakpoint`. Arms
+    /// `KVM_SET_GUEST_DEBUG` on first use.
+    SetBreakpoint { addr: u64, reply: SyncSender<bool> },
+    /// Restore the original byte at a previously set breakpoint.
+    ClearBreakpoint { addr: u64, reply: SyncSender<bool> },
 }
 
-/// OS thread id of the BSP vCPU thread, so break-in can signal it.
+/// OS thread id of the BSP vCPU thread (so break-in can signal it) plus
+/// the software-breakpoint registry (virtual addr -> original byte).
 pub struct GdbControl {
     tid: AtomicI32,
+    breakpoints: Mutex<HashMap<u64, u8>>,
+    debug_armed: AtomicBool,
 }
 
 impl GdbControl {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             tid: AtomicI32::new(0),
+            breakpoints: Mutex::new(HashMap::new()),
+            debug_armed: AtomicBool::new(false),
         })
     }
 
@@ -94,12 +106,26 @@ fn signal_thread(tid: i32, sig: i32) {
 #[cfg(not(target_os = "linux"))]
 fn signal_thread(_tid: i32, _sig: i32) {}
 
+/// `(addr, control, cmd_tx, cmd_rx, stop_tx, stop_rx)` -- everything
+/// `run_until` needs to wire up a gdbstub session. `cmd_tx`/`stop_rx` are
+/// consumed by `spawn`; `cmd_rx` is polled and `stop_tx` is signaled by
+/// run_until's own BSP loop.
+pub type GdbSetup = (
+    String,
+    Arc<GdbControl>,
+    SyncSender<GdbCmd>,
+    Receiver<GdbCmd>,
+    SyncSender<()>,
+    Receiver<()>,
+);
+
 pub fn spawn(
     addr: String,
     kvm: Arc<KvmVm>,
     control: Arc<GdbControl>,
     paused: Arc<AtomicBool>,
     cmd_tx: SyncSender<GdbCmd>,
+    stop_rx: Receiver<()>,
 ) {
     install_signal_handler();
     std::thread::spawn(move || {
@@ -111,8 +137,11 @@ pub fn spawn(
             }
         };
         eprintln!("[gdbstub] listening on {addr} -- attach with: gdb -ex 'target remote {addr}'");
+        // One connection at a time (this is a diagnostic tool, not a
+        // multi-client server), so `stop_rx` can be shared by reference
+        // across connections without needing to be cloneable.
         for stream in listener.incoming().flatten() {
-            handle_conn(stream, &kvm, &control, &paused, &cmd_tx);
+            handle_conn(stream, &kvm, &control, &paused, &cmd_tx, &stop_rx);
         }
     });
 }
@@ -157,6 +186,7 @@ fn handle_conn(
     control: &Arc<GdbControl>,
     paused: &Arc<AtomicBool>,
     cmd_tx: &SyncSender<GdbCmd>,
+    stop_rx: &Receiver<()>,
 ) {
     let _ = stream.set_nodelay(true);
     eprintln!("[gdbstub] client connected -- breaking in");
@@ -183,7 +213,7 @@ fn handle_conn(
                 }
                 TakeResult::Packet(body) => {
                     let _ = stream.write_all(b"+");
-                    if let Some(reply) = dispatch(&body, kvm, paused, cmd_tx) {
+                    if let Some(reply) = dispatch(&body, kvm, paused, cmd_tx, stop_rx) {
                         let _ = stream.write_all(&frame(&reply));
                     }
                 }
@@ -249,6 +279,7 @@ fn dispatch(
     kvm: &Arc<KvmVm>,
     paused: &Arc<AtomicBool>,
     cmd_tx: &SyncSender<GdbCmd>,
+    stop_rx: &Receiver<()>,
 ) -> Option<String> {
     if body.starts_with("qSupported") {
         return Some("PacketSize=4000".into());
@@ -280,13 +311,31 @@ fn dispatch(
         let data = rx.recv_timeout(Duration::from_secs(2)).ok()?;
         return Some(data.iter().map(|b| format!("{b:02x}")).collect());
     }
+    if let Some(rest) = body.strip_prefix("Z0,") {
+        let addr = u64::from_str_radix(rest.split(',').next()?, 16).ok()?;
+        let (tx, rx) = sync_channel(1);
+        cmd_tx.send(GdbCmd::SetBreakpoint { addr, reply: tx }).ok()?;
+        let ok = rx.recv_timeout(Duration::from_secs(2)).unwrap_or(false);
+        return Some(if ok { "OK".into() } else { String::new() });
+    }
+    if let Some(rest) = body.strip_prefix("z0,") {
+        let addr = u64::from_str_radix(rest.split(',').next()?, 16).ok()?;
+        let (tx, rx) = sync_channel(1);
+        cmd_tx.send(GdbCmd::ClearBreakpoint { addr, reply: tx }).ok()?;
+        let _ = rx.recv_timeout(Duration::from_secs(2));
+        return Some("OK".into());
+    }
     if body == "c" {
-        // "Continue" resumes the guest but the RSP client is expected to
-        // keep the connection open only for a subsequent break-in; we
-        // don't emit a stop reply until the client interrupts again or
-        // reconnects (this stub doesn't track completion/exit events).
+        // Resume, then block until a breakpoint/debug-exit fires (or the
+        // connection's caller gives up). A plain `c` with no breakpoints
+        // set will simply wait here until the client sends Ctrl-C --
+        // matching normal remote-debugging semantics, and fine for this
+        // tool's one-shot diagnostic use.
         resume(kvm, paused);
-        return None;
+        return match stop_rx.recv_timeout(Duration::from_secs(600)) {
+            Ok(()) => Some("S05".into()),
+            Err(_) => None,
+        };
     }
     if body.starts_with('D') {
         resume(kvm, paused);
@@ -342,7 +391,7 @@ const PADDR_MASK: u64 = 0x000f_ffff_ffff_f000;
 /// physical addresses directly, as an earlier version of this stub did,
 /// silently returns garbage/zeroed data for any address outside the
 /// guest's physical RAM window, which is most kernel addresses).
-fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
+pub fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
     let idx = |shift: u32| (vaddr >> shift) & 0x1ff;
     let pml4e = read_phys_u64(mem, (cr3 & PADDR_MASK) + idx(39) * 8)?;
     if pml4e & PAGE_PRESENT == 0 {
@@ -367,6 +416,39 @@ fn virt_to_phys(mem: &GuestMemory, cr3: u64, vaddr: u64) -> Option<u64> {
         return None;
     }
     Some((pte & PADDR_MASK) | (vaddr & 0xfff))
+}
+
+/// Patches a software breakpoint (`0xCC`/int3) at a virtual address,
+/// remembering the original byte in `control.breakpoints` so it can be
+/// restored later. Arms `KVM_SET_GUEST_DEBUG` (once) so KVM reports the
+/// resulting int3 back via `KVM_EXIT_DEBUG` instead of forwarding it into
+/// the guest's own IDT. Called on the BSP vCPU thread from run_until's
+/// pause-service loop.
+pub fn set_breakpoint(mem: &mut GuestMemory, kvm: &KvmVm, control: &GdbControl, cr3: u64, addr: u64) -> bool {
+    if !control.debug_armed.swap(true, Ordering::SeqCst) && kvm.enable_guest_debug(0).is_err() {
+        control.debug_armed.store(false, Ordering::SeqCst);
+        return false;
+    }
+    let Some(phys) = virt_to_phys(mem, cr3, addr) else {
+        return false;
+    };
+    let mut orig = [0u8; 1];
+    if mem.read_at(phys, &mut orig).is_err() || mem.write_at(phys, &[0xCCu8]).is_err() {
+        return false;
+    }
+    control.breakpoints.lock().unwrap().insert(addr, orig[0]);
+    true
+}
+
+/// Restores the original byte at a previously set breakpoint.
+pub fn clear_breakpoint(mem: &mut GuestMemory, control: &GdbControl, cr3: u64, addr: u64) -> bool {
+    let Some(orig) = control.breakpoints.lock().unwrap().remove(&addr) else {
+        return false;
+    };
+    match virt_to_phys(mem, cr3, addr) {
+        Some(phys) => mem.write_at(phys, &[orig]).is_ok(),
+        None => false,
+    }
 }
 
 /// Reads guest memory for the `m` command. Translates `addr` as a virtual

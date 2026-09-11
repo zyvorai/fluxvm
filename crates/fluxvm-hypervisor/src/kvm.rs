@@ -519,6 +519,157 @@ impl KvmVm {
         Ok(())
     }
 
+    /// BSP-only, PVH boot entry. Sets up the *minimum* the PVH spec
+    /// requires -- 32-bit protected mode, paging off, a flat code/data
+    /// GDT, RIP at the kernel's PVH entry point, RBX pointing at the
+    /// `hvm_start_info` structure (the PVH ABI's calling convention) --
+    /// and leaves everything else (page tables, the 32-to-64-bit
+    /// transition, per-cpu/GDT reload) to the kernel's own
+    /// startup_32/startup_64 code, exactly as a real PVH-aware hypervisor
+    /// (Xen, and this is also how cloud-hypervisor does it) would.
+    ///
+    /// This exists because our own hand-built identity page tables +
+    /// direct-to-long-mode jump (`setup_long_mode`) substitutes our
+    /// from-scratch setup for a large piece of what the kernel would
+    /// otherwise do itself on real hardware -- any subtle gap there is a
+    /// bug class PVH boot sidesteps entirely by letting the kernel do it.
+    pub fn setup_pvh_entry(&self, mem: &mut GuestMemory, rip: u64, rbx: u64) -> Result<()> {
+        let idx = 0;
+        const GDT: u64 = 0xB000;
+        const TSS: u64 = 0xC000;
+        mem.write_at(TSS, &[0u8; 128])?;
+        // null, code32, data32 -- flat, 4 GiB, matching the well-known
+        // reference GDT bytes documented for the Linux boot protocol's
+        // own 32-bit entry (Documentation/arch/x86/boot.rst) -- plus a
+        // real 32-bit TSS descriptor. Unlike LDTR, VMX's guest-state
+        // entry checks give TR no "unusable" exception: it must always
+        // be a valid, PRESENT, busy (type 11) descriptor, even though
+        // nothing ever actually task-switches into it. Omitting this
+        // (marking TR unusable, matching how LDT is handled) is exactly
+        // what caused KVM_EXIT_FAIL_ENTRY / EXIT_REASON_INVALID_STATE
+        // (basic reason 33) on the very first vmentry -- confirmed live.
+        let mut gdt = [0u8; 32];
+        gdt[8..16].copy_from_slice(&0x00cf_9b00_0000_ffffu64.to_le_bytes());
+        gdt[16..24].copy_from_slice(&0x00cf_9300_0000_ffffu64.to_le_bytes());
+        let tss_limit = 103u64;
+        let tss_desc = (tss_limit & 0xffff)
+            | ((TSS & 0xff_ffff) << 16)
+            | (0xbu64 << 40) // busy 32-bit TSS
+            | (1u64 << 47) // present
+            | (((TSS >> 24) & 0xff) << 56);
+        gdt[24..32].copy_from_slice(&tss_desc.to_le_bytes());
+        mem.write_at(GDT, &gdt)?;
+
+        let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_GET_SREGS,
+                &mut sregs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_GET_SREGS".into()));
+        }
+
+        let code = KvmSegment {
+            base: 0,
+            limit: 0xffff_ffff,
+            selector: 0x08,
+            type_: 0xb, // execute + read
+            present: 1,
+            dpl: 0,
+            db: 1, // 32-bit
+            s: 1,
+            l: 0,
+            g: 1,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
+        let data = KvmSegment {
+            base: 0,
+            limit: 0xffff_ffff,
+            selector: 0x10,
+            type_: 0x3, // read + write
+            present: 1,
+            dpl: 0,
+            db: 1,
+            s: 1,
+            l: 0,
+            g: 1,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
+        sregs.cs = code;
+        sregs.ds = data;
+        sregs.es = data;
+        sregs.fs = data;
+        sregs.gs = data;
+        sregs.ss = data;
+        sregs.ldt = data;
+        sregs.ldt.unusable = 1;
+        sregs.ldt.present = 0;
+        sregs.ldt.selector = 0;
+        sregs.tr = KvmSegment {
+            base: TSS,
+            limit: 103,
+            selector: 0x18,
+            type_: 0xb, // busy 32-bit TSS
+            present: 1,
+            dpl: 0,
+            db: 0,
+            s: 0,
+            l: 0,
+            g: 0,
+            avl: 0,
+            unusable: 0,
+            padding: 0,
+        };
+        sregs.gdt.base = GDT;
+        sregs.gdt.limit = 32 - 1;
+        sregs.idt.base = 0;
+        sregs.idt.limit = 0;
+        // Protected mode only -- no paging (PG), no PAE, no long mode.
+        // The kernel's own startup_32 builds its own page tables and
+        // makes the jump to long mode itself.
+        sregs.cr0 = 0x1; // PE
+        sregs.cr3 = 0;
+        sregs.cr4 = 0;
+        sregs.efer = 0;
+        sregs.apic_base = 0xfee0_0000 | (1 << 11) | (1 << 8); // enable + BSP
+
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_SREGS,
+                &mut sregs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_SREGS".into()));
+        }
+
+        let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
+        regs.rip = rip;
+        // Per the PVH boot spec, EBX holds a pointer to the
+        // hvm_start_info structure at entry.
+        regs.rbx = rbx;
+        regs.rflags = 0x2;
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_REGS,
+                &mut regs as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_REGS".into()));
+        }
+        Ok(())
+    }
+
     /// Assert or deassert a GSI on the in-kernel irqchip (IOAPIC).
     pub fn set_irq_line(&self, gsi: u32, level: bool) -> Result<()> {
         #[repr(C)]
@@ -639,6 +790,36 @@ impl KvmVm {
         unsafe {
             std::ptr::write_volatile(self.vcpus[idx].run.add(1), on as u8);
         }
+    }
+
+    /// Enable trapping of the guest's own `int3` (software breakpoint)
+    /// execution to `KVM_EXIT_DEBUG` instead of letting it reach the
+    /// guest's IDT. The gdbstub still has to patch the `0xCC` byte into
+    /// guest memory itself (`KVM_GUESTDBG_USE_SW_BP` only controls how
+    /// KVM *reports* an int3 that already happened, not where one is).
+    pub fn enable_guest_debug(&self, idx: usize) -> Result<()> {
+        #[repr(C)]
+        struct KvmGuestDebug {
+            control: u32,
+            pad: u32,
+            debugreg: [u64; 8],
+        }
+        let mut dbg = KvmGuestDebug {
+            control: ffi::KVM_GUESTDBG_ENABLE | ffi::KVM_GUESTDBG_USE_SW_BP,
+            pad: 0,
+            debugreg: [0; 8],
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_GUEST_DEBUG,
+                &mut dbg as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor("KVM_SET_GUEST_DEBUG".into()));
+        }
+        Ok(())
     }
 
     pub fn io_info(&self, idx: usize) -> (u8, u8, u16, u32, u32) {

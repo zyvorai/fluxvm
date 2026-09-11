@@ -11,10 +11,10 @@ use crate::devices::virtio_mmio::{self, VirtioMmio};
 use crate::devices::virtio_net::{self, VirtioNetConfig};
 use crate::error::{FluxError, Result};
 use crate::ffi;
-use crate::gdbstub::{self, GdbCmd, GdbControl};
+use crate::gdbstub::{self, GdbCmd, GdbControl, GdbSetup};
 use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
-use crate::memory::{GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
+use crate::memory::{self, GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
 use crate::tap::Tap;
 use std::io;
 use std::sync::{
@@ -37,8 +37,12 @@ pub struct VirtualMachine {
     pub blk_backend: Option<Arc<BlockBackend>>,
     pub tap: Option<Tap>,
     pub boot_rip: u64,
-    /// Linux zero-page GPA for RSI (64-bit boot protocol). None for Windows / netboot.
+    /// Linux zero-page GPA for RSI (64-bit direct-boot protocol). None for
+    /// Windows / netboot / PVH boot.
     pub boot_params_gpa: Option<u64>,
+    /// `hvm_start_info` GPA for PVH boot (see `boot::configure_pvh_boot`).
+    /// Mutually exclusive with `boot_params_gpa`.
+    pub pvh_start_info_gpa: Option<u64>,
     pub notes: Vec<String>,
 }
 
@@ -94,6 +98,7 @@ impl VirtualMachine {
             tap,
             boot_rip: KERNEL_LOAD_ADDR,
             boot_params_gpa: None,
+            pvh_start_info_gpa: None,
             notes,
         })
     }
@@ -177,6 +182,7 @@ impl VirtualMachine {
             tap,
             boot_rip: boot_info.entry_rip,
             boot_params_gpa: boot_info.boot_params_gpa,
+            pvh_start_info_gpa: boot_info.pvh_start_info_gpa,
             notes,
         })
     }
@@ -204,10 +210,11 @@ impl VirtualMachine {
     /// gdbstub (see `gdbstub.rs`) listening there for live inspection of
     /// a hung/misbehaving guest.
     pub fn run_with_gdb(self, gdb_addr: Option<String>) -> Result<String> {
-        let gdb = gdb_addr.map(|addr| {
+        let gdb: Option<GdbSetup> = gdb_addr.map(|addr| {
             let control = GdbControl::new();
             let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel(0);
-            (addr, control, cmd_tx, cmd_rx)
+            let (stop_tx, stop_rx) = std::sync::mpsc::sync_channel(0);
+            (addr, control, cmd_tx, cmd_rx, stop_tx, stop_rx)
         });
         // The gdbstub thread needs Arc<KvmVm>/paused before run_until
         // creates them, so spawn it from inside run_until once those
@@ -227,7 +234,7 @@ impl VirtualMachine {
         paused: Arc<AtomicBool>,
         snap_rx: Option<Receiver<SnapCmd>>,
         restore: Option<CpuSnapshot>,
-        gdb: Option<(String, Arc<GdbControl>, std::sync::mpsc::SyncSender<GdbCmd>, Receiver<GdbCmd>)>,
+        gdb: Option<GdbSetup>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -241,6 +248,17 @@ impl VirtualMachine {
             eprintln!(
                 "[kvm] restored FLUXKVM1 snapshot rip={:#x} cr3={:#x}",
                 cpu.regs.rip, cpu.sregs.cr3
+            );
+        } else if let Some(start_info_gpa) = self.pvh_start_info_gpa {
+            // PVH: hand the kernel a bare 32-bit entry point and let its
+            // own startup_32/startup_64 code build page tables and make
+            // the long-mode transition itself (see kvm.rs::setup_pvh_entry
+            // for why this sidesteps a whole class of bug our own
+            // hand-built identity map + direct long-mode jump can have).
+            kvm.setup_pvh_entry(&mut self.mem, self.boot_rip, start_info_gpa)?;
+            eprintln!(
+                "[kvm] PVH entry rip={:#x} start_info={start_info_gpa:#x}",
+                self.boot_rip
             );
         } else {
             let rsi = self.boot_params_gpa.unwrap_or(0);
@@ -274,11 +292,23 @@ impl VirtualMachine {
             std::thread::spawn(move || run_ap(idx, &kvm, &bus, &serial, &stop));
         }
 
-        let gdb_cmd_rx: Option<Receiver<GdbCmd>> = gdb.map(|(addr, control, cmd_tx, cmd_rx)| {
-            gdbstub::spawn(addr, kvm.clone(), control.clone(), paused.clone(), cmd_tx);
+        let mut gdb_cmd_rx: Option<Receiver<GdbCmd>> = None;
+        let mut gdb_stop_tx: Option<std::sync::mpsc::SyncSender<()>> = None;
+        let mut gdb_control: Option<Arc<GdbControl>> = None;
+        if let Some((addr, control, cmd_tx, cmd_rx, stop_tx, stop_rx)) = gdb {
+            gdbstub::spawn(
+                addr,
+                kvm.clone(),
+                control.clone(),
+                paused.clone(),
+                cmd_tx,
+                stop_rx,
+            );
             control.record_current_thread();
-            cmd_rx
-        });
+            gdb_cmd_rx = Some(cmd_rx);
+            gdb_stop_tx = Some(stop_tx);
+            gdb_control = Some(control);
+        }
 
         let mut serial_log = String::new();
         let run_secs: u64 = std::env::var("FLUXVM_KVM_RUN_SECS")
@@ -312,6 +342,33 @@ impl VirtualMachine {
                             }
                             GdbCmd::GetSregs(reply) => {
                                 let r = kvm.get_sregs(0).unwrap_or(unsafe { std::mem::zeroed() });
+                                eprintln!(
+                                    "[gdbstub] cr0={:#x} cr2={:#x} cr3={:#x} cr4={:#x}",
+                                    r.cr0, r.cr2, r.cr3, r.cr4
+                                );
+                                // TEMP: dump the actual e820 table as the
+                                // guest kernel parsed it from the zero
+                                // page, to check for a discrepancy against
+                                // what fill_e820 intended to write.
+                                let mut nent = [0u8; 1];
+                                let _ = this
+                                    .mem
+                                    .read_at(memory::BOOT_PARAMS_ADDR + 0x1e8, &mut nent);
+                                eprintln!("[diag] e820_entries={}", nent[0]);
+                                for i in 0..(nent[0] as u64).min(8) {
+                                    let mut ent = [0u8; 20];
+                                    let _ = this.mem.read_at(
+                                        memory::BOOT_PARAMS_ADDR + 0x2d0 + i * 20,
+                                        &mut ent,
+                                    );
+                                    let addr = u64::from_le_bytes(ent[0..8].try_into().unwrap());
+                                    let size = u64::from_le_bytes(ent[8..16].try_into().unwrap());
+                                    let typ = u32::from_le_bytes(ent[16..20].try_into().unwrap());
+                                    eprintln!(
+                                        "[diag] e820[{i}] addr={addr:#x} size={size:#x} end={:#x} type={typ}",
+                                        addr + size
+                                    );
+                                }
                                 let _ = reply.send(r);
                             }
                             GdbCmd::ReadMem { addr, len, reply } => {
@@ -326,6 +383,27 @@ impl VirtualMachine {
                                     len,
                                 );
                                 let _ = reply.send(data);
+                            }
+                            GdbCmd::SetBreakpoint { addr, reply } => {
+                                let cr3 = kvm.get_sregs(0).map(|s| s.cr3).unwrap_or(0);
+                                let ok = gdbstub::set_breakpoint(
+                                    &mut this.mem,
+                                    &kvm,
+                                    gdb_control.as_ref().unwrap(),
+                                    cr3,
+                                    addr,
+                                );
+                                let _ = reply.send(ok);
+                            }
+                            GdbCmd::ClearBreakpoint { addr, reply } => {
+                                let cr3 = kvm.get_sregs(0).map(|s| s.cr3).unwrap_or(0);
+                                let ok = gdbstub::clear_breakpoint(
+                                    &mut this.mem,
+                                    gdb_control.as_ref().unwrap(),
+                                    cr3,
+                                    addr,
+                                );
+                                let _ = reply.send(ok);
                             }
                         }
                     }
@@ -447,6 +525,48 @@ impl VirtualMachine {
                     eprintln!("[kvm] HLT after {exits} exits");
                     stop.store(true, Ordering::Relaxed);
                     break;
+                }
+                ffi::KVM_EXIT_DEBUG => {
+                    // A gdbstub software breakpoint (int3) fired. Live-
+                    // tested: KVM already reports RIP sitting exactly at
+                    // the breakpoint address for a KVM_GUESTDBG_USE_SW_BP
+                    // exit (unlike raw hardware int3 semantics, where RIP
+                    // would land one byte past it) -- no rewind needed;
+                    // an earlier version that subtracted 1 here landed
+                    // one byte *before* the intended address instead.
+                    //
+                    // TEMP: breakpoint is set at exc_page_fault(struct
+                    // pt_regs *regs, unsigned long error_code) -- regs is
+                    // in rdi, error_code in rsi (System V AMD64 ABI).
+                    // pt_regs->ip (the actual faulting instruction, not
+                    // exc_page_fault's own entry) is at offset 0x80.
+                    // Dumped here directly (bypassing the gdbstub client)
+                    // since scripting many rapid `continue`s over the RSP
+                    // wire hit a client-side race.
+                    if let Ok(regs) = kvm.get_regs(0) {
+                        let cr3 = kvm.get_sregs(0).map(|s| s.cr3).unwrap_or(0);
+                        let fault_ip = gdbstub::virt_to_phys(&this.mem, cr3, regs.rdi + 0x80)
+                            .and_then(|phys| {
+                                let mut buf = [0u8; 8];
+                                this.mem.read_at(phys, &mut buf).ok()?;
+                                Some(u64::from_le_bytes(buf))
+                            });
+                        eprintln!(
+                            "[diag] exc_page_fault regs={:#x} error_code={:#x} fault_ip={:x?}",
+                            regs.rdi, regs.rsi, fault_ip
+                        );
+                    }
+                    paused.store(true, Ordering::Relaxed);
+                    if let Some(tx) = gdb_stop_tx.as_ref() {
+                        // try_send, not send: this is a rendezvous
+                        // (capacity-0) channel, and if no gdb client is
+                        // currently blocked in a `c` waiting to receive,
+                        // a blocking send here would hang this vCPU
+                        // thread forever (e.g. the breakpoint re-fires
+                        // after a client detaches without clearing it).
+                        let _ = tx.try_send(());
+                    }
+                    continue;
                 }
                 ffi::KVM_EXIT_SHUTDOWN => {
                     eprintln!("[kvm] shutdown");

@@ -123,7 +123,14 @@ pub const KVM_SET_MP_STATE: c_ulong = 0x4004_ae99;
 /// must be moved to this state right after creation.
 pub const KVM_MP_STATE_UNINITIALIZED: u32 = 1;
 
+/// `_IOW(KVMIO, 0x9b, struct kvm_guest_debug)` — control(u32) + pad(u32) +
+/// kvm_guest_debug_arch{debugreg[8]: u64} = 4+4+64 = 72 bytes.
+pub const KVM_SET_GUEST_DEBUG: c_ulong = 0x4048_ae9b;
+pub const KVM_GUESTDBG_ENABLE: u32 = 0x0000_0001;
+pub const KVM_GUESTDBG_USE_SW_BP: u32 = 0x0001_0000;
+
 pub const KVM_EXIT_IO: u32 = 2;
+pub const KVM_EXIT_DEBUG: u32 = 4;
 pub const KVM_EXIT_HLT: u32 = 5;
 pub const KVM_EXIT_MMIO: u32 = 6;
 pub const KVM_EXIT_SHUTDOWN: u32 = 8;
