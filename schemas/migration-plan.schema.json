@@ -1,0 +1,128 @@
+{
+  "$defs": {
+    "argv": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "aux": {
+      "properties": {
+        "destination_plan": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "optional": {
+          "type": "boolean"
+        },
+        "source_plan": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "node": {
+      "additionalProperties": false,
+      "properties": {
+        "command_timeout_seconds": {
+          "maximum": 3600,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "strict_host_key": {
+          "type": "boolean"
+        },
+        "sudo": {
+          "type": "boolean"
+        },
+        "user": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "$id": "https://zyvor.dev/schemas/fluxvm-migration-plan-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "afxdp": {
+      "$ref": "#/$defs/aux"
+    },
+    "automatic_rollback": {
+      "default": true,
+      "type": "boolean"
+    },
+    "destination": {
+      "$ref": "#/$defs/node"
+    },
+    "migration_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$",
+      "type": "string"
+    },
+    "quiclb": {
+      "properties": {
+        "instance_id": {
+          "format": "uuid",
+          "type": "string"
+        },
+        "optional": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "scx": {
+      "$ref": "#/$defs/aux"
+    },
+    "source": {
+      "$ref": "#/$defs/node"
+    },
+    "topology": {
+      "$ref": "#/$defs/aux"
+    },
+    "vm_id": {
+      "format": "uuid",
+      "type": "string"
+    },
+    "vmm": {
+      "properties": {
+        "migrate_argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "rollback_argv": {
+          "$ref": "#/$defs/argv"
+        }
+      },
+      "required": [
+        "migrate_argv"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "migration_id",
+    "vm_id",
+    "source",
+    "destination",
+    "vmm"
+  ],
+  "title": "FluxVM Sentinel Set 13E Migration Plan",
+  "type": "object"
+}
