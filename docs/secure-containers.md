@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 17
+## Implemented through Set 18
 
 Everything through Set 13 below, plus:
 
@@ -64,6 +64,9 @@ Everything through Set 13 below, plus:
 - **Set 17** — optional `fluxvm_prhit` rule-attributed directional telemetry
   (no schema-v8 ABI bump; Observer keeps Set 15 shared-counter fallback) —
   see [docs/secure-containers-set17.md](secure-containers-set17.md).
+- **Set 18** — EndpointSlice-aware opt-in Service VIP admission for egress
+  peers (controller-only; no dataplane ABI change) —
+  see [docs/secure-containers-set18.md](secure-containers-set18.md).
 
 ## Implemented through Set 13
 
@@ -111,6 +114,9 @@ Everything through Set 13 below, plus:
 - **Sentinel Set 17**: optional `fluxvm_prhit` rule-hit / directional
   counters on the Policy Observer — see
   [docs/secure-containers-set17.md](secure-containers-set17.md).
+- **Sentinel Set 18**: EndpointSlice-proven Service VIP admission for
+  `--include-service-clusterips` — see
+  [docs/secure-containers-set18.md](secure-containers-set18.md).
 - restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay
   on the primary interface — see
   [docs/secure-containers-set6.md](secure-containers-set6.md)
@@ -395,3 +401,10 @@ per-direction and per-rule packet counters without a schema-v8 ABI bump.
 Live production scrape and multi-node / stateful CT proof remain open —
 [secure-containers-set17.md](secure-containers-set17.md) and
 [NEXT-FEATURES.md](NEXT-FEATURES.md).
+
+## Set 18 addendum — EndpointSlice Service VIP policy
+
+Set 18 makes opt-in `--include-service-clusterips` admit ClusterIPs only
+when `discovery.k8s.io/v1 EndpointSlice` backends prove every routable
+endpoint is an allowed non-terminal Pod. No dataplane schema change —
+[secure-containers-set18.md](secure-containers-set18.md).

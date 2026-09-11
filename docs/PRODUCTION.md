@@ -160,7 +160,9 @@ confirmed for real (a real ping's learned entry decodes as a plausible
 `fluxvm_prhit` rule-attributed directional telemetry (no schema-v8 ABI bump;
 Policy Observer prefers it when present and keeps Set 15's shared-counter
 fallback otherwise) —
-[secure-containers-set17.md](secure-containers-set17.md). Still open: the live
+[secure-containers-set17.md](secure-containers-set17.md). Set 18 tightens
+opt-in Service ClusterIP inclusion with EndpointSlice routing proof
+([secure-containers-set18.md](secure-containers-set18.md)). Still open: the live
 stateful-conntrack-bypass path between the egress and Pod-ingress programs,
 and Set 16's own timeout expiry/anti-replay behavior, are implemented but not
 yet proven with a live TCP handshake or wall-clock timing test; the per-VM
@@ -169,8 +171,9 @@ conformance is still missing; Set 17's production Prometheus scrape of
 directional/rule metrics remains a gate — see
 [NEXT-FEATURES.md](NEXT-FEATURES.md),
 [secure-containers-set14.md](secure-containers-set14.md),
-[secure-containers-set16.md](secure-containers-set16.md), and
-[secure-containers-set17.md](secure-containers-set17.md). Sentinel
+[secure-containers-set16.md](secure-containers-set16.md),
+[secure-containers-set17.md](secure-containers-set17.md), and
+[secure-containers-set18.md](secure-containers-set18.md). Sentinel
 in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
 policy automatically — every container is enforced fail-closed by default,
 but the shim does not yet forward Pod policy content per container. Sentinel
