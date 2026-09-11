@@ -31,7 +31,7 @@ jobs:
           bpftool version || echo 'bpftool still stubbed for this kernel; build scripts may fall back'
       - name: cargo fmt
         working-directory: fluxvm
-        run: cargo fmt --all -- --check
+        run: ./scripts/ci-fmt-check.sh
       - name: cargo test
         working-directory: fluxvm
         run: cargo test --locked -p fluxvm-network -p fluxvm-container-protocol -p fluxvm-container-agent -p fluxvm-containerd-shim
