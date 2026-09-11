@@ -489,8 +489,13 @@ pub async fn migration_cancel(
     qmp::migration_cancel(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
 }
 
-pub async fn migrate_incoming(_cfg: &Config, vm: &VmRecord, uri: &str) -> Result<()> {
-    qmp::migrate_incoming(&vm.workspace.join("qmp.sock"), uri, QMP_TIMEOUT).await
+pub async fn migrate_incoming(
+    _cfg: &Config,
+    vm: &VmRecord,
+    uri: &str,
+    tls: Option<&fluxvm_core::model::MigrationTlsSpec>,
+) -> Result<()> {
+    qmp::migrate_incoming(&vm.workspace.join("qmp.sock"), uri, tls, QMP_TIMEOUT).await
 }
 
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was

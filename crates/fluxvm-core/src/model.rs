@@ -349,6 +349,30 @@ pub struct MigrationStartRequest {
     pub max_downtime_ms: Option<u64>,
     #[serde(default)]
     pub multifd_channels: Option<u8>,
+    /// When set, the migration stream is authenticated/encrypted via
+    /// QEMU's tls-creds-x509 object (client/source endpoint). `None`
+    /// preserves today's plain `tcp:`/`unix:` behavior.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
+}
+
+/// Cert/key material for QEMU's `tls-creds-x509` migration transport.
+/// `ca_path`/`cert_path`/`key_path` are absolute paths on the FluxVM host's
+/// own filesystem -- callers (e.g. Kairon's adapter) are responsible for
+/// making sure they're actually reachable there; FluxVM materializes them
+/// into the QEMU-expected directory/filename layout itself (see
+/// `fluxvm_qemu::qmp::set_migration_tls`), so callers never need to know
+/// QEMU's internal naming convention (`ca-cert.pem`/`server-cert.pem`/...).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationTlsSpec {
+    pub ca_path: PathBuf,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    /// Hostname/IP the client (source) verifies the server (receiver)
+    /// cert against. Required for meaningful verification on the source
+    /// side; ignored by the receiver, which never verifies a hostname.
+    #[serde(default)]
+    pub tls_hostname: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -440,6 +464,18 @@ pub struct MigrationReceiverRequest {
     /// 300s.
     #[serde(default)]
     pub receiver_ttl_seconds: Option<u64>,
+    /// Literal IP the receiver's QEMU `-incoming` binds/advertises on,
+    /// instead of `0.0.0.0`. `None` preserves today's default. Not a
+    /// hostname -- name resolution (e.g. a caller's own "migration network"
+    /// naming) happens upstream of FluxVM, which only ever sees a literal
+    /// address here.
+    #[serde(default)]
+    pub migration_bind_address: Option<String>,
+    /// When set, the receiver arms its `-incoming` listener with
+    /// tls-creds-x509 (server endpoint) instead of a plain socket. `None`
+    /// preserves today's plain-transport behavior.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

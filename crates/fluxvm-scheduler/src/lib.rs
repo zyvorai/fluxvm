@@ -164,6 +164,7 @@ fn validate_receiver_spec(
     spec: &CreateVmRequest,
     disk_path: &std::path::Path,
     cfg: &Config,
+    migration_bind_address: Option<&str>,
 ) -> Result<()> {
     if spec.backend != BackendKind::Qemu {
         bail!(
@@ -196,6 +197,49 @@ fn validate_receiver_spec(
                 disk_path.display(),
                 dirs
             );
+        }
+    }
+    if let Some(addr) = migration_bind_address {
+        if addr.parse::<std::net::IpAddr>().is_err() {
+            bail!("migration_bind_address {addr:?} is not a valid IP address");
+        }
+        if let Some(allowed) = &cfg.policy.allowed_migration_bind_addresses {
+            if !allowed.iter().any(|a| a == addr) {
+                bail!(
+                    "migration_bind_address {addr:?} is not in policy allowed_migration_bind_addresses {allowed:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Up-front validation for a migration TLS spec, factored out as a sync
+/// helper (mirrors `validate_receiver_spec` above) so it's testable without
+/// real QEMU/QMP I/O. Checks the three cert/key files actually exist and,
+/// when configured, are policy-allowed -- QEMU's own `object-add` is the
+/// authority on whether they're *valid* x509 material, which can't be
+/// checked without a real QEMU process.
+fn validate_migration_tls_spec(
+    tls: &fluxvm_core::model::MigrationTlsSpec,
+    cfg: &Config,
+) -> Result<()> {
+    for (label, path) in [
+        ("ca_path", &tls.ca_path),
+        ("cert_path", &tls.cert_path),
+        ("key_path", &tls.key_path),
+    ] {
+        if !path.exists() {
+            bail!("migration tls {label} does not exist: {}", path.display());
+        }
+        if let Some(dirs) = &cfg.policy.allowed_migration_tls_dirs {
+            if !dirs.iter().any(|d| path.starts_with(d)) {
+                bail!(
+                    "migration tls {label} {} is not under any policy allowed_migration_tls_dirs {:?}",
+                    path.display(),
+                    dirs
+                );
+            }
         }
     }
     Ok(())
@@ -1358,6 +1402,9 @@ impl VmManager {
                 vm.status
             );
         }
+        if let Some(tls) = &request.tls {
+            validate_migration_tls_spec(tls, &self.cfg)?;
+        }
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::migration_start(&self.cfg, &vm, request).await,
             other => bail!("live migration contract v1 supports qemu only (backend={other:?})"),
@@ -1394,7 +1441,16 @@ impl VmManager {
     ) -> Result<(VmRecord, u16)> {
         let mut spec = req.spec;
         spec.backend = resolve_backend(&spec, &self.cfg);
-        validate_receiver_spec(&spec, &req.disk_path, &self.cfg)?;
+        validate_receiver_spec(
+            &spec,
+            &req.disk_path,
+            &self.cfg,
+            req.migration_bind_address.as_deref(),
+        )?;
+        if let Some(tls) = &req.tls {
+            validate_migration_tls_spec(tls, &self.cfg)?;
+        }
+        let bind_address = req.migration_bind_address.as_deref().unwrap_or("0.0.0.0");
 
         let id = Uuid::new_v4();
         let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
@@ -1404,11 +1460,11 @@ impl VmManager {
         let expires_at = Some(Utc::now() + Duration::seconds(ttl as i64));
 
         // Bind-then-drop to claim a free ephemeral port for QEMU's
-        // `-incoming tcp:0.0.0.0:<port>` — the same idiom this codebase
-        // already uses in tests; a small TOCTOU window is accepted at lab
-        // scale (see plan non-goals).
+        // `-incoming tcp:<bind_address>:<port>` — the same idiom this
+        // codebase already uses in tests; a small TOCTOU window is accepted
+        // at lab scale (see plan non-goals).
         let port = {
-            let listener = std::net::TcpListener::bind("0.0.0.0:0")
+            let listener = std::net::TcpListener::bind((bind_address, 0))
                 .context("allocating a free port for the migration receiver")?;
             listener.local_addr()?.port()
         };
@@ -1507,10 +1563,11 @@ impl VmManager {
             record.control_socket = launch.control_socket.clone();
             self.attach_cgroup(id, launch.pid, &mut record, &spec.vfio_devices);
 
-            let uri = format!("tcp:0.0.0.0:{port}");
+            let uri = format!("tcp:{bind_address}:{port}");
             match spec.backend {
                 BackendKind::Qemu => {
-                    fluxvm_qemu::migrate_incoming(&self.cfg, &record, &uri).await?
+                    fluxvm_qemu::migrate_incoming(&self.cfg, &record, &uri, req.tls.as_ref())
+                        .await?
                 }
                 other => bail!(
                     "migration receiver contract v1 supports qemu only (backend={other:?})"
@@ -2454,7 +2511,7 @@ mod tests {
         let mut r = tap_req_with_mac();
         r.backend = BackendKind::Firecracker;
         let disk = std::env::temp_dir();
-        assert!(validate_receiver_spec(&r, &disk, &cfg).is_err());
+        assert!(validate_receiver_spec(&r, &disk, &cfg, None).is_err());
     }
 
     #[test]
@@ -2468,7 +2525,7 @@ mod tests {
             netns: false,
         };
         let disk = std::env::temp_dir();
-        assert!(validate_receiver_spec(&r, &disk, &cfg).is_err());
+        assert!(validate_receiver_spec(&r, &disk, &cfg, None).is_err());
     }
 
     #[test]
@@ -2477,7 +2534,7 @@ mod tests {
         let mut r = tap_req_with_mac();
         r.network = NetworkSpec::User { forwards: vec![] };
         let disk = std::env::temp_dir();
-        assert!(validate_receiver_spec(&r, &disk, &cfg).is_err());
+        assert!(validate_receiver_spec(&r, &disk, &cfg, None).is_err());
     }
 
     #[test]
@@ -2486,7 +2543,7 @@ mod tests {
         let mut r = tap_req_with_mac();
         r.storage = StorageBackend::LvmThin;
         let disk = std::env::temp_dir();
-        assert!(validate_receiver_spec(&r, &disk, &cfg).is_err());
+        assert!(validate_receiver_spec(&r, &disk, &cfg, None).is_err());
     }
 
     #[test]
@@ -2494,7 +2551,7 @@ mod tests {
         let cfg = Config::default();
         let r = tap_req_with_mac();
         let disk = std::path::PathBuf::from("/nonexistent/does-not-exist.qcow2");
-        assert!(validate_receiver_spec(&r, &disk, &cfg).is_err());
+        assert!(validate_receiver_spec(&r, &disk, &cfg, None).is_err());
     }
 
     #[test]
@@ -2502,7 +2559,98 @@ mod tests {
         let cfg = Config::default();
         let r = tap_req_with_mac();
         let disk = std::env::temp_dir();
-        assert!(validate_receiver_spec(&r, &disk, &cfg).is_ok());
+        assert!(validate_receiver_spec(&r, &disk, &cfg, None).is_ok());
+    }
+
+    #[test]
+    fn create_receiver_rejects_invalid_migration_bind_address() {
+        let cfg = Config::default();
+        let r = tap_req_with_mac();
+        let disk = std::env::temp_dir();
+        assert!(validate_receiver_spec(&r, &disk, &cfg, Some("not-an-ip")).is_err());
+    }
+
+    #[test]
+    fn create_receiver_rejects_migration_bind_address_outside_allowlist() {
+        let mut cfg = Config::default();
+        cfg.policy.allowed_migration_bind_addresses = Some(vec!["10.0.0.5".into()]);
+        let r = tap_req_with_mac();
+        let disk = std::env::temp_dir();
+        assert!(validate_receiver_spec(&r, &disk, &cfg, Some("10.0.0.9")).is_err());
+    }
+
+    #[test]
+    fn create_receiver_accepts_migration_bind_address_inside_allowlist() {
+        let mut cfg = Config::default();
+        cfg.policy.allowed_migration_bind_addresses = Some(vec!["10.0.0.5".into()]);
+        let r = tap_req_with_mac();
+        let disk = std::env::temp_dir();
+        assert!(validate_receiver_spec(&r, &disk, &cfg, Some("10.0.0.5")).is_ok());
+    }
+
+    #[test]
+    fn create_receiver_accepts_missing_migration_bind_address_regardless_of_allowlist() {
+        let mut cfg = Config::default();
+        cfg.policy.allowed_migration_bind_addresses = Some(vec!["10.0.0.5".into()]);
+        let r = tap_req_with_mac();
+        let disk = std::env::temp_dir();
+        assert!(validate_receiver_spec(&r, &disk, &cfg, None).is_ok());
+    }
+
+    /// Writes three throwaway files under `std::env::temp_dir()` (this test
+    /// doesn't need real x509 content -- `validate_migration_tls_spec` only
+    /// checks existence/policy, real cert validity is QEMU's `object-add`'s
+    /// job) and returns a `MigrationTlsSpec` pointing at them, plus the
+    /// directory they live in (for allowlist tests).
+    fn tls_spec_with_temp_files() -> (fluxvm_core::model::MigrationTlsSpec, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fluxvm-tls-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("ca.pem");
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        std::fs::write(&ca, b"ca").unwrap();
+        std::fs::write(&cert, b"cert").unwrap();
+        std::fs::write(&key, b"key").unwrap();
+        (
+            fluxvm_core::model::MigrationTlsSpec {
+                ca_path: ca,
+                cert_path: cert,
+                key_path: key,
+                tls_hostname: None,
+            },
+            dir,
+        )
+    }
+
+    #[test]
+    fn validate_migration_tls_spec_rejects_missing_file() {
+        let cfg = Config::default();
+        let (mut tls, _dir) = tls_spec_with_temp_files();
+        tls.ca_path = std::path::PathBuf::from("/nonexistent/ca.pem");
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_err());
+    }
+
+    #[test]
+    fn validate_migration_tls_spec_accepts_existing_files_with_no_allowlist() {
+        let cfg = Config::default();
+        let (tls, _dir) = tls_spec_with_temp_files();
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_migration_tls_spec_rejects_files_outside_allowlist() {
+        let mut cfg = Config::default();
+        let (tls, _dir) = tls_spec_with_temp_files();
+        cfg.policy.allowed_migration_tls_dirs = Some(vec!["/nowhere".into()]);
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_err());
+    }
+
+    #[test]
+    fn validate_migration_tls_spec_accepts_files_inside_allowlist() {
+        let mut cfg = Config::default();
+        let (tls, dir) = tls_spec_with_temp_files();
+        cfg.policy.allowed_migration_tls_dirs = Some(vec![dir]);
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_ok());
     }
 
     #[test]

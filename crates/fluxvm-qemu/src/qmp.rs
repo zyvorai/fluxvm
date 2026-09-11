@@ -9,9 +9,11 @@
 //! process could hang the caller forever.
 
 use anyhow::{Context, Result, bail};
-use fluxvm_core::model::{MigrationMode, MigrationPhase, MigrationStartRequest, MigrationStatus};
+use fluxvm_core::model::{
+    MigrationMode, MigrationPhase, MigrationStartRequest, MigrationStatus, MigrationTlsSpec,
+};
 use serde_json::{Value, json};
-use std::{io::ErrorKind, path::Path, time::Duration};
+use std::{io::ErrorKind, path::Path, path::PathBuf, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 
@@ -160,6 +162,92 @@ fn parse_migration_status(v: &Value) -> MigrationStatus {
     }
 }
 
+/// Copies `spec`'s ca/cert/key into the fixed filenames QEMU's
+/// `tls-creds-x509` object requires (`ca-cert.pem` plus
+/// `server-cert.pem`/`server-key.pem` for `endpoint="server"`, or
+/// `client-cert.pem`/`client-key.pem` for `endpoint="client"`), under
+/// `workspace/migtls`, and returns that directory. Keeps callers
+/// (`MigrationTlsSpec`, and whoever built it -- e.g. Kairon's adapter) free
+/// of any knowledge of QEMU's internal naming convention.
+pub(crate) fn materialize_tls_dir(
+    workspace: &Path,
+    spec: &MigrationTlsSpec,
+    endpoint: &str,
+) -> Result<PathBuf> {
+    let dir = workspace.join("migtls");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating migration TLS directory {}", dir.display()))?;
+    std::fs::copy(&spec.ca_path, dir.join("ca-cert.pem"))
+        .with_context(|| format!("copying migration TLS CA from {}", spec.ca_path.display()))?;
+    let (cert_name, key_name) = match endpoint {
+        "server" => ("server-cert.pem", "server-key.pem"),
+        "client" => ("client-cert.pem", "client-key.pem"),
+        other => bail!("unknown migration TLS endpoint {other:?} (expected server or client)"),
+    };
+    std::fs::copy(&spec.cert_path, dir.join(cert_name)).with_context(|| {
+        format!(
+            "copying migration TLS cert from {}",
+            spec.cert_path.display()
+        )
+    })?;
+    std::fs::copy(&spec.key_path, dir.join(key_name)).with_context(|| {
+        format!(
+            "copying migration TLS key from {}",
+            spec.key_path.display()
+        )
+    })?;
+    Ok(dir)
+}
+
+/// Arms `socket`'s QEMU process to authenticate/encrypt its migration
+/// stream via a `tls-creds-x509` object: `object-add` (creating the QOM
+/// object referencing `dir`'s materialized cert/key files) followed by
+/// `migrate-set-parameters {"tls-creds": creds_id, ...}` -- `object-add`
+/// must complete first, since `migrate-set-parameters` references the
+/// object by `creds_id`, and both must complete before `migrate`/
+/// `migrate-incoming` is sent (the caller's responsibility). `tls_hostname`
+/// is meaningful only for `endpoint="client"` (the side that verifies a
+/// peer hostname); pass `None` for `endpoint="server"`.
+pub(crate) async fn set_migration_tls(
+    socket: &Path,
+    creds_id: &str,
+    dir: &Path,
+    endpoint: &str,
+    tls_hostname: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
+    execute(
+        socket,
+        "object-add",
+        Some(json!({
+            "qom-type": "tls-creds-x509",
+            "id": creds_id,
+            "dir": dir,
+            "endpoint": endpoint,
+            "verify-peer": true,
+        })),
+        timeout,
+    )
+    .await
+    .context(
+        "object-add tls-creds-x509 failed -- QEMU may have been built without TLS support (--enable-gnutls)",
+    )?;
+
+    let mut params = serde_json::Map::new();
+    params.insert("tls-creds".into(), Value::from(creds_id));
+    if let Some(host) = tls_hostname {
+        params.insert("tls-hostname".into(), Value::from(host));
+    }
+    execute(
+        socket,
+        "migrate-set-parameters",
+        Some(Value::Object(params)),
+        timeout,
+    )
+    .await?;
+    Ok(())
+}
+
 fn validate_migration_uri(uri: &str) -> Result<()> {
     if uri.starts_with("tcp:") || uri.starts_with("unix:") {
         return Ok(());
@@ -226,6 +314,23 @@ pub async fn migration_start(
         .await?;
     }
 
+    if let Some(tls) = &request.tls {
+        let workspace = socket
+            .parent()
+            .context("qmp socket path has no parent workspace directory")?;
+        let dir = materialize_tls_dir(workspace, tls, "client")
+            .context("materializing migration TLS client credentials")?;
+        set_migration_tls(
+            socket,
+            "migtls",
+            &dir,
+            "client",
+            tls.tls_hostname.as_deref(),
+            timeout,
+        )
+        .await?;
+    }
+
     execute(
         socket,
         "migrate",
@@ -276,8 +381,21 @@ pub async fn migration_cancel(socket: &Path, timeout: Duration) -> Result<Migrat
 /// connect-before-QMP-is-ready window as every other `execute` caller, via
 /// `handshake_retrying`) and before the source's `migrate` command is sent
 /// against a matching URI -- see `VmManager::create_receiver`.
-pub async fn migrate_incoming(socket: &Path, uri: &str, timeout: Duration) -> Result<()> {
+pub async fn migrate_incoming(
+    socket: &Path,
+    uri: &str,
+    tls: Option<&MigrationTlsSpec>,
+    timeout: Duration,
+) -> Result<()> {
     validate_migration_uri(uri)?;
+    if let Some(tls) = tls {
+        let workspace = socket
+            .parent()
+            .context("qmp socket path has no parent workspace directory")?;
+        let dir = materialize_tls_dir(workspace, tls, "server")
+            .context("materializing migration TLS server credentials")?;
+        set_migration_tls(socket, "migtls", &dir, "server", None, timeout).await?;
+    }
     execute(socket, "migrate-incoming", Some(json!({"uri": uri})), timeout).await?;
     Ok(())
 }
@@ -500,6 +618,7 @@ mod migration_contract_tests {
         let err = tokio_test_block_on(migrate_incoming(
             std::path::Path::new("/nonexistent/qmp.sock"),
             "exec:ssh host nc 4444",
+            None,
             Duration::from_millis(50),
         ));
         assert!(err.is_err());
@@ -532,7 +651,74 @@ mod migration_contract_tests {
             write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
         });
 
-        migrate_incoming(&path, "tcp:0.0.0.0:12345", Duration::from_secs(5))
+        migrate_incoming(&path, "tcp:0.0.0.0:12345", None, Duration::from_secs(5))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrate_incoming_with_tls_sends_object_add_before_set_parameters_before_migrate_incoming()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        // materialize_tls_dir writes into path.parent()/migtls -- give it
+        // throwaway source files to copy from.
+        let ca = dir.path().join("ca.pem");
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&ca, b"ca").unwrap();
+        std::fs::write(&cert, b"cert").unwrap();
+        std::fs::write(&key, b"key").unwrap();
+        let tls = MigrationTlsSpec {
+            ca_path: ca,
+            cert_path: cert,
+            key_path: key,
+            tls_hostname: None,
+        };
+
+        // Each QMP `execute()` call reconnects fresh (see this module's
+        // top doc comment) -- object-add, migrate-set-parameters, and
+        // migrate-incoming are three separate commands, so the fake server
+        // must accept three separate connections, in that order, each
+        // doing its own greeting+capabilities handshake.
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            async fn expect_command(listener: &tokio::net::UnixListener) -> Value {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = tokio::io::BufReader::new(read_half);
+
+                write_half
+                    .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                    .await
+                    .unwrap();
+                let mut caps = String::new();
+                reader.read_line(&mut caps).await.unwrap();
+                write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                let command: Value = serde_json::from_str(&line).unwrap();
+                write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+                command
+            }
+
+            let object_add = expect_command(&listener).await;
+            assert_eq!(object_add["execute"], "object-add");
+            assert_eq!(object_add["arguments"]["qom-type"], "tls-creds-x509");
+            assert_eq!(object_add["arguments"]["endpoint"], "server");
+            assert_eq!(object_add["arguments"]["verify-peer"], true);
+
+            let set_params = expect_command(&listener).await;
+            assert_eq!(set_params["execute"], "migrate-set-parameters");
+            assert_eq!(set_params["arguments"]["tls-creds"], "migtls");
+
+            let migrate_incoming = expect_command(&listener).await;
+            assert_eq!(migrate_incoming["execute"], "migrate-incoming");
+        });
+
+        migrate_incoming(&path, "tcp:0.0.0.0:12345", Some(&tls), Duration::from_secs(5))
             .await
             .unwrap();
         server.await.unwrap();

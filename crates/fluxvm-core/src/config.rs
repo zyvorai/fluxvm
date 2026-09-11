@@ -523,6 +523,15 @@ pub struct Policy {
     /// When false (default), non-empty `extra_args` is rejected.
     #[serde(default)]
     pub allow_extra_args: bool,
+    /// If set, a migration receiver's `migration_bind_address` must be one
+    /// of these literal IPs. Defense-in-depth for a misconfigured/non-Kairon
+    /// caller -- the primary UX for an unresolvable migration network lives
+    /// upstream, in the caller's own name-to-IP resolution.
+    pub allowed_migration_bind_addresses: Option<Vec<String>>,
+    /// If set, a migration TLS spec's `ca_path`/`cert_path`/`key_path` must
+    /// each be underneath one of these directories (same plain path-prefix
+    /// semantics as `allowed_image_dirs`).
+    pub allowed_migration_tls_dirs: Option<Vec<PathBuf>>,
 }
 
 impl Config {
