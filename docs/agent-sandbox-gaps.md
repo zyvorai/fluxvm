@@ -63,8 +63,11 @@ plus [architecture](../README.md#network-fabric-architecture-how-it-works).
 - Hubble SID attribution for VM traffic beyond agent CEP enrichment
 - Optional: scrape `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`) from Prometheus
 - Ranked backlog (Sentinel Set 16 candidates, vhost bind, etc.): [NEXT-FEATURES.md](NEXT-FEATURES.md)
+- SMP: 2+ vCPU boots with a full distro kernel cost a ~10s AP-wakeup stall (`do_boot_cpu failed`) before falling back to 1 CPU; not yet root-caused. Boot still completes.
 
-**Resolved:** in-tree KVM late-boot hang (`init_zbud`) — fixed by matching Firecracker/CH TSS, boot MSRs, FPU, LAPIC lint, and serial irqfd/THRE semantics. Linux guests now mount `root=/dev/vda` (auto `virtio_mmio.device=` cmdline) through `/sbin/init`. See [`crates/fluxvm-hypervisor/README.md`](../crates/fluxvm-hypervisor/README.md).
+**Resolved:** in-tree KVM late-boot hang (`init_zbud`) — fixed by matching Firecracker/CH TSS, boot MSRs, FPU, LAPIC lint, and serial irqfd/THRE semantics. Linux guests now mount `root=/dev/vda` (auto `virtio_mmio.device=` cmdline) through `/sbin/init`.
+
+**Resolved:** the real control-plane boot path (`guest.rs`, what `fluxvm.service` uses for `fluxvm_engine = "kvm"`) had its vCPU execution silently freeze forever the instant the guest logged `Run /sbin/init` — a CLI demo/smoke-test convenience in `run_until()` was firing for production VMs too. Masked until now because the `init_zbud` hang meant no VM ever reached that point. **Verified end-to-end**: the real `fluxvm-guest-agent` (vsock ping/exec/shutdown) now actually starts inside the guest through the production boot path — `[ OK ] Started Zyvor FluxVM in-guest agent`. See [`crates/fluxvm-hypervisor/README.md`](../crates/fluxvm-hypervisor/README.md).
 
 Shipped: concurrent density (`scripts/bench-density.sh`), Cilium-agent CEP
 identity enrich (no private maps), in-tree KVM `FLUXKVM1` v2 memory snapshots

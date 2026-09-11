@@ -20,7 +20,11 @@ A **lightweight KVM Virtual Machine Monitor** in Rust (Firecracker / cloud-hyper
 - **Firmware extras:** minimal ACPI (RSDP/XSDT/FADT/MADT) + PVH `rsdp_paddr`; optional `--pci` ECAM; `--jailer` / `FLUXVM_JAILER`
 - **Control:** UDS JSON API, pause/resume, seccomp, gdbstub, `FLUXKVM1` v2 snapshots (all vCPUs)
 
-Verified: Linux 5.10 guests reach `zbud: loaded`, mount `root=/dev/vda`, and `Run /sbin/init`.
+Verified end-to-end through the real control-plane boot path (not just
+the CLI demo): a Linux 5.10 + systemd guest reaches `zbud: loaded`,
+mounts `root=/dev/vda`, runs `/sbin/init`, and **the in-guest
+`fluxvm-guest-agent` (vsock ping/exec/shutdown) actually starts** —
+`[ OK ] Started Zyvor FluxVM in-guest agent`.
 
 ## Host requirements
 
@@ -50,6 +54,13 @@ Useful flags: `--vsock-cid` / `--vsock-uds`, `--no-balloon`, `--no-rng`, `--no-a
 
 One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for guest INIT-SIPI via in-kernel LAPIC. Virtio queue-notify stays BSP-only.
 
+**Known gap:** with a full distro kernel (5.10, ACPI MADT SMP), a real
+guest reports `smpboot: do_boot_cpu failed(-1) to wakeup CPU#1` and
+falls back to 1 CPU after a ~10s stall — the AP never responds to the
+guest's INIT-SIPI-SIPI. Boot still completes correctly on the
+(single, surviving) BSP; this only costs 10s and one CPU under
+`--cpus 2+`, it does not block boot. Not yet root-caused.
+
 ## Debugging: gdbstub
 
 `--gdb 127.0.0.1:1234` — register/memory reads, SW breakpoints, break-in. No reg/mem write or single-step.
@@ -65,6 +76,19 @@ One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for g
   a guest-kernel config requirement, not a virtio-blk bug (verified: the
   same image/hypervisor boots cleanly to `/sbin/init` on a plain,
   non-GPT ext4 disk). Check with `nm vmlinux | grep efi_partition`.
+- See SMP above: 2+ vCPU boots with a full distro kernel cost a ~10s
+  AP-wakeup stall before falling back to 1 CPU (not yet root-caused).
+
+**Resolved:** every control-plane-launched VM (`guest.rs`, the real path
+`fluxvm.service` uses for `fluxvm_engine = "kvm"`) used to have its vCPU
+execution silently and permanently freeze the instant the guest kernel
+logged `Run /sbin/init` — indistinguishable from a hang, and the guest's
+real agent never got to run. Root cause: `run_until()`'s serial-log
+string-match break (a CLI `--guest` demo/smoke-test convenience) was
+unconditionally shared by the production boot path too. Fixed by gating
+it behind an explicit `exit_on_boot_marker` flag, true only for the CLI
+demo entry point. This was never caught before because the (also now
+fixed) `init_zbud` kernel hang meant no VM ever reached that point.
 
 Lab density / packing: [docs/kvm-density.md](../../docs/kvm-density.md). Gaps: [docs/agent-sandbox-gaps.md](../../docs/agent-sandbox-gaps.md). Ranked next work: [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md). Design notes: [DESIGN.md](DESIGN.md).
 
