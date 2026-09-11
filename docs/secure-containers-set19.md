@@ -12,6 +12,13 @@ Set 19 folds Set 18 into current main and closes the remaining **code-side** hig
 
 The final runner deliberately fails unless real-environment evidence is supplied for S1/S2/S9/S10/S11: stateful TCP/revocation, multi-node plus a second CNI, Kata-equivalence fixtures, a real multi-host fleet rollout/rollback, and migration against a live attached VM. It also reuses the repository's existing Sentinel Set 12E certification gates rather than defining a competing certification process.
 
+**RuntimeClass prerequisite (containerd ≥ 2.3):** the FluxVM shim now tolerates
+BootstrapParams stdin / missing `TTRPC_ADDRESS` and does not race CNI helpers
+against the default SIGCHLD reaper (see `vendor/containerd-shim` and
+`deploy/containerd/README.md`). Lab pods can progress past shim start and CNI
+L2; guest-image boot readiness and the live S1–S2/S9–S11 evidence bundle remain
+open gates.
+
 Portable use-case → test → CI mapping:
 [secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md).
 Live gates are opt-in (`FLUXVM_SECURE_CONTAINERS_LIVE_CI=1`).

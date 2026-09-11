@@ -28,3 +28,9 @@ members = [
     "crates/fluxvm-containerd-shim",
     "crates/fluxvm-intelligence",
 ]
+
+# containerd-shim 0.11 fatally mis-parses containerd ≥ 2.3 BootstrapParams on
+# stdin (IncorrectTag(46)). Keep a patched path copy until upstream releases
+# a fix; see vendor/containerd-shim/README.fluxvm.md.
+[patch.crates-io]
+containerd-shim = { path = "vendor/containerd-shim" }

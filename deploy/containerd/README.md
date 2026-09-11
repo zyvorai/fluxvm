@@ -8,6 +8,20 @@ Kubernetes RuntimeClass handler: `fluxvm`
 Use `scripts/install-secure-containers.sh` to install the host binaries, then
 merge the runtime fragment and restart containerd.
 
+## containerd ≥ 2.3 / k3s 1.36+
+
+Stock crates.io `containerd-shim` 0.11 mis-parses containerd's
+`BootstrapParams` stdin (`IncorrectTag(46)`). FluxVM vendors a patched copy
+under `vendor/containerd-shim` (see `README.fluxvm.md`) and also:
+
+- derives `TTRPC_ADDRESS` from `-address` when unset;
+- disables the shim SIGCHLD reaper (`Config.no_reaper`) so `ip`/`nsenter`
+  used for CNI L2 are not stolen from `tokio::process`.
+
+After rebuilding `containerd-shim-fluxvm-v2`, restart any leaked shim
+processes (`pkill -f containerd-shim-fluxvm-v2`) before retesting
+RuntimeClass pods.
+
 ## Set 2 notes
 
 - **CNI L2** (default on): when the CRI sandbox provides a Pod netns, the shim
