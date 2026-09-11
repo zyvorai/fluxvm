@@ -51,12 +51,14 @@ KillMode=process
 # any other cgroup-based resource control) -- CAP_SYS_ADMIN alone isn't
 # enough on a kernel/systemd version that enforces this strictly.
 AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_CHROOT CAP_DAC_OVERRIDE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SYS_CHROOT CAP_DAC_OVERRIDE
-# virtiofsd (Secure Containers shared folders / Pod volumes) calls
-# capset(2) during startup ("failed to sync capabilities with the kernel"
-# under NoNewPrivileges=true). QEMU children inherit this setting; keeping
-# NNP would leave virtiofs sockets present but not accepting, so guests
-# die with Connection refused while the API still reports Running.
+# Do not set CapabilityBoundingSet. rust-vmm virtiofsd applies a child
+# capability set at startup; a restricted bounding set fails with
+# "can't apply the child capabilities: failed to sync capabilities with
+# the kernel", leaves a stale vhost-user socket, and QEMU then dies with
+# Connection refused while FluxVM still reports the VM Running.
+# AmbientCapabilities above still raise the caps FluxVM itself needs.
+# virtiofsd (Secure Containers shared folders / Pod volumes) also needs
+# NoNewPrivileges=false so capset(2) is allowed.
 NoNewPrivileges=false
 ProtectSystem=strict
 # Images may live under /home during lab deploys; read-only is enough.
