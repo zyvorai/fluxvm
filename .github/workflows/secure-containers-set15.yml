@@ -1,0 +1,61 @@
+name: secure-containers-set15
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'docs/secure-containers-set15.md'
+      - 'scripts/e2e-networkpolicy-set15.sh'
+      - 'scripts/benchmark-policy-observer-set15.sh'
+      - '.github/workflows/secure-containers-set15.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-network/src/ebpf.rs'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'docs/secure-containers-set15.md'
+      - 'scripts/e2e-networkpolicy-set15.sh'
+      - 'scripts/benchmark-policy-observer-set15.sh'
+
+jobs:
+  observer:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/fluxvm-policy-observer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: unit tests
+        run: go test -count=1 ./...
+      - name: race
+        run: go test -count=1 -race ./...
+      - name: vet
+        run: go vet ./...
+      - name: benchmarks
+        run: go test -run '^$' -bench . -benchmem ./internal/observer ./internal/metrics
+      - name: static builds
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/fluxvm-policy-observer-amd64 ./cmd/fluxvm-policy-observer
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/fluxvm-policy-observer-arm64 ./cmd/fluxvm-policy-observer
+
+  fluxvm-network:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: formatting
+        run: cargo fmt --all -- --check
+      - name: fluxvm-network tests
+        run: cargo test --locked -p fluxvm-network
+      - name: compile dependent API/core
+        run: cargo check --locked -p fluxvm-network -p fluxvm-core -p fluxvm-api
+      - name: clippy
+        run: cargo clippy --locked -p fluxvm-network -- -D warnings
