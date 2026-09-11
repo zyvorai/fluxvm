@@ -388,7 +388,7 @@ impl TlsConfig {
 /// Empty `tokens` with `require` false keeps local-dev open (admin). When
 /// `require` is true, or when listen is non-loopback and tokens are empty,
 /// the API refuses to serve mutating routes without tokens (fail-closed).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     pub tokens: Vec<ApiToken>,
@@ -406,19 +406,6 @@ pub struct AuthConfig {
     pub oidc_issuer: Option<String>,
     #[serde(default)]
     pub oidc_audience: Option<String>,
-}
-
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            tokens: Vec::new(),
-            require: false,
-            max_vms_per_token: None,
-            max_memory_mib_per_token: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-        }
-    }
 }
 
 impl AuthConfig {
@@ -548,5 +535,71 @@ impl Config {
         fs::create_dir_all(&self.state_dir)?;
         fs::create_dir_all(&self.run_dir)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod migration_policy_tests {
+    use super::*;
+
+    #[test]
+    fn policy_allowed_migration_bind_addresses_defaults_none_when_absent_from_toml() {
+        let policy: Policy = toml::from_str("").unwrap();
+        assert!(policy.allowed_migration_bind_addresses.is_none());
+    }
+
+    #[test]
+    fn policy_allowed_migration_tls_dirs_defaults_none_when_absent_from_toml() {
+        let policy: Policy = toml::from_str("").unwrap();
+        assert!(policy.allowed_migration_tls_dirs.is_none());
+    }
+
+    #[test]
+    fn policy_allowed_migration_bind_addresses_round_trips_present_value() {
+        let policy: Policy =
+            toml::from_str(r#"allowed_migration_bind_addresses = ["10.0.0.5", "10.0.0.6"]"#)
+                .unwrap();
+        assert_eq!(
+            policy.allowed_migration_bind_addresses,
+            Some(vec!["10.0.0.5".to_string(), "10.0.0.6".to_string()])
+        );
+    }
+
+    #[test]
+    fn policy_allowed_migration_tls_dirs_round_trips_present_value() {
+        let policy: Policy = toml::from_str(
+            r#"allowed_migration_tls_dirs = ["/etc/fluxvm/tls/dest-a", "/etc/fluxvm/tls/dest-b"]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.allowed_migration_tls_dirs,
+            Some(vec![
+                PathBuf::from("/etc/fluxvm/tls/dest-a"),
+                PathBuf::from("/etc/fluxvm/tls/dest-b"),
+            ])
+        );
+    }
+
+    #[test]
+    fn policy_migration_fields_field_names_match_documented_contract() {
+        let policy = Policy {
+            allowed_migration_bind_addresses: Some(vec!["10.0.0.5".into()]),
+            allowed_migration_tls_dirs: Some(vec!["/etc/fluxvm/tls".into()]),
+            ..Default::default()
+        };
+        let value = serde_json::to_value(&policy).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(obj.contains_key("allowed_migration_bind_addresses"));
+        assert!(obj.contains_key("allowed_migration_tls_dirs"));
+    }
+
+    #[test]
+    fn config_without_policy_table_still_parses_with_migration_fields_none() {
+        // A realistic pre-migration-work config.toml on disk today: some
+        // top-level fields set, no [policy] table at all.
+        let raw = "listen = \"127.0.0.1:7788\"\nstate_dir = \"/var/lib/fluxvm\"\n";
+        let config: Config = toml::from_str(raw).unwrap();
+        assert!(config.policy.allowed_migration_bind_addresses.is_none());
+        assert!(config.policy.allowed_migration_tls_dirs.is_none());
     }
 }

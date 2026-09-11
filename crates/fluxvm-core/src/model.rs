@@ -666,3 +666,165 @@ pub struct VmPressure {
     pub io_some: Option<fluxvm_cgroup::PressureRecord>,
     pub io_full: Option<fluxvm_cgroup::PressureRecord>,
 }
+
+#[cfg(test)]
+mod migration_model_tests {
+    use super::*;
+
+    fn minimal_create_vm_json() -> serde_json::Value {
+        serde_json::json!({
+            "name": "vm1",
+            "backend": "qemu",
+            "image": "/tmp/base.img",
+        })
+    }
+
+    #[test]
+    fn create_vm_request_migration_incoming_defaults_false_when_absent() {
+        let req: CreateVmRequest = serde_json::from_value(minimal_create_vm_json()).unwrap();
+        assert!(!req.migration_incoming);
+    }
+
+    #[test]
+    fn create_vm_request_migration_incoming_round_trips_true() {
+        let mut req: CreateVmRequest = serde_json::from_value(minimal_create_vm_json()).unwrap();
+        req.migration_incoming = true;
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["migration_incoming"], serde_json::json!(true));
+        let round_tripped: CreateVmRequest = serde_json::from_value(value).unwrap();
+        assert!(round_tripped.migration_incoming);
+    }
+
+    #[test]
+    fn migration_tls_spec_round_trips_all_fields() {
+        let value = serde_json::json!({
+            "ca_path": "/etc/fluxvm/tls/ca.pem",
+            "cert_path": "/etc/fluxvm/tls/cert.pem",
+            "key_path": "/etc/fluxvm/tls/key.pem",
+            "tls_hostname": "dest.example.com",
+        });
+        let spec: MigrationTlsSpec = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            spec,
+            MigrationTlsSpec {
+                ca_path: "/etc/fluxvm/tls/ca.pem".into(),
+                cert_path: "/etc/fluxvm/tls/cert.pem".into(),
+                key_path: "/etc/fluxvm/tls/key.pem".into(),
+                tls_hostname: Some("dest.example.com".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn migration_tls_spec_field_names_match_documented_contract() {
+        let spec = MigrationTlsSpec {
+            ca_path: "a".into(),
+            cert_path: "b".into(),
+            key_path: "c".into(),
+            tls_hostname: Some("d".into()),
+        };
+        let value = serde_json::to_value(&spec).unwrap();
+        let obj = value.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["ca_path", "cert_path", "key_path", "tls_hostname"]);
+    }
+
+    #[test]
+    fn migration_tls_spec_tls_hostname_defaults_none_when_absent() {
+        let value = serde_json::json!({"ca_path": "a", "cert_path": "b", "key_path": "c"});
+        let spec: MigrationTlsSpec = serde_json::from_value(value).unwrap();
+        assert!(spec.tls_hostname.is_none());
+    }
+
+    #[test]
+    fn migration_start_request_tls_defaults_none_when_absent() {
+        let value = serde_json::json!({"destination": "tcp:10.0.0.5:4444"});
+        let req: MigrationStartRequest = serde_json::from_value(value).unwrap();
+        assert!(req.tls.is_none());
+        assert_eq!(req.mode, MigrationMode::PreCopy);
+    }
+
+    #[test]
+    fn migration_start_request_tls_round_trips_with_all_fields() {
+        let req = MigrationStartRequest {
+            destination: "tcp:10.0.0.5:4444".into(),
+            mode: MigrationMode::PostCopy,
+            bandwidth_mbps: Some(800),
+            max_downtime_ms: Some(300),
+            multifd_channels: Some(4),
+            tls: Some(MigrationTlsSpec {
+                ca_path: "/etc/ca.pem".into(),
+                cert_path: "/etc/cert.pem".into(),
+                key_path: "/etc/key.pem".into(),
+                tls_hostname: Some("dest.example.com".into()),
+            }),
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        let round_tripped: MigrationStartRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(round_tripped, req);
+    }
+
+    #[test]
+    fn migration_receiver_request_optional_fields_default_none_when_absent() {
+        let value = serde_json::json!({
+            "spec": minimal_create_vm_json(),
+            "disk_path": "/var/lib/fluxvm/vms/abc/disk.qcow2",
+        });
+        let req: MigrationReceiverRequest = serde_json::from_value(value).unwrap();
+        assert!(req.migration_bind_address.is_none());
+        assert!(req.tls.is_none());
+        assert!(req.receiver_ttl_seconds.is_none());
+    }
+
+    #[test]
+    fn migration_receiver_request_field_names_match_documented_contract() {
+        let req = MigrationReceiverRequest {
+            spec: serde_json::from_value(minimal_create_vm_json()).unwrap(),
+            disk_path: "/var/lib/fluxvm/vms/abc/disk.qcow2".into(),
+            receiver_ttl_seconds: Some(120),
+            migration_bind_address: Some("10.0.0.9".into()),
+            tls: Some(MigrationTlsSpec {
+                ca_path: "a".into(),
+                cert_path: "b".into(),
+                key_path: "c".into(),
+                tls_hostname: None,
+            }),
+        };
+        let value = serde_json::to_value(&req).unwrap();
+        let obj = value.as_object().unwrap();
+        assert!(obj.contains_key("migration_bind_address"));
+        assert!(obj.contains_key("tls"));
+        let tls_obj = value["tls"].as_object().unwrap();
+        for key in ["ca_path", "cert_path", "key_path", "tls_hostname"] {
+            assert!(tls_obj.contains_key(key), "missing tls key {key}");
+        }
+    }
+
+    #[test]
+    fn migration_receiver_request_migration_bind_address_round_trips_present_value() {
+        let value = serde_json::json!({
+            "spec": minimal_create_vm_json(),
+            "disk_path": "/var/lib/fluxvm/vms/abc/disk.qcow2",
+            "migration_bind_address": "10.0.0.9",
+        });
+        let req: MigrationReceiverRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(req.migration_bind_address, Some("10.0.0.9".to_string()));
+    }
+
+    #[test]
+    fn vm_status_receiving_serializes_as_lowercase_string() {
+        assert_eq!(
+            serde_json::to_string(&VmStatus::Receiving).unwrap(),
+            "\"receiving\""
+        );
+    }
+
+    #[test]
+    fn vm_status_receiving_deserializes_from_lowercase_string() {
+        assert_eq!(
+            serde_json::from_str::<VmStatus>("\"receiving\"").unwrap(),
+            VmStatus::Receiving
+        );
+    }
+}
