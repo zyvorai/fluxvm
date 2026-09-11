@@ -162,14 +162,23 @@ func (c Collector) collectVM(parent context.Context, vm string) VMState {
 	st.Egress.Required = st.Egress.ProgramID != 0
 	st.Ingress.Required = st.Ingress.ProgramID != 0
 
-	st.Egress.Attached = c.attached(ctx, pin, st.Interface, mode, "ingress", st.Egress.ProgramID, false, &st)
-	st.Ingress.Attached = c.attached(ctx, pin, st.Interface, mode, "egress", st.Ingress.ProgramID, true, &st)
+	st.Egress.Attached = c.attached(ctx, pin, st.Interface, mode, "ingress", "49152", st.Egress.ProgramID, false, &st)
+	st.Ingress.Attached = c.attached(ctx, pin, st.Interface, mode, "egress", "49153", st.Ingress.ProgramID, true, &st)
 
 	if st.PodID != 0 {
+		// Set 14's fluxvm_pod_ingress program shares the main program's
+		// pinned fluxvm_ppstat/fluxvm_pspol instances (loaded via `bpftool
+		// prog load ... map name fluxvm_ppstat pinned <same path>`) rather
+		// than owning independent "_in"-suffixed maps -- there is exactly
+		// one Pod-policy stat counter and one Pod-policy flags record per
+		// VM, covering both directions together. Reporting the same read
+		// under both Egress/IngressStats is a deliberately honest
+		// reflection of that shared counter (a hardcoded zero would wrongly
+		// read as "no ingress traffic", which is worse).
 		st.EgressStats = c.podStats(ctx, filepath.Join(pin, "maps", "fluxvm_ppstat"), st.PodID, &st)
-		st.IngressStats = c.podStats(ctx, filepath.Join(pin, "maps", "fluxvm_ppstat_in"), st.PodID, &st)
-		st.EgressPolicy = c.policyState(ctx, filepath.Join(pin, "maps", "fluxvm_pspol"), st.PodID, &st)
-		st.IngressPolicy = c.policyState(ctx, filepath.Join(pin, "maps", "fluxvm_pspol_in"), st.PodID, &st)
+		st.IngressStats = st.EgressStats
+		st.EgressPolicy, st.IngressPolicy = c.policyState(ctx, filepath.Join(pin, "maps", "fluxvm_pspol"), st.PodID, &st)
+		st.RuleEntries["egress_rules"], st.RuleEntries["ingress_rules"] = c.ruleCounts(ctx, filepath.Join(pin, "maps", "fluxvm_prules"), st.PodID, &st)
 	}
 	for _, spec := range ruleMaps() {
 		st.RuleEntries[spec.name] = c.mapEntries(ctx, filepath.Join(pin, "maps", spec.file), st.PodID, spec.podOffset, &st)
@@ -182,16 +191,16 @@ type ruleMap struct {
 	podOffset  int
 }
 
+// Set 14 keeps these four exact-address/port maps for wire compatibility
+// with a pre-Set-14 controller, shared by both directions (there is no
+// per-direction split for legacy, non-rich Pod policy) -- the former CIDR/
+// port-range/"_in"-suffixed maps this listed no longer exist at all,
+// replaced by the unified fluxvm_prules map counted separately in
+// ruleCounts.
 func ruleMaps() []ruleMap {
 	return []ruleMap{
-		{"egress_address_v4", "fluxvm_pid4", 0}, {"egress_address_v6", "fluxvm_pid6", 0},
-		{"egress_exact_port_v4", "fluxvm_pid4_port", 0}, {"egress_exact_port_v6", "fluxvm_pid6_port", 0},
-		{"egress_cidr_v4", "fluxvm_pid4_cidr", 4}, {"egress_cidr_v6", "fluxvm_pid6_cidr", 4},
-		{"egress_port_range_v4", "fluxvm_pid4_port_range", 0}, {"egress_port_range_v6", "fluxvm_pid6_port_range", 0},
-		{"ingress_address_v4", "fluxvm_pid4_in", 0}, {"ingress_address_v6", "fluxvm_pid6_in", 0},
-		{"ingress_exact_port_v4", "fluxvm_pid4_port_in", 0}, {"ingress_exact_port_v6", "fluxvm_pid6_port_in", 0},
-		{"ingress_cidr_v4", "fluxvm_pid4_cidr_in", 4}, {"ingress_cidr_v6", "fluxvm_pid6_cidr_in", 4},
-		{"ingress_port_range_v4", "fluxvm_pid4_port_range_in", 0}, {"ingress_port_range_v6", "fluxvm_pid6_port_range_in", 0},
+		{"shared_address_v4", "fluxvm_pid4", 0}, {"shared_address_v6", "fluxvm_pid6", 0},
+		{"shared_exact_port_v4", "fluxvm_pid4_port", 0}, {"shared_exact_port_v6", "fluxvm_pid6_port", 0},
 	}
 }
 
@@ -207,15 +216,18 @@ func (c Collector) programID(ctx context.Context, pin string, st *VMState) uint3
 	return uint32(findNumberJSON(out, "id"))
 }
 
-func (c Collector) attached(ctx context.Context, pinRoot, iface, mode, direction string, want uint32, ingress bool, st *VMState) bool {
+func (c Collector) attached(ctx context.Context, pinRoot, iface, mode, direction, pref string, want uint32, ingress bool, st *VMState) bool {
 	if want == 0 || iface == "" {
 		return false
 	}
-	if mode == "tcx" {
+	// The Pod-ingress program is always attached via plain tc at its own
+	// reserved pref/handle (49153/2) -- never TCX, unlike the main
+	// guest-egress program which prefers TCX when available. `mode` (from
+	// the VM's attach_mode file) only ever describes the main program's
+	// attachment, so it must not gate whether the ingress check looks for
+	// a TCX link.
+	if mode == "tcx" && !ingress {
 		link := filepath.Join(pinRoot, "links", "tcx_ingress")
-		if ingress {
-			link = filepath.Join(pinRoot, "links", "tcx_pod_ingress")
-		}
 		if _, err := os.Stat(link); err != nil {
 			return false
 		}
@@ -226,14 +238,14 @@ func (c Collector) attached(ctx context.Context, pinRoot, iface, mode, direction
 		}
 		return uint32(findNumberJSON(out, "prog_id")) == want
 	}
-	out, err := c.Runner.Run(ctx, c.TC, "-j", "filter", "show", "dev", iface, direction, "pref", "49152")
+	out, err := c.Runner.Run(ctx, c.TC, "-j", "filter", "show", "dev", iface, direction, "pref", pref)
 	if err == nil {
 		return containsProgramID(out, want)
 	}
 	// Older iproute2 builds may not support JSON for this subcommand. Fall
 	// back to the same text shape FluxVM itself parses, but still require the
 	// exact program id. Keep the JSON error only if the fallback also fails.
-	text, textErr := c.Runner.Run(ctx, c.TC, "filter", "show", "dev", iface, direction, "pref", "49152")
+	text, textErr := c.Runner.Run(ctx, c.TC, "filter", "show", "dev", iface, direction, "pref", pref)
 	if textErr != nil {
 		st.Errors = append(st.Errors, err.Error(), textErr.Error())
 		return false
@@ -318,14 +330,22 @@ func addStat(s *DirectionStats, b []byte) {
 	s.Audited += nativeU64(b[16:24])
 }
 
-func (c Collector) policyState(ctx context.Context, path string, pod uint32, st *VMState) PolicyState {
+// policyState decodes struct fluxvm_pod_policy's flags word for the given
+// pod_id and returns the egress- and ingress-direction views of it. Set 14
+// keeps a single record per Pod covering both directions: bits 0/2
+// (ENABLED/AUDIT) apply to both; bit 3 (RICH_RULES) selects which pair of
+// isolation bits is meaningful -- bits 4/5 (EGRESS_ISOLATED/
+// INGRESS_ISOLATED) for a schema-v2+ rich policy, or bit 1 (DEFAULT_DENY,
+// egress-only, matching the pre-Set-14 Set 6S/13 semantics where an
+// independent ingress isolation concept did not exist) for a legacy one.
+func (c Collector) policyState(ctx context.Context, path string, pod uint32, st *VMState) (egress, ingress PolicyState) {
 	out := c.dumpMap(ctx, path, st)
 	if out == nil {
-		return PolicyState{}
+		return PolicyState{}, PolicyState{}
 	}
 	var entries []map[string]any
 	if json.Unmarshal(out, &entries) != nil {
-		return PolicyState{}
+		return PolicyState{}, PolicyState{}
 	}
 	for _, e := range entries {
 		kb := bytesFromJSON(e["key"])
@@ -334,9 +354,47 @@ func (c Collector) policyState(ctx context.Context, path string, pod uint32, st 
 			continue
 		}
 		flags := nativeU32(vb[:4])
-		return PolicyState{Enabled: flags&1 != 0, DefaultDeny: flags&2 != 0, Audit: flags&4 != 0}
+		enabled, audit := flags&1 != 0, flags&4 != 0
+		if flags&8 != 0 {
+			egress = PolicyState{Enabled: enabled, DefaultDeny: flags&16 != 0, Audit: audit}
+			ingress = PolicyState{Enabled: enabled, DefaultDeny: flags&32 != 0, Audit: audit}
+		} else {
+			egress = PolicyState{Enabled: enabled, DefaultDeny: flags&2 != 0, Audit: audit}
+			ingress = PolicyState{Enabled: enabled, Audit: audit}
+		}
+		return egress, ingress
 	}
-	return PolicyState{}
+	return PolicyState{}, PolicyState{}
+}
+
+// ruleCounts scans the unified fluxvm_prules map (struct fluxvm_pod_rule:
+// pod_id u32, direction u8, family u8, protocol u8, prefix_len u8, ...) and
+// splits its entries for the given pod_id by direction (1=egress,
+// 2=ingress) -- the only place Set 14 records independently-attributable
+// per-direction rule counts, since the legacy exact-address/port maps are
+// shared between directions.
+func (c Collector) ruleCounts(ctx context.Context, path string, pod uint32, st *VMState) (egress, ingress int) {
+	out := c.dumpMap(ctx, path, st)
+	if out == nil {
+		return 0, 0
+	}
+	var entries []map[string]any
+	if json.Unmarshal(out, &entries) != nil {
+		return 0, 0
+	}
+	for _, e := range entries {
+		vb := bytesFromJSON(e["value"])
+		if len(vb) < 5 || nativeU32(vb[:4]) != pod {
+			continue
+		}
+		switch vb[4] {
+		case 1:
+			egress++
+		case 2:
+			ingress++
+		}
+	}
+	return egress, ingress
 }
 func (c Collector) mapEntries(ctx context.Context, path string, pod uint32, podOffset int, st *VMState) int {
 	out := c.dumpMap(ctx, path, st)

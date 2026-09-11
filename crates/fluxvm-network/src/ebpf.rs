@@ -450,27 +450,20 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
         false
     };
 
-    // Schema v8 normally pins and attaches fluxvm_pod_ingress alongside the
-    // long-standing guest-egress program. Before Set 15 attachment_status()
-    // ignored this second hook, so a deleted TC/TCX ingress-policy link could
-    // leave Kubernetes ingress policy unenforced while the VM was reported
-    // healthy. Treat a present program pin as required and verify its exact
-    // owned program id at the host-side egress hook.
+    // Set 14 attaches fluxvm_pod_ingress as a separate, lazily-loaded object
+    // (only when a Pod's policy actually isolates ingress), bound at TC
+    // *egress* with its own reserved pref/handle (49153/2) -- never TCX,
+    // unlike the main guest-egress program. Before Set 15,
+    // attachment_status() ignored this second hook entirely, so a deleted
+    // ingress-policy filter could leave Kubernetes ingress policy
+    // unenforced while the VM was reported healthy. Treat a present
+    // program pin as required and verify its exact owned program id at
+    // that host-side egress hook, mirroring
+    // detach_pod_ingress_filter_in_vm_dir's own ownership check.
     let pod_ingress_prog_pin = vm_dir.join("progs/fluxvm_pod_ingress");
     let pod_ingress_required = pod_ingress_prog_pin.exists();
     let pod_ingress_owned_program_id = if pod_ingress_required {
-        fs::read_to_string(meta_dir.join("pod_ingress_prog_id"))
-            .ok()
-            .and_then(|s| s.trim().parse::<u32>().ok())
-            .or_else(|| pinned_program_id(&pod_ingress_prog_pin).ok())
-    } else {
-        None
-    };
-    let pod_ingress_tcx_link = tcx::ingress_link_pin(&vm_dir);
-    let pod_ingress_tcx_program_id = if pod_ingress_tcx_link.exists() {
-        tcx::status(&pod_ingress_tcx_link)
-            .ok()
-            .and_then(|status| status.prog_id)
+        pinned_program_id(&pod_ingress_prog_pin).ok()
     } else {
         None
     };
@@ -478,8 +471,13 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
         (iface.as_deref(), pod_ingress_owned_program_id)
     {
         schema_compatible
-            && (pod_ingress_tcx_program_id == Some(program_id)
-                || tc_filter_program_id_dir(iface, "egress").ok().flatten() == Some(program_id))
+            && Command::new("tc")
+                .args(["filter", "show", "dev", iface, "egress", "pref", "49153"])
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .and_then(|out| parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2))
+                == Some(program_id)
     } else {
         false
     };

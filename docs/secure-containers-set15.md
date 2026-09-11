@@ -2,18 +2,23 @@
 
 ## Purpose
 
-Set 13 completion on FluxVM main introduced real Pod ingress policy alongside the
-existing Pod egress dataplane. Set 15 hardens operations around that bidirectional
-policy instead of rewriting the wire format again.
+Set 13 completion originally introduced real Pod ingress policy alongside the
+existing Pod egress dataplane; Secure Containers Set 14 later replaced that
+design with a unified directional CIDR+L4 rule model. Set 15 hardens
+operations around that bidirectional policy instead of rewriting the wire
+format again, and this reconciliation updates it to match Set 14's actual
+map/attachment layout rather than Set 13 completion's.
 
 The two goals are:
 
 1. never report a VM dataplane healthy when the Pod-ingress program is present
-   but its TC/TCX hook is missing; and
-2. expose the kernel's existing per-direction Pod-policy counters and compiled
-   map pressure through a small read-only Prometheus exporter.
+   but its TC hook is missing; and
+2. expose the kernel's existing Pod-policy counters, flags, and compiled
+   rule-map pressure through a small read-only Prometheus exporter.
 
-Reviewed upstream base: `7c7f19d1c772f4ea99066f99069d2738129d8230`.
+Reviewed upstream base: `7c7f19d1c772f4ea99066f99069d2738129d8230`
+(Secure Containers Set 14, commit `e65fadb`, merged after this Set's original
+review; see "Reconciled for Set 14" below).
 
 ## Core health fix
 
@@ -26,9 +31,11 @@ Set 15 adds:
 
 - `pod_ingress_required` to `NativeAttachmentStatus`;
 - `pod_ingress_attached` to `NativeAttachmentStatus`;
-- exact program-ID validation for `links/tcx_pod_ingress` in TCX mode;
-- exact program-ID validation for the host-side `tc egress` filter in legacy
-  clsact mode; and
+- exact program-ID validation for the Pod-ingress program's host-side
+  `tc egress` filter at its reserved pref/handle (49153/2) -- Set 14 attaches
+  this separate object only via plain `tc`, never TCX, so unlike the main
+  guest-egress program's own attachment check, this one does not branch on
+  `attach_mode`; and
 - aggregate health where `attached` is true only when the normal egress hook
   and every required Pod-ingress hook are both live.
 
@@ -39,6 +46,21 @@ normal repair condition without adding a second lifecycle owner.
 Older BPF objects remain compatible: if `progs/fluxvm_pod_ingress` is absent,
 `pod_ingress_required=false` and the legacy one-direction attachment is judged
 by its previous rules.
+
+## Reconciled for Set 14
+
+Set 15 was originally reviewed against the Secure Containers Set 13
+completion architecture (`fluxvm_pod_ingress` embedded in `fluxvm_tc.bpf.o`,
+attached via TCX-egress or a shared-pref legacy `tc` filter). Secure
+Containers Set 14 replaced that architecture with a unified rule model and a
+separate `fluxvm_pod_ingress.bpf.o` object, attached only via plain `tc` at
+its own reserved pref/handle (49153/2), sharing the main program's pinned
+maps (including `fluxvm_ppstat`/`fluxvm_pspol` -- there is no `_in`-suffixed
+counterpart of either under Set 14). This reconciliation updates
+`attachment_status()`'s Pod-ingress check and the policy observer's map
+reads/rule-pressure counting to match that reality, and is reflected in the
+"Sentinel Policy Observer" section below and in the code itself, not just
+here.
 
 ## Sentinel Policy Observer
 
@@ -51,9 +73,13 @@ The observer scans:
 
 - `/sys/fs/bpf/fluxvm/vms/<vm>/progs/*`;
 - `/sys/fs/bpf/fluxvm/vms/<vm>/links/*`;
-- `/sys/fs/bpf/fluxvm/vms/<vm>/maps/fluxvm_ppstat{,_in}`;
-- the Pod policy state maps `fluxvm_pspol{,_in}`;
-- the exact-address, exact-port, CIDR and port-range maps for both directions;
+- `/sys/fs/bpf/fluxvm/vms/<vm>/maps/fluxvm_ppstat` and `fluxvm_pspol` (Set 14's
+  separate Pod-ingress object shares these pinned instances with the main
+  program rather than owning independent copies, so there is one counter and
+  one flags record per VM covering both directions, not one per direction);
+- the shared exact-address/exact-port maps, and the unified `fluxvm_prules`
+  rich-rule map (which does carry a real per-entry direction, unlike the
+  maps above);
 - `/run/fluxvm/ebpf/vms/<vm>/` runtime metadata.
 
 It recognizes dataplane schema v8 and exports Prometheus text on `:9091`.
@@ -78,15 +104,22 @@ additional high-cardinality label dimension.
 ### Counter source
 
 The exporter does not invent counters. It reads the existing per-CPU
-`fluxvm_ppstat` and `fluxvm_ppstat_in` maps and aggregates the 24-byte
-`allowed/dropped/audited` value across CPUs.
+`fluxvm_ppstat` map and aggregates the 24-byte `allowed/dropped/audited`
+value across CPUs. Because Set 14's Pod-ingress program shares this same
+pinned map with the main program, the exact same aggregate value is reported
+under both `direction="egress"` and `direction="ingress"` -- that is a
+faithful reflection of the underlying counter, not a bug: FluxVM does not
+currently record allow/drop/audit counts separately per direction.
 
 ### Rule pressure
 
-Compiled entries are counted for the observed Pod identity only. CIDR LPM maps
-use the schema-v8 key offset (`prefixlen` then `pod_id`); other Pod maps use
-`pod_id` at offset zero. This keeps the metric correct if the implementation
-later allows more than one Pod identity in a VM-owned map instance.
+The four legacy exact-address/exact-port maps are counted for the observed
+Pod identity only (`pod_id` at key offset zero) and reported once as
+`shared_*`, since Set 14 shares them between directions -- they have no
+independent per-direction split to report. The unified `fluxvm_prules` map
+is scanned separately and its entries genuinely are counted per direction
+(`egress_rules`/`ingress_rules`), since each entry's own `direction` field
+makes that possible.
 
 ## Deployment
 
@@ -115,7 +148,16 @@ VM/rule counts remains a required sizing gate.
 Portable validation covers Go tests, race detector, vet, gofmt, static
 amd64/arm64 builds, shell/Python/YAML parsing and benchmark execution.
 
-This packaging environment does not provide a live bpffs populated by FluxVM,
-a host TCX link, `/dev/kvm`, or a Kubernetes Secure Containers cluster. Therefore
-live counter movement, TC/TCX repair and end-to-end Prometheus scraping remain
-explicit node/cluster gates.
+The Set 14 reconciliation additionally closed the live-node gate this section
+used to describe as open: a real dual-object VM was built by hand on the
+validation host (`fluxvm_tc.bpf.o`'s single program attached via plain `tc`
+at pref 49152/handle 1, plus the separate `fluxvm_pod_ingress.bpf.o` loaded
+with shared pinned maps and attached at pref 49153/handle 2), and the real
+`fluxvm-policy-observer` binary was run against it with `--once`. Both
+directions correctly reported `hook_required=1`/`hook_attached=1`; removing
+the ingress `tc` filter and re-running correctly flipped only
+`fluxvm_sentinel_policy_hook_attached{direction="ingress"}` to `0` while
+leaving egress and `hook_required` untouched -- proving the observer
+distinguishes "program present" from "program actually attached" against
+the real kernel, not just its own mocked unit tests. A live Kubernetes
+Secure Containers cluster and `/dev/kvm` remain out of scope for this pass.

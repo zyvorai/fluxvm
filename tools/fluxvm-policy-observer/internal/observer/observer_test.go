@@ -50,6 +50,11 @@ func statBytes(a, d, u uint64) []byte {
 	return b
 }
 
+// ruleVal builds a minimal struct fluxvm_pod_rule value: only pod_id (bytes
+// 0-3) and direction (byte 4) matter to ruleCounts; the rest of the real
+// 28-byte struct is irrelevant to this test.
+func ruleVal(pod uint32, direction byte) []byte { return append(u32(pod), direction, 0, 0, 0) }
+
 func TestCollectLegacyTCHooksAndDirectionalStats(t *testing.T) {
 	root := t.TempDir()
 	pinRoot := filepath.Join(root, "bpf")
@@ -61,30 +66,34 @@ func TestCollectLegacyTCHooksAndDirectionalStats(t *testing.T) {
 	putFile(t, filepath.Join(meta, "schema_version"), "8\n")
 	putFile(t, filepath.Join(meta, "iface"), "tap42\n")
 	putFile(t, filepath.Join(meta, "attach_mode"), "tc\n")
-	for _, p := range []string{"progs/fluxvm_egress", "progs/fluxvm_pod_ingress", "maps/fluxvm_ppstat", "maps/fluxvm_ppstat_in", "maps/fluxvm_pspol", "maps/fluxvm_pspol_in", "maps/fluxvm_pid4", "maps/fluxvm_pid4_cidr_in"} {
+	// Set 14: fluxvm_pod_ingress is a separate object sharing the main
+	// program's pinned fluxvm_ppstat/fluxvm_pspol -- there is no "_in"
+	// suffix, and the former CIDR/port-range maps no longer exist at all
+	// (superseded by the unified fluxvm_prules map).
+	for _, p := range []string{"progs/fluxvm_egress", "progs/fluxvm_pod_ingress", "maps/fluxvm_ppstat", "maps/fluxvm_pspol", "maps/fluxvm_pid4", "maps/fluxvm_prules"} {
 		putFile(t, filepath.Join(pin, p), "")
 	}
-	statE, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(u32(42)), "values": []any{map[string]any{"cpu": 0, "value": bytesJSON(statBytes(10, 2, 1))}, map[string]any{"cpu": 1, "value": bytesJSON(statBytes(3, 1, 0))}}}})
-	statI, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(u32(42)), "value": bytesJSON(statBytes(7, 4, 2))}})
-	pol := append(u32(1|2), make([]byte, 12)...)
-	polI := append(u32(1|4), make([]byte, 12)...)
+	stat, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(u32(42)), "values": []any{map[string]any{"cpu": 0, "value": bytesJSON(statBytes(10, 2, 1))}, map[string]any{"cpu": 1, "value": bytesJSON(statBytes(3, 1, 0))}}}})
+	// ENABLED|DEFAULT_DENY|AUDIT, not RICH_RULES: the legacy (pre-schema-v2)
+	// decode path, where DEFAULT_DENY is an egress-only concept and ingress
+	// has no independent isolation bit.
+	pol := append(u32(1|2|4), make([]byte, 12)...)
 	polJ, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(u32(42)), "value": bytesJSON(pol)}})
-	polIJ, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(u32(42)), "value": bytesJSON(polI)}})
 	one, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(u32(42)), "value": []int{1}}})
-	cidrKey := append(u32(64), u32(42)...)
-	cidrKey = append(cidrKey, 10, 0, 0, 0)
-	cidrOne, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(cidrKey), "value": []int{1}}})
+	prules, _ := json.Marshal([]any{
+		map[string]any{"key": bytesJSON(u32(0)), "value": bytesJSON(ruleVal(42, 1))},
+		map[string]any{"key": bytesJSON(u32(1)), "value": bytesJSON(ruleVal(42, 2))},
+		map[string]any{"key": bytesJSON(u32(2)), "value": bytesJSON(ruleVal(99, 1))}, // different pod_id, must not be counted
+	})
 	r := fakeRunner{responses: map[string][]byte{
 		"bpftool -j prog show pinned " + filepath.Join(pin, "progs/fluxvm_egress"):      []byte(`[ {"id":101} ]`),
 		"bpftool -j prog show pinned " + filepath.Join(pin, "progs/fluxvm_pod_ingress"): []byte(`[ {"id":202} ]`),
 		"tc -j filter show dev tap42 ingress pref 49152":                                []byte(`[{"options":{"id":101}}]`),
-		"tc -j filter show dev tap42 egress pref 49152":                                 []byte(`[{"options":{"id":202}}]`),
-		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_ppstat"):        statE,
-		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_ppstat_in"):     statI,
+		"tc -j filter show dev tap42 egress pref 49153":                                 []byte(`[{"options":{"id":202}}]`),
+		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_ppstat"):        stat,
 		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_pspol"):         polJ,
-		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_pspol_in"):      polIJ,
 		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_pid4"):          one,
-		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_pid4_cidr_in"):  cidrOne,
+		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_prules"):        prules,
 	}}
 	snap := Collector{PinRoot: pinRoot, MetaRoot: metaRoot, Runner: r}.Collect(context.Background())
 	if len(snap.VMs) != 1 {
@@ -94,27 +103,55 @@ func TestCollectLegacyTCHooksAndDirectionalStats(t *testing.T) {
 	if !v.Egress.Attached || !v.Ingress.Attached {
 		t.Fatalf("hooks not healthy: %+v %+v", v.Egress, v.Ingress)
 	}
-	if v.EgressStats != (DirectionStats{Allowed: 13, Dropped: 3, Audited: 1}) {
-		t.Fatalf("egress stats: %+v", v.EgressStats)
+	// Set 14 shares one stat counter across both directions.
+	want := DirectionStats{Allowed: 13, Dropped: 3, Audited: 1}
+	if v.EgressStats != want || v.IngressStats != want {
+		t.Fatalf("stats: egress=%+v ingress=%+v want=%+v", v.EgressStats, v.IngressStats, want)
 	}
-	if v.IngressStats != (DirectionStats{Allowed: 7, Dropped: 4, Audited: 2}) {
-		t.Fatalf("ingress stats: %+v", v.IngressStats)
-	}
-	if !v.EgressPolicy.Enabled || !v.EgressPolicy.DefaultDeny || v.EgressPolicy.Audit {
+	if !v.EgressPolicy.Enabled || !v.EgressPolicy.DefaultDeny || !v.EgressPolicy.Audit {
 		t.Fatalf("egress policy: %+v", v.EgressPolicy)
 	}
 	if !v.IngressPolicy.Enabled || v.IngressPolicy.DefaultDeny || !v.IngressPolicy.Audit {
-		t.Fatalf("ingress policy: %+v", v.IngressPolicy)
+		t.Fatalf("ingress policy (legacy mode must not isolate ingress): %+v", v.IngressPolicy)
 	}
-	if v.RuleEntries["egress_address_v4"] != 1 || v.RuleEntries["ingress_cidr_v4"] != 1 {
-		t.Fatalf("rule counts: %+v", v.RuleEntries)
+	if v.RuleEntries["shared_address_v4"] != 1 {
+		t.Fatalf("shared_address_v4: %+v", v.RuleEntries)
+	}
+	if v.RuleEntries["egress_rules"] != 1 || v.RuleEntries["ingress_rules"] != 1 {
+		t.Fatalf("rich rule counts: %+v", v.RuleEntries)
 	}
 	if len(v.Errors) != 0 {
 		t.Fatalf("errors: %v", v.Errors)
 	}
 }
 
-func TestCollectTCXRequiresMatchingDirectionalLinks(t *testing.T) {
+func TestPolicyStateRichModeUsesIndependentIsolationBits(t *testing.T) {
+	root := t.TempDir()
+	pinRoot := filepath.Join(root, "bpf")
+	pin := filepath.Join(pinRoot, "vms", "x")
+	putFile(t, filepath.Join(pin, "maps/fluxvm_pspol"), "")
+	// ENABLED|RICH_RULES|EGRESS_ISOLATED (no INGRESS_ISOLATED).
+	pol := append(u32(1|8|16), make([]byte, 12)...)
+	polJ, _ := json.Marshal([]any{map[string]any{"key": bytesJSON(u32(7)), "value": bytesJSON(pol)}})
+	r := fakeRunner{responses: map[string][]byte{
+		"bpftool -j map dump pinned " + filepath.Join(pin, "maps/fluxvm_pspol"): polJ,
+	}}
+	egress, ingress := Collector{BPFTool: "bpftool", Runner: r}.policyState(context.Background(), filepath.Join(pin, "maps/fluxvm_pspol"), 7, &VMState{})
+	if !egress.Enabled || !egress.DefaultDeny {
+		t.Fatalf("egress should be isolated: %+v", egress)
+	}
+	if !ingress.Enabled || ingress.DefaultDeny {
+		t.Fatalf("ingress should not be isolated: %+v", ingress)
+	}
+}
+
+// The main guest-egress program prefers TCX and reports attached via a
+// matching pinned link; the separate Pod-ingress program is never TCX
+// (Set 14 attaches it only via plain tc at pref 49153), so `attach_mode:
+// tcx` on the VM must not make the ingress check look for a
+// links/tcx_pod_ingress link -- it must still consult tc, and here that tc
+// query finds no filter at all, so ingress is correctly unattached.
+func TestCollectTCXEgressDoesNotGateIngressOnATCXLink(t *testing.T) {
 	root := t.TempDir()
 	pinRoot := filepath.Join(root, "bpf")
 	metaRoot := filepath.Join(root, "meta")
@@ -124,17 +161,45 @@ func TestCollectTCXRequiresMatchingDirectionalLinks(t *testing.T) {
 	putFile(t, filepath.Join(meta, "iface"), "tap0")
 	putFile(t, filepath.Join(meta, "schema_version"), "8")
 	putFile(t, filepath.Join(meta, "attach_mode"), "tcx")
-	for _, p := range []string{"progs/fluxvm_egress", "progs/fluxvm_pod_ingress", "links/tcx_ingress", "links/tcx_pod_ingress"} {
+	for _, p := range []string{"progs/fluxvm_egress", "progs/fluxvm_pod_ingress", "links/tcx_ingress"} {
 		putFile(t, filepath.Join(pin, p), "")
 	}
 	r := fakeRunner{responses: map[string][]byte{
 		"bpftool -j prog show pinned " + filepath.Join(pin, "progs/fluxvm_egress"):      []byte(`{"id":11}`),
 		"bpftool -j prog show pinned " + filepath.Join(pin, "progs/fluxvm_pod_ingress"): []byte(`{"id":12}`),
 		"bpftool -j link show pinned " + filepath.Join(pin, "links/tcx_ingress"):        []byte(`{"prog_id":11}`),
-		"bpftool -j link show pinned " + filepath.Join(pin, "links/tcx_pod_ingress"):    []byte(`{"prog_id":99}`),
+		"tc -j filter show dev tap0 egress pref 49153":                                  []byte(`[]`),
 	}}
 	v := Collector{PinRoot: pinRoot, MetaRoot: metaRoot, Runner: r}.Collect(context.Background()).VMs[0]
 	if !v.Egress.Attached || v.Ingress.Attached {
+		t.Fatalf("unexpected hook state: egress=%v ingress=%v", v.Egress.Attached, v.Ingress.Attached)
+	}
+}
+
+// The inverse: a real ingress filter present at pref 49153 with the exact
+// owned program id must report attached even while the main program is
+// TCX-attached.
+func TestCollectIngressAttachedViaPlainTCEvenWhenEgressIsTCX(t *testing.T) {
+	root := t.TempDir()
+	pinRoot := filepath.Join(root, "bpf")
+	metaRoot := filepath.Join(root, "meta")
+	vm := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	pin := filepath.Join(pinRoot, "vms", vm)
+	meta := filepath.Join(metaRoot, vm)
+	putFile(t, filepath.Join(meta, "iface"), "tap0")
+	putFile(t, filepath.Join(meta, "schema_version"), "8")
+	putFile(t, filepath.Join(meta, "attach_mode"), "tcx")
+	for _, p := range []string{"progs/fluxvm_egress", "progs/fluxvm_pod_ingress", "links/tcx_ingress"} {
+		putFile(t, filepath.Join(pin, p), "")
+	}
+	r := fakeRunner{responses: map[string][]byte{
+		"bpftool -j prog show pinned " + filepath.Join(pin, "progs/fluxvm_egress"):      []byte(`{"id":11}`),
+		"bpftool -j prog show pinned " + filepath.Join(pin, "progs/fluxvm_pod_ingress"): []byte(`{"id":12}`),
+		"bpftool -j link show pinned " + filepath.Join(pin, "links/tcx_ingress"):        []byte(`{"prog_id":11}`),
+		"tc -j filter show dev tap0 egress pref 49153":                                  []byte(`[{"options":{"id":12}}]`),
+	}}
+	v := Collector{PinRoot: pinRoot, MetaRoot: metaRoot, Runner: r}.Collect(context.Background()).VMs[0]
+	if !v.Egress.Attached || !v.Ingress.Attached {
 		t.Fatalf("unexpected hook state: egress=%v ingress=%v", v.Egress.Attached, v.Ingress.Attached)
 	}
 }
