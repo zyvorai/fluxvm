@@ -8,8 +8,8 @@ Operator reference with full safety properties:
 [network-fabric.md](network-fabric.md).
 Production runbook: [production-dataplane.md](production-dataplane.md).
 CNP / identities: [network-policy.md](network-policy.md).
-README diagrams:
-[Network Fabric architecture](../README.md#network-fabric-architecture-how-it-works).
+Diagrams:
+[Packet-decision and control-plane diagrams](network-fabric.md#packet-decision-and-control-plane-diagrams).
 
 ## Modes
 

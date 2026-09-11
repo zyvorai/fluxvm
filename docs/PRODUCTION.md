@@ -198,3 +198,25 @@ in-guest eBPF LSM MAC (Set 9S) is off by default
 loader has a known intermittent "error parsing ELF data" load failure on at
 least one validation host (see [secure-containers-set9s.md](secure-containers-set9s.md)),
 not yet root-caused to a fix.
+
+## MVP-era roadmap notes (mostly resolved)
+
+Historical per-area status notes carried over from the original MVP README. Most
+items below are now implemented; kept here for the reasoning/context behind each,
+and to flag the few genuinely still-open follow-ups.
+
+1. **Firecracker jailer's own `--cgroup`/`--resource-limit` flags** — superseded: every VM already gets cgroup v2 resource control independent of the jailer (see [operations.md](operations.md#resource-control-cgroup-v2)). Wiring jailer-native limits remains optional hardening only.
+2. **Network namespace / Fabric** — nftables NAT + IPAM are implemented; optional TC/eBPF Network Fabric (schema **v4**: L3+L4, rate limits, groups/CNP, observe/health/ipcache, FQDN refresh, optional XDP) is implemented (default remains nftables — see [ebpf-cilium.md](ebpf-cilium.md), [network-fabric.md](network-fabric.md), [network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md)). Follow-ups: Cilium-native VM endpoints / first-class Hubble attribution — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md).
+3. **Snapshots on QEMU/CH** — QEMU `savevm` + `POST /v1/vms/{id}/snapshot` and Cloud Hypervisor `ch-remote snapshot` are implemented (pair with `POST /v1/vms/{id}/start-from-snapshot`). FluxVm memory+disk snapshots remain on the agent-sandbox track.
+4. **Storage abstraction** — already implemented and fully verified (qcow2/raw, LVM thin, NBD, Ceph RBD). NVMe-local as a distinct backend remains unnecessary. See [operations.md](operations.md#storage-backends).
+5. **Image catalog** — Ed25519 signing shipped; optional `catalog.cosign_identities` shells out to `cosign verify-blob`. See [operations.md](operations.md#image-catalog--signing).
+6. **Policy** — `allowed_network_modes` and `allow_extra_args` (default false) are enforced alongside existing vCPU/RAM/disk/TTL/backend/image-dir limits. See [operations.md](operations.md#policy-admission-limits).
+7. **Auth** — fail-closed off-loopback, JSON audit (`fluxvm_audit`), per-token quotas, VM/token `tenant`, `/readyz`. Still open: mTLS/OIDC token exchange (`auth.oidc_issuer` reserved). See [api.md](api.md#auth--rbac).
+8. **Observability** — Prometheus `/metrics` now includes auth/egress deny counters and create/start latency; OpenTelemetry remains optional.
+9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see the README's [Kubernetes CRD/operator](../README.md#kubernetes-crdoperator) section and `deploy/k8s/`.
+10. **Distributed node-agent** — TLS/auth, persisted registry, and residual-capacity placement are implemented; see [operations.md](operations.md#distributed-node-agent).
+11. **Scheduler placement** — `CreateVmRequest` accepts optional `numa_node`, `cpuset`, `hugepages`, and `vfio_devices` (QEMU backend only). Broader placement policies still open.
+12. **Windows path** — Offline `windows{}` (incl. `unattend_path`/`sysprep`) and live QGA on QEMU are implemented; still missing: Cloud Hypervisor Windows + QGA — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md#2-cloud-hypervisor-windows--qga).
+13. **AI-agent sandbox hardening** (see [agent-sandbox-gaps.md](agent-sandbox-gaps.md)) — `fluxvm_engine=kvm`, multi-port proxy, native TC/eBPF + Cilium coexistence, benchmarks. Optional: Cilium-native identities / Hubble; published density numbers.
+
+"auto" backend selection is already implemented — see [operations.md](operations.md#auto-backend-selection).

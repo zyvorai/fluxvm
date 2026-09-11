@@ -54,8 +54,8 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 Applied on FluxVm create/start/restart on the host-visible interface (guest CIDR
 optional for native). See [network-fabric.md](network-fabric.md),
 [network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md),
-and README [eBPF / Cilium sandbox dataplane](../README.md#ebpf--cilium-sandbox-dataplane)
-plus [architecture](../README.md#network-fabric-architecture-how-it-works).
+[ebpf-cilium.md](ebpf-cilium.md), and the
+[packet-decision diagrams](network-fabric.md#packet-decision-and-control-plane-diagrams).
 
 ## Remaining (optional hardening)
 

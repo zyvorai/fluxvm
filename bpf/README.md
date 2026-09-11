@@ -59,4 +59,4 @@ Docs: [docs/network-fabric.md](../docs/network-fabric.md),
 [docs/network-policy.md](../docs/network-policy.md),
 [docs/network-groups.md](../docs/network-groups.md),
 [docs/production-dataplane.md](../docs/production-dataplane.md),
-[README architecture](../README.md#network-fabric-architecture-how-it-works).
+[docs/network-fabric.md diagrams](../docs/network-fabric.md#packet-decision-and-control-plane-diagrams).
