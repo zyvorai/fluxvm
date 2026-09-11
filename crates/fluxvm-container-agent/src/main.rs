@@ -1703,10 +1703,7 @@ fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
         if !arches.is_empty() && !has_native {
             bail!(
                 "OCI seccomp architectures {:?} do not include SCMP_ARCH_X86_64; FluxVM Set 11 currently enforces native x86_64 only",
-                arches
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
+                arches.iter().filter_map(Value::as_str).collect::<Vec<_>>()
             );
         }
     }
