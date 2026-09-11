@@ -312,7 +312,7 @@ async fn spawn_virtiofsd_instances(
         // race: the path is present but nothing accepts → Connection refused.
         let _ = tokio::fs::remove_file(&socket).await;
         let tag = format!("fs{i}");
-        let mut args = vec![
+        let args = vec![
             // Ubuntu/systemd hosts often fail virtiofsd's default namespace
             // sandbox ("Error creating sandbox" / capability sync) when
             // spawned under ProtectSystem/NoNewPrivileges. Fail-open to an
