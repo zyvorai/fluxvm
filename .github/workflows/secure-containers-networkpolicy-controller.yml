@@ -70,7 +70,13 @@ jobs:
         with:
           components: rustfmt,clippy
       - name: Install eBPF build deps
-        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic iproute2 libsystemd-dev libhivex-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev iproute2 libsystemd-dev libhivex-dev pkg-config \
+            linux-tools-common linux-tools-generic
+          # Azure GH runners need the matching kernel tools package for a real bpftool binary.
+          sudo apt-get install -y "linux-tools-$(uname -r)" || sudo apt-get install -y linux-tools-azure || true
+          bpftool version
       - name: Rust format/check/tests
         working-directory: fluxvm
         run: |
@@ -85,4 +91,9 @@ jobs:
         run: |
           test -s /tmp/fluxvm-bpf/fluxvm_tc.bpf.o
           test -s /tmp/fluxvm-bpf/fluxvm_pod_ingress.bpf.o
-          bpftool btf dump file /tmp/fluxvm-bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pod_rule
+          if bpftool version >/dev/null 2>&1; then
+            bpftool btf dump file /tmp/fluxvm-bpf/fluxvm_tc.bpf.o format raw | grep -q fluxvm_pod_rule
+          else
+            echo 'bpftool unavailable for this runner kernel; falling back to symbol check'
+            llvm-objdump -t /tmp/fluxvm-bpf/fluxvm_tc.bpf.o | grep -E 'fluxvm_prules|fluxvm_ppstat'
+          fi
