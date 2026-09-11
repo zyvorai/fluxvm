@@ -1,0 +1,36 @@
+name: secure-containers-set18
+on:
+  pull_request:
+    paths:
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'scripts/test-networkpolicy-endpointslice-set18.sh'
+      - 'docs/secure-containers-set18.md'
+      - '.github/workflows/secure-containers-set18.yml'
+  push:
+    paths:
+      - 'controllers/fluxvm-networkpolicy-controller/**'
+      - 'scripts/test-networkpolicy-endpointslice-set18.sh'
+      - 'docs/secure-containers-set18.md'
+jobs:
+  controller:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: controllers/fluxvm-networkpolicy-controller
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: controllers/fluxvm-networkpolicy-controller/go.mod
+      - run: gofmt -w cmd internal
+      - run: git diff --exit-code
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+  shell-yaml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n scripts/test-networkpolicy-endpointslice-set18.sh
+      - run: |
+          grep -Fq 'resources: ["endpointslices"]' controllers/fluxvm-networkpolicy-controller/deploy/rbac.yaml

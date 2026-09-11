@@ -26,6 +26,7 @@ type Snapshot struct {
 	Pods            []kube.Pod
 	Namespaces      []kube.Namespace
 	Services        []kube.Service
+	EndpointSlices  []kube.EndpointSlice // FLUXVM_SECURE_CONTAINERS_SET18
 	NetworkPolicies []kube.NetworkPolicy
 }
 
@@ -196,7 +197,9 @@ func compileRule(target kube.Pod, snapshot Snapshot, np kube.NetworkPolicy, dire
 		peerSets = []peerResolution{{CIDRs: []string{"0.0.0.0/0", "::/0"}}}
 	} else {
 		for i, peer := range peers {
-			resolved, msg, resolveErr := resolvePeer(np, peer, snapshot, includeServiceVIPs)
+			// FLUXVM_SECURE_CONTAINERS_SET18: ClusterIPs are destination VIPs.
+			// They are meaningful only for egress peers, never as ingress source identities.
+			resolved, msg, resolveErr := resolvePeer(np, peer, snapshot, includeServiceVIPs && direction == "egress")
 			if resolveErr != nil {
 				return nil, nil, fmt.Errorf("peer[%d]: %w", i, resolveErr)
 			}
@@ -395,7 +398,7 @@ func resolvePeer(np kube.NetworkPolicy, peer kube.NetworkPolicyPeer, snapshot Sn
 		}
 	}
 	if includeServiceVIPs {
-		includeConservativeServiceVIPs(snapshot, namespaces, selectedUIDs, cidrSet)
+		includeEndpointSliceServiceVIPs(snapshot, namespaces, selectedUIDs, cidrSet)
 	}
 	return peerResolution{CIDRs: sortedStrings(cidrSet), Pods: pods, SelectorPeer: true}, "", nil
 }
@@ -479,32 +482,148 @@ func selectedNamespaces(policyNamespace string, selector *kube.LabelSelector, na
 	return out
 }
 
-func includeConservativeServiceVIPs(snapshot Snapshot, namespaces, peerPods map[string]struct{}, cidrs map[string]struct{}) {
+// FLUXVM_SECURE_CONTAINERS_SET18: Include a Service VIP only when the
+// EndpointSlice routing truth proves that every endpoint that may receive
+// new Service traffic for that address family is already selected by the
+// NetworkPolicy peer. This replaces Set 14's selector-only approximation.
+//
+// The proof is intentionally fail closed:
+//   * selectorless Services are not inferred from a podSelector peer;
+//   * a Service with no usable EndpointSlice backend gets no VIP rule;
+//   * an endpoint without a Pod targetRef, an unknown Pod UID, selector
+//     drift, or an address that does not belong to that Pod invalidates only
+//     that address family of the Service;
+//   * Ready==nil is routable per discovery/v1 semantics;
+//   * serving+terminating is also treated as potentially routable because
+//     Service proxies may use draining endpoints when no normal endpoint is
+//     available.
+func includeEndpointSliceServiceVIPs(snapshot Snapshot, namespaces, peerPods map[string]struct{}, cidrs map[string]struct{}) {
+	podsByUID := make(map[string]kube.Pod, len(snapshot.Pods))
+	podAddrByUID := make(map[string]map[string]struct{}, len(snapshot.Pods))
+	for _, pod := range snapshot.Pods {
+		if pod.Metadata.UID == "" {
+			continue
+		}
+		podsByUID[pod.Metadata.UID] = pod
+		addrs := map[string]struct{}{}
+		for _, raw := range kube.PodAddresses(pod) {
+			if addr, err := netip.ParseAddr(raw); err == nil {
+				addrs[addr.String()] = struct{}{}
+			}
+		}
+		podAddrByUID[pod.Metadata.UID] = addrs
+	}
+
 	for _, svc := range snapshot.Services {
 		if _, ok := namespaces[svc.Metadata.Namespace]; !ok || len(svc.Spec.Selector) == 0 {
 			continue
 		}
-		matched := 0
-		safe := true
-		for _, pod := range snapshot.Pods {
-			if pod.Metadata.Namespace != svc.Metadata.Namespace || terminalPod(pod) || !matchesExactSelector(pod.Metadata.Labels, svc.Spec.Selector) {
-				continue
-			}
-			matched++
-			if _, ok := peerPods[pod.Metadata.UID]; !ok {
-				safe = false
-				break
-			}
-		}
-		if !safe || matched == 0 {
+
+		slices := endpointSlicesForService(snapshot.EndpointSlices, svc)
+		if len(slices) == 0 {
 			continue
 		}
-		for _, raw := range serviceIPs(svc) {
-			if cidr, ok := hostCIDR(raw); ok {
-				cidrs[cidr] = struct{}{}
+		for _, rawVIP := range serviceIPs(svc) {
+			vip, err := netip.ParseAddr(rawVIP)
+			if err != nil {
+				continue
+			}
+			family := "IPv6"
+			if vip.Is4() {
+				family = "IPv4"
+			}
+			if serviceFamilyEndpointSafe(svc, slices, family, peerPods, podsByUID, podAddrByUID) {
+				if cidr, ok := hostCIDR(vip.String()); ok {
+					cidrs[cidr] = struct{}{}
+				}
 			}
 		}
 	}
+}
+
+func endpointSlicesForService(all []kube.EndpointSlice, svc kube.Service) []kube.EndpointSlice {
+	const serviceNameLabel = "kubernetes.io/service-name"
+	var out []kube.EndpointSlice
+	for _, slice := range all {
+		if slice.Metadata.Namespace != svc.Metadata.Namespace || slice.Metadata.Labels[serviceNameLabel] != svc.Metadata.Name {
+			continue
+		}
+		out = append(out, slice)
+	}
+	return out
+}
+
+func serviceFamilyEndpointSafe(
+	svc kube.Service,
+	slices []kube.EndpointSlice,
+	family string,
+	peerPods map[string]struct{},
+	podsByUID map[string]kube.Pod,
+	podAddrByUID map[string]map[string]struct{},
+) bool {
+	usable := 0
+	for _, slice := range slices {
+		if !strings.EqualFold(slice.AddressType, family) {
+			continue
+		}
+		for _, ep := range slice.Endpoints {
+			if !endpointMayReceiveServiceTraffic(ep) {
+				continue
+			}
+			usable++
+			if !endpointBackedBySelectedPod(svc, ep, peerPods, podsByUID, podAddrByUID) {
+				return false
+			}
+		}
+	}
+	return usable > 0
+}
+
+func endpointMayReceiveServiceTraffic(ep kube.Endpoint) bool {
+	// discovery.k8s.io/v1: nil Ready and Serving mean true; nil Terminating
+	// means false. Ready captures the normal Service path. serving+terminating
+	// captures the draining fallback some Service proxies may use.
+	ready := ep.Conditions.Ready == nil || *ep.Conditions.Ready
+	serving := ep.Conditions.Serving == nil || *ep.Conditions.Serving
+	terminating := ep.Conditions.Terminating != nil && *ep.Conditions.Terminating
+	return ready || (serving && terminating)
+}
+
+func endpointBackedBySelectedPod(
+	svc kube.Service,
+	ep kube.Endpoint,
+	peerPods map[string]struct{},
+	podsByUID map[string]kube.Pod,
+	podAddrByUID map[string]map[string]struct{},
+) bool {
+	ref := ep.TargetRef
+	if ref == nil || !strings.EqualFold(ref.Kind, "Pod") || ref.UID == "" {
+		return false
+	}
+	if ref.Namespace != "" && ref.Namespace != svc.Metadata.Namespace {
+		return false
+	}
+	if _, ok := peerPods[ref.UID]; !ok {
+		return false
+	}
+	pod, ok := podsByUID[ref.UID]
+	if !ok || pod.Metadata.Namespace != svc.Metadata.Namespace || terminalPod(pod) || !matchesExactSelector(pod.Metadata.Labels, svc.Spec.Selector) {
+		return false
+	}
+	known := podAddrByUID[ref.UID]
+	if len(ep.Addresses) == 0 || len(known) == 0 {
+		return false
+	}
+	for _, raw := range ep.Addresses {
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return false
+		}
+		if _, ok := known[addr.String()]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func serviceIPs(svc kube.Service) []string {

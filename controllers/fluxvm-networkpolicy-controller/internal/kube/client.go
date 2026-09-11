@@ -155,6 +155,13 @@ func (c *Client) Services(ctx context.Context) ([]Service, error) {
 	return listAll[Service](ctx, c, "/api/v1/services")
 }
 
+// FLUXVM_SECURE_CONTAINERS_SET18: EndpointSlices are consulted only when
+// Service ClusterIP inclusion is enabled by the controller. The discovery
+// v1 API is stable and is kube-proxy's Service-backend source of truth.
+func (c *Client) EndpointSlices(ctx context.Context) ([]EndpointSlice, error) {
+	return listAll[EndpointSlice](ctx, c, "/apis/discovery.k8s.io/v1/endpointslices")
+}
+
 func (c *Client) NetworkPolicies(ctx context.Context) ([]NetworkPolicy, error) {
 	return listAll[NetworkPolicy](ctx, c, "/apis/networking.k8s.io/v1/networkpolicies")
 }

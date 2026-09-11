@@ -70,6 +70,34 @@ type ServiceSpec struct {
 	Type       string            `json:"type"`
 }
 
+// FLUXVM_SECURE_CONTAINERS_SET18: EndpointSlice is the Service-routing
+// source of truth used to decide whether an opt-in Service ClusterIP can be
+// safely represented by a selector-based NetworkPolicy peer.
+type EndpointSlice struct {
+	Metadata    ObjectMeta `json:"metadata"`
+	AddressType string     `json:"addressType"`
+	Endpoints   []Endpoint `json:"endpoints"`
+}
+
+type Endpoint struct {
+	Addresses  []string           `json:"addresses"`
+	Conditions EndpointConditions `json:"conditions"`
+	TargetRef  *ObjectReference   `json:"targetRef"`
+}
+
+type EndpointConditions struct {
+	Ready       *bool `json:"ready"`
+	Serving     *bool `json:"serving"`
+	Terminating *bool `json:"terminating"`
+}
+
+type ObjectReference struct {
+	Kind      string `json:"kind"`
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+	UID       string `json:"uid"`
+}
+
 type NetworkPolicy struct {
 	Metadata ObjectMeta        `json:"metadata"`
 	Spec     NetworkPolicySpec `json:"spec"`
