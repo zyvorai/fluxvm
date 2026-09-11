@@ -59,6 +59,12 @@ One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for g
 - Virtio **device live-state** in snapshots is a watermark only; backends re-attach from boot config (Firecracker remains production snap format).
 - Full virtio-pci BAR wiring / Windows production path → cloud-hypervisor SoT (P2 follow-up).
 - virtio-fs, live migration, CPU/device hotplug → demand-driven P3 stubs (`Unsupported` until product needs them).
+- Guest kernels need `CONFIG_EFI_PARTITION` to boot from a GPT-partitioned
+  image (standard cloud images). Without it, the guest falls back to
+  legacy protective-MBR parsing and can't find the real root partition —
+  a guest-kernel config requirement, not a virtio-blk bug (verified: the
+  same image/hypervisor boots cleanly to `/sbin/init` on a plain,
+  non-GPT ext4 disk). Check with `nm vmlinux | grep efi_partition`.
 
 Lab density / packing: [docs/kvm-density.md](../../docs/kvm-density.md). Gaps: [docs/agent-sandbox-gaps.md](../../docs/agent-sandbox-gaps.md). Ranked next work: [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md). Design notes: [DESIGN.md](DESIGN.md).
 
