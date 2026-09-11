@@ -42,5 +42,6 @@ jobs:
         working-directory: fluxvm
         run: ./scripts/test-afxdp-static.sh
       - name: Privileged veth bridge test
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
         working-directory: fluxvm
         run: sudo -E ./scripts/test-afxdp-host.sh

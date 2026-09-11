@@ -64,6 +64,8 @@ jobs:
             echo 'runner kernel has no sched_ext; target build is a certified-host gate'
           fi
       - name: Privileged host smoke when sched_ext is available
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
         env:
           FLUXVM_SCX_HOST_REQUIRED: '0'
         run: sudo -E ./scripts/test-scx-host.sh

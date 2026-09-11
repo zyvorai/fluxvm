@@ -19,15 +19,19 @@
 # sibling at ../guestkit — matching every other path in this repo that
 # assumes that layout).
 
-FROM docker.io/library/rust:1.89-bookworm AS builder
+FROM docker.io/library/ubuntu:24.04 AS builder
 
-# guestkit's default feature set pulls in libsystemd-sys (journal-native
-# logging), which needs libsystemd-dev's pkg-config file to build — this
-# repo's own CI hits and works around the exact same gap (see
-# .github/workflows/ci.yml).
+ENV DEBIAN_FRONTEND=noninteractive
+# Ubuntu 24.04 ships clang 18, which supports -bpf-stack-size needed by
+# Service Fabric objects. The older rust:bookworm image's clang cannot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libsystemd-dev libhivex-dev pkg-config clang llvm libbpf-dev \
+    ca-certificates curl build-essential pkg-config \
+    libsystemd-dev libhivex-dev clang llvm libbpf-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# Match CI's stable toolchain (dtolnay/rust-toolchain@stable).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /build
 COPY . ./fluxvm

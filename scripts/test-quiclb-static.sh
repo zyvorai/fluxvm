@@ -14,7 +14,7 @@ grep -q 'hardware offload requires explicit --ack-hardware-offload' "$ROOT/crate
 grep -q 'export_affinity' "$ROOT/crates/fluxvm-intelligence/src/quiclb.rs"
 grep -q 'source_last_seen_ns' "$ROOT/crates/fluxvm-intelligence/src/quiclb.rs"
 grep -q 'pub struct SmartNicProbe' "$ROOT/crates/fluxvm-intelligence/src/quiclb.rs"
-grep -q 'backend_key(g:u32,sid:u32,id:u32)' "$ROOT/crates/fluxvm-intelligence/src/quiclb.rs"
+grep -q 'backend_key(g: u32, sid: u32, id: u32)' "$ROOT/crates/fluxvm-intelligence/src/quiclb.rs"
 grep -q 'udp_end' "$ROOT/bpf/fluxvm_quiclb.bpf.c"
 grep -q 'route add 198.51.100.100/32' "$ROOT/scripts/test-quiclb-host.sh"
 grep -q 'DSR mode preserves the VIP' "$ROOT/crates/fluxvm-intelligence/src/quiclb.rs"
