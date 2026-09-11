@@ -48,6 +48,17 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
+## Implemented through Set 15
+
+Everything through Set 13 below, plus:
+
+- **Set 14** — NetworkPolicy v2 directional CIDR+L4 rules (`ipBlock.except`,
+  SCTP, named/`endPort` ports) and a separate stateful Pod-ingress BPF object —
+  see [docs/secure-containers-set14.md](secure-containers-set14.md).
+- **Set 15** — directional attachment health (`pod_ingress_*` on
+  `NativeAttachmentStatus`) and the read-only Sentinel Policy Observer —
+  see [docs/secure-containers-set15.md](secure-containers-set15.md).
+
 ## Implemented through Set 13
 
 - containerd runtime-v2 binary: `containerd-shim-fluxvm-v2`

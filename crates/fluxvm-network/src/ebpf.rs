@@ -114,9 +114,11 @@ pub struct NativeAttachmentStatus {
     pub pin_dir: String,
     pub schema_version: Option<u32>,
     pub schema_compatible: bool,
-    /// Set 15: the schema-v8 object carries a second program for Pod ingress.
+    /// Set 15: schema-v8 objects may pin a second Pod-ingress program.
     /// `attached` is healthy only when every required directional hook is live.
+    #[serde(default)]
     pub pod_ingress_required: bool,
+    #[serde(default)]
     pub pod_ingress_attached: bool,
     /// Fingerprint of the durable control-plane policy that was last fully
     /// committed to the kernel maps. `None` means an update may have been

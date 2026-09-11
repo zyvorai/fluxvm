@@ -3,6 +3,13 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Secure Containers Set 15** — directional attachment health for
+  `fluxvm_pod_ingress` (`pod_ingress_required` / `pod_ingress_attached` on
+  `NativeAttachmentStatus`; aggregate `attached` requires both hooks when
+  ingress is pinned); read-only Sentinel Policy Observer
+  (`tools/fluxvm-policy-observer`) exporting Pod-policy counters and
+  hook/rule pressure on `:9091`. Docs:
+  [`docs/secure-containers-set15.md`](docs/secure-containers-set15.md).
 - **In-tree KVM FC/CH parity (P0–P2)** — virtio-mmio vsock/balloon/rng with
   `KVM_IRQFD`; auto `virtio_mmio.device=` cmdline; token-bucket net/blk
   rate limits; optional vhost-net open; ACPI RSDP/XSDT/FADT/MADT + PVH
