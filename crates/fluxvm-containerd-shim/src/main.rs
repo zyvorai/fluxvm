@@ -172,7 +172,12 @@ impl Default for RuntimeConfig {
             boot_timeout_secs: std::env::var("FLUXVM_CONTAINER_BOOT_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(90),
+                // Secure-container guest images often spend >90s reaching
+                // multi-user + fluxvm-guest-agent (cloud-init, virtiofs
+                // mounts, networkd). 90s left pods stuck in ContainerCreating
+                // with "timed out waiting for FluxVM sandbox" despite a
+                // healthy later vsock ping.
+                .unwrap_or(300),
             cni_interface: std::env::var("FLUXVM_CONTAINER_CNI_INTERFACE")
                 .unwrap_or_else(|_| "eth0".into()),
             cni_enabled: std::env::var("FLUXVM_CONTAINER_CNI")
@@ -3955,10 +3960,7 @@ async fn run_command(program: &str, args: &[String]) -> AnyResult<()> {
 
 async fn run_command_best_effort(program: &str, args: &[String]) {
     let bin = resolve_host_bin(program);
-    let _ = tokio::process::Command::new(&bin)
-        .args(args)
-        .output()
-        .await;
+    let _ = tokio::process::Command::new(&bin).args(args).output().await;
 }
 
 async fn command_output(program: &str, args: &[String]) -> AnyResult<String> {

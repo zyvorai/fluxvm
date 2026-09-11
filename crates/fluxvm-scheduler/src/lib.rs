@@ -322,8 +322,12 @@ impl VmManager {
         for (i, share) in req.shared_folders.iter().enumerate() {
             let tag = format!("fs{i}");
             let path = &share.guest_path;
+            // Host virtiofsd (rust-vmm) has no --readonly; enforce RO in-guest.
+            let opts = if share.read_only { "ro" } else { "defaults" };
             ci.runcmd.push(format!("mkdir -p {path}"));
-            ci.runcmd.push(format!("grep -qF ' {path} ' /etc/fstab || echo '{tag} {path} virtiofs defaults 0 0' >> /etc/fstab"));
+            ci.runcmd.push(format!(
+                "grep -qF ' {path} ' /etc/fstab || echo '{tag} {path} virtiofs {opts} 0 0' >> /etc/fstab"
+            ));
             ci.runcmd.push(format!("mount {path}"));
         }
         Some(ci)
@@ -2205,6 +2209,7 @@ mod tests {
         let ci = VmManager::effective_cloud_init(&r).unwrap();
         assert_eq!(ci.runcmd[0], "echo hi");
         assert!(ci.runcmd.iter().any(|c| c.contains("/mnt/data")));
+        assert!(ci.runcmd.iter().any(|c| c.contains("virtiofs ro ")));
     }
 
     #[test]

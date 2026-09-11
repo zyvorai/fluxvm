@@ -73,5 +73,5 @@ FluxVM’s own REST API uses optional bearer tokens for direct `fluxvm serve`
 callers; that is separate from the Ragnarok dashboard login and from Ragnarok
 trial tokens (`scripts/trial-tool.py` stays in the private Ragnarok repo only).
 
-See also the longer integration notes in the [root README — Using FluxVM through Ragnarok](../../README.md#using-fluxvm-through-ragnarok).
+See also the longer integration notes in [../ragnarok.md](../ragnarok.md).
 
