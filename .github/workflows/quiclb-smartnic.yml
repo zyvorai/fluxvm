@@ -20,15 +20,27 @@ jobs:
   build-test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Host packages
         run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config libsystemd-dev libhivex-dev iproute2 iputils-ping ethtool
       - name: Rust tests
+        working-directory: fluxvm
         run: cargo test -p fluxvm-intelligence quiclb
       - name: Build QUIC LB
+        working-directory: fluxvm
         run: ./scripts/build-quiclb.sh /tmp/quiclb-bpf /tmp/quiclb-bin
       - name: Portable gates
+        working-directory: fluxvm
         run: ./scripts/test-quiclb-static.sh
       - name: Privileged QUIC DSR test
+        working-directory: fluxvm
         run: sudo -E ./scripts/test-quiclb-host.sh

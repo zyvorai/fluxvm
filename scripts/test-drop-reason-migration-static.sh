@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 bash -n "$ROOT/scripts/test-drop-reason-migration-host.sh"
-grep -q 'DATAPLANE_SCHEMA_VERSION: u32 = 6' "$ROOT/crates/fluxvm-network/src/ebpf.rs"
+grep -q 'DATAPLANE_SCHEMA_VERSION: u32 = 9' "$ROOT/crates/fluxvm-network/src/ebpf.rs"
 grep -q 'pub struct DropReasonRecord' "$ROOT/crates/fluxvm-network/src/ebpf.rs"
 grep -q 'fluxvm_drop_reasons' "$ROOT/bpf/fluxvm_tc.bpf.c"
 grep -q 'fluxvm_migration' "$ROOT/bpf/fluxvm_tc.bpf.c"

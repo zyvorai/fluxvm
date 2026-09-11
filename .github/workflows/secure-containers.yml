@@ -35,13 +35,13 @@ jobs:
         # clang is required at `cargo build` time now, not just for bpf/:
         # fluxvm-container-agent's build.rs compiles bpf/fluxvm_guest_cgroup.bpf.c
         # (Set 8S) into the binary via scripts/build-ebpf-guest.sh.
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fluxvm
       - name: Format
         working-directory: fluxvm
-        run: cargo fmt --all -- --check
+        run: ./scripts/ci-fmt-check.sh
       - name: Secure-container unit tests
         working-directory: fluxvm
         run: ./scripts/test-secure-containers.sh

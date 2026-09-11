@@ -75,7 +75,7 @@ jobs:
 
       - name: Format check
         working-directory: fluxvm
-        run: cargo fmt --all -- --check
+        run: ./scripts/ci-fmt-check.sh
 
       - name: Build full Rust workspace
         working-directory: fluxvm

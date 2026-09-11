@@ -25,20 +25,32 @@ jobs:
   portable:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config python3-yaml
       - name: Rust tests
+        working-directory: fluxvm
         run: cargo test -p fluxvm-intelligence scx -- --nocapture
       - name: Portable gates
+        working-directory: fluxvm
         run: ./scripts/test-scx-static.sh
       - name: Build userspace helpers
+        working-directory: fluxvm
         run: |
           cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-scx-taskctl.c -o /tmp/fluxvm-scx-taskctl
           cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-scx-loader.c -o /tmp/fluxvm-scx-loader $(pkg-config --cflags --libs libbpf)
           cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-scx-events.c -o /tmp/fluxvm-scx-events $(pkg-config --cflags --libs libbpf)
       - name: Target-kernel build when runner supports sched_ext
+        working-directory: fluxvm
         shell: bash
         run: |
           if [[ -r /sys/kernel/sched_ext/state && -r /sys/kernel/btf/vmlinux ]]; then

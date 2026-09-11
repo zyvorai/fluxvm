@@ -19,18 +19,30 @@ jobs:
   build-test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout fluxvm
+        uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - name: Host packages
         run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config libsystemd-dev libhivex-dev taskset || sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic pkg-config libsystemd-dev libhivex-dev util-linux
       - name: Rust tests
+        working-directory: fluxvm
         run: cargo test -p fluxvm-intelligence topology
       - name: Build topology BPF and helpers
+        working-directory: fluxvm
         run: |
           ./scripts/build-topology-intelligence.sh /tmp/fluxvm-topology-bpf
           cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-topology-loader.c -o /tmp/fluxvm-topology-loader $(pkg-config --cflags --libs libbpf)
           cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-topology-events.c -o /tmp/fluxvm-topology-events $(pkg-config --cflags --libs libbpf)
       - name: Portable gates
+        working-directory: fluxvm
         run: ./scripts/test-topology-static.sh
       - name: Privileged host test
+        working-directory: fluxvm
         run: sudo -E ./scripts/test-topology-host.sh

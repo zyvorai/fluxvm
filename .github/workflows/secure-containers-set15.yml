@@ -61,7 +61,7 @@ jobs:
           components: rustfmt, clippy
       - name: formatting
         working-directory: fluxvm
-        run: cargo fmt --all -- --check
+        run: ./scripts/ci-fmt-check.sh
       - name: fluxvm-network tests
         working-directory: fluxvm
         run: cargo test --locked -p fluxvm-network

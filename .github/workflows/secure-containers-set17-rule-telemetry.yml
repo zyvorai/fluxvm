@@ -50,7 +50,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic iproute2
       - name: formatting
         working-directory: fluxvm
-        run: cargo fmt --all -- --check
+        run: ./scripts/ci-fmt-check.sh
       - name: fluxvm-network tests
         working-directory: fluxvm
         run: cargo test --locked -p fluxvm-network
