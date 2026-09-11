@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "transaction_id": "sentinel-20260911-001",
+  "state_dir": "/var/lib/fluxvm/sentinel-upgrades",
+  "bpffs_root": "/sys/fs/bpf/fluxvm",
+  "repo_root": "/opt/fluxvm",
+  "components": [
+    {
+      "name": "runtime-intelligence",
+      "preflight": [
+        "/usr/libexec/fluxvm/fluxvm-sentinel-certify",
+        "probe"
+      ],
+      "apply": [
+        "systemctl",
+        "restart",
+        "fluxvm-intelligence.service"
+      ],
+      "health": [
+        "systemctl",
+        "is-active",
+        "--quiet",
+        "fluxvm-intelligence.service"
+      ],
+      "rollback": [
+        "systemctl",
+        "restart",
+        "fluxvm-intelligence.service"
+      ],
+      "rollback_health": [
+        "systemctl",
+        "is-active",
+        "--quiet",
+        "fluxvm-intelligence.service"
+      ],
+      "maps": [
+        {
+          "pin": "intelligence/maps/vm_stats",
+          "optional": true,
+          "state": "merge",
+          "abi": {
+            "type": "hash",
+            "key_size": 8
+          }
+        }
+      ],
+      "state_abi": {
+        "current": 2,
+        "target": 2,
+        "target_compatible_from": [
+          2
+        ]
+      }
+    },
+    {
+      "name": "migration-orchestrator",
+      "preflight": [
+        "/usr/libexec/fluxvm/fluxvm-migrate",
+        "--help"
+      ],
+      "apply": [
+        "systemctl",
+        "restart",
+        "fluxvm-migration-observer.service"
+      ],
+      "health": [
+        "systemctl",
+        "is-active",
+        "--quiet",
+        "fluxvm-migration-observer.service"
+      ],
+      "rollback": [
+        "systemctl",
+        "restart",
+        "fluxvm-migration-observer.service"
+      ]
+    }
+  ]
+}

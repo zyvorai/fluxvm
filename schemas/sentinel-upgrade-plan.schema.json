@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zyvor.dev/schemas/sentinel-upgrade-plan.schema.json",
+  "title": "FluxVM Sentinel Stateful Upgrade Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "transaction_id",
+    "components"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "transaction_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "state_dir": {
+      "type": "string"
+    },
+    "bpffs_root": {
+      "type": "string"
+    },
+    "repo_root": {
+      "type": "string"
+    },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ssh_private_key"
+      ],
+      "properties": {
+        "ssh_private_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "namespace": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "timeout_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "health_timeout_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "preflight": {
+            "$ref": "#/$defs/argv"
+          },
+          "apply": {
+            "$ref": "#/$defs/argv"
+          },
+          "health": {
+            "$ref": "#/$defs/argv"
+          },
+          "rollback": {
+            "$ref": "#/$defs/argv"
+          },
+          "rollback_health": {
+            "$ref": "#/$defs/argv"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+            }
+          },
+          "maps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "pin"
+              ],
+              "properties": {
+                "pin": {
+                  "type": "string",
+                  "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+                },
+                "optional": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "state": {
+                  "enum": [
+                    "metadata-only",
+                    "merge",
+                    "replace"
+                  ],
+                  "default": "metadata-only"
+                },
+                "abi": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "key_size": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "value_size": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "state_abi": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "current",
+              "target",
+              "target_compatible_from"
+            ],
+            "properties": {
+              "current": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "target": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "target_compatible_from": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}
