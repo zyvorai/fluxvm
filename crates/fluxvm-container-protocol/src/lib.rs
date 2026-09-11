@@ -76,6 +76,12 @@ pub struct IoStreamAck {
 /// enabled-and-empty policy, which the guest's fail-closed-by-default design
 /// (see bpf/fluxvm_guest_cgroup.bpf.c) turns into "deny all non-loopback
 /// traffic until a policy is actually set."
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContainerNetworkRule {
+    pub direction: String,
+    pub cidr: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContainerNetworkPolicy {
     /// An unlisted peer is allowed when true. Default false: unlike Set 6S's
@@ -92,6 +98,16 @@ pub struct ContainerNetworkPolicy {
     pub allow_addresses: Vec<IpAddr>,
     #[serde(default)]
     pub deny_addresses: Vec<IpAddr>,
+    /// Set 19: CIDR/direction mirror of the host Pod policy. L4 remains
+    /// authoritative at the VM edge; this guest layer is additive.
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub ingress_isolated: bool,
+    #[serde(default)]
+    pub egress_isolated: bool,
+    #[serde(default)]
+    pub rules: Vec<ContainerNetworkRule>,
 }
 
 /// Portable subset of OCI LinuxResources used by the guest cgroup-v2 layer.
@@ -197,6 +213,11 @@ pub enum ContainerRequest {
     /// linux.resources block.
     ConfigureSandboxResources {
         resources: ResourceLimits,
+    },
+    /// Set 19: live Pod-policy mirror update for an existing container.
+    UpdateNetworkPolicy {
+        id: String,
+        policy: ContainerNetworkPolicy,
     },
     Create {
         id: String,
@@ -306,6 +327,7 @@ pub struct ContainerEnvelope {
 pub enum ContainerResponse {
     Pong,
     SandboxResourcesConfigured,
+    NetworkPolicyUpdated,
     Created {
         pid: u32,
         /// Set 9S: stable per-container identity minted in-guest, exposed so

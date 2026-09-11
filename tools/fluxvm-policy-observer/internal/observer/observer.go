@@ -21,7 +21,7 @@ import (
 const (
 	DefaultPinRoot  = "/sys/fs/bpf/fluxvm"
 	DefaultMetaRoot = "/run/fluxvm/ebpf/vms"
-	CurrentSchema   = 8
+	CurrentSchema   = 10
 )
 
 type Runner interface {

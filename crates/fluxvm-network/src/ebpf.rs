@@ -44,7 +44,10 @@ const MAX_POD_RULES: usize = 64;
 /// declare their own copy of this map and must agree on its value size, so
 /// a v8 object cannot be mixed with v9 userspace code that assumes the new
 /// layout -- bump the version rather than silently reinterpreting bytes.
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 9;
+/// Set 19: schema v10 adds the rich-rule candidate index and verifier-bounded
+/// IPv6 extension-header semantics. Reattach is required so both TC objects
+/// share the same map set and packet parser contract.
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -996,6 +999,8 @@ fn configure_pod_maps(
     // that asked for CIDR/L4 tuple rules presumably wants to know they did
     // not take effect.
     let prules_map = map_dir.join("fluxvm_prules");
+    // FLUXVM_SECURE_CONTAINERS_SET19: candidate bitmap for rich rule slots.
+    let pridx_map = map_dir.join("fluxvm_pridx");
     // FLUXVM_SECURE_CONTAINERS_SET17: optional rule-attributed telemetry.
     // It is deliberately not part of the schema-v8 policy ABI; old objects
     // simply do not pin it and Set 15 observer fallback remains valid.
@@ -1083,6 +1088,9 @@ fn configure_pod_maps(
     if prules_map.exists() {
         clear_map(&prules_map)?;
     }
+    if pridx_map.exists() {
+        clear_map(&pridx_map)?;
+    }
     // Rule slots are reused on every policy compile. Reset their counters
     // before publishing a different rule set so an index can never inherit
     // traffic history from the rule that previously occupied that slot.
@@ -1091,12 +1099,13 @@ fn configure_pod_maps(
     }
 
     if rich {
-        if !prules_map.exists() {
-            bail!("Set 14 Pod rule map is missing; rebuild/reattach fluxvm_tc.bpf.o");
+        if !prules_map.exists() || !pridx_map.exists() {
+            bail!("Set 19 Pod rule/index maps are missing; rebuild/reattach FluxVM eBPF objects");
         }
         for (slot, rule) in policy.rules.iter().enumerate() {
             update_pod_rule(&prules_map, slot as u32, pod_id, rule)?;
         }
+        update_pod_rule_index(&pridx_map, pod_id, &policy.rules)?;
         update_pod_policy(
             &pspol_map,
             pod_id,
@@ -1161,6 +1170,44 @@ fn update_pod_rule(map: &Path, slot: u32, pod_id: u32, rule: &PodPolicyRule) -> 
     value.extend_from_slice(&rule.port_end.to_ne_bytes());
     value.extend_from_slice(&address);
     bpftool_map_update(map, &slot.to_ne_bytes(), &value)
+}
+
+/// Set 19: compile the 64 rich-rule slots into protocol/direction/family
+/// candidate bitmaps. Wildcard protocol rules live in protocol=0 and are ORed
+/// with the packet's exact-protocol bucket by the BPF program.
+fn update_pod_rule_index(map: &Path, pod_id: u32, rules: &[PodPolicyRule]) -> Result<()> {
+    let mut entries: Vec<([u8; 8], u64)> = Vec::new();
+    for (slot, rule) in rules.iter().enumerate() {
+        let direction = match rule.direction.to_ascii_lowercase().as_str() {
+            "egress" => 1u8,
+            "ingress" => 2u8,
+            other => bail!("invalid Pod policy direction {other:?}"),
+        };
+        let protocol = match rule.protocol.to_ascii_uppercase().as_str() {
+            "" => 0u8,
+            "TCP" => 6u8,
+            "UDP" => 17u8,
+            "SCTP" => 132u8,
+            other => bail!("invalid Pod policy protocol {other:?}"),
+        };
+        let family = match parse_ip_cidr(&rule.cidr)? {
+            IpCidr::V4(_) => 4u8,
+            IpCidr::V6(_) => 6u8,
+        };
+        let mut key = [0u8; 8];
+        key[..4].copy_from_slice(&pod_id.to_ne_bytes());
+        key[4..8].copy_from_slice(&[direction, family, protocol, 0]);
+        let bit = 1u64 << slot;
+        if let Some((_, mask)) = entries.iter_mut().find(|(k, _)| *k == key) {
+            *mask |= bit;
+        } else {
+            entries.push((key, bit));
+        }
+    }
+    for (key, mask) in entries {
+        bpftool_map_update(map, &key, &mask.to_ne_bytes())?;
+    }
+    Ok(())
 }
 
 fn update_pod_policy(
@@ -1801,6 +1848,7 @@ fn sync_pod_ingress_attachment(
         "fluxvm_pid4_port",
         "fluxvm_pid6_port",
         "fluxvm_prules",
+        "fluxvm_pridx",
         "fluxvm_ppstat",
         "fluxvm_prhit",
         "fluxvm_ct",

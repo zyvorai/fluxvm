@@ -38,6 +38,14 @@
 #define FLUXVM_CPOL_ENABLED       (1u << 0)
 #define FLUXVM_CPOL_DEFAULT_ALLOW (1u << 1)
 #define FLUXVM_CPOL_AUDIT         (1u << 2)
+#define FLUXVM_CPOL_RICH          (1u << 3)
+#define FLUXVM_CPOL_EGRESS_ISOLATED  (1u << 4)
+#define FLUXVM_CPOL_INGRESS_ISOLATED (1u << 5)
+#define FLUXVM_CDIR_EGRESS 1u
+#define FLUXVM_CDIR_INGRESS 2u
+#define FLUXVM_CAF_INET 4u
+#define FLUXVM_CAF_INET6 6u
+#define FLUXVM_MAX_CRULE 64u
 #define FLUXVM_CPEER_ALLOW 1u
 #define FLUXVM_CPEER_DENY  2u
 
@@ -69,6 +77,9 @@ struct fluxvm_cid6_key {
     __u64 cgroup_id;
     __u8 address[16];
 };
+\n/* FLUXVM_SECURE_CONTAINERS_SET19: CIDR/direction mirror of host Pod policy. */
+struct fluxvm_crule_key { __u64 cgroup_id; __u32 slot; __u32 reserved; };
+struct fluxvm_crule_value { __u8 direction; __u8 family; __u8 prefix_len; __u8 reserved; __u8 address[16]; };
 
 _Static_assert(sizeof(struct fluxvm_container_policy) == 8, "container policy ABI");
 _Static_assert(sizeof(struct fluxvm_cid4_key) == 16, "container cid4 ABI");
@@ -94,6 +105,10 @@ struct {
     __type(key, struct fluxvm_cid6_key);
     __type(value, __u32);
 } fluxvm_cid6 SEC(".maps");
+\nstruct {
+    __uint(type, BPF_MAP_TYPE_HASH); __uint(max_entries, 65536);
+    __type(key, struct fluxvm_crule_key); __type(value, struct fluxvm_crule_value);
+} fluxvm_crules SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_HASH);
@@ -128,47 +143,42 @@ static __always_inline void count_drop(__u64 cg)
     bpf_map_update_elem(&fluxvm_cdrops, &cg, &one, BPF_NOEXIST);
 }
 
-// Returns 1 (allow) or 0 (deny) -- cgroup_skb verdicts must verifiably fall
-// in that range, not an arbitrary map value passed straight through.
-static __always_inline int verdict4(__u64 cg, __u32 addr)
+// FLUXVM_SECURE_CONTAINERS_SET19: rich CIDR/direction mirror.
+static __always_inline int cprefix(const __u8 *packet,const __u8 *network,__u8 bits,__u8 family)
 {
-    if (is_loopback4(addr))
-        return 1;
-    struct fluxvm_container_policy *p = bpf_map_lookup_elem(&fluxvm_cpol, &cg);
-    if (!p || !(p->flags & FLUXVM_CPOL_ENABLED)) {
-        count_drop(cg);
-        return 0;
-    }
-    struct fluxvm_cid4_key key = {.cgroup_id = cg, .address = addr};
-    __u32 *v = bpf_map_lookup_elem(&fluxvm_cid4, &key);
-    int allowed = v ? (*v != FLUXVM_CPEER_DENY) : ((p->flags & FLUXVM_CPOL_DEFAULT_ALLOW) != 0);
-    if (allowed)
-        return 1;
-    if (p->flags & FLUXVM_CPOL_AUDIT)
-        return 1;
-    count_drop(cg);
-    return 0;
+    __u8 max=family==FLUXVM_CAF_INET?32:128; if(bits>max) return 0;
+    __u8 full=bits>>3, rem=bits&7; __u8 local[16]={};
+#pragma unroll
+    for(int i=0;i<16;i++) local[i]=packet[i];
+#pragma unroll
+    for(int i=0;i<16;i++) if(i<full && local[i]!=network[i]) return 0;
+    if(!rem) return 1; full &= 0x0f; __u8 mask=(__u8)(0xffu << (8-rem));
+    return (local[full]&mask)==(network[full]&mask);
 }
-
-static __always_inline int verdict6(__u64 cg, const __u8 *addr)
+static __always_inline int rich_verdict(__u64 cg,__u8 direction,__u8 family,const __u8 *addr,
+                                        struct fluxvm_container_policy *p)
 {
-    if (is_loopback6(addr))
-        return 1;
-    struct fluxvm_container_policy *p = bpf_map_lookup_elem(&fluxvm_cpol, &cg);
-    if (!p || !(p->flags & FLUXVM_CPOL_ENABLED)) {
-        count_drop(cg);
-        return 0;
-    }
-    struct fluxvm_cid6_key key = {.cgroup_id = cg};
-    __builtin_memcpy(key.address, addr, 16);
-    __u32 *v = bpf_map_lookup_elem(&fluxvm_cid6, &key);
-    int allowed = v ? (*v != FLUXVM_CPEER_DENY) : ((p->flags & FLUXVM_CPOL_DEFAULT_ALLOW) != 0);
-    if (allowed)
-        return 1;
-    if (p->flags & FLUXVM_CPOL_AUDIT)
-        return 1;
-    count_drop(cg);
-    return 0;
+    int isolated=direction==FLUXVM_CDIR_INGRESS ? !!(p->flags&FLUXVM_CPOL_INGRESS_ISOLATED) : !!(p->flags&FLUXVM_CPOL_EGRESS_ISOLATED);
+    if(!isolated) return 1; __u32 count=p->reserved; if(count>FLUXVM_MAX_CRULE) count=FLUXVM_MAX_CRULE;
+#pragma clang loop unroll(disable)
+    for(__u32 i=0;i<FLUXVM_MAX_CRULE;i++) { if(i>=count) break; struct fluxvm_crule_key k={.cgroup_id=cg,.slot=i}; struct fluxvm_crule_value *r=bpf_map_lookup_elem(&fluxvm_crules,&k); if(r && r->direction==direction && r->family==family && cprefix(addr,r->address,r->prefix_len,family)) return 1; }
+    if(p->flags&FLUXVM_CPOL_AUDIT) return 1; count_drop(cg); return 0;
+}
+static __always_inline int verdict4(__u64 cg,__u8 direction,__u32 addr)
+{
+    if(is_loopback4(addr)) return 1; struct fluxvm_container_policy *p=bpf_map_lookup_elem(&fluxvm_cpol,&cg);
+    if(!p || !(p->flags&FLUXVM_CPOL_ENABLED)){count_drop(cg);return 0;}
+    if(p->flags&FLUXVM_CPOL_RICH){ __u8 raw[16]={}; __builtin_memcpy(raw,&addr,4); return rich_verdict(cg,direction,FLUXVM_CAF_INET,raw,p); }
+    struct fluxvm_cid4_key key={.cgroup_id=cg,.address=addr}; __u32 *v=bpf_map_lookup_elem(&fluxvm_cid4,&key);
+    int allowed=v?(*v!=FLUXVM_CPEER_DENY):((p->flags&FLUXVM_CPOL_DEFAULT_ALLOW)!=0); if(allowed || (p->flags&FLUXVM_CPOL_AUDIT)) return 1; count_drop(cg); return 0;
+}
+static __always_inline int verdict6(__u64 cg,__u8 direction,const __u8 *addr)
+{
+    if(is_loopback6(addr)) return 1; struct fluxvm_container_policy *p=bpf_map_lookup_elem(&fluxvm_cpol,&cg);
+    if(!p || !(p->flags&FLUXVM_CPOL_ENABLED)){count_drop(cg);return 0;}
+    if(p->flags&FLUXVM_CPOL_RICH) return rich_verdict(cg,direction,FLUXVM_CAF_INET6,addr,p);
+    struct fluxvm_cid6_key key={.cgroup_id=cg}; __builtin_memcpy(key.address,addr,16); __u32 *v=bpf_map_lookup_elem(&fluxvm_cid6,&key);
+    int allowed=v?(*v!=FLUXVM_CPEER_DENY):((p->flags&FLUXVM_CPOL_DEFAULT_ALLOW)!=0); if(allowed || (p->flags&FLUXVM_CPOL_AUDIT)) return 1; count_drop(cg); return 0;
 }
 
 SEC("cgroup_skb/egress")
@@ -179,13 +189,13 @@ int fluxvm_guest_egress(struct __sk_buff *skb)
         __u32 daddr;
         if (bpf_skb_load_bytes(skb, IPV4_DADDR_OFFSET, &daddr, sizeof(daddr)) < 0)
             return 1;
-        return verdict4(cg, daddr);
+        return verdict4(cg, FLUXVM_CDIR_EGRESS, daddr);
     }
     if (skb->family == LINUX_AF_INET6) {
         __u8 daddr[16];
         if (bpf_skb_load_bytes(skb, IPV6_DADDR_OFFSET, &daddr, sizeof(daddr)) < 0)
             return 1;
-        return verdict6(cg, daddr);
+        return verdict6(cg, FLUXVM_CDIR_EGRESS, daddr);
     }
     return 1;
 }
@@ -198,13 +208,13 @@ int fluxvm_guest_ingress(struct __sk_buff *skb)
         __u32 saddr;
         if (bpf_skb_load_bytes(skb, IPV4_SADDR_OFFSET, &saddr, sizeof(saddr)) < 0)
             return 1;
-        return verdict4(cg, saddr);
+        return verdict4(cg, FLUXVM_CDIR_INGRESS, saddr);
     }
     if (skb->family == LINUX_AF_INET6) {
         __u8 saddr[16];
         if (bpf_skb_load_bytes(skb, IPV6_SADDR_OFFSET, &saddr, sizeof(saddr)) < 0)
             return 1;
-        return verdict6(cg, saddr);
+        return verdict6(cg, FLUXVM_CDIR_INGRESS, saddr);
     }
     return 1;
 }

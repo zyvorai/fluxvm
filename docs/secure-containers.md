@@ -48,7 +48,7 @@ agent, launches it on VSOCK port 17778, and uses a dedicated lifecycle protocol.
 That makes the feature removable and independently versionable while reusing
 the VM's existing per-instance authentication token.
 
-## Implemented through Set 18
+## Implemented through Set 19
 
 Everything through Set 13 below, plus:
 
@@ -67,6 +67,10 @@ Everything through Set 13 below, plus:
 - **Set 18** — EndpointSlice-aware opt-in Service VIP admission for egress
   peers (controller-only; no dataplane ABI change) —
   see [docs/secure-containers-set18.md](secure-containers-set18.md).
+- **Set 19** — GA completion candidate: schema-v10, `fluxvm_pridx` rule index,
+  IPv6 extension-header walk, Set 8S guest policy mirror, Observer
+  ServiceMonitor/sizing, fail-hard GA runner —
+  see [docs/secure-containers-set19.md](secure-containers-set19.md).
 
 ## Implemented through Set 13
 
@@ -117,6 +121,9 @@ Everything through Set 13 below, plus:
 - **Sentinel Set 18**: EndpointSlice-proven Service VIP admission for
   `--include-service-clusterips` — see
   [docs/secure-containers-set18.md](secure-containers-set18.md).
+- **Sentinel Set 19**: schema-v10 + `fluxvm_pridx` + IPv6 ext-hdr walk + guest
+  Pod-policy mirror + Observer ops / GA runner —
+  [docs/secure-containers-set19.md](secure-containers-set19.md).
 - restart-safe runtime ownership journal and IPv4/IPv6 dual-stack CNI replay
   on the primary interface — see
   [docs/secure-containers-set6.md](secure-containers-set6.md)
@@ -408,3 +415,12 @@ Set 18 makes opt-in `--include-service-clusterips` admit ClusterIPs only
 when `discovery.k8s.io/v1 EndpointSlice` backends prove every routable
 endpoint is an allowed non-terminal Pod. No dataplane schema change —
 [secure-containers-set18.md](secure-containers-set18.md).
+
+## Set 19 addendum — GA completion candidate
+
+Set 19 bumps the native dataplane to schema-v10 with `fluxvm_pridx`,
+bounded IPv6 extension-header walking, Set 8S guest CIDR/direction mirror
+(create + live), and Observer ServiceMonitor/sizing. External S1/S2/S9–S11
+lab evidence remains mandatory —
+[secure-containers-set19.md](secure-containers-set19.md) and
+[NEXT-FEATURES.md](NEXT-FEATURES.md).
