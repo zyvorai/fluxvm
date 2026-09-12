@@ -274,7 +274,17 @@ Hands-on tutorials: [network policy](docs/tutorials/network-policy/README.md) ·
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Copyright 2026 Zyvor.
+### Open source (Apache-2.0)
+
+This repository is licensed under the [Apache License, Version 2.0](LICENSE).
+You may use, modify, and run it for personal, lab, and commercial production
+use at no charge, subject to Apache-2.0 (preserve notices / NOTICE where required).
+See [NOTICE](NOTICE). Copyright 2026 Zyvor.
+
+### Enterprise
+
+Production support, SLAs, and Zyvor Enterprise products are licensed separately.
+Contact [sales@zyvor.dev](mailto:sales@zyvor.dev) or see [zyvor.dev](https://zyvor.dev).
 
 Part of the Zyvor platform (see [zyvor-fabric](docs/zyvor-fabric.md) and [Ragnarok](docs/ragnarok.md)
 above). More at **[zyvor.dev](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)**.
