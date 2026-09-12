@@ -1,14 +1,14 @@
 # Use cases
 
-FluxVM is a disposable-VM control plane: create a short-lived, isolated
-virtual machine backed by QEMU/KVM, Cloud Hypervisor, or Firecracker, use it,
-and let a TTL reaper clean it up. This doc walks through the use cases that
-map directly onto what's actually implemented (see the main
-[README](../README.md#feature-highlights) for the full feature list) —
-nothing here is aspirational.
+FluxVM is a Disposable Compute Engine: create a short-lived, isolated
+virtual machine backed by QEMU/KVM, Cloud Hypervisor, Firecracker, or the
+in-tree FluxVM hypervisor, use it, and let a TTL reaper clean it up. This doc
+walks through the use cases that map directly onto what's actually
+implemented (see the main [README](../README.md#feature-highlights) for the
+full feature list) — nothing here is aspirational.
 
 
-## FluxVMl CI/CD build and test runners
+## FluxVM CI/CD build and test runners
 
 Spin up a real VM per job, run the job inside it over vsock `exec` (no SSH,
 no network path needed at all), and let `ttl_seconds` guarantee cleanup even

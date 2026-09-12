@@ -1,6 +1,6 @@
 # FluxVM Feature Reference
 
-Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is for, see [docs/POSITIONING.md](docs/POSITIONING.md); for the capability tour and metrics, see [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md).
+Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is for, see [docs/POSITIONING.md](docs/POSITIONING.md); for the capability tour and metrics, see [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md); for concrete scenarios, see [docs/use-cases.md](docs/use-cases.md).
 
 ## Project Statistics
 

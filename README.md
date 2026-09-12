@@ -11,6 +11,8 @@
 
 ### Disposable Compute Engine — secure, isolated, short-lived VMs via Firecracker, Cloud Hypervisor, QEMU/KVM, and the FluxVM hypervisor
 
+<img src="docs/assets/social-preview.png" alt="FluxVM — Disposable Compute Engine" width="720">
+
 [![CI](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml)
 [![DevOps gates](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml)
 [![License: Apache-2.0](https://img.shields.io/github/license/zyvorai/fluxvm)](LICENSE)

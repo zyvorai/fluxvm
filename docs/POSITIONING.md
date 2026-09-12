@@ -8,19 +8,12 @@ Part of the [Zyvor](https://zyvor.dev) product family from Zyvor AI Labs.
 
 ---
 
-## What FluxVM Is
-
-| Dimension | Positioning |
-|-----------|-------------|
-| **Category** | Disposable-VM control plane / host-local libvirt replacement |
-| **Analogy** | `virsh` with a REST API instead of XML, purpose-built for short-lived VMs |
-| **Runtime** | `fluxvm` CLI + `fluxvm serve` daemon — one binary, direct netlink networking, no libvirtd |
-| **Scope** | VM lifecycle across 4 backends, image build/catalog, per-VM networking (incl. eBPF dataplane), Kubernetes-native disposable workloads, multi-host fleets |
-| **Interfaces** | CLI (`fluxvm`), REST API, Kubernetes CRDs (`DisposableVm`, MicroVM) |
-
-### Elevator pitch
+## Elevator pitch
 
 > FluxVM creates secure, isolated, short-lived virtual machines — via Firecracker, Cloud Hypervisor, QEMU/KVM, or its own in-tree hypervisor — from one Rust-native control plane with a real REST API. Run it standalone as a libvirt replacement, or as the VM engine under another Zyvor product; it's the same binary and the same API either way.
+
+The strongest concrete hook here is the first one: **a real REST API where you'd otherwise be
+hand-rolling XML for `virsh`.** Everything else in this doc builds on that.
 
 ---
 
@@ -34,6 +27,18 @@ Part of the [Zyvor](https://zyvor.dev) product family from Zyvor AI Labs.
 | **Economic buyer evaluating build-vs-adopt for a disposable-VM layer** | Deciding whether to build this in-house or adopt FluxVM | Whether the maturity level matches the use case, whether it's a maintained open project or a dead end | Apache-2.0, actively developed, but read the [maturity caveat](../README.md#maturity-whats-real-today) honestly before committing — this is not yet a finished multi-tenant security boundary |
 
 The economic-buyer row matters here specifically because FluxVM is explicit about *not* being finished in one dimension (multi-tenant security hardening) while being solid in others (core VM lifecycle, Network Fabric GA, k3s-verified Kubernetes operator). A buyer should read the [maturity caveat](../README.md#maturity-whats-real-today) as the actual scoping tool, not a boilerplate disclaimer.
+
+---
+
+## What FluxVM Is
+
+| Dimension | Positioning |
+|-----------|-------------|
+| **Category** | Disposable-VM control plane / host-local libvirt replacement |
+| **Analogy** | `virsh` with a REST API instead of XML, purpose-built for short-lived VMs |
+| **Runtime** | `fluxvm` CLI + `fluxvm serve` daemon — one binary, direct netlink networking, no libvirtd |
+| **Scope** | VM lifecycle across 4 backends, image build/catalog, per-VM networking (incl. eBPF dataplane), Kubernetes-native disposable workloads, multi-host fleets |
+| **Interfaces** | CLI (`fluxvm`), REST API, Kubernetes CRDs (`DisposableVm`, MicroVM) |
 
 ---
 
