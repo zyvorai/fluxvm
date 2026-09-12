@@ -4,6 +4,7 @@ import Link from '@docusaurus/Link';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import FeatureHighlights from '@site/src/components/FeatureHighlights';
+import Reveal from '@site/src/components/Reveal';
 
 import styles from './index.module.css';
 
@@ -11,31 +12,29 @@ function HomepageHeader() {
   return (
     <header className={clsx('hero hero--primary', styles.heroBanner)}>
       <div className="container">
-        <div className={styles.heroGridSingle}>
-          <div className="text--center">
-            <Heading as="h1" className="hero__title">
-              Disposable Compute Engine
-            </Heading>
-            <p className="hero__subtitle">
-              Create secure, isolated, short-lived virtual machines — via
-              Firecracker, Cloud Hypervisor, QEMU/KVM, or the in-tree FluxVM
-              hypervisor — from one Rust-native control plane with a real
-              REST API. Run it standalone as a libvirt replacement, or as
-              the VM engine under another Zyvor product; it's the same
-              binary and the same API either way.
-            </p>
-            <div className={styles.buttons}>
-              <Link
-                className="button button--secondary button--lg"
-                href="https://github.com/zyvorai/fluxvm#quick-start">
-                Get Started
-              </Link>
-              <Link
-                className="button button--outline button--lg button--secondary"
-                to="https://github.com/zyvorai/fluxvm">
-                View on GitHub
-              </Link>
-            </div>
+        <div className={clsx(styles.heroGridSingle, 'text--center')}>
+          <Heading as="h1" className="hero__title">
+            Disposable Compute Engine
+          </Heading>
+          <p className="hero__subtitle">
+            Create secure, isolated, short-lived virtual machines — via
+            Firecracker, Cloud Hypervisor, QEMU/KVM, or the in-tree FluxVM
+            hypervisor — from one Rust-native control plane with a real
+            REST API. Run it standalone as a libvirt replacement, or as
+            the VM engine under another Zyvor product; it's the same
+            binary and the same API either way.
+          </p>
+          <div className={styles.buttons}>
+            <Link
+              className="button button--secondary button--lg"
+              href="https://github.com/zyvorai/fluxvm#quick-start">
+              Get Started
+            </Link>
+            <Link
+              className="button button--outline button--lg button--secondary"
+              to="https://github.com/zyvorai/fluxvm">
+              View on GitHub
+            </Link>
           </div>
         </div>
       </div>
@@ -47,9 +46,11 @@ function ProblemStatement() {
   return (
     <section className={styles.problem}>
       <div className="container">
-        <div className="row">
+        <Reveal className="row">
           <div className="col col--8 col--offset-2 text--center">
-            <Heading as="h2">Why FluxVM</Heading>
+            <Heading as="h2" className={styles.sectionHeading}>
+              Why FluxVM
+            </Heading>
             <p>
               Teams that need short-lived, isolated VMs — CI runners,
               sandboxed code execution, per-branch dev environments,
@@ -70,7 +71,7 @@ function ProblemStatement() {
               a REST API libvirt doesn't have.
             </p>
           </div>
-        </div>
+        </Reveal>
       </div>
     </section>
   );
@@ -80,9 +81,11 @@ function TrustBand() {
   return (
     <section className={styles.trust}>
       <div className="container">
-        <div className={styles.trustGrid}>
+        <Reveal className={styles.trustGrid}>
           <div>
-            <Heading as="h3">Open, and honest about its limits</Heading>
+            <Heading as="h3" className={styles.sectionHeading}>
+              Open, and honest about its limits
+            </Heading>
             <p>
               Apache-2.0, entire repository, no dual licensing. This is a
               complete MVP/control-plane skeleton, not yet a finished
@@ -106,7 +109,7 @@ function TrustBand() {
               alt="Apache 2.0 license"
             />
           </div>
-        </div>
+        </Reveal>
       </div>
     </section>
   );
@@ -116,19 +119,24 @@ function EnterpriseCTA() {
   return (
     <section className={styles.enterprise}>
       <div className="container text--center">
-        <Heading as="h2">Standalone, or part of the Zyvor platform</Heading>
-        <p>
-          FluxVM itself is Apache-2.0 with no commercial tier — adopt it
-          directly with no other Zyvor product required. It's also the VM
-          engine under <Link to="https://github.com/zyvorai/fabric">Zyvor Fabric</Link> and{' '}
-          Ragnarok, which do offer production support and SLAs, for teams
-          that want the orchestration/UX layer on top.
-        </p>
-        <Link
-          className="button button--primary button--lg"
-          href="mailto:sales@zyvor.dev">
-          Contact sales@zyvor.dev
-        </Link>
+        <Reveal>
+          <Heading as="h2" className={styles.sectionHeading}>
+            Standalone, or part of the Zyvor platform
+          </Heading>
+          <p className={styles.enterpriseCopy}>
+            FluxVM itself is Apache-2.0 with no commercial tier — adopt it
+            directly with no other Zyvor product required. It's also the VM
+            engine under{' '}
+            <Link to="https://github.com/zyvorai/fabric">Zyvor Fabric</Link>{' '}
+            and Ragnarok, which do offer production support and SLAs, for
+            teams that want the orchestration/UX layer on top.
+          </p>
+          <Link
+            className="button button--primary button--lg"
+            href="mailto:sales@zyvor.dev">
+            Contact sales@zyvor.dev
+          </Link>
+        </Reveal>
       </div>
     </section>
   );
@@ -142,7 +150,9 @@ export default function Home(): ReactNode {
       <HomepageHeader />
       <main>
         <ProblemStatement />
-        <FeatureHighlights />
+        <Reveal>
+          <FeatureHighlights />
+        </Reveal>
         <TrustBand />
         <EnterpriseCTA />
       </main>
