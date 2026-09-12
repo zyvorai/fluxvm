@@ -541,6 +541,37 @@ pub struct ResourcePatch {
     pub cpuset_cpus: Option<Vec<u32>>,
 }
 
+/// Request body for `POST /v1/vms/{id}/hotplug/cpu` -- adds vCPUs into the
+/// unrealized `query-hotpluggable-cpus` slots reserved via `max_vcpus` at
+/// creation. QEMU-only; other backends reject this outright (see
+/// `VmManager::hotplug_cpu`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugCpuRequest {
+    pub add_vcpus: u8,
+}
+
+/// Response for a successful CPU hotplug -- the realized vCPU count after
+/// adding, not just what this call added.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugCpuResult {
+    pub vcpus: u8,
+}
+
+/// Request body for `POST /v1/vms/{id}/hotplug/memory` -- adds RAM as a new
+/// `pc-dimm` backed by a fresh `memory-backend-ram` object, into the DIMM
+/// slots reserved via `max_memory_mib` at creation. QEMU-only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugMemoryRequest {
+    pub add_memory_mib: u64,
+}
+
+/// Response for a successful memory hotplug -- the VM's new *total* live
+/// memory (boot-time `memory_mib` plus every hot-added DIMM so far).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugMemoryResult {
+    pub memory_mib: u64,
+}
+
 /// Point-in-time resource usage for a VM, read from its cgroup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmMetrics {

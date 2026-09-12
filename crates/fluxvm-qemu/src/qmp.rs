@@ -270,6 +270,133 @@ pub async fn migration_cancel(socket: &Path, timeout: Duration) -> Result<Migrat
     migration_status(socket, timeout).await
 }
 
+/// Hot-add `add_vcpus` vCPUs into unrealized `query-hotpluggable-cpus`
+/// slots (the ones reserved via `-smp maxcpus=` at launch — see
+/// `fluxvm-qemu`'s `build_args`). Returns the realized vCPU count after
+/// adding. Slot order is sorted by `(socket-id, core-id, thread-id)` so
+/// repeated calls fill sockets/cores deterministically rather than in
+/// whatever order QEMU happens to report them.
+pub async fn hotplug_cpu(socket: &Path, add_vcpus: u8, timeout: Duration) -> Result<u8> {
+    if add_vcpus == 0 {
+        bail!("add_vcpus must be >= 1");
+    }
+    let entries = query_hotpluggable_cpus(socket, timeout).await?;
+    let realized_before = entries
+        .iter()
+        .filter(|e| e.get("qom-path").is_some())
+        .count();
+    let mut free: Vec<&Value> = entries
+        .iter()
+        .filter(|e| e.get("qom-path").is_none())
+        .collect();
+    if free.len() < add_vcpus as usize {
+        bail!(
+            "not enough hotplug headroom: {} free vCPU slot(s), requested {add_vcpus} -- increase max_vcpus at creation",
+            free.len()
+        );
+    }
+    free.sort_by_key(|e| {
+        let props = e.get("props");
+        let at = |k: &str| {
+            props
+                .and_then(|p| p.get(k))
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        };
+        (at("socket-id"), at("core-id"), at("thread-id"))
+    });
+    for (i, slot) in free.iter().take(add_vcpus as usize).enumerate() {
+        let driver = slot
+            .get("type")
+            .and_then(Value::as_str)
+            .context("query-hotpluggable-cpus entry missing 'type'")?;
+        let mut args = slot.get("props").cloned().unwrap_or_else(|| json!({}));
+        let obj = args
+            .as_object_mut()
+            .context("query-hotpluggable-cpus entry 'props' was not an object")?;
+        obj.insert("driver".into(), Value::from(driver));
+        obj.insert(
+            "id".into(),
+            Value::from(format!("cpu-hotplug-{}", realized_before + i)),
+        );
+        execute(socket, "device_add", Some(args), timeout)
+            .await
+            .with_context(|| format!("device_add for vCPU slot {i}"))?;
+    }
+    let after = query_hotpluggable_cpus(socket, timeout).await?;
+    Ok(after.iter().filter(|e| e.get("qom-path").is_some()).count() as u8)
+}
+
+async fn query_hotpluggable_cpus(socket: &Path, timeout: Duration) -> Result<Vec<Value>> {
+    let value = execute(socket, "query-hotpluggable-cpus", None, timeout).await?;
+    value
+        .as_array()
+        .cloned()
+        .context("query-hotpluggable-cpus did not return an array")
+}
+
+/// Hot-add `add_memory_mib` MiB of RAM as a `pc-dimm` backed by a fresh
+/// `memory-backend-ram` object (the DIMM slots reserved via `-m slots=` at
+/// launch). Returns the total MiB now provided by every hot-added DIMM
+/// (the caller adds the VM's original boot-time memory_mib on top for a
+/// full live total — this function has no way to know that figure itself).
+pub async fn hotplug_memory(socket: &Path, add_memory_mib: u64, timeout: Duration) -> Result<u64> {
+    if add_memory_mib == 0 {
+        bail!("add_memory_mib must be >= 1");
+    }
+    let existing = query_memory_devices(socket, timeout).await?;
+    let next_index = existing.len();
+    let mem_id = format!("mem-hotplug-{next_index}");
+    let dimm_id = format!("dimm-hotplug-{next_index}");
+    let bytes = add_memory_mib.saturating_mul(1024 * 1024);
+
+    // object-add's properties are flattened at the top level, unlike
+    // device_add's props-merged-into-args shape used for CPU hotplug above
+    // -- confirmed live: a nested "props": {"size": ...} is rejected with
+    // "Parameter 'size' is missing".
+    execute(
+        socket,
+        "object-add",
+        Some(json!({"qom-type": "memory-backend-ram", "id": mem_id, "size": bytes})),
+        timeout,
+    )
+    .await
+    .context("object-add memory-backend-ram")?;
+
+    if let Err(e) = execute(
+        socket,
+        "device_add",
+        Some(json!({"driver": "pc-dimm", "id": dimm_id, "memdev": mem_id})),
+        timeout,
+    )
+    .await
+    {
+        // Don't leave an orphaned backend object occupying address space
+        // behind a DIMM that never actually attached.
+        let _ = execute(socket, "object-del", Some(json!({"id": mem_id})), timeout).await;
+        return Err(e).context("device_add pc-dimm");
+    }
+
+    let after = query_memory_devices(socket, timeout).await?;
+    Ok(sum_memory_devices_mib(&after))
+}
+
+async fn query_memory_devices(socket: &Path, timeout: Duration) -> Result<Vec<Value>> {
+    let value = execute(socket, "query-memory-devices", None, timeout).await?;
+    value
+        .as_array()
+        .cloned()
+        .context("query-memory-devices did not return an array")
+}
+
+fn sum_memory_devices_mib(devices: &[Value]) -> u64 {
+    devices
+        .iter()
+        .filter_map(|d| d.get("data")?.get("size")?.as_u64())
+        .sum::<u64>()
+        / (1024 * 1024)
+}
+
 /// Save VM state to an internal snapshot tagged `name` on the VM's disk
 /// (pairs with QEMU `-loadvm` / `start_from_snapshot`).
 pub async fn savevm(socket: &Path, name: &str, timeout: Duration) -> Result<Value> {
@@ -481,5 +608,296 @@ mod migration_contract_tests {
         for state in ["postcopy-active", "postcopy-paused", "postcopy-recover"] {
             assert_eq!(migration_phase(state), MigrationPhase::PostcopyActive);
         }
+    }
+}
+
+#[cfg(test)]
+mod hotplug_tests {
+    use super::*;
+    use tokio::net::UnixListener;
+
+    /// `execute()` opens a fresh connection per command (see the module
+    /// doc), so a scripted multi-command exchange needs one accepted
+    /// connection per step -- this serves `steps` in order, each on its own
+    /// connection, asserting the expected command name and replying with
+    /// the given canned `return` value.
+    async fn serve_script(listener: UnixListener, steps: Vec<(&'static str, Value)>) {
+        for (expect_command, reply) in steps {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
+            write_half
+                .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                .await
+                .unwrap();
+            let mut caps = String::new();
+            reader.read_line(&mut caps).await.unwrap();
+            write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+
+            let mut req = String::new();
+            reader.read_line(&mut req).await.unwrap();
+            let req: Value = serde_json::from_str(&req).unwrap();
+            assert_eq!(req["execute"], expect_command, "unexpected command");
+
+            let resp = json!({"return": reply});
+            write_half
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    }
+
+    fn cpu_slot(realized: bool, socket_id: i64, core_id: i64) -> Value {
+        let mut v = json!({
+            "type": "host-x86_64-cpu",
+            "props": {"socket-id": socket_id, "core-id": core_id, "thread-id": 0},
+        });
+        if realized {
+            v["qom-path"] = Value::from(format!("/machine/peripheral/cpu-{socket_id}-{core_id}"));
+        }
+        v
+    }
+
+    #[tokio::test]
+    async fn hotplug_cpu_fills_free_slots_in_socket_core_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        // 1 realized (socket 0) + 3 free slots listed out of order
+        // (sockets 2,1,3); requesting 2 must fill sockets 1 then 2 -- the
+        // two lowest -- not whatever order they were reported in.
+        let before = vec![
+            cpu_slot(true, 0, 0),
+            cpu_slot(false, 2, 0),
+            cpu_slot(false, 1, 0),
+            cpu_slot(false, 3, 0),
+        ];
+        let after = vec![
+            cpu_slot(true, 0, 0),
+            cpu_slot(true, 2, 0),
+            cpu_slot(true, 1, 0),
+            cpu_slot(false, 3, 0),
+        ];
+
+        let server = tokio::spawn(async move {
+            for step in 0..4 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                write_half
+                    .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                    .await
+                    .unwrap();
+                let mut caps = String::new();
+                reader.read_line(&mut caps).await.unwrap();
+                write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+
+                let mut req = String::new();
+                reader.read_line(&mut req).await.unwrap();
+                let req: Value = serde_json::from_str(&req).unwrap();
+                match step {
+                    0 => {
+                        assert_eq!(req["execute"], "query-hotpluggable-cpus");
+                        let resp = json!({"return": before});
+                        write_half
+                            .write_all(format!("{resp}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                    1 => {
+                        assert_eq!(req["execute"], "device_add");
+                        assert_eq!(
+                            req["arguments"]["socket-id"], 1,
+                            "must fill socket 1 before socket 2"
+                        );
+                        write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+                    }
+                    2 => {
+                        assert_eq!(req["execute"], "device_add");
+                        assert_eq!(req["arguments"]["socket-id"], 2);
+                        write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+                    }
+                    3 => {
+                        assert_eq!(req["execute"], "query-hotpluggable-cpus");
+                        let resp = json!({"return": after});
+                        write_half
+                            .write_all(format!("{resp}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        let realized = hotplug_cpu(&path, 2, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(realized, 3);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hotplug_cpu_rejects_more_than_available_headroom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let steps = vec![(
+            "query-hotpluggable-cpus",
+            Value::Array(vec![cpu_slot(true, 0, 0), cpu_slot(false, 1, 0)]),
+        )];
+        let server = tokio::spawn(serve_script(listener, steps));
+
+        let err = hotplug_cpu(&path, 5, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not enough hotplug headroom"),
+            "unexpected error: {err:#}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hotplug_cpu_rejects_zero() {
+        let path = std::path::PathBuf::from("/nonexistent/qmp.sock");
+        let err = hotplug_cpu(&path, 0, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("add_vcpus must be >= 1"));
+    }
+
+    #[tokio::test]
+    async fn hotplug_memory_adds_a_dimm_and_reports_new_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        // Real QEMU rejects a nested `"props": {"size": ...}` on object-add
+        // ("Parameter 'size' is missing") -- confirmed live against a real
+        // VM. This server asserts the flattened shape so that regression
+        // can't creep back in silently the way it did the first time.
+        let server = tokio::spawn(async move {
+            for step in 0..4 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                write_half
+                    .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                    .await
+                    .unwrap();
+                let mut caps = String::new();
+                reader.read_line(&mut caps).await.unwrap();
+                write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+
+                let mut req = String::new();
+                reader.read_line(&mut req).await.unwrap();
+                let req: Value = serde_json::from_str(&req).unwrap();
+                match step {
+                    0 => {
+                        assert_eq!(req["execute"], "query-memory-devices");
+                        write_half.write_all(b"{\"return\":[]}\n").await.unwrap();
+                    }
+                    1 => {
+                        assert_eq!(req["execute"], "object-add");
+                        assert_eq!(req["arguments"]["qom-type"], "memory-backend-ram");
+                        assert_eq!(
+                            req["arguments"]["size"], 1073741824u64,
+                            "size must be a flattened top-level argument, not nested under props"
+                        );
+                        assert!(
+                            req["arguments"].get("props").is_none(),
+                            "object-add must not nest properties under 'props'"
+                        );
+                        write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+                    }
+                    2 => {
+                        assert_eq!(req["execute"], "device_add");
+                        assert_eq!(req["arguments"]["driver"], "pc-dimm");
+                        write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+                    }
+                    3 => {
+                        assert_eq!(req["execute"], "query-memory-devices");
+                        let resp =
+                            json!({"return": [{"type": "dimm", "data": {"size": 1073741824u64}}]});
+                        write_half
+                            .write_all(format!("{resp}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        let total_mib = hotplug_memory(&path, 1024, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(total_mib, 1024);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hotplug_memory_rolls_back_backend_object_on_device_add_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+
+        // Serve: query (empty) -> object-add ok -> device_add ERRORS -> object-del (rollback).
+        let server = tokio::spawn(async move {
+            for step in 0..4 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = stream.into_split();
+                let mut reader = BufReader::new(read_half);
+                write_half
+                    .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                    .await
+                    .unwrap();
+                let mut caps = String::new();
+                reader.read_line(&mut caps).await.unwrap();
+                write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+
+                let mut req = String::new();
+                reader.read_line(&mut req).await.unwrap();
+                let req: Value = serde_json::from_str(&req).unwrap();
+                match step {
+                    0 => {
+                        assert_eq!(req["execute"], "query-memory-devices");
+                        write_half.write_all(b"{\"return\":[]}\n").await.unwrap();
+                    }
+                    1 => {
+                        assert_eq!(req["execute"], "object-add");
+                        write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+                    }
+                    2 => {
+                        assert_eq!(req["execute"], "device_add");
+                        write_half
+                            .write_all(b"{\"error\":{\"desc\":\"no slots where allocated\"}}\n")
+                            .await
+                            .unwrap();
+                    }
+                    3 => {
+                        assert_eq!(req["execute"], "object-del");
+                        write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        let err = hotplug_memory(&path, 1024, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("device_add pc-dimm"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hotplug_memory_rejects_zero() {
+        let path = std::path::PathBuf::from("/nonexistent/qmp.sock");
+        let err = hotplug_memory(&path, 0, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("add_memory_mib must be >= 1"));
     }
 }
