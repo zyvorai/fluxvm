@@ -4,8 +4,9 @@ FluxVM is a disposable-VM control plane: create a short-lived, isolated
 virtual machine backed by QEMU/KVM, Cloud Hypervisor, or Firecracker, use it,
 and let a TTL reaper clean it up. This doc walks through the use cases that
 map directly onto what's actually implemented (see the main
-[README](../README.md#what-is-implemented) for the full feature list) —
+[README](../README.md#feature-highlights) for the full feature list) —
 nothing here is aspirational.
+
 
 ## FluxVMl CI/CD build and test runners
 

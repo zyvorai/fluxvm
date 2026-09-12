@@ -1625,6 +1625,17 @@ impl VmManager {
             .context("qga ping worker panicked")?
     }
 
+    pub async fn qga_network_interfaces(
+        &self,
+        id: Uuid,
+    ) -> Result<Vec<fluxvm_image::qga::QgaNetworkInterface>> {
+        let vm = self.get(id).await?;
+        let sock = Self::qga_socket_for(&vm)?;
+        tokio::task::spawn_blocking(move || fluxvm_image::qga::network_interfaces(&sock))
+            .await
+            .context("qga network-interfaces worker panicked")?
+    }
+
     pub async fn qga_exec(
         &self,
         id: Uuid,
