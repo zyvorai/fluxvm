@@ -3,6 +3,18 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **QEMU backend: real CPU/memory hotplug** — `POST /v1/vms/{uuid}/hotplug/cpu`
+  (`add_vcpus`) and `POST /v1/vms/{uuid}/hotplug/memory` (`add_memory_mib`),
+  QEMU-only. CPU hotplug fills unrealized `query-hotpluggable-cpus` slots via
+  `device_add` in deterministic `(socket-id, core-id, thread-id)` order;
+  memory hotplug attaches a `pc-dimm` backed by a fresh `memory-backend-ram`
+  object, rolling the backend object back if the `device_add` fails. Both use
+  the hotplug headroom (`-smp maxcpus=`, `-m slots=/maxmem=`) every QEMU VM
+  has reserved since `max_vcpus`/`max_memory_mib` were added — this wires up
+  the actual `device_add`/`object-add` calls that headroom existed for but
+  nothing in this repo previously issued. Verified against a real running VM
+  (`query-cpus-fast`/`query-memory-devices` independently confirm the new
+  vCPU thread and DIMM). Docs: [`docs/api.md`](docs/api.md).
 - **Docs: next-features backlog** — ranked Sentinel / hypervisor / Fabric
   follow-ups after Set 15 + FC/CH parity ([`docs/NEXT-FEATURES.md`](docs/NEXT-FEATURES.md)).
 - **Secure Containers Set 15** — directional attachment health for

@@ -505,6 +505,21 @@ pub async fn migration_cancel(
     qmp::migration_cancel(&vm.workspace.join("qmp.sock"), QMP_TIMEOUT).await
 }
 
+/// Hot-add `add_vcpus` vCPUs. Returns the realized vCPU count after adding
+/// (bounded by `max_vcpus`'s headroom reserved at launch — see `build_args`).
+pub async fn hotplug_cpu(_cfg: &Config, vm: &VmRecord, add_vcpus: u8) -> Result<u8> {
+    qmp::hotplug_cpu(&vm.workspace.join("qmp.sock"), add_vcpus, QMP_TIMEOUT).await
+}
+
+/// Hot-add `add_memory_mib` MiB of RAM. Returns the VM's new *total* live
+/// memory (boot-time `memory_mib` plus every hot-added DIMM so far), not
+/// just what this one call added.
+pub async fn hotplug_memory(_cfg: &Config, vm: &VmRecord, add_memory_mib: u64) -> Result<u64> {
+    let hotplugged =
+        qmp::hotplug_memory(&vm.workspace.join("qmp.sock"), add_memory_mib, QMP_TIMEOUT).await?;
+    Ok(vm.request.memory_mib.saturating_add(hotplugged))
+}
+
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was
 /// running. Pairs with `-loadvm` / [`VmManager::start_from_snapshot`].
 pub async fn snapshot_save(_cfg: &Config, vm: &VmRecord, name: &str) -> Result<()> {

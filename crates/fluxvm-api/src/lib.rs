@@ -250,6 +250,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
         .route("/v1/vms/{id}/resources", post(set_vm_resources))
+        .route("/v1/vms/{id}/hotplug/cpu", post(hotplug_vm_cpu))
+        .route("/v1/vms/{id}/hotplug/memory", post(hotplug_vm_memory))
         .route("/v1/vms/{id}/cpuset", get(vm_cpuset))
         .route("/v1/vms/{id}/freeze", post(freeze_vm))
         .route("/v1/vms/{id}/thaw", post(thaw_vm))
@@ -1142,6 +1144,28 @@ async fn set_vm_resources(
     require_admin(role)?;
     m.set_resources(id, patch).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn hotplug_vm_cpu(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugCpuRequest>,
+) -> ApiResult<Json<fluxvm_core::model::HotplugCpuResult>> {
+    require_admin(role)?;
+    let vcpus = m.hotplug_cpu(id, req.add_vcpus).await?;
+    Ok(Json(fluxvm_core::model::HotplugCpuResult { vcpus }))
+}
+
+async fn hotplug_vm_memory(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugMemoryRequest>,
+) -> ApiResult<Json<fluxvm_core::model::HotplugMemoryResult>> {
+    require_admin(role)?;
+    let memory_mib = m.hotplug_memory(id, req.add_memory_mib).await?;
+    Ok(Json(fluxvm_core::model::HotplugMemoryResult { memory_mib }))
 }
 
 async fn freeze_vm(

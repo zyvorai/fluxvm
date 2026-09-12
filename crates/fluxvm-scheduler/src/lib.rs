@@ -371,6 +371,30 @@ impl VmManager {
         Ok(())
     }
 
+    /// Hot-add `add_vcpus` vCPUs to a running VM without a reboot -- QEMU
+    /// only, since Cloud Hypervisor/Firecracker backends have no hotplug
+    /// support in this codebase. Bounded by the `max_vcpus` headroom
+    /// reserved at creation (`CreateVmRequest::max_vcpus`); fails clearly
+    /// once that headroom is exhausted rather than silently no-op'ing.
+    pub async fn hotplug_cpu(&self, id: Uuid, add_vcpus: u8) -> Result<u8> {
+        let vm = self.get(id).await?;
+        match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::hotplug_cpu(&self.cfg, &vm, add_vcpus).await,
+            other => bail!("CPU hotplug is not supported for backend {other:?}"),
+        }
+    }
+
+    /// Hot-add `add_memory_mib` MiB of RAM to a running VM without a
+    /// reboot -- QEMU only, same backend restriction as `hotplug_cpu`.
+    /// Returns the VM's new total live memory.
+    pub async fn hotplug_memory(&self, id: Uuid, add_memory_mib: u64) -> Result<u64> {
+        let vm = self.get(id).await?;
+        match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::hotplug_memory(&self.cfg, &vm, add_memory_mib).await,
+            other => bail!("memory hotplug is not supported for backend {other:?}"),
+        }
+    }
+
     /// The cpuset currently pinned via `set_resources`'s `cpuset_cpus`, or
     /// empty if never set (cgroup default: unrestricted).
     pub async fn get_cpuset(&self, id: Uuid) -> Result<Vec<u32>> {

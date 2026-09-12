@@ -30,6 +30,8 @@ POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
 POST   /v1/vms/{uuid}/resume
 POST   /v1/vms/{uuid}/resources
+POST   /v1/vms/{uuid}/hotplug/cpu
+POST   /v1/vms/{uuid}/hotplug/memory
 GET    /v1/vms/{uuid}/cpuset
 POST   /v1/vms/{uuid}/freeze
 POST   /v1/vms/{uuid}/thaw
@@ -112,9 +114,9 @@ route except `GET /healthz` and `GET /readyz` (liveness vs readiness). Absent or
 (the default) leaves the API exactly as open as the pre-auth MVP — every request is treated as
 `admin`. Two roles:
 
-- `admin` — everything: create/stop/pause/resume/exec/delete/build-image/resources/freeze/thaw.
+- `admin` — everything: create/stop/pause/resume/exec/delete/build-image/resources/hotplug/freeze/thaw.
 - `read-only` — any `GET` route (`/v1/vms`, `/v1/vms/{uuid}`, `/metrics`, `/frozen`, `/stats`,
-  `/pressure`, pool list/get) only; any mutating route (including `resources`/`freeze`/`thaw`) returns 403.
+  `/pressure`, pool list/get) only; any mutating route (including `resources`/`hotplug`/`freeze`/`thaw`) returns 403.
 
 Optional per-token `tenant` is authoritative on create (inherited when the body omits it;
 mismatch → 403) and scopes list/get/mutate to that tenant.
