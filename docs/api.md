@@ -43,6 +43,7 @@ GET    /v1/vms/{uuid}/console
 POST   /v1/vms/{uuid}/agent
 POST   /v1/vms/{uuid}/agent/put-file
 POST   /v1/vms/{uuid}/agent/get-file
+GET    /v1/vms/{uuid}/qga/network-interfaces
 DELETE /v1/vms/{uuid}
 POST   /v1/images/build
 GET    /v1/images/catalog

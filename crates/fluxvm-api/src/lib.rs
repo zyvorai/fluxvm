@@ -401,6 +401,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
         .route("/v1/vms/{id}/console", get(agent_console))
         .route("/v1/vms/{id}/qga/ping", post(qga_ping))
+        .route(
+            "/v1/vms/{id}/qga/network-interfaces",
+            get(qga_network_interfaces),
+        )
         .route("/v1/vms/{id}/qga/exec", post(qga_exec))
         .route("/v1/vms/{id}/qga/firewall/open", post(qga_firewall_open))
         .route("/v1/vms/{id}/qga/firewall/close", post(qga_firewall_close))
@@ -1905,6 +1909,15 @@ async fn qga_ping(
     require_admin(role)?;
     m.qga_ping(id).await?;
     Ok(Json(json!({"ok": true})))
+}
+
+// A GET query, not a mutation -- read-only tokens can call this like any
+// other GET route, same as vm_stats/vm_frozen below.
+async fn qga_network_interfaces(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Vec<fluxvm_image::qga::QgaNetworkInterface>>> {
+    Ok(Json(m.qga_network_interfaces(id).await?))
 }
 
 async fn qga_exec(

@@ -32,6 +32,41 @@ pub fn ping(socket: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QgaIpAddress {
+    #[serde(rename = "ip-address")]
+    pub ip_address: String,
+    #[serde(rename = "ip-address-type")]
+    pub ip_address_type: String,
+    #[serde(default)]
+    pub prefix: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QgaNetworkInterface {
+    pub name: String,
+    #[serde(rename = "hardware-address", default)]
+    pub hardware_address: Option<String>,
+    #[serde(rename = "ip-addresses", default)]
+    pub ip_addresses: Vec<QgaIpAddress>,
+}
+
+/// Real guest-reported network interfaces and IPs via `guest-network-get-interfaces`
+/// -- unlike DHCP-lease parsing (the only source `guest_ip` has today), this
+/// works for every network mode the guest agent can reach, including
+/// `NetworkSpec::User` (SLIRP), which has no lease file to parse at all.
+pub fn network_interfaces(socket: &Path) -> Result<Vec<QgaNetworkInterface>> {
+    let resp = call_qga_socket(
+        &socket.display().to_string(),
+        "guest-network-get-interfaces",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .with_context(|| format!("QGA guest-network-get-interfaces on {}", socket.display()))?;
+    let ifaces = resp.get("return").cloned().unwrap_or(Value::Null);
+    serde_json::from_value(ifaces).context("decode guest-network-get-interfaces response")
+}
+
 /// Run `path` with `args` via `guest-exec`, wait for completion, return output.
 pub fn exec(
     socket: &Path,

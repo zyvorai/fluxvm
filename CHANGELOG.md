@@ -3,6 +3,16 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **QGA: `guest-network-get-interfaces`** — `GET /v1/vms/{uuid}/qga/network-interfaces`
+  (read-only, no `admin` role required unlike the other `qga/*` routes)
+  returns the guest's own reported interfaces/IPs via the real
+  `qemu-guest-agent` protocol. Unlike `guest_ip`, which only ever comes from
+  parsing a dnsmasq DHCP lease file (`NetworkSpec::Tap { netns: true }`
+  only — `None` for every other network mode, `User`/SLIRP included), this
+  works for any network mode the guest agent can reach. Verified against a
+  real running VM under `network.mode = "user"` (SLIRP), which has no lease
+  file at all: the guest's own real SLIRP-assigned address (`10.0.2.15`)
+  came back correctly.
 - **QEMU backend: real CPU/memory hotplug** — `POST /v1/vms/{uuid}/hotplug/cpu`
   (`add_vcpus`) and `POST /v1/vms/{uuid}/hotplug/memory` (`add_memory_mib`),
   QEMU-only. CPU hotplug fills unrealized `query-hotpluggable-cpus` slots via
