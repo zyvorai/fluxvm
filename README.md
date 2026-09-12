@@ -17,7 +17,7 @@
 [![Release](https://img.shields.io/github/v/release/zyvorai/fluxvm?sort=semver)](https://github.com/zyvorai/fluxvm/releases)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 
-[Quick start](#quick-start) · [Feature highlights](#feature-highlights) · [Architecture](#architecture-at-a-glance) · [Use cases](docs/use-cases.md) · [Docs](#documentation-map) · [zyvor.dev/docs](https://zyvor.dev/docs?utm_source=github&utm_medium=fluxvm) · [Blog](https://zyvor.dev/blog?utm_source=github&utm_medium=fluxvm)
+[Quick start](#quick-start) · [Is this for you?](#is-this-for-you) · [Use cases](#use-cases) · [Feature highlights](#feature-highlights) · [FAQ](#faq) · [Docs](#documentation-map) · [zyvor.dev/docs](https://zyvor.dev/docs?utm_source=github&utm_medium=fluxvm)
 
 </div>
 
@@ -26,7 +26,7 @@
 ## What is FluxVM
 
 **Disposable Compute Engine** — create secure, isolated, short-lived virtual machines using
-Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor from one Rust-native
+Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor, from one Rust-native
 control plane. Repository: [github.com/zyvorai/fluxvm](https://github.com/zyvorai/fluxvm).
 
 - **QEMU/KVM** — broad guest/device compatibility, qcow2 CoW overlays, QMP socket.
@@ -34,44 +34,89 @@ control plane. Repository: [github.com/zyvorai/fluxvm](https://github.com/zyvora
 - **Firecracker** — microVM backend using a Linux kernel + raw root filesystem.
 - **FluxVM hypervisor** (`backend: "flux-vm"`, binary `fluxvm-hypervisor`) — the agent-sandbox track:
   memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console`,
-  and an optional native TC/eBPF dataplane (nftables default; see
-  [Network Fabric](docs/network-fabric.md)).
+  and an optional native TC/eBPF dataplane (nftables default; see [Network Fabric](docs/network-fabric.md)).
 
-It also ships a small **virt-builder-style image pipeline**: take a local/HTTP base image, verify
-SHA-256, convert/resize it, and customize it before first boot. Beyond a single host: a
-`DisposableVm` Kubernetes CRD + node-local operator (`fluxvm-kube`), a non-Kubernetes distributed
-node-agent (`fluxvm-agent`) with a central fleet registry and load-aware placement across multiple
-hosts, and a **developer-preview** containerd runtime-v2 path
-([Secure Containers](docs/secure-containers.md)) that maps a Pod/task group onto one QEMU FluxVM.
+FluxVM runs standalone — as a host-local replacement for libvirt/virsh (see [below](#vs-libvirtvirsh))
+— or as the VM engine underneath other Zyvor products. Either way it's the same binary and the same
+REST API; nothing changes depending on who's calling it.
 
-> **This repository is a complete MVP/control-plane skeleton, not a finished multi-tenant security
-> boundary.** Auth/RBAC, the Firecracker jailer (chroot + uid/gid isolation), cgroup v2 resource
-> control, and per-VM network namespaces are already implemented — before exposing it to untrusted
-> tenants, still add seccomp/AppArmor/SELinux policy, quotas, audit logging, and stronger image
-> provenance. Full checklist: [docs/PRODUCTION.md](docs/PRODUCTION.md).
+---
 
-### Who does what (users)
+## Maturity: what's real today
 
-| You need… | Use |
-|-----------|-----|
-| Score / repair a disk **offline** (doctor, passport, fix plans) | **[GuestKit](https://github.com/zyvorai/guestkit)** |
-| **Boot & manage** that qcow2 (network, SSH, TTL, pause/resume, fleets) | **This repo (FluxVM)** |
-| Hypervisor → KVM convert + import | **[h2kvm](https://github.com/zyvorai/h2kvm)** |
+**This repository is a complete MVP/control-plane skeleton, not a finished multi-tenant security
+boundary.** Auth/RBAC, the Firecracker jailer (chroot + uid/gid isolation), cgroup v2 resource
+control, and per-VM network namespaces are already implemented — before exposing it to untrusted
+tenants, still add seccomp/AppArmor/SELinux policy, quotas, audit logging, and stronger image
+provenance. Full checklist: [docs/PRODUCTION.md](docs/PRODUCTION.md).
 
-**Certify with GuestKit → run & manage with FluxVM → convert/deploy with h2kvm.**
-FluxVM already creates TAP/macvtap, optional per-VM **netns + DHCP** (known `guest_ip`), cloud-init
-seeds, CoW overlays, and TTL reaping — GuestKit does **not** duplicate that; hand off after the disk
-is certified.
+Two subsystems are GA today; one is explicitly not:
 
-FluxVM is also the Zyvor **host-local** replacement for libvirt/virsh lifecycle and networking (it is
-**not** a drop-in for KubeVirt/OpenShift — `virtctl` stays): `fluxvm create` ≈ `virsh define`+`start`,
-`fluxvm list`/`get` ≈ `virsh list`/`dominfo`, `fluxvm pause`/`resume` ≈ `virsh suspend`/`resume`,
-`fluxvm delete` ≈ `virsh destroy`. Offline disk certify/repair stays in GuestKit.
+| Subsystem | Status |
+|---|---|
+| Core VM lifecycle (QEMU/CH/Firecracker/FluxVM hypervisor backends, cgroups, jailer, netns) | Implemented, see caveat above before untrusted multi-tenant use |
+| Network Fabric (TC/eBPF VM-edge dataplane, schema v4) | **GA** — [docs/network-fabric.md](docs/network-fabric.md) |
+| Secure Containers (containerd runtime-v2 shim) | **Developer preview** — not a Kata Containers-equivalence claim yet, see [docs/secure-containers.md](docs/secure-containers.md) |
 
-See [docs/use-cases.md](docs/use-cases.md) for concrete use cases — ephemeral CI runners, a
-golden-image pipeline, Kubernetes-native disposable workloads, multi-host fleets without Kubernetes,
-and sandboxed code execution. Product paths built on FluxVM:
-[zyvor-fabric](docs/zyvor-fabric.md) · [Ragnarok](docs/ragnarok.md).
+---
+
+## vs. libvirt/virsh
+
+FluxVM is the Zyvor **host-local** replacement for libvirt/virsh VM lifecycle and networking — it is
+**not** a drop-in for KubeVirt/OpenShift (`virtctl` stays that ecosystem's tool; see [MicroVM vs.
+KubeVirt](docs/microvm.md#vs-disposablevm-and-kubevirt) for where FluxVM's Kubernetes paths sit
+relative to KubeVirt):
+
+| libvirt/virsh | FluxVM | Same job? |
+|---|---|---|
+| `virsh define` + `virsh start` | `fluxvm create` | Yes |
+| `virsh list` / `virsh dominfo` | `fluxvm list` / `fluxvm get` | Yes |
+| `virsh suspend` / `virsh resume` | `fluxvm pause` / `fluxvm resume` | Yes |
+| `virsh destroy` | `fluxvm delete` | Yes |
+| XML domain definitions | JSON VM spec (`fluxvm create --spec vm.json`) | Different format, same purpose |
+| No REST API | Full REST API (`fluxvm serve`) | FluxVM adds this |
+
+No libvirtd, no XML domain definitions — FluxVM talks its own REST API and manages TAP/bridge/netns
+networking directly via netlink.
+
+---
+
+## Use cases
+
+Nine use cases map directly onto what's implemented today — nothing below is aspirational. Full detail
+for each: [docs/use-cases.md](docs/use-cases.md).
+
+| Use case | What it uses |
+|---|---|
+| **CI/CD build & test runners** | VM-per-job over vsock `exec` (no SSH, no network path needed), `ttl_seconds` guarantees cleanup even on a crashed job |
+| **Golden-image pipeline** | Build once (`fluxvm build-image`), reuse via qcow2 CoW overlays; SHA-256 + optional Ed25519-signed image catalog |
+| **Kubernetes-native disposable workloads** | `DisposableVm` CRD + node-local `fluxvm-kube` operator — verified end to end against a real k3s cluster |
+| **Secure Containers (OCI in a FluxVM)** | Per-Pod guest kernel via `containerd-shim-fluxvm-v2` — **developer preview**, not production-ready yet |
+| **Multi-host fleets without Kubernetes** | `fluxvm-agent` central fleet registry + load-aware placement — verified across two real, physically separate hosts |
+| **Sandboxed / untrusted code execution** | Firecracker jailer + cgroup v2 + netns + vsock `exec` + TTL reaper, the same isolation shape as gVisor/Firecracker-based CI sandboxes |
+| **Disposable dev/test environments** | Per-branch/PR VMs, cheap qcow2 CoW cloning, `pause`/`resume` to park instead of rebuild |
+| **Bring-your-own storage backend** | LVM thin, NBD, Ceph RBD (RBD verified against a real Rook Ceph cluster) |
+| **Networking that matches the environment** | QEMU user-mode NAT, TAP+bridge, or macvtap — all three SSH-verified end to end in this project's own regression tests |
+
+---
+
+## Is this for you?
+
+FluxVM is a strong fit when:
+
+- **You want VM lifecycle without a systemd/libvirtd dependency** — direct netlink networking, no XML domain definitions, a real REST API.
+- **You need disposable, short-lived VMs at the core of the workflow** — CI runners, sandboxed execution, per-branch dev environments — where `ttl_seconds` and cheap CoW cloning matter more than long-lived VM management.
+- **You're evaluating a Kubernetes-native VM path that isn't KubeVirt** — the `DisposableVm` CRD and `fluxvm-microvm` scheduler-native path are real alternatives, not a KubeVirt clone.
+- **You want to adopt this standalone** — FluxVM doesn't require Fabric, Ragnarok, or any other Zyvor product. It's a complete, independently useful control plane on its own.
+
+Look elsewhere (for now) when:
+
+- **You need a finished multi-tenant security boundary today** — see the [maturity caveat](#maturity-whats-real-today) above; the primitives (jailer, cgroups, netns) are there, but seccomp/AppArmor/SELinux policy, quotas, audit logging, and stronger image provenance still need to be added before exposing this to untrusted tenants.
+- **You need OCI/containerd workloads with Kata-equivalent isolation today** — Secure Containers is explicitly developer preview; PRODUCTION.md lists concrete gaps (hostPath hotplug, broader CNI/OCI conformance) still open.
+- **You need KubeVirt/OpenShift compatibility** — FluxVM's Kubernetes paths (`DisposableVm`, MicroVM) are deliberately not KubeVirt-compatible; `virtctl` and the KubeVirt API surface aren't goals here.
+- **You need published performance numbers for capacity planning** — boot latency, VM density, and throughput haven't been benchmarked and published yet (tracked as future work in [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md)); don't expect a sizing guide today.
+
+---
 
 ## Quick start
 
@@ -126,6 +171,8 @@ Full examples: [`examples/qemu.json`](examples/qemu.json) (user-mode lab),
 [docs/operations.md](docs/operations.md#testing-networking-and-lifecycle-end-to-end). Deploying to a
 remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 
+---
+
 ## Feature highlights
 
 | Area | What's there | Docs |
@@ -138,6 +185,28 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 | **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native MicroVM path (no KubeVirt); `fluxvm-agent` distributed node-agent with a central fleet registry and load-aware placement across hosts | [Kubernetes CRD/operator](#kubernetes-crdoperator) below · [docs/microvm.md](docs/microvm.md) · [docs/operations.md](docs/operations.md#distributed-node-agent) |
 | **Secure Containers** | Developer-preview containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one QEMU FluxVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, and guest AppArmor/SELinux/seccomp enforcement | [docs/secure-containers.md](docs/secure-containers.md) |
 | **Sentinel observability** | eBPF-based host + guest runtime intelligence — per-VM syscall/page-fault telemetry, drop-reason tracking, flight recorder, BPF-LSM VMM guard/QoS, XDP shield, topology steering | [docs/runtime-intelligence.md](docs/runtime-intelligence.md) · [docs/flight-recorder.md](docs/flight-recorder.md) |
+
+---
+
+## FAQ
+
+**Is FluxVM production-ready?** For the core VM-lifecycle primitives (auth/RBAC, jailer, cgroups, netns), yes with the caveat in [Maturity](#maturity-whats-real-today) above — add seccomp/AppArmor/SELinux policy, quotas, audit logging, and stronger image provenance before exposing it to untrusted tenants. Secure Containers is separately still developer preview.
+
+**How is this different from libvirt?** No libvirtd, no XML domain definitions — FluxVM has its own REST API and talks netlink directly for networking. See [vs. libvirt/virsh](#vs-libvirtvirsh) above for the command mapping.
+
+**How is this different from KubeVirt?** Different model entirely — FluxVM's `DisposableVm` and MicroVM paths run the VMM on the host under `fluxvm serve`, not inside a virt-launcher Pod, and don't implement `virtctl`, live migration, or CDI. See [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison.
+
+**Do I need Fabric or Ragnarok to use FluxVM?** No. FluxVM is a complete, independently useful control plane — clone it, build it, run `fluxvm create`, and you have a working disposable-VM engine with no other Zyvor product involved. Fabric and Ragnarok are separate products that happen to use FluxVM as their VM engine; see [Ecosystem](#ecosystem) below.
+
+**Is Secure Containers ready for production OCI workloads?** No — it's explicitly a developer preview. `hostPath` hotplug and broader CNI/OCI conformance are still open; see [docs/secure-containers.md](docs/secure-containers.md) and [docs/PRODUCTION.md](docs/PRODUCTION.md) for the itemized gap list.
+
+**What storage backends are supported?** qcow2/raw by default, plus LVM thin snapshots, NBD-exported disks, and Ceph RBD (verified against a real Rook Ceph cluster) — see [Bring-your-own storage backend](docs/use-cases.md#bring-your-own-storage-backend).
+
+**Are there published performance numbers (boot latency, VM density)?** Not yet — this is tracked as open future work in [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md), not something we've benchmarked and published. Don't rely on unpublished figures for capacity planning.
+
+**What license is this under?** Apache License 2.0, the entire repository, no dual licensing — see [License](#license) below.
+
+---
 
 ## Architecture at a glance
 
@@ -175,7 +244,7 @@ Full diagrams for the Network Fabric dataplane (packet-decision and control-plan
 ## Project layout
 
 The MVP is a Cargo workspace, structured to match Zyvor FluxVM's longer-term
-multi-node architecture:
+multi-node architecture — **23 crates**:
 
 ```text
 crates/
@@ -201,7 +270,9 @@ crates/
 ├── fluxvm-container-protocol    Secure Containers lifecycle wire types (VSOCK :17778)
 ├── fluxvm-container-agent       in-guest OCI process supervisor (`fluxvm-container-agent`)
 ├── fluxvm-container-client      host-side VSOCK client for the container agent
-└── fluxvm-containerd-shim       containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`)
+├── fluxvm-containerd-shim       containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`)
+└── fluxvm-intelligence          Sentinel: eBPF host+guest telemetry, drop-reason tracking, flight
+                                   recorder, BPF-LSM VMM guard/QoS, XDP shield, topology steering
 ```
 
 Deploy fragments for the containerd RuntimeClass path live under `deploy/containerd/`
@@ -212,8 +283,7 @@ node-agent for multi-node deployments — a distinct concept from `fluxvm-guest-
 [Kubernetes CRD/operator](#kubernetes-crdoperator) below.
 
 This project also depends on the sibling [`guestkit`](https://github.com/zyvorai/guestkit) project
-(path dep from `fluxvm-image`) for offline image customization. For the **user certify → run** path,
-see [Who does what](#who-does-what-users) above.
+(path dep from `fluxvm-image`) for offline image customization.
 
 ## Kubernetes CRD/operator
 
@@ -221,9 +291,10 @@ see [Who does what](#who-does-what-users) above.
 against a *local* `fluxvm serve` instance's REST API — each node's operator instance only ever acts
 on `DisposableVm` objects whose `spec.node` matches the node name it was started with, the same
 shape as a real daemonset (see [`deploy/k8s/`](deploy/k8s/) for the Dockerfile + CRD/RBAC/DaemonSet
-manifests). Verified end to end against a real k3s cluster (9/9 passing): create a `DisposableVm`,
-watch it reconcile into a real running QEMU VM, delete the CR and confirm `kubectl delete` blocks on
-a finalizer until the real VM is actually gone.
+manifests). Verified end to end against a real k3s cluster (9/9 passing — the 9 checks span CRD
+acceptance, real VM reconciliation, out-of-band-delete self-healing, and finalizer-blocked cleanup
+with no leaked QEMU process; see [`scripts/test-kube-operator.sh`](scripts/test-kube-operator.sh)
+for the exact checks):
 
 ```bash
 fluxvm-kube --print-crd | kubectl apply -f -
@@ -242,10 +313,45 @@ RuntimeClass `fluxvm` for OCI workloads inside a FluxVM; it does not replace `Di
 scheduler-native alternative for Kubernetes-without-KubeVirt is `fluxvm-microvm` — see
 [docs/microvm.md](docs/microvm.md).
 
+---
+
+## Ecosystem
+
+FluxVM is complete and useful on its own (see [Is this for you?](#is-this-for-you) above). It's also
+the VM engine underneath two other Zyvor products, which build orchestration/UX layers on top of the
+same REST API rather than forking or wrapping FluxVM internals:
+
+| Product | Role |
+|---|---|
+| **[zyvor-fabric](docs/zyvor-fabric.md)** | Private cloud control plane (CLI/Web/K8s operator/Terraform) — FluxVM handles VM execution, Fabric handles auth/RBAC/networking policy/UX on top |
+| **[Ragnarok](docs/ragnarok.md)** | AI-powered KubeVirt VM management — creates `DisposableVm` CRs via its FluxVM Hub with OIDC/SSO and RBAC |
+| **[h2kvm](https://github.com/zyvorai/h2kvm)** | Hypervisor → KVM convert + import, hands off a certified disk to FluxVM to run |
+| **[GuestKit](https://github.com/zyvorai/guestkit)** | Offline disk scoring/repair — FluxVM boots and manages what GuestKit certifies, see [Who does what](#who-does-what-users) below |
+
+Neither Fabric nor Ragnarok is required to use FluxVM directly — see the [Quick start](#quick-start) above.
+
+### Who does what (users)
+
+| You need… | Use |
+|-----------|-----|
+| Score / repair a disk **offline** (doctor, passport, fix plans) | **[GuestKit](https://github.com/zyvorai/guestkit)** |
+| **Boot & manage** that qcow2 (network, SSH, TTL, pause/resume, fleets) | **This repo (FluxVM)** |
+| Hypervisor → KVM convert + import | **[h2kvm](https://github.com/zyvorai/h2kvm)** |
+
+**Certify with GuestKit → run & manage with FluxVM → convert/deploy with h2kvm.**
+FluxVM already creates TAP/macvtap, optional per-VM **netns + DHCP** (known `guest_ip`), cloud-init
+seeds, CoW overlays, and TTL reaping — GuestKit does **not** duplicate that; hand off after the disk
+is certified.
+
+---
+
 ## Documentation map
 
 | Topic | Doc |
 |-------|-----|
+| Product positioning (who/why/when-not) | [docs/POSITIONING.md](docs/POSITIONING.md) |
+| Product overview + metrics | [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) |
+| Exhaustive feature checklist | [FEATURES.md](FEATURES.md) |
 | Concrete use cases (CI runners, golden images, sandboxes, fleets) | [docs/use-cases.md](docs/use-cases.md) |
 | Network Fabric (eBPF/Cilium dataplane, diagrams, why it's faster) | [docs/network-fabric.md](docs/network-fabric.md) |
 | eBPF / Cilium coexistence detail | [docs/ebpf-cilium.md](docs/ebpf-cilium.md) |
@@ -274,7 +380,9 @@ Hands-on tutorials: [network policy](docs/tutorials/network-policy/README.md) ·
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Copyright 2026 Zyvor.
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Copyright 2026 Zyvor AI Labs. The
+entire repository is under this one license; there is no dual-licensing or separately-licensed core
+component.
 
-Part of the Zyvor platform (see [zyvor-fabric](docs/zyvor-fabric.md) and [Ragnarok](docs/ragnarok.md)
-above). More at **[zyvor.dev](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)**.
+Part of the Zyvor platform (see [Ecosystem](#ecosystem) above). More at
+**[zyvor.dev](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)**.
