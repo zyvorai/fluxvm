@@ -50,9 +50,26 @@ pub struct CatalogEntry {
     /// `Config::catalog.trusted_signers` is non-empty — see [`resolve`].
     #[serde(default)]
     pub signature: Option<String>,
+    /// Unix seconds at the moment `fluxvm catalog sign` ran — asserted by
+    /// the signer and covered by [`canonical_payload`] itself (so it can't
+    /// be back/post-dated after the fact without invalidating the
+    /// signature), the tamper-evident half of "when was this vouched for."
+    /// `None` for an unsigned entry. **Breaking change**: `canonical_payload`
+    /// now covers more fields than it used to (see its own doc comment) --
+    /// any entry signed before this existed will fail verification and
+    /// needs `fluxvm catalog sign` re-run. There is no dual-format
+    /// fallback; see `docs/operations.md`'s "Image catalog & signing"
+    /// section for the upgrade note.
+    #[serde(default)]
+    pub signed_at: Option<i64>,
     /// When `true`, [`remove_entry`]/[`rename_entry`] refuse to act on this
     /// entry — mirrors machinectl's per-image read-only flag, used to
-    /// protect a base image other entries are cloned from.
+    /// protect a base image other entries are cloned from. Deliberately
+    /// NOT covered by [`canonical_payload`] -- it's a mutable operational
+    /// setting toggled via a dedicated REST route
+    /// (`POST .../read-only`), not provenance data, and signing it would
+    /// mean every legitimate toggle silently invalidates the entry's
+    /// signature.
     #[serde(default)]
     pub read_only: bool,
 }
@@ -63,10 +80,31 @@ fn default_format() -> String {
 /// The exact bytes a signature is computed over — every field that
 /// identifies *what* is being vouched for, so a signature can't be replayed
 /// onto an entry with the same name but a different source/checksum.
+///
+/// Covers `distro`/`version`/`arch`/`signed_at` in addition to the
+/// original `name`/`source`/`sha256`/`format` -- previously those first
+/// three were present on `CatalogEntry` but excluded from the signed
+/// payload entirely, so they could be edited in `catalog.json` post-signing
+/// (e.g. relabeling an entry's `arch` to mislead a platform-matching
+/// consumer) without invalidating the signature; a real, closed gap, not a
+/// new capability. `read_only` deliberately stays excluded -- see its own
+/// doc comment on `CatalogEntry` for why. `Option<String>` fields serialize
+/// as an empty segment when `None`, so "unset" and "empty string" are
+/// still distinguishable from any *other* field's own value shifting the
+/// line count, but not from each other -- acceptable here since an empty
+/// `distro`/`version`/`arch` string is not a value worth distinguishing
+/// from absent for signing purposes.
 fn canonical_payload(entry: &CatalogEntry) -> String {
     format!(
-        "{}\n{}\n{}\n{}",
-        entry.name, entry.source, entry.sha256, entry.format
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        entry.name,
+        entry.source,
+        entry.sha256,
+        entry.format,
+        entry.distro.as_deref().unwrap_or(""),
+        entry.version.as_deref().unwrap_or(""),
+        entry.arch.as_deref().unwrap_or(""),
+        entry.signed_at.map(|t| t.to_string()).unwrap_or_default(),
     )
 }
 
@@ -128,6 +166,7 @@ pub async fn add_entry(
         version: None,
         arch: None,
         signature: None,
+        signed_at: None,
         read_only: false,
     };
     entries.push(entry.clone());
@@ -172,6 +211,7 @@ pub fn rename_entry(cfg: &Config, name: &str, new_name: &str) -> Result<CatalogE
     }
     entry.name = new_name.to_string();
     entry.signature = None;
+    entry.signed_at = None;
     let updated = entry.clone();
     save_catalog(path, &entries)?;
     Ok(updated)
@@ -249,6 +289,7 @@ pub fn clone_entry(cfg: &Config, name: &str, target_name: &str) -> Result<Catalo
     let cloned = CatalogEntry {
         name: target_name.to_string(),
         signature: None,
+        signed_at: None,
         ..source_entry
     };
     entries.push(cloned.clone());
@@ -284,7 +325,29 @@ fn parse_public_key(b64: &str) -> Result<VerifyingKey> {
     VerifyingKey::from_bytes(&arr).context("invalid Ed25519 public key")
 }
 
-fn verify_signature(entry: &CatalogEntry, trusted: &[VerifyingKey]) -> Result<()> {
+/// Parses every `[[catalog.trusted_signers]]` entry's own `public_key`
+/// once, paired with its `name` -- shared by both `resolve` and
+/// `list_with_verification` rather than each re-parsing independently.
+fn parse_trusted_signers(
+    signers: &[fluxvm_core::config::TrustedSigner],
+) -> Result<Vec<(String, VerifyingKey)>> {
+    signers
+        .iter()
+        .map(|s| Ok((s.name.clone(), parse_public_key(&s.public_key)?)))
+        .collect::<Result<_>>()
+        .context("parsing config.catalog.trusted_signers")
+}
+
+/// Verifies `entry`'s signature against every configured trusted signer,
+/// returning the **name** of whichever one actually matched on success --
+/// real signer identity, derived fresh here from which key verified,
+/// never trusted from anything the signed payload itself claims (the
+/// payload has no signer-identity field at all, deliberately -- a signer
+/// asserting its own name would be trivially forgeable).
+fn verify_signature<'a>(
+    entry: &CatalogEntry,
+    trusted: &'a [(String, VerifyingKey)],
+) -> Result<&'a str> {
     let sig_b64 = entry.signature.as_deref().with_context(|| {
         format!(
             "catalog entry '{}' has no signature, but trusted_signers is configured",
@@ -299,17 +362,16 @@ fn verify_signature(entry: &CatalogEntry, trusted: &[VerifyingKey]) -> Result<()
         .map_err(|v: Vec<u8>| anyhow::anyhow!("signature must be 64 bytes, got {}", v.len()))?;
     let sig = Signature::from_bytes(&sig_arr);
     let payload = canonical_payload(entry);
-    if trusted
+    trusted
         .iter()
-        .any(|key| key.verify(payload.as_bytes(), &sig).is_ok())
-    {
-        Ok(())
-    } else {
-        bail!(
-            "catalog entry '{}' signature does not match any configured trusted_signers",
-            entry.name
-        );
-    }
+        .find(|(_, key)| key.verify(payload.as_bytes(), &sig).is_ok())
+        .map(|(name, _)| name.as_str())
+        .with_context(|| {
+            format!(
+                "catalog entry '{}' signature does not match any configured trusted_signers",
+                entry.name
+            )
+        })
 }
 
 /// Resolves `image_ref` against the configured catalog:
@@ -343,14 +405,8 @@ pub async fn resolve(cfg: &Config, image_ref: &Path) -> Result<PathBuf> {
     };
 
     if !cfg.catalog.trusted_signers.is_empty() {
-        let keys: Vec<VerifyingKey> = cfg
-            .catalog
-            .trusted_signers
-            .iter()
-            .map(|s| parse_public_key(s))
-            .collect::<Result<_>>()
-            .context("parsing config.catalog.trusted_signers")?;
-        verify_signature(entry, &keys)?;
+        let signers = parse_trusted_signers(&cfg.catalog.trusted_signers)?;
+        verify_signature(entry, &signers)?;
     }
 
     let local = fetch_if_needed(cfg, &entry.source)
@@ -403,6 +459,12 @@ pub struct CatalogListEntry {
     /// so this is meaningless); otherwise whether the entry's signature
     /// verified against at least one configured trusted signer.
     pub signature_valid: Option<bool>,
+    /// The matched trusted signer's own configured `name` when
+    /// `signature_valid == Some(true)`; `None` otherwise (unsigned,
+    /// signature didn't match anything, or signatures aren't required at
+    /// all) -- real identity derived from which key verified, not
+    /// something the entry itself claims about its own signer.
+    pub signed_by: Option<String>,
 }
 
 /// Backs `GET /v1/images/catalog`: every entry alongside whether its
@@ -419,24 +481,22 @@ pub fn list_with_verification(cfg: &Config) -> Result<Vec<CatalogListEntry>> {
         return Ok(Vec::new());
     }
     let catalog = load_catalog(catalog_path)?;
-    let keys: Vec<VerifyingKey> = cfg
-        .catalog
-        .trusted_signers
-        .iter()
-        .map(|s| parse_public_key(s))
-        .collect::<Result<_>>()
-        .context("parsing config.catalog.trusted_signers")?;
+    let signers = parse_trusted_signers(&cfg.catalog.trusted_signers)?;
     Ok(catalog
         .into_iter()
         .map(|entry| {
-            let signature_valid = if keys.is_empty() {
-                None
+            let (signature_valid, signed_by) = if signers.is_empty() {
+                (None, None)
             } else {
-                Some(verify_signature(&entry, &keys).is_ok())
+                match verify_signature(&entry, &signers) {
+                    Ok(name) => (Some(true), Some(name.to_string())),
+                    Err(_) => (Some(false), None),
+                }
             };
             CatalogListEntry {
                 entry,
                 signature_valid,
+                signed_by,
             }
         })
         .collect())
@@ -483,6 +543,15 @@ pub fn sign_entry(
         version,
         arch,
         signature: None,
+        // Asserted now, before computing the payload below, so it's
+        // covered by the signature itself (tamper-evident) rather than
+        // free-form, unverified metadata.
+        signed_at: Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64,
+        ),
         read_only: false,
     };
     let signature = signing_key.sign(canonical_payload(&entry).as_bytes());
@@ -496,11 +565,18 @@ mod tests {
     use fluxvm_core::config::{CatalogConfig, Config};
     use sha2::Digest;
 
-    fn cfg_with_catalog(path: &Path, trusted_signers: Vec<String>) -> Config {
+    fn cfg_with_catalog(path: &Path, trusted_signer_keys: Vec<String>) -> Config {
         Config {
             catalog: CatalogConfig {
                 path: Some(path.to_path_buf()),
-                trusted_signers,
+                trusted_signers: trusted_signer_keys
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, public_key)| fluxvm_core::config::TrustedSigner {
+                        name: format!("test-signer-{i}"),
+                        public_key,
+                    })
+                    .collect(),
                 cosign_identities: vec![],
             },
             ..Config::default()
@@ -551,6 +627,7 @@ mod tests {
                 version: None,
                 arch: None,
                 signature: None,
+                signed_at: None,
                 read_only: false,
             }],
         );
@@ -578,6 +655,7 @@ mod tests {
                 version: None,
                 arch: None,
                 signature: None,
+                signed_at: None,
                 read_only: false,
             }],
         );
@@ -607,7 +685,7 @@ mod tests {
         .unwrap();
 
         let key = parse_public_key(&public_b64).unwrap();
-        assert!(verify_signature(&entry, &[key]).is_ok());
+        assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_ok());
     }
 
     #[test]
@@ -627,7 +705,7 @@ mod tests {
         .unwrap();
 
         let wrong_key = parse_public_key(&other_public_b64).unwrap();
-        assert!(verify_signature(&entry, &[wrong_key]).is_err());
+        assert!(verify_signature(&entry, &[("k".to_string(), wrong_key)]).is_err());
     }
 
     #[test]
@@ -647,7 +725,205 @@ mod tests {
         entry.sha256 = "different-hash-than-what-was-signed".into();
 
         let key = parse_public_key(&public_b64).unwrap();
-        assert!(verify_signature(&entry, &[key]).is_err());
+        assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_err());
+    }
+
+    #[test]
+    fn verify_rejects_a_tampered_metadata_field_even_though_it_used_to_be_unsigned() {
+        // distro/version/arch are now covered by canonical_payload -- this
+        // is the exact gap that closed: previously these could be edited
+        // post-signing without invalidating the signature.
+        let (private_b64, public_b64) = generate_keypair();
+        let mut entry = sign_entry(
+            &private_b64,
+            "n".into(),
+            "s".into(),
+            "h".into(),
+            "qcow2".into(),
+            Some("ubuntu".into()),
+            Some("24.04".into()),
+            Some("x86_64".into()),
+        )
+        .unwrap();
+        entry.arch = Some("aarch64".into()); // relabeled after signing
+
+        let key = parse_public_key(&public_b64).unwrap();
+        assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_err());
+    }
+
+    #[test]
+    fn verify_rejects_a_backdated_signed_at() {
+        let (private_b64, public_b64) = generate_keypair();
+        let mut entry = sign_entry(
+            &private_b64,
+            "n".into(),
+            "s".into(),
+            "h".into(),
+            "qcow2".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        entry.signed_at = entry.signed_at.map(|t| t - 100_000); // backdated after signing
+
+        let key = parse_public_key(&public_b64).unwrap();
+        assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_err());
+    }
+
+    #[test]
+    fn read_only_can_be_toggled_without_invalidating_the_signature() {
+        // read_only is deliberately excluded from canonical_payload -- its
+        // own dedicated REST route (set_read_only) must keep working on a
+        // signed entry without requiring a re-sign.
+        let (private_b64, public_b64) = generate_keypair();
+        let mut entry = sign_entry(
+            &private_b64,
+            "n".into(),
+            "s".into(),
+            "h".into(),
+            "qcow2".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let key = parse_public_key(&public_b64).unwrap();
+        assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_ok());
+
+        entry.read_only = true;
+        assert!(
+            verify_signature(&entry, &[("k".to_string(), key)]).is_ok(),
+            "toggling read_only must not invalidate the signature"
+        );
+    }
+
+    #[test]
+    fn verify_signature_reports_the_matching_signers_own_name() {
+        let (private_b64, public_b64) = generate_keypair();
+        let entry = sign_entry(
+            &private_b64,
+            "n".into(),
+            "s".into(),
+            "h".into(),
+            "qcow2".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_other_priv, other_public_b64) = generate_keypair();
+        let trusted = vec![
+            (
+                "decoy".to_string(),
+                parse_public_key(&other_public_b64).unwrap(),
+            ),
+            (
+                "release-ci".to_string(),
+                parse_public_key(&public_b64).unwrap(),
+            ),
+        ];
+        let matched = verify_signature(&entry, &trusted).unwrap();
+        assert_eq!(matched, "release-ci");
+    }
+
+    #[test]
+    fn sign_entry_stamps_a_recent_signed_at() {
+        let (private_b64, _public_b64) = generate_keypair();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let entry = sign_entry(
+            &private_b64,
+            "n".into(),
+            "s".into(),
+            "h".into(),
+            "qcow2".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let signed_at = entry.signed_at.expect("sign_entry must set signed_at");
+        assert!(
+            signed_at >= before && signed_at <= before + 5,
+            "expected signed_at ({signed_at}) to be within 5s of {before}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_with_verification_reports_signed_by_only_when_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let (private_b64, public_b64) = generate_keypair();
+        let signed = sign_entry(
+            &private_b64,
+            "signed-image".into(),
+            "/irrelevant".into(),
+            "irrelevant".into(),
+            "qcow2".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let unsigned = CatalogEntry {
+            name: "unsigned-image".into(),
+            source: "/irrelevant".into(),
+            sha256: "irrelevant".into(),
+            format: "qcow2".into(),
+            distro: None,
+            version: None,
+            arch: None,
+            signature: None,
+            signed_at: None,
+            read_only: false,
+        };
+        let catalog_path = write_catalog(dir.path(), &[signed, unsigned]);
+        let cfg = cfg_with_catalog(&catalog_path, vec![public_b64]);
+
+        let listed = list_with_verification(&cfg).unwrap();
+        let signed_entry = listed
+            .iter()
+            .find(|e| e.entry.name == "signed-image")
+            .unwrap();
+        assert_eq!(signed_entry.signature_valid, Some(true));
+        assert_eq!(signed_entry.signed_by.as_deref(), Some("test-signer-0"));
+
+        let unsigned_entry = listed
+            .iter()
+            .find(|e| e.entry.name == "unsigned-image")
+            .unwrap();
+        assert_eq!(unsigned_entry.signature_valid, Some(false));
+        assert_eq!(unsigned_entry.signed_by, None);
+    }
+
+    #[test]
+    fn clone_and_rename_drop_signed_at_alongside_the_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let (private_b64, _public_b64) = generate_keypair();
+        let signed = sign_entry(
+            &private_b64,
+            "base".into(),
+            "/irrelevant".into(),
+            "irrelevant".into(),
+            "qcow2".into(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(signed.signed_at.is_some());
+        let catalog_path = write_catalog(dir.path(), &[signed]);
+        let cfg = cfg_with_catalog(&catalog_path, vec![]);
+
+        let cloned = clone_entry(&cfg, "base", "base-clone").unwrap();
+        assert!(cloned.signature.is_none());
+        assert!(cloned.signed_at.is_none());
+
+        let renamed = rename_entry(&cfg, "base", "base-renamed").unwrap();
+        assert!(renamed.signature.is_none());
+        assert!(renamed.signed_at.is_none());
     }
 
     #[tokio::test]
@@ -665,6 +941,7 @@ mod tests {
                 version: None,
                 arch: None,
                 signature: None, // unsigned
+                signed_at: None,
                 read_only: false,
             }],
         );
@@ -691,6 +968,7 @@ mod tests {
                 version: None,
                 arch: None,
                 signature: None,
+                signed_at: None,
                 read_only: false,
             }],
         );
@@ -733,6 +1011,7 @@ mod tests {
                 version: None,
                 arch: None,
                 signature: None,
+                signed_at: None,
                 read_only: false,
             }],
         );

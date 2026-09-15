@@ -786,7 +786,9 @@ async fn main() -> Result<()> {
                 println!(
                     "private key (keep secret, use with `catalog sign --key`):\n  {private_b64}"
                 );
-                println!("public key (put in config.catalog.trusted_signers):\n  {public_b64}");
+                println!(
+                    "public key -- add as [[catalog.trusted_signers]] with a name:\n  [[catalog.trusted_signers]]\n  name = \"CHANGE_ME\"\n  public_key = \"{public_b64}\""
+                );
             }
             CatalogCommand::Sign {
                 key,

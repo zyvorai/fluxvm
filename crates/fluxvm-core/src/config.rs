@@ -337,15 +337,36 @@ impl Default for StorageConfig {
 #[serde(default)]
 pub struct CatalogConfig {
     pub path: Option<PathBuf>,
-    /// Base64-encoded Ed25519 public keys. Empty (the default) means
-    /// catalog entries don't need to be signed at all. Non-empty means
-    /// *every* catalog entry used to create a VM must carry a valid
-    /// signature from one of these keys — there is no per-entry opt-out.
-    pub trusted_signers: Vec<String>,
+    /// `[[catalog.trusted_signers]]` — named Ed25519 public keys, the same
+    /// array-of-tables-with-a-keying-field shape `[[auth.tokens]]` already
+    /// uses, rather than a bare list of keys with no attached identity.
+    /// Empty (the default) means catalog entries don't need to be signed
+    /// at all. Non-empty means *every* catalog entry used to create a VM
+    /// must carry a valid signature from one of these keys — there is no
+    /// per-entry opt-out. The matched entry's `name` is what
+    /// `fluxvm_image::catalog::CatalogListEntry.signed_by` reports —
+    /// real signer identity, derived fresh at verify time from which key
+    /// actually matched, never trusted from anything the signed payload
+    /// itself claims.
+    pub trusted_signers: Vec<TrustedSigner>,
     /// Optional cosign/Sigstore identity strings. When non-empty, resolve
     /// shells out to `cosign verify-blob` against the local image path
     /// (requires `cosign` on PATH).
     pub cosign_identities: Vec<String>,
+}
+
+/// One named Ed25519 public key allowed to sign catalog entries -- see
+/// `CatalogConfig::trusted_signers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrustedSigner {
+    /// A human-readable label for this key (e.g. "release-ci",
+    /// "platform-team") -- never cryptographically verified itself (it's
+    /// operator-asserted config, the same trust level `[[auth.tokens]]`'s
+    /// own `name` field already has), just what gets reported back as
+    /// `signed_by` once the *key* has verified a signature.
+    pub name: String,
+    /// Base64-encoded Ed25519 public key (32 bytes).
+    pub public_key: String,
 }
 
 /// Firecracker-only: runs the VM through Firecracker's own `jailer` binary

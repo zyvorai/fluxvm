@@ -3,6 +3,29 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Stronger image catalog signatures** — the Ed25519 signed payload now
+  covers `distro`/`version`/`arch` and a new tamper-evident `signed_at`
+  timestamp, not just `name`/`source`/`sha256`/`format`. Previously
+  `distro`/`version`/`arch` were present on a `CatalogEntry` but excluded
+  from what was actually signed, so they could be edited in `catalog.json`
+  post-signing (e.g. relabeling `arch` to mislead a platform-matching
+  consumer) without invalidating the signature — a real gap, closed here.
+  `read_only` stays deliberately unsigned (a mutable operational flag
+  toggled via its own REST route, not provenance data). `[[catalog.trusted_signers]]`
+  is now a named list (`name`/`public_key`, the same `[[auth.tokens]]`-shaped
+  convention this project already uses for labeled credential lists)
+  instead of a bare list of base64 keys, so `GET /v1/images/catalog`'s
+  new `signed_by` field can report real signer identity — the *name* of
+  whichever configured key actually verified the signature, derived
+  fresh on every call from which key matched, never trusted from
+  anything the entry itself claims about its own signer. **Breaking
+  change**: an entry signed before this existed will fail verification
+  against the wider payload; re-run `fluxvm catalog sign` for every
+  entry after upgrading if `trusted_signers` is configured. Does not
+  close the deeper "no real build-lineage/CI-provenance recording" gap —
+  see FEATURES.md's Security Posture table for what's still genuinely
+  open there. Docs: `docs/operations.md`'s "Image catalog & signing"
+  section.
 - **Per-tenant aggregate admission quotas** — `[[policy.tenants]]`
   (`tenant`, `max_vcpus_total`, `max_memory_mib_total`, `max_vms_total`),
   summed across every existing VM a tenant already owns plus the incoming

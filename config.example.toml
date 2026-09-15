@@ -145,6 +145,15 @@ reaper_interval_secs = 5
 # role = "read-only"
 # name = "dashboard"
 
+# Named, checksummed, optionally-signed base images -- see
+# docs/operations.md#image-catalog--signing. trusted_signers empty (the
+# default) means catalog entries don't need to be signed at all.
+# [catalog]
+# path = "/etc/fluxvm/catalog.json"
+# [[catalog.trusted_signers]]
+# name = "release-ci"
+# public_key = "BASE64_ED25519_PUBLIC_KEY"    # from `fluxvm catalog keygen`
+
 # Optional HTTPS for the API. When client_ca is set, require client certs (mTLS).
 # Bearer / OIDC still apply after the TLS handshake.
 # [tls]

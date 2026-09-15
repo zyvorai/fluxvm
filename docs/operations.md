@@ -389,7 +389,13 @@ Enable it with `[catalog]` in the config:
 ```toml
 [catalog]
 path = "/etc/fluxvm/catalog.json"
-trusted_signers = []   # empty = signatures not required; non-empty = every entry MUST verify
+# Empty = signatures not required; non-empty = every entry MUST verify against one of these.
+# Named (unlike a bare list of keys) so `signed_by` below can report real signer identity,
+# not just pass/fail -- the same [[auth.tokens]]-shaped "array of tables with a name" this
+# project uses everywhere else it needs a labeled list of credentials.
+[[catalog.trusted_signers]]
+name = "release-ci"
+public_key = "BASE64_ED25519_PUBLIC_KEY"
 ```
 
 An image reference that doesn't match any catalog entry's `name` is treated as a literal path/URL,
@@ -402,7 +408,7 @@ external network-dependent test infrastructure):
 ```bash
 fluxvm catalog keygen
 #   private key (keep secret, use with `catalog sign --key`): ...
-#   public key (put in config.catalog.trusted_signers): ...
+#   public key -- add as [[catalog.trusted_signers]] with a name: ...
 
 fluxvm catalog sign \
   --key <private-key> --name ubuntu-24.04 \
@@ -411,10 +417,27 @@ fluxvm catalog sign \
   --catalog-file /etc/fluxvm/catalog.json   # appends/updates in place; omit to just print the entry
 ```
 
+`sign` also stamps a `signed_at` (Unix seconds, right when signing runs) onto the entry, **covered by
+the signature itself** — the signed payload now spans `name`/`source`/`sha256`/`format`/
+`distro`/`version`/`arch`/`signed_at`, not just the first four. Previously `distro`/`version`/`arch`
+were present on an entry but excluded from what was actually signed, so they could be edited in
+`catalog.json` after the fact (e.g. relabeling `arch` to mislead a platform-matching consumer) without
+invalidating the signature — closed now. `read_only` stays deliberately unsigned, since it's a mutable
+operational flag toggled via its own REST route (below), not provenance data — signing it would mean
+every legitimate toggle silently breaks the signature.
+
+**Breaking change for existing signed catalogs**: an entry signed before this existed will fail
+verification against the new, wider payload — there's no dual-format fallback. Re-run `fluxvm catalog
+sign` for every entry after upgrading if `trusted_signers` is configured.
+
 With `trusted_signers` set, an unsigned (or wrongly-signed) catalog entry is rejected at `create` time
 — fails closed, no silent fallback to "unsigned is fine." `GET /v1/images/catalog` lists every entry
-with a computed `signature_valid` (read-only; signing stays a CLI/offline operation, so private keys
-never touch the API surface).
+with a computed `signature_valid`, and — new — `signed_by`: the *name* of whichever configured
+`trusted_signers` entry's key actually verified the signature (`null` when unsigned, wrongly signed, or
+signatures aren't required at all). This is derived fresh on every call from which key matched, not
+something the entry itself claims about its own signer — an entry can't assert its own identity, only a
+real key can prove it. Signing itself stays a CLI/offline operation; private keys never touch the API
+surface.
 
 **Catalog CRUD over REST** — add/remove/rename/clone/export entries without hand-editing
 `catalog.json` or going through the CLI's offline sign flow (this is what zyvor-fabric's
@@ -436,8 +459,9 @@ curl -sS -X POST http://127.0.0.1:7788/v1/images/catalog/ubuntu-24.04/export \
 curl -sS -X DELETE http://127.0.0.1:7788/v1/images/catalog/ubuntu-24.04-qa
 ```
 
-A clone or rename drops any existing signature (a signature covers the entry's `name`, so it no
-longer vouches for the new one). All five mutating operations are serialized against each other and
+A clone or rename drops any existing signature and `signed_at` (a signature covers the entry's `name`,
+so it no longer vouches for the new one — the old `signed_at` timestamp would also be misleading once
+detached from a valid signature). All five mutating operations are serialized against each other and
 against a fresh `catalog.json` read on every call — no in-memory cache to go stale.
 
 Verified on real hardware (`scripts/test-image-catalog.sh`, 10/10): `keygen`/`sign` produce a real
