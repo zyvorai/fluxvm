@@ -7,7 +7,7 @@ use fluxvm_core::{
     backend::{LaunchContext, LaunchResult, VmBackend, path_arg},
     config::Config,
     model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
-    process::{run_checked_timeout, spawn_logged},
+    process::{run_checked_timeout, spawn_logged, spawn_swtpm},
 };
 use std::time::Duration;
 
@@ -112,6 +112,19 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
         ]);
     }
 
+    if req.tpm.unwrap_or(false) {
+        // `launch()` spawns the shared `swtpm` sidecar (see
+        // fluxvm_core::process::spawn_swtpm, also used by the QEMU
+        // backend) before this function ever runs, listening on this
+        // exact socket. Cloud Hypervisor's own `--tpm` flag is a single
+        // `socket=<path>` parameter -- no separate chardev/tpmdev/device
+        // triad the way QEMU needs, CH abstracts that away itself.
+        a.extend([
+            "--tpm".into(),
+            format!("socket={}", path_arg(&ctx.workspace.join("swtpm.sock"))),
+        ]);
+    }
+
     if let Some(kernel) = &req.kernel {
         a.extend(["--kernel".into(), path_arg(kernel)]);
         if let Some(initrd) = &req.initrd {
@@ -148,6 +161,20 @@ impl VmBackend for CloudHypervisorBackend {
         req: &CreateVmRequest,
         ctx: &LaunchContext,
     ) -> Result<LaunchResult> {
+        let swtpm_pid = if req.tpm.unwrap_or(false) {
+            match spawn_swtpm(cfg, ctx).await {
+                Ok(pid) => Some(pid),
+                Err(e) => {
+                    if let Some(fd) = ctx.network.macvtap_fd {
+                        fluxvm_core::process::close_fd(fd);
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+
         let args = build_args(cfg, req, ctx)?;
         let (program, args) = fluxvm_core::process::netns_wrap(
             ctx.network.netns.as_deref(),
@@ -158,17 +185,28 @@ impl VmBackend for CloudHypervisorBackend {
         if let Some(fd) = ctx.network.macvtap_fd {
             fluxvm_core::process::close_fd(fd);
         }
-        let child = spawned?;
-        let pid = child
-            .id()
-            .context("Cloud Hypervisor exited before PID was available")?;
+        let child = match spawned {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(pid) = swtpm_pid {
+                    let _ = fluxvm_core::process::terminate_pid(pid).await;
+                }
+                return Err(e);
+            }
+        };
+        let Some(pid) = child.id() else {
+            if let Some(pid) = swtpm_pid {
+                let _ = fluxvm_core::process::terminate_pid(pid).await;
+            }
+            bail!("Cloud Hypervisor exited before PID was available");
+        };
         Ok(LaunchResult {
             pid,
             control_socket: Some(ctx.workspace.join("ch-api.sock")),
             jail_path: None,
             vsock_socket: ctx.vsock_socket.clone(),
             virtiofsd_pids: Vec::new(),
-            swtpm_pid: None,
+            swtpm_pid,
         })
     }
 
@@ -224,6 +262,7 @@ async fn ch_remote(cfg: &Config, vm: &VmRecord, subcommand: &str) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fluxvm_core::backend::PreparedNetwork;
 
     #[test]
     fn qga_serial_socket_flag_shape() {
@@ -231,5 +270,86 @@ mod tests {
         let flag = format!("socket={}", path_arg(&sock));
         assert!(flag.contains("qga.sock"));
         assert!(flag.starts_with("socket="));
+    }
+
+    fn cfg() -> Config {
+        Config::default()
+    }
+
+    fn req() -> CreateVmRequest {
+        CreateVmRequest {
+            name: "fixture".into(),
+            tenant: None,
+            backend: BackendKind::CloudHypervisor,
+            image: "/tmp/base.raw".into(),
+            vcpus: 1,
+            memory_mib: 512,
+            max_vcpus: None,
+            max_memory_mib: None,
+            loadvm_tag: None,
+            disk_size_gib: None,
+            kernel: None,
+            initrd: None,
+            firmware: Some("/usr/share/cloud-hypervisor/CLOUDHV.fd".into()),
+            kernel_args: None,
+            network: NetworkSpec::None,
+            cloud_init: None,
+            ttl_seconds: None,
+            extra_args: vec![],
+            agent: None,
+            qga: None,
+            hyperv: false,
+            storage: fluxvm_core::model::StorageBackend::Default,
+            shared_folders: vec![],
+            numa_node: None,
+            cpuset: None,
+            hugepages: None,
+            vfio_devices: vec![],
+            pod_uid: None,
+            secure_boot: None,
+            tpm: None,
+        }
+    }
+
+    fn ctx() -> LaunchContext {
+        LaunchContext {
+            id: uuid::Uuid::nil(),
+            workspace: "/tmp/eph-ch-fixture".into(),
+            disk: "/tmp/eph-ch-fixture/root.raw".into(),
+            seed_disk: None,
+            log_path: "/tmp/eph-ch-fixture/console.log".into(),
+            network: PreparedNetwork {
+                spec: NetworkSpec::None,
+                tap_name: None,
+                macvtap_fd: None,
+                netns: None,
+                dhcp_leasefile: None,
+                guest_ip: None,
+                guest_cidr: None,
+                gateway: None,
+            },
+            guest_cid: None,
+            vsock_socket: None,
+            disk_format: "raw".into(),
+            nbd_export: None,
+        }
+    }
+
+    #[test]
+    fn tpm_disabled_omits_tpm_flag() {
+        let args = build_args(&cfg(), &req(), &ctx()).unwrap();
+        assert!(!args.iter().any(|a| a == "--tpm"));
+    }
+
+    #[test]
+    fn tpm_enabled_adds_tpm_socket_flag() {
+        let mut r = req();
+        r.tpm = Some(true);
+        let args = build_args(&cfg(), &r, &ctx()).unwrap();
+        let idx = args
+            .iter()
+            .position(|a| a == "--tpm")
+            .expect("missing --tpm flag");
+        assert_eq!(args[idx + 1], "socket=/tmp/eph-ch-fixture/swtpm.sock");
     }
 }

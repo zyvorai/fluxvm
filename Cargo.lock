@@ -1993,6 +1993,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fluxvm-core",
+ "uuid",
 ]
 
 [[package]]

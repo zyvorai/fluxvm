@@ -1,9 +1,16 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::backend::{LaunchContext, path_arg};
+use crate::config::Config;
 use anyhow::{Context, Result, bail};
-use std::{fs::OpenOptions, path::Path, process::Stdio};
+use std::{fs::OpenOptions, path::Path, process::Stdio, time::Duration};
 use tokio::process::{Child, Command};
+
+/// How long `wait_for_socket_ready` waits for a sidecar's listening socket
+/// (`swtpm`, and formerly this crate's own copy of the wait used by
+/// `fluxvm-qemu`'s `virtiofsd` spawn loop) to appear before giving up.
+const SIDECAR_SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub async fn run_checked(program: &str, args: &[String]) -> Result<()> {
     let out = Command::new(program)
@@ -137,6 +144,101 @@ pub async fn terminate_pid(pid: u32) -> Result<()> {
         return Ok(());
     }
     bail!("pid {pid} did not exit after SIGTERM/SIGKILL");
+}
+
+/// Polls `socket` for a listening child process (`pid`) to become ready --
+/// existence + liveness, then a brief settle-then-recheck once it appears
+/// (a virtiofsd/swtpm-shaped subprocess can create the socket and still
+/// exit right after, e.g. capability sync failing under
+/// NoNewPrivileges). SIGKILLs `pid` and returns an error on any failure
+/// path (timeout, the process died before the socket appeared, or it died
+/// right after) -- never leaves `pid` running on an `Err` return. Does not
+/// touch any other already-spawned sibling process; a caller with its own
+/// accumulated pids list (e.g. `fluxvm-qemu`'s `spawn_virtiofsd_instances`)
+/// is responsible for killing those itself on error. Shared here (rather
+/// than living in one backend crate) because both the QEMU and Cloud
+/// Hypervisor backends spawn a `swtpm` sidecar via `spawn_swtpm` below.
+pub async fn wait_for_socket_ready(
+    pid: u32,
+    socket: &Path,
+    timeout: Duration,
+    what: &str,
+    log: &Path,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+            anyhow::bail!(
+                "{what}: socket {} not ready within {:?}; see {}",
+                socket.display(),
+                timeout,
+                log.display()
+            );
+        }
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        if !alive {
+            anyhow::bail!(
+                "{what}: exited before socket was ready; see {}",
+                log.display()
+            );
+        }
+        if socket.exists() {
+            // Brief settle so bind/listen completes after the inode appears,
+            // then re-check liveness — the child can create the socket and
+            // still exit right after.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            if !still_alive {
+                anyhow::bail!(
+                    "{what}: exited right after creating socket; see {}",
+                    log.display()
+                );
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Spawns the `swtpm` sidecar backing `req.tpm`, listening on
+/// `<workspace>/swtpm.sock` -- the socket both the QEMU backend
+/// (`-chardev socket,id=chrtpm,...`) and the Cloud Hypervisor backend
+/// (`--tpm socket=...`) point their own TPM device wiring at. TPM state
+/// (NVRAM/keys) is written to `<workspace>/tpm/`, which persists for the
+/// VM's lifetime (deleted only on VM delete, same as the disk file) --
+/// unlike this function's own return value, which is a fresh process
+/// spawned on every `launch()` call (create and every subsequent start),
+/// mirroring `virtiofsd`'s respawn-every-launch model rather than
+/// `qemu-nbd`'s kept-alive-across-stop model.
+pub async fn spawn_swtpm(cfg: &Config, ctx: &LaunchContext) -> Result<u32> {
+    let tpm_dir = ctx.workspace.join("tpm");
+    tokio::fs::create_dir_all(&tpm_dir)
+        .await
+        .context("creating swtpm state directory")?;
+    let sock = ctx.workspace.join("swtpm.sock");
+    // Stale socket from a previous failed launch -- same reasoning as
+    // virtiofsd's own stale-socket cleanup has for its own sockets.
+    let _ = tokio::fs::remove_file(&sock).await;
+    let args = vec![
+        "socket".to_string(),
+        "--tpmstate".to_string(),
+        format!("dir={}", path_arg(&tpm_dir)),
+        "--ctrl".to_string(),
+        format!("type=unixio,path={}", path_arg(&sock)),
+        "--tpm2".to_string(),
+    ];
+    let log = ctx.workspace.join("swtpm.log");
+    let child = spawn_logged(&cfg.swtpm_binary, &args, &log)
+        .await
+        .context("spawning swtpm")?;
+    let Some(pid) = child.id() else {
+        anyhow::bail!("swtpm exited before PID was available");
+    };
+    wait_for_socket_ready(pid, &sock, SIDECAR_SOCKET_TIMEOUT, "swtpm", &log).await?;
+    Ok(pid)
 }
 
 /// Closes a raw fd handed off to a VMM child (e.g. a macvtap device fd) once

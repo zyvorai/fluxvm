@@ -1,0 +1,12 @@
+{
+  "name": "ch-tpm-vm",
+  "backend": "cloud-hypervisor",
+  "image": "/var/lib/fluxvm/images/base.raw",
+  "_comment": "See docs/secure-boot-tpm.md -- Cloud Hypervisor supports tpm (a real --tpm socket=... flag) but NOT secure_boot (no documented persistent UEFI variable store to enroll keys into); a request setting secure_boot on this backend is rejected outright at create() time",
+  "vcpus": 2,
+  "memory_mib": 4096,
+  "disk_size_gib": 20,
+  "firmware": "/usr/share/cloud-hypervisor/CLOUDHV.fd",
+  "tpm": true,
+  "network": { "mode": "none" }
+}

@@ -9,7 +9,7 @@ use fluxvm_core::{
     backend::{LaunchContext, LaunchResult, VmBackend, path_arg},
     config::Config,
     model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
-    process::spawn_logged,
+    process::{spawn_logged, spawn_swtpm, wait_for_socket_ready},
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -429,101 +429,6 @@ async fn spawn_virtiofsd_instances(
         sockets.push((tag, socket));
     }
     Ok((pids, sockets))
-}
-
-/// Polls `socket` for a listening child process (`pid`) to become ready --
-/// existence + liveness, then a brief settle-then-recheck once it appears
-/// (a virtiofsd/swtpm-shaped subprocess can create the socket and still
-/// exit right after, e.g. capability sync failing under
-/// NoNewPrivileges). SIGKILLs `pid` and returns an error on any failure
-/// path (timeout, the process died before the socket appeared, or it died
-/// right after) -- never leaves `pid` running on an `Err` return. Does not
-/// touch any other already-spawned sibling process; a caller with its own
-/// accumulated pids list (e.g. `spawn_virtiofsd_instances`) is responsible
-/// for killing those itself on error. Extracted from
-/// `spawn_virtiofsd_instances`'s own original wait loop, unchanged in
-/// behavior, so `spawn_swtpm` below can reuse the identical readiness
-/// contract instead of duplicating it.
-async fn wait_for_socket_ready(
-    pid: u32,
-    socket: &std::path::Path,
-    timeout: Duration,
-    what: &str,
-    log: &std::path::Path,
-) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if tokio::time::Instant::now() >= deadline {
-            unsafe {
-                libc::kill(pid as libc::pid_t, libc::SIGKILL);
-            }
-            anyhow::bail!(
-                "{what}: socket {} not ready within {:?}; see {}",
-                socket.display(),
-                timeout,
-                log.display()
-            );
-        }
-        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-        if !alive {
-            anyhow::bail!(
-                "{what}: exited before socket was ready; see {}",
-                log.display()
-            );
-        }
-        if socket.exists() {
-            // Brief settle so bind/listen completes after the inode appears,
-            // then re-check liveness — the child can create the socket and
-            // still exit right after.
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-            if !still_alive {
-                anyhow::bail!(
-                    "{what}: exited right after creating socket; see {}",
-                    log.display()
-                );
-            }
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Spawns the `swtpm` sidecar backing `req.tpm`, listening on
-/// `<workspace>/swtpm.sock` -- the exact socket `build_args` wires into
-/// `-chardev socket,id=chrtpm,...`. TPM state (NVRAM/keys) is written to
-/// `<workspace>/tpm/`, which persists for the VM's lifetime (deleted only
-/// on VM delete, same as the disk file) -- unlike this function's own
-/// return value, which is a fresh process spawned on every `launch()` call
-/// (create and every subsequent start), mirroring virtiofsd's
-/// respawn-every-launch model rather than `qemu-nbd`'s
-/// kept-alive-across-stop model.
-async fn spawn_swtpm(cfg: &Config, ctx: &LaunchContext) -> Result<u32> {
-    let tpm_dir = ctx.workspace.join("tpm");
-    tokio::fs::create_dir_all(&tpm_dir)
-        .await
-        .context("creating swtpm state directory")?;
-    let sock = ctx.workspace.join("swtpm.sock");
-    // Stale socket from a previous failed launch -- same reasoning as
-    // virtiofsd's own stale-socket cleanup above.
-    let _ = tokio::fs::remove_file(&sock).await;
-    let args = vec![
-        "socket".to_string(),
-        "--tpmstate".to_string(),
-        format!("dir={}", path_arg(&tpm_dir)),
-        "--ctrl".to_string(),
-        format!("type=unixio,path={}", path_arg(&sock)),
-        "--tpm2".to_string(),
-    ];
-    let log = ctx.workspace.join("swtpm.log");
-    let child = spawn_logged(&cfg.swtpm_binary, &args, &log)
-        .await
-        .context("spawning swtpm")?;
-    let Some(pid) = child.id() else {
-        anyhow::bail!("swtpm exited before PID was available");
-    };
-    wait_for_socket_ready(pid, &sock, VIRTIOFSD_SOCKET_TIMEOUT, "swtpm", &log).await?;
-    Ok(pid)
 }
 
 fn kill_pids(pids: &[u32]) {

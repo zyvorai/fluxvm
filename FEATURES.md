@@ -21,12 +21,12 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - vsock guest agent: `exec`, PTY console, file transfer — no SSH or network path required
 - qcow2 copy-on-write overlays for cheap disposable clones from a golden image
 - Direct-kernel or firmware boot (Cloud Hypervisor, QEMU)
-- UEFI Secure Boot + emulated TPM 2.0 (QEMU only — see [docs/secure-boot-tpm.md](docs/secure-boot-tpm.md))
+- UEFI Secure Boot (QEMU only) + emulated TPM 2.0 (QEMU and Cloud Hypervisor) — see [docs/secure-boot-tpm.md](docs/secure-boot-tpm.md)
 
 ## Backends
 
 - **QEMU/KVM** — broad guest/device compatibility, qcow2 CoW overlays, QMP socket, OVMF UEFI/Secure Boot + emulated vTPM
-- **Cloud Hypervisor** — Rust VMM, direct-kernel or firmware boot
+- **Cloud Hypervisor** — Rust VMM, direct-kernel or firmware boot, emulated vTPM (no Secure Boot — see [docs/secure-boot-tpm.md](docs/secure-boot-tpm.md))
 - **Firecracker** — microVM backend, Linux kernel + raw root filesystem, includes the **Firecracker jailer** (chroot + uid/gid isolation, see [docs/operations.md](docs/operations.md#firecracker-jailer-chroot-uidgid-isolation-cgroups))
 - **FluxVM hypervisor** (`backend: "flux-vm"`, binary `fluxvm-hypervisor`) — agent-sandbox track: memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console`
 

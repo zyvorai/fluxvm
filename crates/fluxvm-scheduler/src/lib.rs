@@ -72,26 +72,49 @@ pub fn resolve_backend(req: &CreateVmRequest, cfg: &Config) -> BackendKind {
 }
 
 /// `Some(message)` when `req` asks for `secure_boot`/`tpm` against a
-/// backend that doesn't implement either (only QEMU does — OVMF split
-/// pflash + smm=on, and a swtpm emulator device). Extracted as its own
-/// pure function so it's directly unit-testable without spinning up a
-/// full `VmManager`/`Store`, the same "small pure helper, real coverage"
-/// shape `resolve_backend` above already has. Unlike
+/// backend that doesn't implement it. Extracted as its own pure function
+/// so it's directly unit-testable without spinning up a full
+/// `VmManager`/`Store`, the same "small pure helper, real coverage" shape
+/// `resolve_backend` above already has. Unlike
 /// `vfio_devices`/`numa_node`/`hugepages`, which other backends silently
 /// ignore, this is a hard rejection: a caller believing they got Secure
 /// Boot/measured boot when they silently didn't is a real,
 /// security-relevant footgun, not a cosmetic no-op.
+///
+/// The two fields have different real scope, deliberately not treated the
+/// same:
+///  - `secure_boot` is QEMU-only. Cloud Hypervisor's own `--firmware` is a
+///    single opaque file with no documented persistent UEFI variable
+///    store separate from it (confirmed against Cloud Hypervisor's own
+///    `docs/uefi.md` and Windows-guest docs, which describe plain UEFI
+///    boot only) -- there is nothing to enroll Secure Boot keys into, so
+///    claiming support would be dishonest, not just unimplemented.
+///  - `tpm` is QEMU **and** Cloud Hypervisor: CH has a real, documented
+///    `--tpm socket=<path>` flag (confirmed against a real `cloud-hypervisor
+///    --help`, v53.0) that dials the exact same `swtpm`-backed Unix socket
+///    QEMU's `-tpmdev emulator` does -- `fluxvm_core::process::spawn_swtpm`
+///    is shared between both backends for this reason.
+///  - Firecracker has no firmware concept (always direct kernel boot) and
+///    no TPM device -- both fields are rejected there.
 fn secure_boot_or_tpm_backend_error(req: &CreateVmRequest) -> Option<String> {
-    if (req.secure_boot.unwrap_or(false) || req.tpm.unwrap_or(false))
-        && req.backend != BackendKind::Qemu
-    {
-        Some(format!(
-            "secure_boot/tpm require backend qemu (OVMF pflash + swtpm emulator device); got {:?}",
+    if req.secure_boot.unwrap_or(false) && req.backend != BackendKind::Qemu {
+        return Some(format!(
+            "secure_boot requires backend qemu (OVMF split pflash + smm=on) -- Cloud Hypervisor has no documented persistent UEFI variable store to enroll keys into, and Firecracker has no firmware concept at all; got {:?}",
             req.backend
-        ))
-    } else {
-        None
+        ));
     }
+    if req.tpm.unwrap_or(false)
+        && !matches!(
+            req.backend,
+            BackendKind::Qemu | BackendKind::CloudHypervisor
+        )
+    {
+        return Some(format!(
+            "tpm requires backend qemu or cloud-hypervisor (both dial a swtpm-backed emulated TPM device); got {:?}",
+            req.backend
+        ));
+    }
+    None
 }
 
 /// Admission check for `cfg.policy`, run once resolved (see `resolve_backend`)
@@ -1110,13 +1133,14 @@ impl VmManager {
                 "qga.enabled requires backend qemu (virtio-serial) or cloud-hypervisor (serial socket)"
             );
         }
-        // Secure Boot/TPM only have a real implementation on the QEMU
-        // backend (OVMF split pflash + smm=on, and a swtpm emulator
-        // device) -- unlike vfio_devices/numa_node/hugepages, which other
-        // backends silently ignore, these are hard-rejected on a
-        // mismatched backend: a caller believing they got Secure
-        // Boot/measured boot when they silently didn't is a real,
-        // security-relevant footgun, not a cosmetic no-op.
+        // secure_boot is QEMU-only; tpm is QEMU or Cloud Hypervisor -- see
+        // secure_boot_or_tpm_backend_error's own doc comment for why the
+        // two have different real scope. Unlike
+        // vfio_devices/numa_node/hugepages, which other backends silently
+        // ignore, these are hard-rejected on a mismatched backend: a
+        // caller believing they got Secure Boot/measured boot when they
+        // silently didn't is a real, security-relevant footgun, not a
+        // cosmetic no-op.
         if let Some(msg) = secure_boot_or_tpm_backend_error(&req) {
             anyhow::bail!(msg);
         }
@@ -2348,8 +2372,19 @@ mod tests {
 
     #[test]
     fn secure_boot_and_tpm_are_allowed_on_qemu() {
-        let mut r = req(BackendKind::Qemu, None, Some("/usr/share/OVMF/OVMF_CODE.fd"));
+        let mut r = req(
+            BackendKind::Qemu,
+            None,
+            Some("/usr/share/OVMF/OVMF_CODE.fd"),
+        );
         r.secure_boot = Some(true);
+        r.tpm = Some(true);
+        assert!(secure_boot_or_tpm_backend_error(&r).is_none());
+    }
+
+    #[test]
+    fn tpm_alone_is_allowed_on_cloud_hypervisor() {
+        let mut r = req(BackendKind::CloudHypervisor, None, None);
         r.tpm = Some(true);
         assert!(secure_boot_or_tpm_backend_error(&r).is_none());
     }
@@ -2371,12 +2406,19 @@ mod tests {
     }
 
     #[test]
-    fn tpm_is_rejected_on_every_non_qemu_backend() {
-        for backend in [
-            BackendKind::CloudHypervisor,
-            BackendKind::Firecracker,
-            BackendKind::FluxVm,
-        ] {
+    fn secure_boot_on_cloud_hypervisor_is_rejected_even_when_tpm_is_also_set() {
+        // secure_boot must be evaluated independently of tpm -- a request
+        // asking for both on Cloud Hypervisor should still fail on the
+        // secure_boot half, not be waved through because tpm alone is valid there.
+        let mut r = req(BackendKind::CloudHypervisor, None, None);
+        r.secure_boot = Some(true);
+        r.tpm = Some(true);
+        assert!(secure_boot_or_tpm_backend_error(&r).is_some());
+    }
+
+    #[test]
+    fn tpm_is_rejected_on_firecracker_and_fluxvm() {
+        for backend in [BackendKind::Firecracker, BackendKind::FluxVm] {
             let mut r = req(backend, None, None);
             r.tpm = Some(true);
             assert!(
