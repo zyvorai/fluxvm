@@ -92,6 +92,10 @@ pub struct LaunchResult {
     /// one per share, in order — see `VmRecord::virtiofsd_pids`. Empty for
     /// every backend but QEMU, and for QEMU when the request has no shares.
     pub virtiofsd_pids: Vec<u32>,
+    /// PID of the `swtpm` process spawned for `req.tpm` -- see
+    /// `VmRecord::swtpm_pid`. `None` for every backend but QEMU, and for
+    /// QEMU when the request has no TPM.
+    pub swtpm_pid: Option<u32>,
 }
 
 #[async_trait]

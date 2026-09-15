@@ -298,6 +298,20 @@ pub struct CreateVmRequest {
     /// `None` for every non-Secure-Containers VM, matching today's behavior.
     #[serde(default)]
     pub pod_uid: Option<String>,
+    /// QEMU only, requires `firmware` (OVMF) to also be set: enable UEFI
+    /// Secure Boot (`-global driver=cfi.pflash01,property=secure,value=on`
+    /// plus `smm=on`) and require `Config::qemu_ovmf_vars_template` to be
+    /// configured -- a real Secure Boot chain needs a vars store with
+    /// Microsoft's UEFI CA keys already enrolled, which this project
+    /// doesn't synthesize. See docs/secure-boot-tpm.md.
+    #[serde(default)]
+    pub secure_boot: Option<bool>,
+    /// QEMU only: attach an emulated TPM 2.0 device (`swtpm` sidecar +
+    /// `-tpmdev emulator` + `-device tpm-crb`). Independent of
+    /// `secure_boot`/`firmware` -- a TPM is useful under legacy BIOS too
+    /// (measured boot, disk encryption unseal), not only under UEFI.
+    #[serde(default)]
+    pub tpm: Option<bool>,
 }
 fn default_vcpus() -> u8 {
     2
@@ -462,6 +476,14 @@ pub struct VmRecord {
     /// on delete/stop by `VmManager` — see `LaunchResult::virtiofsd_pids`.
     #[serde(default)]
     pub virtiofsd_pids: Vec<u32>,
+    /// PID of the `swtpm` process backing `request.tpm`, when set --
+    /// respawned fresh on every launch (like `virtiofsd_pids`, not kept
+    /// alive across stop/start like `nbd_pid`) -- see
+    /// `backend::LaunchResult::swtpm_pid`. The TPM's actual persistent
+    /// state (NVRAM/keys) lives under `workspace/tpm/`, independent of
+    /// this PID's lifetime.
+    #[serde(default)]
+    pub swtpm_pid: Option<u32>,
     /// Path to this VM's per-namespace dnsmasq lease file -- only set for
     /// `NetworkSpec::Tap { netns: true, .. }` VMs. `VmManager::get`/`list`
     /// use it to freshly resolve `guest_ip` on every read rather than

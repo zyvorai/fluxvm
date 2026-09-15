@@ -201,6 +201,7 @@ async fn launch_direct(
         jail_path: None,
         vsock_socket: ctx.vsock_socket.clone(),
         virtiofsd_pids: Vec::new(),
+        swtpm_pid: None,
     })
 }
 
@@ -329,6 +330,7 @@ async fn launch_jailed(
         vsock_socket: vsock_socket_host,
         jail_path: Some(chroot_root),
         virtiofsd_pids: Vec::new(),
+        swtpm_pid: None,
     })
 }
 

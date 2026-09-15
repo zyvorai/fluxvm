@@ -30,6 +30,25 @@ pub struct Config {
     /// Default kernel for `BackendKind::FluxVm` when the create request omits one.
     pub fluxvm_kernel: Option<PathBuf>,
     pub cloud_hypervisor_firmware: Option<PathBuf>,
+    /// QEMU only, optional: host-wide default for `req.firmware` when a
+    /// request wants UEFI but omits the field -- mirrors
+    /// `cloud_hypervisor_firmware`'s fallback role. Per-request
+    /// `firmware` always wins when set.
+    pub qemu_ovmf_code: Option<PathBuf>,
+    /// QEMU only: a *template* OVMF_VARS.fd (read-only; never written to
+    /// directly -- copied once per VM into `<workspace>/ovmf_vars.fd` on
+    /// first launch, then that per-VM copy is reused/persisted across
+    /// stop/start so enrolled keys and boot order survive). Required
+    /// whenever a VM's effective firmware (`req.firmware` or
+    /// `qemu_ovmf_code`) resolves to Some -- deliberately not
+    /// synthesized (a wrong-size zero-filled file risks QEMU pflash
+    /// errors or a vars store OVMF can't actually use), fails closed
+    /// with a clear error instead of guessing. See
+    /// docs/secure-boot-tpm.md.
+    pub qemu_ovmf_vars_template: Option<PathBuf>,
+    /// QEMU only, consulted when `req.tpm` is set: the `swtpm` binary,
+    /// resolved via $PATH like `virtiofsd_binary`/`qemu_binary`.
+    pub swtpm_binary: String,
     pub default_bridge: Option<String>,
     pub reaper_interval_secs: u64,
     pub policy: Policy,
@@ -74,6 +93,9 @@ impl Default for Config {
             fluxvm_hypervisor_binary: "fluxvm-hypervisor".into(),
             fluxvm_kernel: None,
             cloud_hypervisor_firmware: None,
+            qemu_ovmf_code: None,
+            qemu_ovmf_vars_template: None,
+            swtpm_binary: "swtpm".into(),
             default_bridge: Some("vmbr0".into()),
             reaper_interval_secs: 5,
             policy: Policy::default(),

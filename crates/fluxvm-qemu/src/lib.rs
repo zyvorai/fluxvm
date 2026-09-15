@@ -53,10 +53,16 @@ pub struct QemuBackend;
 pub type VirtiofsSocket = (String, PathBuf);
 
 pub fn build_args(
+    cfg: &Config,
     req: &CreateVmRequest,
     ctx: &LaunchContext,
     virtiofs_sockets: &[VirtiofsSocket],
 ) -> Result<Vec<String>> {
+    // `req.firmware` always wins over the host-wide `cfg.qemu_ovmf_code`
+    // default when both are set -- same "per-request overrides config
+    // default" convention `cloud_hypervisor_firmware` already has on the
+    // Cloud Hypervisor backend.
+    let effective_firmware = req.firmware.clone().or_else(|| cfg.qemu_ovmf_code.clone());
     // A `StorageBackend::Nbd` disk isn't opened as a local file at all — it's
     // attached via QEMU's native nbd: block client against the qemu-nbd
     // export this VM owns. Every other storage backend (including the
@@ -91,10 +97,19 @@ pub fn build_args(
             .saturating_mul(2)
             .max(req.memory_mib.saturating_add(2048))
     });
+    // `smm=on` is required for OVMF's SMM-based UEFI variable service --
+    // needed for any pflash/OVMF boot, not only when Secure Boot
+    // enforcement itself is on, matching the standard modern QEMU+OVMF+q35
+    // invocation (the same shape libvirt itself generates).
+    let machine = if effective_firmware.is_some() {
+        "q35,accel=kvm,smm=on".to_string()
+    } else {
+        "q35,accel=kvm".to_string()
+    };
     let mut a = vec![
         "-enable-kvm".into(),
         "-machine".into(),
-        "q35,accel=kvm".into(),
+        machine,
         "-cpu".into(),
         "host".into(),
         "-smp".into(),
@@ -127,6 +142,31 @@ pub fn build_args(
         "-drive".into(),
         disk_drive,
     ];
+    if let Some(fw) = &effective_firmware {
+        // Split code/vars pflash: `unit=0` (read-only, admin-provided
+        // OVMF_CODE.fd) + `unit=1` (writable, this VM's own per-workspace
+        // copy of `cfg.qemu_ovmf_vars_template` -- copied by `launch()`
+        // before this function runs, never written here). `secure=on` on
+        // cfi.pflash01 enables the flash variant OVMF's variable service
+        // needs; it doesn't by itself force Secure Boot enforcement, which
+        // is controlled entirely by the vars store's own enrolled-key
+        // content -- safe/recommended to set for any OVMF boot, not only
+        // when `req.secure_boot` is set.
+        a.extend([
+            "-global".into(),
+            "driver=cfi.pflash01,property=secure,value=on".into(),
+            "-drive".into(),
+            format!(
+                "if=pflash,format=raw,unit=0,readonly=on,file={}",
+                path_arg(fw)
+            ),
+            "-drive".into(),
+            format!(
+                "if=pflash,format=raw,unit=1,file={}",
+                path_arg(&ctx.workspace.join("ovmf_vars.fd"))
+            ),
+        ]);
+    }
     for i in 0..HOTPLUG_PCIE_PORTS {
         a.extend([
             "-device".into(),
@@ -269,6 +309,24 @@ pub fn build_args(
         ]);
     }
 
+    if req.tpm.unwrap_or(false) {
+        // `launch()` spawns the `swtpm` sidecar listening on this exact
+        // socket path before build_args ever runs -- see spawn_swtpm.
+        // `tpm-crb` (not the older `tpm-tis`) is the modern-recommended
+        // device for q35/UEFI guests.
+        a.extend([
+            "-chardev".into(),
+            format!(
+                "socket,id=chrtpm,path={}",
+                path_arg(&ctx.workspace.join("swtpm.sock"))
+            ),
+            "-tpmdev".into(),
+            "emulator,id=tpm0,chardev=chrtpm".into(),
+            "-device".into(),
+            "tpm-crb,tpmdev=tpm0".into(),
+        ]);
+    }
+
     if let Some(kernel) = &req.kernel {
         a.extend(["-kernel".into(), path_arg(kernel)]);
         if let Some(initrd) = &req.initrd {
@@ -355,49 +413,117 @@ async fn spawn_virtiofsd_instances(
         // Stale sockets (path present, nothing listening) caused Connection
         // refused; we unlink before spawn and wait for a *new* path while
         // the child is still alive.
-        let deadline = tokio::time::Instant::now() + VIRTIOFSD_SOCKET_TIMEOUT;
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                kill_pids(&pids);
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGKILL);
-                }
-                anyhow::bail!(
-                    "virtiofsd for shared_folders[{i}] socket {} not ready within {:?}; see {}",
-                    socket.display(),
-                    VIRTIOFSD_SOCKET_TIMEOUT,
-                    log.display()
-                );
-            }
-            let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-            if !alive {
-                kill_pids(&pids);
-                anyhow::bail!(
-                    "virtiofsd for shared_folders[{i}] exited before socket was ready; see {}",
-                    log.display()
-                );
-            }
-            if socket.exists() {
-                // Brief settle so bind/listen completes after the inode appears,
-                // then re-check liveness — virtiofsd can create the socket and
-                // still exit (e.g. capability sync under NoNewPrivileges).
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-                if !still_alive {
-                    kill_pids(&pids);
-                    anyhow::bail!(
-                        "virtiofsd for shared_folders[{i}] exited right after creating socket; see {}",
-                        log.display()
-                    );
-                }
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Err(e) = wait_for_socket_ready(
+            pid,
+            &socket,
+            VIRTIOFSD_SOCKET_TIMEOUT,
+            &format!("virtiofsd for shared_folders[{i}]"),
+            &log,
+        )
+        .await
+        {
+            kill_pids(&pids);
+            return Err(e);
         }
         pids.push(pid);
         sockets.push((tag, socket));
     }
     Ok((pids, sockets))
+}
+
+/// Polls `socket` for a listening child process (`pid`) to become ready --
+/// existence + liveness, then a brief settle-then-recheck once it appears
+/// (a virtiofsd/swtpm-shaped subprocess can create the socket and still
+/// exit right after, e.g. capability sync failing under
+/// NoNewPrivileges). SIGKILLs `pid` and returns an error on any failure
+/// path (timeout, the process died before the socket appeared, or it died
+/// right after) -- never leaves `pid` running on an `Err` return. Does not
+/// touch any other already-spawned sibling process; a caller with its own
+/// accumulated pids list (e.g. `spawn_virtiofsd_instances`) is responsible
+/// for killing those itself on error. Extracted from
+/// `spawn_virtiofsd_instances`'s own original wait loop, unchanged in
+/// behavior, so `spawn_swtpm` below can reuse the identical readiness
+/// contract instead of duplicating it.
+async fn wait_for_socket_ready(
+    pid: u32,
+    socket: &std::path::Path,
+    timeout: Duration,
+    what: &str,
+    log: &std::path::Path,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+            anyhow::bail!(
+                "{what}: socket {} not ready within {:?}; see {}",
+                socket.display(),
+                timeout,
+                log.display()
+            );
+        }
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        if !alive {
+            anyhow::bail!(
+                "{what}: exited before socket was ready; see {}",
+                log.display()
+            );
+        }
+        if socket.exists() {
+            // Brief settle so bind/listen completes after the inode appears,
+            // then re-check liveness — the child can create the socket and
+            // still exit right after.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+            if !still_alive {
+                anyhow::bail!(
+                    "{what}: exited right after creating socket; see {}",
+                    log.display()
+                );
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Spawns the `swtpm` sidecar backing `req.tpm`, listening on
+/// `<workspace>/swtpm.sock` -- the exact socket `build_args` wires into
+/// `-chardev socket,id=chrtpm,...`. TPM state (NVRAM/keys) is written to
+/// `<workspace>/tpm/`, which persists for the VM's lifetime (deleted only
+/// on VM delete, same as the disk file) -- unlike this function's own
+/// return value, which is a fresh process spawned on every `launch()` call
+/// (create and every subsequent start), mirroring virtiofsd's
+/// respawn-every-launch model rather than `qemu-nbd`'s
+/// kept-alive-across-stop model.
+async fn spawn_swtpm(cfg: &Config, ctx: &LaunchContext) -> Result<u32> {
+    let tpm_dir = ctx.workspace.join("tpm");
+    tokio::fs::create_dir_all(&tpm_dir)
+        .await
+        .context("creating swtpm state directory")?;
+    let sock = ctx.workspace.join("swtpm.sock");
+    // Stale socket from a previous failed launch -- same reasoning as
+    // virtiofsd's own stale-socket cleanup above.
+    let _ = tokio::fs::remove_file(&sock).await;
+    let args = vec![
+        "socket".to_string(),
+        "--tpmstate".to_string(),
+        format!("dir={}", path_arg(&tpm_dir)),
+        "--ctrl".to_string(),
+        format!("type=unixio,path={}", path_arg(&sock)),
+        "--tpm2".to_string(),
+    ];
+    let log = ctx.workspace.join("swtpm.log");
+    let child = spawn_logged(&cfg.swtpm_binary, &args, &log)
+        .await
+        .context("spawning swtpm")?;
+    let Some(pid) = child.id() else {
+        anyhow::bail!("swtpm exited before PID was available");
+    };
+    wait_for_socket_ready(pid, &sock, VIRTIOFSD_SOCKET_TIMEOUT, "swtpm", &log).await?;
+    Ok(pid)
 }
 
 fn kill_pids(pids: &[u32]) {
@@ -431,7 +557,74 @@ impl VmBackend for QemuBackend {
                 }
             };
 
-        let args = build_args(req, ctx, &virtiofs_sockets)?;
+        let effective_firmware = req.firmware.clone().or_else(|| cfg.qemu_ovmf_code.clone());
+        if req.secure_boot.unwrap_or(false) {
+            if effective_firmware.is_none() {
+                kill_pids(&virtiofsd_pids);
+                if let Some(fd) = ctx.network.macvtap_fd {
+                    fluxvm_core::process::close_fd(fd);
+                }
+                anyhow::bail!(
+                    "secure_boot requires UEFI firmware (req.firmware, or Config::qemu_ovmf_code as a host default)"
+                );
+            }
+            if cfg.qemu_ovmf_vars_template.is_none() {
+                kill_pids(&virtiofsd_pids);
+                if let Some(fd) = ctx.network.macvtap_fd {
+                    fluxvm_core::process::close_fd(fd);
+                }
+                anyhow::bail!(
+                    "secure_boot requires Config::qemu_ovmf_vars_template (a vars store with enrolled UEFI CA keys) to be configured"
+                );
+            }
+        }
+        // First launch of this VM id: seed its own per-workspace vars
+        // copy from the admin-provided template. A later `start` after
+        // `stop` reuses the same workspace/id and must NOT re-copy, so
+        // enrolled keys / boot order set inside the guest survive --
+        // exactly like the disk file itself.
+        if effective_firmware.is_some() {
+            let vars_path = ctx.workspace.join("ovmf_vars.fd");
+            if !vars_path.exists() {
+                let Some(template) = &cfg.qemu_ovmf_vars_template else {
+                    kill_pids(&virtiofsd_pids);
+                    if let Some(fd) = ctx.network.macvtap_fd {
+                        fluxvm_core::process::close_fd(fd);
+                    }
+                    anyhow::bail!(
+                        "firmware is set but Config::qemu_ovmf_vars_template is not configured -- see docs/secure-boot-tpm.md"
+                    );
+                };
+                if let Err(e) = tokio::fs::copy(template, &vars_path)
+                    .await
+                    .context("copying OVMF vars template")
+                {
+                    kill_pids(&virtiofsd_pids);
+                    if let Some(fd) = ctx.network.macvtap_fd {
+                        fluxvm_core::process::close_fd(fd);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        let swtpm_pid = if req.tpm.unwrap_or(false) {
+            match spawn_swtpm(cfg, ctx).await {
+                Ok(pid) => Some(pid),
+                Err(e) => {
+                    kill_pids(&virtiofsd_pids);
+                    if let Some(fd) = ctx.network.macvtap_fd {
+                        fluxvm_core::process::close_fd(fd);
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+        let sidecar_pids: Vec<u32> = virtiofsd_pids.iter().copied().chain(swtpm_pid).collect();
+
+        let args = build_args(cfg, req, ctx, &virtiofs_sockets)?;
         let (program, args) =
             fluxvm_core::process::netns_wrap(ctx.network.netns.as_deref(), &cfg.qemu_binary, &args);
         let spawned = spawn_logged(&program, &args, &ctx.log_path).await;
@@ -443,12 +636,12 @@ impl VmBackend for QemuBackend {
         let child = match spawned {
             Ok(c) => c,
             Err(e) => {
-                kill_pids(&virtiofsd_pids);
+                kill_pids(&sidecar_pids);
                 return Err(e);
             }
         };
         let Some(pid) = child.id() else {
-            kill_pids(&virtiofsd_pids);
+            kill_pids(&sidecar_pids);
             anyhow::bail!("QEMU exited before PID was available");
         };
         Ok(LaunchResult {
@@ -457,6 +650,7 @@ impl VmBackend for QemuBackend {
             jail_path: None,
             vsock_socket: None,
             virtiofsd_pids,
+            swtpm_pid,
         })
     }
 
@@ -572,7 +766,13 @@ mod tests {
             hugepages: None,
             vfio_devices: vec![],
             pod_uid: None,
+            secure_boot: None,
+            tpm: None,
         }
+    }
+
+    fn cfg() -> Config {
+        Config::default()
     }
 
     fn ctx() -> LaunchContext {
@@ -601,7 +801,7 @@ mod tests {
 
     #[test]
     fn no_shares_means_no_virtiofs_args() {
-        let args = build_args(&req(2048), &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
         assert!(!args.iter().any(|a| a.contains("memory-backend-memfd")));
         assert!(!args.iter().any(|a| a.contains("vhost-user-fs-pci")));
         assert!(args.iter().any(|a| a.starts_with("2048M,slots=")));
@@ -609,7 +809,7 @@ mod tests {
 
     #[test]
     fn reserves_hotpluggable_pcie_root_ports() {
-        let args = build_args(&req(2048), &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
         for i in 0..HOTPLUG_PCIE_PORTS {
             assert!(
                 args.iter()
@@ -621,7 +821,7 @@ mod tests {
 
     #[test]
     fn adds_a_virtio_scsi_controller_for_scsi_hotplug() {
-        let args = build_args(&req(2048), &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
         assert!(
             args.iter()
                 .any(|a| a.starts_with("virtio-scsi-pci,id=scsi0"))
@@ -630,7 +830,7 @@ mod tests {
 
     #[test]
     fn no_loadvm_flag_when_tag_unset() {
-        let args = build_args(&req(2048), &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
         assert!(!args.iter().any(|a| a == "-loadvm"));
     }
 
@@ -638,7 +838,7 @@ mod tests {
     fn appends_loadvm_when_tag_set() {
         let mut r = req(2048);
         r.loadvm_tag = Some("hibernate-20260101".into());
-        let args = build_args(&r, &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
         let idx = args
             .iter()
             .position(|a| a == "-loadvm")
@@ -648,7 +848,7 @@ mod tests {
 
     #[test]
     fn memory_and_cpu_hotplug_headroom_defaults_when_unset() {
-        let args = build_args(&req(2048), &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
         let smp = args
             .iter()
             .position(|a| a == "-smp")
@@ -669,7 +869,7 @@ mod tests {
         r.vcpus = 4;
         r.max_vcpus = Some(8);
         r.max_memory_mib = Some(4096);
-        let args = build_args(&r, &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
         let smp = args
             .iter()
             .position(|a| a == "-smp")
@@ -690,7 +890,7 @@ mod tests {
             ("fs0".to_string(), "/tmp/eph-fixture/virtiofs-0.sock".into()),
             ("fs1".to_string(), "/tmp/eph-fixture/virtiofs-1.sock".into()),
         ];
-        let args = build_args(&req(4096), &ctx(), &sockets).unwrap();
+        let args = build_args(&cfg(), &req(4096), &ctx(), &sockets).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("memory-backend-memfd,id=mem,size=4096M,share=on"));
         assert!(joined.contains("numa node,memdev=mem"));
@@ -710,11 +910,97 @@ mod tests {
     fn qga_enabled_adds_virtio_serial_channel() {
         let mut r = req(2048);
         r.qga = Some(fluxvm_core::model::QgaSpec { enabled: true });
-        let args = build_args(&r, &ctx(), &[]).unwrap();
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
         let joined = args.join(" ");
         assert!(joined.contains("id=qga0"));
         assert!(joined.contains("virtio-serial-pci"));
         assert!(joined.contains("name=org.qemu.guest_agent.0"));
         assert!(joined.contains("qga.sock"));
+    }
+
+    #[test]
+    fn firmware_none_omits_pflash_and_smm() {
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
+        assert!(!args.iter().any(|a| a.contains("if=pflash")));
+        assert!(!args.iter().any(|a| a.contains("cfi.pflash01")));
+        let machine = args
+            .iter()
+            .position(|a| a == "-machine")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        assert!(!machine.contains("smm=on"));
+    }
+
+    #[test]
+    fn firmware_set_adds_split_pflash_and_smm() {
+        let mut r = req(2048);
+        r.firmware = Some("/usr/share/OVMF/OVMF_CODE_4M.ms.fd".into());
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains(
+            "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.ms.fd"
+        ));
+        assert!(joined.contains("if=pflash,format=raw,unit=1,file=/tmp/eph-fixture/ovmf_vars.fd"));
+        assert!(joined.contains("driver=cfi.pflash01,property=secure,value=on"));
+        let machine = args
+            .iter()
+            .position(|a| a == "-machine")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        assert!(machine.contains("smm=on"), "machine line: {machine}");
+    }
+
+    #[test]
+    fn firmware_falls_back_to_config_default_when_request_omits_it() {
+        let mut c = cfg();
+        c.qemu_ovmf_code = Some("/usr/share/OVMF/OVMF_CODE_4M.fd".into());
+        let args = build_args(&c, &req(2048), &ctx(), &[]).unwrap();
+        assert!(
+            args.iter()
+                .any(|a| a.contains("unit=0,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd"))
+        );
+    }
+
+    #[test]
+    fn firmware_request_overrides_config_default() {
+        let mut c = cfg();
+        c.qemu_ovmf_code = Some("/usr/share/OVMF/config-default.fd".into());
+        let mut r = req(2048);
+        r.firmware = Some("/usr/share/OVMF/request-wins.fd".into());
+        let args = build_args(&c, &r, &ctx(), &[]).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("file=/usr/share/OVMF/request-wins.fd"));
+        assert!(!joined.contains("config-default.fd"));
+    }
+
+    #[test]
+    fn tpm_disabled_omits_chardev_tpmdev_device() {
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
+        assert!(!args.iter().any(|a| a.contains("chrtpm")));
+        assert!(!args.iter().any(|a| a.contains("tpmdev")));
+        assert!(!args.iter().any(|a| a.contains("tpm-crb")));
+    }
+
+    #[test]
+    fn tpm_enabled_adds_chardev_tpmdev_device() {
+        let mut r = req(2048);
+        r.tpm = Some(true);
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("socket,id=chrtpm,path=/tmp/eph-fixture/swtpm.sock"));
+        assert!(joined.contains("emulator,id=tpm0,chardev=chrtpm"));
+        assert!(joined.contains("tpm-crb,tpmdev=tpm0"));
+    }
+
+    #[test]
+    fn tpm_is_independent_of_firmware() {
+        // A TPM is useful under legacy BIOS too (measured boot, disk
+        // encryption unseal) -- setting tpm without firmware must not
+        // pull in any pflash/smm args.
+        let mut r = req(2048);
+        r.tpm = Some(true);
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
+        assert!(!args.iter().any(|a| a.contains("if=pflash")));
+        assert!(args.iter().any(|a| a.contains("chrtpm")));
     }
 }

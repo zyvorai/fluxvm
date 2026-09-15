@@ -71,6 +71,29 @@ pub fn resolve_backend(req: &CreateVmRequest, cfg: &Config) -> BackendKind {
     }
 }
 
+/// `Some(message)` when `req` asks for `secure_boot`/`tpm` against a
+/// backend that doesn't implement either (only QEMU does — OVMF split
+/// pflash + smm=on, and a swtpm emulator device). Extracted as its own
+/// pure function so it's directly unit-testable without spinning up a
+/// full `VmManager`/`Store`, the same "small pure helper, real coverage"
+/// shape `resolve_backend` above already has. Unlike
+/// `vfio_devices`/`numa_node`/`hugepages`, which other backends silently
+/// ignore, this is a hard rejection: a caller believing they got Secure
+/// Boot/measured boot when they silently didn't is a real,
+/// security-relevant footgun, not a cosmetic no-op.
+fn secure_boot_or_tpm_backend_error(req: &CreateVmRequest) -> Option<String> {
+    if (req.secure_boot.unwrap_or(false) || req.tpm.unwrap_or(false))
+        && req.backend != BackendKind::Qemu
+    {
+        Some(format!(
+            "secure_boot/tpm require backend qemu (OVMF pflash + swtpm emulator device); got {:?}",
+            req.backend
+        ))
+    } else {
+        None
+    }
+}
+
 /// Admission check for `cfg.policy`, run once resolved (see `resolve_backend`)
 /// but before any disk/network work — a rejected request should be cheap.
 fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
@@ -1063,6 +1086,7 @@ impl VmManager {
             lvm_lv: None,
             nbd_pid: None,
             virtiofsd_pids: Vec::new(),
+            swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
         };
@@ -1085,6 +1109,16 @@ impl VmManager {
             anyhow::bail!(
                 "qga.enabled requires backend qemu (virtio-serial) or cloud-hypervisor (serial socket)"
             );
+        }
+        // Secure Boot/TPM only have a real implementation on the QEMU
+        // backend (OVMF split pflash + smm=on, and a swtpm emulator
+        // device) -- unlike vfio_devices/numa_node/hugepages, which other
+        // backends silently ignore, these are hard-rejected on a
+        // mismatched backend: a caller believing they got Secure
+        // Boot/measured boot when they silently didn't is a real,
+        // security-relevant footgun, not a cosmetic no-op.
+        if let Some(msg) = secure_boot_or_tpm_backend_error(&req) {
+            anyhow::bail!(msg);
         }
 
         let result: Result<()> = async {
@@ -1192,6 +1226,7 @@ impl VmManager {
             record.jail_path = launch.jail_path;
             record.vsock_socket = launch.vsock_socket;
             record.virtiofsd_pids = launch.virtiofsd_pids;
+            record.swtpm_pid = launch.swtpm_pid;
             if req.qga.as_ref().is_some_and(|q| q.enabled) {
                 record.qga_socket = Some(workspace.join("qga.sock"));
             }
@@ -1463,6 +1498,7 @@ impl VmManager {
             vm.jail_path = launch.jail_path;
             vm.vsock_socket = launch.vsock_socket;
             vm.virtiofsd_pids = launch.virtiofsd_pids;
+            vm.swtpm_pid = launch.swtpm_pid;
             if vm.request.qga.as_ref().is_some_and(|q| q.enabled) {
                 vm.qga_socket = Some(vm.workspace.join("qga.sock"));
             }
@@ -1544,6 +1580,14 @@ impl VmManager {
         // is (see the Nbd comment in `start`) — a fresh set gets spawned on
         // the next `start`, so tear these down unconditionally here.
         for pid in vm.virtiofsd_pids.drain(..) {
+            if process::process_alive(pid).await {
+                let _ = process::terminate_pid(pid).await;
+            }
+        }
+        // swtpm isn't reattachable either, same reasoning as virtiofsd
+        // above -- a fresh instance gets spawned on the next `start`. Its
+        // *state* (workspace/tpm/) is untouched here, only the process.
+        if let Some(pid) = vm.swtpm_pid.take() {
             if process::process_alive(pid).await {
                 let _ = process::terminate_pid(pid).await;
             }
@@ -2229,6 +2273,8 @@ mod tests {
             hugepages: None,
             vfio_devices: vec![],
             pod_uid: None,
+            secure_boot: None,
+            tpm: None,
         }
     }
 
@@ -2298,6 +2344,59 @@ mod tests {
         cfg.firecracker_kernel = Some("/boot/vmlinux".into());
         let r = req(BackendKind::Auto, None, None);
         assert_eq!(resolve_backend(&r, &cfg), BackendKind::Firecracker);
+    }
+
+    #[test]
+    fn secure_boot_and_tpm_are_allowed_on_qemu() {
+        let mut r = req(BackendKind::Qemu, None, Some("/usr/share/OVMF/OVMF_CODE.fd"));
+        r.secure_boot = Some(true);
+        r.tpm = Some(true);
+        assert!(secure_boot_or_tpm_backend_error(&r).is_none());
+    }
+
+    #[test]
+    fn secure_boot_is_rejected_on_every_non_qemu_backend() {
+        for backend in [
+            BackendKind::CloudHypervisor,
+            BackendKind::Firecracker,
+            BackendKind::FluxVm,
+        ] {
+            let mut r = req(backend, None, None);
+            r.secure_boot = Some(true);
+            assert!(
+                secure_boot_or_tpm_backend_error(&r).is_some(),
+                "expected secure_boot to be rejected on {backend:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tpm_is_rejected_on_every_non_qemu_backend() {
+        for backend in [
+            BackendKind::CloudHypervisor,
+            BackendKind::Firecracker,
+            BackendKind::FluxVm,
+        ] {
+            let mut r = req(backend, None, None);
+            r.tpm = Some(true);
+            assert!(
+                secure_boot_or_tpm_backend_error(&r).is_some(),
+                "expected tpm to be rejected on {backend:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn neither_secure_boot_nor_tpm_set_is_never_rejected_on_any_backend() {
+        for backend in [
+            BackendKind::Qemu,
+            BackendKind::CloudHypervisor,
+            BackendKind::Firecracker,
+            BackendKind::FluxVm,
+        ] {
+            let r = req(backend, None, None);
+            assert!(secure_boot_or_tpm_backend_error(&r).is_none());
+        }
     }
 
     #[test]

@@ -16,6 +16,18 @@ fluxvm_hypervisor_binary = "fluxvm-hypervisor"
 # Guest engine for backend "flux-vm": firecracker (default) or kvm (in-tree, no Firecracker child).
 # fluxvm_engine = "firecracker"
 # cloud_hypervisor_firmware = "/usr/share/cloud-hypervisor/CLOUDHV.fd"
+# QEMU UEFI/Secure Boot/vTPM (see docs/secure-boot-tpm.md). qemu_ovmf_code
+# is a host-wide default for requests that omit CreateVmRequest.firmware
+# (a per-request firmware always wins when set). qemu_ovmf_vars_template
+# is required whenever a VM's effective firmware resolves to Some --
+# copied once per VM into <workspace>/ovmf_vars.fd on first launch, never
+# synthesized. Typical paths vary by distro: Debian/Ubuntu ship a
+# Microsoft-keys-pre-enrolled pair as OVMF_CODE_4M.ms.fd/OVMF_VARS_4M.ms.fd
+# (secure-boot-ready out of the box); Fedora/RHEL ship OVMF_CODE.fd plus a
+# separate OVMF_CODE.secboot.fd, with keys enrolled at first boot instead.
+# qemu_ovmf_code = "/usr/share/OVMF/OVMF_CODE_4M.ms.fd"
+# qemu_ovmf_vars_template = "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"
+swtpm_binary = "swtpm"
 default_bridge = "vmbr0"
 reaper_interval_secs = 5
 

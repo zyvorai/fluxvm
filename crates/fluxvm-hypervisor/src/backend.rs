@@ -135,6 +135,7 @@ impl VmBackend for FluxVmBackend {
             jail_path: None,
             vsock_socket: ctx.vsock_socket.clone(),
             virtiofsd_pids: Vec::new(),
+            swtpm_pid: None,
         })
     }
 

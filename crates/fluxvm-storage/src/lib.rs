@@ -353,6 +353,8 @@ mod tests {
                 hugepages: None,
                 vfio_devices: vec![],
                 pod_uid: None,
+                secure_boot: None,
+                tpm: None,
             },
             guest_cid: None,
             jail_path: None,
@@ -363,6 +365,7 @@ mod tests {
             lvm_lv: None,
             nbd_pid: None,
             virtiofsd_pids: vec![],
+            swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
         }

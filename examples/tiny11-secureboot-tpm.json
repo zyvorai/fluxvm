@@ -1,0 +1,20 @@
+{
+  "name": "tiny-win-secureboot",
+  "backend": "qemu",
+  "image": "/var/lib/fluxvm/images/tiny11-custom.qcow2",
+  "_comment": "See docs/secure-boot-tpm.md -- requires config.qemu_ovmf_vars_template configured (a vars store with enrolled UEFI CA keys, e.g. Debian/Ubuntu's OVMF_VARS_4M.ms.fd), not synthesized by FluxVM itself",
+  "vcpus": 2,
+  "memory_mib": 4096,
+  "disk_size_gib": 40,
+  "firmware": "/usr/share/OVMF/OVMF_CODE_4M.ms.fd",
+  "secure_boot": true,
+  "tpm": true,
+  "network": {
+    "mode": "user",
+    "forwards": [
+      { "host_port": 3389, "guest_port": 3389, "protocol": "tcp" }
+    ]
+  },
+  "qga": { "enabled": true },
+  "ttl_seconds": 7200
+}

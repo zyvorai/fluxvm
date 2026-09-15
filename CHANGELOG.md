@@ -3,6 +3,33 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **QEMU backend: UEFI Secure Boot + emulated vTPM 2.0, QEMU-only** —
+  `CreateVmRequest.secure_boot`/`.tpm`. Also fixes a real, independent
+  pre-existing gap: `CreateVmRequest.firmware` already existed and Cloud
+  Hypervisor already wired it correctly, but the QEMU backend never read
+  it at all despite `docs/tiny-windows.md`/three `examples/*.json` setting
+  it on QEMU-backend requests — those silently fell back to QEMU's default
+  BIOS. Now wired as split code/vars pflash
+  (`-drive if=pflash,...unit=0,readonly=on` + `...unit=1` for a per-VM
+  writable `<workspace>/ovmf_vars.fd` copy of a new
+  `Config::qemu_ovmf_vars_template`, plus `smm=on`/
+  `driver=cfi.pflash01,property=secure,value=on`) — the prerequisite
+  Secure Boot itself needs. `tpm: true` spawns a `swtpm` sidecar
+  (mirroring the existing `virtiofsd` spawn/wait/kill-on-failure pattern,
+  whose readiness-poll loop was extracted into a shared
+  `wait_for_socket_ready` helper for reuse) and wires
+  `-tpmdev emulator` + `-device tpm-crb`; TPM state persists under
+  `<workspace>/tpm/` for the VM's lifetime, independent of the sidecar
+  process's own per-launch lifecycle. `secure_boot`/`tpm` on Cloud
+  Hypervisor/Firecracker are rejected outright at `create()` time with a
+  clear error (unlike `vfio_devices`/`numa_node`, which those backends
+  silently ignore) — a caller believing they got Secure Boot/measured
+  boot when they silently didn't is a real, security-relevant footgun.
+  Real unit coverage for `build_args`'s pure argument construction; the
+  `swtpm`/OVMF-vars-copy process-spawning glue is not validated against
+  real `swtpm`/`qemu-system-x86_64` binaries in this repo's own dev/CI
+  environment (a pre-existing gap `spawn_virtiofsd_instances` itself
+  already had). Docs: [`docs/secure-boot-tpm.md`](docs/secure-boot-tpm.md).
 - **QGA: `guest-network-get-interfaces`** — `GET /v1/vms/{uuid}/qga/network-interfaces`
   (read-only, no `admin` role required unlike the other `qga/*` routes)
   returns the guest's own reported interfaces/IPs via the real
