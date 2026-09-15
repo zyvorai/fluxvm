@@ -406,6 +406,12 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(qga_network_interfaces),
         )
         .route("/v1/vms/{id}/qga/exec", post(qga_exec))
+        .route("/v1/vms/{id}/qga/fsfreeze", post(qga_fsfreeze_freeze))
+        .route("/v1/vms/{id}/qga/fsthaw", post(qga_fsfreeze_thaw))
+        .route(
+            "/v1/vms/{id}/qga/fsfreeze-status",
+            get(qga_fsfreeze_status),
+        )
         .route("/v1/vms/{id}/qga/firewall/open", post(qga_firewall_open))
         .route("/v1/vms/{id}/qga/firewall/close", post(qga_firewall_close))
         .route("/v1/sandboxes", post(create_sandbox).get(list_sandboxes))
@@ -1918,6 +1924,42 @@ async fn qga_network_interfaces(
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Vec<fluxvm_image::qga::QgaNetworkInterface>>> {
     Ok(Json(m.qga_network_interfaces(id).await?))
+}
+
+// Mutating (freezes real guest I/O), so this requires admin like qga_ping
+// above -- not a read-only query.
+async fn qga_fsfreeze_freeze(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let frozen = m.qga_fsfreeze_freeze(id).await?;
+    Ok(Json(json!({"frozen": frozen})))
+}
+
+// Deliberately no admin gate weaker than freeze's own -- thaw is the
+// recovery half of the same operation, and a caller (Kairon's own
+// MachineSnapshot reconcile, in particular) must be able to retry this
+// unconditionally until it succeeds without a separate escalation path.
+async fn qga_fsfreeze_thaw(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let thawed = m.qga_fsfreeze_thaw(id).await?;
+    Ok(Json(json!({"thawed": thawed})))
+}
+
+// A GET query, not a mutation -- read-only tokens can call this like any
+// other GET route, same as qga_network_interfaces above.
+async fn qga_fsfreeze_status(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let status = m.qga_fsfreeze_status(id).await?;
+    Ok(Json(json!({"status": status})))
 }
 
 async fn qga_exec(

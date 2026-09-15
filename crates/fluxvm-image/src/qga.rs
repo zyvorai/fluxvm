@@ -67,6 +67,62 @@ pub fn network_interfaces(socket: &Path) -> Result<Vec<QgaNetworkInterface>> {
     serde_json::from_value(ifaces).context("decode guest-network-get-interfaces response")
 }
 
+/// Freezes every mounted, writable filesystem inside the guest via
+/// `guest-fsfreeze-freeze`, for an application-consistent disk snapshot
+/// instead of a merely crash-consistent one -- the same mechanism
+/// libvirt/virt-manager use for this. Always pair with a later
+/// `fsfreeze_thaw` call (see its own doc comment for why a caller must
+/// never leave a frozen guest unresolved). Returns the number of
+/// filesystems frozen.
+pub fn fsfreeze_freeze(socket: &Path) -> Result<i64> {
+    let resp = call_qga_socket(
+        &socket.display().to_string(),
+        "guest-fsfreeze-freeze",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .with_context(|| format!("QGA guest-fsfreeze-freeze on {}", socket.display()))?;
+    resp.get("return")
+        .and_then(Value::as_i64)
+        .context("decode guest-fsfreeze-freeze response")
+}
+
+/// Thaws filesystems frozen by `fsfreeze_freeze` via `guest-fsfreeze-thaw`.
+/// Idempotent per QGA's own semantics -- calling this against an
+/// already-thawed guest succeeds as a no-op rather than erroring, which is
+/// exactly what makes it safe for a caller to retry unconditionally, on
+/// every later attempt, until it succeeds, rather than ever giving up on
+/// a stuck-frozen guest filesystem (a real, guest-visible failure mode
+/// otherwise). Returns the number of filesystems thawed.
+pub fn fsfreeze_thaw(socket: &Path) -> Result<i64> {
+    let resp = call_qga_socket(
+        &socket.display().to_string(),
+        "guest-fsfreeze-thaw",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .with_context(|| format!("QGA guest-fsfreeze-thaw on {}", socket.display()))?;
+    resp.get("return")
+        .and_then(Value::as_i64)
+        .context("decode guest-fsfreeze-thaw response")
+}
+
+/// Reports the guest's current freeze state via `guest-fsfreeze-status`
+/// -- "frozen" or "thawed".
+pub fn fsfreeze_status(socket: &Path) -> Result<String> {
+    let resp = call_qga_socket(
+        &socket.display().to_string(),
+        "guest-fsfreeze-status",
+        None,
+        DEFAULT_TIMEOUT,
+    )
+    .with_context(|| format!("QGA guest-fsfreeze-status on {}", socket.display()))?;
+    resp.get("return")
+        .and_then(Value::as_str)
+        .map(String::from)
+        .context("decode guest-fsfreeze-status response")
+}
+
 /// Run `path` with `args` via `guest-exec`, wait for completion, return output.
 pub fn exec(
     socket: &Path,

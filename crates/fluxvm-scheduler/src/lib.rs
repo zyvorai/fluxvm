@@ -1636,6 +1636,30 @@ impl VmManager {
             .context("qga network-interfaces worker panicked")?
     }
 
+    pub async fn qga_fsfreeze_freeze(&self, id: Uuid) -> Result<i64> {
+        let vm = self.get(id).await?;
+        let sock = Self::qga_socket_for(&vm)?;
+        tokio::task::spawn_blocking(move || fluxvm_image::qga::fsfreeze_freeze(&sock))
+            .await
+            .context("qga fsfreeze-freeze worker panicked")?
+    }
+
+    pub async fn qga_fsfreeze_thaw(&self, id: Uuid) -> Result<i64> {
+        let vm = self.get(id).await?;
+        let sock = Self::qga_socket_for(&vm)?;
+        tokio::task::spawn_blocking(move || fluxvm_image::qga::fsfreeze_thaw(&sock))
+            .await
+            .context("qga fsfreeze-thaw worker panicked")?
+    }
+
+    pub async fn qga_fsfreeze_status(&self, id: Uuid) -> Result<String> {
+        let vm = self.get(id).await?;
+        let sock = Self::qga_socket_for(&vm)?;
+        tokio::task::spawn_blocking(move || fluxvm_image::qga::fsfreeze_status(&sock))
+            .await
+            .context("qga fsfreeze-status worker panicked")?
+    }
+
     pub async fn qga_exec(
         &self,
         id: Uuid,
