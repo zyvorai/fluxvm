@@ -3,6 +3,22 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **AppArmor local-include for `swtpm` on Debian/Ubuntu** —
+  `packaging/apparmor/usr.bin.swtpm.fluxvm`. Found by actually driving a
+  real `fluxvm create` call with `tpm: true` through the compiled binary
+  on a real Ubuntu host (not just the argument-syntax smoke test the
+  Secure Boot/vTPM change shipped with): the distro's own `swtpm` package
+  ships an AppArmor profile confining it to libvirt's conventional paths,
+  with nothing for FluxVM's own `<state_dir>/instances/<id>/` workspace,
+  so `spawn_swtpm` fails closed with a permission error on any host
+  where that profile enforces (the common case). The snippet extends the
+  packaged profile via its own already-present `#include
+  <local/usr.bin.swtpm>` hook — Debian/Ubuntu's supported mechanism for
+  this, never edits the package-owned file itself. Not live-verified
+  end-to-end in this session (installing it edits a host's live security
+  policy, deliberately not done here without separate authorization) —
+  see `docs/secure-boot-tpm.md`'s "Real limits" for the honest framing
+  and the diagnosed-but-unverified distinction.
 - **Stronger image catalog signatures** — the Ed25519 signed payload now
   covers `distro`/`version`/`arch` and a new tamper-evident `signed_at`
   timestamp, not just `name`/`source`/`sha256`/`format`. Previously

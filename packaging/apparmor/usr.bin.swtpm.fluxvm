@@ -1,0 +1,31 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# AppArmor local-include for /usr/bin/swtpm, granting the paths FluxVM's
+# own req.tpm sidecar (fluxvm_core::process::spawn_swtpm) needs -- see
+# docs/secure-boot-tpm.md.
+#
+# Debian/Ubuntu's swtpm package ships a confining profile
+# (/etc/apparmor.d/usr.bin.swtpm) scoped to libvirt's own conventional
+# paths (/var/lib/libvirt/swtpm/**, /run/libvirt/qemu/swtpm/*.sock,
+# /var/lib/swtpm/**, /tmp/**) -- it has no entry for FluxVM's own
+# <state_dir>/instances/<id>/ workspace at all, so a `tpm: true` VM's
+# swtpm sidecar fails outright with "Could not open UnixIO socket:
+# Permission denied" on any host where that profile is enforced
+# (confirmed live: `aa-status` shows it enforcing by default on stock
+# Ubuntu/Debian hosts with the swtpm package installed).
+#
+# This is a *local include*, Debian/Ubuntu's own supported mechanism for
+# extending a packaged profile without editing the package-owned file
+# itself (which `apt upgrade` would silently overwrite) -- the packaged
+# profile already carries the hook line `#include <local/usr.bin.swtpm>`
+# for exactly this purpose; nothing to add there.
+#
+# Install:
+#   sudo tee -a /etc/apparmor.d/local/usr.bin.swtpm < packaging/apparmor/usr.bin.swtpm.fluxvm
+#   sudo apparmor_parser -r /etc/apparmor.d/usr.bin.swtpm
+#
+# If Config::state_dir is not the default /var/lib/fluxvm, edit the path
+# below to match before installing -- AppArmor profiles are static text,
+# they can't read fluxvm.toml.
+owner /var/lib/fluxvm/instances/** rwk,

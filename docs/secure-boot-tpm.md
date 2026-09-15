@@ -192,10 +192,33 @@ ephemeral per launch; its socket is torn down and respawned fresh on every
   bootable option or device was found` — the correct, expected message
   for an intentionally blank test disk, confirming the firmware itself
   loaded and ran); real `cloud-hypervisor --firmware CLOUDHV.fd --tpm
-  socket=...` does the same. Neither smoke test exercised an actual guest
-  OS, Secure Boot key enrollment, or a real `fluxvm create` API call
-  driving the compiled `spawn_swtpm`/`launch()` Rust code itself — that
-  remains unexercised end-to-end.
+  socket=...` does the same.
+- **A real `fluxvm create` call with `secure_boot`/`tpm` was also driven
+  through the actual compiled binary and REST API** (not just the
+  argument-syntax smoke test above) on a real Ubuntu host, and surfaced a
+  genuine, environment-specific obstacle worth naming plainly:
+  **AppArmor.** Debian/Ubuntu's `swtpm` package ships a confining profile
+  (`/etc/apparmor.d/usr.bin.swtpm`, enforcing by default) scoped to
+  libvirt's own conventional paths — it has no entry for FluxVM's own
+  `<state_dir>/instances/<id>/` workspace, so `spawn_swtpm` fails outright
+  with `Could not open UnixIO socket: Permission denied` on any host where
+  that profile is enforced (which is the common case on stock
+  Ubuntu/Debian with the `swtpm` package installed — confirmed via
+  `aa-status`). `packaging/apparmor/usr.bin.swtpm.fluxvm` is a ready-to-use
+  local-include snippet (Debian/Ubuntu's own supported mechanism for
+  extending a packaged profile — the packaged profile already carries the
+  `#include <local/usr.bin.swtpm>` hook for exactly this) granting the
+  one path FluxVM actually needs; see the file's own header for the
+  two-command install. **This snippet was derived from a real diagnosed
+  failure and the AppArmor profile's own confirmed local-include
+  mechanism, but the fix itself was not live-verified end-to-end in this
+  session** — installing it means editing a host's live security policy,
+  a deliberately different, more sensitive class of change than editing
+  FluxVM's own config file, and wasn't done here without separately
+  checking first. Confirm it resolves the failure on your own host before
+  relying on it in production. A host without AppArmor enforcing (or a
+  distro that doesn't ship a `swtpm` confinement profile at all) is
+  unaffected by any of this.
 - **No attestation/measurement consumption story.** A `tpm: true` VM gets
   a real TPM 2.0 device the guest OS can use (measured boot, BitLocker,
   `tpm2-tools`, etc.) — nothing in FluxVM itself reads PCR values or does
