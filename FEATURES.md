@@ -136,7 +136,8 @@ This mirrors the [maturity caveat](README.md#maturity-whats-real-today) in the R
 | Firecracker jailer (chroot + uid/gid isolation) | seccomp/AppArmor/SELinux policy beyond what Secure Containers guests get |
 | cgroup v2 resource control | Stronger resource quotas at the admission-policy layer |
 | Per-VM network namespaces | — |
-| Bearer-token auth/RBAC on the REST API | Audit logging |
+| Bearer-token auth/RBAC on the REST API | — |
+| Audit logging (`tracing` target `fluxvm_audit`, every authenticated request) | — |
 | SHA-256 verification + Ed25519-signed image catalog | Stronger image provenance beyond catalog signing |
 | `network.mode: "none"` for zero network path out of a guest | — |
 
