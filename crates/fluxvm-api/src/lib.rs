@@ -970,14 +970,22 @@ struct EgressCheckBody {
     host: String,
 }
 
+// Admin-only: a matching host can return `inject_authorization`, a real
+// credential-vault secret (see `fluxvm_network::egress::decide`) -- letting
+// a `read-only` token call this would hand it a secret only an `admin`
+// caller should ever see, contradicting api.md's own "any mutating route
+// ... returns 403 [for read-only]" RBAC contract this route had silently
+// never enforced (no role check of any kind existed here before).
 async fn egress_check(
     State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
     Json(body): Json<EgressCheckBody>,
-) -> Json<serde_json::Value> {
-    Json(json!(fluxvm_network::egress::decide(
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(fluxvm_network::egress::decide(
         &m.cfg.sandbox,
         &body.host
-    )))
+    ))))
 }
 
 async fn egress_nftables() -> impl IntoResponse {
@@ -2649,6 +2657,60 @@ mod tests {
             assert_eq!(
                 request(app, "POST", "/v1/vms", Some("ro"), Some(VALID_CREATE_BODY)).await,
                 StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn readonly_token_cannot_call_egress_check() {
+            // Regression test: egress_check previously had no role check at
+            // all, so a read-only token could call this POST route and get
+            // back a real credential-vault secret (inject_authorization)
+            // that only an admin caller should ever see.
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/egress/check",
+                    Some("ro"),
+                    Some(r#"{"host":"example.com"}"#),
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn admin_token_can_call_egress_check() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "admin".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/egress/check",
+                    Some("admin"),
+                    Some(r#"{"host":"example.com"}"#),
+                )
+                .await,
+                StatusCode::OK
             );
         }
 

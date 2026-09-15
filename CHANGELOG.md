@@ -2,6 +2,20 @@
 
 ## 0.4.0 (unreleased)
 
+### Fixed
+- **`POST /v1/egress/check` had no role check at all** — every other mutating
+  route calls `require_admin`, but this one never did, so a `read-only`
+  bearer token could call it directly and get back a real secret: when the
+  checked host matches a configured `[sandbox] credential_vault` entry, the
+  response includes that entry's plaintext `inject_authorization` value,
+  which only an `admin` caller should ever see. Found by auditing every
+  mutating route in `fluxvm-api::router` for a `require_admin` call — this
+  was the only one missing it. Now returns 403 for `read-only` tokens,
+  matching `docs/api.md`'s own documented RBAC contract ("any mutating
+  route ... returns 403"). 2 new tests
+  (`readonly_token_cannot_call_egress_check`/
+  `admin_token_can_call_egress_check`).
+
 ### Added
 - **REST API rate limiting** — `auth.rate_limit_rps`/`auth.rate_limit_burst`
   (opt-in, both must be set together). Closes a real gap: `fluxvm-api`

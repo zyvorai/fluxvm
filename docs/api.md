@@ -119,6 +119,11 @@ route except `GET /healthz` and `GET /readyz` (liveness vs readiness). Absent or
 - `read-only` — any `GET` route (`/v1/vms`, `/v1/vms/{uuid}`, `/metrics`, `/frozen`, `/stats`,
   `/pressure`, pool list/get) only; any mutating route (including `resources`/`hotplug`/`freeze`/`thaw`) returns 403.
 
+`POST /v1/egress/check` is admin-only despite looking like a read-only diagnostic: a host that
+matches a configured `[sandbox] credential_vault` entry gets its `inject_authorization` secret
+echoed back in the response, so a `read-only` token must not be able to call it (it previously
+could — see CHANGELOG).
+
 Optional per-token `tenant` is authoritative on create (inherited when the body omits it;
 mismatch → 403) and scopes list/get/mutate to that tenant.
 List with `GET /v1/vms?tenant=acme`. Reserved keys `auth.oidc_issuer` /
