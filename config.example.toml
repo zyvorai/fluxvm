@@ -134,6 +134,14 @@ reaper_interval_secs = 5
 # OIDC: accept IdP JWTs (discovery + JWKS) in addition to static tokens:
 # oidc_issuer = "https://login.example.com/"
 # oidc_audience = "fluxvm"
+# REST API rate limiting: both fields must be set together, or neither
+# applies. Keyed by authenticated caller (token name, OIDC subject, mTLS
+# cert CN, or "anonymous-admin" on an unauthenticated loopback deployment)
+# -- a burst of rate_limit_burst requests is allowed instantly, refilling
+# at rate_limit_rps requests/second after that. Absent by default: no
+# rate limiting at all.
+# rate_limit_rps = 20
+# rate_limit_burst = 40
 # [[auth.tokens]]
 # token = "REPLACE_ME_ADMIN_TOKEN"
 # role = "admin"

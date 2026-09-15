@@ -449,6 +449,21 @@ pub struct AuthConfig {
     pub oidc_issuer: Option<String>,
     #[serde(default)]
     pub oidc_audience: Option<String>,
+    /// Opt-in REST API request rate limit: average requests/second allowed
+    /// per caller before `fluxvm-api` starts returning 429. Both this and
+    /// `rate_limit_burst` must be set together (validated at serve-time) --
+    /// `None` (the default) means no rate limiting at all, byte-for-byte
+    /// the behavior before this existed. Keyed by authenticated token/OIDC
+    /// actor name when the request carries one, falling back to remote IP
+    /// for an anonymous caller on a loopback listener with no credentials
+    /// configured -- see `fluxvm-api`'s `rate_limit_middleware`.
+    #[serde(default)]
+    pub rate_limit_rps: Option<f64>,
+    /// Burst size (tokens) paired with `rate_limit_rps` -- a caller can
+    /// spend up to this many requests instantly before the average-rate
+    /// limit starts throttling them.
+    #[serde(default)]
+    pub rate_limit_burst: Option<u32>,
 }
 
 impl AuthConfig {
@@ -456,6 +471,17 @@ impl AuthConfig {
     pub fn oidc_enabled(&self) -> bool {
         self.oidc_issuer.as_ref().is_some_and(|s| !s.is_empty())
             && self.oidc_audience.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Rate limiting is enabled only when both `rate_limit_rps` and
+    /// `rate_limit_burst` are set to a positive value -- mirrors
+    /// `oidc_enabled`'s "both fields or neither" shape. Returns the
+    /// resolved `(rps, burst)` pair when enabled.
+    pub fn rate_limit_enabled(&self) -> Option<(f64, u32)> {
+        match (self.rate_limit_rps, self.rate_limit_burst) {
+            (Some(rps), Some(burst)) if rps > 0.0 && burst > 0 => Some((rps, burst)),
+            _ => None,
+        }
     }
 
     /// Fail closed when explicitly required, or when binding off-loopback

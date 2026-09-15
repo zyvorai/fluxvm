@@ -20,10 +20,12 @@ use serde::Deserialize;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod oidc;
+mod rate_limit;
 
 #[derive(Clone)]
 struct AuthState {
@@ -205,6 +207,54 @@ async fn tenant_guard_middleware(
     next.run(req).await
 }
 
+/// Rejects a request with 429 (`Retry-After` set) once its authenticated
+/// caller has exceeded `Limiter`'s configured rate -- runs after
+/// `auth_middleware` so `AuditActor` is present for every request this
+/// middleware actually rate-limits. Explicitly bypasses `/healthz`/
+/// `/readyz` itself: `auth_middleware` only skips resolving an identity
+/// for those two paths, it still calls `next.run` and lets them reach
+/// every layer below it -- without this bypass they'd all share one
+/// `"unknown"` bucket here, and a caller's own throttling could starve
+/// its own liveness/readiness probes. Keyed by the same actor identity
+/// `audit_log` already records -- a static token's name, an OIDC
+/// subject, an mTLS cert CN, or `"anonymous-admin"` on an unauthenticated
+/// loopback deployment -- so distinct real callers behind a shared
+/// token/identity share one bucket by design, the same way `audit_log`
+/// already attributes them as one actor.
+async fn rate_limit_middleware(
+    State(limiter): State<Arc<rate_limit::Limiter>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    // /healthz and /readyz reach every layer below auth_middleware too --
+    // it only skips *resolving an identity* for them, then still calls
+    // `next.run(req)` -- so without this explicit check they'd all share
+    // one "unknown" bucket here and a real caller's own throttling could
+    // starve its own liveness/readiness probes. Caught by
+    // healthz_is_never_rate_limited failing before this check existed.
+    let path = req.uri().path();
+    if path == "/healthz" || path == "/readyz" {
+        return next.run(req).await;
+    }
+    let key = req
+        .extensions()
+        .get::<AuditActor>()
+        .map(|a| a.0.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    match limiter.allow(&key) {
+        Ok(()) => next.run(req).await,
+        Err(retry_after) => {
+            tracing::warn!(actor = %key, "fluxvm-api rate limited");
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, (retry_after.as_secs() + 1).to_string())],
+                Json(json!({"error": "too many requests; try again later"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 fn audit_log(actor: &str, role: Role, method: &Method, path: &str, status: u16) {
     let role = match role {
         Role::Admin => "admin",
@@ -230,7 +280,7 @@ fn require_admin(role: Role) -> ApiResult<()> {
 
 pub fn router(manager: Arc<VmManager>) -> Router {
     let oidc = build_oidc(&manager.cfg.auth);
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
@@ -456,7 +506,17 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,
-        ))
+        ));
+    // Between tenant_guard (innermost) and auth (below): runs after auth
+    // has resolved an AuditActor, before tenant scoping -- see
+    // rate_limit_middleware's own doc comment.
+    if let Some(limiter) = build_rate_limiter(&manager.cfg.auth) {
+        router = router.layer(middleware::from_fn_with_state(
+            limiter,
+            rate_limit_middleware,
+        ));
+    }
+    router
         .layer(middleware::from_fn_with_state(
             AuthState {
                 manager: manager.clone(),
@@ -466,6 +526,42 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(manager)
+}
+
+/// Builds the REST API rate limiter from `auth.rate_limit_rps`/
+/// `.rate_limit_burst` when both are set (`None` = no rate limiting,
+/// byte-for-byte the behavior before this existed) -- mirrors
+/// `build_oidc`'s own "both fields or neither, warn on a half-set pair"
+/// shape.
+fn build_rate_limiter(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<rate_limit::Limiter>> {
+    match cfg.rate_limit_enabled() {
+        Some((rps, burst)) => {
+            let limiter = Arc::new(rate_limit::Limiter::new(rps, burst));
+            // Bounds memory growth from a long-running process seeing many
+            // distinct actors over its lifetime (every distinct token name
+            // plus, for OIDC, every distinct subject ever seen) -- an idle
+            // key's bucket is dropped 10 minutes after its last request,
+            // long enough that a real caller's own average rate has fully
+            // refilled it anyway.
+            let prune_target = limiter.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(60));
+                loop {
+                    ticker.tick().await;
+                    prune_target.prune(Duration::from_secs(600));
+                }
+            });
+            Some(limiter)
+        }
+        None => {
+            if cfg.rate_limit_rps.is_some() != cfg.rate_limit_burst.is_some() {
+                tracing::warn!(
+                    "auth.rate_limit_rps and auth.rate_limit_burst must both be set — rate limiting disabled"
+                );
+            }
+            None
+        }
+    }
 }
 
 fn build_oidc(cfg: &fluxvm_core::config::AuthConfig) -> Option<Arc<oidc::OidcValidator>> {
@@ -2580,6 +2676,97 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        fn token_auth(rps: f64, burst: u32) -> AuthConfig {
+            AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "alice".into(),
+                        role: Role::Admin,
+                        name: Some("alice".into()),
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "bob".into(),
+                        role: Role::Admin,
+                        name: Some("bob".into()),
+                        tenant: None,
+                    },
+                ],
+                rate_limit_rps: Some(rps),
+                rate_limit_burst: Some(burst),
+                ..Default::default()
+            }
+        }
+
+        #[tokio::test]
+        async fn caller_is_throttled_past_burst_with_retry_after_set() {
+            let app = router(manager(token_auth(1.0, 2)));
+            for _ in 0..2 {
+                assert_eq!(
+                    status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                    StatusCode::OK
+                );
+            }
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/vms")
+                .header(header::AUTHORIZATION, "Bearer alice")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert!(resp.headers().get(header::RETRY_AFTER).is_some());
+        }
+
+        #[tokio::test]
+        async fn distinct_tokens_have_independent_buckets() {
+            let app = router(manager(token_auth(1.0, 1)));
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                StatusCode::OK
+            );
+            // alice's single-token burst is spent -- she's throttled now.
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                StatusCode::TOO_MANY_REQUESTS
+            );
+            // bob has never made a request -- his own bucket is untouched.
+            assert_eq!(
+                status_for(app, "GET", "/v1/vms", Some("bob")).await,
+                StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn healthz_is_never_rate_limited() {
+            let app = router(manager(token_auth(1.0, 1)));
+            for _ in 0..5 {
+                assert_eq!(
+                    status_for(app.clone(), "GET", "/healthz", None).await,
+                    StatusCode::OK
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn unset_config_applies_no_rate_limiting_at_all() {
+            let app = router(manager(AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "alice".into(),
+                    role: Role::Admin,
+                    name: Some("alice".into()),
+                    tenant: None,
+                }],
+                ..Default::default()
+            }));
+            for _ in 0..10 {
+                assert_eq!(
+                    status_for(app.clone(), "GET", "/v1/vms", Some("alice")).await,
+                    StatusCode::OK
+                );
+            }
         }
     }
 }

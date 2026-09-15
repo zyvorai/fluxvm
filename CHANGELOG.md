@@ -3,6 +3,26 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **REST API rate limiting** — `auth.rate_limit_rps`/`auth.rate_limit_burst`
+  (opt-in, both must be set together). Closes a real gap: `fluxvm-api`
+  had no request-volume limiting at all, in either the network-dataplane
+  sense (`[[policy.tenants]]`/per-VM Mbps/PPS limits already exist there)
+  or the control-plane sense — a single caller holding one valid token
+  could issue unbounded requests with nothing to push back. New
+  `fluxvm-api::rate_limit::Limiter`, a small hand-rolled per-key token
+  bucket (no new dependency), keyed by the same actor identity the audit
+  log already attributes a request to (token name, OIDC subject, mTLS
+  cert CN, or `"anonymous-admin"` on an unauthenticated loopback
+  deployment) rather than raw connection volume — two callers sharing
+  one token share one bucket by design. Runs after auth (so every
+  request it sees already carries that identity) and before the
+  per-tenant scope guard, with its own explicit bypass for `/healthz`/
+  `/readyz` (auth only skips resolving an identity for those two, it
+  doesn't stop them reaching the layers below it) so a probe can never
+  be starved by a caller's own throttling. A throttled request gets `429` with
+  `Retry-After` set. Absent by default: no rate limiting at all,
+  byte-for-byte the behavior before this existed. Docs:
+  `docs/operations.md`'s "REST API rate limiting" section.
 - **AppArmor local-include for `swtpm` on Debian/Ubuntu** —
   `packaging/apparmor/usr.bin.swtpm.fluxvm`. Found by actually driving a
   real `fluxvm create` call with `tpm: true` through the compiled binary

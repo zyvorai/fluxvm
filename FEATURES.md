@@ -137,6 +137,7 @@ This mirrors the [maturity caveat](README.md#maturity-whats-real-today) in the R
 | cgroup v2 resource control, per-request `[policy]` caps, and per-tenant aggregate quotas (`[[policy.tenants]]`) | — |
 | Per-VM network namespaces | — |
 | Bearer-token auth/RBAC on the REST API | — |
+| REST API request rate limiting, opt-in (`auth.rate_limit_rps`/`.rate_limit_burst`), keyed per authenticated caller | — |
 | Audit logging (`tracing` target `fluxvm_audit`, every authenticated request) | — |
 | SHA-256 verification + Ed25519-signed image catalog, now covering `distro`/`version`/`arch`/a tamper-evident `signed_at` timestamp and named signer identity (`signed_by`), not just `name`/`source`/`sha256`/`format` | Real build-lineage/CI-provenance recording (which pipeline/run produced this image) -- signing here still only vouches for the catalog entry's own fields, asserted by whoever ran `fluxvm catalog sign` |
 | `network.mode: "none"` for zero network path out of a guest | — |

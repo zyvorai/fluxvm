@@ -401,6 +401,13 @@ async fn main() -> Result<()> {
             } else if cfg.auth.oidc_issuer.is_some() {
                 tracing::warn!("auth.oidc_issuer set without auth.oidc_audience — OIDC disabled");
             }
+            if let Some((rps, burst)) = cfg.auth.rate_limit_enabled() {
+                tracing::info!(rps, burst, "REST API rate limiting enabled");
+            } else if cfg.auth.rate_limit_rps.is_some() != cfg.auth.rate_limit_burst.is_some() {
+                tracing::warn!(
+                    "auth.rate_limit_rps and auth.rate_limit_burst must both be set — rate limiting disabled"
+                );
+            }
             m.start_reaper();
             m.spawn_autopause_loop();
             if !cfg.sandbox.egress_proxy_listen.is_empty() {

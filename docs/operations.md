@@ -214,6 +214,36 @@ counterpart to Kairon's own `MachineQuota` CRD (a sibling project in the same fa
 config-file-based here rather than a separate CRD/API object, matching how every other admission
 control in this project is already shaped (`[policy]`, `[[auth.tokens]]`).
 
+### REST API rate limiting
+
+`[policy]`/`[[policy.tenants]]` above cap what a request may *ask for*; neither caps how *often* one
+caller can ask. Before this existed, `fluxvm-api` had no request-volume limiting at all — a single
+misbehaving script holding one valid token (or hitting an unauthenticated loopback deployment) could
+issue an unbounded number of requests, no different in effect from an external DoS, with nothing in
+the REST layer itself to push back. `auth.rate_limit_rps`/`auth.rate_limit_burst` (both opt-in, must
+be set together) close that gap with a small hand-rolled per-caller token bucket
+(`fluxvm-api::rate_limit`, no new dependency):
+
+```toml
+[auth]
+rate_limit_rps = 20
+rate_limit_burst = 40
+```
+
+Keyed by the same actor identity the audit log already attributes a request to — a static token's
+`name`, an OIDC subject, an mTLS client-cert CN, or `"anonymous-admin"` on an unauthenticated
+loopback deployment with no credentials configured at all — so a caller's bucket tracks the identity
+already established by `auth_middleware`, not raw connection volume; two callers sharing one token
+share one bucket by design, the same way the audit log already attributes them as one actor. Runs
+after auth (so every request it sees already carries that identity) and before the per-tenant scope
+guard, with its own explicit bypass for `GET /healthz`/`GET /readyz` (auth only skips resolving an
+identity for those two, it doesn't stop them reaching the layers below it), so a liveness/readiness
+probe can never be starved by a caller's own throttling. A throttled request gets
+`429 Too Many Requests` with `Retry-After` set. Absent by default (both fields unset): no rate
+limiting at all, byte-for-byte the behavior before this existed. The admission-side checks above stay
+separate and unaffected either way — this only bounds request frequency, never what a single request
+is allowed to contain.
+
 ## Pause, resume, and exec
 
 ```bash
