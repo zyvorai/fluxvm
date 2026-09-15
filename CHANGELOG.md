@@ -3,6 +3,22 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Per-tenant aggregate admission quotas** — `[[policy.tenants]]`
+  (`tenant`, `max_vcpus_total`, `max_memory_mib_total`, `max_vms_total`),
+  summed across every existing VM a tenant already owns plus the incoming
+  request, matched against `CreateVmRequest.tenant` (already authoritative
+  by the time `fluxvm-scheduler` sees it — resolved by `fluxvm-api` from
+  `[[auth.tokens]]`'s own `tenant` field or an OIDC claim). Closes a real
+  gap: `[policy]`'s existing fields (`max_vcpus`, `max_memory_mib`, etc.)
+  only ever validate one incoming request in isolation, with no way to cap
+  how much a tenant accumulates across many VMs over time. New
+  `fluxvm-scheduler::validate_tenant_policy`, called from `VmManager::create`
+  right after the existing per-request `validate_policy`, only when the
+  request has a `tenant` set and at least one `[[policy.tenants]]` entry
+  exists — a full `Store::list()` scan is skipped entirely otherwise, so
+  hosts that don't use this pay nothing extra per create. The aggregate,
+  fleet-wide counterpart to Kairon's own `MachineQuota` CRD (a sibling
+  project). 6 new unit tests. Docs: `docs/operations.md`'s "Policy" section.
 - **UEFI Secure Boot (QEMU) + emulated vTPM 2.0 (QEMU and Cloud
   Hypervisor)** — `CreateVmRequest.secure_boot`/`.tpm`, with deliberately
   different scope per field: `tpm` works on both backends, `secure_boot`

@@ -110,6 +110,18 @@ reaper_interval_secs = 5
 # allowed_image_dirs = ["/var/lib/fluxvm/images"]
 # allowed_network_modes = ["none", "user", "tap"]
 # allow_extra_args = false
+#
+# Aggregate per-tenant caps (summed across every existing VM that tenant
+# already owns, plus the incoming request) -- a different kind of check
+# from the per-request fields above, matched against CreateVmRequest.tenant
+# (itself resolved authoritatively from [[auth.tokens]]'s own tenant field
+# or an OIDC claim -- see [auth] below). A tenant with no entry here is
+# unrestricted by this mechanism. See docs/ for the full writeup.
+# [[policy.tenants]]
+# tenant = "acme"
+# max_vcpus_total = 32
+# max_memory_mib_total = 131072
+# max_vms_total = 20
 
 # REST API bearer-token auth/RBAC. Absent or empty -> auth is off on
 # loopback only. Non-loopback listen with empty tokens fails at serve-time.

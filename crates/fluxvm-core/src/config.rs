@@ -530,6 +530,40 @@ pub struct Policy {
     /// When false (default), non-empty `extra_args` is rejected.
     #[serde(default)]
     pub allow_extra_args: bool,
+    /// Per-tenant aggregate caps, keyed by `CreateVmRequest.tenant` --
+    /// `[[policy.tenants]]`, the same array-of-tables-with-a-keying-field
+    /// shape `[[auth.tokens]]` already uses (`ApiToken.tenant`), rather
+    /// than a `HashMap<String, _>`-keyed TOML table, which has no
+    /// precedent elsewhere in this config. Unlike the rest of `Policy`
+    /// above (all per-request-only checks against one incoming request in
+    /// isolation), these are aggregate: summed across every existing VM
+    /// already belonging to that tenant plus the incoming request. A
+    /// tenant with no matching entry here is unrestricted by this
+    /// mechanism (still subject to every global `Policy` field above,
+    /// unchanged).
+    #[serde(default)]
+    pub tenants: Vec<TenantPolicy>,
+}
+
+/// One tenant's aggregate admission caps -- see `Policy::tenants`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TenantPolicy {
+    /// Matched against `CreateVmRequest.tenant` (already authoritative by
+    /// the time `fluxvm-scheduler` sees it -- resolved once, at request
+    /// entry, from `[[auth.tokens]]`'s own `tenant` field or an OIDC
+    /// claim; see `fluxvm-api`'s `auth_middleware`/`create_vm`).
+    pub tenant: String,
+    /// Total vCPUs across every `Running`/`Creating`/etc. VM this tenant
+    /// already owns, plus the incoming request's own `vcpus` -- rejected
+    /// if that sum would exceed this.
+    #[serde(default)]
+    pub max_vcpus_total: Option<u32>,
+    /// Same shape as `max_vcpus_total`, for `memory_mib`.
+    #[serde(default)]
+    pub max_memory_mib_total: Option<u64>,
+    /// Maximum number of VMs (any status) this tenant may own at once.
+    #[serde(default)]
+    pub max_vms_total: Option<usize>,
 }
 
 impl Config {

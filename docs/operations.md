@@ -188,6 +188,32 @@ path-prefix check — good enough to stop a tenant pointing `image` at an arbitr
 symlink-resistant sandboxing boundary. Verified against a real config on real hardware: all five
 cases (four rejections, one compliant create that actually boots) behave as documented.
 
+### Per-tenant aggregate quotas
+
+Everything above is a **per-request** check — it validates the one incoming `CreateVmRequest` in
+isolation, never looking at what else already exists. `[[policy.tenants]]` is different: an
+**aggregate** cap, summed across every existing VM a tenant already owns plus the incoming request,
+matched against `CreateVmRequest.tenant` (itself resolved authoritatively by `fluxvm-api` from
+`[[auth.tokens]]`'s own `tenant` field or an OIDC claim before `fluxvm-scheduler` ever sees the
+request — see `SECURITY.md`'s "per-token / OIDC `tenant` is authoritative" note):
+
+```toml
+[[policy.tenants]]
+tenant = "acme"
+max_vcpus_total = 32
+max_memory_mib_total = 131072
+max_vms_total = 20
+```
+
+A tenant with no matching entry is unrestricted by this mechanism (still subject to every
+per-request `[policy]` field above, unchanged). Checked right after the per-request `[policy]`
+check, only when the request actually has a `tenant` set and at least one `[[policy.tenants]]`
+entry exists at all — a full `Store::list()` scan is skipped entirely otherwise, so hosts that
+don't use per-tenant quotas pay nothing extra per create. This is the aggregate, fleet-wide
+counterpart to Kairon's own `MachineQuota` CRD (a sibling project in the same family) — deliberately
+config-file-based here rather than a separate CRD/API object, matching how every other admission
+control in this project is already shaped (`[policy]`, `[[auth.tokens]]`).
+
 ## Pause, resume, and exec
 
 ```bash

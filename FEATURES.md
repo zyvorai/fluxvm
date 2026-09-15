@@ -134,7 +134,7 @@ This mirrors the [maturity caveat](README.md#maturity-whats-real-today) in the R
 | Implemented today | Still open before untrusted multi-tenant use |
 |---|---|
 | Firecracker jailer (chroot + uid/gid isolation) | seccomp/AppArmor/SELinux policy beyond what Secure Containers guests get |
-| cgroup v2 resource control | Stronger resource quotas at the admission-policy layer |
+| cgroup v2 resource control, per-request `[policy]` caps, and per-tenant aggregate quotas (`[[policy.tenants]]`) | — |
 | Per-VM network namespaces | — |
 | Bearer-token auth/RBAC on the REST API | — |
 | Audit logging (`tracing` target `fluxvm_audit`, every authenticated request) | — |

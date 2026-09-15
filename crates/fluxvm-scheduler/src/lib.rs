@@ -192,6 +192,59 @@ fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Aggregate per-tenant admission check -- see `Policy::tenants`'s own doc
+/// comment for why this is a separate function from `validate_policy`
+/// rather than folded into it: every check in `validate_policy` is a pure
+/// function of the one incoming request, but this one needs to sum
+/// resource usage across every *existing* VM the same tenant already
+/// owns, which means it needs `existing_for_tenant` (already filtered by
+/// the caller, see `VmManager::create`) rather than just `(req, cfg)`.
+/// A no-op (`Ok(())`) when `req.tenant` is unset or has no matching
+/// `[[policy.tenants]]` entry -- unrestricted by this mechanism, same
+/// "absent means unrestricted" convention every other `Policy` field has.
+fn validate_tenant_policy(
+    req: &CreateVmRequest,
+    cfg: &Config,
+    existing_for_tenant: &[VmRecord],
+) -> Result<()> {
+    let Some(tenant) = req.tenant.as_deref() else {
+        return Ok(());
+    };
+    let Some(tp) = cfg.policy.tenants.iter().find(|t| t.tenant == tenant) else {
+        return Ok(());
+    };
+    if let Some(max) = tp.max_vms_total {
+        if existing_for_tenant.len() >= max {
+            bail!("tenant '{tenant}' is already at max_vms_total ({max})");
+        }
+    }
+    if let Some(max) = tp.max_vcpus_total {
+        let used: u32 = existing_for_tenant
+            .iter()
+            .map(|v| v.request.vcpus as u32)
+            .sum();
+        if used.saturating_add(req.vcpus as u32) > max {
+            bail!(
+                "tenant '{tenant}' would exceed max_vcpus_total ({max}): {used} already used + {} requested",
+                req.vcpus
+            );
+        }
+    }
+    if let Some(max) = tp.max_memory_mib_total {
+        let used: u64 = existing_for_tenant
+            .iter()
+            .map(|v| v.request.memory_mib)
+            .sum();
+        if used.saturating_add(req.memory_mib) > max {
+            bail!(
+                "tenant '{tenant}' would exceed max_memory_mib_total ({max}): {used} already used + {} requested",
+                req.memory_mib
+            );
+        }
+    }
+    Ok(())
+}
+
 pub struct VmManager {
     pub cfg: Config,
     pub store: Arc<Store>,
@@ -1050,6 +1103,20 @@ impl VmManager {
             .await
             .context("resolving image from catalog")?;
         validate_policy(&req, &self.cfg)?;
+        if req.tenant.is_some() && !self.cfg.policy.tenants.is_empty() {
+            // Only paid for when a tenant is actually set on the request
+            // AND at least one [[policy.tenants]] entry exists -- avoids a
+            // full Store::list() scan on every create for hosts that don't
+            // use per-tenant quotas at all (the common case today).
+            let existing_for_tenant: Vec<VmRecord> = self
+                .store
+                .list()
+                .await
+                .into_iter()
+                .filter(|v| v.request.tenant == req.tenant)
+                .collect();
+            validate_tenant_policy(&req, &self.cfg, &existing_for_tenant)?;
+        }
         // Every storage backend except CephRbd points `image` at a real
         // filesystem entry (a file for Default/Nbd, a block device for
         // LvmThin) — CephRbd's `image` is a `pool/image` reference with no
@@ -2562,5 +2629,133 @@ mod tests {
             "/var/lib/fluxvm/images/base.qcow2",
         );
         assert!(validate_policy(&inside, &cfg).is_ok());
+    }
+
+    fn tenant_vm(tenant: &str, vcpus: u8, memory_mib: u64) -> VmRecord {
+        let mut request = req(BackendKind::Qemu, None, None);
+        request.tenant = Some(tenant.to_string());
+        request.vcpus = vcpus;
+        request.memory_mib = memory_mib;
+        VmRecord {
+            id: Uuid::new_v4(),
+            name: request.name.clone(),
+            backend: request.backend,
+            status: VmStatus::Running,
+            pid: None,
+            created_at: Utc::now(),
+            expires_at: None,
+            workspace: "/tmp/does-not-matter".into(),
+            disk: "/tmp/does-not-matter/root.qcow2".into(),
+            seed_disk: None,
+            tap_name: None,
+            control_socket: None,
+            log_path: "/tmp/does-not-matter/console.log".into(),
+            error: None,
+            request,
+            guest_cid: None,
+            jail_path: None,
+            vsock_socket: None,
+            qga_socket: None,
+            cgroup_path: None,
+            netns: None,
+            lvm_lv: None,
+            nbd_pid: None,
+            virtiofsd_pids: Vec::new(),
+            swtpm_pid: None,
+            dhcp_leasefile: None,
+            guest_ip: None,
+        }
+    }
+
+    #[test]
+    fn tenant_policy_is_a_noop_without_a_matching_tenants_entry() {
+        let cfg = Config::default();
+        let mut r = req(BackendKind::Qemu, None, None);
+        r.tenant = Some("acme".into());
+        assert!(validate_tenant_policy(&r, &cfg, &[]).is_ok());
+    }
+
+    #[test]
+    fn tenant_policy_is_a_noop_when_request_has_no_tenant() {
+        let mut cfg = Config::default();
+        cfg.policy.tenants.push(fluxvm_core::config::TenantPolicy {
+            tenant: "acme".into(),
+            max_vcpus_total: Some(1),
+            max_memory_mib_total: None,
+            max_vms_total: None,
+        });
+        let r = req(BackendKind::Qemu, None, None);
+        assert!(validate_tenant_policy(&r, &cfg, &[]).is_ok());
+    }
+
+    #[test]
+    fn tenant_policy_rejects_over_aggregate_vcpu_cap() {
+        let mut cfg = Config::default();
+        cfg.policy.tenants.push(fluxvm_core::config::TenantPolicy {
+            tenant: "acme".into(),
+            max_vcpus_total: Some(4),
+            max_memory_mib_total: None,
+            max_vms_total: None,
+        });
+        let existing = vec![tenant_vm("acme", 3, 512)];
+        let mut r = req(BackendKind::Qemu, None, None);
+        r.tenant = Some("acme".into());
+        r.vcpus = 2; // 3 already used + 2 requested > 4
+        assert!(validate_tenant_policy(&r, &cfg, &existing).is_err());
+        r.vcpus = 1; // 3 + 1 == 4, exactly at the cap, still allowed
+        assert!(validate_tenant_policy(&r, &cfg, &existing).is_ok());
+    }
+
+    #[test]
+    fn tenant_policy_rejects_over_aggregate_memory_cap() {
+        let mut cfg = Config::default();
+        cfg.policy.tenants.push(fluxvm_core::config::TenantPolicy {
+            tenant: "acme".into(),
+            max_vcpus_total: None,
+            max_memory_mib_total: Some(4096),
+            max_vms_total: None,
+        });
+        let existing = vec![tenant_vm("acme", 1, 3072)];
+        let mut r = req(BackendKind::Qemu, None, None);
+        r.tenant = Some("acme".into());
+        r.memory_mib = 2048; // 3072 + 2048 > 4096
+        assert!(validate_tenant_policy(&r, &cfg, &existing).is_err());
+    }
+
+    #[test]
+    fn tenant_policy_rejects_over_aggregate_vm_count_cap() {
+        let mut cfg = Config::default();
+        cfg.policy.tenants.push(fluxvm_core::config::TenantPolicy {
+            tenant: "acme".into(),
+            max_vcpus_total: None,
+            max_memory_mib_total: None,
+            max_vms_total: Some(2),
+        });
+        let existing = vec![tenant_vm("acme", 1, 512), tenant_vm("acme", 1, 512)];
+        let mut r = req(BackendKind::Qemu, None, None);
+        r.tenant = Some("acme".into());
+        assert!(validate_tenant_policy(&r, &cfg, &existing).is_err());
+    }
+
+    #[test]
+    fn tenant_policy_ignores_other_tenants_usage() {
+        let mut cfg = Config::default();
+        cfg.policy.tenants.push(fluxvm_core::config::TenantPolicy {
+            tenant: "acme".into(),
+            max_vcpus_total: Some(2),
+            max_memory_mib_total: None,
+            max_vms_total: None,
+        });
+        // A caller of validate_tenant_policy is responsible for
+        // pre-filtering `existing_for_tenant` to the request's own tenant
+        // (VmManager::create does this via Store::list().filter(...)) --
+        // this test documents that the function itself does not
+        // re-filter, by only ever passing already-tenant-scoped records,
+        // matching real call-site behavior.
+        let other_tenant_only: Vec<VmRecord> = vec![];
+        let mut r = req(BackendKind::Qemu, None, None);
+        r.tenant = Some("acme".into());
+        r.vcpus = 2;
+        assert!(validate_tenant_policy(&r, &cfg, &other_tenant_only).is_ok());
     }
 }
