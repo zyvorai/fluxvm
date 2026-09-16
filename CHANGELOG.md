@@ -96,6 +96,41 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`GuestImage.spec.kernel` now actually reaches the VM it boots** — the
+  field has existed on `GuestImageSpec` since `GuestImage` was introduced
+  (`docs/microvm.md` already documented it as an "optional ... `kernel`"),
+  but nothing downstream ever read it: `images::guest_image_host_path` only
+  ever surfaced the disk image, `fluxvm_client::create_body` never emitted a
+  `"kernel"` key in the `POST /v1/vms` body, and `MicroVMSpec` itself has no
+  `kernel` field to carry one — so a GuestImage catalogued for Firecracker's
+  direct-kernel boot silently had no way to actually get its kernel to the
+  VM it named. `CreateVmRequest.kernel` (`fluxvm-core`) and the scheduler's
+  own Firecracker-eligibility check (`req.kernel.is_some()`) were already
+  real and load-bearing on the `fluxvm serve` side — the microvm CRD layer
+  was the missing link. Wired now: `guest_images::reconcile` verifies
+  `spec.kernel` is present on the node (same fail-closed contract as
+  `spec.sha256` above — a GuestImage naming a kernel that isn't staged is
+  never marked Ready, never launches a guest with no kernel or a stale one
+  reused from a same-named entry) and records the confirmed path in a new
+  `status.kernelPath`. `node_agent::resolve_image` now resolves both the
+  disk path and `status.kernelPath` from the same GuestImage lookup, and
+  `FluxVMClient::create_vm`/`create_body` take an added `kernel: Option<&str>`
+  forwarded straight onto the create request. Warm-pool templates
+  (`pools::reconcile` → `ensure_pool`) are unaffected — they don't resolve
+  the GuestImage catalog for their `image` field either, so pool templates
+  must still name a direct disk image, matching existing behavior. 9 new
+  unit tests (`guest_images::resolve_kernel`, `images::guest_image_kernel_path`,
+  `fluxvm_client::resolved_kernel_is_forwarded`). Docs:
+  [docs/microvm.md](docs/microvm.md#guestimage),
+  [docs/tutorials/microvm/05-guestimage.md](docs/tutorials/microvm/05-guestimage.md)
+  (new "catalog a direct-kernel-boot image" section). Verified with `cargo
+  build`/`cargo test`/`cargo clippy --no-deps`/`cargo fmt --check` on macOS
+  and the real Linux build host — no live Firecracker guest was booted
+  end-to-end to confirm the forwarded `kernel` path actually produces a
+  working direct-kernel boot; that's a hardware/root capability this
+  environment doesn't have, so it's verified by code inspection of the
+  already-existing `fluxvm-core`/scheduler kernel handling plus these unit
+  tests, not a live run.
 - **`GuestImage.spec.sha256` is now actually verified** — the field has
   existed on `GuestImageSpec` since `GuestImage` was introduced (`docs/microvm.md`
   already documented it as an "optional `sha256`"), but nothing in

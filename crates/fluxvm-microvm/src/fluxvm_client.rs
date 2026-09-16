@@ -34,8 +34,13 @@ impl FluxVMClient {
         }
     }
 
-    pub async fn create_vm(&self, name: &str, spec: &MicroVMSpec) -> Result<Value> {
-        let body = create_body(name, spec)?;
+    pub async fn create_vm(
+        &self,
+        name: &str,
+        spec: &MicroVMSpec,
+        kernel: Option<&str>,
+    ) -> Result<Value> {
+        let body = create_body(name, spec, kernel)?;
         let resp = self
             .request(reqwest::Method::POST, "/v1/vms")
             .json(&body)
@@ -96,7 +101,10 @@ impl FluxVMClient {
         size: usize,
         template: &MicroVMSpec,
     ) -> Result<Value> {
-        let tmpl = create_body(&format!("{name}-tmpl"), template)?;
+        // Warm-pool templates aren't resolved against the GuestImage catalog
+        // (see `pools::reconcile`), so there's no verified kernel path to
+        // forward here -- pool templates must name a direct disk image.
+        let tmpl = create_body(&format!("{name}-tmpl"), template, None)?;
         let body = json!({"name": name, "size": size, "template": tmpl});
         let resp = self
             .request(reqwest::Method::POST, "/v1/pools")
@@ -144,7 +152,13 @@ impl FluxVMClient {
     }
 }
 
-pub fn create_body(name: &str, spec: &MicroVMSpec) -> Result<Value> {
+/// Build the `POST /v1/vms` (or pool-template) body from a `MicroVMSpec`.
+/// `kernel`, when given, is the GuestImage-resolved host path for
+/// direct-kernel boot (see `node_agent::resolve_image` /
+/// `images::guest_image_kernel_path`) -- `MicroVMSpec` itself carries no
+/// kernel field, since a kernel only ever comes from the catalog entry
+/// `spec.image` names, never from the MicroVM spec directly.
+pub fn create_body(name: &str, spec: &MicroVMSpec, kernel: Option<&str>) -> Result<Value> {
     let network = match spec.network_mode.as_str() {
         "none" => json!({"mode": "none"}),
         "user" => json!({"mode": "user", "forwards": []}),
@@ -160,7 +174,7 @@ pub fn create_body(name: &str, spec: &MicroVMSpec) -> Result<Value> {
         }
         other => bail!("network_mode '{other}' is not supported"),
     };
-    Ok(json!({
+    let mut body = json!({
         "name": name,
         "backend": spec.backend,
         "image": spec.image,
@@ -171,7 +185,11 @@ pub fn create_body(name: &str, spec: &MicroVMSpec) -> Result<Value> {
         "storage": spec.storage,
         "ttl_seconds": spec.ttl_seconds,
         "agent": { "enabled": spec.command.is_some() },
-    }))
+    });
+    if let Some(k) = kernel {
+        body["kernel"] = json!(k);
+    }
+    Ok(body)
 }
 
 pub fn record_id(record: &Value) -> Option<String> {
@@ -230,18 +248,24 @@ mod tests {
     }
     #[test]
     fn tap_netns_body() {
-        let body = create_body("mvm-ci", &spec()).unwrap();
+        let body = create_body("mvm-ci", &spec(), None).unwrap();
         assert_eq!(body["backend"], "firecracker");
         assert_eq!(body["network"]["mode"], "tap");
         assert_eq!(body["network"]["netns"], true);
         assert_eq!(body["agent"]["enabled"], true);
+        assert!(body.get("kernel").is_none());
     }
     #[test]
     fn macvtap_requires_parent() {
         let mut s = spec();
         s.network_mode = "macvtap".into();
         s.parent = None;
-        assert!(create_body("x", &s).is_err());
+        assert!(create_body("x", &s, None).is_err());
+    }
+    #[test]
+    fn resolved_kernel_is_forwarded() {
+        let body = create_body("mvm-ci", &spec(), Some("/boot/vmlinux")).unwrap();
+        assert_eq!(body["kernel"], "/boot/vmlinux");
     }
     #[test]
     fn record_helpers() {

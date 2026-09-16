@@ -217,6 +217,11 @@ pub struct GuestImageSpec {
     pub sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
+    /// Host path to a kernel image (e.g. a `vmlinux`) for Firecracker-style
+    /// direct-kernel boot. Verified present on the node before this catalog
+    /// entry is marked Ready, then forwarded as `CreateVmRequest.kernel` for
+    /// every MicroVM that names this GuestImage — see `guest_images.rs` and
+    /// `node_agent::resolve_image`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel: Option<String>,
 }
@@ -236,6 +241,12 @@ pub struct GuestImageStatus {
     /// Empty whenever `spec.sha256` is unset or the last check failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_signature: Option<String>,
+    /// Host path of `spec.kernel`, set only once its presence on this node
+    /// has been confirmed. Empty whenever `spec.kernel` is unset or the
+    /// file could not be found -- consumers must never fall back to
+    /// launching without the kernel a catalog entry named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_path: Option<String>,
 }
 
 pub const FINALIZER: &str = "microvm.fluxvm.zyvor.io/runtime";

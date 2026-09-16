@@ -17,6 +17,15 @@
 //! reconciler's own async task (no `spawn_blocking`), matching this
 //! module's existing synchronous `fs` use; that first hash is a one-time
 //! blocking cost per staged file, not a per-tick one.
+//!
+//! When `spec.kernel` is set (a direct-kernel-boot image, e.g. Firecracker's
+//! `vmlinux`), its presence on this node is confirmed the same way before
+//! Ready flips true, and the verified path is recorded in
+//! `status.kernelPath` for `node_agent::resolve_image` to forward into every
+//! MicroVM's create request. A GuestImage that names a kernel but doesn't
+//! have one staged must never be marked Ready — that would let a MicroVM
+//! boot with no kernel at all, or with a stale one from a previous entry
+//! reusing the same name (fail closed, same as the sha256 check above).
 
 use crate::crd::{GuestImage, GuestImageStatus};
 use crate::images::local_source_ready;
@@ -64,26 +73,40 @@ pub async fn run(client: Client) {
 async fn reconcile(obj: Arc<GuestImage>, client: Arc<Client>) -> Result<Action, Error> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let api: Api<GuestImage> = Api::namespaced(client.as_ref().clone(), &ns);
-    let (ready, path, message, verified_signature) = match local_source_ready(&obj.spec.source) {
-        Some(p) => verify_staged_file(
-            &p,
-            obj.spec.sha256.as_deref(),
-            obj.status
-                .as_ref()
-                .and_then(|s| s.verified_signature.as_deref()),
-        ),
-        None => (
-            false,
-            None,
-            Some("stage this file on the node with GuestKit (no CDI pull)".into()),
-            None,
-        ),
+    let (mut ready, path, mut message, verified_signature) =
+        match local_source_ready(&obj.spec.source) {
+            Some(p) => verify_staged_file(
+                &p,
+                obj.spec.sha256.as_deref(),
+                obj.status
+                    .as_ref()
+                    .and_then(|s| s.verified_signature.as_deref()),
+            ),
+            None => (
+                false,
+                None,
+                Some("stage this file on the node with GuestKit (no CDI pull)".into()),
+                None,
+            ),
+        };
+    let kernel_path = if ready {
+        match resolve_kernel(obj.spec.kernel.as_deref()) {
+            Ok(kp) => kp,
+            Err(e) => {
+                ready = false;
+                message = Some(e);
+                None
+            }
+        }
+    } else {
+        None
     };
     let status = GuestImageStatus {
         ready,
         path,
         message,
         verified_signature,
+        kernel_path,
     };
     api.patch_status(
         &obj.name_any(),
@@ -180,6 +203,22 @@ fn verify_staged_file(
             Some(format!("failed to hash staged file: {e}")),
             None,
         ),
+    }
+}
+
+/// Resolve `spec.kernel`: `Ok(None)` when unset (nothing to verify, the
+/// catalog entry has no direct-kernel-boot image), `Ok(Some(path))` once the
+/// file is confirmed present on this node, `Err(reason)` when a kernel was
+/// named but is missing. Trims whitespace and treats an empty string the
+/// same as unset, matching `local_source_ready`'s handling of `spec.source`.
+fn resolve_kernel(kernel: Option<&str>) -> Result<Option<String>, String> {
+    let Some(k) = kernel.map(str::trim).filter(|k| !k.is_empty()) else {
+        return Ok(None);
+    };
+    if Path::new(k).is_file() {
+        Ok(Some(k.to_string()))
+    } else {
+        Err(format!("kernel file not found on node: {k}"))
     }
 }
 
@@ -288,5 +327,40 @@ mod tests {
         );
         assert!(!ready);
         assert!(message.unwrap().starts_with("sha256 mismatch"));
+    }
+
+    #[test]
+    fn unset_kernel_needs_no_verification() {
+        assert_eq!(resolve_kernel(None), Ok(None));
+        assert_eq!(resolve_kernel(Some("")), Ok(None));
+        assert_eq!(resolve_kernel(Some("   ")), Ok(None));
+    }
+
+    #[test]
+    fn present_kernel_resolves_to_its_trimmed_path() {
+        let f = staged(b"fake-vmlinux-bytes");
+        let path = f.path().to_str().unwrap();
+        assert_eq!(resolve_kernel(Some(path)), Ok(Some(path.to_string())));
+        let padded = format!("  {path}  ");
+        assert_eq!(resolve_kernel(Some(&padded)), Ok(Some(path.to_string())));
+    }
+
+    #[test]
+    fn missing_kernel_fails_closed() {
+        let err = resolve_kernel(Some("/no/such/kernel/anywhere")).unwrap_err();
+        assert!(err.contains("kernel file not found"));
+    }
+
+    #[test]
+    fn a_missing_kernel_keeps_the_whole_entry_not_ready() {
+        // Regression guard for the reconcile wiring: a GuestImage whose disk
+        // image is staged and verified but whose named kernel is absent must
+        // not be marked Ready overall -- callers only ever see `status.ready`,
+        // never the per-field detail, so partial readiness would look like
+        // full readiness to `node_agent::resolve_image`.
+        let f = staged(b"golden-image-bytes");
+        let (ready, ..) = verify_staged_file(f.path().to_str().unwrap(), None, None);
+        assert!(ready, "sanity: the disk image alone verifies fine");
+        assert!(resolve_kernel(Some("/no/such/kernel/anywhere")).is_err());
     }
 }

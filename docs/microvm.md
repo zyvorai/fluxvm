@@ -202,6 +202,20 @@ recomputed when the file's size/mtime changes (cached in
 `status.verifiedSignature`), so a large disk image is hashed once, not on
 every 30s reconcile.
 
+When `spec.kernel` is set — a host path to a `vmlinux`-style kernel for
+Firecracker's direct-kernel boot — its presence on the node is confirmed the
+same way before `status.ready` flips true, and the confirmed path is
+recorded in `status.kernelPath`. Every `MicroVM` that resolves its
+`spec.image` to this catalog entry gets `status.kernelPath` forwarded as
+`kernel` on the underlying `fluxvm serve` create request automatically —
+there's nothing to set on the `MicroVM` itself. A GuestImage that names a
+kernel but doesn't have one staged is never marked Ready (fail closed): a
+missing kernel must block the whole catalog entry, not launch a Firecracker
+guest with no kernel or a stale one left over from a previous entry with
+the same name. `spec.kernel` is unused by backends that boot straight off
+the disk image (QEMU, Cloud Hypervisor with firmware) — leave it unset for
+those.
+
 `MicroVM.spec.image` may be:
 
 - a direct path / URL / `*.qcow2|raw|ext4|img` name (used as-is), or

@@ -67,7 +67,38 @@ an unverified file. The digest is only recomputed when the staged file's
 size/mtime changes (`status.verifiedSignature` is the cache key), so a large
 image is not re-hashed on every reconcile.
 
-## 4. MicroVM by catalog name
+## 4. Optional: catalog a direct-kernel-boot image
+
+Set `spec.kernel` to a host `vmlinux` path when this catalog entry is meant
+for Firecracker's direct-kernel boot. It's verified present the same way as
+`spec.source`/`spec.sha256` before `status.ready` flips true:
+
+```bash
+KERNEL=/var/lib/fluxvm/kernels/vmlinux-fc   # adjust; must exist on the node
+
+kubectl apply -f - <<EOF
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: GuestImage
+metadata:
+  name: lab-firecracker
+  namespace: default
+spec:
+  source: ${IMG}
+  kernel: ${KERNEL}
+EOF
+
+kubectl get gimg lab-firecracker -o jsonpath='{.status.ready} {.status.kernelPath}{"\n"}'
+```
+
+**Expect:** `true /var/lib/fluxvm/kernels/vmlinux-fc`. A `MicroVM` naming
+`lab-firecracker` gets `status.kernelPath` forwarded automatically as
+`kernel` on the `POST /v1/vms` request — nothing to set on the `MicroVM`
+itself. If `spec.kernel` names a file that isn't actually on the node,
+`status.ready` stays `false` with `status.message: "kernel file not found on
+node: <path>"`, the same fail-closed contract as a `spec.sha256` mismatch: a
+`MicroVM` must never silently launch on Firecracker with no kernel at all.
+
+## 5. MicroVM by catalog name
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -94,11 +125,11 @@ kubectl get mvm from-catalog -w
 
 Direct paths still work (`image: /var/lib/fluxvm/images/...`, `*.qcow2`, URLs).
 
-## 5. Cleanup
+## 6. Cleanup
 
 ```bash
 kubectl delete mvm from-catalog --ignore-not-found
-kubectl delete gimg lab-ubuntu lab-ubuntu-verified --ignore-not-found
+kubectl delete gimg lab-ubuntu lab-ubuntu-verified lab-firecracker --ignore-not-found
 ```
 
 ## Next
