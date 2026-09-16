@@ -388,6 +388,30 @@ pub struct RuntimeMigrationCapability {
     /// shared storage (for example Ceph RBD) or prepare storage separately.
     pub requires_shared_storage: bool,
     pub transports: Vec<String>,
+    /// Whether this backend's migration-start call can be followed up with
+    /// a `GET .../migration/status` poll to observe progress, and whether
+    /// an in-flight migration can be cancelled at all.
+    ///
+    /// `true` for QEMU: QMP's `migrate` is asynchronous and `query-migrate`
+    /// reports live phase/progress, so Fabric polls status and can
+    /// `migrate_cancel` mid-flight.
+    ///
+    /// `false` for Cloud Hypervisor: verified live against a real
+    /// `cloud-hypervisor`/`ch-remote` v53.0 pair that `send-migration`
+    /// returns as soon as the VMM *accepts* the request, not once the
+    /// transfer finishes -- the real outcome (including any failure) is
+    /// only ever visible in the VMM's own process log, which this contract
+    /// does not scrape. Cloud Hypervisor's API also has no cancellation
+    /// primitive once a migration has been requested. Fabric must instead
+    /// infer completion the same way it already detects any other node-local
+    /// state change: this VM disappearing from `GET /v1/vms` on the source
+    /// node once its process exits (success) versus it staying `Running`
+    /// there (no attempt has succeeded yet).
+    #[serde(default = "default_status_pollable")]
+    pub status_pollable: bool,
+}
+fn default_status_pollable() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

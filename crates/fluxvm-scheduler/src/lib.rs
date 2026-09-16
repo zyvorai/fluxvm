@@ -1491,6 +1491,9 @@ impl VmManager {
         }
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::migration_start(&self.cfg, &vm, request).await,
+            BackendKind::CloudHypervisor => {
+                fluxvm_cloud_hypervisor::migration_start(&self.cfg, &vm, request).await
+            }
             other => bail!("live migration contract v1 supports qemu only (backend={other:?})"),
         }
     }
@@ -1499,6 +1502,10 @@ impl VmManager {
         let vm = self.get(id).await?;
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::migration_status(&self.cfg, &vm).await,
+            BackendKind::CloudHypervisor => bail!(
+                "Cloud Hypervisor's migration API has no status-polling primitive (send-migration \
+                 is fire-and-forget) -- check whether this VM is still Running on this node instead"
+            ),
             other => bail!("migration status contract v1 supports qemu only (backend={other:?})"),
         }
     }
@@ -1507,6 +1514,10 @@ impl VmManager {
         let vm = self.get(id).await?;
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::migration_cancel(&self.cfg, &vm).await,
+            BackendKind::CloudHypervisor => bail!(
+                "Cloud Hypervisor's migration API has no cancellation primitive once a migration \
+                 has been requested"
+            ),
             other => bail!("migration cancel contract v1 supports qemu only (backend={other:?})"),
         }
     }

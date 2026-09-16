@@ -115,3 +115,39 @@ pub trait VmBackend: Send + Sync {
 pub fn path_arg(p: &Path) -> String {
     p.display().to_string()
 }
+
+/// Shared `tcp:`/`unix:` migration-transport allowlist for every VMM backend
+/// wiring up `MigrationStartRequest::destination` (`fluxvm-qemu`'s QMP
+/// `migrate` URI, `fluxvm-cloud-hypervisor`'s `send-migration
+/// destination_url=`). Kept in one place so the two backends' contracts
+/// can't quietly drift apart -- `exec:` stays deliberately forbidden on
+/// both (QEMU's `exec:` runs an arbitrary shell command as the migration
+/// transport; Cloud Hypervisor has no such scheme at all, but there's no
+/// reason to special-case one backend into a looser rule the other can't
+/// match).
+pub fn validate_migration_transport(uri: &str) -> Result<()> {
+    if uri.starts_with("tcp:") || uri.starts_with("unix:") {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "unsupported migration URI '{uri}': FluxVM contract v1 permits only tcp: or unix: (exec: is intentionally forbidden)"
+    )
+}
+
+#[cfg(test)]
+mod migration_transport_tests {
+    use super::validate_migration_transport;
+
+    #[test]
+    fn accepts_tcp_and_unix() {
+        assert!(validate_migration_transport("tcp:10.0.0.5:4444").is_ok());
+        assert!(validate_migration_transport("unix:/tmp/mig.sock").is_ok());
+    }
+
+    #[test]
+    fn rejects_exec_and_anything_else() {
+        assert!(validate_migration_transport("exec:cat > /tmp/x").is_err());
+        assert!(validate_migration_transport("rdma:10.0.0.5:4444").is_err());
+        assert!(validate_migration_transport("").is_err());
+    }
+}

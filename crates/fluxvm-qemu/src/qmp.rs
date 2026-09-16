@@ -9,6 +9,7 @@
 //! process could hang the caller forever.
 
 use anyhow::{Context, Result, bail};
+use fluxvm_core::backend::validate_migration_transport;
 use fluxvm_core::model::{MigrationMode, MigrationPhase, MigrationStartRequest, MigrationStatus};
 use serde_json::{Value, json};
 use std::{io::ErrorKind, path::Path, time::Duration};
@@ -160,15 +161,6 @@ fn parse_migration_status(v: &Value) -> MigrationStatus {
     }
 }
 
-fn validate_migration_uri(uri: &str) -> Result<()> {
-    if uri.starts_with("tcp:") || uri.starts_with("unix:") {
-        return Ok(());
-    }
-    bail!(
-        "unsupported migration URI '{uri}': FluxVM contract v1 permits only tcp: or unix: (exec: is intentionally forbidden)"
-    )
-}
-
 pub async fn migration_status(socket: &Path, timeout: Duration) -> Result<MigrationStatus> {
     let value = execute(socket, "query-migrate", None, timeout).await?;
     Ok(parse_migration_status(&value))
@@ -179,7 +171,7 @@ pub async fn migration_start(
     request: &MigrationStartRequest,
     timeout: Duration,
 ) -> Result<MigrationStatus> {
-    validate_migration_uri(&request.destination)?;
+    validate_migration_transport(&request.destination)?;
 
     if request.multifd_channels == Some(0) {
         bail!("multifd_channels must be >= 1 when set");
@@ -598,9 +590,9 @@ mod migration_contract_tests {
 
     #[test]
     fn rejects_shell_backed_migration_uri() {
-        assert!(validate_migration_uri("exec:ssh host nc 4444").is_err());
-        assert!(validate_migration_uri("tcp:10.0.0.4:4444").is_ok());
-        assert!(validate_migration_uri("unix:/run/fluxvm/incoming.sock").is_ok());
+        assert!(validate_migration_transport("exec:ssh host nc 4444").is_err());
+        assert!(validate_migration_transport("tcp:10.0.0.4:4444").is_ok());
+        assert!(validate_migration_transport("unix:/run/fluxvm/incoming.sock").is_ok());
     }
 
     #[test]

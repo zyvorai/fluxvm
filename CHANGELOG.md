@@ -96,6 +96,54 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **Cloud Hypervisor backend: real live migration** — `POST
+  /v1/vms/{uuid}/migration/start` previously bailed "live migration
+  contract v1 supports qemu only" for every non-QEMU backend; Cloud
+  Hypervisor now actually migrates. `migration_start` validates the
+  destination through the same shared `validate_migration_transport`
+  `fluxvm-qemu` already used (moved into `fluxvm-core::backend` so the two
+  backends' `tcp:`/`unix:`-only contract can't drift apart), maps
+  `MigrationStartRequest` onto `ch-remote send-migration`'s own
+  `destination_url=...,downtime_ms=...,memory_mode=precopy|postcopy,
+  connections=...` config string, and pre-checks three real Cloud
+  Hypervisor constraints up front rather than relaying its raw validation
+  error for them (all three verified live): it has no bandwidth-throttle
+  knob at all, so `bandwidth_mbps` is rejected outright rather than
+  silently ignored; `connections` (its multifd analogue) and a `unix:`
+  destination are mutually exclusive; and post-copy mode requires exactly
+  one connection. `RuntimeCapabilities`'s migration entry gained a new
+  `status_pollable` field (`true` for QEMU, `false` for Cloud Hypervisor)
+  and a Cloud Hypervisor entry, so Fabric can tell up front which contract
+  it's getting. 9 new tests (5 in `fluxvm-cloud-hypervisor` against a
+  scripted fake `ch-remote` logging its full argv, 2 shared-validator
+  tests moved with the function, plus the pre-existing QEMU validator
+  tests now exercising the shared implementation).
+
+  The single biggest way this differs from QEMU's contract, discovered
+  only by testing against real binaries rather than assumed from Cloud
+  Hypervisor's own docs: `send-migration` returns as soon as the request
+  is *accepted*, not once the transfer finishes. Verified live against a
+  real `cloud-hypervisor`/`ch-remote` v53.0 pair by pointing `send-migration`
+  at a `unix:` destination nothing was listening on — the call still
+  returned success immediately, with the real "Migration failed: ... No
+  such file or directory" only ever surfacing seconds later in the VMM's
+  own log file. Cloud Hypervisor's API has no status-query or cancellation
+  primitive at all for what happens next, so `migration_status`/
+  `cancel_migration` deliberately stay qemu-only (with a Cloud
+  Hypervisor-specific error explaining why, not the generic "supports qemu
+  only" every other unsupported backend gets) rather than inventing a
+  status this backend cannot actually report. Also verified live, over
+  both `unix:` and `tcp:` destinations on that same real pair: a running
+  VM was fully handed off between two separate `cloud-hypervisor`
+  processes — the destination's `ch-remote info` came back with the
+  migrated config and `"state":"Running"`, and the source process exited
+  on its own right after, exactly as Cloud Hypervisor's docs describe. That
+  source exit needed no new handling here: this project's existing
+  reconcile loop already notices the pid is gone and marks the VM
+  `Stopped` (releasing its tap/netns/sandbox policy on this node) the same
+  as it would for any other process that exited on its own — which is
+  exactly the right outcome for a VM that just left this node for another
+  one.
 - **Cloud Hypervisor backend: real CPU/memory hotplug** — `POST
   /v1/vms/{uuid}/hotplug/cpu`/`hotplug/memory` previously worked on QEMU
   only ("Cloud Hypervisor/Firecracker backends have no hotplug support in

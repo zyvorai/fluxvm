@@ -1202,15 +1202,31 @@ async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities>
         api_version: "runtime.fluxvm.zyvor.io/v1".into(),
         scope: "node-local".into(),
         orchestration_owner: "zyvor-fabric".into(),
-        migration: vec![RuntimeMigrationCapability {
-            backend: BackendKind::Qemu,
-            live: true,
-            pre_copy: true,
-            post_copy: true,
-            multifd: true,
-            requires_shared_storage: true,
-            transports: vec!["tcp".into(), "unix".into()],
-        }],
+        migration: vec![
+            RuntimeMigrationCapability {
+                backend: BackendKind::Qemu,
+                live: true,
+                pre_copy: true,
+                post_copy: true,
+                multifd: true,
+                requires_shared_storage: true,
+                transports: vec!["tcp".into(), "unix".into()],
+                status_pollable: true,
+            },
+            RuntimeMigrationCapability {
+                backend: BackendKind::CloudHypervisor,
+                live: true,
+                pre_copy: true,
+                post_copy: true,
+                // `connections` (send-migration's multifd analogue) only
+                // over `tcp:` -- verified live it's rejected outright
+                // alongside a `unix:` destination.
+                multifd: true,
+                requires_shared_storage: true,
+                transports: vec!["tcp".into(), "unix".into()],
+                status_pollable: false,
+            },
+        ],
         snapshot: vec![
             RuntimeSnapshotCapability {
                 backend: BackendKind::Qemu,

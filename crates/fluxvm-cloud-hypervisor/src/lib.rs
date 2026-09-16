@@ -4,15 +4,27 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use fluxvm_core::{
-    backend::{LaunchContext, LaunchResult, VmBackend, path_arg},
+    backend::{LaunchContext, LaunchResult, VmBackend, path_arg, validate_migration_transport},
     config::Config,
-    model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
+    model::{
+        BackendKind, CreateVmRequest, MigrationMode, MigrationPhase, MigrationStartRequest,
+        MigrationStatus, NetworkSpec, VmRecord,
+    },
     process::{output_checked_timeout, run_checked_timeout, spawn_logged, spawn_swtpm},
 };
 use serde_json::Value;
 use std::time::Duration;
 
 const CH_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+/// `send-migration` itself returns as soon as Cloud Hypervisor *accepts*
+/// the request (verified live -- see `migration_start`), so this only ever
+/// needs to cover a wedged local `ch-remote`/VMM pair, not an actual
+/// migration's real transfer time. Kept a little more generous than the
+/// plain `CH_REMOTE_TIMEOUT` anyway, since establishing the initial
+/// destination connection (particularly `tcp:` to a real remote host) is
+/// slower than the purely-local `info`/`resize`/`pause` calls that constant
+/// is used for.
+const CH_SEND_MIGRATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound this backend will ever pass to `--cpus boot=N,max=M`.
 /// Deliberately the exact same value as `fluxvm-qemu`'s own
 /// `MAX_VCPUS_CEILING` -- an arbitrary-but-generous shared policy choice
@@ -317,6 +329,118 @@ pub async fn snapshot_save(cfg: &Config, vm: &VmRecord, dest: &std::path::Path) 
     }
     snapshot_result?;
     Ok(())
+}
+
+// ZYVOR_RUNTIME_BOUNDARY_V1: node-local live-migration primitives.
+/// Node-local send-side live migration for a running Cloud Hypervisor VM --
+/// same `MigrationStartRequest` contract `fluxvm_qemu::migration_start`
+/// already has (destination validated to `tcp:`/`unix:` by the same shared
+/// [`validate_migration_transport`]), routed through `ch-remote
+/// send-migration` instead of QMP's `migrate`.
+///
+/// Verified live against a real `cloud-hypervisor`/`ch-remote` v53.0 pair,
+/// over both `unix:` and `tcp:` destinations: a running VM was fully
+/// handed off from one VMM process to another -- the destination's
+/// `ch-remote info` came back with the migrated config and `"state":
+/// "Running"`, and the source process exited on its own right after,
+/// exactly as Cloud Hypervisor's own docs describe. That source exit is
+/// also already handled correctly by this project's existing reconcile
+/// loop with no changes needed here: it notices the pid is gone and marks
+/// the VM `Stopped` (cleaning up its tap/netns/sandbox policy on this
+/// node), the same as it would for any other process that exited on its
+/// own -- which is exactly the right outcome for a VM that just left this
+/// node for another one.
+///
+/// Cloud Hypervisor's own `send-migration` has real constraints this
+/// checks up front rather than relaying its raw validation error for --
+/// all three verified live against that same real binary pair:
+///   - it has no bandwidth-throttle knob at all (unlike QEMU's
+///     `max-bandwidth`), so `bandwidth_mbps` is rejected outright instead
+///     of being silently ignored;
+///   - `connections` (its multifd analogue) and a `unix:` destination are
+///     mutually exclusive: "UNIX sockets and connections option cannot be
+///     used at the same time.";
+///   - post-copy mode requires exactly one connection: "memory_mode=
+///     postcopy currently requires a single connection (connections=1)."
+///
+/// Also verified live, and the single biggest way this contract differs
+/// from QEMU's: `send-migration` returns as soon as Cloud Hypervisor
+/// *accepts* the request, not once the transfer actually finishes -- even
+/// pointed at a destination nothing was listening on, the call still
+/// returned success immediately, with the real failure only ever showing
+/// up seconds later in the VMM's own log file. Cloud Hypervisor's API has
+/// no status-query or cancellation primitive to observe or stop what
+/// happens next (see `RuntimeMigrationCapability::status_pollable`), so
+/// the [`MigrationStatus`] returned here reports the request was accepted,
+/// not a confirmed outcome -- `fluxvm-api` deliberately leaves
+/// `migration_status`/`cancel_migration` qemu-only rather than inventing a
+/// status this backend cannot actually report.
+pub async fn migration_start(
+    cfg: &Config,
+    vm: &VmRecord,
+    request: &MigrationStartRequest,
+) -> Result<MigrationStatus> {
+    validate_migration_transport(&request.destination)?;
+
+    if request.bandwidth_mbps.is_some() {
+        bail!(
+            "Cloud Hypervisor's migration API has no bandwidth throttle -- leave bandwidth_mbps unset for this backend"
+        );
+    }
+    if request.multifd_channels == Some(0) {
+        bail!("multifd_channels must be >= 1 when set");
+    }
+    let connections = request.multifd_channels.filter(|c| *c > 1);
+    let is_unix = request.destination.starts_with("unix:");
+    if connections.is_some() && is_unix {
+        bail!(
+            "Cloud Hypervisor rejects multifd_channels > 1 over a unix: destination -- use tcp: instead, or drop multifd_channels"
+        );
+    }
+    if connections.is_some() && request.mode == MigrationMode::PostCopy {
+        bail!(
+            "Cloud Hypervisor's post-copy mode requires a single connection -- leave multifd_channels unset (or 1) when mode is post-copy"
+        );
+    }
+
+    let mut send_config = format!("destination_url={}", request.destination);
+    if let Some(ms) = request.max_downtime_ms {
+        send_config.push_str(&format!(",downtime_ms={ms}"));
+    }
+    if request.mode == MigrationMode::PostCopy {
+        send_config.push_str(",memory_mode=postcopy");
+    }
+    if let Some(n) = connections {
+        send_config.push_str(&format!(",connections={n}"));
+    }
+
+    let api = vm.workspace.join("ch-api.sock");
+    run_checked_timeout(
+        &cfg.ch_remote_binary,
+        &[
+            "--api-socket".into(),
+            api.display().to_string(),
+            "send-migration".into(),
+            send_config,
+        ],
+        CH_SEND_MIGRATION_TIMEOUT,
+    )
+    .await
+    .context("Cloud Hypervisor rejected the send-migration request")?;
+
+    Ok(MigrationStatus {
+        phase: MigrationPhase::Active,
+        status: "accepted by Cloud Hypervisor -- this backend's migration API is fire-and-forget, \
+                 success or failure is only observable by this VM disappearing from GET /v1/vms \
+                 on this node (see RuntimeMigrationCapability::status_pollable)"
+            .into(),
+        ram_transferred: None,
+        ram_remaining: None,
+        ram_total: None,
+        total_time_ms: None,
+        downtime_ms: None,
+        error: None,
+    })
 }
 
 async fn ch_remote(cfg: &Config, vm: &VmRecord, subcommand: &str) -> Result<()> {
@@ -858,5 +982,145 @@ mod tests {
             .position(|a| a == "--tpm")
             .expect("missing --tpm flag");
         assert_eq!(args[idx + 1], "socket=/tmp/eph-ch-fixture/swtpm.sock");
+    }
+
+    fn migration_request(destination: &str) -> MigrationStartRequest {
+        MigrationStartRequest {
+            destination: destination.into(),
+            mode: MigrationMode::PreCopy,
+            bandwidth_mbps: None,
+            max_downtime_ms: None,
+            multifd_channels: None,
+        }
+    }
+
+    /// Writes an executable fake `ch-remote` for `migration_start` tests:
+    /// `send-migration` appends its own full argv to `log` (one line per
+    /// call) and exits with `send_migration_exit`, anything else exits 0.
+    fn fake_ch_remote_migration(
+        dir: &std::path::Path,
+        send_migration_exit: i32,
+        log: &std::path::Path,
+    ) -> String {
+        let script = format!(
+            "#!/bin/sh\nargs=\" $* \"\ncase \"$args\" in\n  *\" send-migration \"*) echo \"$*\" >> {log:?} ; exit {send_migration_exit} ;;\n  *) exit 0 ;;\nesac\n"
+        );
+        let path = dir.join("fake-ch-remote-migration.sh");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.display().to_string()
+    }
+
+    #[tokio::test]
+    async fn migration_start_rejects_a_non_tcp_unix_destination() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let err = migration_start(&cfg, &vm, &migration_request("exec:cat > /tmp/x"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("tcp: or unix:"));
+    }
+
+    #[tokio::test]
+    async fn migration_start_rejects_bandwidth_mbps() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let mut req = migration_request("tcp:10.0.0.5:4444");
+        req.bandwidth_mbps = Some(100);
+        let err = migration_start(&cfg, &vm, &req).await.unwrap_err();
+        assert!(format!("{err:#}").contains("no bandwidth throttle"));
+    }
+
+    #[tokio::test]
+    async fn migration_start_rejects_zero_multifd_channels() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let mut req = migration_request("tcp:10.0.0.5:4444");
+        req.multifd_channels = Some(0);
+        let err = migration_start(&cfg, &vm, &req).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("greater than zero") || format!("{err:#}").contains(">= 1")
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_start_rejects_multifd_over_a_unix_destination() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let mut req = migration_request("unix:/tmp/mig.sock");
+        req.multifd_channels = Some(4);
+        let err = migration_start(&cfg, &vm, &req).await.unwrap_err();
+        assert!(format!("{err:#}").contains("unix:"));
+    }
+
+    #[tokio::test]
+    async fn migration_start_rejects_multifd_with_post_copy() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let mut req = migration_request("tcp:10.0.0.5:4444");
+        req.mode = MigrationMode::PostCopy;
+        req.multifd_channels = Some(4);
+        let err = migration_start(&cfg, &vm, &req).await.unwrap_err();
+        assert!(format!("{err:#}").contains("post-copy"));
+    }
+
+    #[tokio::test]
+    async fn migration_start_builds_the_expected_send_migration_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("send-migration.log");
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote_migration(dir.path(), 0, &log);
+        let vm = vm_record(dir.path().to_path_buf());
+        let mut req = migration_request("tcp:10.0.0.5:4444");
+        req.max_downtime_ms = Some(300);
+        req.multifd_channels = Some(4);
+        let status = migration_start(&cfg, &vm, &req).await.unwrap();
+        assert_eq!(status.phase, MigrationPhase::Active);
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            logged.contains(
+                "send-migration destination_url=tcp:10.0.0.5:4444,downtime_ms=300,connections=4"
+            ),
+            "unexpected argv: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_start_adds_memory_mode_postcopy_for_post_copy_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("send-migration.log");
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote_migration(dir.path(), 0, &log);
+        let vm = vm_record(dir.path().to_path_buf());
+        let mut req = migration_request("unix:/tmp/mig.sock");
+        req.mode = MigrationMode::PostCopy;
+        migration_start(&cfg, &vm, &req).await.unwrap();
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            logged.contains("destination_url=unix:/tmp/mig.sock,memory_mode=postcopy"),
+            "unexpected argv: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_start_propagates_a_real_send_migration_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("send-migration.log");
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote_migration(dir.path(), 1, &log);
+        let vm = vm_record(dir.path().to_path_buf());
+        let err = migration_start(&cfg, &vm, &migration_request("tcp:10.0.0.5:4444"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("send-migration request"));
     }
 }
