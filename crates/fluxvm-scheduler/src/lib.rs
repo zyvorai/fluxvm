@@ -117,6 +117,23 @@ fn secure_boot_or_tpm_backend_error(req: &CreateVmRequest) -> Option<String> {
     None
 }
 
+/// VM-state snapshot save/restore is only implemented for `Qemu`
+/// (`savevm`/`-loadvm`) and `CloudHypervisor` (its own snapshot directory) --
+/// `Firecracker` and `FluxVm` have neither. Shared by `create_vm_snapshot`
+/// (the save side) and `start_from_snapshot` (the restore side) so the two
+/// can never drift: before this existed, `start_from_snapshot` set
+/// `loadvm_tag` on the launch request and called `start_impl` unconditionally,
+/// with no backend check of its own -- since neither `FirecrackerBackend`'s
+/// nor `FluxVmBackend`'s `launch` ever reads `req.loadvm_tag` at all, that
+/// silently produced an ordinary cold boot instead of a restore, with no
+/// error telling the caller their snapshot tag was ignored.
+fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
+    match backend {
+        BackendKind::Qemu | BackendKind::CloudHypervisor => None,
+        other => Some(format!("snapshot not supported for backend {other:?}")),
+    }
+}
+
 /// Admission check for `cfg.policy`, run once resolved (see `resolve_backend`)
 /// but before any disk/network work — a rejected request should be cheap.
 fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
@@ -1433,6 +1450,10 @@ impl VmManager {
     /// later plain `start` doesn't keep trying to load a now-stale
     /// snapshot. Added for zyvor-fabric's hibernate/resume feature.
     pub async fn start_from_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
+        let vm = self.get(id).await?;
+        if let Some(e) = snapshot_backend_error(vm.backend) {
+            bail!(e);
+        }
         self.start_impl(id, Some(tag)).await
     }
 
@@ -1482,6 +1503,9 @@ impl VmManager {
                 vm.status
             );
         }
+        if let Some(e) = snapshot_backend_error(vm.backend) {
+            bail!(e);
+        }
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::snapshot_save(&self.cfg, &vm, tag).await,
             BackendKind::CloudHypervisor => {
@@ -1489,7 +1513,7 @@ impl VmManager {
                 tokio::fs::create_dir_all(&dest).await?;
                 fluxvm_cloud_hypervisor::snapshot_save(&self.cfg, &vm, &dest).await
             }
-            other => bail!("snapshot not supported for backend {other:?}"),
+            _ => unreachable!("snapshot_backend_error already rejected every other backend"),
         }
     }
 
@@ -2530,6 +2554,26 @@ mod tests {
         ] {
             let r = req(backend, None, None);
             assert!(secure_boot_or_tpm_backend_error(&r).is_none());
+        }
+    }
+
+    #[test]
+    fn snapshot_is_allowed_on_qemu_and_cloud_hypervisor() {
+        for backend in [BackendKind::Qemu, BackendKind::CloudHypervisor] {
+            assert!(
+                snapshot_backend_error(backend).is_none(),
+                "expected snapshot to be allowed on {backend:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_is_rejected_on_firecracker_and_fluxvm() {
+        for backend in [BackendKind::Firecracker, BackendKind::FluxVm] {
+            assert!(
+                snapshot_backend_error(backend).is_some(),
+                "expected snapshot to be rejected on {backend:?}, matching create_vm_snapshot's own rejection -- a start_from_snapshot call must fail the same way rather than silently ignoring the tag and cold-booting"
+            );
         }
     }
 

@@ -3,6 +3,19 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **`start_from_snapshot` silently ignored a `loadvm_tag` on `Firecracker`/`FluxVm`
+  VMs instead of rejecting it** — `create_vm_snapshot` (the save side) already
+  correctly bails with "snapshot not supported for backend ..." for every
+  backend but `Qemu`/`CloudHypervisor`, but `start_from_snapshot` (the
+  restore side) had no matching check of its own: it set `loadvm_tag` on the
+  launch request and called `start_impl` unconditionally. Neither
+  `FirecrackerBackend`'s nor `FluxVmBackend`'s `launch` ever reads
+  `req.loadvm_tag` at all, so a `start_from_snapshot` call against either
+  backend silently produced an ordinary cold boot instead of a restore —
+  the caller believed they got a VM resumed from saved state when they
+  silently didn't, with no error naming the mismatch. New
+  `snapshot_backend_error` is now shared by both the save and restore
+  paths so they can never drift apart again. 2 new tests.
 - **`fluxvm-cloud-hypervisor`'s `snapshot_save` had the exact same
   resume-failure-discard bug as `fluxvm-qemu`'s, below** — found while
   auditing every other `let _ = ...`-discarded `Result` across the crates
