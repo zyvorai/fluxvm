@@ -393,6 +393,30 @@ A separately-running `fluxvm serve` daemon's reaper independently tops up every 
 schedule regardless of which process's claim under-filled it, so pool health converges either way —
 but for a claim's *own* immediate replenishment to be reliable, use REST against a running daemon.
 
+Resize a pool after the fact instead of deleting and recreating it from the same spec just to change
+one number:
+
+```bash
+curl -sS -X POST http://127.0.0.1:7788/v1/pools/my-pool/resize \
+  -H 'content-type: application/json' \
+  -d '{"size": 8}' | jq
+```
+
+Growing behaves exactly like `pool create`'s own initial fill — the target size is updated
+immediately and a background backfill (same code path, same reaper backstop) brings membership up
+to it. Shrinking is synchronous: excess ready members are popped and deleted right away, not left
+for the reaper. `fluxvm pool resize <name> --size N` exists on the CLI too, and — like `pool
+create` but unlike `pool claim` — blocks on `backfill_pool_sync` when growing, so this one-shot
+process doesn't take its own background backfill down with it before the pool actually reaches the
+requested size.
+
+**Real limits today**: resizing has unit and router-level tests (`fluxvm-scheduler`,
+`fluxvm-api`) but, unlike the rest of this section, has not been exercised against real hardware —
+`scripts/test-warm-pool.sh` doesn't cover it yet. A shrink that fails to delete one excess member
+(logged, not fatal) leaves the pool's target size reduced but membership not fully caught up; the
+reaper never shrinks a pool on its own, so an under-trimmed pool stays exactly that size until
+resized again, rather than silently drifting back up.
+
 Every pool member is verified genuinely ready — not just "a process exists" — before being paused: a
 real bug found on real hardware pausing a member immediately after `create()` returns (before the
 guest had even finished booting, let alone started its guest-agent) meant a "warm" member was actually

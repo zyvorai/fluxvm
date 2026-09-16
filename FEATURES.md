@@ -69,7 +69,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 ## Operations
 
 - **cgroup v2 resource control** — CPU/memory/IO limits, freeze/thaw, PSI (pressure stall information)
-- **Warm VM pools** — pre-started VMs for lower cold-start latency
+- **Warm VM pools** — pre-started VMs for lower cold-start latency, resizable after creation
+  (`POST /v1/pools/{name}/resize`, `fluxvm pool resize`) without deleting and recreating the pool
 - **Firecracker jailer** — chroot + uid/gid drop per VM
 - **Admission policy limits** — caps on what a request is allowed to provision
 - **Bearer-token auth/RBAC** — on the REST API

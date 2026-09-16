@@ -59,6 +59,7 @@ GET    /v1/pools
 GET    /v1/pools/{name}
 DELETE /v1/pools/{name}
 POST   /v1/pools/{name}/claim
+POST   /v1/pools/{name}/resize
 POST   /v1/sandboxes
 GET    /v1/sandboxes
 POST   /v1/sandboxes/{id}/snapshot
@@ -140,8 +141,18 @@ previously missing entirely (see CHANGELOG).
 `/v1/pools` gets the same treatment, name-keyed rather than `Uuid`-keyed: `POST /v1/pools`
 inherits/enforces the caller's token `tenant` on `template.tenant` (every member ever backfilled
 from that pool inherits it unchanged), `GET /v1/pools` only returns the caller's own tenant's
-pools, and `GET`/`DELETE /v1/pools/{name}` and `POST /v1/pools/{name}/claim` all 404 for a
-different tenant's token — also previously missing entirely (see CHANGELOG).
+pools, and `GET`/`DELETE /v1/pools/{name}`, `POST /v1/pools/{name}/claim`, and
+`POST /v1/pools/{name}/resize` all 404 for a different tenant's token — also previously missing
+entirely (see CHANGELOG).
+
+`POST /v1/pools/{name}/resize` (admin-only, body `{"size": N}`) changes a pool's target size after
+creation — previously the only way to change a running pool's size at all was to `DELETE` it
+(discarding every still-ready warm member) and `POST /v1/pools` again from the same spec. Growing
+only updates the stored target and fires the same background backfill `create`/`claim` already use
+(the reaper's own per-tick top-up is the backstop, as always); shrinking deletes excess ready
+members immediately and synchronously, not on the next reaper tick — a caller asking for a smaller
+pool is asking to give resources back right away. See `docs/operations.md`'s "Warm VM pools"
+section for a worked example.
 
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms -H 'Authorization: Bearer <token>'

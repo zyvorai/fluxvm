@@ -2193,6 +2193,69 @@ impl VmManager {
         Ok(())
     }
 
+    /// Changes an existing pool's target `size`, the one thing `create_pool`
+    /// has no way to fix up after the fact today (a pool sized wrong for
+    /// its actual load previously had to be deleted -- discarding every
+    /// still-ready warm member -- and recreated from the same spec just to
+    /// change one number).
+    ///
+    /// Growing (`size` > current) only updates the stored target and fires
+    /// off the same background `spawn_backfill` `create_pool`/
+    /// `claim_from_pool` already use -- the reaper's per-tick top-up is the
+    /// same backstop for a resize as it is for those two, so a caller
+    /// inside `serve` needs nothing further; a one-shot CLI caller should
+    /// follow up with `backfill_pool_sync` exactly as `fluxvm pool create`
+    /// already does, for the same reason (see its own doc comment).
+    ///
+    /// Shrinking (`size` < current) is handled synchronously and
+    /// immediately, not left for the reaper: a caller asking for a smaller
+    /// pool is asking to give resources back, and there's no reason to sit
+    /// on idle-but-unwanted paused VMs until the next tick. Excess ready
+    /// members are popped and deleted one at a time, fail-open per member
+    /// (matching `delete_pool`'s own "best effort, log and keep going"
+    /// cleanup) -- a single stuck member's delete failure must not stop the
+    /// rest of the trim, and must not roll back the size change itself
+    /// (leaving `size` reduced but membership not yet caught up is a
+    /// correct, if temporary, state: the next reaper tick only ever grows a
+    /// pool toward `size`, never shrinks it, so an under-trimmed pool
+    /// simply stays put rather than drifting back up).
+    ///
+    /// Both directions are serialized against this same pool's own
+    /// `backfill_pool` via `backfill_locks`, so a shrink can never race a
+    /// concurrent grow's member creation (or vice versa) into an
+    /// inconsistent intermediate membership count.
+    pub async fn resize_pool(self: &Arc<Self>, name: &str, size: usize) -> Result<PoolRecord> {
+        if size == 0 {
+            bail!("pool size must be at least 1");
+        }
+        let lock = self.backfill_lock(name).await;
+        let _guard = lock.lock().await;
+
+        let existing = self.pools.get(name).await.context("pool not found")?;
+        self.pools
+            .set_size(name, size)
+            .await?
+            .context("pool not found")?;
+
+        if size < existing.size {
+            for _ in 0..(existing.size - size) {
+                let Some(id) = self.pools.pop_member(name).await? else {
+                    break; // fewer ready members than the excess to trim -- nothing left to remove right now
+                };
+                if let Err(e) = self.delete(id).await {
+                    tracing::warn!(pool = %name, vm = %id, error = ?e, "failed to delete excess pool member while shrinking pool");
+                }
+            }
+        }
+        drop(_guard);
+        if size > existing.size {
+            self.spawn_backfill(name.to_string());
+        }
+        // Re-read rather than reuse either value above: it must reflect the
+        // shrink loop's own member removals, which happened after both.
+        self.pools.get(name).await.context("pool not found")
+    }
+
     /// Pops one ready member off `name`'s pool, resumes it (fast — the
     /// member was already fully booted and paused ahead of time), applies
     /// `overrides`, and triggers a backfill to replace it. Fails with a
@@ -2826,5 +2889,168 @@ mod tests {
         r.tenant = Some("acme".into());
         r.vcpus = 2;
         assert!(validate_tenant_policy(&r, &cfg, &other_tenant_only).is_ok());
+    }
+
+    mod resize_pool_tests {
+        use super::*;
+        use std::path::PathBuf;
+
+        fn manager() -> Arc<VmManager> {
+            // fluxvm-scheduler has no `tempfile` dev-dependency (unlike
+            // fluxvm-storage/fluxvm-api), so a plain unique directory under
+            // the OS temp dir stands in for it here rather than adding one
+            // just for this test module. Never cleaned up, same as the
+            // Box::leak'd tempdirs elsewhere in this workspace's own test
+            // helpers -- a short-lived `cargo test` process leaks either way.
+            let dir =
+                std::env::temp_dir().join(format!("fluxvm-resize-pool-test-{}", Uuid::new_v4()));
+            let cfg = Config {
+                state_dir: dir.join("state"),
+                run_dir: dir.join("run"),
+                ..Config::default()
+            };
+            VmManager::new(cfg).unwrap()
+        }
+
+        /// A minimal, fully-populated `VmRecord` a shrink's `delete()` call
+        /// can actually delete cleanly: `pid: None` so `delete()` never
+        /// tries to stop a "running" process that doesn't exist.
+        fn paused_member(name: &str) -> VmRecord {
+            VmRecord {
+                id: Uuid::new_v4(),
+                name: name.to_string(),
+                backend: BackendKind::Qemu,
+                status: VmStatus::Paused,
+                pid: None,
+                created_at: Utc::now(),
+                expires_at: None,
+                workspace: PathBuf::from("/tmp/does-not-matter"),
+                disk: PathBuf::from("/tmp/does-not-matter/root.qcow2"),
+                seed_disk: None,
+                tap_name: None,
+                control_socket: None,
+                log_path: PathBuf::from("/tmp/does-not-matter/console.log"),
+                error: None,
+                request: req(BackendKind::Qemu, None, None),
+                guest_cid: None,
+                jail_path: None,
+                vsock_socket: None,
+                qga_socket: None,
+                cgroup_path: None,
+                netns: None,
+                lvm_lv: None,
+                nbd_pid: None,
+                virtiofsd_pids: vec![],
+                swtpm_pid: None,
+                dhcp_leasefile: None,
+                guest_ip: None,
+            }
+        }
+
+        fn pool_with_members(name: &str, size: usize, members: Vec<Uuid>) -> PoolRecord {
+            PoolRecord {
+                name: name.to_string(),
+                size,
+                template: req(BackendKind::Qemu, None, None),
+                members,
+            }
+        }
+
+        #[tokio::test]
+        async fn resize_pool_rejects_zero_size() {
+            let m = manager();
+            m.pools
+                .insert(pool_with_members("p", 2, vec![]))
+                .await
+                .unwrap();
+            assert!(m.resize_pool("p", 0).await.is_err());
+            // Rejected before touching the store at all.
+            assert_eq!(m.pools.get("p").await.unwrap().size, 2);
+        }
+
+        #[tokio::test]
+        async fn resize_pool_errors_on_unknown_pool() {
+            let m = manager();
+            assert!(m.resize_pool("does-not-exist", 3).await.is_err());
+        }
+
+        #[tokio::test]
+        async fn resize_pool_growing_updates_target_size_immediately() {
+            let m = manager();
+            m.pools
+                .insert(pool_with_members("p", 1, vec![]))
+                .await
+                .unwrap();
+            let updated = m.resize_pool("p", 4).await.unwrap();
+            assert_eq!(updated.size, 4);
+            // Growing must never delete or reorder whatever members already
+            // existed -- there were none here, but the field itself must
+            // still be left alone (checked properly by the shrink test
+            // below, which does start with real members).
+            assert!(updated.members.is_empty());
+        }
+
+        #[tokio::test]
+        async fn resize_pool_shrinking_deletes_exactly_the_excess_members() {
+            let m = manager();
+            let keep = paused_member("keep");
+            let drop1 = paused_member("drop1");
+            let drop2 = paused_member("drop2");
+            for vm in [&keep, &drop1, &drop2] {
+                m.store.insert(vm.clone()).await.unwrap();
+            }
+            // pop_member() pops from the end, so "keep" (pushed first) is
+            // the one still standing once the other two are trimmed.
+            m.pools
+                .insert(pool_with_members("p", 3, vec![keep.id, drop1.id, drop2.id]))
+                .await
+                .unwrap();
+
+            let updated = m.resize_pool("p", 1).await.unwrap();
+            assert_eq!(updated.size, 1);
+            assert_eq!(updated.members, vec![keep.id]);
+            assert!(
+                m.store.get(keep.id).await.is_some(),
+                "kept member must survive"
+            );
+            assert!(
+                m.store.get(drop1.id).await.is_none(),
+                "excess member must be deleted"
+            );
+            assert!(
+                m.store.get(drop2.id).await.is_none(),
+                "excess member must be deleted"
+            );
+        }
+
+        #[tokio::test]
+        async fn resize_pool_shrinking_below_actual_membership_stops_at_zero_members() {
+            // Asking for a smaller size than there are ready members to pop
+            // (e.g. a backfill hadn't caught up yet) must not error or
+            // underflow -- it just removes whatever is actually there.
+            let m = manager();
+            let only = paused_member("only");
+            m.store.insert(only.clone()).await.unwrap();
+            m.pools
+                .insert(pool_with_members("p", 1, vec![only.id]))
+                .await
+                .unwrap();
+
+            let updated = m.resize_pool("p", 1).await.unwrap();
+            assert_eq!(updated.size, 1);
+            assert_eq!(
+                updated.members,
+                vec![only.id],
+                "no-op resize to the same size must not touch members"
+            );
+
+            let updated = m.resize_pool("p", 5).await.unwrap();
+            assert_eq!(updated.size, 5);
+            assert_eq!(
+                updated.members,
+                vec![only.id],
+                "growing must leave existing members untouched (backfill tops up separately)"
+            );
+        }
     }
 }

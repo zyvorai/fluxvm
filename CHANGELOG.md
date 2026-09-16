@@ -96,6 +96,41 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **Warm VM pools can now be resized after creation** —
+  `POST /v1/pools/{name}/resize` (admin-only, body `{"size": N}`) and
+  `fluxvm pool resize <name> --size N`. Previously `PoolSpec::size` was
+  fixed for the life of a pool: an operator whose real load outgrew (or
+  shrank below) a pool's original size had no way to change it short of
+  `DELETE`-ing the pool outright and `POST`-ing a new one from the same
+  spec, discarding every still-ready warm member in the process just to
+  change one number. New `VmManager::resize_pool` and
+  `PoolStore::set_size` (`fluxvm-scheduler`/`fluxvm-storage`). Growing
+  only updates the stored target and fires the same background
+  `spawn_backfill` `create_pool`/`claim_from_pool` already use — the
+  reaper's per-tick top-up is the same backstop for a resize as it is for
+  those two, so nothing new was needed there. Shrinking is handled
+  synchronously instead: excess ready members are popped and deleted
+  immediately, fail-open per member (a single stuck delete is logged and
+  skipped, matching `delete_pool`'s own best-effort cleanup) rather than
+  left for the next reaper tick — asking for a smaller pool is asking to
+  give resources back, and the reaper itself only ever grows a pool
+  toward its target, never shrinks it, so an under-trimmed shrink simply
+  stays put rather than drifting back up. Both directions serialize
+  against the same per-pool `backfill_locks` mutex `backfill_pool` itself
+  already uses, so a resize can't race a concurrent reaper-triggered (or
+  claim-triggered) backfill into an inconsistent membership count. Tenant
+  scoping matches every other name-keyed pool route (`get`/`delete`/
+  `claim`): a mismatched tenant's token gets the same 404
+  `pool_visible_to` already returns for those. 10 new tests (2
+  `fluxvm-storage` unit tests on `set_size`, 4 `fluxvm-scheduler` unit
+  tests on `resize_pool` covering zero-size rejection, an unknown pool,
+  growing, and shrinking down to and past actual membership, 4
+  `fluxvm-api` router tests covering the REST route's tenant scoping,
+  admin-only enforcement, and validation). Docs: `docs/api.md`'s pools
+  section, `docs/operations.md`'s "Warm VM pools" section (with an
+  explicit "Real limits today" noting this has not yet been exercised
+  against real hardware the way the rest of that section has been —
+  `scripts/test-warm-pool.sh` doesn't cover it), `FEATURES.md`.
 - **REST API rate limiting** — `auth.rate_limit_rps`/`auth.rate_limit_burst`
   (opt-in, both must be set together). Closes a real gap: `fluxvm-api`
   had no request-volume limiting at all, in either the network-dataplane

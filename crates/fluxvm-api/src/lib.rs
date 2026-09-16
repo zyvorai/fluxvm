@@ -12,7 +12,10 @@ use axum::{
 };
 use fluxvm_core::{
     config::{Role, constant_time_eq},
-    model::{BackendKind, ClaimOverrides, CreateVmRequest, PoolSpec, VmRecord, VmStatus},
+    model::{
+        BackendKind, ClaimOverrides, CreateVmRequest, PoolResizeRequest, PoolSpec, VmRecord,
+        VmStatus,
+    },
 };
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
@@ -465,10 +468,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/qga/exec", post(qga_exec))
         .route("/v1/vms/{id}/qga/fsfreeze", post(qga_fsfreeze_freeze))
         .route("/v1/vms/{id}/qga/fsthaw", post(qga_fsfreeze_thaw))
-        .route(
-            "/v1/vms/{id}/qga/fsfreeze-status",
-            get(qga_fsfreeze_status),
-        )
+        .route("/v1/vms/{id}/qga/fsfreeze-status", get(qga_fsfreeze_status))
         .route("/v1/vms/{id}/qga/firewall/open", post(qga_firewall_open))
         .route("/v1/vms/{id}/qga/firewall/close", post(qga_firewall_close))
         .route("/v1/sandboxes", post(create_sandbox).get(list_sandboxes))
@@ -510,6 +510,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/pools", post(create_pool).get(list_pools))
         .route("/v1/pools/{name}", get(get_pool).delete(delete_pool))
         .route("/v1/pools/{name}/claim", post(claim_pool))
+        .route("/v1/pools/{name}/resize", post(resize_pool))
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,
@@ -2452,7 +2453,10 @@ async fn list_pools(
 /// already documents: a tenant-scoped caller shouldn't be able to tell
 /// "wrong tenant" apart from "doesn't exist" for a resource they have no
 /// business seeing either way).
-fn pool_visible_to(p: &fluxvm_core::model::PoolRecord, token_tenant: &Option<Extension<TokenTenant>>) -> bool {
+fn pool_visible_to(
+    p: &fluxvm_core::model::PoolRecord,
+    token_tenant: &Option<Extension<TokenTenant>>,
+) -> bool {
     match token_tenant {
         Some(Extension(TokenTenant(t))) => p.template.tenant.as_deref() == Some(t.as_str()),
         None => true,
@@ -2510,6 +2514,29 @@ async fn claim_pool(
         m.claim_from_pool(&name, overrides, token_tenant.as_deref())
             .await?
     )))
+}
+
+/// Changes an existing pool's target size without deleting and recreating
+/// it from the same spec just to change one number -- see
+/// `VmManager::resize_pool`. Admin-only and tenant-scoped exactly like
+/// `delete_pool`/`claim_pool` above (a pool is name-keyed, so this needs
+/// its own `pool_visible_to` check same as those two).
+async fn resize_pool(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(body): Json<PoolResizeRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
+    Ok(Json(json!(m.resize_pool(&name, body.size).await?)))
 }
 
 #[cfg(test)]
@@ -3109,8 +3136,96 @@ mod tests {
             );
         }
 
-        const VALID_POOL_BODY: &str =
-            r#"{"name":"p1","size":1,"template":{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2"}}"#;
+        #[tokio::test]
+        async fn resize_pool_route_is_tenant_scoped() {
+            // Same reasoning as pool_by_name_routes_are_tenant_scoped
+            // above -- resize is one more name-keyed pool route that needs
+            // its own pool_visible_to check, not tenant_guard_middleware's
+            // generic UUID-based one.
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            let app = router(m.clone());
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/pools/acme-pool/resize",
+                    Some("other"),
+                    Some(r#"{"size":3}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            // Untouched by the rejected cross-tenant attempt.
+            assert_eq!(m.get_pool("acme-pool").await.unwrap().size, 1);
+
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/acme-pool/resize",
+                    Some("acme"),
+                    Some(r#"{"size":3}"#),
+                )
+                .await,
+                StatusCode::OK
+            );
+            assert_eq!(m.get_pool("acme-pool").await.unwrap().size, 3);
+        }
+
+        #[tokio::test]
+        async fn resize_pool_route_requires_admin() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            m.pools.insert(pool_fixture("p", None)).await.unwrap();
+            let app = router(m.clone());
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/p/resize",
+                    Some("ro"),
+                    Some(r#"{"size":3}"#),
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            assert_eq!(m.get_pool("p").await.unwrap().size, 1);
+        }
+
+        #[tokio::test]
+        async fn resize_pool_route_rejects_zero_size() {
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            let app = router(m);
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/acme-pool/resize",
+                    Some("acme"),
+                    Some(r#"{"size":0}"#),
+                )
+                .await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+
+        const VALID_POOL_BODY: &str = r#"{"name":"p1","size":1,"template":{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2"}}"#;
 
         #[tokio::test]
         async fn create_pool_forces_the_callers_own_tenant() {
@@ -3123,7 +3238,14 @@ mod tests {
             let m = manager(tenant_tokens());
             let app = router(m.clone());
             assert_eq!(
-                request(app, "POST", "/v1/pools", Some("acme"), Some(VALID_POOL_BODY)).await,
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools",
+                    Some("acme"),
+                    Some(VALID_POOL_BODY)
+                )
+                .await,
                 StatusCode::CREATED
             );
             let pool = m.get_pool("p1").await.unwrap();

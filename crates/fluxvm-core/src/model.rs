@@ -541,6 +541,13 @@ pub struct ClaimOverrides {
     pub ttl_seconds: Option<u64>,
 }
 
+/// Body of `POST /v1/pools/{name}/resize` / `fluxvm pool resize` — the new
+/// target `size` for an existing pool. See `VmManager::resize_pool`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolResizeRequest {
+    pub size: usize,
+}
+
 /// cgroup v2 resource-control settings to apply to a running VM. Every
 /// field is optional so a caller only touches what it actually wants to
 /// change — see `VmManager::set_resources`.

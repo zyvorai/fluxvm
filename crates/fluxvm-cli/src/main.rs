@@ -354,6 +354,18 @@ enum PoolCommand {
         #[arg(long)]
         ttl_seconds: Option<u64>,
     },
+    /// Change a pool's target size without deleting and recreating it from
+    /// the same spec. Growing blocks until the pool actually reaches its
+    /// new size, same reasoning (and same `backfill_pool_sync` call) as
+    /// `pool create` -- this is a one-shot process, so it can't rely on its
+    /// own background backfill task surviving past printing the result.
+    /// Shrinking happens synchronously either way: excess ready members are
+    /// deleted immediately, not left for a reaper tick.
+    Resize {
+        name: String,
+        #[arg(long)]
+        size: usize,
+    },
     Delete {
         name: String,
     },
@@ -612,6 +624,22 @@ async fn main() -> Result<()> {
                     serde_json::to_string_pretty(
                         &m.claim_from_pool(&name, overrides, None).await?
                     )?
+                );
+            }
+            PoolCommand::Resize { name, size } => {
+                let before = m.get_pool(&name).await?.size;
+                m.resize_pool(&name, size).await?;
+                if size > before {
+                    // Same reasoning as `pool create`'s own call: this
+                    // process exits right after printing, which would
+                    // otherwise take resize_pool's own background backfill
+                    // down with it before the pool actually reaches its
+                    // new (larger) size.
+                    m.backfill_pool_sync(&name).await?;
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.get_pool(&name).await?)?
                 );
             }
             PoolCommand::Delete { name } => m.delete_pool(&name).await?,

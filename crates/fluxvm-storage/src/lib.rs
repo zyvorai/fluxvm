@@ -298,6 +298,24 @@ impl PoolStore {
         })
         .await
     }
+
+    /// Atomically overwrites `name`'s target `size`, returning the updated
+    /// record, or `None` if the pool doesn't exist. Does not touch
+    /// `members` at all — the caller (`VmManager::resize_pool`) is
+    /// responsible for growing (backfill) or shrinking (pop + delete)
+    /// membership afterward to match the new size; this method only ever
+    /// changes the *target*, the same "one field, one writer" shape as
+    /// `push_member`/`pop_member` each only ever touching `members`.
+    pub async fn set_size(&self, name: &str, size: usize) -> Result<Option<PoolRecord>> {
+        let name = name.to_string();
+        self.with_exclusive(move |m| {
+            m.get_mut(&name).map(|p| {
+                p.size = size;
+                p.clone()
+            })
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -519,6 +537,27 @@ mod tests {
         let store = PoolStore::load(dir.path()).unwrap();
         // No insert — "a" was never created (or was already deleted).
         assert!(!store.push_member("a", Uuid::new_v4()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn set_size_updates_the_stored_record_without_touching_members() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PoolStore::load(dir.path()).unwrap();
+        store.insert(fixture_pool("a")).await.unwrap();
+        let id = Uuid::new_v4();
+        store.push_member("a", id).await.unwrap();
+
+        let updated = store.set_size("a", 5).await.unwrap().unwrap();
+        assert_eq!(updated.size, 5);
+        assert_eq!(updated.members, vec![id], "set_size must not touch members");
+        assert_eq!(store.get("a").await.unwrap().size, 5);
+    }
+
+    #[tokio::test]
+    async fn set_size_on_missing_pool_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PoolStore::load(dir.path()).unwrap();
+        assert!(store.set_size("does-not-exist", 3).await.unwrap().is_none());
     }
 
     #[tokio::test]
