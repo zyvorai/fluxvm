@@ -19,8 +19,11 @@ use fluxvm_core::{
 };
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
+use http_body_util::{BodyExt, Full};
+use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::json;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -906,6 +909,51 @@ async fn sandbox_http_proxy(
     sandbox_proxy_inner(m, id, port, path, req).await
 }
 
+/// Connects to `addr` from inside the network namespace `pid` is running in,
+/// by `setns()`-ing a throwaway OS thread before calling `connect()`. A
+/// namespace only governs which sockets a thread's *syscalls* create, not
+/// fds it already holds, so the resulting `TcpStream` stays perfectly usable
+/// once handed back to the async runtime on any other thread -- only the
+/// `connect()` itself needs to happen inside the namespace.
+///
+/// A `tap`+`netns=true` sandbox's `guest_ip` (assigned by the per-VM dnsmasq
+/// on its internal bridge, see `fluxvm_network::netns`) is only routable
+/// from inside that namespace: the daemon's own default namespace has no
+/// path to it, so a plain `reqwest::Client` (which always connects from the
+/// calling thread's ambient namespace) hangs until it times out. That was
+/// silently breaking the HTTP proxy for every netns sandbox -- vsock-based
+/// guest-agent calls (exec, fs read/write) were unaffected since vsock
+/// doesn't route through the guest's network namespace at all, so a booted,
+/// working guest still looked completely unreachable over this path.
+///
+/// Uses a plain `std::thread::spawn`, never `tokio::task::spawn_blocking`:
+/// tokio's blocking pool reuses its threads across unrelated work, and
+/// `setns()` would leak into whatever that thread runs next. A one-shot
+/// thread that exits right after `connect()` has nothing left to leak.
+async fn connect_in_netns(
+    pid: u32,
+    addr: std::net::SocketAddr,
+) -> std::io::Result<tokio::net::TcpStream> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let result = (|| -> std::io::Result<std::net::TcpStream> {
+            let ns_file = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
+            if unsafe { libc::setns(ns_file.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        })();
+        // The receiver only drops early if the whole proxy request was
+        // itself abandoned (e.g. the client disconnected) -- nothing to do.
+        let _ = tx.send(result);
+    });
+    let std_stream = rx.await.map_err(|_| {
+        std::io::Error::other("netns connect worker thread panicked before replying")
+    })??;
+    std_stream.set_nonblocking(true)?;
+    tokio::net::TcpStream::from_std(std_stream)
+}
+
 async fn sandbox_proxy_inner(
     m: Arc<VmManager>,
     id: Uuid,
@@ -930,43 +978,106 @@ async fn sandbox_proxy_inner(
         )
             .into_response();
     };
+    let Some(pid) = vm.pid else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "sandbox has no running process to reach its network namespace through",
+        )
+            .into_response();
+    };
+    let addr = match format!("{guest_ip}:{port}").parse::<std::net::SocketAddr>() {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("guest_ip: {e}")).into_response(),
+    };
     let method = req.method().clone();
     let query = req
         .uri()
         .query()
         .map(|q| format!("?{q}"))
         .unwrap_or_default();
-    let url = format!("http://{guest_ip}:{port}/{path}{query}");
-    let client = reqwest::Client::new();
-    let mut builder = client.request(
-        Method::from_bytes(method.as_str().as_bytes()).unwrap_or(Method::GET),
-        &url,
-    );
-    for (k, v) in req.headers().iter() {
+    let uri = format!("/{path}{query}");
+    let headers = req.headers().clone();
+
+    let tcp = match tokio::time::timeout(Duration::from_secs(10), connect_in_netns(pid, addr)).await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr}: {e}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr} timed out"),
+            )
+                .into_response();
+        }
+    };
+
+    let (mut sender, connection) =
+        match hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
+            }
+        };
+    // Drives the connection's I/O; must stay alive for `sender` to work at
+    // all, but its exit (guest closes the connection) isn't itself an error.
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let body = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::BAD_REQUEST, format!("body: {e}")).into_response(),
+    };
+    let mut builder = hyper::Request::builder().method(method).uri(uri);
+    for (k, v) in headers.iter() {
         if k == header::HOST {
             continue;
         }
         builder = builder.header(k, v);
     }
-    let body = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("body: {e}")).into_response(),
-    };
-    match builder.body(body).send().await {
-        Ok(up) => {
-            let status =
-                StatusCode::from_u16(up.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let mut response = Response::builder().status(status);
-            for (k, v) in up.headers().iter() {
-                response = response.header(k, v);
-            }
-            let bytes = up.bytes().await.unwrap_or_default();
-            response
-                .body(Body::from(bytes))
-                .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+    let outgoing = match builder.body(Full::new(body)) {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("building request: {e}")).into_response();
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response(),
+    };
+
+    let up = match tokio::time::timeout(Duration::from_secs(30), sender.send_request(outgoing))
+        .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
+        }
+        Err(_) => {
+            return (StatusCode::BAD_GATEWAY, "guest upstream: request timed out").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(up.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = up.headers().clone();
+    let bytes = match up.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: reading response body: {e}"),
+            )
+                .into_response();
+        }
+    };
+    let mut response = Response::builder().status(status);
+    for (k, v) in headers.iter() {
+        response = response.header(k, v);
     }
+    response
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
 async fn list_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {

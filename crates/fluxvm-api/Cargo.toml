@@ -21,12 +21,20 @@ bytes = "1"
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["fs", "io-util", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "time", "net", "sync", "rt"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# Used only by sandbox_proxy_inner: reqwest has no way to hand it a socket
+# that was connected from inside the sandbox's network namespace (see the
+# setns() call in connect_in_netns below), so that one path speaks HTTP/1.1
+# directly over a pre-connected stream instead of going through reqwest.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+libc = "0.2"
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }
