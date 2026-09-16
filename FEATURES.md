@@ -113,6 +113,9 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
   automatic placement for planned maintenance without deregistering it or touching any VM already
   running on it; an explicit `POST /fleet/vms {"node": "..."}` can still target a cordoned node
   directly, same precedent as a Kubernetes Pod's `spec.nodeName` bypassing the scheduler
+- Per-node VM listing (`GET /fleet/nodes/{name}/vms`) — "what's actually running on this node?",
+  answered directly against that node (so it still works when other nodes in the fleet are
+  unreachable) rather than filtered client-side out of the fleet-wide `GET /fleet/vms` aggregate
 - Verified across two real, physically separate hosts
 
 ## Secure Containers (developer preview — not production-ready)

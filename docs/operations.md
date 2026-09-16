@@ -680,7 +680,8 @@ Every `--interval-secs` (default 10), each node agent reports its name, real cap
 `GET /v1/vms`) to the central registry. `POST /fleet/vms` with no `"node"` field picks the healthy
 node with the fewest VMs and proxies the create there; with an explicit `"node"` it targets that node
 directly. `GET /fleet/vms` aggregates every healthy node's VMs, tagged with which node each came from.
-`DELETE /fleet/vms/{node}/{id}` proxies to that exact node.
+`GET /fleet/nodes/{name}/vms` narrows that same query to exactly one node, queried directly rather
+than filtered out of the aggregate. `DELETE /fleet/vms/{node}/{id}` proxies to that exact node.
 
 Verified end to end across two real, physically separate hosts (`scripts/test-fleet-agent.sh`, 11/11
 passing): both hosts register with real capacity; an unaddressed create picks the least-loaded host
@@ -741,6 +742,28 @@ only-node-cordoned case, uncordon restoring eligibility, cordoning an unknown
 node reporting not-found rather than silently succeeding, heartbeat
 preserving an existing cordon vs. a brand-new node registering uncordoned,
 and both directions of the explicit-`"node"`-bypasses-cordon behavior).
+
+**See what's actually running on a node** before deciding to cordon it (or
+after, to confirm nothing changed):
+
+```bash
+curl http://fleet-registry:7799/fleet/nodes/worker-1/vms
+```
+
+This is deliberately a different route from the fleet-wide `GET /fleet/vms`,
+not a documented query-param filter on it: the fleet-wide list silently
+drops any node it can't currently reach (a server-side `tracing::warn!` the
+caller never sees) and requires every *other* node to also be up just to
+answer a question about *one* node. `GET /fleet/nodes/{name}/vms` proxies
+straight to that node's own `GET /v1/vms` — it works regardless of the
+node's `cordoned`/`healthy` state, tags each VM with `"node"` the same way
+the fleet-wide list does, and turns that node being unreachable or erroring
+into a real `502` naming the node instead of an empty, unexplained list.
+Unknown node name is a `400`, same as every other `/fleet/*` route that
+takes a `{name}` path segment. 5 new tests in `fluxvm-agent::central`
+against a real (not mocked) minimal HTTP server standing in for the node —
+happy path with correct tagging, unknown node, an unreachable node, a node
+whose own `/v1/vms` itself errors, and a node with zero VMs.
 
 ## State layout
 

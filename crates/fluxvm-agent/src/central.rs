@@ -267,6 +267,7 @@ pub fn router(cfg: CentralConfig) -> Router {
         .route("/fleet/nodes/{name}/cordon", post(cordon_node))
         .route("/fleet/nodes/{name}/uncordon", post(uncordon_node))
         .route("/fleet/vms", post(create_vm).get(list_vms))
+        .route("/fleet/nodes/{name}/vms", get(node_vms))
         .route("/fleet/vms/{node}/{id}", axum::routing::delete(delete_vm))
         .layer(middleware::from_fn_with_state(
             fleet.clone(),
@@ -513,6 +514,58 @@ async fn list_vms(State(fleet): State<Fleet>) -> Json<Value> {
     Json(json!({"items": items}))
 }
 
+/// `GET /fleet/nodes/{name}/vms` — the VMs on exactly one node, queried
+/// directly against that node's own `fluxvm serve` rather than the
+/// fleet-wide aggregate `GET /fleet/vms` produces. Two reasons this earns
+/// its own route instead of leaving callers to filter the fleet-wide list
+/// client-side: it works even when *other* nodes in the fleet are
+/// unreachable or stale (the fleet-wide list silently drops a node it can't
+/// reach, logging a warning server-side that the caller never sees), and it
+/// surfaces a failure to reach *this* node as a real error instead of
+/// quietly returning nothing for it. This is the natural "what's actually
+/// running here?" check before cordoning a node for maintenance (or before
+/// deciding a cordon is safe to lift) — cordoning alone only tells you
+/// whether a node *is* excluded from new placement, not what's already on
+/// it.
+async fn node_vms(
+    State(fleet): State<Fleet>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let target = {
+        let nodes = fleet.nodes.lock().await;
+        nodes.get(&name).cloned().ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_REQUEST,
+                format!("no registered node named '{name}'"),
+            )
+        })?
+    };
+    let resp = fleet
+        .http
+        .get(format!("{}/v1/vms", target.fluxvm_url))
+        .send()
+        .await?;
+    let status = resp.status();
+    let body: Value = resp.json().await?;
+    if !status.is_success() {
+        return Err(AppError(
+            StatusCode::BAD_GATEWAY,
+            format!("node '{name}' rejected list: {body}"),
+        ));
+    }
+    let mut items: Vec<Value> = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for vm in items.iter_mut() {
+        if let Some(obj) = vm.as_object_mut() {
+            obj.insert("node".into(), json!(target.name));
+        }
+    }
+    Ok(Json(json!({"node": target.name, "items": items})))
+}
+
 async fn delete_vm(
     State(fleet): State<Fleet>,
     Path((node, id)): Path<(String, String)>,
@@ -740,5 +793,138 @@ mod tests {
         nodes.insert("tight".to_string(), node_cap("tight", 1, 4, 8192));
         let target = resolve_target(&nodes, None, 2, 2048).unwrap();
         assert_eq!(target.name, "tight");
+    }
+
+    // --- GET /fleet/nodes/{name}/vms ---
+
+    fn test_fleet(nodes: HashMap<String, NodeInfo>) -> Fleet {
+        Fleet {
+            nodes: Arc::new(Mutex::new(nodes)),
+            http: reqwest::Client::new(),
+            persist_path: None,
+            lock_path: None,
+            token: None,
+        }
+    }
+
+    /// Spawns a real, minimal HTTP server on an OS-assigned loopback port
+    /// that answers `GET /v1/vms` with a fixed body/status, so `node_vms`
+    /// (which proxies via a real `reqwest` call, not something mockable
+    /// in-process) has a real node to talk to. Returns the `http://` base
+    /// URL to hand to a `NodeInfo.fluxvm_url`.
+    async fn spawn_fake_node(status: StatusCode, body: Value) -> String {
+        let app = Router::new().route(
+            "/v1/vms",
+            get(move || {
+                let body = body.clone();
+                async move { (status, Json(body)) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn node_vms_returns_only_that_nodes_vms_tagged_with_its_name() {
+        let url = spawn_fake_node(
+            StatusCode::OK,
+            json!({"items": [{"id": "vm-1"}, {"id": "vm-2"}]}),
+        )
+        .await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: url,
+                ..node("a", 2, 0)
+            },
+        );
+        nodes.insert("b".to_string(), node("b", 5, 0)); // never contacted
+        let fleet = test_fleet(nodes);
+
+        let Json(resp) = node_vms(State(fleet), Path("a".to_string())).await.unwrap();
+        assert_eq!(resp["node"], "a");
+        let items = resp["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], "vm-1");
+        assert_eq!(items[0]["node"], "a");
+        assert_eq!(items[1]["node"], "a");
+    }
+
+    #[tokio::test]
+    async fn node_vms_unknown_node_is_bad_request() {
+        let fleet = test_fleet(HashMap::new());
+        let err = node_vms(State(fleet), Path("ghost".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn node_vms_surfaces_unreachable_node_as_an_error_instead_of_hiding_it() {
+        // Bind then immediately drop a listener: nothing is listening on
+        // this port any more, so a connection to it fails fast — unlike
+        // the fleet-wide list, which would just warn server-side and
+        // silently omit this node.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: format!("http://{dead_addr}"),
+                ..node("a", 1, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+        let err = node_vms(State(fleet), Path("a".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn node_vms_propagates_the_nodes_own_error_status() {
+        let url = spawn_fake_node(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "local fluxvm serve is unhappy"}),
+        )
+        .await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: url,
+                ..node("a", 1, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+        let err = node_vms(State(fleet), Path("a".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_GATEWAY);
+        assert!(err.1.contains("local fluxvm serve is unhappy"));
+    }
+
+    #[tokio::test]
+    async fn node_vms_handles_a_node_with_no_vms() {
+        let url = spawn_fake_node(StatusCode::OK, json!({"items": []})).await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: url,
+                ..node("a", 0, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+        let Json(resp) = node_vms(State(fleet), Path("a".to_string())).await.unwrap();
+        assert_eq!(resp["items"].as_array().unwrap().len(), 0);
     }
 }

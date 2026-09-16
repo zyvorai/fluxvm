@@ -96,6 +96,44 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm-agent central` can now list exactly one node's VMs** —
+  `GET /fleet/nodes/{name}/vms`. The only existing way to see what's
+  running on a specific node was `GET /fleet/vms`, which aggregates every
+  *healthy* node's VMs into one list tagged by node — useful for a
+  fleet-wide view, but the wrong tool for the actual question an operator
+  has right before (or right after) cordoning a node: "what, specifically,
+  is on this one node?" That question needed either grep'ing the
+  fleet-wide aggregate client-side (which silently drops a node's VMs
+  entirely, with only a server-side `tracing::warn!` the caller never
+  sees, if that one node happens to be unreachable — exactly the node an
+  operator is most likely asking about mid-maintenance) or bypassing
+  `fluxvm-agent` altogether and querying that host's local `fluxvm serve`
+  directly (which means already knowing, and having direct network access
+  to, that host — the whole point of the fleet registry is not needing
+  that). The new route proxies straight to the named node's own
+  `GET /v1/vms`, tags each VM with `"node"` the same way the fleet-wide
+  list does, and — unlike the fleet-wide list — turns that one node being
+  unreachable or erroring into a real `502` naming the node, instead of
+  quietly omitting it. Works for any registered node regardless of
+  `cordoned`/`healthy` state (an operator checking on a node they just
+  cordoned, or one that just went stale, still gets a real answer or a
+  real error, never silence). 5 new tests in `fluxvm-agent::central`
+  against a real (not mocked) minimal axum server bound to an OS-assigned
+  loopback port standing in for the target node's `fluxvm serve` — the
+  same shape `fluxvm-container-agent`'s own tests already use for this —
+  covering the happy path (VMs returned and correctly tagged with the
+  node name), an unknown node name (400, not a panic or an empty list),
+  a node that's unreachable (bound-then-dropped listener; 502, not a
+  silently empty result), a node whose own `GET /v1/vms` itself errors
+  (its status/body is propagated, not swallowed), and a node with zero
+  VMs (empty list, not an error). Docs:
+  [docs/operations.md — Distributed node-agent](docs/operations.md#distributed-node-agent),
+  `FEATURES.md`'s "`fluxvm-agent`" bullet. Same honest limit as the
+  cordon feature below: not re-verified against the real
+  two-physically-separate-host rig `scripts/test-fleet-agent.sh`
+  exercises — that script is unchanged and wasn't re-run against live
+  hardware; verification here is the 5 new unit-level tests plus a real
+  (if local) Linux build/test/clippy/fmt pass, not a live-fleet run.
 - **`fluxvm-agent central` fleet nodes can now be cordoned for planned
   maintenance** — `POST /fleet/nodes/{name}/cordon` and `.../uncordon`.
   Previously the only way to stop new VMs landing on a specific node ahead
