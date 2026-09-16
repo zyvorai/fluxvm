@@ -606,7 +606,12 @@ async fn main() -> Result<()> {
                 };
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&m.claim_from_pool(&name, overrides).await?)?
+                    // No token/tenant concept for this local CLI -- same
+                    // untenanted-admin posture every other m.<mutate>()
+                    // call in this file already has.
+                    serde_json::to_string_pretty(
+                        &m.claim_from_pool(&name, overrides, None).await?
+                    )?
                 );
             }
             PoolCommand::Delete { name } => m.delete_pool(&name).await?,

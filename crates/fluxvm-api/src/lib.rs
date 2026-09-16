@@ -2404,26 +2404,89 @@ async fn clean_catalog(
 async fn create_pool(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
-    Json(spec): Json<PoolSpec>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(mut spec): Json<PoolSpec>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
+    // Every member ever backfilled from this pool inherits
+    // spec.template.tenant unchanged (create()'s own req.clone() into each
+    // member's VmRecord) -- enforcing it once here, exactly like
+    // create_vm's own token-tenant forcing above, means it's correct for
+    // every future member too, not just re-checked per member.
+    if let Some(Extension(TokenTenant(t))) = token_tenant {
+        if let Some(ref body) = spec.template.tenant {
+            if body != &t {
+                return Err(ApiError::forbidden(format!(
+                    "token tenant '{t}' cannot create a pool for tenant '{body}'"
+                )));
+            }
+        }
+        spec.template.tenant = Some(t);
+    }
     Ok((StatusCode::CREATED, Json(m.create_pool(spec).await?)))
 }
-async fn list_pools(State(m): State<Arc<VmManager>>) -> Json<serde_json::Value> {
-    Json(json!({"items": m.list_pools().await}))
+async fn list_pools(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> Json<serde_json::Value> {
+    // Mirrors list_vms/list_sandboxes: a tenant-scoped token only ever
+    // sees pools whose template.tenant matches its own -- previously
+    // every pool, of every tenant, was visible to any authenticated
+    // caller regardless of role or tenant.
+    let items: Vec<_> = m
+        .list_pools()
+        .await
+        .into_iter()
+        .filter(|p| match &token_tenant {
+            Some(Extension(TokenTenant(t))) => p.template.tenant.as_deref() == Some(t.as_str()),
+            None => true,
+        })
+        .collect();
+    Json(json!({ "items": items }))
 }
+
+/// Returns `p` only if it's visible to `token_tenant` (no tenant on the
+/// token, or an exact match) -- otherwise the generic "not found" every
+/// other cross-tenant lookup in this file already returns, never a
+/// distinguishable 403 (same reasoning tenant_guard_middleware's own 404
+/// already documents: a tenant-scoped caller shouldn't be able to tell
+/// "wrong tenant" apart from "doesn't exist" for a resource they have no
+/// business seeing either way).
+fn pool_visible_to(p: &fluxvm_core::model::PoolRecord, token_tenant: &Option<Extension<TokenTenant>>) -> bool {
+    match token_tenant {
+        Some(Extension(TokenTenant(t))) => p.template.tenant.as_deref() == Some(t.as_str()),
+        None => true,
+    }
+}
+
 async fn get_pool(
     State(m): State<Arc<VmManager>>,
     Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(json!(m.get_pool(&name).await?)))
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
+    Ok(Json(json!(pool)))
 }
 async fn delete_pool(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
 ) -> ApiResult<StatusCode> {
     require_admin(role)?;
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
     m.delete_pool(&name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2431,10 +2494,22 @@ async fn claim_pool(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     Path(name): Path<String>,
+    token_tenant: Option<Extension<TokenTenant>>,
     Json(overrides): Json<ClaimOverrides>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    Ok(Json(json!(m.claim_from_pool(&name, overrides).await?)))
+    let pool = m.get_pool(&name).await?;
+    if !pool_visible_to(&pool, &token_tenant) {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "pool not found".into(),
+        });
+    }
+    let token_tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    Ok(Json(json!(
+        m.claim_from_pool(&name, overrides, token_tenant.as_deref())
+            .await?
+    )))
 }
 
 #[cfg(test)]
@@ -2958,6 +3033,111 @@ mod tests {
                 )
                 .await,
                 StatusCode::NOT_FOUND
+            );
+        }
+
+        fn pool_fixture(name: &str, tenant: Option<&str>) -> fluxvm_core::model::PoolRecord {
+            let mut template = fixture(BackendKind::Qemu, VmStatus::Running, false).request;
+            template.tenant = tenant.map(String::from);
+            fluxvm_core::model::PoolRecord {
+                name: name.into(),
+                size: 1,
+                template,
+                members: vec![],
+            }
+        }
+
+        #[tokio::test]
+        async fn list_pools_only_returns_the_callers_own_tenant() {
+            // Regression test: list_pools previously had no tenant
+            // filtering at all, unlike list_vms/list_sandboxes.
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            m.pools
+                .insert(pool_fixture("other-pool", Some("other")))
+                .await
+                .unwrap();
+            let app = router(m);
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/pools")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let items = parsed["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1, "expected exactly one pool in:\n{body}");
+            assert_eq!(items[0]["name"], "acme-pool");
+        }
+
+        #[tokio::test]
+        async fn pool_by_name_routes_are_tenant_scoped() {
+            // Regression test: get_pool/delete_pool/claim_pool previously
+            // had no tenant check at all -- pools are name-keyed, not
+            // UUID-keyed, so tenant_guard_middleware's own generic
+            // "/v1/vms/{id}..." extraction never covered them either way.
+            let m = manager(tenant_tokens());
+            m.pools
+                .insert(pool_fixture("acme-pool", Some("acme")))
+                .await
+                .unwrap();
+            let app = router(m);
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/pools/acme-pool", Some("other")).await,
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/pools/acme-pool", Some("acme")).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                request(
+                    app,
+                    "POST",
+                    "/v1/pools/acme-pool/claim",
+                    Some("other"),
+                    Some("{}"),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        const VALID_POOL_BODY: &str =
+            r#"{"name":"p1","size":1,"template":{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2"}}"#;
+
+        #[tokio::test]
+        async fn create_pool_forces_the_callers_own_tenant() {
+            // Regression test: create_pool previously never forced the
+            // caller's own token tenant onto template.tenant the way
+            // create_vm already does for a plain VM create -- every
+            // member ever backfilled from an untenanted pool would have
+            // inherited no tenant at all, making it unreachable via any
+            // tenant-scoped route once claimed.
+            let m = manager(tenant_tokens());
+            let app = router(m.clone());
+            assert_eq!(
+                request(app, "POST", "/v1/pools", Some("acme"), Some(VALID_POOL_BODY)).await,
+                StatusCode::CREATED
+            );
+            let pool = m.get_pool("p1").await.unwrap();
+            assert_eq!(pool.template.tenant.as_deref(), Some("acme"));
+        }
+
+        #[tokio::test]
+        async fn create_pool_rejects_a_template_tenant_mismatch() {
+            let m = manager(tenant_tokens());
+            let app = router(m);
+            let body = r#"{"name":"p2","size":1,"template":{"name":"t","tenant":"other","backend":"qemu","image":"/does/not/exist.qcow2"}}"#;
+            assert_eq!(
+                request(app, "POST", "/v1/pools", Some("acme"), Some(body)).await,
+                StatusCode::FORBIDDEN
             );
         }
     }

@@ -3,6 +3,24 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **Warm pools (`/v1/pools`) had no tenant scoping at all** — the same gap
+  as sandboxes above, in the same audit pass: `list_pools` had no tenant
+  filter, `get_pool`/`delete_pool`/`claim_pool` (name-keyed, so
+  `tenant_guard_middleware`'s UUID-based extraction never covered them
+  either way) had no tenant check, and `create_pool` never forced the
+  caller's own token `tenant` onto `spec.template.tenant`. The last one
+  is the most consequential: every member ever backfilled from an
+  untenanted pool inherits `template.tenant` unchanged, so a tenant-scoped
+  admin token creating a pool without this fix would have produced members
+  no tenant-scoped token — including its own creator, after claiming one —
+  could ever reach via `/v1/vms/{id}/...`. Fixed: `create_pool`
+  inherits/rejects the token tenant on `spec.template` exactly like
+  `create_vm`; `list_pools` filters by tenant like `list_vms`;
+  `get_pool`/`delete_pool`/`claim_pool` 404 for a mismatched tenant before
+  reaching the underlying `VmManager` call; `claim_from_pool` additionally
+  rejects (and cleans up, matching its own existing resume-failure
+  cleanup) a claim whose resumed member's tenant doesn't match the
+  claiming token's. 6 new tests.
 - **Sandboxes (`/v1/sandboxes`) had no tenant scoping at all** —
   `tenant_guard_middleware` only ever recognized `/v1/vms/{id}...` paths, so
   every `/v1/sandboxes/{id}/...` route (snapshot, `fs/read`, `fs/write`,

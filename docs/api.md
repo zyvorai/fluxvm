@@ -137,6 +137,12 @@ sandboxes, and every `/v1/sandboxes/{id}/...` route (snapshot, `fs/read`, `fs/wr
 404s for a different tenant's token exactly like `/v1/vms/{id}/...` already did — this was
 previously missing entirely (see CHANGELOG).
 
+`/v1/pools` gets the same treatment, name-keyed rather than `Uuid`-keyed: `POST /v1/pools`
+inherits/enforces the caller's token `tenant` on `template.tenant` (every member ever backfilled
+from that pool inherits it unchanged), `GET /v1/pools` only returns the caller's own tenant's
+pools, and `GET`/`DELETE /v1/pools/{name}` and `POST /v1/pools/{name}/claim` all 404 for a
+different tenant's token — also previously missing entirely (see CHANGELOG).
+
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms -H 'Authorization: Bearer <token>'
 curl -sS 'http://127.0.0.1:7788/v1/vms?tenant=acme' -H 'Authorization: Bearer <token>'

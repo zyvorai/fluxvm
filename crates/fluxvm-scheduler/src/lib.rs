@@ -2175,10 +2175,23 @@ impl VmManager {
     /// clear "no ready members" error rather than falling back to a slow
     /// synchronous create — a caller who wants that can just call
     /// `create()` directly instead of `claim_from_pool`.
+    ///
+    /// `token_tenant`, when the caller's own API token carries one, is
+    /// checked against the resumed member's own `request.tenant` (which
+    /// `create_pool`'s own enforcement should already have set to match
+    /// the pool's owning tenant) -- a mismatch is rejected outright rather
+    /// than silently handed over. Without this, claiming from any pool
+    /// whose tenant didn't happen to match the caller's own would have
+    /// left `tenant_guard_middleware` denying the very caller who just
+    /// claimed it access to every one of its own `/v1/vms/{id}/...`
+    /// routes afterward (their token's tenant would never match the
+    /// claimed VM's), which is a correctness break, not just a security
+    /// one.
     pub async fn claim_from_pool(
         self: &Arc<Self>,
         name: &str,
         overrides: ClaimOverrides,
+        token_tenant: Option<&str>,
     ) -> Result<VmRecord> {
         let Some(id) = self.pools.pop_member(name).await? else {
             bail!(
@@ -2197,6 +2210,18 @@ impl VmManager {
                 return Err(e).context("resuming claimed pool member");
             }
         };
+        if let Some(t) = token_tenant {
+            if vm.request.tenant.as_deref() != Some(t) {
+                // Already popped -- same "clean up rather than leak a
+                // claimed-but-unusable VM outside any pool's accounting"
+                // reasoning as the resume-failure case above; a backfill
+                // was already triggered to replace it.
+                let _ = self.delete(id).await;
+                bail!(
+                    "token tenant '{t}' cannot claim a pool member belonging to a different tenant"
+                );
+            }
+        }
         if let Some(new_name) = overrides.name {
             vm.request.name = new_name.clone();
             vm.name = new_name;
