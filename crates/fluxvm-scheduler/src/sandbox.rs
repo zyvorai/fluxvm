@@ -41,10 +41,19 @@ pub struct TemplateInfo {
 
 impl VmManager {
     /// Create a sandbox VM. Forces `BackendKind::FluxVm` unless the embedded
-    /// spec already names FluxVm.
+    /// spec already names FluxVm. `token_tenant`, when the caller's own API
+    /// token carries one, is authoritative over both a `template`'s own
+    /// resolved spec and an explicit `req.spec` -- mirroring exactly how
+    /// `create_vm` (`fluxvm-api`) already forces `CreateVmRequest.tenant`
+    /// for a plain VM create. Without this, a tenant-scoped token could
+    /// create a sandbox tagged with no tenant at all (or, worse, an
+    /// explicit `spec.tenant` naming a *different* tenant), which would
+    /// have made `tenant_guard_middleware`'s per-VM tenant check
+    /// meaningless for that sandbox from the moment it was created.
     pub async fn create_sandbox(
         self: &std::sync::Arc<Self>,
         req: SandboxCreateRequest,
+        token_tenant: Option<&str>,
     ) -> Result<VmRecord> {
         let mut create = if let Some(template) = &req.template {
             self.load_template_spec(template).await?
@@ -53,6 +62,7 @@ impl VmManager {
         } else {
             bail!("sandbox create requires `template` or `spec`");
         };
+        enforce_sandbox_tenant(&mut create, token_tenant)?;
         create.backend = BackendKind::FluxVm;
         if let Some(name) = req.name {
             create.name = name;
@@ -276,5 +286,99 @@ impl VmManager {
                 }
             }
         });
+    }
+}
+
+/// A tenant-scoped token is authoritative over a resolved sandbox spec's
+/// own `tenant` field: inherited when unset, rejected outright when it
+/// names a *different* tenant. Extracted as a pure, sync function (no
+/// `VmManager`/I/O) so the actual enforcement decision is unit-testable
+/// without needing a real `create()` call -- see `create_sandbox`'s own
+/// doc comment for why this exists at all.
+fn enforce_sandbox_tenant(create: &mut CreateVmRequest, token_tenant: Option<&str>) -> Result<()> {
+    let Some(t) = token_tenant else {
+        return Ok(());
+    };
+    if let Some(ref body) = create.tenant {
+        if body != t {
+            bail!("token tenant '{t}' cannot create a sandbox for tenant '{body}'");
+        }
+    }
+    create.tenant = Some(t.to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req() -> CreateVmRequest {
+        CreateVmRequest {
+            name: String::new(),
+            tenant: None,
+            backend: BackendKind::FluxVm,
+            image: PathBuf::from("/does/not/exist.qcow2"),
+            vcpus: 1,
+            memory_mib: 512,
+            max_vcpus: None,
+            max_memory_mib: None,
+            loadvm_tag: None,
+            disk_size_gib: None,
+            kernel: None,
+            initrd: None,
+            firmware: None,
+            kernel_args: None,
+            network: fluxvm_core::model::NetworkSpec::None,
+            cloud_init: None,
+            ttl_seconds: None,
+            extra_args: vec![],
+            agent: None,
+            qga: None,
+            hyperv: false,
+            storage: Default::default(),
+            shared_folders: vec![],
+            numa_node: None,
+            cpuset: None,
+            hugepages: None,
+            vfio_devices: vec![],
+            pod_uid: None,
+            secure_boot: None,
+            tpm: None,
+        }
+    }
+
+    #[test]
+    fn no_token_tenant_leaves_an_untenanted_spec_untenanted() {
+        let mut create = req();
+        enforce_sandbox_tenant(&mut create, None).unwrap();
+        assert_eq!(create.tenant, None);
+    }
+
+    #[test]
+    fn token_tenant_is_inherited_when_the_spec_names_none() {
+        let mut create = req();
+        enforce_sandbox_tenant(&mut create, Some("acme")).unwrap();
+        assert_eq!(create.tenant.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn token_tenant_matching_the_specs_own_tenant_is_a_noop() {
+        let mut create = req();
+        create.tenant = Some("acme".into());
+        enforce_sandbox_tenant(&mut create, Some("acme")).unwrap();
+        assert_eq!(create.tenant.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn token_tenant_rejects_a_spec_naming_a_different_tenant() {
+        // Without this, a tenant-scoped token could spoof a sandbox into
+        // another tenant's name (or, via a template with no tenant of its
+        // own, create one with no tenant at all) -- either would make
+        // tenant_guard_middleware's per-record check meaningless for that
+        // sandbox from the moment it was created.
+        let mut create = req();
+        create.tenant = Some("other-tenant".into());
+        let err = enforce_sandbox_tenant(&mut create, Some("acme")).unwrap_err();
+        assert!(err.to_string().contains("cannot create a sandbox"));
     }
 }

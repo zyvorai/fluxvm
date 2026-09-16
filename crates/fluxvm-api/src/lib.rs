@@ -177,12 +177,19 @@ struct AuditActor(pub String);
 struct TokenTenant(pub String);
 
 fn extract_vm_uuid(path: &str) -> Option<Uuid> {
-    let rest = path.strip_prefix("/v1/vms/")?;
+    let rest = path
+        .strip_prefix("/v1/vms/")
+        .or_else(|| path.strip_prefix("/v1/sandboxes/"))?;
     let id = rest.split('/').next()?;
     Uuid::parse_str(id).ok()
 }
 
-/// When a token carries a tenant, scope all `/v1/vms/{uuid}…` access to that tenant.
+/// When a token carries a tenant, scope all `/v1/vms/{uuid}…` and
+/// `/v1/sandboxes/{uuid}…` access to that tenant -- a sandbox is a
+/// `VmRecord` like any other (`VmManager::create_sandbox` funnels through
+/// the same `create()`), so the same per-record tenant check applies to
+/// both id spaces uniformly rather than needing a second copy of this
+/// logic.
 async fn tenant_guard_middleware(
     State(m): State<Arc<VmManager>>,
     req: Request,
@@ -770,18 +777,35 @@ async fn enforce_token_quotas(
 async fn create_sandbox(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
     Json(req): Json<fluxvm_scheduler::SandboxCreateRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
-    Ok((StatusCode::CREATED, Json(m.create_sandbox(req).await?)))
+    let token_tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    Ok((
+        StatusCode::CREATED,
+        Json(m.create_sandbox(req, token_tenant.as_deref()).await?),
+    ))
 }
 
-async fn list_sandboxes(State(m): State<Arc<VmManager>>) -> Json<serde_json::Value> {
+async fn list_sandboxes(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> Json<serde_json::Value> {
+    // Unlike list_vms, this had no tenant filtering at all -- any
+    // authenticated caller, tenant-scoped token or not, could see every
+    // sandbox across every tenant. tenant_guard_middleware only ever
+    // scoped *per-record* access by id (GET/POST .../{id}/...), never a
+    // list. Mirrors list_vms's own filtering exactly.
     let items: Vec<_> = m
         .list()
         .await
         .into_iter()
         .filter(|v| v.backend == BackendKind::FluxVm)
+        .filter(|v| match &token_tenant {
+            Some(Extension(TokenTenant(t))) => v.request.tenant.as_deref() == Some(t.as_str()),
+            None => true,
+        })
         .collect();
     Json(json!({ "items": items }))
 }
@@ -2829,6 +2853,112 @@ mod tests {
                     StatusCode::OK
                 );
             }
+        }
+
+        fn tenant_tokens() -> AuthConfig {
+            AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "acme".into(),
+                        role: Role::Admin,
+                        name: Some("acme".into()),
+                        tenant: Some("acme".into()),
+                    },
+                    ApiToken {
+                        token: "other".into(),
+                        role: Role::Admin,
+                        name: Some("other".into()),
+                        tenant: Some("other".into()),
+                    },
+                ],
+                ..Default::default()
+            }
+        }
+
+        async fn body_string(resp: Response) -> String {
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            String::from_utf8(bytes.to_vec()).unwrap()
+        }
+
+        #[tokio::test]
+        async fn list_sandboxes_only_returns_the_callers_own_tenant() {
+            // Regression test: list_sandboxes previously had no tenant
+            // filtering at all (unlike list_vms), so any authenticated
+            // caller -- tenant-scoped or not -- could see every sandbox
+            // across every tenant.
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let mut other_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            other_sandbox.request.tenant = Some("other".into());
+            m.store.insert(acme_sandbox.clone()).await.unwrap();
+            m.store.insert(other_sandbox).await.unwrap();
+
+            let app = router(m);
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/sandboxes")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            assert!(
+                body.contains(&acme_sandbox.id.to_string()),
+                "expected acme's own sandbox in:\n{body}"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                parsed["items"].as_array().unwrap().len(),
+                1,
+                "expected exactly one sandbox (the caller's own) in:\n{body}"
+            );
+        }
+
+        #[tokio::test]
+        async fn sandbox_id_routes_are_tenant_scoped_like_vm_routes() {
+            // tenant_guard_middleware previously only recognized "/v1/vms/"
+            // paths -- every "/v1/sandboxes/{id}/..." route (snapshot,
+            // fs/read, fs/write, process) was entirely unscoped, so a
+            // tenant-scoped admin token could reach any tenant's sandbox by
+            // UUID, not just its own.
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let id = acme_sandbox.id;
+            m.store.insert(acme_sandbox).await.unwrap();
+
+            let app = router(m);
+            // The "other" tenant's token gets exactly the same 404 the
+            // tenant_guard already returns for a mismatched /v1/vms/{id}.
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/process"),
+                    Some("other"),
+                    Some(r#"{"command":["true"]}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            // The owning tenant's token clears the tenant guard -- it may
+            // still fail downstream (no real agent/vsock in this test), but
+            // that's a different, later error, never a 404 "not found".
+            assert_ne!(
+                request(
+                    app,
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/process"),
+                    Some("acme"),
+                    Some(r#"{"command":["true"]}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
         }
     }
 }

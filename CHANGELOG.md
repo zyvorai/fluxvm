@@ -3,6 +3,28 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **Sandboxes (`/v1/sandboxes`) had no tenant scoping at all** —
+  `tenant_guard_middleware` only ever recognized `/v1/vms/{id}...` paths, so
+  every `/v1/sandboxes/{id}/...` route (snapshot, `fs/read`, `fs/write`,
+  `process`) was reachable by any tenant-scoped token for any tenant's
+  sandbox by UUID, not just its own; `list_sandboxes` had no tenant filter
+  at all, unlike `list_vms`; and `create_sandbox` never forced the caller's
+  own token `tenant` onto the resolved spec the way `create_vm` already
+  does, so a tenant-scoped admin token could create a sandbox with no
+  tenant at all, or an explicit `spec.tenant` naming a *different* tenant
+  outright — either would have made the per-record tenant check
+  meaningless for that sandbox from the moment it was created. Found by
+  auditing tenant-scoping coverage across every `VmRecord`-backed id space,
+  not just `/v1/vms`, following the same "audit every X for a Y" method
+  that already found the `egress/check` gap below. Fixed: `extract_vm_uuid`
+  now also recognizes `/v1/sandboxes/{id}...` (a sandbox is a `VmRecord`
+  like any other); `list_sandboxes` filters by the caller's token tenant
+  exactly like `list_vms`; a new `enforce_sandbox_tenant`
+  (`fluxvm-scheduler::sandbox`) inherits/rejects the token tenant on the
+  resolved spec, covering both the `template` and explicit-`spec` paths
+  uniformly. 6 new tests (4 pure unit tests on `enforce_sandbox_tenant`, 2
+  router-level regression tests proving cross-tenant list/id-route access
+  is denied).
 - **`POST /v1/egress/check` had no role check at all** — every other mutating
   route calls `require_admin`, but this one never did, so a `read-only`
   bearer token could call it directly and get back a real secret: when the

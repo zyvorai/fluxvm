@@ -129,6 +129,14 @@ mismatch → 403) and scopes list/get/mutate to that tenant.
 List with `GET /v1/vms?tenant=acme`. Reserved keys `auth.oidc_issuer` /
 `auth.oidc_audience` are placeholders for a future OIDC exchange — bearer tokens remain the GA path.
 
+The same tenant scoping applies to `/v1/sandboxes` (a sandbox is a `VmRecord` like any other):
+`POST /v1/sandboxes` inherits/enforces the caller's token `tenant` on the resolved spec exactly
+like `POST /v1/vms` does (a `template`'s own tenant, if any, is subject to the same check as an
+explicit `spec.tenant` would be), `GET /v1/sandboxes` only ever returns the caller's own tenant's
+sandboxes, and every `/v1/sandboxes/{id}/...` route (snapshot, `fs/read`, `fs/write`, `process`)
+404s for a different tenant's token exactly like `/v1/vms/{id}/...` already did — this was
+previously missing entirely (see CHANGELOG).
+
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms -H 'Authorization: Bearer <token>'
 curl -sS 'http://127.0.0.1:7788/v1/vms?tenant=acme' -H 'Authorization: Bearer <token>'
