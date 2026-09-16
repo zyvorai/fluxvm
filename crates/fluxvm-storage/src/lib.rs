@@ -299,6 +299,23 @@ impl PoolStore {
         .await
     }
 
+    /// Atomically bumps `name`'s lifetime `claimed_total` by one. A no-op
+    /// (not an error) if the pool doesn't exist any more — called from
+    /// `VmManager::claim_from_pool` after a claim has already fully
+    /// succeeded (member resumed, tenant checked), so a pool deleted in the
+    /// narrow window between those two steps should never turn a completed
+    /// claim into a hard error over a stats counter that no longer has
+    /// anywhere to live.
+    pub async fn increment_claimed(&self, name: &str) -> Result<()> {
+        let name = name.to_string();
+        self.with_exclusive(move |m| {
+            if let Some(p) = m.get_mut(&name) {
+                p.claimed_total += 1;
+            }
+        })
+        .await
+    }
+
     /// Atomically overwrites `name`'s target `size`, returning the updated
     /// record, or `None` if the pool doesn't exist. Does not touch
     /// `members` at all — the caller (`VmManager::resize_pool`) is
@@ -496,6 +513,7 @@ mod tests {
             size: 2,
             template: fixture_record("template").request,
             members: vec![],
+            claimed_total: 0,
         }
     }
 
@@ -558,6 +576,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = PoolStore::load(dir.path()).unwrap();
         assert!(store.set_size("does-not-exist", 3).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn increment_claimed_bumps_the_counter_each_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PoolStore::load(dir.path()).unwrap();
+        store.insert(fixture_pool("a")).await.unwrap();
+        assert_eq!(store.get("a").await.unwrap().claimed_total, 0);
+
+        store.increment_claimed("a").await.unwrap();
+        assert_eq!(store.get("a").await.unwrap().claimed_total, 1);
+
+        store.increment_claimed("a").await.unwrap();
+        store.increment_claimed("a").await.unwrap();
+        assert_eq!(store.get("a").await.unwrap().claimed_total, 3);
+    }
+
+    #[tokio::test]
+    async fn increment_claimed_on_deleted_pool_is_a_harmless_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PoolStore::load(dir.path()).unwrap();
+        // No insert — "a" was never created (or was already deleted between
+        // a claim popping its member and the increment that follows).
+        store.increment_claimed("a").await.unwrap();
     }
 
     #[tokio::test]

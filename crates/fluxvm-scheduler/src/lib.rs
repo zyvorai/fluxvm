@@ -2171,6 +2171,7 @@ impl VmManager {
             size: spec.size,
             template: spec.template,
             members: vec![],
+            claimed_total: 0,
         };
         self.pools.insert(record.clone()).await?;
         self.spawn_backfill(record.name.clone());
@@ -2318,6 +2319,15 @@ impl VmManager {
             .ttl_seconds
             .map(|s| Utc::now() + Duration::seconds(s as i64));
         self.store.update(vm.clone()).await?;
+        // Best-effort: the claim itself is already done (the VM is resumed
+        // and handed back below) by the time this runs, so a failure here
+        // must not turn a completed claim into an error over a stats
+        // counter — log and keep going, same "observability must never
+        // block or unwind the operation it's observing" reasoning as every
+        // metrics-recording call elsewhere in this file.
+        if let Err(e) = self.pools.increment_claimed(name).await {
+            tracing::warn!(pool = %name, error = ?e, "failed to bump pool claimed_total");
+        }
         Ok(vm)
     }
 
@@ -2953,6 +2963,7 @@ mod tests {
                 size,
                 template: req(BackendKind::Qemu, None, None),
                 members,
+                claimed_total: 0,
             }
         }
 

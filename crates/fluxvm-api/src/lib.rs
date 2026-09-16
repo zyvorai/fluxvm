@@ -2424,7 +2424,12 @@ async fn create_pool(
         }
         spec.template.tenant = Some(t);
     }
-    Ok((StatusCode::CREATED, Json(m.create_pool(spec).await?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(fluxvm_core::model::PoolView::from(
+            m.create_pool(spec).await?,
+        )),
+    ))
 }
 async fn list_pools(
     State(m): State<Arc<VmManager>>,
@@ -2442,6 +2447,9 @@ async fn list_pools(
             Some(Extension(TokenTenant(t))) => p.template.tenant.as_deref() == Some(t.as_str()),
             None => true,
         })
+        // See PoolView's doc comment: `size`/`members` alone don't say
+        // which is the target and which is what's ready right now.
+        .map(fluxvm_core::model::PoolView::from)
         .collect();
     Json(json!({ "items": items }))
 }
@@ -2475,7 +2483,7 @@ async fn get_pool(
             message: "pool not found".into(),
         });
     }
-    Ok(Json(json!(pool)))
+    Ok(Json(json!(fluxvm_core::model::PoolView::from(pool))))
 }
 async fn delete_pool(
     State(m): State<Arc<VmManager>>,
@@ -2536,7 +2544,9 @@ async fn resize_pool(
             message: "pool not found".into(),
         });
     }
-    Ok(Json(json!(m.resize_pool(&name, body.size).await?)))
+    Ok(Json(json!(fluxvm_core::model::PoolView::from(
+        m.resize_pool(&name, body.size).await?
+    ))))
 }
 
 #[cfg(test)]
@@ -3071,6 +3081,7 @@ mod tests {
                 size: 1,
                 template,
                 members: vec![],
+                claimed_total: 0,
             }
         }
 
@@ -3101,6 +3112,54 @@ mod tests {
             let items = parsed["items"].as_array().unwrap();
             assert_eq!(items.len(), 1, "expected exactly one pool in:\n{body}");
             assert_eq!(items[0]["name"], "acme-pool");
+        }
+
+        #[tokio::test]
+        async fn pool_routes_report_computed_ready_pending_and_claimed_total() {
+            // Regression coverage for PoolView: GET /v1/pools and
+            // GET /v1/pools/{name} previously returned the raw PoolRecord
+            // (`size`/`members` only) -- a caller had no named field for
+            // "how many are ready right now" or "how many more are still
+            // needed to reach target," and no visibility at all into a
+            // pool's lifetime claim history.
+            let m = manager(tenant_tokens());
+            let mut pool = pool_fixture("acme-pool", Some("acme"));
+            pool.size = 5;
+            pool.members = vec![Uuid::new_v4(), Uuid::new_v4()];
+            pool.claimed_total = 7;
+            m.pools.insert(pool).await.unwrap();
+            let app = router(m);
+
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/pools/acme-pool")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(parsed["size"], 5);
+            assert_eq!(parsed["ready"], 2);
+            assert_eq!(parsed["pending"], 3);
+            assert_eq!(parsed["claimed_total"], 7);
+
+            let req = Request::builder()
+                .method("GET")
+                .uri("/v1/pools")
+                .header(header::AUTHORIZATION, "Bearer acme")
+                .body(Body::empty())
+                .unwrap();
+            let resp = app.oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            let body = body_string(resp).await;
+            let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let items = parsed["items"].as_array().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0]["ready"], 2);
+            assert_eq!(items[0]["pending"], 3);
+            assert_eq!(items[0]["claimed_total"], 7);
         }
 
         #[tokio::test]

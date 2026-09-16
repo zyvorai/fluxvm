@@ -410,12 +410,40 @@ create` but unlike `pool claim` — blocks on `backfill_pool_sync` when growing,
 process doesn't take its own background backfill down with it before the pool actually reaches the
 requested size.
 
+`pool list`/`pool get` (and the equivalent REST responses) report computed occupancy alongside the
+stored fields, so you don't have to derive it yourself:
+
+```bash
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml pool get my-pool
+```
+
+```json
+{
+  "name": "my-pool",
+  "size": 8,
+  "members": ["...", "..."],
+  "claimed_total": 41,
+  "ready": 6,
+  "pending": 2
+}
+```
+
+`ready` is `members.len()` under a clearer name; `pending` is how many more members are still
+needed to reach `size` (0 once backfill has caught up); `claimed_total` is a lifetime count of
+every member this pool has ever successfully handed out via `pool claim` — useful for telling
+"this pool is sized about right" apart from "this pool has never actually been claimed from" or
+"this pool is running dry constantly and should be bigger," none of which the bare `size`/`members`
+pair said on their own.
+
 **Real limits today**: resizing has unit and router-level tests (`fluxvm-scheduler`,
 `fluxvm-api`) but, unlike the rest of this section, has not been exercised against real hardware —
 `scripts/test-warm-pool.sh` doesn't cover it yet. A shrink that fails to delete one excess member
 (logged, not fatal) leaves the pool's target size reduced but membership not fully caught up; the
 reaper never shrinks a pool on its own, so an under-trimmed pool stays exactly that size until
-resized again, rather than silently drifting back up.
+resized again, rather than silently drifting back up. The `ready`/`pending`/`claimed_total` fields
+are pure read-side computation over state `pool create`/`claim`/`resize` already maintain and
+already exercise on real hardware above — nothing new to independently verify against a live guest,
+but also not separately re-run against real hardware under this name.
 
 Every pool member is verified genuinely ready — not just "a process exists" — before being paused: a
 real bug found on real hardware pausing a member immediately after `create()` returns (before the

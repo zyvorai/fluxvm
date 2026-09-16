@@ -597,15 +597,25 @@ async fn main() -> Result<()> {
                 m.backfill_pool_sync(&name).await?;
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&m.get_pool(&name).await?)?
+                    serde_json::to_string_pretty(&fluxvm_core::model::PoolView::from(
+                        m.get_pool(&name).await?
+                    ))?
                 );
             }
             PoolCommand::List => {
-                println!("{}", serde_json::to_string_pretty(&m.list_pools().await)?)
+                let items: Vec<_> = m
+                    .list_pools()
+                    .await
+                    .into_iter()
+                    .map(fluxvm_core::model::PoolView::from)
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?)
             }
             PoolCommand::Get { name } => println!(
                 "{}",
-                serde_json::to_string_pretty(&m.get_pool(&name).await?)?
+                serde_json::to_string_pretty(&fluxvm_core::model::PoolView::from(
+                    m.get_pool(&name).await?
+                ))?
             ),
             PoolCommand::Claim {
                 name,
@@ -639,7 +649,9 @@ async fn main() -> Result<()> {
                 }
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&m.get_pool(&name).await?)?
+                    serde_json::to_string_pretty(&fluxvm_core::model::PoolView::from(
+                        m.get_pool(&name).await?
+                    ))?
                 );
             }
             PoolCommand::Delete { name } => m.delete_pool(&name).await?,

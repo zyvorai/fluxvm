@@ -96,6 +96,40 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **Warm VM pools now report computed occupancy, not just raw membership** —
+  `GET /v1/pools`, `GET /v1/pools/{name}`, `fluxvm pool list`, and
+  `fluxvm pool get` previously returned the bare `PoolRecord`: `size` (the
+  *target* member count) and `members` (the ids of members currently ready),
+  with nothing naming which was which. Telling "fully backfilled" apart
+  from "still catching up after a resize or a burst of claims" meant a
+  caller had to already know, unprompted, to compare `members.len()`
+  against `size` itself — and there was no visibility at all into how
+  heavily a pool had actually been used over its lifetime, which is the
+  other half of knowing whether it's sized right. New `PoolView`
+  (`fluxvm-core::model`), a `#[serde(flatten)]` wrapper around `PoolRecord`
+  adding two computed fields — `ready` (`members.len()`) and `pending`
+  (`size` minus `ready`, saturating so a pool briefly over target
+  mid-shrink reports 0 rather than an underflowed `usize`) — plus a new
+  persisted `PoolRecord.claimed_total: u64`, a lifetime counter of
+  successful `claim_from_pool` calls, bumped via a new
+  `PoolStore::increment_claimed` right after a claim has already fully
+  succeeded (member resumed, and tenant-checked when the caller's token
+  carries one) — best-effort and fail-open the same way `delete_pool`'s own
+  member cleanup is, so a stats-increment failure can never turn an
+  already-completed claim into an error for the caller who just received
+  their VM. `#[serde(default)]` on the new field so a `pools.json` written
+  before this existed still loads cleanly (as 0, the honest "unknown
+  history" value). All four pool-returning routes (`create`, `list`, `get`,
+  `resize`) and both CLI print sites (`pool list`/`get`, which read
+  straight off the same local `VmManager` the server uses, not through
+  HTTP) now go through `PoolView` — purely additive, no existing field
+  renamed or removed. 9 new tests (4 `fluxvm-core` unit tests on `PoolView`
+  covering the ready/pending arithmetic, the saturating-at-target-exceeded
+  case, and that the flatten doesn't shadow a persisted field; 2
+  `fluxvm-storage` unit tests on `increment_claimed`, including the
+  pool-deleted-concurrently no-op case; 1 `fluxvm-api` router test
+  asserting `ready`/`pending`/`claimed_total` on both the list and
+  by-name routes). Docs: `FEATURES.md`'s "Warm VM pools" bullet.
 - **Warm VM pools can now be resized after creation** —
   `POST /v1/pools/{name}/resize` (admin-only, body `{"size": N}`) and
   `fluxvm pool resize <name> --size N`. Previously `PoolSpec::size` was

@@ -154,6 +154,13 @@ members immediately and synchronously, not on the next reaper tick — a caller 
 pool is asking to give resources back right away. See `docs/operations.md`'s "Warm VM pools"
 section for a worked example.
 
+Every pool-returning route (`POST`/`GET /v1/pools`, `GET`/`POST .../resize /v1/pools/{name}`)
+returns a `PoolView`, not the bare stored record: alongside `size` (the target) and `members` (ids
+of members ready right now) it adds `ready` (`members.len()`, named explicitly so you don't have to
+know that's what `members` counts), `pending` (`size` minus `ready`, floored at 0), and
+`claimed_total` (a lifetime count of members this pool has actually handed out via
+`POST .../claim`). All three are additive — nothing existing was renamed or removed.
+
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms -H 'Authorization: Bearer <token>'
 curl -sS 'http://127.0.0.1:7788/v1/vms?tenant=acme' -H 'Authorization: Bearer <token>'

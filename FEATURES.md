@@ -70,7 +70,12 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 - **cgroup v2 resource control** — CPU/memory/IO limits, freeze/thaw, PSI (pressure stall information)
 - **Warm VM pools** — pre-started VMs for lower cold-start latency, resizable after creation
-  (`POST /v1/pools/{name}/resize`, `fluxvm pool resize`) without deleting and recreating the pool
+  (`POST /v1/pools/{name}/resize`, `fluxvm pool resize`) without deleting and recreating the pool.
+  `GET /v1/pools`/`/v1/pools/{name}` and `fluxvm pool list`/`get` report computed `ready` (members
+  paused and claimable right now) and `pending` (how many more are needed to reach target `size`)
+  counts alongside a lifetime `claimed_total`, so "fully backfilled" vs "still catching up" vs
+  "never actually claimed from" don't require inferring anything from `members.len()` vs `size`
+  yourself
 - **Firecracker jailer** — chroot + uid/gid drop per VM
 - **Admission policy limits** — caps on what a request is allowed to provision
 - **Bearer-token auth/RBAC** — on the REST API

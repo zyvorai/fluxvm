@@ -527,6 +527,55 @@ pub struct PoolRecord {
     pub template: CreateVmRequest,
     #[serde(default)]
     pub members: Vec<Uuid>,
+    /// Lifetime count of members successfully handed out by
+    /// `VmManager::claim_from_pool` — incremented once per claim that
+    /// actually succeeded (resumed and, if tenant-scoped, verified), not
+    /// once per pop attempt. Pure observability: nothing reads this back to
+    /// make a decision, it exists so an operator staring at a pool that
+    /// keeps running dry (or one that's never claimed at all) has a number
+    /// to size it by, instead of only ever seeing a point-in-time
+    /// ready-vs-target snapshot that says nothing about actual demand over
+    /// time. `#[serde(default)]` so a `pools.json` written before this
+    /// field existed still loads (as 0, the honest "unknown history"
+    /// value) rather than failing to parse.
+    #[serde(default)]
+    pub claimed_total: u64,
+}
+
+/// Read-only view of a [`PoolRecord`] returned by the pool API/CLI surfaces,
+/// augmenting the persisted fields with occupancy stats a caller would
+/// otherwise have to derive itself. Before this, `GET /v1/pools/{name}` (and
+/// `fluxvm pool get`/`list`) returned only `size` (the *target* member
+/// count) and `members` (the ids of members currently ready) — nothing
+/// named which was which, so telling "fully backfilled" apart from "still
+/// catching up" meant a caller had to know, unprompted, to compare
+/// `members.len()` against `size` itself. `ready`/`pending` name that
+/// comparison explicitly; `claimed_total` (already on `record`, just called
+/// out here too since it's the other half of "is this pool sized right")
+/// rides along via the flatten.
+#[derive(Debug, Clone, Serialize)]
+pub struct PoolView {
+    #[serde(flatten)]
+    pub record: PoolRecord,
+    /// `record.members.len()` — members currently paused and claimable
+    /// right now.
+    pub ready: usize,
+    /// How many more members are needed to reach `record.size`. Saturating,
+    /// so a pool briefly over target (e.g. mid-shrink, before the excess is
+    /// trimmed) reports 0 rather than an underflowed huge number.
+    pub pending: usize,
+}
+
+impl From<PoolRecord> for PoolView {
+    fn from(record: PoolRecord) -> Self {
+        let ready = record.members.len();
+        let pending = record.size.saturating_sub(ready);
+        Self {
+            record,
+            ready,
+            pending,
+        }
+    }
 }
 
 /// Applied to the VM handed back by a pool claim, replacing whatever the
@@ -621,4 +670,68 @@ pub struct VmPressure {
     pub memory_full: Option<fluxvm_cgroup::PressureRecord>,
     pub io_some: Option<fluxvm_cgroup::PressureRecord>,
     pub io_full: Option<fluxvm_cgroup::PressureRecord>,
+}
+
+#[cfg(test)]
+mod pool_view_tests {
+    use super::*;
+
+    /// A `CreateVmRequest` has ~25 fields, nearly all `#[serde(default)]` --
+    /// going through JSON with only the three actually-required ones set
+    /// exercises the same defaulting real request bodies rely on, instead
+    /// of this test needing to list every field by hand (and rot every time
+    /// a field is added elsewhere).
+    fn minimal_request() -> CreateVmRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": "t",
+            "backend": "qemu",
+            "image": "/does/not/exist.qcow2",
+        }))
+        .unwrap()
+    }
+
+    fn pool(size: usize, member_count: usize, claimed_total: u64) -> PoolRecord {
+        PoolRecord {
+            name: "p".into(),
+            size,
+            template: minimal_request(),
+            members: (0..member_count).map(|_| Uuid::new_v4()).collect(),
+            claimed_total,
+        }
+    }
+
+    #[test]
+    fn ready_and_pending_reflect_members_vs_target() {
+        let view = PoolView::from(pool(5, 2, 0));
+        assert_eq!(view.ready, 2);
+        assert_eq!(view.pending, 3);
+    }
+
+    #[test]
+    fn pending_is_zero_once_fully_backfilled() {
+        let view = PoolView::from(pool(3, 3, 0));
+        assert_eq!(view.ready, 3);
+        assert_eq!(view.pending, 0);
+    }
+
+    #[test]
+    fn pending_saturates_rather_than_underflows_when_over_target() {
+        // Briefly possible mid-shrink, before the excess members are
+        // trimmed -- must report 0, not wrap around to a huge usize.
+        let view = PoolView::from(pool(2, 5, 0));
+        assert_eq!(view.ready, 5);
+        assert_eq!(view.pending, 0);
+    }
+
+    #[test]
+    fn claimed_total_rides_along_via_the_flatten() {
+        let view = PoolView::from(pool(1, 0, 42));
+        let value = serde_json::to_value(&view).unwrap();
+        assert_eq!(value["claimed_total"], 42);
+        assert_eq!(value["ready"], 0);
+        assert_eq!(value["pending"], 1);
+        // The flatten must not shadow or duplicate any persisted field.
+        assert_eq!(value["size"], 1);
+        assert_eq!(value["name"], "p");
+    }
 }
