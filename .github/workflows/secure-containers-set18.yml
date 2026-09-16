@@ -19,7 +19,7 @@ jobs:
         working-directory: controllers/fluxvm-networkpolicy-controller
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: controllers/fluxvm-networkpolicy-controller/go.mod
       - run: gofmt -w cmd internal
