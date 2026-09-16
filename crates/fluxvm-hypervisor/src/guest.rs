@@ -360,7 +360,14 @@ fn firecracker_config(cfg: &BootConfig) -> Result<serde_json::Value> {
             "mem_size_mib": cfg.memory_mib,
             "smt": false,
             "track_dirty_pages": true
-        }
+        },
+        // Without this, the guest kernel has no fast entropy source (no
+        // RDRAND passthrough, no other virtio-rng) and boots with
+        // crng_init=0. Anything that calls getrandom() before enough
+        // environmental noise accumulates -- in practice, Node's own
+        // startup -- blocks forever, which looks identical to a hung
+        // process from the outside: alive, no output, nothing listening.
+        "entropy": {}
     });
 
     if let Some(tap) = &cfg.tap {
@@ -575,4 +582,51 @@ async fn fc_request_inner(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::FluxVmEngine;
+
+    fn base_config() -> BootConfig {
+        BootConfig {
+            kernel: PathBuf::from("/boot/vmlinux"),
+            rootfs: PathBuf::from("/var/lib/fluxvm/rootfs.ext4"),
+            initrd: None,
+            seed: None,
+            memory_mib: 512,
+            vcpus: 1,
+            kernel_args: None,
+            tap: None,
+            mac: None,
+            vsock_cid: None,
+            vsock_uds: None,
+            seccomp: false,
+            engine: FluxVmEngine::Firecracker,
+        }
+    }
+
+    // A guest kernel with no fast entropy source (no RDRAND passthrough, no
+    // virtio-rng) boots with crng_init=0; anything that calls getrandom()
+    // before enough environmental noise accumulates -- in practice, a
+    // guest's own init/runtime startup -- blocks forever, indistinguishable
+    // from a hung process from the outside. Every Firecracker boot config
+    // must request the built-in entropy device to avoid this, unconditionally
+    // -- not just when a caller happens to ask for it.
+    #[test]
+    fn firecracker_config_always_requests_an_entropy_device() {
+        let cfg = firecracker_config(&base_config()).expect("config");
+        assert_eq!(cfg["entropy"], json!({}));
+    }
+
+    #[test]
+    fn firecracker_config_entropy_device_present_regardless_of_other_options() {
+        let mut cfg = base_config();
+        cfg.tap = Some("tap0".into());
+        cfg.vsock_cid = Some(3);
+        cfg.vsock_uds = Some(PathBuf::from("/tmp/vsock.sock"));
+        let json = firecracker_config(&cfg).expect("config");
+        assert_eq!(json["entropy"], serde_json::json!({}));
+    }
 }
