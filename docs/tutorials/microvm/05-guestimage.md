@@ -37,7 +37,37 @@ the node-agent reconciler sees the file.
 kubectl get gimg lab-ubuntu -o jsonpath='{.status.ready} {.status.path}{"\n"}'
 ```
 
-## 3. MicroVM by catalog name
+## 3. Optional: verify the staged file's digest
+
+Set `spec.sha256` to have the node agent check the staged file's digest
+before it flips `status.ready`:
+
+```bash
+SHA=$(sha256sum "$IMG" | cut -d' ' -f1)
+
+kubectl apply -f - <<EOF
+apiVersion: microvm.fluxvm.zyvor.io/v1alpha1
+kind: GuestImage
+metadata:
+  name: lab-ubuntu-verified
+  namespace: default
+spec:
+  source: ${IMG}
+  sha256: ${SHA}
+EOF
+
+kubectl get gimg lab-ubuntu-verified -o jsonpath='{.status.ready} {.status.message}{"\n"}'
+```
+
+**Expect:** `true host file present, sha256 verified`. Edit `spec.sha256` to a
+wrong value and the next reconcile flips `status.ready=false` with
+`status.message: "sha256 mismatch: expected ..., got ..."` — `status.path` is
+cleared too, so a `MicroVM` naming this catalog entry never resolves against
+an unverified file. The digest is only recomputed when the staged file's
+size/mtime changes (`status.verifiedSignature` is the cache key), so a large
+image is not re-hashed on every reconcile.
+
+## 4. MicroVM by catalog name
 
 ```bash
 kubectl apply -f - <<'EOF'
@@ -64,11 +94,11 @@ kubectl get mvm from-catalog -w
 
 Direct paths still work (`image: /var/lib/fluxvm/images/...`, `*.qcow2`, URLs).
 
-## 4. Cleanup
+## 5. Cleanup
 
 ```bash
 kubectl delete mvm from-catalog --ignore-not-found
-kubectl delete gimg lab-ubuntu --ignore-not-found
+kubectl delete gimg lab-ubuntu lab-ubuntu-verified --ignore-not-found
 ```
 
 ## Next

@@ -230,6 +230,12 @@ pub struct GuestImageStatus {
     pub path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Internal cache key (`"{len}:{mtime}:{sha256}"`) recording the staged
+    /// file this GuestImage was last verified against, so an unchanged file
+    /// with an unchanged `spec.sha256` is not re-hashed on every reconcile.
+    /// Empty whenever `spec.sha256` is unset or the last check failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_signature: Option<String>,
 }
 
 pub const FINALIZER: &str = "microvm.fluxvm.zyvor.io/runtime";

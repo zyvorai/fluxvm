@@ -25,8 +25,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 schemars = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fluxvm-kube = { path = "../fluxvm-kube" }
+
+[dev-dependencies]
+tempfile = "3"

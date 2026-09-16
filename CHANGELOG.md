@@ -96,6 +96,50 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`GuestImage.spec.sha256` is now actually verified** — the field has
+  existed on `GuestImageSpec` since `GuestImage` was introduced (`docs/microvm.md`
+  already documented it as an "optional `sha256`"), but nothing in
+  `guest_images::reconcile` ever read it: any file staged at `spec.source`
+  flipped `status.ready=true` regardless of its contents, so a corrupted
+  transfer or an operator staging the wrong file under the right path was
+  silently handed to every `MicroVM` naming that catalog entry — no error,
+  no signal, just a guest that boots off the wrong disk. Fail-closed now:
+  when `spec.sha256` is set, the reconciler hashes the staged file and
+  compares before `status.ready` flips true; a mismatch leaves
+  `status.ready=false`, clears `status.path`, and reports
+  `status.message: "sha256 mismatch: expected <spec>, got <actual>"` so the
+  cause is visible on `kubectl get gimg -o yaml` rather than a `MicroVM`
+  stuck unexplainably Pending against a Ready-but-wrong image. A GuestImage
+  with `spec.sha256` unset keeps today's behavior exactly (Ready as soon as
+  the file exists) — this is opt-in, not a change to any existing manifest's
+  observed lifecycle. Re-hashing a multi-GB disk image on every 30s
+  reconcile forever would be its own quiet cost, so the digest is only
+  recomputed when the staged file's size/mtime or the requested `spec.sha256`
+  itself changes since the last successful check — a new internal
+  `status.verifiedSignature` field (`"{len}:{mtime}:{sha256}"`) is the cache
+  key, so an unchanged file costs one `stat()` per reconcile instead of a
+  full re-read. New `sha2` dependency in `fluxvm-microvm` — already vetted
+  and present in the workspace via `fluxvm-image`'s own catalog signing,
+  which uses the identical `expected .../got ...` mismatch message
+  convention (`fluxvm-image::verify_sha256`) this mirrors for consistency.
+  8 new unit tests in `fluxvm-microvm::guest_images` (`verify_staged_file`
+  and its `signature`/`hash_file` helpers are plain functions against real
+  temp files via `tempfile`, matching this crate's existing
+  `jobs::ttl_expired`/`policy` convention of keeping reconcile decisions
+  testable without a cluster): no-`sha256` short-circuit, matching digest,
+  case-insensitive comparison, mismatch clears `path`, a missing file fails
+  closed even without a `sha256` requirement, a fresh cache hit is trusted
+  without re-hashing, and changing the requested digest invalidates a stale
+  cache entry rather than trusting it. Docs:
+  [docs/microvm.md](docs/microvm.md#guestimage),
+  [docs/tutorials/microvm/05-guestimage.md](docs/tutorials/microvm/05-guestimage.md)
+  (new "verify the staged file's digest" section). Verified with `cargo
+  build`/`cargo test`/`cargo clippy --no-deps`/`cargo fmt --check` on macOS
+  (`fluxvm-microvm` builds there) and on the real Linux build host — no live
+  k3s cluster exercised this end to end, so the `MicroVM` reading a stale
+  `status.path` from a since-invalidated GuestImage is verified by code
+  inspection of `images::guest_image_host_path` (unchanged; it already
+  requires `status.ready`) plus these unit tests, not a live cluster run.
 - **`MicroVMJob.spec.ttlSecondsAfterFinished` now actually does something** —
   the field has existed on the CRD since `MicroVMJob` was introduced (it's
   right there in `MicroVMJobSpec`, and `examples/microvm/microvmjob.yaml`

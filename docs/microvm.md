@@ -192,6 +192,16 @@ Tutorial: [tutorials/microvm/03-pool.md](tutorials/microvm/03-pool.md).
 node. The node-agent reconciler sets `status.ready` + `status.path` when
 `spec.source` is an absolute path that exists on that host.
 
+When `spec.sha256` is set, the staged file's digest is checked before
+`status.ready` flips true — a wrong or corrupted file under the right path
+never becomes Ready, so it can't be handed to every `MicroVM` naming this
+catalog entry. A mismatch leaves `status.ready=false` with
+`status.message: "sha256 mismatch: expected <spec>, got <actual>"`; `status`
+never carries a `path` until the digest checks out. The digest is only
+recomputed when the file's size/mtime changes (cached in
+`status.verifiedSignature`), so a large disk image is hashed once, not on
+every 30s reconcile.
+
 `MicroVM.spec.image` may be:
 
 - a direct path / URL / `*.qcow2|raw|ext4|img` name (used as-is), or

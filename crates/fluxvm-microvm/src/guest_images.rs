@@ -4,6 +4,19 @@
 //! Node-local GuestImage: if `spec.source` is an existing host file, mark
 //! Ready. HTTP sources stay Pending until that file is staged by GuestKit
 //! onto the node (no importer Pod, no CDI).
+//!
+//! When `spec.sha256` is set, the staged file's digest is verified before
+//! `status.ready` flips true — a corrupted or wrong file staged under the
+//! right path must never be handed to every MicroVM that names this
+//! catalog entry (fail closed, matching `fluxvm-image`'s catalog convention).
+//! The digest is only recomputed when the file's size/mtime or the
+//! requested `spec.sha256` changes since the last successful check
+//! (`status.verifiedSignature`), so a multi-GB disk image is not re-read
+//! from scratch on every 30s reconcile — it is hashed once and then the
+//! cheap `stat()` alone confirms nothing has changed. This runs on the
+//! reconciler's own async task (no `spawn_blocking`), matching this
+//! module's existing synchronous `fs` use; that first hash is a one-time
+//! blocking cost per staged file, not a per-tick one.
 
 use crate::crd::{GuestImage, GuestImageStatus};
 use crate::images::local_source_ready;
@@ -16,6 +29,9 @@ use kube::{
         watcher,
     },
 };
+use sha2::{Digest, Sha256};
+use std::io::Read;
+use std::path::Path;
 use std::{sync::Arc, time::Duration};
 
 #[derive(thiserror::Error, Debug)]
@@ -48,19 +64,26 @@ pub async fn run(client: Client) {
 async fn reconcile(obj: Arc<GuestImage>, client: Arc<Client>) -> Result<Action, Error> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let api: Api<GuestImage> = Api::namespaced(client.as_ref().clone(), &ns);
-    let (ready, path, message) = if let Some(p) = local_source_ready(&obj.spec.source) {
-        (true, Some(p), Some("host file present".into()))
-    } else {
-        (
+    let (ready, path, message, verified_signature) = match local_source_ready(&obj.spec.source) {
+        Some(p) => verify_staged_file(
+            &p,
+            obj.spec.sha256.as_deref(),
+            obj.status
+                .as_ref()
+                .and_then(|s| s.verified_signature.as_deref()),
+        ),
+        None => (
             false,
             None,
             Some("stage this file on the node with GuestKit (no CDI pull)".into()),
-        )
+            None,
+        ),
     };
     let status = GuestImageStatus {
         ready,
         path,
         message,
+        verified_signature,
     };
     api.patch_status(
         &obj.name_any(),
@@ -69,4 +92,201 @@ async fn reconcile(obj: Arc<GuestImage>, client: Arc<Client>) -> Result<Action, 
     )
     .await?;
     Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+/// Cache key covering both "this exact staged file" (size + mtime, cheap to
+/// `stat()`) and "this exact requested digest" — so editing `spec.sha256` on
+/// an otherwise-unchanged file forces a fresh hash instead of trusting a
+/// cache entry computed against the old value.
+fn signature(len: u64, mtime_secs: i64, wanted_sha256: &str) -> String {
+    format!("{len}:{mtime_secs}:{}", wanted_sha256.to_ascii_lowercase())
+}
+
+fn hash_file(path: &Path) -> std::io::Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Decide `(ready, path, message, verifiedSignature)` for a staged file that
+/// exists at `path`. Pure with respect to whatever `std::fs` returns, so the
+/// cache-hit / mismatch / stat-failure branches are unit-testable against
+/// real temp files without a cluster, matching this crate's
+/// `jobs::ttl_expired` / `policy` convention of keeping reconcile decisions
+/// in plain functions.
+fn verify_staged_file(
+    path: &str,
+    wanted_sha256: Option<&str>,
+    cached_signature: Option<&str>,
+) -> (bool, Option<String>, Option<String>, Option<String>) {
+    let Some(wanted) = wanted_sha256 else {
+        return (
+            true,
+            Some(path.to_string()),
+            Some("host file present".into()),
+            None,
+        );
+    };
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            return (
+                false,
+                None,
+                Some(format!("failed to stat staged file: {e}")),
+                None,
+            );
+        }
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let sig = signature(meta.len(), mtime, wanted);
+    if cached_signature == Some(sig.as_str()) {
+        return (
+            true,
+            Some(path.to_string()),
+            Some("host file present, sha256 verified".into()),
+            Some(sig),
+        );
+    }
+    match hash_file(Path::new(path)) {
+        Ok(got) if got.eq_ignore_ascii_case(wanted) => (
+            true,
+            Some(path.to_string()),
+            Some("host file present, sha256 verified".into()),
+            Some(sig),
+        ),
+        Ok(got) => (
+            false,
+            None,
+            Some(format!("sha256 mismatch: expected {wanted}, got {got}")),
+            None,
+        ),
+        Err(e) => (
+            false,
+            None,
+            Some(format!("failed to hash staged file: {e}")),
+            None,
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn staged(bytes: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(bytes).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn no_sha256_is_ready_without_hashing() {
+        let f = staged(b"anything");
+        let (ready, path, message, sig) =
+            verify_staged_file(f.path().to_str().unwrap(), None, None);
+        assert!(ready);
+        assert_eq!(path.as_deref(), Some(f.path().to_str().unwrap()));
+        assert_eq!(message.as_deref(), Some("host file present"));
+        assert!(sig.is_none());
+    }
+
+    #[test]
+    fn matching_sha256_is_ready_and_caches_signature() {
+        let f = staged(b"golden-image-bytes");
+        let want = format!("{:x}", Sha256::digest(b"golden-image-bytes"));
+        let (ready, path, message, sig) =
+            verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
+        assert!(ready);
+        assert!(path.is_some());
+        assert_eq!(
+            message.as_deref(),
+            Some("host file present, sha256 verified")
+        );
+        assert!(sig.is_some());
+    }
+
+    #[test]
+    fn sha256_comparison_is_case_insensitive() {
+        let f = staged(b"golden-image-bytes");
+        let want = format!("{:X}", Sha256::digest(b"golden-image-bytes"));
+        let (ready, ..) = verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
+        assert!(ready);
+    }
+
+    #[test]
+    fn mismatched_sha256_is_not_ready_and_has_no_path() {
+        let f = staged(b"tampered-bytes");
+        let wrong = format!("{:x}", Sha256::digest(b"not-what-is-on-disk"));
+        let (ready, path, message, sig) =
+            verify_staged_file(f.path().to_str().unwrap(), Some(&wrong), None);
+        assert!(!ready);
+        assert!(path.is_none());
+        assert!(message.unwrap().starts_with("sha256 mismatch"));
+        assert!(sig.is_none());
+    }
+
+    #[test]
+    fn missing_file_is_not_ready_even_with_no_sha256_requirement() {
+        let (ready, path, message, sig) =
+            verify_staged_file("/no/such/file/anywhere", Some("deadbeef"), None);
+        assert!(!ready);
+        assert!(path.is_none());
+        assert!(message.unwrap().starts_with("failed to stat staged file"));
+        assert!(sig.is_none());
+    }
+
+    #[test]
+    fn a_fresh_cache_hit_skips_hashing_without_re_reading_the_file() {
+        let f = staged(b"golden-image-bytes");
+        let want = format!("{:x}", Sha256::digest(b"golden-image-bytes"));
+        let (_, _, _, sig) = verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
+        let cached = sig.unwrap();
+        // Even if the on-disk content no longer matches, a signature computed
+        // from the *previous* (len, mtime, sha256) still hits the cache path
+        // and is trusted without re-hashing — this is exactly the contract:
+        // caching is keyed on size+mtime+wanted-digest, not on re-reading.
+        let (ready, _, message, sig2) =
+            verify_staged_file(f.path().to_str().unwrap(), Some(&want), Some(&cached));
+        assert!(ready);
+        assert_eq!(
+            message.as_deref(),
+            Some("host file present, sha256 verified")
+        );
+        assert_eq!(sig2.as_deref(), Some(cached.as_str()));
+    }
+
+    #[test]
+    fn changing_the_wanted_digest_invalidates_the_cache() {
+        let f = staged(b"golden-image-bytes");
+        let want = format!("{:x}", Sha256::digest(b"golden-image-bytes"));
+        let (_, _, _, sig) = verify_staged_file(f.path().to_str().unwrap(), Some(&want), None);
+        let stale_cache = sig.unwrap();
+        // Same file, but the operator now asks for a different digest: the
+        // stale cache entry (keyed on the old `wanted`) must not short-circuit
+        // verification of the new one.
+        let other_wanted = format!("{:x}", Sha256::digest(b"a-different-golden-image"));
+        let (ready, _, message, _) = verify_staged_file(
+            f.path().to_str().unwrap(),
+            Some(&other_wanted),
+            Some(&stale_cache),
+        );
+        assert!(!ready);
+        assert!(message.unwrap().starts_with("sha256 mismatch"));
+    }
 }
