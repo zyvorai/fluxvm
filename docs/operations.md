@@ -710,6 +710,38 @@ time with no error surfaced. Fixed with the standard `[t]arget/...` bracket-esca
 `last_seen`). Unaddressed creates use residual CPU/memory capacity scoring (not
 only fewest-VMs).
 
+**Cordon a node for planned maintenance** without deregistering it, waiting out
+`HEALTHY_WINDOW_SECS` for a heartbeat timeout, or draining/evicting anything
+already running on it:
+
+```bash
+curl -X POST http://fleet-registry:7799/fleet/nodes/worker-1/cordon
+curl -X POST http://fleet-registry:7799/fleet/nodes/worker-1/uncordon
+```
+
+(add `-H "Authorization: Bearer $FLUXVM_AGENT_TOKEN"` when the registry has a
+token configured, same as every other `/fleet/*` route). A cordoned node keeps
+heartbeating, keeps reporting real capacity in `GET /fleet/nodes` (now with a
+`"cordoned"` field alongside `"healthy"`), and any VM already on it keeps
+running and keeps showing up in `GET /fleet/vms` — cordon only removes the
+node from automatic placement's candidate set in a subsequent unaddressed
+`POST /fleet/vms`, the same "stop scheduling here, don't touch what's already
+there" semantics as `kubectl cordon`. It does *not* block an explicit
+`POST /fleet/vms {"node": "worker-1", ...}` naming that exact node — matching
+the same precedent: a Kubernetes Pod with `spec.nodeName` set bypasses the
+scheduler and can still land on a cordoned node, because cordoning was never a
+per-node admission check, only a placement-candidate filter. Cordoned state is
+per-node-name in the registry, not carried in the node agent's heartbeat body
+at all (the node agent has no idea cordoning exists), so it survives every
+subsequent heartbeat and a central restart (it's in `fleet-nodes.json`)
+without a node operator having to do anything to keep it in effect, and
+without a node agent's own heartbeat ever silently clearing it back off. 9 new
+unit tests in `fluxvm-agent::central` (cordoned-node placement exclusion, the
+only-node-cordoned case, uncordon restoring eligibility, cordoning an unknown
+node reporting not-found rather than silently succeeding, heartbeat
+preserving an existing cordon vs. a brand-new node registering uncordoned,
+and both directions of the explicit-`"node"`-bypasses-cordon behavior).
+
 ## State layout
 
 ```text

@@ -109,6 +109,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 - Central fleet registry + per-host heartbeat client
 - Load-aware placement across hosts
+- Per-node cordon/uncordon (`POST /fleet/nodes/{name}/cordon`/`/uncordon`) — take a node out of
+  automatic placement for planned maintenance without deregistering it or touching any VM already
+  running on it; an explicit `POST /fleet/vms {"node": "..."}` can still target a cordoned node
+  directly, same precedent as a Kubernetes Pod's `spec.nodeName` bypassing the scheduler
 - Verified across two real, physically separate hosts
 
 ## Secure Containers (developer preview — not production-ready)

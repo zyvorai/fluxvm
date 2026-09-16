@@ -49,6 +49,15 @@ pub struct NodeInfo {
     pub memory_mib_total: u64,
     pub vm_count: usize,
     pub last_seen: DateTime<Utc>,
+    /// Operator-set maintenance flag (`POST /fleet/nodes/{name}/cordon`):
+    /// excludes this node from automatic (residual-capacity) placement in
+    /// `pick_best_capacity` without deregistering it or touching any VM
+    /// already on it — same "stop scheduling here, don't evict anything"
+    /// semantics as `kubectl cordon`. `#[serde(default)]` so a
+    /// `fleet-nodes.json` written before this field existed still loads
+    /// cleanly (as `false`, the honest "never cordoned" value).
+    #[serde(default)]
+    pub cordoned: bool,
 }
 
 impl NodeInfo {
@@ -80,7 +89,7 @@ impl NodeInfo {
         request_vcpus: u32,
         request_mem: u64,
     ) -> Option<(i64, i64, i64, String)> {
-        if !self.healthy() {
+        if !self.healthy() || self.cordoned {
             return None;
         }
         if self.free_vcpus() < request_vcpus || self.free_memory_mib() < request_mem {
@@ -117,6 +126,7 @@ pub struct RegisterRequest {
     pub vm_count: usize,
 }
 
+#[derive(Debug)]
 struct AppError(StatusCode, String);
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
@@ -254,6 +264,8 @@ pub fn router(cfg: CentralConfig) -> Router {
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/fleet/register", post(register))
         .route("/fleet/nodes", get(list_nodes))
+        .route("/fleet/nodes/{name}/cordon", post(cordon_node))
+        .route("/fleet/nodes/{name}/uncordon", post(uncordon_node))
         .route("/fleet/vms", post(create_vm).get(list_vms))
         .route("/fleet/vms/{node}/{id}", axum::routing::delete(delete_vm))
         .layer(middleware::from_fn_with_state(
@@ -263,8 +275,15 @@ pub fn router(cfg: CentralConfig) -> Router {
         .with_state(fleet)
 }
 
-async fn register(State(fleet): State<Fleet>, Json(req): Json<RegisterRequest>) -> Json<Value> {
-    let mut nodes = fleet.nodes.lock().await;
+/// Insert/update a node from a heartbeat. A brand-new node starts
+/// uncordoned; a node that's already registered keeps whatever `cordoned`
+/// state an operator previously set on it — a node agent has no idea
+/// cordoning exists and its heartbeat body carries no such field, so a
+/// naive overwrite-on-every-beat would silently un-cordon a node the very
+/// next time its own agent reported in, seconds after an operator cordoned
+/// it for maintenance.
+fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
+    let cordoned = nodes.get(&req.name).map(|n| n.cordoned).unwrap_or(false);
     nodes.insert(
         req.name.clone(),
         NodeInfo {
@@ -274,33 +293,81 @@ async fn register(State(fleet): State<Fleet>, Json(req): Json<RegisterRequest>) 
             memory_mib_total: req.memory_mib_total,
             vm_count: req.vm_count,
             last_seen: Utc::now(),
+            cordoned,
         },
     );
+}
+
+async fn register(State(fleet): State<Fleet>, Json(req): Json<RegisterRequest>) -> Json<Value> {
+    let mut nodes = fleet.nodes.lock().await;
+    apply_register(&mut nodes, req);
     if let (Some(path), Some(lock)) = (&fleet.persist_path, &fleet.lock_path) {
         persist_nodes(path, lock, &nodes);
     }
     Json(json!({"ok": true}))
 }
 
+fn node_json(n: &NodeInfo) -> Value {
+    json!({
+        "name": n.name,
+        "fluxvm_url": n.fluxvm_url,
+        "vcpus_total": n.vcpus_total,
+        "memory_mib_total": n.memory_mib_total,
+        "vm_count": n.vm_count,
+        "last_seen": n.last_seen,
+        "healthy": n.healthy(),
+        "cordoned": n.cordoned,
+        "free_vcpus": n.free_vcpus(),
+        "free_memory_mib": n.free_memory_mib(),
+    })
+}
+
 async fn list_nodes(State(fleet): State<Fleet>) -> Json<Value> {
     let nodes = fleet.nodes.lock().await;
-    let items: Vec<Value> = nodes
-        .values()
-        .map(|n| {
-            json!({
-                "name": n.name,
-                "fluxvm_url": n.fluxvm_url,
-                "vcpus_total": n.vcpus_total,
-                "memory_mib_total": n.memory_mib_total,
-                "vm_count": n.vm_count,
-                "last_seen": n.last_seen,
-                "healthy": n.healthy(),
-                "free_vcpus": n.free_vcpus(),
-                "free_memory_mib": n.free_memory_mib(),
-            })
-        })
-        .collect();
+    let items: Vec<Value> = nodes.values().map(node_json).collect();
     Json(json!({"items": items}))
+}
+
+/// Set (or clear) a node's cordoned flag. Returns `None` if no node by
+/// that name is registered — cordoning an unregistered name is a no-op
+/// error, not a way to pre-seed a node record.
+fn set_cordoned(nodes: &mut HashMap<String, NodeInfo>, name: &str, cordoned: bool) -> Option<()> {
+    let node = nodes.get_mut(name)?;
+    node.cordoned = cordoned;
+    Some(())
+}
+
+async fn cordon_node(
+    State(fleet): State<Fleet>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    set_node_cordoned(fleet, name, true).await
+}
+
+async fn uncordon_node(
+    State(fleet): State<Fleet>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    set_node_cordoned(fleet, name, false).await
+}
+
+async fn set_node_cordoned(
+    fleet: Fleet,
+    name: String,
+    cordoned: bool,
+) -> Result<Json<Value>, AppError> {
+    let mut nodes = fleet.nodes.lock().await;
+    if set_cordoned(&mut nodes, &name, cordoned).is_none() {
+        return Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("no registered node named '{name}'"),
+        ));
+    }
+    let updated = node_json(nodes.get(&name).expect("just set"));
+    if let (Some(path), Some(lock)) = (&fleet.persist_path, &fleet.lock_path) {
+        persist_nodes(path, lock, &nodes);
+    }
+    Ok(Json(updated))
 }
 
 /// Residual-capacity placement: prefer the healthy node with the highest
@@ -338,9 +405,39 @@ fn request_sizes(body: &Value) -> (u32, u64) {
     (vcpus, mem)
 }
 
+/// Resolve which node a `POST /fleet/vms` should land on. An explicit
+/// `"node"` name bypasses placement entirely — including a cordoned
+/// node — the same way a Kubernetes Pod with `spec.nodeName` set bypasses
+/// the scheduler and can still land on a cordoned node: cordoning only
+/// ever removes a node from *automatic* placement's candidate set, it was
+/// never a per-node admission check. Automatic (no `"node"` given)
+/// placement excludes cordoned nodes via `pick_best_capacity` ->
+/// `capacity_score` regardless of how much free capacity they have.
+fn resolve_target(
+    nodes: &HashMap<String, NodeInfo>,
+    requested_node: Option<String>,
+    req_vcpus: u32,
+    req_mem: u64,
+) -> Result<NodeInfo, AppError> {
+    match requested_node {
+        Some(name) => nodes.get(&name).cloned().ok_or_else(|| {
+            AppError(
+                StatusCode::BAD_REQUEST,
+                format!("no registered node named '{name}'"),
+            )
+        }),
+        None => pick_best_capacity(nodes, req_vcpus, req_mem).ok_or_else(|| {
+            AppError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no healthy, uncordoned nodes registered".into(),
+            )
+        }),
+    }
+}
+
 /// `POST /fleet/vms`. Body is a normal `CreateVmRequest` JSON, optionally
 /// with a top-level `"node"` field naming an exact node to target — when
-/// absent, residual-capacity placement picks a healthy node.
+/// absent, residual-capacity placement picks a healthy, uncordoned node.
 async fn create_vm(
     State(fleet): State<Fleet>,
     Json(mut body): Json<Value>,
@@ -354,20 +451,7 @@ async fn create_vm(
 
     let target = {
         let nodes = fleet.nodes.lock().await;
-        match requested_node {
-            Some(name) => nodes.get(&name).cloned().ok_or_else(|| {
-                AppError(
-                    StatusCode::BAD_REQUEST,
-                    format!("no registered node named '{name}'"),
-                )
-            })?,
-            None => pick_best_capacity(&nodes, req_vcpus, req_mem).ok_or_else(|| {
-                AppError(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "no healthy nodes registered".into(),
-                )
-            })?,
-        }
+        resolve_target(&nodes, requested_node, req_vcpus, req_mem)?
     };
 
     let resp = fleet
@@ -471,6 +555,7 @@ mod tests {
             memory_mib_total: 16384,
             vm_count,
             last_seen: Utc::now() - chrono::Duration::seconds(age_secs),
+            cordoned: false,
         }
     }
 
@@ -482,6 +567,7 @@ mod tests {
             memory_mib_total: mem,
             vm_count,
             last_seen: Utc::now(),
+            cordoned: false,
         }
     }
 
@@ -544,5 +630,115 @@ mod tests {
             request_sizes(&json!({"vcpus": 4, "memory_mib": 4096})),
             (4, 4096)
         );
+    }
+
+    #[test]
+    fn cordoned_node_excluded_from_automatic_placement() {
+        let mut nodes = HashMap::new();
+        let mut a = node("a", 0, 0); // most free capacity, but cordoned
+        a.cordoned = true;
+        nodes.insert("a".to_string(), a);
+        nodes.insert("b".to_string(), node("b", 3, 0));
+        let picked = pick_best_capacity(&nodes, 2, 2048).unwrap();
+        assert_eq!(picked.name, "b");
+    }
+
+    #[test]
+    fn cordoning_the_only_node_leaves_nothing_placeable() {
+        let mut nodes = HashMap::new();
+        let mut a = node("a", 0, 0);
+        a.cordoned = true;
+        nodes.insert("a".to_string(), a);
+        assert!(pick_best_capacity(&nodes, 2, 2048).is_none());
+    }
+
+    #[test]
+    fn uncordoning_restores_eligibility() {
+        let mut nodes = HashMap::new();
+        let mut a = node("a", 0, 0);
+        a.cordoned = true;
+        nodes.insert("a".to_string(), a);
+        assert!(pick_best_capacity(&nodes, 2, 2048).is_none());
+        set_cordoned(&mut nodes, "a", false).unwrap();
+        let picked = pick_best_capacity(&nodes, 2, 2048).unwrap();
+        assert_eq!(picked.name, "a");
+    }
+
+    #[test]
+    fn set_cordoned_reports_none_for_unknown_node() {
+        let mut nodes = HashMap::new();
+        nodes.insert("a".to_string(), node("a", 0, 0));
+        assert!(set_cordoned(&mut nodes, "nonexistent", true).is_none());
+    }
+
+    #[test]
+    fn heartbeat_preserves_existing_cordoned_state() {
+        let mut nodes = HashMap::new();
+        nodes.insert("a".to_string(), node("a", 0, 0));
+        set_cordoned(&mut nodes, "a", true).unwrap();
+        assert!(nodes["a"].cordoned);
+
+        // A fresh heartbeat carries no cordon information at all — it must
+        // not silently un-cordon the node.
+        apply_register(
+            &mut nodes,
+            RegisterRequest {
+                name: "a".into(),
+                fluxvm_url: "http://a".into(),
+                vcpus_total: 8,
+                memory_mib_total: 16384,
+                vm_count: 1,
+            },
+        );
+        assert!(nodes["a"].cordoned);
+        assert_eq!(nodes["a"].vm_count, 1); // other fields still update
+    }
+
+    #[test]
+    fn first_ever_heartbeat_registers_uncordoned() {
+        let mut nodes = HashMap::new();
+        apply_register(
+            &mut nodes,
+            RegisterRequest {
+                name: "new".into(),
+                fluxvm_url: "http://new".into(),
+                vcpus_total: 4,
+                memory_mib_total: 8192,
+                vm_count: 0,
+            },
+        );
+        assert!(!nodes["new"].cordoned);
+    }
+
+    #[test]
+    fn explicit_node_targeting_bypasses_cordon() {
+        let mut nodes = HashMap::new();
+        let mut a = node("a", 0, 0);
+        a.cordoned = true;
+        nodes.insert("a".to_string(), a);
+        // Automatic placement finds nothing...
+        assert!(pick_best_capacity(&nodes, 2, 2048).is_none());
+        // ...but an explicit "node":"a" still resolves, same as a
+        // Kubernetes Pod with spec.nodeName bypassing the scheduler.
+        let target = resolve_target(&nodes, Some("a".to_string()), 2, 2048).unwrap();
+        assert_eq!(target.name, "a");
+    }
+
+    #[test]
+    fn explicit_node_targeting_unknown_name_still_errors() {
+        let nodes: HashMap<String, NodeInfo> = HashMap::new();
+        let err = resolve_target(&nodes, Some("ghost".to_string()), 2, 2048).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn automatic_placement_skips_cordoned_even_with_more_capacity() {
+        let mut nodes = HashMap::new();
+        let mut roomy = node_cap("roomy", 0, 64, 131072);
+        roomy.cordoned = true;
+        nodes.insert("roomy".to_string(), roomy);
+        nodes.insert("tight".to_string(), node_cap("tight", 1, 4, 8192));
+        let target = resolve_target(&nodes, None, 2, 2048).unwrap();
+        assert_eq!(target.name, "tight");
     }
 }

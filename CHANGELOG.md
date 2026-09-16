@@ -96,6 +96,59 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm-agent central` fleet nodes can now be cordoned for planned
+  maintenance** — `POST /fleet/nodes/{name}/cordon` and `.../uncordon`.
+  Previously the only way to stop new VMs landing on a specific node ahead
+  of a reboot/upgrade/decommission was to either stop its `fluxvm-agent
+  node` heartbeat client outright and wait out `HEALTHY_WINDOW_SECS` (30s)
+  for the central registry to mark it unhealthy — at which point it also
+  silently drops out of the fleet-wide `GET /fleet/vms` aggregation and
+  `DELETE /fleet/vms/{node}/{id}` still works but the operator has lost
+  the node's own reported capacity/VM-count in the meantime — or take the
+  whole node offline and lose visibility into it entirely. Neither gives
+  a clean "stop scheduling new work here, but keep everything already
+  running and keep reporting on it" state, which is the actual maintenance
+  workflow a fleet operator needs. New `NodeInfo.cordoned: bool`
+  (`#[serde(default)]`, so an existing `fleet-nodes.json` still loads as
+  "never cordoned") excludes a node from `pick_best_capacity`'s
+  placement candidates regardless of how much free capacity it reports,
+  while `GET /fleet/nodes` keeps reporting it (now with a `"cordoned"`
+  field) and the fleet-wide `GET /fleet/vms` keeps aggregating its VMs
+  exactly as before — cordoning never touches health, capacity reporting,
+  or any VM already there. An explicit `POST /fleet/vms {"node": "..."}`
+  naming a cordoned node by name still resolves and proxies through
+  unchanged — deliberately, matching the same precedent a Kubernetes Pod
+  with `spec.nodeName` set already has (it bypasses the scheduler and can
+  still land on a cordoned node): cordoning was only ever meant to narrow
+  automatic placement's candidate set, never to become a second admission
+  check bolted onto every route. A node's own heartbeat (`POST
+  /fleet/register`, sent by `fluxvm-agent node` every `--interval-secs`)
+  carries no notion of cordoning at all — the node agent has no idea the
+  feature exists — so `register`'s handling had to change too: it now
+  looks up whether the node already has a `cordoned` flag set before
+  overwriting the rest of its `NodeInfo`, instead of blindly re-inserting
+  a fresh record (which would have silently un-cordoned every node the
+  very next heartbeat, seconds after an operator cordoned it). 9 new unit
+  tests in `fluxvm-agent::central`, all against the same pure,
+  HTTP-free functions the existing placement tests already use
+  (`pick_best_capacity`, plus new `set_cordoned`/`apply_register`/
+  `resolve_target` extracted the same way to stay testable without
+  standing up a mock node backend): cordoned-node placement exclusion
+  even against a node with far more free capacity, the only-registered-
+  node-cordoned case, uncordon restoring eligibility, cordoning an
+  unregistered name reporting not-found instead of silently no-op'ing,
+  a heartbeat preserving an existing cordon while still updating every
+  other field, a brand-new node's first-ever heartbeat registering
+  uncordoned, and both directions of the explicit-`"node"`-bypasses-
+  cordon behavior (a cordoned node targeted by name still resolves; an
+  unregistered name still errors). Docs:
+  [docs/operations.md — Distributed node-agent](docs/operations.md#distributed-node-agent),
+  `FEATURES.md`'s "`fluxvm-agent`" bullet. Not re-verified against the
+  real two-physically-separate-host rig `scripts/test-fleet-agent.sh`
+  already exercises for the rest of this subsystem — that script is
+  unchanged by this commit and wasn't re-run against live hardware; the 9
+  new tests are unit-level only, against the same in-process registry
+  logic the existing placement tests already cover the same way.
 - **`fluxvm catalog` gained CLI parity with the image catalog's REST CRUD** —
   `list`/`add`/`remove`/`rename`/`clone`/`export`/`lock`/`unlock`/`clean`,
   alongside the existing `keygen`/`sign`. The underlying
