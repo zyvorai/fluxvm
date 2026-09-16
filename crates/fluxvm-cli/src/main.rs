@@ -330,6 +330,20 @@ enum CatalogCommand {
         version: Option<String>,
         #[arg(long)]
         arch: Option<String>,
+        /// Which CI pipeline produced these image bytes, e.g.
+        /// "github-actions/build-images.yml" -- asserted by you, the
+        /// signer, same posture as everything else on this command: not
+        /// independently verified against the actual CI system, but
+        /// tamper-evident (covered by the signature) once set.
+        #[arg(long)]
+        build_pipeline: Option<String>,
+        /// The specific run/job id within --build-pipeline that produced
+        /// this image.
+        #[arg(long)]
+        build_run_id: Option<String>,
+        /// The source commit SHA the build was triggered from.
+        #[arg(long)]
+        build_commit: Option<String>,
         #[arg(long)]
         catalog_file: Option<PathBuf>,
     },
@@ -900,10 +914,23 @@ async fn main() -> Result<()> {
                 distro,
                 version,
                 arch,
+                build_pipeline,
+                build_run_id,
+                build_commit,
                 catalog_file,
             } => {
                 let entry = image::catalog::sign_entry(
-                    &key, name, source, sha256, format, distro, version, arch,
+                    &key,
+                    name,
+                    source,
+                    sha256,
+                    format,
+                    distro,
+                    version,
+                    arch,
+                    build_pipeline,
+                    build_run_id,
+                    build_commit,
                 )?;
                 match catalog_file {
                     Some(path) => {
@@ -1103,6 +1130,95 @@ mod catalog_cli_tests {
     #[test]
     fn catalog_add_requires_source() {
         assert!(Cli::try_parse_from(["fluxvm", "catalog", "add", "ubuntu-24.04"]).is_err());
+    }
+
+    #[test]
+    fn catalog_sign_parses_optional_build_provenance_flags() {
+        let Command::Catalog {
+            command:
+                CatalogCommand::Sign {
+                    key,
+                    name,
+                    source,
+                    sha256,
+                    format,
+                    distro,
+                    version,
+                    arch,
+                    build_pipeline,
+                    build_run_id,
+                    build_commit,
+                    catalog_file,
+                },
+        } = parse(&[
+            "catalog",
+            "sign",
+            "--key",
+            "base64key",
+            "--name",
+            "ubuntu-24.04",
+            "--source",
+            "/var/lib/fluxvm/images/ubuntu.qcow2",
+            "--sha256",
+            "abc123",
+            "--build-pipeline",
+            "github-actions/build-images.yml",
+            "--build-run-id",
+            "42",
+            "--build-commit",
+            "deadbeef",
+        ])
+        else {
+            panic!("expected CatalogCommand::Sign");
+        };
+        assert_eq!(key, "base64key");
+        assert_eq!(name, "ubuntu-24.04");
+        assert_eq!(source, "/var/lib/fluxvm/images/ubuntu.qcow2");
+        assert_eq!(sha256, "abc123");
+        assert_eq!(format, "qcow2", "format must default to qcow2");
+        assert_eq!(distro, None);
+        assert_eq!(version, None);
+        assert_eq!(arch, None);
+        assert_eq!(
+            build_pipeline.as_deref(),
+            Some("github-actions/build-images.yml")
+        );
+        assert_eq!(build_run_id.as_deref(), Some("42"));
+        assert_eq!(build_commit.as_deref(), Some("deadbeef"));
+        assert_eq!(
+            catalog_file, None,
+            "build provenance flags must stay optional and independent of --catalog-file"
+        );
+    }
+
+    #[test]
+    fn catalog_sign_leaves_build_provenance_unset_when_omitted() {
+        let Command::Catalog {
+            command:
+                CatalogCommand::Sign {
+                    build_pipeline,
+                    build_run_id,
+                    build_commit,
+                    ..
+                },
+        } = parse(&[
+            "catalog",
+            "sign",
+            "--key",
+            "base64key",
+            "--name",
+            "n",
+            "--source",
+            "s",
+            "--sha256",
+            "h",
+        ])
+        else {
+            panic!("expected CatalogCommand::Sign");
+        };
+        assert_eq!(build_pipeline, None);
+        assert_eq!(build_run_id, None);
+        assert_eq!(build_commit, None);
     }
 
     #[test]

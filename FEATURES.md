@@ -160,7 +160,7 @@ This mirrors the [maturity caveat](README.md#maturity-whats-real-today) in the R
 | Bearer-token auth/RBAC on the REST API | — |
 | REST API request rate limiting, opt-in (`auth.rate_limit_rps`/`.rate_limit_burst`), keyed per authenticated caller | — |
 | Audit logging (`tracing` target `fluxvm_audit`, every authenticated request) | — |
-| SHA-256 verification + Ed25519-signed image catalog, now covering `distro`/`version`/`arch`/a tamper-evident `signed_at` timestamp and named signer identity (`signed_by`), not just `name`/`source`/`sha256`/`format` | Real build-lineage/CI-provenance recording (which pipeline/run produced this image) -- signing here still only vouches for the catalog entry's own fields, asserted by whoever ran `fluxvm catalog sign` |
+| SHA-256 verification + Ed25519-signed image catalog, now covering `distro`/`version`/`arch`/a tamper-evident `signed_at` timestamp/named signer identity (`signed_by`)/build-lineage recording (`build_pipeline`, `build_run_id`, `build_commit` -- which CI pipeline, run, and source commit produced this image, `fluxvm catalog sign --build-pipeline/--build-run-id/--build-commit`), not just `name`/`source`/`sha256`/`format` | Independent attestation of that claimed build lineage (e.g. Sigstore/in-toto) -- `build_pipeline`/`build_run_id`/`build_commit` are asserted by whoever ran `fluxvm catalog sign` and tamper-evident once signed (relabeling any of them post-signing invalidates the signature, same as every other covered field), but there is no cryptographic chain proving the named CI system actually produced these bytes |
 | `network.mode: "none"` for zero network path out of a guest | — |
 
 ## Build and Development

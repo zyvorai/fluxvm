@@ -72,6 +72,32 @@ pub struct CatalogEntry {
     /// signature.
     #[serde(default)]
     pub read_only: bool,
+    /// The CI pipeline that produced this image's bytes, e.g.
+    /// `"github-actions/build-images.yml"` — asserted by whoever ran
+    /// `fluxvm catalog sign`, the same honesty posture as [`signed_by`]:
+    /// there is no cryptographic attestation chain back to the actual CI
+    /// system (that would need something like Sigstore/in-toto, which this
+    /// module's own signing scheme deliberately avoids — see the module
+    /// doc comment). Once signed, though, it's tamper-evident: covered by
+    /// [`canonical_payload`], so it can't be edited in `catalog.json`
+    /// afterward without invalidating the signature. `None` when the
+    /// signer didn't record one.
+    ///
+    /// [`signed_by`]: CatalogListEntry::signed_by
+    #[serde(default)]
+    pub build_pipeline: Option<String>,
+    /// The specific run/job id within [`build_pipeline`] that produced this
+    /// image, e.g. a GitHub Actions run id — same asserted-not-attested,
+    /// tamper-evident-once-signed posture as `build_pipeline`.
+    ///
+    /// [`build_pipeline`]: CatalogEntry::build_pipeline
+    #[serde(default)]
+    pub build_run_id: Option<String>,
+    /// The source commit SHA the build was triggered from — same
+    /// asserted-not-attested, tamper-evident-once-signed posture as
+    /// `build_pipeline`.
+    #[serde(default)]
+    pub build_commit: Option<String>,
 }
 fn default_format() -> String {
     "qcow2".into()
@@ -87,16 +113,24 @@ fn default_format() -> String {
 /// payload entirely, so they could be edited in `catalog.json` post-signing
 /// (e.g. relabeling an entry's `arch` to mislead a platform-matching
 /// consumer) without invalidating the signature; a real, closed gap, not a
-/// new capability. `read_only` deliberately stays excluded -- see its own
-/// doc comment on `CatalogEntry` for why. `Option<String>` fields serialize
-/// as an empty segment when `None`, so "unset" and "empty string" are
-/// still distinguishable from any *other* field's own value shifting the
-/// line count, but not from each other -- acceptable here since an empty
-/// `distro`/`version`/`arch` string is not a value worth distinguishing
-/// from absent for signing purposes.
+/// new capability. Now also covers `build_pipeline`/`build_run_id`/
+/// `build_commit` -- the same reasoning extended to FluxVM's answer to
+/// "real build-lineage/CI-provenance recording," previously named as an
+/// explicitly open gap: those three fields are asserted by the signer, not
+/// independently verified against the actual CI system, but once signed
+/// they can no longer be silently relabeled in `catalog.json` (e.g.
+/// claiming a different pipeline produced these bytes) without
+/// invalidating the signature. `read_only` deliberately stays excluded --
+/// see its own doc comment on `CatalogEntry` for why. `Option<String>`
+/// fields serialize as an empty segment when `None`, so "unset" and "empty
+/// string" are still distinguishable from any *other* field's own value
+/// shifting the line count, but not from each other -- acceptable here
+/// since an empty `distro`/`version`/`arch`/`build_pipeline`/
+/// `build_run_id`/`build_commit` string is not a value worth
+/// distinguishing from absent for signing purposes.
 fn canonical_payload(entry: &CatalogEntry) -> String {
     format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         entry.name,
         entry.source,
         entry.sha256,
@@ -105,6 +139,9 @@ fn canonical_payload(entry: &CatalogEntry) -> String {
         entry.version.as_deref().unwrap_or(""),
         entry.arch.as_deref().unwrap_or(""),
         entry.signed_at.map(|t| t.to_string()).unwrap_or_default(),
+        entry.build_pipeline.as_deref().unwrap_or(""),
+        entry.build_run_id.as_deref().unwrap_or(""),
+        entry.build_commit.as_deref().unwrap_or(""),
     )
 }
 
@@ -168,6 +205,9 @@ pub async fn add_entry(
         signature: None,
         signed_at: None,
         read_only: false,
+        build_pipeline: None,
+        build_run_id: None,
+        build_commit: None,
     };
     entries.push(entry.clone());
     save_catalog(path, &entries)?;
@@ -516,6 +556,7 @@ pub fn generate_keypair() -> (String, String) {
 /// `fluxvm catalog sign`: builds a `CatalogEntry` from the given fields
 /// and signs it with `private_key_b64` (as produced by
 /// [`generate_keypair`]), ready to append to a catalog file's JSON array.
+#[allow(clippy::too_many_arguments)]
 pub fn sign_entry(
     private_key_b64: &str,
     name: String,
@@ -525,6 +566,9 @@ pub fn sign_entry(
     distro: Option<String>,
     version: Option<String>,
     arch: Option<String>,
+    build_pipeline: Option<String>,
+    build_run_id: Option<String>,
+    build_commit: Option<String>,
 ) -> Result<CatalogEntry> {
     let key_bytes = B64
         .decode(private_key_b64)
@@ -553,6 +597,9 @@ pub fn sign_entry(
                 .as_secs() as i64,
         ),
         read_only: false,
+        build_pipeline,
+        build_run_id,
+        build_commit,
     };
     let signature = signing_key.sign(canonical_payload(&entry).as_bytes());
     entry.signature = Some(B64.encode(signature.to_bytes()));
@@ -629,6 +676,9 @@ mod tests {
                 signature: None,
                 signed_at: None,
                 read_only: false,
+                build_pipeline: None,
+                build_run_id: None,
+                build_commit: None,
             }],
         );
         let cfg = cfg_with_catalog(&catalog_path, vec![]); // no trusted_signers -> signature not required
@@ -657,6 +707,9 @@ mod tests {
                 signature: None,
                 signed_at: None,
                 read_only: false,
+                build_pipeline: None,
+                build_run_id: None,
+                build_commit: None,
             }],
         );
         let cfg = cfg_with_catalog(&catalog_path, vec![]);
@@ -681,11 +734,20 @@ mod tests {
             Some("ubuntu".into()),
             Some("24.04".into()),
             Some("x86_64".into()),
+            Some("github-actions/build-images.yml".into()),
+            Some("123456789".into()),
+            Some("deadbeefcafef00d".into()),
         )
         .unwrap();
 
         let key = parse_public_key(&public_b64).unwrap();
         assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_ok());
+        assert_eq!(
+            entry.build_pipeline.as_deref(),
+            Some("github-actions/build-images.yml")
+        );
+        assert_eq!(entry.build_run_id.as_deref(), Some("123456789"));
+        assert_eq!(entry.build_commit.as_deref(), Some("deadbeefcafef00d"));
     }
 
     #[test]
@@ -698,6 +760,9 @@ mod tests {
             "s".into(),
             "h".into(),
             "qcow2".into(),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -717,6 +782,9 @@ mod tests {
             "s".into(),
             "h".into(),
             "qcow2".into(),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -743,9 +811,40 @@ mod tests {
             Some("ubuntu".into()),
             Some("24.04".into()),
             Some("x86_64".into()),
+            None,
+            None,
+            None,
         )
         .unwrap();
         entry.arch = Some("aarch64".into()); // relabeled after signing
+
+        let key = parse_public_key(&public_b64).unwrap();
+        assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_err());
+    }
+
+    #[test]
+    fn verify_rejects_a_relabeled_build_provenance_field() {
+        // build_pipeline/build_run_id/build_commit are covered by
+        // canonical_payload -- this is the closed gap: claiming a
+        // different pipeline/run/commit produced these bytes after the
+        // fact must invalidate the signature, the same way relabeling
+        // arch does.
+        let (private_b64, public_b64) = generate_keypair();
+        let mut entry = sign_entry(
+            &private_b64,
+            "n".into(),
+            "s".into(),
+            "h".into(),
+            "qcow2".into(),
+            None,
+            None,
+            None,
+            Some("github-actions/build-images.yml".into()),
+            Some("111".into()),
+            Some("abc123".into()),
+        )
+        .unwrap();
+        entry.build_run_id = Some("999".into()); // relabeled after signing
 
         let key = parse_public_key(&public_b64).unwrap();
         assert!(verify_signature(&entry, &[("k".to_string(), key)]).is_err());
@@ -760,6 +859,9 @@ mod tests {
             "s".into(),
             "h".into(),
             "qcow2".into(),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -786,6 +888,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         let key = parse_public_key(&public_b64).unwrap();
@@ -807,6 +912,9 @@ mod tests {
             "s".into(),
             "h".into(),
             "qcow2".into(),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -843,6 +951,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         let signed_at = entry.signed_at.expect("sign_entry must set signed_at");
@@ -865,6 +976,9 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         let unsigned = CatalogEntry {
@@ -878,6 +992,9 @@ mod tests {
             signature: None,
             signed_at: None,
             read_only: false,
+            build_pipeline: None,
+            build_run_id: None,
+            build_commit: None,
         };
         let catalog_path = write_catalog(dir.path(), &[signed, unsigned]);
         let cfg = cfg_with_catalog(&catalog_path, vec![public_b64]);
@@ -908,6 +1025,9 @@ mod tests {
             "/irrelevant".into(),
             "irrelevant".into(),
             "qcow2".into(),
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -943,6 +1063,9 @@ mod tests {
                 signature: None, // unsigned
                 signed_at: None,
                 read_only: false,
+                build_pipeline: None,
+                build_run_id: None,
+                build_commit: None,
             }],
         );
         let cfg = cfg_with_catalog(&catalog_path, vec![public_b64]);
@@ -970,6 +1093,9 @@ mod tests {
                 signature: None,
                 signed_at: None,
                 read_only: false,
+                build_pipeline: None,
+                build_run_id: None,
+                build_commit: None,
             }],
         );
         let cfg = cfg_with_catalog(&catalog_path, vec![]);
@@ -1013,6 +1139,9 @@ mod tests {
                 signature: None,
                 signed_at: None,
                 read_only: false,
+                build_pipeline: None,
+                build_run_id: None,
+                build_commit: None,
             }],
         );
         let cfg = Config {

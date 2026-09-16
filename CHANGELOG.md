@@ -96,6 +96,35 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **Image catalog signing: build-lineage/CI-provenance recording** — closes
+  the second, deeper half of the gap FEATURES.md's Security Posture table
+  named explicitly as still open ("Real build-lineage/CI-provenance
+  recording (which pipeline/run produced this image)") after the first half
+  (`signed_at`/`signed_by`/covering `distro`/`version`/`arch`) closed
+  earlier. `CatalogEntry` gains three new optional fields —
+  `build_pipeline`, `build_run_id`, `build_commit` — settable via three new
+  `fluxvm catalog sign` flags (`--build-pipeline`/`--build-run-id`/
+  `--build-commit`) and now covered by `canonical_payload`, the same
+  tamper-evidence treatment `distro`/`version`/`arch` got: relabeling any of
+  them in `catalog.json` after signing invalidates the signature (new test:
+  `verify_rejects_a_relabeled_build_provenance_field`). Read the honesty
+  caveat plainly, though — same posture as `signed_by` — this *records* a
+  claim asserted by whoever ran `catalog sign`, not an independently
+  verified attestation; there is still no cryptographic chain proving the
+  named CI system actually produced these bytes (that would need something
+  like Sigstore/in-toto, which this project's signing scheme deliberately
+  avoids, same reasoning as avoiding a `cosign`/Fulcio/Rekor dependency —
+  see this file's own module doc comment). Live-verified against the real
+  `fluxvm` binary on the test host: signed an entry with
+  `--build-pipeline github-actions/build-images.yml --build-run-id
+  987654321 --build-commit <sha>`, confirmed `GET`/`catalog list` reports
+  `signature_valid: true`/`signed_by: "release-ci"`, then hand-edited
+  `build_run_id` in `catalog.json` and confirmed the same entry flips to
+  `signature_valid: false`/`signed_by: null` — the tamper-evidence claim is
+  real, not just unit-tested. 3 new catalog tests (round-trip through
+  `sign_entry`, the relabel-invalidates-signature test above, and the
+  existing sign/verify suite extended to cover the new fields) plus 2 new
+  `fluxvm catalog sign` CLI-parsing tests.
 - **Cloud Hypervisor backend: real live migration** — `POST
   /v1/vms/{uuid}/migration/start` previously bailed "live migration
   contract v1 supports qemu only" for every non-QEMU backend; Cloud

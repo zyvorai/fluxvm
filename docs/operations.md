@@ -496,17 +496,30 @@ fluxvm catalog sign \
   --key <private-key> --name ubuntu-24.04 \
   --source https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img \
   --sha256 <sha256> --distro ubuntu --version 24.04 --arch x86_64 \
+  --build-pipeline github-actions/build-images.yml --build-run-id 987654321 --build-commit <commit-sha> \
   --catalog-file /etc/fluxvm/catalog.json   # appends/updates in place; omit to just print the entry
 ```
 
 `sign` also stamps a `signed_at` (Unix seconds, right when signing runs) onto the entry, **covered by
 the signature itself** — the signed payload now spans `name`/`source`/`sha256`/`format`/
-`distro`/`version`/`arch`/`signed_at`, not just the first four. Previously `distro`/`version`/`arch`
-were present on an entry but excluded from what was actually signed, so they could be edited in
-`catalog.json` after the fact (e.g. relabeling `arch` to mislead a platform-matching consumer) without
-invalidating the signature — closed now. `read_only` stays deliberately unsigned, since it's a mutable
-operational flag toggled via its own REST route (below), not provenance data — signing it would mean
-every legitimate toggle silently breaks the signature.
+`distro`/`version`/`arch`/`signed_at`/`build_pipeline`/`build_run_id`/`build_commit`, not just the
+first four. Previously `distro`/`version`/`arch` were present on an entry but excluded from what was
+actually signed, so they could be edited in `catalog.json` after the fact (e.g. relabeling `arch` to
+mislead a platform-matching consumer) without invalidating the signature — closed now. `read_only`
+stays deliberately unsigned, since it's a mutable operational flag toggled via its own REST route
+(below), not provenance data — signing it would mean every legitimate toggle silently breaks the
+signature.
+
+**Build lineage** (`--build-pipeline`/`--build-run-id`/`--build-commit`, all optional) records which
+CI pipeline, which run within it, and which source commit produced the image's bytes — the real gap
+this closes: previously signing only ever vouched for the catalog entry's own fields (name, source,
+checksum, ...), with no way to record *who built it* at all. Read this claim honestly, though: it's
+asserted by whoever ran `catalog sign`, the same posture as `signed_by` below — there is no
+cryptographic attestation chain proving the named CI system actually produced these bytes (that would
+need something like Sigstore/in-toto, which this project's signing scheme deliberately avoids for the
+same reason it avoids cosign — see above). What signing *does* give it: once set, `build_pipeline`/
+`build_run_id`/`build_commit` are tamper-evident exactly like `distro`/`version`/`arch` — relabeling
+any of them in `catalog.json` after the fact invalidates the signature.
 
 **Breaking change for existing signed catalogs**: an entry signed before this existed will fail
 verification against the new, wider payload — there's no dual-format fallback. Re-run `fluxvm catalog
