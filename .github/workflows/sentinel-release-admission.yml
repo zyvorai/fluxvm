@@ -26,7 +26,7 @@ jobs:
   portable:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Static and unit gates
         run: ./scripts/test-sentinel-release-admission-static.sh
       - name: Host smoke

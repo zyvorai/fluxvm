@@ -11,7 +11,7 @@ jobs:
   static:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: scripts/test-migration-orchestrator-static.sh
       - name: Systemd unit syntax
         run: |
@@ -21,6 +21,6 @@ jobs:
     if: ${{ vars.FLUXVM_MIGRATION_PRIVILEGED_CI == '1' }}
     runs-on: [self-hosted, linux, x64, fluxvm-migration]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - env: {FLUXVM_MIGRATION_HOST_TEST: '1', FLUXVM_MIGRATION_PLAN: '${{ vars.FLUXVM_MIGRATION_TEST_PLAN }}'}
         run: sudo -E scripts/test-migration-orchestrator-host.sh

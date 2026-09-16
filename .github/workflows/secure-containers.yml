@@ -21,10 +21,10 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: fluxvm
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit

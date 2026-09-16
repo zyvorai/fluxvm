@@ -30,7 +30,7 @@ jobs:
   portable:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Static and transaction tests
         run: ./scripts/test-sentinel-upgrade-manager-static.sh
       - name: Shell syntax
@@ -51,7 +51,7 @@ jobs:
     if: ${{ vars.FLUXVM_UPGRADE_DESTRUCTIVE_E2E == '1' }}
     runs-on: [self-hosted, linux, x64, fluxvm-ebpf-lab]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Destructive map roundtrip
         env:
           FLUXVM_UPGRADE_DESTRUCTIVE_E2E: '1'

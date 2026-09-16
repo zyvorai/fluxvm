@@ -23,14 +23,14 @@ jobs:
   static:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Static and unit gates
         run: sudo -E ./scripts/test-sentinel-fleet-guard-static.sh
   host:
     if: ${{ vars.FLUXVM_FLEET_GUARD_HOST_TEST == '1' }}
     runs-on: [self-hosted, linux, fluxvm-fleet]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Disposable fleet smoke
         env:
           FLUXVM_FLEET_GUARD_HOST_TEST: '1'
