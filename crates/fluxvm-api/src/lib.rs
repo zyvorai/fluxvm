@@ -1036,7 +1036,14 @@ async fn sandbox_proxy_inner(
     };
     let mut builder = hyper::Request::builder().method(method).uri(uri);
     for (k, v) in headers.iter() {
-        if k == header::HOST {
+        // host: about the wrong peer once forwarded. content-length: hyper
+        // computes and sets its own from the `Full` body below -- forwarding
+        // the original value duplicates the header, and on a non-empty body
+        // (anything but the plain GETs this path was first exercised with)
+        // that framing mismatch left the guest's HTTP server waiting on body
+        // bytes that were never coming, hanging the request indefinitely
+        // instead of erroring.
+        if k == header::HOST || k == header::CONTENT_LENGTH || k == header::TRANSFER_ENCODING {
             continue;
         }
         builder = builder.header(k, v);
