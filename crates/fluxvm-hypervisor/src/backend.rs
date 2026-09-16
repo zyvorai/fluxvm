@@ -48,7 +48,16 @@ impl VmBackend for FluxVmBackend {
             vcpus: req.vcpus,
             kernel_args: req.kernel_args.clone().or_else(|| {
                 Some(
+                    // random.trust_cpu=on: this kernel has no virtio-rng driver, and
+                    // without it the guest's CRNG gets stuck at "fast init" forever
+                    // (real entropy sources -- disk/keyboard/network jitter -- barely
+                    // exist in a headless microVM). Anything that calls the blocking
+                    // getrandom() before the CRNG is *fully* seeded hangs indefinitely
+                    // in wait_for_random_bytes(), which is indistinguishable from a
+                    // hung process from the outside -- alive, no output, nothing
+                    // listening. Trusting RDRAND lets it seed fully at boot instead.
                     "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
+                     random.trust_cpu=on rdrand=force \
                      virtio_mmio.device=0x200@0xfeb00000:5 \
                      virtio_mmio.device=0x200@0xfeb00200:6"
                         .into(),
