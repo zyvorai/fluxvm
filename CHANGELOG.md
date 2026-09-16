@@ -3,6 +3,19 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **`fluxvm-cloud-hypervisor`'s `snapshot_save` had the exact same
+  resume-failure-discard bug as `fluxvm-qemu`'s, below** — found while
+  auditing every other `let _ = ...`-discarded `Result` across the crates
+  that fix didn't already cover. `snapshot_save` pauses (`ch-remote pause`),
+  takes the snapshot (`ch-remote snapshot`), then resumes
+  (`ch-remote resume`) — but the resume call's result was also a bare
+  `let _ = ...`, so a resume failure *after a successful snapshot* still
+  returned `Ok(())`, leaving the VM silently paused with no error surfaced.
+  Fixed the same way: both failure combinations are now reported
+  explicitly. 4 new tests against a scripted fake `ch-remote` shell script
+  (this backend shells out to a real binary rather than a QMP socket),
+  covering the success path, resume-fails-after-save-succeeds, both-fail,
+  and snapshot-fails-but-resume-succeeds.
 - **`fluxvm-qemu`'s internal-snapshot resume failure was silently discarded** —
   `snapshot_save` pauses a running VM (QMP `stop`), takes the internal
   `savevm` snapshot, then resumes it (QMP `cont`) — but the `cont` call's

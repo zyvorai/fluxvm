@@ -225,11 +225,19 @@ impl VmBackend for CloudHypervisorBackend {
 
 /// Pause, snapshot to `dest`, resume. `dest` is a directory URL path
 /// (`file:///…`) without the scheme — written under the VM workspace.
+///
+/// The resume result is never discarded: this used to be a bare
+/// `let _ = ch_remote(cfg, vm, "resume").await;`, so a resume failure after
+/// a *successful* snapshot still returned `Ok(())` -- the caller believed
+/// the snapshot fully succeeded with the VM still running, when it was
+/// actually left paused with no error surfaced anywhere (the same bug
+/// already fixed for the QEMU backend's own `snapshot_save`, see
+/// fluxvm-qemu). Both failure combinations are reported explicitly.
 pub async fn snapshot_save(cfg: &Config, vm: &VmRecord, dest: &std::path::Path) -> Result<()> {
     ch_remote(cfg, vm, "pause").await?;
     let url = format!("file://{}", path_arg(dest));
     let api = vm.workspace.join("ch-api.sock");
-    let result = run_checked_timeout(
+    let snapshot_result = run_checked_timeout(
         &cfg.ch_remote_binary,
         &[
             "--api-socket".into(),
@@ -240,8 +248,17 @@ pub async fn snapshot_save(cfg: &Config, vm: &VmRecord, dest: &std::path::Path) 
         CH_REMOTE_TIMEOUT,
     )
     .await;
-    let _ = ch_remote(cfg, vm, "resume").await;
-    result?;
+    if let Err(resume_err) = ch_remote(cfg, vm, "resume").await {
+        return match snapshot_result {
+            Ok(_) => Err(resume_err).context(
+                "snapshot saved, but the VM failed to resume afterward and is now paused, not running",
+            ),
+            Err(snapshot_err) => Err(snapshot_err.context(format!(
+                "snapshot failed, and the VM also failed to resume afterward: {resume_err}"
+            ))),
+        };
+    }
+    snapshot_result?;
     Ok(())
 }
 
@@ -333,6 +350,120 @@ mod tests {
             disk_format: "raw".into(),
             nbd_export: None,
         }
+    }
+
+    fn vm_record(workspace: std::path::PathBuf) -> VmRecord {
+        VmRecord {
+            id: uuid::Uuid::new_v4(),
+            name: "fixture".into(),
+            backend: BackendKind::CloudHypervisor,
+            status: fluxvm_core::model::VmStatus::Running,
+            pid: None,
+            created_at: chrono_now(),
+            expires_at: None,
+            workspace: workspace.clone(),
+            disk: workspace.join("root.raw"),
+            seed_disk: None,
+            tap_name: None,
+            control_socket: None,
+            log_path: workspace.join("console.log"),
+            error: None,
+            request: req(),
+            guest_cid: None,
+            jail_path: None,
+            vsock_socket: None,
+            qga_socket: None,
+            cgroup_path: None,
+            netns: None,
+            lvm_lv: None,
+            nbd_pid: None,
+            virtiofsd_pids: Vec::new(),
+            swtpm_pid: None,
+            dhcp_leasefile: None,
+            guest_ip: None,
+        }
+    }
+
+    fn chrono_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+
+    /// Writes an executable fake `ch-remote` under `dir` whose exit code
+    /// for each subcommand is looked up from `outcomes` (subcommand ->
+    /// success). A subcommand not present in `outcomes` always succeeds --
+    /// matching real `ch-remote`'s behavior for any call this test doesn't
+    /// care about. Matches `subcommand` as a whole word anywhere in the
+    /// argv (`snapshot` is followed by a URL argument, `pause`/`resume`
+    /// are not, so this can't just check the last word).
+    fn fake_ch_remote(dir: &std::path::Path, outcomes: &[(&str, bool)]) -> String {
+        let mut script = String::from("#!/bin/sh\nargs=\" $* \"\ncase \"$args\" in\n");
+        for (subcommand, ok) in outcomes {
+            let exit = if *ok { 0 } else { 1 };
+            script.push_str(&format!("  *\" {subcommand} \"*) exit {exit} ;;\n"));
+        }
+        script.push_str("  *) exit 0 ;;\nesac\n");
+        let path = dir.join("fake-ch-remote.sh");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.display().to_string()
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_success_path_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote(dir.path(), &[]);
+        let vm = vm_record(dir.path().to_path_buf());
+        let dest = dir.path().join("snap");
+        snapshot_save(&cfg, &vm, &dest).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_reports_resume_failure_after_successful_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote(dir.path(), &[("resume", false)]);
+        let vm = vm_record(dir.path().to_path_buf());
+        let dest = dir.path().join("snap");
+        let err = snapshot_save(&cfg, &vm, &dest).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("snapshot saved") && msg.contains("resume"),
+            "expected a resume-after-success message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_reports_both_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg();
+        cfg.ch_remote_binary =
+            fake_ch_remote(dir.path(), &[("snapshot", false), ("resume", false)]);
+        let vm = vm_record(dir.path().to_path_buf());
+        let dest = dir.path().join("snap");
+        let err = snapshot_save(&cfg, &vm, &dest).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("also failed to resume"),
+            "expected both-failed message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_propagates_snapshot_failure_when_resume_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote(dir.path(), &[("snapshot", false)]);
+        let vm = vm_record(dir.path().to_path_buf());
+        let dest = dir.path().join("snap");
+        let err = snapshot_save(&cfg, &vm, &dest).await.unwrap_err();
+        // The pre-existing behavior for this combination: only the
+        // snapshot error, resume having succeeded needs no mention.
+        assert!(!format!("{err:#}").contains("also failed to resume"));
     }
 
     #[test]
