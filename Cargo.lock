@@ -2012,6 +2012,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "fluxvm-core",
+ "serde_json",
  "tempfile",
  "tokio",
  "uuid",

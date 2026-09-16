@@ -58,6 +58,21 @@ pub async fn output_checked(program: &str, args: &[String]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Like `output_checked`, but bounded — same rationale as
+/// `run_checked_timeout`: a call that both needs a VMM control CLI's
+/// stdout *and* can't risk hanging forever against a wedged VMM (e.g.
+/// `ch-remote info`, read before a resize to learn the VM's current live
+/// vCPU/memory count).
+pub async fn output_checked_timeout(
+    program: &str,
+    args: &[String],
+    timeout: std::time::Duration,
+) -> Result<String> {
+    tokio::time::timeout(timeout, output_checked(program, args))
+        .await
+        .with_context(|| format!("{program} timed out after {timeout:?}"))?
+}
+
 /// When `netns` is `Some`, rewrites `(program, args)` into `("ip", ["netns",
 /// "exec", netns, program, ...args])` so the eventual `spawn_logged` call
 /// launches the VMM (or, for a jailed Firecracker VM, `jailer` — `ip netns

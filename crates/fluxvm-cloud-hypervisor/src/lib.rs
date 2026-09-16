@@ -7,13 +7,58 @@ use fluxvm_core::{
     backend::{LaunchContext, LaunchResult, VmBackend, path_arg},
     config::Config,
     model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
-    process::{run_checked_timeout, spawn_logged, spawn_swtpm},
+    process::{output_checked_timeout, run_checked_timeout, spawn_logged, spawn_swtpm},
 };
+use serde_json::Value;
 use std::time::Duration;
 
 const CH_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bound this backend will ever pass to `--cpus boot=N,max=M`.
+/// Deliberately the exact same value as `fluxvm-qemu`'s own
+/// `MAX_VCPUS_CEILING` -- an arbitrary-but-generous shared policy choice
+/// between the two backends (nowhere near either hypervisor's own real
+/// limit), not a Cloud Hypervisor-specific constraint, so a Machine that
+/// doesn't set `max_vcpus` gets the same headroom regardless of which
+/// backend it lands on.
+const MAX_VCPUS_CEILING: u8 = 254;
+/// Every Cloud Hypervisor ACPI memory-hotplug add must be a whole multiple
+/// of this many MiB — verified live against a real `cloud-hypervisor`/
+/// `ch-remote` v53.0 pair: a non-aligned `resize --memory` target fails
+/// with Cloud Hypervisor's own "the requested hotplug memory addition is
+/// not a valid size". Checked up front in `hotplug_memory` for a clearer
+/// error than relaying that raw one.
+const MEMORY_HOTPLUG_ALIGNMENT_MIB: u64 = 128;
 
 pub struct CloudHypervisorBackend;
+
+/// The absolute vCPU ceiling this VM was (or would be) booted with —
+/// mirrors `fluxvm-qemu`'s own default-headroom formula exactly, so a
+/// Machine that doesn't set `max_vcpus` gets comparable hotplug headroom on
+/// either backend. Shared between `build_args` (which passes it as `--cpus
+/// boot=N,max=M`) and `hotplug_cpu` (which needs the identical ceiling to
+/// give a clear "exceeds max_vcpus" error instead of relaying Cloud
+/// Hypervisor's own raw one) so the two can never drift apart.
+fn max_vcpus(req: &CreateVmRequest) -> u8 {
+    req.max_vcpus
+        .unwrap_or_else(|| req.vcpus.saturating_mul(2))
+        .max(req.vcpus)
+        .min(MAX_VCPUS_CEILING)
+}
+
+/// The absolute memory ceiling in MiB — same role as `max_vcpus` above,
+/// mirroring `fluxvm-qemu`'s own default-headroom formula exactly. Cloud
+/// Hypervisor's own `--memory` flag reserves headroom as an *additive*
+/// `hotplug_size` rather than QEMU's absolute `-m maxmem=`, so `build_args`
+/// itself still has to subtract `req.memory_mib` back out of this — this
+/// function always returns the same absolute ceiling either backend would
+/// use for the same request.
+fn max_memory_mib(req: &CreateVmRequest) -> u64 {
+    req.max_memory_mib.unwrap_or_else(|| {
+        req.memory_mib
+            .saturating_mul(2)
+            .max(req.memory_mib.saturating_add(2048))
+    })
+}
 
 pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> Result<Vec<String>> {
     // Restore from a prior Cloud Hypervisor snapshot — config comes from the
@@ -28,18 +73,30 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
         ]);
     }
 
+    // Reserve hotplug headroom by default, exactly mirroring fluxvm-qemu's
+    // own `-smp maxcpus=`/`-m maxmem=` reasoning -- a bare `--cpus boot=N`/
+    // `--memory size=NM` with no `max=`/`hotplug_size=` leaves `resize`
+    // nothing to grow into (verified live: `ch-remote resize --cpus`
+    // against a VM booted without `max=` fails "Requested vCPUs exceed
+    // maximum" the instant it asks for even one more than boot count).
+    // Cloud Hypervisor's own headroom scheme is *additive* rather than
+    // QEMU's absolute `maxmem=`, so `hotplug_size` here is `max_memory_mib`
+    // (the same absolute ceiling `fluxvm-qemu` would compute for an
+    // identical request) with `req.memory_mib` subtracted back out.
+    let max_vcpus = max_vcpus(req);
+    let hotplug_size_mib = max_memory_mib(req).saturating_sub(req.memory_mib);
     let api = ctx.workspace.join("ch-api.sock");
     let mut a = vec![
         "--api-socket".into(),
         api.display().to_string(),
         "--cpus".into(),
         if req.hyperv {
-            format!("boot={},kvm_hyperv=on", req.vcpus)
+            format!("boot={},max={max_vcpus},kvm_hyperv=on", req.vcpus)
         } else {
-            format!("boot={}", req.vcpus)
+            format!("boot={},max={max_vcpus}", req.vcpus)
         },
         "--memory".into(),
-        format!("size={}M", req.memory_mib),
+        format!("size={}M,hotplug_size={hotplug_size_mib}M", req.memory_mib),
         "--disk".into(),
         format!("path={}", path_arg(&ctx.disk)),
     ];
@@ -276,6 +333,145 @@ async fn ch_remote(cfg: &Config, vm: &VmRecord, subcommand: &str) -> Result<()> 
     .await
 }
 
+/// Hot-add `add_vcpus` vCPUs to a running Cloud Hypervisor VM without a
+/// reboot. Returns the VM's new total live vCPU count. Bounded by the
+/// `max_vcpus` headroom reserved at launch (`build_args`'s own `--cpus
+/// boot=N,max=M`), the same contract `fluxvm-qemu::hotplug_cpu` already
+/// has.
+///
+/// Verified live against a real `cloud-hypervisor`/`ch-remote` v53.0 pair:
+/// `ch-remote resize --cpus` takes an *absolute* target vCPU count, not a
+/// delta, and `ch-remote info`'s own `config.cpus.boot_vcpus` field is
+/// live-mutated by a prior resize (despite the "boot" name, it reports the
+/// VM's *current* count, confirmed by resizing and re-querying) -- so this
+/// reads the current count first, computes the new absolute target, then
+/// resizes to it. Also verified live: `resize --cpus` accepts a *smaller*
+/// target than the current count (Cloud Hypervisor auto-offlines the
+/// surplus vCPUs in the guest) -- deliberately not exposed here, since
+/// this project's own hotplug contract is grow-only (matching
+/// `fluxvm-qemu::hotplug_cpu`, which has no unplug primitive at all).
+pub async fn hotplug_cpu(cfg: &Config, vm: &VmRecord, add_vcpus: u8) -> Result<u8> {
+    if add_vcpus == 0 {
+        bail!("add_vcpus must be greater than zero");
+    }
+    let api = vm.workspace.join("ch-api.sock");
+    let info = ch_info(cfg, &api).await?;
+    let current = cpus_boot_vcpus(&info)?;
+    let ceiling = cpus_max_vcpus(&info)?;
+    let target = current.checked_add(add_vcpus).filter(|t| *t <= ceiling);
+    let Some(target) = target else {
+        bail!(
+            "adding {add_vcpus} vCPU(s) to the current {current} would exceed the {ceiling}-vCPU headroom reserved at creation"
+        );
+    };
+    run_checked_timeout(
+        &cfg.ch_remote_binary,
+        &[
+            "--api-socket".into(),
+            api.display().to_string(),
+            "resize".into(),
+            "--cpus".into(),
+            target.to_string(),
+        ],
+        CH_REMOTE_TIMEOUT,
+    )
+    .await
+    .context("resizing vCPU count")?;
+    Ok(target)
+}
+
+/// Hot-add `add_memory_mib` MiB of RAM to a running Cloud Hypervisor VM
+/// without a reboot. Returns the VM's new *total* live memory in MiB —
+/// same "query current, resize to an absolute new total" shape as
+/// `hotplug_cpu` above (`ch-remote resize --memory` also takes an absolute
+/// byte target, verified live against the same real `cloud-hypervisor`/
+/// `ch-remote` v53.0 pair). Bounded by the `hotplug_size` headroom
+/// `build_args` reserved at launch -- verified live: a target beyond the
+/// boot-time `size + hotplug_size` ceiling fails Cloud Hypervisor's own
+/// "Not enough space in the hotplug RAM region", which surfaces here
+/// wrapped with which target/current values produced it rather than
+/// relaying the raw string alone.
+pub async fn hotplug_memory(cfg: &Config, vm: &VmRecord, add_memory_mib: u64) -> Result<u64> {
+    if add_memory_mib == 0 {
+        bail!("add_memory_mib must be greater than zero");
+    }
+    if !add_memory_mib.is_multiple_of(MEMORY_HOTPLUG_ALIGNMENT_MIB) {
+        bail!(
+            "add_memory_mib ({add_memory_mib}) must be a multiple of {MEMORY_HOTPLUG_ALIGNMENT_MIB}MiB -- Cloud Hypervisor's own ACPI memory hotplug requires it"
+        );
+    }
+    let api = vm.workspace.join("ch-api.sock");
+    let info = ch_info(cfg, &api).await?;
+    let current_bytes = memory_size_bytes(&info)?;
+    let add_bytes = add_memory_mib.saturating_mul(1024 * 1024);
+    let target_bytes = current_bytes.saturating_add(add_bytes);
+    run_checked_timeout(
+        &cfg.ch_remote_binary,
+        &[
+            "--api-socket".into(),
+            api.display().to_string(),
+            "resize".into(),
+            "--memory".into(),
+            target_bytes.to_string(),
+        ],
+        CH_REMOTE_TIMEOUT,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "resizing memory from {current_bytes} to {target_bytes} bytes (may exceed the hotplug headroom reserved at creation)"
+        )
+    })?;
+    Ok(target_bytes / (1024 * 1024))
+}
+
+/// Runs `ch-remote info` and parses its JSON stdout -- the one query this
+/// backend has for a running VM's own live vCPU/memory state (Cloud
+/// Hypervisor has no QMP-style socket protocol of its own; `ch-remote` is
+/// always a real subprocess call, the same shape `ch_remote`/
+/// `snapshot_save` above already use for mutating calls).
+async fn ch_info(cfg: &Config, api: &std::path::Path) -> Result<Value> {
+    let out = output_checked_timeout(
+        &cfg.ch_remote_binary,
+        &[
+            "--api-socket".into(),
+            api.display().to_string(),
+            "info".into(),
+        ],
+        CH_REMOTE_TIMEOUT,
+    )
+    .await
+    .context("querying Cloud Hypervisor VM info")?;
+    serde_json::from_str(&out).context("parsing `ch-remote info` output")
+}
+
+fn cpus_boot_vcpus(info: &Value) -> Result<u8> {
+    json_u64(info, &["config", "cpus", "boot_vcpus"])?
+        .try_into()
+        .context("`ch-remote info`'s config.cpus.boot_vcpus does not fit in a u8")
+}
+
+fn cpus_max_vcpus(info: &Value) -> Result<u8> {
+    json_u64(info, &["config", "cpus", "max_vcpus"])?
+        .try_into()
+        .context("`ch-remote info`'s config.cpus.max_vcpus does not fit in a u8")
+}
+
+fn memory_size_bytes(info: &Value) -> Result<u64> {
+    json_u64(info, &["config", "memory", "size"])
+}
+
+fn json_u64(info: &Value, path: &[&str]) -> Result<u64> {
+    let mut cur = info;
+    for key in path {
+        cur = cur
+            .get(key)
+            .with_context(|| format!("`ch-remote info` output has no {}", path.join(".")))?;
+    }
+    cur.as_u64()
+        .with_context(|| format!("`ch-remote info`'s {} is not an integer", path.join(".")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +606,186 @@ mod tests {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         path.display().to_string()
+    }
+
+    /// Writes an executable fake `ch-remote` for `hotplug_cpu`/
+    /// `hotplug_memory` tests: `info` prints `info_json` verbatim to
+    /// stdout, `resize` appends its own full argv to `log` (one line) and
+    /// exits with `resize_exit`, anything else exits 0 -- lets a test
+    /// assert both the *target* this crate computed (from `log`) and the
+    /// resulting `Result` (from `resize_exit`), without a real
+    /// `cloud-hypervisor` VMM behind the socket.
+    fn fake_ch_remote_hotplug(
+        dir: &std::path::Path,
+        info_json: &str,
+        resize_exit: i32,
+        log: &std::path::Path,
+    ) -> String {
+        let script = format!(
+            "#!/bin/sh\nargs=\" $* \"\ncase \"$args\" in\n  *\" info \"*) cat <<'CH_INFO_JSON'\n{info_json}\nCH_INFO_JSON\n    exit 0 ;;\n  *\" resize \"*) echo \"$*\" >> {log:?} ; exit {resize_exit} ;;\n  *) exit 0 ;;\nesac\n"
+        );
+        let path = dir.join("fake-ch-remote-hotplug.sh");
+        std::fs::write(&path, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.display().to_string()
+    }
+
+    #[tokio::test]
+    async fn hotplug_cpu_resizes_to_current_plus_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("resize.log");
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote_hotplug(
+            dir.path(),
+            r#"{"config":{"cpus":{"boot_vcpus":2,"max_vcpus":8},"memory":{"size":536870912,"hotplug_size":2147483648}}}"#,
+            0,
+            &log,
+        );
+        let vm = vm_record(dir.path().to_path_buf());
+        let vcpus = hotplug_cpu(&cfg, &vm, 3).await.unwrap();
+        assert_eq!(vcpus, 5);
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            logged.contains("resize --cpus 5"),
+            "expected an absolute target of 5, got: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hotplug_cpu_rejects_exceeding_max_vcpus_headroom() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("resize.log");
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote_hotplug(
+            dir.path(),
+            r#"{"config":{"cpus":{"boot_vcpus":6,"max_vcpus":8},"memory":{"size":536870912,"hotplug_size":2147483648}}}"#,
+            0,
+            &log,
+        );
+        let vm = vm_record(dir.path().to_path_buf());
+        let err = hotplug_cpu(&cfg, &vm, 5).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("exceed the 8-vCPU headroom"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !log.exists(),
+            "resize must never be called once the pre-check already refused it"
+        );
+    }
+
+    #[tokio::test]
+    async fn hotplug_cpu_rejects_zero() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let err = hotplug_cpu(&cfg, &vm, 0).await.unwrap_err();
+        assert!(format!("{err:#}").contains("greater than zero"));
+    }
+
+    #[tokio::test]
+    async fn hotplug_cpu_propagates_a_real_resize_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("resize.log");
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote_hotplug(
+            dir.path(),
+            r#"{"config":{"cpus":{"boot_vcpus":1,"max_vcpus":8},"memory":{"size":536870912,"hotplug_size":2147483648}}}"#,
+            1,
+            &log,
+        );
+        let vm = vm_record(dir.path().to_path_buf());
+        let err = hotplug_cpu(&cfg, &vm, 1).await.unwrap_err();
+        assert!(format!("{err:#}").contains("resizing vCPU count"));
+    }
+
+    #[tokio::test]
+    async fn hotplug_memory_resizes_to_current_plus_add() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("resize.log");
+        let mut cfg = cfg();
+        cfg.ch_remote_binary = fake_ch_remote_hotplug(
+            dir.path(),
+            r#"{"config":{"cpus":{"boot_vcpus":1,"max_vcpus":8},"memory":{"size":536870912,"hotplug_size":2147483648}}}"#,
+            0,
+            &log,
+        );
+        let vm = vm_record(dir.path().to_path_buf());
+        // 536870912 bytes (512 MiB) + 256 MiB = 805306368 bytes (768 MiB).
+        let memory_mib = hotplug_memory(&cfg, &vm, 256).await.unwrap();
+        assert_eq!(memory_mib, 768);
+        let logged = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            logged.contains("resize --memory 805306368"),
+            "expected an absolute byte target, got: {logged}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hotplug_memory_rejects_non_128mib_multiple() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let err = hotplug_memory(&cfg, &vm, 100).await.unwrap_err();
+        assert!(format!("{err:#}").contains("multiple of 128MiB"));
+    }
+
+    #[tokio::test]
+    async fn hotplug_memory_rejects_zero() {
+        let cfg = cfg();
+        let dir = tempfile::tempdir().unwrap();
+        let vm = vm_record(dir.path().to_path_buf());
+        let err = hotplug_memory(&cfg, &vm, 0).await.unwrap_err();
+        assert!(format!("{err:#}").contains("greater than zero"));
+    }
+
+    #[test]
+    fn cpu_and_memory_hotplug_headroom_defaults_when_unset() {
+        let args = build_args(&cfg(), &req(), &ctx()).unwrap();
+        let cpus = args
+            .iter()
+            .position(|a| a == "--cpus")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        // req().vcpus == 1, req().memory_mib == 512 (see `req()` below) --
+        // the same doubling-with-a-floor default fluxvm-qemu computes.
+        assert_eq!(cpus, "boot=1,max=2");
+        let memory = args
+            .iter()
+            .position(|a| a == "--memory")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        // max_memory_mib defaults to max(512*2, 512+2048) = 2560 (the
+        // absolute ceiling); hotplug_size is that minus req.memory_mib
+        // itself (512), since Cloud Hypervisor's own headroom parameter is
+        // additive, not absolute.
+        assert_eq!(memory, "size=512M,hotplug_size=2048M");
+    }
+
+    #[test]
+    fn cpu_and_memory_hotplug_headroom_respects_explicit_request() {
+        let mut r = req();
+        r.vcpus = 4;
+        r.max_vcpus = Some(8);
+        r.memory_mib = 1024;
+        r.max_memory_mib = Some(4096);
+        let args = build_args(&cfg(), &r, &ctx()).unwrap();
+        let cpus = args
+            .iter()
+            .position(|a| a == "--cpus")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        assert_eq!(cpus, "boot=4,max=8");
+        let memory = args
+            .iter()
+            .position(|a| a == "--memory")
+            .map(|i| &args[i + 1])
+            .unwrap();
+        assert_eq!(memory, "size=1024M,hotplug_size=3072M");
     }
 
     #[tokio::test]

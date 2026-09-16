@@ -96,6 +96,40 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **Cloud Hypervisor backend: real CPU/memory hotplug** — `POST
+  /v1/vms/{uuid}/hotplug/cpu`/`hotplug/memory` previously worked on QEMU
+  only ("Cloud Hypervisor/Firecracker backends have no hotplug support in
+  this codebase," per this file's own QEMU-hotplug entry below); Firecracker
+  still doesn't, but Cloud Hypervisor now does. `build_args` reserves the
+  same headroom QEMU already reserves by default (mirrored via two new
+  shared `max_vcpus`/`max_memory_mib` helpers so the two backends' default
+  formulas can never drift apart) — `--cpus boot=N,max=M` and `--memory
+  size=NM,hotplug_size=HM` (Cloud Hypervisor's own headroom parameter is
+  *additive*, unlike QEMU's absolute `-m maxmem=`, so `hotplug_size` is
+  computed by subtracting `size` back out of the same absolute ceiling QEMU
+  would use for an identical request). `hotplug_cpu`/`hotplug_memory` query
+  `ch-remote info` for the VM's current live vCPU count/memory size, compute
+  the new absolute total, and call `ch-remote resize --cpus`/`--memory` to
+  it — `resize` itself takes an absolute target, not a delta, the opposite
+  shape from QEMU's own `device_add`-based fill-the-next-free-slot
+  mechanism. Grow-only by this crate's own choice (`resize` itself can
+  shrink too, auto-offlining vCPUs in the guest) to match the QEMU backend's
+  existing no-unplug contract. A memory add must be a whole multiple of
+  128MiB, Cloud Hypervisor's own ACPI-hotplug requirement — checked up
+  front with a clear message instead of relaying its raw
+  "not a valid size" error. 8 new tests against a scripted fake `ch-remote`
+  (extending the existing `snapshot_save` fixture pattern with a fake
+  `info` JSON response and resize-argv logging) plus 2 build-args tests
+  proving the new `max=`/`hotplug_size=` headroom math. Verified live
+  end-to-end against a real `cloud-hypervisor v53.0`/`ch-remote v53.0` pair
+  on a KVM-capable Linux host — not just unit tests against a fake binary:
+  booted with `--cpus boot=1,max=4`/`--memory size=512M,hotplug_size=2048M`,
+  resized vCPUs 1→2 and memory 512M→1G→2G→2.5G (`ch-remote info` confirming
+  the new live totals each time), confirmed the documented 128MiB-alignment
+  and max-headroom rejections fail with Cloud Hypervisor's own real error
+  strings, and confirmed `resize --cpus`/`--memory` reject a target beyond
+  `max_vcpus`/`size + hotplug_size` exactly as this crate's own pre-checks
+  now anticipate before ever shelling out.
 - **`fluxvm-agent central`'s fleet-wide `GET /fleet/vms` now names any node
   it couldn't account for, instead of silently omitting it** — the same
   surface-don't-hide fix the single-node `GET /fleet/nodes/{name}/vms`
