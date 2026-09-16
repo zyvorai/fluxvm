@@ -2226,6 +2226,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "fluxvm-core",
  "libc",
  "serde_json",

@@ -3,6 +3,19 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **`fluxvm-qemu`'s internal-snapshot resume failure was silently discarded** —
+  `snapshot_save` pauses a running VM (QMP `stop`), takes the internal
+  `savevm` snapshot, then resumes it (QMP `cont`) — but the `cont` call's
+  result was a bare `let _ = ...`, so a resume failure *after a successful
+  snapshot* still returned `Ok(())`. A caller acting on that `Ok` believed
+  the VM was still running when it had actually been left paused, with no
+  error surfaced anywhere to explain why. Fixed: both failure combinations
+  (snapshot failed and/or resume failed) are now reported explicitly,
+  naming which one happened; a snapshot that saved fine but failed to
+  resume now returns an error saying exactly that, rather than a clean
+  `Ok(())`. 4 new tests against a scripted fake QMP socket, covering the
+  success path, resume-fails-after-save-succeeds, both-fail, and the
+  already-paused VM (never told to `stop`/`cont` at all) case.
 - **Warm pools (`/v1/pools`) had no tenant scoping at all** — the same gap
   as sandboxes above, in the same audit pass: `list_pools` had no tenant
   filter, `get_pool`/`delete_pool`/`claim_pool` (name-keyed, so

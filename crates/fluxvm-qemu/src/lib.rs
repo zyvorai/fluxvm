@@ -621,17 +621,32 @@ pub async fn hotplug_memory(_cfg: &Config, vm: &VmRecord, add_memory_mib: u64) -
 
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was
 /// running. Pairs with `-loadvm` / [`VmManager::start_from_snapshot`].
+///
+/// The resume (`cont`) result is never discarded: this used to be a bare
+/// `let _ = ...`, so a `cont` failure after a *successful* `savevm` still
+/// returned `Ok(())` -- the caller believed the snapshot fully succeeded
+/// with the VM still running, when it was actually left paused with no
+/// error surfaced anywhere. Both failure combinations are now reported
+/// explicitly, since a caller acting on `Ok(())` here has no other way to
+/// learn the VM didn't come back up.
 pub async fn snapshot_save(_cfg: &Config, vm: &VmRecord, name: &str) -> Result<()> {
     let sock = vm.workspace.join("qmp.sock");
     let was_running = vm.status == fluxvm_core::model::VmStatus::Running;
     if was_running {
         qmp::execute(&sock, "stop", None, QMP_TIMEOUT).await?;
     }
-    let result = qmp::savevm(&sock, name, QMP_SAVEVM_TIMEOUT).await;
-    if was_running {
-        let _ = qmp::execute(&sock, "cont", None, QMP_TIMEOUT).await;
+    let save_result = qmp::savevm(&sock, name, QMP_SAVEVM_TIMEOUT).await;
+    if was_running && let Err(resume_err) = qmp::execute(&sock, "cont", None, QMP_TIMEOUT).await {
+        return match save_result {
+            Ok(_) => Err(resume_err).context(format!(
+                "snapshot '{name}' saved, but the VM failed to resume afterward and is now paused, not running"
+            )),
+            Err(save_err) => Err(save_err.context(format!(
+                "snapshot '{name}' failed, and the VM also failed to resume afterward: {resume_err}"
+            ))),
+        };
     }
-    result?;
+    save_result?;
     Ok(())
 }
 
@@ -907,5 +922,205 @@ mod tests {
         let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
         assert!(!args.iter().any(|a| a.contains("if=pflash")));
         assert!(args.iter().any(|a| a.contains("chrtpm")));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_save_tests {
+    use super::*;
+    use fluxvm_core::model::{CreateVmRequest, NetworkSpec, StorageBackend, VmStatus};
+    use serde_json::{Value, json};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixListener;
+
+    fn vm_record(workspace: PathBuf, status: VmStatus) -> VmRecord {
+        VmRecord {
+            id: uuid::Uuid::new_v4(),
+            name: "fixture".into(),
+            backend: BackendKind::Qemu,
+            status,
+            pid: None,
+            created_at: chrono::Utc::now(),
+            expires_at: None,
+            workspace: workspace.clone(),
+            disk: workspace.join("root.qcow2"),
+            seed_disk: None,
+            tap_name: None,
+            control_socket: None,
+            log_path: workspace.join("console.log"),
+            error: None,
+            request: CreateVmRequest {
+                name: "fixture".into(),
+                tenant: None,
+                backend: BackendKind::Qemu,
+                image: PathBuf::from("/tmp/base.qcow2"),
+                vcpus: 1,
+                memory_mib: 512,
+                max_vcpus: None,
+                max_memory_mib: None,
+                loadvm_tag: None,
+                disk_size_gib: None,
+                kernel: None,
+                initrd: None,
+                firmware: None,
+                kernel_args: None,
+                network: NetworkSpec::None,
+                cloud_init: None,
+                ttl_seconds: None,
+                extra_args: vec![],
+                agent: None,
+                qga: None,
+                hyperv: false,
+                storage: StorageBackend::Default,
+                shared_folders: vec![],
+                numa_node: None,
+                cpuset: None,
+                hugepages: None,
+                vfio_devices: vec![],
+                pod_uid: None,
+                secure_boot: None,
+                tpm: None,
+            },
+            guest_cid: None,
+            jail_path: None,
+            vsock_socket: None,
+            qga_socket: None,
+            cgroup_path: None,
+            netns: None,
+            lvm_lv: None,
+            nbd_pid: None,
+            virtiofsd_pids: vec![],
+            swtpm_pid: None,
+            dhcp_leasefile: None,
+            guest_ip: None,
+        }
+    }
+
+    /// Serves one QMP connection per step, replying `{"return": reply}`
+    /// for a successful step or `{"error": {...}}` for a failing one --
+    /// mirrors `qmp::hotplug_tests::serve_script`, which lives in a
+    /// different module and isn't reusable from here.
+    async fn serve_steps(listener: UnixListener, steps: Vec<(&'static str, Result<Value, ()>)>) {
+        for (expect_command, outcome) in steps {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+
+            write_half
+                .write_all(b"{\"QMP\":{\"version\":{}}}\n")
+                .await
+                .unwrap();
+            let mut caps = String::new();
+            reader.read_line(&mut caps).await.unwrap();
+            write_half.write_all(b"{\"return\":{}}\n").await.unwrap();
+
+            let mut req = String::new();
+            reader.read_line(&mut req).await.unwrap();
+            let req: Value = serde_json::from_str(&req).unwrap();
+            assert_eq!(req["execute"], expect_command, "unexpected command");
+
+            let resp = match outcome {
+                Ok(reply) => json!({"return": reply}),
+                Err(()) => json!({"error": {"class": "GenericError", "desc": "boom"}}),
+            };
+            write_half
+                .write_all(format!("{resp}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn resumes_after_a_successful_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server = tokio::spawn(serve_steps(
+            listener,
+            vec![
+                ("stop", Ok(json!({}))),
+                ("human-monitor-command", Ok(json!({}))),
+                ("cont", Ok(json!({}))),
+            ],
+        ));
+
+        let vm = vm_record(dir.path().to_path_buf(), VmStatus::Running);
+        snapshot_save(&Config::default(), &vm, "tag1")
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_resume_failure_after_a_successful_snapshot() {
+        // Regression test: this used to discard `cont`'s error entirely
+        // (`let _ = ...`) and return `Ok(())` here, even though the VM was
+        // left paused instead of running.
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server = tokio::spawn(serve_steps(
+            listener,
+            vec![
+                ("stop", Ok(json!({}))),
+                ("human-monitor-command", Ok(json!({}))),
+                ("cont", Err(())),
+            ],
+        ));
+
+        let vm = vm_record(dir.path().to_path_buf(), VmStatus::Running);
+        let err = snapshot_save(&Config::default(), &vm, "tag1")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("failed to resume"),
+            "unexpected error: {err}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reports_both_failures_when_savevm_and_resume_both_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        let server = tokio::spawn(serve_steps(
+            listener,
+            vec![
+                ("stop", Ok(json!({}))),
+                ("human-monitor-command", Err(())),
+                ("cont", Err(())),
+            ],
+        ));
+
+        let vm = vm_record(dir.path().to_path_buf(), VmStatus::Running);
+        let err = snapshot_save(&Config::default(), &vm, "tag1")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("also failed to resume"),
+            "unexpected error: {msg}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn does_not_touch_stop_or_cont_when_vm_is_already_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("qmp.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        // Only `savevm` should be sent -- a Paused VM was never told to
+        // `stop` and must never be told to `cont` either.
+        let server = tokio::spawn(serve_steps(
+            listener,
+            vec![("human-monitor-command", Ok(json!({})))],
+        ));
+
+        let vm = vm_record(dir.path().to_path_buf(), VmStatus::Paused);
+        snapshot_save(&Config::default(), &vm, "tag1")
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 }
