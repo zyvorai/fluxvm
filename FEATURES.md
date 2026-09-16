@@ -35,6 +35,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - QEMU user-mode NAT (SLIRP) — zero host config
 - TAP + Linux bridge — VM on the host's L2
 - Per-VM network namespace + dnsmasq DHCP (known `guest_ip`)
+- Netns-sandbox `/28` IPAM pool utilization visibility (`GET /v1/network/ipam`,
+  `fluxvm dataplane ipam-status`) — capacity/allocated/free/utilization and a
+  `near_exhaustion` flag (≤5% free), ahead of a failed VM create discovering
+  pool exhaustion the hard way
 - macvtap — VM's own MAC directly on a parent link
 - All 4 modes SSH-verified end to end in this project's own regression tests
 

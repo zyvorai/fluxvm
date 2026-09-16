@@ -774,6 +774,19 @@ impl VmManager {
             .context("ipcache list panicked")?
     }
 
+    /// `/28` allocation counts for netns sandboxes' persistent IPAM pool —
+    /// see `fluxvm_network::ipam`. Independent of dataplane mode: the pool is
+    /// only consumed by `network.netns: true` VMs, so a host that never uses
+    /// netns sandboxing simply reports an always-empty pool.
+    pub async fn network_ipam_status(&self) -> Result<fluxvm_network::ipam::IpamStatus> {
+        let state_dir = self.cfg.state_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            fluxvm_network::ipam::IpamStore::load(&state_dir).status()
+        })
+        .await
+        .context("ipam status panicked")?
+    }
+
     /// Fabric ClusterMesh-like remote identity fan-out into local ipcache.
     pub async fn upsert_remote_ipcache(&self, identity: u32, cidrs: Vec<String>) -> Result<usize> {
         let cfg = self.cfg.clone();

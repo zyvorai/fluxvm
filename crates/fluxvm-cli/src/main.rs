@@ -205,6 +205,9 @@ enum IdentityCommand {
 enum DataplaneCommand {
     Health,
     Ipcache,
+    /// Netns-sandbox `/28` IPAM pool utilization (capacity, allocated, free,
+    /// and whether it's near exhaustion) — see docs/network-fabric.md.
+    IpamStatus,
     RefreshDns,
     /// Show the VM-edge migration gate and schema generation.
     MigrationState {
@@ -761,6 +764,12 @@ async fn main() -> Result<()> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&m.network_ipcache().await?)?
+                );
+            }
+            DataplaneCommand::IpamStatus => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_ipam_status().await?)?
                 );
             }
             DataplaneCommand::RefreshDns => {

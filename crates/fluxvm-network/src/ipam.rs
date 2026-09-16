@@ -21,6 +21,35 @@ struct IpamState {
     allocations: HashMap<String, u16>,
 }
 
+/// Point-in-time snapshot of `/28` block usage, for operators who want to see
+/// exhaustion coming rather than discover it from a failed `allocate` call
+/// mid-VM-create.
+///
+/// The pool (4096 `/28` blocks in 169.254.0.0/16) is large enough that
+/// exhaustion is rare, but not impossible on a host running a lot of
+/// long-lived `netns: true` sandboxes with churny create/delete traffic and a
+/// slow leak somewhere in cleanup. `near_exhaustion` is meant to be cheap to
+/// alert on before that turns into a hard failure.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IpamStatus {
+    /// Total addressable `/28` blocks in the pool (fixed: 4096).
+    pub capacity: u16,
+    /// Blocks currently held by a live allocation.
+    pub allocated: u16,
+    /// `capacity - allocated`.
+    pub free: u16,
+    /// `allocated * 100 / capacity`, rounded down.
+    pub utilization_percent: u8,
+    /// True once free capacity drops to `NEAR_EXHAUSTION_FREE_PERCENT` percent
+    /// of `capacity` or below.
+    pub near_exhaustion: bool,
+}
+
+/// Free-capacity threshold, as a percentage of `capacity`, at which
+/// `IpamStatus::near_exhaustion` flips true. 4096 blocks * 5% = ~204 blocks
+/// still free, comfortably ahead of the pool actually running out.
+const NEAR_EXHAUSTION_FREE_PERCENT: u32 = 5;
+
 pub struct IpamStore {
     path: PathBuf,
     lock_path: PathBuf,
@@ -37,6 +66,13 @@ impl IpamStore {
     /// Returns `(third_octet, fourth_octet_base)` for a /28 in 169.254.0.0/16.
     pub fn allocate(&self, id: Uuid) -> Result<(u8, u8)> {
         self.with_exclusive(|state| allocate_in(state, id))
+    }
+
+    /// Current allocation counts/utilization, for `GET /v1/network/ipam` and
+    /// `fluxvm dataplane ipam-status`. Never fails on an empty/missing store
+    /// — that just means nothing has allocated yet.
+    pub fn status(&self) -> Result<IpamStatus> {
+        self.with_shared(|state| Ok(status_of(state)))
     }
 
     /// Releases a VM's block; returns the former octets when one existed.
@@ -150,6 +186,20 @@ fn allocate_in(state: &mut IpamState, id: Uuid) -> Result<(u8, u8)> {
     Ok(block_to_octets(block))
 }
 
+fn status_of(state: &IpamState) -> IpamStatus {
+    let allocated = state.allocations.len() as u16;
+    let free = POOL_SIZE - allocated;
+    let utilization_percent = (allocated as u32 * 100 / POOL_SIZE as u32) as u8;
+    let near_exhaustion = (free as u32) * 100 <= (POOL_SIZE as u32) * NEAR_EXHAUSTION_FREE_PERCENT;
+    IpamStatus {
+        capacity: POOL_SIZE,
+        allocated,
+        free,
+        utilization_percent,
+        near_exhaustion,
+    }
+}
+
 /// Maps block index to `(third_octet, fourth_octet_base)` for 169.254.{third}.{base}/28.
 pub fn block_to_octets(block: u16) -> (u8, u8) {
     ((block / 16) as u8, ((block % 16) * 16) as u8)
@@ -198,5 +248,68 @@ mod tests {
         assert_eq!(b, 240);
         let (t0, b0) = block_to_octets(0);
         assert_eq!((t0, b0), (0, 0));
+    }
+
+    #[test]
+    fn status_reports_empty_pool() {
+        let _guard = lock_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let store = IpamStore::load(dir.path());
+
+        let status = store.status().unwrap();
+        assert_eq!(
+            status,
+            IpamStatus {
+                capacity: POOL_SIZE,
+                allocated: 0,
+                free: POOL_SIZE,
+                utilization_percent: 0,
+                near_exhaustion: false,
+            }
+        );
+    }
+
+    #[test]
+    fn status_tracks_allocate_and_release() {
+        let _guard = lock_tests();
+        let dir = tempfile::tempdir().unwrap();
+        let store = IpamStore::load(dir.path());
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+
+        store.allocate(a).unwrap();
+        store.allocate(b).unwrap();
+        // Re-allocating an already-held id must not double-count.
+        store.allocate(a).unwrap();
+
+        let status = store.status().unwrap();
+        assert_eq!(status.allocated, 2);
+        assert_eq!(status.free, POOL_SIZE - 2);
+        assert_eq!(status.utilization_percent, 0);
+        assert!(!status.near_exhaustion);
+
+        store.release(a).unwrap();
+        let status = store.status().unwrap();
+        assert_eq!(status.allocated, 1);
+        assert_eq!(status.free, POOL_SIZE - 1);
+    }
+
+    #[test]
+    fn status_flags_near_exhaustion() {
+        // Drive `status_of` directly against a synthetic state rather than
+        // 3800+ real allocate() calls, which would each round-trip the state
+        // file. 5% of 4096 is 204.8, so the flag should flip once free
+        // capacity drops to 204 (allocated == 3892) but not before.
+        let mut state = IpamState::default();
+        for i in 0..3891u32 {
+            state.allocations.insert(format!("id-{i}"), i as u16);
+        }
+        assert_eq!(status_of(&state).allocated, 3891);
+        assert!(!status_of(&state).near_exhaustion);
+
+        state.allocations.insert("id-3891".into(), 3891);
+        assert_eq!(status_of(&state).allocated, 3892);
+        assert_eq!(status_of(&state).free, 204);
+        assert!(status_of(&state).near_exhaustion);
     }
 }

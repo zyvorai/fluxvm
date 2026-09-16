@@ -86,6 +86,7 @@ GET    /v1/network/identities
 GET    /v1/network/observe
 GET    /v1/network/health
 GET    /v1/network/ipcache
+GET    /v1/network/ipam
 POST   /v1/network/refresh-dns
 GET    /console
 ```

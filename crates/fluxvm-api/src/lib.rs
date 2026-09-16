@@ -444,6 +444,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/network/observe", get(network_observe))
         .route("/v1/network/health", get(network_health))
         .route("/v1/network/ipcache", get(network_ipcache))
+        .route("/v1/network/ipam", get(network_ipam_status))
         .route("/v1/network/ipcache/remote", post(upsert_remote_ipcache))
         .route(
             "/v1/network/ipcache/remote/{identity}",
@@ -1749,6 +1750,13 @@ async fn network_health(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde
 
 async fn network_ipcache(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_ipcache().await?})))
+}
+
+/// Netns-sandbox `/28` IPAM pool utilization — see `fluxvm_network::ipam::IpamStatus`.
+async fn network_ipam_status(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<fluxvm_network::ipam::IpamStatus>> {
+    Ok(Json(m.network_ipam_status().await?))
 }
 
 #[derive(Debug, Deserialize)]

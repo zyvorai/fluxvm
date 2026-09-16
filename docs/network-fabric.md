@@ -177,6 +177,27 @@ Cleanup always deletes the host veth by name even when `ip netns del` fails, so
 orphan edges cannot collide on the same `/28` on the next VM. `prepare` also
 clears leftover veth/netns handles before create.
 
+The pool is 4096 `/28` blocks — generous, but not infinite on a host running a
+lot of long-lived `netns: true` sandboxes. Rather than finding out it's full
+from a failed VM create (`ipam pool exhausted (4096 /28 subnets in use)`),
+check current utilization directly:
+
+```bash
+curl -s localhost:7788/v1/network/ipam | jq
+# or
+fluxvm dataplane ipam-status
+```
+
+```json
+{"capacity": 4096, "allocated": 12, "free": 4084, "utilization_percent": 0, "near_exhaustion": false}
+```
+
+`near_exhaustion` flips true once free capacity drops to 5% of capacity
+(≤204 blocks free) — cheap to poll or alert on ahead of an actual exhaustion
+failure. This endpoint is independent of dataplane mode: it always reads
+`state_dir/ipam.json`, so a host that never uses `netns: true` sandboxing
+simply reports an always-empty pool rather than erroring.
+
 ## Policy
 
 ```json
