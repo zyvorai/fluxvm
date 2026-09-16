@@ -96,6 +96,52 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`MicroVMJob.spec.ttlSecondsAfterFinished` now actually does something** —
+  the field has existed on the CRD since `MicroVMJob` was introduced (it's
+  right there in `MicroVMJobSpec`, and `examples/microvm/microvmjob.yaml`
+  never set it), but nothing in `jobs::reconcile` ever read it: a finished
+  Job — and every child `MicroVM` it created along the way — sat around
+  forever until an operator ran `kubectl delete mvmj` by hand. CI-style
+  fan-out workloads (`MicroVMJob`'s own documented use case in
+  `docs/tutorials/microvm/02-job.md`) are exactly the kind that create a lot
+  of these and finish quickly, so this was a slow, silent resource leak
+  every run added to. Fixed the same way Kubernetes' own `Job` TTL
+  controller works: the reconciler now stamps a new `status.finishedAt`
+  (RFC3339) the first reconcile that observes a terminal phase
+  (`Succeeded`/`Failed`) — set once and carried forward unchanged on every
+  later reconcile, so restarting the controller or re-reconciling an
+  already-finished Job can never push its deletion out — and once
+  `now >= finishedAt + ttlSecondsAfterFinished`, deletes the `MicroVMJob`
+  object outright. Deleting it is enough: its child `MicroVM`s already carry
+  a `controller_owner_ref` back to the Job (set when `jobs::reconcile`
+  creates them), so Kubernetes' own garbage collector cascades the delete to
+  them, and each child's own finalizer-driven cleanup (shadow Pod,
+  EndpointSlice, node-agent-side VMM teardown — unchanged, in
+  `controller.rs`) runs exactly as it would for a `kubectl delete mvm` today.
+  A Job with `ttlSecondsAfterFinished` unset keeps today's behavior exactly
+  — this is opt-in per Job, not a change to any existing manifest's
+  observed lifecycle. The reconcile's own requeue interval is now
+  TTL-aware too (`next_requeue`): it sleeps until the TTL deadline instead
+  of the previous fixed 10s poll, clamped to a 1s floor and the existing 10s
+  ceiling, so a short TTL is honored promptly rather than waiting up to one
+  more full poll interval after it expires. 7 new unit tests in
+  `fluxvm-microvm::jobs` (`ttl_expired`/`next_requeue` are pure functions,
+  matching this crate's existing `policy`/`capacity` convention, so no
+  cluster is needed to exercise the TTL math: not-yet-expired, expired-at-
+  and-past-the-deadline, a zero-TTL expiring immediately, the no-TTL steady
+  cadence, mid-countdown sleep length, capping at the steady ceiling for a
+  far-off TTL, and flooring at 1s when a reconcile lands essentially exactly
+  on the deadline). Docs:
+  [docs/microvm.md](docs/microvm.md#microvmjob),
+  [docs/tutorials/microvm/02-job.md](docs/tutorials/microvm/02-job.md),
+  `FEATURES.md`'s "MicroVM" bullet; `examples/microvm/microvmjob.yaml` now
+  sets `ttlSecondsAfterFinished: 300` to show the shape. Verified with
+  `cargo build`/`cargo test`/`cargo clippy --no-deps`/`cargo fmt --check`
+  both on macOS and on the real Linux build host (`fluxvm-microvm` builds
+  on both) — no live k3s cluster exercised this end to end, so the
+  ownerReference-cascade-to-a-real-finalizer-cleanup path is verified by
+  code inspection of the existing, unchanged `controller.rs` cleanup path
+  plus these unit tests, not a live cluster run.
 - **Image catalog signing: build-lineage/CI-provenance recording** — closes
   the second, deeper half of the gap FEATURES.md's Security Posture table
   named explicitly as still open ("Real build-lineage/CI-provenance

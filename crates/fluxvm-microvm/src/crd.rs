@@ -153,6 +153,12 @@ pub struct MicroVMJobStatus {
     pub succeeded: u32,
     #[serde(default)]
     pub failed: u32,
+    /// RFC3339 timestamp of the first reconcile that observed a terminal
+    /// phase (`Succeeded`/`Failed`). Set once and carried forward — it is
+    /// the clock `spec.ttlSecondsAfterFinished` counts from, so it must not
+    /// reset on every reconcile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]

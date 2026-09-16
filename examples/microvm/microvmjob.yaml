@@ -6,6 +6,9 @@ spec:
   completions: 1
   parallelism: 1
   backoffLimit: 2
+  # Delete this MicroVMJob (and its child MicroVMs) 5 minutes after it
+  # reaches Succeeded/Failed, instead of leaving it around forever.
+  ttlSecondsAfterFinished: 300
   template:
     backend: firecracker
     image: /var/lib/fluxvm/images/ci-rootfs.ext4

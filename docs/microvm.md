@@ -160,6 +160,17 @@ kubectl apply -f examples/microvm/microvmjob.yaml
 kubectl get mvmj compile-main -w
 ```
 
+Set `spec.ttlSecondsAfterFinished` to have the Job controller delete a
+finished `MicroVMJob` (and, via ownerReferences, its child `MicroVM`s) on its
+own once it has sat in `Succeeded`/`Failed` for that long — the same
+`ttlSecondsAfterFinished` pattern as a stock Kubernetes `Job`. Without it, a
+finished `MicroVMJob` (and its child MicroVMs) stays around until something
+deletes it by hand, which is exactly what CI-style fan-out workloads
+(`examples/microvm/microvmjob.yaml`'s own use case) tend to create a lot of.
+The clock starts on the first reconcile that observes a terminal phase
+(`status.finishedAt`, set once and never reset) rather than on every
+reconcile, so restarting the controller does not restart the countdown.
+
 Tutorial: [tutorials/microvm/02-job.md](tutorials/microvm/02-job.md).
 
 ## MicroVMPool

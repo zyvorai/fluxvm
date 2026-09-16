@@ -28,6 +28,7 @@ spec:
   completions: 1
   parallelism: 1
   backoffLimit: 2
+  ttlSecondsAfterFinished: 300   # optional; auto-delete once finished
   template:
     backend: firecracker
     image: /var/lib/fluxvm/images/ci-rootfs.ext4
@@ -66,6 +67,13 @@ kubectl delete mvmj compile-main
 ```
 
 Child MicroVMs are removed with the Job (controller-owned).
+
+Set `spec.ttlSecondsAfterFinished` (as in the example above) to skip the
+manual `kubectl delete` once a Job settles into `Succeeded`/`Failed` — the
+Job controller deletes it (and, via ownerReferences, its child MicroVMs) on
+its own once that many seconds have passed since it first went terminal.
+Leave it unset to keep today's behavior: a finished Job (and its children)
+stays around until deleted by hand.
 
 ## Next
 
