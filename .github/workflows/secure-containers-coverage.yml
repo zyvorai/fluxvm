@@ -38,13 +38,13 @@ jobs:
   matrix-lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: bash scripts/check-use-case-matrix.sh
 
   go-controller:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with: { go-version: '1.23' }
       - name: gofmt
@@ -61,7 +61,7 @@ jobs:
   go-observer:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with: { go-version: '1.23' }
       - name: gofmt
@@ -78,7 +78,7 @@ jobs:
   observer-sizing:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: sizing model JSON
         run: |
           python3 scripts/benchmark-policy-observer-set19.py --vms 100 --rules 16 > /tmp/sizing.json
@@ -95,10 +95,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # fluxvm-image → guestkit path dep requires sibling checkout layout.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: fluxvm
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit
@@ -121,7 +121,7 @@ jobs:
   ebpf-objects:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev linux-libc-dev linux-tools-common linux-tools-generic
@@ -144,7 +144,7 @@ jobs:
   shell-contracts:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: bash -n scripts
         run: |
           set -euo pipefail
@@ -162,7 +162,7 @@ jobs:
   sentinel-python:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           sudo apt-get update
           sudo apt-get install -y shellcheck iproute2 ethtool linux-tools-common linux-tools-generic

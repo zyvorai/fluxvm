@@ -22,12 +22,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout fluxvm
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: fluxvm
 
       - name: Checkout guestkit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit

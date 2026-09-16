@@ -14,12 +14,12 @@ jobs:
       # has to land as an actual sibling directory here too, not nested
       # inside this checkout.
       - name: Checkout fluxvm
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: fluxvm
 
       - name: Checkout guestkit (sibling path dependency)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit
@@ -84,12 +84,12 @@ jobs:
             test_service: sshd
     steps:
       - name: Checkout fluxvm
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: fluxvm
 
       - name: Checkout guestkit (sibling path dependency)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit
@@ -141,12 +141,12 @@ jobs:
       packages: write
     steps:
       - name: Checkout fluxvm
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: fluxvm
 
       - name: Checkout guestkit (BuildKit context)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: zyvorai/guestkit
           path: guestkit
@@ -167,7 +167,7 @@ jobs:
   website:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:

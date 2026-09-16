@@ -18,7 +18,7 @@ jobs:
       run:
         working-directory: controllers/fluxvm-networkpolicy-controller
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: controllers/fluxvm-networkpolicy-controller/go.mod
@@ -30,7 +30,7 @@ jobs:
   shell-yaml:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: bash -n scripts/test-networkpolicy-endpointslice-set18.sh
       - run: |
           grep -Fq 'resources: ["endpointslices"]' controllers/fluxvm-networkpolicy-controller/deploy/rbac.yaml

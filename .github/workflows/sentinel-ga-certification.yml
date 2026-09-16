@@ -33,7 +33,7 @@ jobs:
   static:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install static test dependencies
         run: |
           sudo apt-get update
@@ -59,7 +59,7 @@ jobs:
     if: ${{ vars.FLUXVM_SENTINEL_PRIVILEGED_CI == '1' }}
     runs-on: [self-hosted, linux, x64, fluxvm-sentinel-lab]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Failure injection
         env:
           FLUXVM_SENTINEL_FAILURE_INJECTION: '1'

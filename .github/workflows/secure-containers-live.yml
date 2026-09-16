@@ -21,7 +21,7 @@ jobs:
     if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' }}
     runs-on: [self-hosted, linux, x64, fluxvm-lab]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set 18 EndpointSlice live gate
         run: |
           export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
@@ -33,7 +33,7 @@ jobs:
     if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' }}
     runs-on: [self-hosted, linux, x64, fluxvm-lab]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set 17 stateful NetworkPolicy (single-node)
         run: |
           export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
@@ -48,7 +48,7 @@ jobs:
     if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' && vars.FLUXVM_REQUIRE_MULTI_NODE == '1' }}
     runs-on: [self-hosted, linux, x64, fluxvm-lab]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set 17 stateful NetworkPolicy (multi-node)
         run: |
           export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
@@ -63,7 +63,7 @@ jobs:
     if: ${{ vars.FLUXVM_SECURE_CONTAINERS_LIVE_CI == '1' && vars.FLUXVM_SECOND_CNI_GATE != '' && vars.FLUXVM_KATA_GATE != '' && vars.FLUXVM_REAL_FLEET_GATE != '' && vars.FLUXVM_ATTACHED_MIGRATION_GATE != '' }}
     runs-on: [self-hosted, linux, x64, fluxvm-lab]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Set 19 fail-hard GA gate
         run: |
           export KUBECONFIG="${FLUXVM_LAB_KUBECONFIG:-/etc/rancher/k3s/k3s.yaml}"
