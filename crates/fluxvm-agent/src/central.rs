@@ -472,16 +472,31 @@ async fn create_vm(
     Ok(Json(json!({"node": target.name, "vm": record})))
 }
 
+/// `GET /fleet/vms` — the fleet-wide aggregate. Every node this couldn't
+/// account for (excluded up front as unhealthy, or one whose query failed
+/// partway through) is named in `"unreachable_nodes"` alongside a short
+/// reason, instead of being silently absent from `"items"` with only a
+/// server-side `tracing::warn!` the caller never sees — the same
+/// surface-don't-hide fix `GET /fleet/nodes/{name}/vms` already applies to
+/// the single-node case, extended to the aggregate. A caller that cares
+/// whether the list it just got is complete can check this field is empty;
+/// one that doesn't can ignore it exactly like before.
 async fn list_vms(State(fleet): State<Fleet>) -> Json<Value> {
-    let targets: Vec<NodeInfo> = {
-        fleet
-            .nodes
-            .lock()
-            .await
-            .values()
-            .filter(|n| n.healthy())
-            .cloned()
-            .collect()
+    let (targets, mut unreachable): (Vec<NodeInfo>, Vec<Value>) = {
+        let nodes = fleet.nodes.lock().await;
+        let mut targets = Vec::new();
+        let mut unreachable = Vec::new();
+        for node in nodes.values() {
+            if node.healthy() {
+                targets.push(node.clone());
+            } else {
+                unreachable.push(json!({
+                    "node": node.name,
+                    "reason": "unhealthy (stale heartbeat)",
+                }));
+            }
+        }
+        (targets, unreachable)
     };
     let mut items = Vec::new();
     for node in targets {
@@ -491,27 +506,46 @@ async fn list_vms(State(fleet): State<Fleet>) -> Json<Value> {
             .send()
             .await
         {
-            Ok(resp) => match resp.json::<Value>().await {
-                Ok(body) => {
-                    if let Some(node_items) = body.get("items").and_then(|v| v.as_array()) {
-                        for mut vm in node_items.clone() {
-                            if let Some(obj) = vm.as_object_mut() {
-                                obj.insert("node".into(), json!(node.name));
+            Ok(resp) => {
+                let status = resp.status();
+                match resp.json::<Value>().await {
+                    Ok(body) => {
+                        if !status.is_success() {
+                            tracing::warn!(node = %node.name, %status, body = %body, "node rejected fleet-wide list");
+                            unreachable.push(json!({
+                                "node": node.name,
+                                "reason": format!("node rejected list ({status}): {body}"),
+                            }));
+                            continue;
+                        }
+                        if let Some(node_items) = body.get("items").and_then(|v| v.as_array()) {
+                            for mut vm in node_items.clone() {
+                                if let Some(obj) = vm.as_object_mut() {
+                                    obj.insert("node".into(), json!(node.name));
+                                }
+                                items.push(vm);
                             }
-                            items.push(vm);
                         }
                     }
+                    Err(e) => {
+                        tracing::warn!(node = %node.name, error = %e, "failed to parse node's VM list");
+                        unreachable.push(json!({
+                            "node": node.name,
+                            "reason": format!("failed to parse node's VM list: {e}"),
+                        }));
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(node = %node.name, error = %e, "failed to parse node's VM list")
-                }
-            },
+            }
             Err(e) => {
-                tracing::warn!(node = %node.name, error = %e, "failed to reach node for fleet-wide list")
+                tracing::warn!(node = %node.name, error = %e, "failed to reach node for fleet-wide list");
+                unreachable.push(json!({
+                    "node": node.name,
+                    "reason": format!("unreachable: {e}"),
+                }));
             }
         }
     }
-    Json(json!({"items": items}))
+    Json(json!({"items": items, "unreachable_nodes": unreachable}))
 }
 
 /// `GET /fleet/nodes/{name}/vms` — the VMs on exactly one node, queried
@@ -519,14 +553,16 @@ async fn list_vms(State(fleet): State<Fleet>) -> Json<Value> {
 /// fleet-wide aggregate `GET /fleet/vms` produces. Two reasons this earns
 /// its own route instead of leaving callers to filter the fleet-wide list
 /// client-side: it works even when *other* nodes in the fleet are
-/// unreachable or stale (the fleet-wide list silently drops a node it can't
-/// reach, logging a warning server-side that the caller never sees), and it
-/// surfaces a failure to reach *this* node as a real error instead of
-/// quietly returning nothing for it. This is the natural "what's actually
-/// running here?" check before cordoning a node for maintenance (or before
-/// deciding a cordon is safe to lift) — cordoning alone only tells you
-/// whether a node *is* excluded from new placement, not what's already on
-/// it.
+/// unreachable or stale — the fleet-wide list no longer silently drops a
+/// node it can't reach (it names every such node in its own
+/// `"unreachable_nodes"` field), but still requires every *other* node to
+/// answer too just to learn about this one; this route needs none of them
+/// — and it surfaces a failure to reach *this* node as a hard `502` instead
+/// of a field in an otherwise-200 response the caller has to remember to
+/// check. This is the natural "what's actually running here?" check before
+/// cordoning a node for maintenance (or before deciding a cordon is safe to
+/// lift) — cordoning alone only tells you whether a node *is* excluded from
+/// new placement, not what's already on it.
 async fn node_vms(
     State(fleet): State<Fleet>,
     Path(name): Path<String>,
@@ -926,5 +962,122 @@ mod tests {
         let fleet = test_fleet(nodes);
         let Json(resp) = node_vms(State(fleet), Path("a".to_string())).await.unwrap();
         assert_eq!(resp["items"].as_array().unwrap().len(), 0);
+    }
+
+    // --- GET /fleet/vms (fleet-wide aggregate) ---
+
+    #[tokio::test]
+    async fn list_vms_all_healthy_and_reachable_reports_no_unreachable_nodes() {
+        let url = spawn_fake_node(StatusCode::OK, json!({"items": [{"id": "vm-1"}]})).await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: url,
+                ..node("a", 1, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+        let Json(resp) = list_vms(State(fleet)).await;
+        let items = resp["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["node"], "a");
+        assert_eq!(resp["unreachable_nodes"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_vms_names_a_node_it_cannot_connect_to_instead_of_silently_dropping_it() {
+        // Same dead-listener trick as node_vms's unreachable test: bind then
+        // drop, so nothing answers and the connection fails fast.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let good_url = spawn_fake_node(StatusCode::OK, json!({"items": [{"id": "vm-ok"}]})).await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "dead".to_string(),
+            NodeInfo {
+                fluxvm_url: format!("http://{dead_addr}"),
+                ..node("dead", 3, 0)
+            },
+        );
+        nodes.insert(
+            "up".to_string(),
+            NodeInfo {
+                fluxvm_url: good_url,
+                ..node("up", 1, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+        let Json(resp) = list_vms(State(fleet)).await;
+
+        // The reachable node's VM still comes through...
+        let items = resp["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "vm-ok");
+
+        // ...and the unreachable one is named, not just missing.
+        let unreachable = resp["unreachable_nodes"].as_array().unwrap();
+        assert_eq!(unreachable.len(), 1);
+        assert_eq!(unreachable[0]["node"], "dead");
+        assert!(
+            unreachable[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("unreachable")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_vms_names_a_stale_heartbeat_node_as_unreachable_without_contacting_it() {
+        // 300s old is well past HEALTHY_WINDOW_SECS (30s) — excluded from
+        // placement the same way, but previously vanished from the
+        // fleet-wide list with no trace at all.
+        let mut nodes = HashMap::new();
+        nodes.insert("stale".to_string(), node("stale", 2, 300));
+        let fleet = test_fleet(nodes);
+        let Json(resp) = list_vms(State(fleet)).await;
+
+        assert_eq!(resp["items"].as_array().unwrap().len(), 0);
+        let unreachable = resp["unreachable_nodes"].as_array().unwrap();
+        assert_eq!(unreachable.len(), 1);
+        assert_eq!(unreachable[0]["node"], "stale");
+        assert!(
+            unreachable[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("unhealthy")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_vms_names_a_node_that_rejects_the_list_call_as_unreachable() {
+        let url = spawn_fake_node(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "local fluxvm serve is unhappy"}),
+        )
+        .await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "cranky".to_string(),
+            NodeInfo {
+                fluxvm_url: url,
+                ..node("cranky", 1, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+        let Json(resp) = list_vms(State(fleet)).await;
+
+        assert_eq!(resp["items"].as_array().unwrap().len(), 0);
+        let unreachable = resp["unreachable_nodes"].as_array().unwrap();
+        assert_eq!(unreachable.len(), 1);
+        assert_eq!(unreachable[0]["node"], "cranky");
+        assert!(
+            unreachable[0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("local fluxvm serve is unhappy")
+        );
     }
 }

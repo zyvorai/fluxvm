@@ -96,6 +96,38 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm-agent central`'s fleet-wide `GET /fleet/vms` now names any node
+  it couldn't account for, instead of silently omitting it** — the same
+  surface-don't-hide fix the single-node `GET /fleet/nodes/{name}/vms`
+  route got below, extended to the aggregate it was originally written to
+  work around. Previously a node excluded up front for a stale heartbeat,
+  or one whose own `GET /v1/vms` call failed partway through (connection
+  error, non-2xx response, unparseable body), just disappeared from
+  `"items"` with nothing but a server-side `tracing::warn!` the caller
+  never saw — a fleet member being down looked identical to it simply
+  having no VMs, with no way to tell the two apart from the response
+  alone. The response now carries a second field, `"unreachable_nodes"`:
+  an array of `{"node": "...", "reason": "..."}` naming every node that
+  didn't make it into `"items"` and why (`"unhealthy (stale heartbeat)"`
+  for one excluded before it was even queried; a specific connection/
+  status/parse error for one that was queried and failed). It's `[]` on
+  the ordinary all-healthy path, so an existing caller that only reads
+  `"items"` sees no behavior change; one that wants to know whether the
+  list it just got is the *whole* fleet's now has a direct answer instead
+  of having to cross-reference `GET /fleet/nodes` or grep server logs. 4
+  new tests in `fluxvm-agent::central`: all-healthy-and-reachable reports
+  an empty `unreachable_nodes`; an unreachable node is named while the
+  other node's real VMs still come through; a stale-heartbeat node is
+  named without ever being contacted; a node that rejects the call with a
+  non-2xx is named with its own error message folded into the reason.
+  Docs:
+  [docs/operations.md — Distributed node-agent](docs/operations.md#distributed-node-agent),
+  `FEATURES.md`'s "`fluxvm-agent`" bullet. Same honest limit as the two
+  fleet-registry features below: not re-verified against the real
+  two-physically-separate-host rig `scripts/test-fleet-agent.sh`
+  exercises — that script is unchanged and wasn't re-run against live
+  hardware; verification here is the 4 new unit-level tests plus a real
+  (if local) build/test/clippy/fmt pass, not a live-fleet run.
 - **`fluxvm-agent central` can now list exactly one node's VMs** —
   `GET /fleet/nodes/{name}/vms`. The only existing way to see what's
   running on a specific node was `GET /fleet/vms`, which aggregates every

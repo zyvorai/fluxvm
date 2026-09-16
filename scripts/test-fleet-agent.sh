@@ -16,7 +16,8 @@
 #   process on that exact host (and NOT on the other one)
 # - a second create lands on the OTHER host once the first host's vm_count
 #   updates via heartbeat — real load-aware placement, not round-robin
-# - `GET /fleet/vms` aggregates real VMs from both hosts, correctly tagged
+# - `GET /fleet/vms` aggregates real VMs from both hosts, correctly tagged,
+#   and reports an empty `unreachable_nodes` when both real hosts are up
 # - `DELETE /fleet/vms/{node}/{id}` proxies to the right host and reaps the
 #   real VM there, leaving the other host's VM untouched
 #
@@ -183,6 +184,8 @@ ids = {v['id']: v['node'] for v in d['items']}
 print('ok' if ids.get('$VM1_ID') == '$VM1_NODE' and ids.get('$VM2_ID') == '$VM2_NODE' else 'mismatch')
 ")
 [ "$FOUND" = "ok" ] && pass "fleet-wide list shows both VMs tagged with their correct real node" || fail "fleet-wide list did not correctly aggregate/tag both VMs"
+UNREACHABLE_COUNT=$(echo "$LIST" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('unreachable_nodes', ['missing'])))")
+[ "$UNREACHABLE_COUNT" = "0" ] && pass "fleet-wide list reports zero unreachable nodes with both real hosts up" || fail "fleet-wide list's unreachable_nodes was not an empty list (got: ${UNREACHABLE_COUNT})"
 
 section "Deleting via the fleet proxy reaps the right VM on the right host"
 if [ "$VM2_NODE" = "node-a" ]; then VM2_HOST="$CENTRAL"; else VM2_HOST="$NODE"; fi

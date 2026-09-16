@@ -679,7 +679,9 @@ Every `--interval-secs` (default 10), each node agent reports its name, real cap
 `available_parallelism()`, RAM off `/proc/meminfo`), and current VM count (via its own local
 `GET /v1/vms`) to the central registry. `POST /fleet/vms` with no `"node"` field picks the healthy
 node with the fewest VMs and proxies the create there; with an explicit `"node"` it targets that node
-directly. `GET /fleet/vms` aggregates every healthy node's VMs, tagged with which node each came from.
+directly. `GET /fleet/vms` aggregates every healthy node's VMs, tagged with which node each came from,
+and names any node it couldn't account for in a separate `"unreachable_nodes"` field (see below) rather
+than silently omitting it.
 `GET /fleet/nodes/{name}/vms` narrows that same query to exactly one node, queried directly rather
 than filtered out of the aggregate. `DELETE /fleet/vms/{node}/{id}` proxies to that exact node.
 
@@ -751,19 +753,55 @@ curl http://fleet-registry:7799/fleet/nodes/worker-1/vms
 ```
 
 This is deliberately a different route from the fleet-wide `GET /fleet/vms`,
-not a documented query-param filter on it: the fleet-wide list silently
-drops any node it can't currently reach (a server-side `tracing::warn!` the
-caller never sees) and requires every *other* node to also be up just to
-answer a question about *one* node. `GET /fleet/nodes/{name}/vms` proxies
-straight to that node's own `GET /v1/vms` — it works regardless of the
-node's `cordoned`/`healthy` state, tags each VM with `"node"` the same way
-the fleet-wide list does, and turns that node being unreachable or erroring
+not a documented query-param filter on it: answering "what's on *one* node"
+by filtering the fleet-wide list client-side would still require every
+*other* node in the fleet to also be up and reachable just to answer a
+question about one of them. `GET /fleet/nodes/{name}/vms` proxies straight
+to that one node's own `GET /v1/vms` — it works regardless of the node's
+`cordoned`/`healthy` state, tags each VM with `"node"` the same way the
+fleet-wide list does, and turns that node being unreachable or erroring
 into a real `502` naming the node instead of an empty, unexplained list.
 Unknown node name is a `400`, same as every other `/fleet/*` route that
 takes a `{name}` path segment. 5 new tests in `fluxvm-agent::central`
 against a real (not mocked) minimal HTTP server standing in for the node —
 happy path with correct tagging, unknown node, an unreachable node, a node
 whose own `/v1/vms` itself errors, and a node with zero VMs.
+
+**Know when the fleet-wide list is incomplete.** `GET /fleet/vms` originally
+dropped any node it couldn't account for — one excluded up front for a stale
+heartbeat, or one whose `GET /v1/vms` call failed partway through — with
+nothing but a server-side `tracing::warn!` the caller never saw; a fleet
+member being down looked identical to it simply having no VMs. The response
+now carries a second field naming exactly which nodes that happened to and
+why:
+
+```bash
+curl http://fleet-registry:7799/fleet/vms
+# {
+#   "items": [ ... VMs from every node that did answer, "node"-tagged ... ],
+#   "unreachable_nodes": [
+#     { "node": "worker-2", "reason": "unhealthy (stale heartbeat)" },
+#     { "node": "worker-5", "reason": "unreachable: error sending request..." }
+#   ]
+# }
+```
+
+`"unreachable_nodes"` is `[]` on the ordinary all-healthy path — existing
+callers that only ever read `"items"` see no behavior change. A caller that
+does care whether the list it just got is the *whole* fleet's now has a
+direct way to check, instead of having to cross-reference `GET /fleet/nodes`
+or grep server logs to rule out a silent gap. Each reason distinguishes a
+node excluded before it was even queried (stale heartbeat) from one that
+was queried and failed (connection error, a non-2xx from its own
+`GET /v1/vms`, or an unparseable body), matching the same three failure
+modes `GET /fleet/nodes/{name}/vms` already turns into a `502` for the
+single-node case — this just extends that surface-don't-hide behavior to
+the aggregate instead of requiring a per-node loop to get it. 4 new tests in
+`fluxvm-agent::central`: all-healthy-and-reachable reports an empty
+`unreachable_nodes`; an unreachable node is named without losing the other
+node's real VMs; a stale-heartbeat node is named without ever being
+contacted; a node that rejects the call with a non-2xx is named with its
+own error message included in the reason.
 
 ## State layout
 
