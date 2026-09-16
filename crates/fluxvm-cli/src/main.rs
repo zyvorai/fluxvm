@@ -101,7 +101,9 @@ enum Command {
     /// Manage the named/checksummed/optionally-signed image catalog (see
     /// config.catalog). Referencing a catalog name in a VM spec's `image`
     /// field (instead of a raw path) is handled automatically by `create` —
-    /// these subcommands are only for building/signing the catalog itself.
+    /// these subcommands are only for building/signing/administering the
+    /// catalog itself, and work offline against `catalog.path` with no
+    /// `fluxvm serve` required.
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
@@ -328,6 +330,44 @@ enum CatalogCommand {
         #[arg(long)]
         catalog_file: Option<PathBuf>,
     },
+    /// List every catalog entry, each with a computed `signature_valid` /
+    /// `signed_by` (see `GET /v1/images/catalog`). Reads `catalog.json`
+    /// directly — works with no `fluxvm serve` running.
+    List,
+    /// Register a new catalog entry: fetches `source` first if it's a URL,
+    /// then hashes whatever actually landed on disk (never trusts a
+    /// caller-supplied sha256). The entry starts unsigned — sign it
+    /// separately with `catalog sign` if `trusted_signers` is configured.
+    Add {
+        name: String,
+        /// Local path or http(s):// URL.
+        #[arg(long)]
+        source: String,
+        #[arg(long, default_value = "qcow2")]
+        format: String,
+    },
+    /// Remove a catalog entry. Refuses a `read_only` entry — `catalog
+    /// unlock` it first.
+    Remove { name: String },
+    /// Rename a catalog entry. Clears its signature and `signed_at` — a
+    /// signature covers the entry's name (see `canonical_payload`), so a
+    /// renamed entry's old signature no longer vouches for it. Refuses a
+    /// `read_only` entry.
+    Rename { name: String, new_name: String },
+    /// Clone a catalog entry under a new name. The clone is unsigned, same
+    /// reasoning as `rename`.
+    Clone { name: String, target_name: String },
+    /// Copy a catalog entry's resolved local file to `dest` (fetching it
+    /// first if `source` is a URL not yet cached).
+    Export { name: String, dest: PathBuf },
+    /// Mark a catalog entry read-only, protecting it from `remove`/`rename`
+    /// — for a base image other entries get `clone`d from.
+    Lock { name: String },
+    /// Clear a catalog entry's read-only flag.
+    Unlock { name: String },
+    /// Remove cached downloads under `state_dir/downloads` that no current
+    /// catalog entry's `source` still references by filename.
+    Clean,
 }
 
 #[derive(Subcommand)]
@@ -871,6 +911,65 @@ async fn main() -> Result<()> {
                     None => println!("{}", serde_json::to_string_pretty(&entry)?),
                 }
             }
+            CatalogCommand::List => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&image::catalog::list_with_verification(&cfg)?)?
+                );
+            }
+            CatalogCommand::Add {
+                name,
+                source,
+                format,
+            } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &m.add_catalog_entry(name, source, format).await?
+                    )?
+                );
+            }
+            CatalogCommand::Remove { name } => {
+                m.remove_catalog_entry(&name).await?;
+                println!("{}", serde_json::json!({"removed": name}));
+            }
+            CatalogCommand::Rename { name, new_name } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.rename_catalog_entry(&name, &new_name).await?)?
+                );
+            }
+            CatalogCommand::Clone { name, target_name } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &m.clone_catalog_entry(&name, &target_name).await?
+                    )?
+                );
+            }
+            CatalogCommand::Export { name, dest } => {
+                m.export_catalog_entry(&name, &dest).await?;
+                println!("{}", serde_json::json!({"exported": dest}));
+            }
+            CatalogCommand::Lock { name } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.set_catalog_read_only(&name, true).await?)?
+                );
+            }
+            CatalogCommand::Unlock { name } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.set_catalog_read_only(&name, false).await?)?
+                );
+            }
+            CatalogCommand::Clean => {
+                let removed = m.clean_catalog_downloads().await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"removed": removed}))?
+                );
+            }
         },
     }
     Ok(())
@@ -941,4 +1040,143 @@ async fn print_hubble_observe(
     };
     print!("{}", render_flows(&views, mode, detailed));
     Ok(())
+}
+
+#[cfg(test)]
+mod catalog_cli_tests {
+    use super::*;
+
+    /// Every `fluxvm catalog <verb>` subcommand this file added parses into
+    /// the field values it's documented to take, and rejects a required
+    /// flag/positional being left off — clap wiring bugs (a typo'd `long`
+    /// name, a flag that silently became optional) would otherwise only
+    /// surface the first time someone actually ran the command by hand.
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn catalog_list_takes_no_arguments() {
+        assert!(matches!(
+            parse(&["catalog", "list"]),
+            Command::Catalog {
+                command: CatalogCommand::List
+            }
+        ));
+    }
+
+    #[test]
+    fn catalog_add_parses_name_positional_and_source_format_flags() {
+        let Command::Catalog {
+            command:
+                CatalogCommand::Add {
+                    name,
+                    source,
+                    format,
+                },
+        } = parse(&[
+            "catalog",
+            "add",
+            "ubuntu-24.04",
+            "--source",
+            "/var/lib/fluxvm/images/ubuntu.qcow2",
+        ])
+        else {
+            panic!("expected CatalogCommand::Add");
+        };
+        assert_eq!(name, "ubuntu-24.04");
+        assert_eq!(source, "/var/lib/fluxvm/images/ubuntu.qcow2");
+        assert_eq!(format, "qcow2", "format must default to qcow2");
+    }
+
+    #[test]
+    fn catalog_add_requires_source() {
+        assert!(Cli::try_parse_from(["fluxvm", "catalog", "add", "ubuntu-24.04"]).is_err());
+    }
+
+    #[test]
+    fn catalog_remove_parses_name() {
+        let Command::Catalog {
+            command: CatalogCommand::Remove { name },
+        } = parse(&["catalog", "remove", "ubuntu-24.04-qa"])
+        else {
+            panic!("expected CatalogCommand::Remove");
+        };
+        assert_eq!(name, "ubuntu-24.04-qa");
+    }
+
+    #[test]
+    fn catalog_rename_parses_both_positionals() {
+        let Command::Catalog {
+            command: CatalogCommand::Rename { name, new_name },
+        } = parse(&["catalog", "rename", "old-name", "new-name"])
+        else {
+            panic!("expected CatalogCommand::Rename");
+        };
+        assert_eq!(name, "old-name");
+        assert_eq!(new_name, "new-name");
+    }
+
+    #[test]
+    fn catalog_clone_parses_both_positionals() {
+        let Command::Catalog {
+            command: CatalogCommand::Clone { name, target_name },
+        } = parse(&["catalog", "clone", "ubuntu-24.04", "ubuntu-24.04-staging"])
+        else {
+            panic!("expected CatalogCommand::Clone");
+        };
+        assert_eq!(name, "ubuntu-24.04");
+        assert_eq!(target_name, "ubuntu-24.04-staging");
+    }
+
+    #[test]
+    fn catalog_export_parses_name_and_dest_path() {
+        let Command::Catalog {
+            command: CatalogCommand::Export { name, dest },
+        } = parse(&[
+            "catalog",
+            "export",
+            "ubuntu-24.04",
+            "/var/lib/fluxvm/exports/ubuntu-24.04.qcow2",
+        ])
+        else {
+            panic!("expected CatalogCommand::Export");
+        };
+        assert_eq!(name, "ubuntu-24.04");
+        assert_eq!(
+            dest,
+            PathBuf::from("/var/lib/fluxvm/exports/ubuntu-24.04.qcow2")
+        );
+    }
+
+    #[test]
+    fn catalog_lock_and_unlock_parse_name() {
+        let Command::Catalog {
+            command: CatalogCommand::Lock { name },
+        } = parse(&["catalog", "lock", "ubuntu-24.04"])
+        else {
+            panic!("expected CatalogCommand::Lock");
+        };
+        assert_eq!(name, "ubuntu-24.04");
+
+        let Command::Catalog {
+            command: CatalogCommand::Unlock { name },
+        } = parse(&["catalog", "unlock", "ubuntu-24.04"])
+        else {
+            panic!("expected CatalogCommand::Unlock");
+        };
+        assert_eq!(name, "ubuntu-24.04");
+    }
+
+    #[test]
+    fn catalog_clean_takes_no_arguments() {
+        assert!(matches!(
+            parse(&["catalog", "clean"]),
+            Command::Catalog {
+                command: CatalogCommand::Clean
+            }
+        ));
+    }
 }

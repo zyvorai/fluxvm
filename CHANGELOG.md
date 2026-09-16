@@ -96,6 +96,25 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm catalog` gained CLI parity with the image catalog's REST CRUD** —
+  `list`/`add`/`remove`/`rename`/`clone`/`export`/`lock`/`unlock`/`clean`,
+  alongside the existing `keygen`/`sign`. The underlying
+  `fluxvm_image::catalog` functions (`add_entry`, `remove_entry`,
+  `rename_entry`, `clone_entry`, `export_entry`, `set_read_only`,
+  `clean_downloads`, `list_with_verification`) already backed all of this
+  over REST (`POST/GET/DELETE /v1/images/catalog...`) — the CLI itself had
+  never grown past the two offline-signing verbs, so managing a catalog
+  without a running `fluxvm serve` (seeding a fresh host before the daemon
+  is up, or a script that would rather shell out than depend on an HTTP
+  endpoint) had no path at all. Each new subcommand is a thin wrapper
+  reading `catalog.path` straight off `--config`/`FLUXVM_CONFIG`, the same
+  one-shot-process model `fluxvm pool claim` already uses — works whether
+  or not `fluxvm serve` happens to be running against the same
+  `state_dir`. `lock`/`unlock` replace the REST route's boolean
+  `{"read_only": bool}` body with two verbs, clearer on a command line.
+  9 new tests (clap parsing for every new subcommand, including that
+  `catalog add` rejects a missing `--source`). Docs:
+  [docs/operations.md — Image catalog & signing](docs/operations.md#image-catalog--signing).
 - **Warm VM pools now report computed occupancy, not just raw membership** —
   `GET /v1/pools`, `GET /v1/pools/{name}`, `fluxvm pool list`, and
   `fluxvm pool get` previously returned the bare `PoolRecord`: `size` (the

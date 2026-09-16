@@ -546,6 +546,38 @@ so it no longer vouches for the new one — the old `signed_at` timestamp would 
 detached from a valid signature). All five mutating operations are serialized against each other and
 against a fresh `catalog.json` read on every call — no in-memory cache to go stale.
 
+**The same CRUD lives on `fluxvm catalog`, too** — `keygen`/`sign` were the only catalog subcommands
+this project's CLI had for a while (offline-signing needs to stay CLI/offline; private keys never touch
+the API surface), leaving list/add/remove/rename/clone/export/lock unlock/clean reachable only over
+REST even though the underlying `fluxvm_image::catalog` functions backing all of it (`add_entry`,
+`remove_entry`, ...) always covered them. That meant a one-shot admin task against a `catalog.json` no
+`fluxvm serve` was currently serving — seeding a fresh host's catalog before the daemon is even up, or a
+script that would rather shell out than depend on a running HTTP endpoint — had no CLI path at all. Each
+subcommand below is a thin wrapper: it operates on `catalog.path` from `--config`/`FLUXVM_CONFIG`
+directly (same one-shot-process model as `fluxvm pool claim`, see its own doc comment), so it works
+identically whether or not `fluxvm serve` happens to be running against the same `state_dir`:
+
+```bash
+fluxvm catalog list
+#   [{"name": "ubuntu-24.04", "source": "...", "sha256": "...", "signature_valid": null, ...}, ...]
+
+fluxvm catalog add ubuntu-24.04 --source /var/lib/fluxvm/images/ubuntu.qcow2
+fluxvm catalog clone ubuntu-24.04 ubuntu-24.04-staging
+fluxvm catalog rename ubuntu-24.04-staging ubuntu-24.04-qa
+fluxvm catalog export ubuntu-24.04 /var/lib/fluxvm/exports/ubuntu-24.04.qcow2
+fluxvm catalog lock ubuntu-24.04     # refuse remove/rename until unlocked
+fluxvm catalog unlock ubuntu-24.04
+fluxvm catalog remove ubuntu-24.04-qa
+fluxvm catalog clean                 # prune downloads/ orphans no entry's source references any more
+```
+
+`lock`/`unlock` are new: the REST route (`POST .../read-only`) took a `{"read_only": bool}` body, which
+the CLI now exposes as two verbs instead of a boolean flag — clearer on a command line than
+`--read-only true`, and it keeps `fluxvm catalog --help` self-explanatory without reading the REST docs
+first. Every other subcommand mirrors its REST counterpart's semantics exactly (same refuse-on-read-only,
+same signature/`signed_at` clearing on `clone`/`rename`), since both ultimately call the identical
+`fluxvm_image::catalog` functions.
+
 Verified on real hardware (`scripts/test-image-catalog.sh`, 10/10): `keygen`/`sign` produce a real
 verifiable entry; creating a VM by catalog name actually resolves and boots the underlying image; with
 `trusted_signers` configured, an unsigned entry is rejected while a validly signed one is accepted (both

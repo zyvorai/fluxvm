@@ -63,7 +63,8 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - `build-image` — virt-builder-style pipeline, guestkit-based (never libguestfs)
 - Per-distro package install (Debian/Ubuntu, RHEL-family, Arch, Windows via GuestKit agent)
 - SHA-256 verification on every source image
-- Ed25519-signed image catalog with REST CRUD (`allowed_image_dirs`, `trusted_signers`)
+- Ed25519-signed image catalog with REST CRUD (`allowed_image_dirs`, `trusted_signers`), also reachable
+  entirely offline via `fluxvm catalog list|add|remove|rename|clone|export|lock|unlock|clean`
 - Windows/Kryton golden-image customization with live QGA
 
 ## Operations
