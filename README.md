@@ -151,6 +151,8 @@ fluxvm exec <id> -- hostname
 fluxvm ping <id>                            # health-check the vsock guest agent
 fluxvm copy-to <id> ./local.txt /etc/app.cfg
 fluxvm copy-from <id> /etc/app.cfg ./local.txt
+fluxvm migrate start <id> --destination tcp:10.0.0.9:49152   # QEMU/CH source-side live migration
+fluxvm migrate status <id>      # QEMU only -- Cloud Hypervisor's send-migration is fire-and-forget
 fluxvm pause <id> && fluxvm resume <id>
 fluxvm delete <id>              # or wait for ttl_seconds
 ```

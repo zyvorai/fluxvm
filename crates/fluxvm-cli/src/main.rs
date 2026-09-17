@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use fluxvm_api as api;
 use fluxvm_core::{
     config::Config,
-    model::{ClaimOverrides, CreateVmRequest},
+    model::{ClaimOverrides, CreateVmRequest, MigrationMode, MigrationStartRequest},
 };
 use fluxvm_guest_protocol::AgentResponse;
 use fluxvm_image::{self as image, BuildImageRequest};
@@ -113,6 +113,17 @@ enum Command {
         /// Path to write on this host.
         local: PathBuf,
     },
+    /// Live VM migration -- source-side VMM transport only (QEMU and Cloud
+    /// Hypervisor; see docs/runtime-boundary.md's runtime contract v1).
+    /// Fabric owns host selection, storage, and target-arming; this is the
+    /// standalone-mode escape hatch for triggering the same
+    /// `/v1/vms/{id}/migration/*` REST primitives without Fabric or a raw
+    /// HTTP call, the same reasoning `ping`/`copy-to`/`copy-from` closed for
+    /// the vsock agent.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
+    },
     /// QEMU guest-agent (virtio-serial) helpers — Zyvor/GuestKit Windows agent.
     Qga {
         #[command(subcommand)]
@@ -212,6 +223,35 @@ enum QgaCommand {
         #[arg(long)]
         timeout_seconds: Option<u64>,
     },
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Start a live migration to `destination` (a `tcp:host:port` or
+    /// `unix:/path` URI -- `exec:` is rejected by the same shared allowlist
+    /// the REST route validates against). Requires the VM to already be
+    /// Running; both QEMU and Cloud Hypervisor sources are supported.
+    Start {
+        id: Uuid,
+        #[arg(long)]
+        destination: String,
+        /// "pre-copy" (default) or "post-copy".
+        #[arg(long, default_value = "pre-copy")]
+        mode: String,
+        #[arg(long)]
+        bandwidth_mbps: Option<u64>,
+        #[arg(long)]
+        max_downtime_ms: Option<u64>,
+        #[arg(long)]
+        multifd_channels: Option<u8>,
+    },
+    /// Poll migration progress. QEMU only -- Cloud Hypervisor's
+    /// send-migration is fire-and-forget and exposes no status-polling
+    /// primitive (see docs/runtime-boundary.md); this errors clearly for a
+    /// Cloud Hypervisor VM rather than hanging or guessing.
+    Status { id: Uuid },
+    /// Cancel an in-flight migration. QEMU only, same reason as `status`.
+    Cancel { id: Uuid },
 }
 
 #[derive(Subcommand)]
@@ -465,6 +505,20 @@ async fn manager(cfg: Config) -> Result<Arc<VmManager>> {
     VmManager::new(cfg)
 }
 
+/// Parses `migrate start --mode`, matching `MigrationMode`'s own
+/// `#[serde(rename_all = "kebab-case")]` spelling ("pre-copy"/"post-copy")
+/// exactly rather than inventing a separate CLI vocabulary for the same two
+/// values the wire format already uses.
+fn parse_migration_mode(s: &str) -> Result<MigrationMode> {
+    match s {
+        "pre-copy" => Ok(MigrationMode::PreCopy),
+        "post-copy" => Ok(MigrationMode::PostCopy),
+        other => anyhow::bail!(
+            "unknown migration mode {other:?}, expected \"pre-copy\" or \"post-copy\""
+        ),
+    }
+}
+
 /// Reads a local file for `copy-to`, rejecting anything already too big for
 /// the guest agent's own file-transfer cap before spending a base64 encode
 /// and a vsock round trip on content the agent would just reject anyway —
@@ -691,6 +745,40 @@ async fn main() -> Result<()> {
             }
             AgentResponse::Error { message } => anyhow::bail!("guest agent error: {message}"),
             other => anyhow::bail!("unexpected response to get-file: {other:?}"),
+        },
+        Command::Migrate { command } => match command {
+            MigrateCommand::Start {
+                id,
+                destination,
+                mode,
+                bandwidth_mbps,
+                max_downtime_ms,
+                multifd_channels,
+            } => {
+                let request = MigrationStartRequest {
+                    destination,
+                    mode: parse_migration_mode(&mode)?,
+                    bandwidth_mbps,
+                    max_downtime_ms,
+                    multifd_channels,
+                };
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.start_migration(id, &request).await?)?
+                );
+            }
+            MigrateCommand::Status { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.migration_status(id).await?)?
+                );
+            }
+            MigrateCommand::Cancel { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.cancel_migration(id).await?)?
+                );
+            }
         },
         Command::Qga { command } => match command {
             QgaCommand::Ping { id } => {
@@ -1616,5 +1704,141 @@ mod agent_cli_tests {
         assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod migrate_cli_tests {
+    use super::*;
+
+    /// `migrate start/status/cancel` parse into the field values documented
+    /// above -- the same clap-wiring-bug class `agent_cli_tests` and
+    /// `catalog_cli_tests` guard against for their own subcommands.
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn migrate_start_parses_destination_and_defaults_mode_to_pre_copy() {
+        let id = Uuid::nil();
+        let Command::Migrate {
+            command:
+                MigrateCommand::Start {
+                    id: parsed_id,
+                    destination,
+                    mode,
+                    bandwidth_mbps,
+                    max_downtime_ms,
+                    multifd_channels,
+                },
+        } = parse(&[
+            "migrate",
+            "start",
+            &id.to_string(),
+            "--destination",
+            "tcp:10.0.0.9:49152",
+        ])
+        else {
+            panic!("expected Command::Migrate/MigrateCommand::Start");
+        };
+        assert_eq!(parsed_id, id);
+        assert_eq!(destination, "tcp:10.0.0.9:49152");
+        assert_eq!(mode, "pre-copy", "mode must default to pre-copy");
+        assert_eq!(bandwidth_mbps, None);
+        assert_eq!(max_downtime_ms, None);
+        assert_eq!(multifd_channels, None);
+    }
+
+    #[test]
+    fn migrate_start_parses_all_optional_tuning_flags() {
+        let id = Uuid::nil();
+        let Command::Migrate {
+            command:
+                MigrateCommand::Start {
+                    mode,
+                    bandwidth_mbps,
+                    max_downtime_ms,
+                    multifd_channels,
+                    ..
+                },
+        } = parse(&[
+            "migrate",
+            "start",
+            &id.to_string(),
+            "--destination",
+            "unix:/run/fluxvm/migrate.sock",
+            "--mode",
+            "post-copy",
+            "--bandwidth-mbps",
+            "500",
+            "--max-downtime-ms",
+            "300",
+            "--multifd-channels",
+            "4",
+        ])
+        else {
+            panic!("expected Command::Migrate/MigrateCommand::Start");
+        };
+        assert_eq!(mode, "post-copy");
+        assert_eq!(bandwidth_mbps, Some(500));
+        assert_eq!(max_downtime_ms, Some(300));
+        assert_eq!(multifd_channels, Some(4));
+    }
+
+    #[test]
+    fn migrate_start_requires_a_destination() {
+        let id = Uuid::nil().to_string();
+        assert!(Cli::try_parse_from(["fluxvm", "migrate", "start", &id]).is_err());
+    }
+
+    #[test]
+    fn migrate_status_takes_only_the_vm_id() {
+        let id = Uuid::nil();
+        let Command::Migrate {
+            command: MigrateCommand::Status { id: parsed },
+        } = parse(&["migrate", "status", &id.to_string()])
+        else {
+            panic!("expected Command::Migrate/MigrateCommand::Status");
+        };
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn migrate_cancel_takes_only_the_vm_id() {
+        let id = Uuid::nil();
+        let Command::Migrate {
+            command: MigrateCommand::Cancel { id: parsed },
+        } = parse(&["migrate", "cancel", &id.to_string()])
+        else {
+            panic!("expected Command::Migrate/MigrateCommand::Cancel");
+        };
+        assert_eq!(parsed, id);
+    }
+
+    /// `parse_migration_mode` matches `MigrationMode`'s own kebab-case wire
+    /// spelling exactly and rejects anything else with a clear error,
+    /// rather than silently falling back to a default the caller didn't ask
+    /// for.
+    #[test]
+    fn parse_migration_mode_accepts_the_two_wire_values() {
+        assert_eq!(
+            parse_migration_mode("pre-copy").unwrap(),
+            MigrationMode::PreCopy
+        );
+        assert_eq!(
+            parse_migration_mode("post-copy").unwrap(),
+            MigrationMode::PostCopy
+        );
+    }
+
+    #[test]
+    fn parse_migration_mode_rejects_unknown_values() {
+        let err = parse_migration_mode("precopy").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown migration mode"),
+            "unexpected error: {err}"
+        );
     }
 }

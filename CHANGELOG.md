@@ -142,6 +142,30 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm migrate start`/`status`/`cancel` — CLI parity for live migration.**
+  `POST /v1/vms/{id}/migration/start`, `GET .../migration/status`, and
+  `POST .../migration/cancel` have existed since the QEMU (and, more
+  recently, Cloud Hypervisor) source-side live-migration transport landed
+  (see docs/runtime-boundary.md's runtime contract v1), but triggering one
+  meant a raw HTTP call with a hand-built JSON body — there was no CLI
+  equivalent at all, unlike every other VM lifecycle operation. This closes
+  that gap for the standalone mode the runtime-boundary doc already calls
+  out: a deployment with no Fabric orchestrator driving these routes over
+  HTTP still needs a way to move a VM off a node by hand.
+  `fluxvm migrate start <id> --destination <tcp:host:port|unix:/path>
+  [--mode pre-copy|post-copy] [--bandwidth-mbps N] [--max-downtime-ms N]
+  [--multifd-channels N]` requires the VM to already be `Running` and
+  refuses anything but a `tcp:`/`unix:` destination, same shared allowlist
+  the REST route already validated against (`exec:` included, so this can't
+  become an arbitrary shell invocation on the source host); `--mode` takes
+  exactly `MigrationMode`'s own kebab-case wire spelling rather than a
+  second CLI vocabulary for the same two values. `migrate status`/`migrate
+  cancel <id>` stay QEMU-only — Cloud Hypervisor's `send-migration` is
+  fire-and-forget with no status-polling or cancellation primitive of its
+  own — and now surface that as a clear CLI error instead of only being
+  discoverable by reading the REST handler's source. 5 new
+  CLI-argument-parsing tests plus 2 for the `--mode` parser; verified on the
+  Linux remote alongside the rest of this crate's suite.
 - **`fluxvm ping`/`copy-to`/`copy-from` — CLI parity for the vsock guest
   agent's health check and file transfer.** The REST API has exposed
   `POST /v1/vms/{id}/agent/put-file` and `.../get-file` since the guest

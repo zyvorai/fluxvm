@@ -23,6 +23,10 @@ Live migration primitives:
 - `GET /v1/vms/{id}/migration/status`
 - `POST /v1/vms/{id}/migration/cancel`
 
+`fluxvm migrate start|status|cancel` is the CLI equivalent of the three
+routes above -- for the standalone mode mentioned below, where there is no
+Fabric orchestrator to drive them over HTTP.
+
 Contract v1 is intentionally narrow:
 
 - QEMU and Cloud Hypervisor. Firecracker and the in-tree FluxVM hypervisor

@@ -304,6 +304,33 @@ own `0o644` default when it's left unset). Both still go through the same 64MB s
 no-chunking transfer `PutFile`/`GetFile` already used — bulk data still belongs in a disk image, not
 this channel; see `MAX_FILE_TRANSFER_BYTES`'s own doc comment in `fluxvm-guest-protocol`.
 
+**`migrate start`/`status`/`cancel`: CLI parity for live migration.** `POST /v1/vms/{id}/migration/start`,
+`GET .../migration/status`, and `POST .../migration/cancel` (see
+[docs/runtime-boundary.md](runtime-boundary.md#runtime-contract-v1) for the full contract) previously had
+no CLI equivalent at all — triggering a migration by hand meant a raw HTTP call with a hand-built JSON
+body. This closes that gap for the standalone mode `docs/runtime-boundary.md` already calls out: a
+deployment with no Fabric orchestrator driving these routes over HTTP still needs a way to move a VM off
+a node by hand.
+
+```bash
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate start <id> --destination tcp:10.0.0.9:49152
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate start <id> --destination unix:/run/fluxvm/migrate.sock \
+    --mode post-copy --bandwidth-mbps 500 --max-downtime-ms 300 --multifd-channels 4
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate status <id>
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate cancel <id>
+```
+
+`start` requires the VM to already be `Running` and refuses anything but a `tcp:`/`unix:` destination —
+the same shared allowlist the REST route validates against, `exec:` included, so a migration can't be
+turned into an arbitrary shell invocation on the source host. `--mode` takes `pre-copy` (default) or
+`post-copy`, matching `MigrationMode`'s own wire spelling exactly rather than inventing a second CLI
+vocabulary for the same two values. `status` and `cancel` are QEMU-only — Cloud Hypervisor's
+`send-migration` is fire-and-forget with no status-polling or cancellation primitive of its own (see
+runtime-boundary.md's `statusPollable` capability field) — calling either against a Cloud Hypervisor VM
+returns a clear error rather than hanging. None of this picks a destination host, confirms shared
+storage, or does anything Fabric-shaped; it is exactly the three existing REST primitives, reachable
+without Fabric or `curl`.
+
 **Firecracker-specific note:** pause/resume were verified correct and fast against Firecracker's own
 authoritative `GET /` state (not CPU-time heuristics — an idle guest and a paused one both show flat
 CPU time, which is a false "it's paused" signal either way). `exec` over vsock works before a VM is
