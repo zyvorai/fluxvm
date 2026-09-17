@@ -1413,6 +1413,54 @@ impl VmManager {
             .collect()
     }
 
+    /// Per-token `max_vms_per_token`/`max_memory_mib_per_token` enforcement
+    /// for `create_vm` and `create_sandbox` (`fluxvm-api`) alike -- shared
+    /// here rather than duplicated per call site since both need the exact
+    /// same accounting. `actor` is the caller's own token identity
+    /// (`AuditActor`); `req` is the about-to-be-created VM/sandbox's
+    /// resolved `CreateVmRequest`.
+    ///
+    /// Previously counted every VM on the node from every token
+    /// ("conservative", per this function's own prior comment) against
+    /// each token's own quota -- a real correctness bug, and dangerous in
+    /// the untrusted-multi-tenant direction specifically: with two tokens
+    /// both configured with a quota of 10, the first token to reach 10 VMs
+    /// blocked every *other* token from creating any more. A quota meant
+    /// to contain a noisy tenant instead let that tenant deny service to
+    /// every other tenant. Now filtered to `created_by_token == actor` --
+    /// stamped server-side in `create_vm`/`create_sandbox`, never settable
+    /// from the request body, so this can't be spoofed by a client either.
+    pub async fn enforce_token_quotas(
+        &self,
+        actor: Option<&str>,
+        req: &CreateVmRequest,
+    ) -> Result<()> {
+        let Some(actor) = actor else {
+            return Ok(());
+        };
+        if actor == "anonymous-admin" || actor == "none" {
+            return Ok(());
+        }
+        let vms: Vec<VmRecord> = self
+            .list()
+            .await
+            .into_iter()
+            .filter(|v| v.request.created_by_token.as_deref() == Some(actor))
+            .collect();
+        if let Some(max) = self.cfg.auth.max_vms_per_token {
+            if vms.len() >= max {
+                bail!("token '{actor}' at max_vms_per_token ({max})");
+            }
+        }
+        if let Some(max_mem) = self.cfg.auth.max_memory_mib_per_token {
+            let used: u64 = vms.iter().map(|v| v.request.memory_mib).sum();
+            if used.saturating_add(req.memory_mib) > max_mem {
+                bail!("token '{actor}' would exceed max_memory_mib_per_token ({max_mem})");
+            }
+        }
+        Ok(())
+    }
+
     pub async fn get(&self, id: Uuid) -> Result<VmRecord> {
         self.store
             .get(id)
@@ -2501,6 +2549,7 @@ mod tests {
         CreateVmRequest {
             name: "fixture".into(),
             tenant: None,
+            created_by_token: None,
             backend,
             image: "/tmp/base.qcow2".into(),
             vcpus: 1,

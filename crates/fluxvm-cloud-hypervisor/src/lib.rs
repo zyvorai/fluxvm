@@ -617,6 +617,7 @@ mod tests {
         CreateVmRequest {
             name: "fixture".into(),
             tenant: None,
+            created_by_token: None,
             backend: BackendKind::CloudHypervisor,
             image: "/tmp/base.raw".into(),
             vcpus: 1,

@@ -220,6 +220,27 @@ pub struct CreateVmRequest {
     /// First-class tenant id for multi-team hosts. Optional; filterable on list.
     #[serde(default)]
     pub tenant: Option<String>,
+    /// Identity of the API token that created this VM, stamped server-side
+    /// in `create_vm`/`create_sandbox` (`fluxvm-api`) from the authenticated
+    /// caller right after deserializing the request -- unconditionally,
+    /// unlike `tenant` above (which has a legitimate client-supplied path
+    /// for the untenanted-token case), so whatever a request body claims
+    /// for this field is always discarded and replaced. Deliberately
+    /// *not* `skip_deserializing`, even though there's no legitimate
+    /// client-supplied path for it either: `fluxvm-storage::Store`
+    /// round-trips every `VmRecord` (this field included) through this
+    /// exact same serde codec on every single read (its flock-per-
+    /// operation, read-fresh-under-lock file), so a `skip_deserializing`
+    /// field would silently come back `None` on every `list()`/`get()`
+    /// after being written -- which is exactly what broke
+    /// `enforce_token_quotas` (it always saw zero VMs for any token) during
+    /// development of this field. The request-body attack surface this
+    /// would have closed is already closed by the handler's unconditional
+    /// overwrite instead. Used by `enforce_token_quotas` to scope
+    /// `max_vms_per_token`/`max_memory_mib_per_token` to the calling
+    /// token's own VMs instead of every VM on the node from every token.
+    #[serde(default)]
+    pub created_by_token: Option<String>,
     pub backend: BackendKind,
     pub image: PathBuf,
     #[serde(default = "default_vcpus")]
@@ -757,5 +778,35 @@ mod pool_view_tests {
         // The flatten must not shadow or duplicate any persisted field.
         assert_eq!(value["size"], 1);
         assert_eq!(value["name"], "p");
+    }
+}
+
+#[cfg(test)]
+mod create_vm_request_tests {
+    use super::*;
+
+    #[test]
+    fn created_by_token_round_trips_through_serde_like_a_stored_record_would() {
+        // created_by_token is deliberately a plain #[serde(default)]
+        // field, not skip_deserializing (see its own doc comment for why:
+        // fluxvm-storage::Store round-trips every VmRecord through this
+        // exact same codec on every read, and a skip_deserializing field
+        // would silently come back None there every time). This proves
+        // the round trip that quota accounting depends on actually works
+        // -- the client-spoofing concern that might otherwise motivate
+        // skip_deserializing is handled instead by fluxvm-api's create_vm/
+        // create_sandbox unconditionally overwriting this field from the
+        // authenticated caller right after deserializing (see
+        // created_by_token_cannot_be_spoofed_via_the_request_body in
+        // fluxvm-api for that half of the guarantee).
+        let req: CreateVmRequest = serde_json::from_str(
+            r#"{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2","created_by_token":"tokenA"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.created_by_token.as_deref(), Some("tokenA"));
+
+        let json = serde_json::to_string(&req).unwrap();
+        let round_tripped: CreateVmRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(round_tripped.created_by_token.as_deref(), Some("tokenA"));
     }
 }

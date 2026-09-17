@@ -660,6 +660,7 @@ mod tests {
         CreateVmRequest {
             name: "fixture".into(),
             tenant: None,
+            created_by_token: None,
             backend: BackendKind::Qemu,
             image: "/tmp/base.qcow2".into(),
             vcpus: 1,
@@ -952,6 +953,7 @@ mod snapshot_save_tests {
             request: CreateVmRequest {
                 name: "fixture".into(),
                 tenant: None,
+                created_by_token: None,
                 backend: BackendKind::Qemu,
                 image: PathBuf::from("/tmp/base.qcow2"),
                 vcpus: 1,

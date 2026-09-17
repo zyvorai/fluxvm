@@ -50,10 +50,18 @@ impl VmManager {
     /// explicit `spec.tenant` naming a *different* tenant), which would
     /// have made `tenant_guard_middleware`'s per-VM tenant check
     /// meaningless for that sandbox from the moment it was created.
+    ///
+    /// `created_by_token`, the caller's own token identity, is stamped the
+    /// same way and then checked against quotas via
+    /// `enforce_token_quotas` -- a sandbox is a `VmRecord` like any other
+    /// (see `tenant_guard_middleware`'s own doc comment), so it must not
+    /// be able to bypass `max_vms_per_token`/`max_memory_mib_per_token`
+    /// just by going through this path instead of plain `create_vm`.
     pub async fn create_sandbox(
         self: &std::sync::Arc<Self>,
         req: SandboxCreateRequest,
         token_tenant: Option<&str>,
+        created_by_token: Option<&str>,
     ) -> Result<VmRecord> {
         let mut create = if let Some(template) = &req.template {
             self.load_template_spec(template).await?
@@ -63,6 +71,7 @@ impl VmManager {
             bail!("sandbox create requires `template` or `spec`");
         };
         enforce_sandbox_tenant(&mut create, token_tenant)?;
+        create.created_by_token = created_by_token.map(String::from);
         create.backend = BackendKind::FluxVm;
         if let Some(name) = req.name {
             create.name = name;
@@ -82,6 +91,7 @@ impl VmManager {
         } else if let Some(a) = create.agent.as_mut() {
             a.enabled = true;
         }
+        self.enforce_token_quotas(created_by_token, &create).await?;
         let record = self.create(create).await?;
         let proxy_ports: Vec<u16> = {
             let mut ports = Vec::new();
@@ -172,6 +182,7 @@ impl VmManager {
         let spec = CreateVmRequest {
             name: name.into(),
             tenant: None,
+            created_by_token: None,
             backend: BackendKind::FluxVm,
             image: rootfs.clone(),
             vcpus: 1,
@@ -316,6 +327,7 @@ mod tests {
         CreateVmRequest {
             name: String::new(),
             tenant: None,
+            created_by_token: None,
             backend: BackendKind::FluxVm,
             image: PathBuf::from("/does/not/exist.qcow2"),
             vcpus: 1,

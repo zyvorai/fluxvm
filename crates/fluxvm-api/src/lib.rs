@@ -756,53 +756,37 @@ async fn create_vm(
         }
         req.tenant = Some(t);
     }
-    enforce_token_quotas(&m, actor.as_ref().map(|a| a.0.0.as_str()), &req).await?;
+    // Server-side only, unconditionally -- unlike `tenant` above,
+    // `created_by_token` is always overwritten from the authenticated
+    // caller's own identity regardless of what the body claims (see
+    // `CreateVmRequest.created_by_token`'s own doc comment for why this is
+    // a handler-level overwrite rather than `skip_deserializing`), then
+    // used by `enforce_token_quotas` to scope quotas to this token's own
+    // VMs instead of every VM on the node.
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    req.created_by_token = actor_name.map(String::from);
+    m.enforce_token_quotas(actor_name, &req)
+        .await
+        .map_err(|e| ApiError::forbidden(e.to_string()))?;
     Ok((StatusCode::CREATED, Json(m.create(req).await?)))
-}
-
-async fn enforce_token_quotas(
-    m: &VmManager,
-    actor: Option<&str>,
-    req: &CreateVmRequest,
-) -> ApiResult<()> {
-    let Some(actor) = actor else {
-        return Ok(());
-    };
-    if actor == "anonymous-admin" || actor == "none" {
-        return Ok(());
-    }
-    let vms = m.list().await;
-    // Quotas are global per-token identity stored in labels via name prefix —
-    // count all VMs when max_vms_per_token is set (conservative).
-    if let Some(max) = m.cfg.auth.max_vms_per_token {
-        if vms.len() >= max {
-            return Err(ApiError::forbidden(format!(
-                "token '{actor}' at max_vms_per_token ({max})"
-            )));
-        }
-    }
-    if let Some(max_mem) = m.cfg.auth.max_memory_mib_per_token {
-        let used: u64 = vms.iter().map(|v| v.request.memory_mib).sum();
-        if used.saturating_add(req.memory_mib) > max_mem {
-            return Err(ApiError::forbidden(format!(
-                "token '{actor}' would exceed max_memory_mib_per_token ({max_mem})"
-            )));
-        }
-    }
-    Ok(())
 }
 
 async fn create_sandbox(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
     Json(req): Json<fluxvm_scheduler::SandboxCreateRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
     let token_tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
     Ok((
         StatusCode::CREATED,
-        Json(m.create_sandbox(req, token_tenant.as_deref()).await?),
+        Json(
+            m.create_sandbox(req, token_tenant.as_deref(), actor_name)
+                .await?,
+        ),
     ))
 }
 
@@ -2859,6 +2843,7 @@ mod tests {
             request: CreateVmRequest {
                 name: "fixture".into(),
                 tenant: None,
+                created_by_token: None,
                 backend,
                 image: PathBuf::from("/tmp/base.qcow2"),
                 vcpus: 1,
@@ -3159,6 +3144,105 @@ mod tests {
             )
             .await;
             assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+
+        #[tokio::test]
+        async fn per_token_quota_does_not_count_other_tokens_vms() {
+            // Regression test: enforce_token_quotas previously called
+            // m.list().await -- every VM on the node from every token --
+            // and checked that *global* count against each token's own
+            // max_vms_per_token. With two tokens both configured (via the
+            // one shared max_vms_per_token) with a quota of 1, the first
+            // token to reach its quota blocked every OTHER token from
+            // creating any VMs at all, not just itself: a quota meant to
+            // contain a noisy tenant instead let that tenant deny service
+            // to every other tenant. Filtering by created_by_token (see
+            // CreateVmRequest's own doc comment) fixes this.
+            let auth = AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "a".into(),
+                        role: Role::Admin,
+                        name: Some("tokenA".into()),
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "b".into(),
+                        role: Role::Admin,
+                        name: Some("tokenB".into()),
+                        tenant: None,
+                    },
+                ],
+                max_vms_per_token: Some(1),
+                ..Default::default()
+            };
+            let m = manager(auth);
+            // Token A is already at its own quota of 1 -- a real stored VM
+            // it created.
+            let mut vm = fixture(BackendKind::Qemu, VmStatus::Running, false);
+            vm.request.created_by_token = Some("tokenA".into());
+            m.store.insert(vm).await.unwrap();
+
+            let app = router(m);
+            // Token A: correctly blocked by its own quota.
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "POST",
+                    "/v1/vms",
+                    Some("a"),
+                    Some(VALID_CREATE_BODY)
+                )
+                .await,
+                StatusCode::FORBIDDEN
+            );
+            // Token B: has zero VMs of its own -- must NOT be blocked by
+            // token A's quota. May still fail downstream (fake image
+            // path, same as admin_token_passes_auth_for_a_mutating_route
+            // above), but that's a different, later error, never the 403
+            // a full quota gets.
+            assert_ne!(
+                request(app, "POST", "/v1/vms", Some("b"), Some(VALID_CREATE_BODY)).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn created_by_token_cannot_be_spoofed_via_the_request_body() {
+            // Regression test, behavioral half of the created_by_token
+            // guarantee (see model::create_vm_request_tests for the
+            // serde-round-trip half): create_vm unconditionally overwrites
+            // CreateVmRequest.created_by_token from the authenticated
+            // caller's identity right after deserializing, so that stamp
+            // must win regardless of what the body claims. Proven here via
+            // the same quota mechanism as
+            // the test above -- "tokenA" is already at its quota of 1; if
+            // the body's "created_by_token":"spoofed" were honored,
+            // enforce_token_quotas would filter by "spoofed" instead of
+            // the real caller, find zero matching VMs, and let this
+            // through. It doesn't: this still hits the same 403 an
+            // unspoofed request from "tokenA" would.
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "a".into(),
+                    role: Role::Admin,
+                    name: Some("tokenA".into()),
+                    tenant: None,
+                }],
+                max_vms_per_token: Some(1),
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let mut vm = fixture(BackendKind::Qemu, VmStatus::Running, false);
+            vm.request.created_by_token = Some("tokenA".into());
+            m.store.insert(vm).await.unwrap();
+
+            let app = router(m);
+            let body = r#"{"name":"t","backend":"qemu","image":"/does/not/exist.qcow2","created_by_token":"spoofed"}"#;
+            assert_eq!(
+                request(app, "POST", "/v1/vms", Some("a"), Some(body)).await,
+                StatusCode::FORBIDDEN
+            );
         }
 
         fn token_auth(rps: f64, burst: u32) -> AuthConfig {
