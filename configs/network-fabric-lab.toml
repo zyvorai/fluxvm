@@ -1,0 +1,28 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Network Fabric lab profile (dataplane schema v4) — soft opt-in for first
+# enable. Same eBPF mode as GA, but not fail-closed and default-allow so a lab
+# host can exercise attach/status/flows without a deny-by-default blast radius.
+#
+# Prefer:
+#   sudo ./scripts/enable-network-fabric-ga.sh --lab --restart
+# Upgrade-safe default remains mode=legacy when this fragment is absent.
+#
+# For production fail-closed policy use configs/network-fabric-ga.toml
+# (or --restart without --lab). Operator loop (health/ipcache/refresh-dns):
+# configs/network-fabric-prod.toml + docs/production-dataplane.md.
+
+[sandbox.dataplane]
+mode = "ebpf"
+bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+pin_root = "/sys/fs/bpf/fluxvm"
+required = false
+default_allow = true
+allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+allow_ports = ["tcp/443", "tcp/80", "udp/53"]
+max_egress_mbps = 250
+max_egress_pps = 100000
+sample_rate = 100
+
+# On Cilium nodes use: sudo ./scripts/enable-network-fabric-ga.sh --lab --cilium --restart

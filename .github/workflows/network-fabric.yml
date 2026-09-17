@@ -12,6 +12,9 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-network-fabric.sh'
       - 'scripts/validate-network-fabric.sh'
+      - 'scripts/network-fabric-preflight.sh'
+      - 'scripts/enable-network-fabric-ga.sh'
+      - 'configs/network-fabric-*.toml'
       - 'scripts/test-service-fabric-perf.sh'
       - 'scripts/test-service-fabric-slo.sh'
       - 'scripts/test-service-fabric-rss.sh'
@@ -31,6 +34,9 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-network-fabric.sh'
       - 'scripts/validate-network-fabric.sh'
+      - 'scripts/network-fabric-preflight.sh'
+      - 'scripts/enable-network-fabric-ga.sh'
+      - 'configs/network-fabric-*.toml'
       - 'scripts/test-service-fabric-perf.sh'
       - 'scripts/test-service-fabric-slo.sh'
       - 'scripts/test-service-fabric-rss.sh'
@@ -72,6 +78,30 @@ jobs:
       - name: Build eBPF objects
         working-directory: fluxvm
         run: ./scripts/build-ebpf.sh
+
+      - name: Network Fabric enable/preflight shell syntax
+        working-directory: fluxvm
+        run: |
+          bash -n scripts/network-fabric-preflight.sh
+          bash -n scripts/enable-network-fabric-ga.sh
+
+      - name: Install TC/XDP objects for preflight
+        working-directory: fluxvm
+        run: |
+          sudo install -D -m 0644 dist/bpf/fluxvm_tc.bpf.o /usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o
+          if [[ -f dist/bpf/fluxvm_xdp.bpf.o ]]; then
+            sudo install -D -m 0644 dist/bpf/fluxvm_xdp.bpf.o /usr/lib/fluxvm/bpf/fluxvm_xdp.bpf.o
+          fi
+
+      - name: Network Fabric preflight
+        working-directory: fluxvm
+        run: ./scripts/network-fabric-preflight.sh --require-bpf
+
+      - name: Enable script dry-run (lab + GA)
+        working-directory: fluxvm
+        run: |
+          ./scripts/enable-network-fabric-ga.sh --dry-run --lab
+          ./scripts/enable-network-fabric-ga.sh --dry-run
 
       - name: Format check
         working-directory: fluxvm

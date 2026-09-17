@@ -18,7 +18,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Create, list, get, pause, resume, delete across all 4 backends
 - `"backend":"auto"` resolution (picks a backend based on spec/host capability)
 - `ttl_seconds` — guaranteed cleanup of a VM even if the creating job crashes or disappears
-- vsock guest agent: `exec`, PTY console, file transfer — no SSH or network path required
+- vsock guest agent: `exec`, PTY console, file transfer — no SSH or network path required (QEMU native AF_VSOCK; Cloud Hypervisor / Firecracker / in-tree FluxVM KVM via Firecracker-style UDS `CONNECT` proxy)
 - qcow2 copy-on-write overlays for cheap disposable clones from a golden image
 - Direct-kernel or firmware boot (Cloud Hypervisor, QEMU)
 - UEFI Secure Boot (QEMU only) + emulated TPM 2.0 (QEMU and Cloud Hypervisor) — see [docs/secure-boot-tpm.md](docs/secure-boot-tpm.md)
@@ -28,7 +28,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - **QEMU/KVM** — broad guest/device compatibility, qcow2 CoW overlays, QMP socket, OVMF UEFI/Secure Boot + emulated vTPM
 - **Cloud Hypervisor** — Rust VMM, direct-kernel or firmware boot, emulated vTPM (no Secure Boot — see [docs/secure-boot-tpm.md](docs/secure-boot-tpm.md))
 - **Firecracker** — microVM backend, Linux kernel + raw root filesystem, includes the **Firecracker jailer** (chroot + uid/gid isolation, see [docs/operations.md](docs/operations.md#firecracker-jailer-chroot-uidgid-isolation-cgroups))
-- **FluxVM hypervisor** (`backend: "flux-vm"`, binary `fluxvm-hypervisor`) — agent-sandbox track: memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console`
+- **FluxVM hypervisor** (`backend: "flux-vm"`, binary `fluxvm-hypervisor`) — agent-sandbox track: memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console`; in-tree KVM virtio-vsock host→guest CSM (guest-agent ping/exec); guest→host `uds_path_<port>` muxer still deferred
 
 ## Networking
 
@@ -52,6 +52,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - REST observability: status, policy, stats, flows
 - nftables is the default fallback when eBPF mode isn't enabled
 - Per-VM eBPF rule cap: 64 (kernel BPF verifier limit)
+- Opt-in enable: `sudo ./scripts/enable-network-fabric-ga.sh --restart` (fail-closed GA) or `--lab` (soft default-allow); host readiness via `./scripts/network-fabric-preflight.sh` — see [docs/network-fabric.md](docs/network-fabric.md)
 
 ### Service Fabric
 

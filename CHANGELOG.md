@@ -142,6 +142,29 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **All-features GitHub CI** — `.github/workflows/all-features.yml` runs portable
+  suites on `push` to `main` and `workflow_dispatch` (vsock CSM, Network Fabric
+  preflight/enable dry-run, devops gates, Secure Containers units + use-case
+  matrix, Sentinel/intelligence static). `ci.yml` adds an explicit virtio-vsock
+  CSM filter; `network-fabric.yml` path-filters and runs preflight + enable
+  dry-runs after installing BPF objects. `docs/DEVOPS.md` documents
+  `vars.FLUXVM_*` and self-hosted lab labels. Privileged/live lanes stay opt-in.
+- **In-tree FluxVM KVM virtio-vsock host→guest CSM** — `fluxvm-hypervisor`
+  previously bound the Firecracker-style unix socket and advertised the MMIO
+  device so the guest driver could bind, but drained TX without parsing
+  packets and never accepted `CONNECT`, so guest-agent ping/exec could not
+  complete on `fluxvm_engine=kvm`. The device now implements the Firecracker
+  unix proxy handshake (`CONNECT <port>\n` → virtio REQUEST → guest RESPONSE
+  → `OK <host_port>\n`) plus RW/credit/shutdown bridging for host-initiated
+  streams. Guest→host `uds_path_<port>` muxer remains deferred. Unit tests
+  cover header codec, CONNECT parsing, and CONNECT→REQUEST→OK→RW.
+- **Network Fabric eBPF enablement UX** — new
+  `scripts/network-fabric-preflight.sh` (bpffs, bpftool/tc, BPF object,
+  systemd MEMLOCK/paths); `enable-network-fabric-ga.sh` merges from
+  `configs/network-fabric-{ga,lab}.toml` (SoT), supports `--lab` soft
+  profile, schema-v4 managed markers, and post-restart health hints. README /
+  `config.example.toml` / production-dataplane runbook surface the one-liner.
+  Global default remains `mode=legacy`.
 - **`GuestImage.spec.kernel` now actually reaches the VM it boots** — the
   field has existed on `GuestImageSpec` since `GuestImage` was introduced
   (`docs/microvm.md` already documented it as an "optional ... `kernel`"),

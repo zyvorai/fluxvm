@@ -51,6 +51,10 @@ jobs:
         working-directory: fluxvm
         run: cargo test --workspace
 
+      - name: In-tree virtio-vsock CSM unit tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-hypervisor --lib devices::virtio_vsock -- --nocapture
+
       - name: MicroVM gates (policy + unit + print-crd)
         working-directory: fluxvm
         run: |

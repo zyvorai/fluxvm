@@ -7,13 +7,21 @@ conntrack, CNP-shaped policy). Upgrade-safe installs keep `mode = "legacy"`
 until you opt into the GA profile:
 
 ```bash
+# Host readiness (bpffs, bpftool/tc, BPF object, systemd MEMLOCK/paths):
+./scripts/network-fabric-preflight.sh
+
+# Fail-closed GA (required=true, default_allow=false):
 sudo ./scripts/enable-network-fabric-ga.sh --restart
-# or merge configs/network-fabric-ga.toml into /etc/fluxvm.toml
+
+# Soft lab first-enable (required=false, default_allow=true):
+sudo ./scripts/enable-network-fabric-ga.sh --lab --restart
+
+# or merge configs/network-fabric-ga.toml / network-fabric-lab.toml into /etc/fluxvm.toml
 ```
 
-Production profile (FQDN resolve, ipcache, health, refresh-dns):
-[`configs/network-fabric-prod.toml`](../configs/network-fabric-prod.toml) —
-see [production-dataplane.md](production-dataplane.md). Policy:
+Production operator loop (FQDN resolve, ipcache, health, refresh-dns) uses the
+same dataplane knobs as GA — [`configs/network-fabric-prod.toml`](../configs/network-fabric-prod.toml)
+is not a different `mode`; see [production-dataplane.md](production-dataplane.md). Policy:
 [network-policy.md](network-policy.md), [network-groups.md](network-groups.md),
 [tutorials/network-policy/](tutorials/network-policy/README.md).
 

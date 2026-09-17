@@ -1,10 +1,17 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 #
-# Network Fabric v3 — GA production profile (fragment).
+# Network Fabric GA production profile (dataplane schema v4 fragment).
 #
-# Merge into /etc/fluxvm.toml (or use scripts/enable-network-fabric-ga.sh).
+# Prefer one-command enable (builds/installs BPF objects + merges this file):
+#   sudo ./scripts/enable-network-fabric-ga.sh --restart
+# Host readiness: ./scripts/network-fabric-preflight.sh
+# Lab (soft, default-allow): configs/network-fabric-lab.toml or --lab
+#
 # Upgrade-safe default remains mode=legacy when this fragment is absent.
+# Dataplane knobs here match network-fabric-prod.toml; "prod" adds the operator
+# loop (health / ipcache / refresh-dns / CNP), not a different mode — see
+# docs/production-dataplane.md.
 #
 # Prerequisites:
 #   ./scripts/build-ebpf.sh && install .o under /usr/lib/fluxvm/bpf/

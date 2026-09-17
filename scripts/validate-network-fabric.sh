@@ -18,6 +18,8 @@ bash -n scripts/build-ebpf.sh
 bash -n scripts/test-ebpf-smoke.sh
 bash -n scripts/test-network-fabric.sh
 bash -n scripts/validate-network-fabric.sh
+bash -n scripts/network-fabric-preflight.sh
+bash -n scripts/enable-network-fabric-ga.sh
 
 echo "==> Python flow-exporter tests"
 python3 scripts/test_flow_exporter.py

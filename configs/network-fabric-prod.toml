@@ -1,8 +1,19 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 #
-# Production Network Fabric + network-policy profile.
-# Merge into /etc/fluxvm.toml after installing BPF objects.
+# Production Network Fabric profile (dataplane schema v4).
+#
+# Same [sandbox.dataplane] knobs as network-fabric-ga.toml. Prefer enabling via:
+#   sudo ./scripts/enable-network-fabric-ga.sh --restart
+# then run the operator loop in docs/production-dataplane.md
+# (fluxvm dataplane health | ipcache | refresh-dns, CNP apply).
+#
+# Merging this file alone does not add FQDN/ipcache features — those are
+# runtime APIs once mode=ebpf/cilium is active. Preflight:
+#   ./scripts/network-fabric-preflight.sh --require-bpf
+#
+# On nodes that already run a CNI agent: use --cilium on the enable script
+# (or set mode = "cilium") and leave XDP disabled.
 
 [sandbox.dataplane]
 mode = "ebpf"

@@ -565,6 +565,20 @@ impl VirtualMachine {
             }
             let _ = fed;
 
+            // Host↔guest vsock: accept CONNECT / shuttle RW even when the
+            // guest is not notifying (Firecracker-style unix backend).
+            if let (Some(vsock), Some(be)) = (&this.vsock, &this.vsock_backend) {
+                let mut st = vsock.state.lock().unwrap();
+                match virtio_vsock::poll(&mut this.mem, &mut st, be.as_ref()) {
+                    Ok(n) if n > 0 => {
+                        drop(st);
+                        vsock.raise_vring_interrupt();
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("[vsock] poll err {e}"),
+                }
+            }
+
             let reason = kvm.run_once(0)?;
             exits += 1;
             if exits <= 20 {
@@ -646,7 +660,12 @@ impl VirtualMachine {
                     if let Some(vsock) = &this.vsock {
                         if let Some(q) = virtio_mmio::take_notify(&vsock.state) {
                             let mut st = vsock.state.lock().unwrap();
-                            match virtio_vsock::handle_notify(&mut this.mem, &mut st, q) {
+                            match virtio_vsock::handle_notify(
+                                &mut this.mem,
+                                &mut st,
+                                q,
+                                this.vsock_backend.as_deref(),
+                            ) {
                                 Ok(n) => {
                                     if n > 0 {
                                         eprintln!("[vsock] processed q={q} pkts={n}");

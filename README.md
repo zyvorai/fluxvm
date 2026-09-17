@@ -57,7 +57,7 @@ Two subsystems are GA today; one is explicitly not:
 | Subsystem | Status |
 |---|---|
 | Core VM lifecycle (QEMU/CH/Firecracker/FluxVM hypervisor backends, cgroups, jailer, netns) | Implemented, see caveat above before untrusted multi-tenant use |
-| Network Fabric (TC/eBPF VM-edge dataplane, schema v4) | **GA** — [docs/network-fabric.md](docs/network-fabric.md) |
+| Network Fabric (TC/eBPF VM-edge dataplane, schema v4) | **GA** — default remains nftables; enable with `sudo ./scripts/enable-network-fabric-ga.sh --restart` (lab: `--lab`) — [docs/network-fabric.md](docs/network-fabric.md) |
 | Secure Containers (containerd runtime-v2 shim) | **Developer preview** — not a Kata Containers-equivalence claim yet, see [docs/secure-containers.md](docs/secure-containers.md) |
 
 ---

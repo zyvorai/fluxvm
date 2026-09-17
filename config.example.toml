@@ -41,17 +41,31 @@ reaper_interval_secs = 5
 # http_proxy_default_port = 8080
 #
 # Native VM-edge networking — Network Fabric GA (dataplane schema v4).
-# Absent / commented = upgrade-safe legacy nftables.
-# Production GA profile: configs/network-fabric-ga.toml
-#   or: sudo ./scripts/enable-network-fabric-ga.sh --restart
-# Production dataplane (FQDN/ipcache/health): configs/network-fabric-prod.toml
+# Absent / commented = upgrade-safe legacy nftables (do not uncomment casually).
+# Prefer one-command enable over hand-editing:
+#   ./scripts/network-fabric-preflight.sh
+#   sudo ./scripts/enable-network-fabric-ga.sh --restart          # fail-closed GA
+#   sudo ./scripts/enable-network-fabric-ga.sh --lab --restart    # soft lab
+# Profiles: configs/network-fabric-{lab,ga,prod}.toml
+#   lab  = required=false, default_allow=true
+#   ga   = required=true,  default_allow=false (fail-closed)
+#   prod = same knobs as ga; operator loop in docs/production-dataplane.md
 # See docs/network-fabric.md, docs/production-dataplane.md, docs/ebpf-cilium.md.
 #
+# --- Lab (soft; safe to try attach/status without deny-by-default) ---
+# [sandbox.dataplane]
+# mode = "ebpf"
+# bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+# pin_root = "/sys/fs/bpf/fluxvm"
+# required = false
+# default_allow = true
+#
+# --- GA / production (fail-closed when a host VM edge exists) ---
 # [sandbox.dataplane]
 # mode = "ebpf"                         # legacy | ebpf | cilium
 # bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
 # pin_root = "/sys/fs/bpf/fluxvm"
-# required = true                       # GA: fail-closed when a host VM edge exists
+# required = true
 # default_allow = false
 # allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
 # allow_ports = ["tcp/443", "tcp/80", "udp/53"]

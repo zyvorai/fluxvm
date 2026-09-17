@@ -9,9 +9,18 @@ the dataplane), start with [PRODUCTION.md](PRODUCTION.md) and
 
 ## Host checklist
 
-1. `./scripts/build-ebpf.sh` and install both `.o` files under `/usr/lib/fluxvm/bpf/`.
-2. `LimitMEMLOCK=infinity`, `ReadWritePaths` includes `/sys/fs/bpf` and `/run/fluxvm`.
-3. Merge [`configs/network-fabric-prod.toml`](../configs/network-fabric-prod.toml).
+Prefer the one-command enable (builds/installs BPF objects, merges the GA
+profile, optional restart). Dataplane knobs match
+[`configs/network-fabric-ga.toml`](../configs/network-fabric-ga.toml) /
+[`configs/network-fabric-prod.toml`](../configs/network-fabric-prod.toml);
+"prod" here means the operator loop below, not a different `mode`.
+
+1. `./scripts/network-fabric-preflight.sh` (bpffs, `bpftool`/`tc`, optional BPF object).
+2. `sudo ./scripts/enable-network-fabric-ga.sh --restart`
+   (or `--cilium --restart` on CNI nodes; lab: `--lab --restart`).
+3. Manual alternative: `./scripts/build-ebpf.sh`, install `.o` under
+   `/usr/lib/fluxvm/bpf/`, ensure `LimitMEMLOCK=infinity` + `ReadWritePaths`
+   for `/sys/fs/bpf` and `/run/fluxvm`, merge `network-fabric-prod.toml`.
 4. Nodes with an existing CNI agent: `mode = "cilium"`, mount `/var/run/cilium` read-only, do not enable FluxVM XDP.
 5. `curl -sf http://127.0.0.1:7788/readyz` and `fluxvm dataplane health` must report `"ok": true` before creating tenant VMs.
 6. Prefer `tenant` on create (or token `tenant`) so `GET /v1/vms?tenant=` works for fleet filters.
