@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context, Result};
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use clap::{Parser, Subcommand};
 use fluxvm_api as api;
 use fluxvm_core::{
     config::Config,
     model::{ClaimOverrides, CreateVmRequest},
 };
+use fluxvm_guest_protocol::AgentResponse;
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
 use std::{
@@ -79,6 +81,37 @@ enum Command {
         timeout_seconds: Option<u64>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
+    },
+    /// Health-check the vsock guest agent (requires agent.enabled) without
+    /// spending a real `exec` round trip just to find out it's reachable —
+    /// distinct from `qga ping`, which checks the QEMU guest-agent channel.
+    Ping {
+        id: Uuid,
+    },
+    /// Copy a local file into the guest over vsock (requires agent.enabled)
+    /// — the REST `/agent/put-file` route's CLI equivalent, previously only
+    /// reachable by hand-rolling the HTTP call yourself.
+    CopyTo {
+        id: Uuid,
+        /// Path to the file on this host.
+        local: PathBuf,
+        /// Destination path inside the guest; parent directories are
+        /// created as needed.
+        remote: String,
+        /// Unix permission bits to set on the guest-side file, e.g. `600`.
+        /// Defaults to `644` if unset.
+        #[arg(long)]
+        mode: Option<u32>,
+    },
+    /// Copy a file out of the guest over vsock (requires agent.enabled) —
+    /// the REST `/agent/get-file` route's CLI equivalent. The guest file's
+    /// own Unix permission bits are restored on the copy this host writes.
+    CopyFrom {
+        id: Uuid,
+        /// Path to the file inside the guest.
+        remote: String,
+        /// Path to write on this host.
+        local: PathBuf,
     },
     /// QEMU guest-agent (virtio-serial) helpers — Zyvor/GuestKit Windows agent.
     Qga {
@@ -432,6 +465,53 @@ async fn manager(cfg: Config) -> Result<Arc<VmManager>> {
     VmManager::new(cfg)
 }
 
+/// Reads a local file for `copy-to`, rejecting anything already too big for
+/// the guest agent's own file-transfer cap before spending a base64 encode
+/// and a vsock round trip on content the agent would just reject anyway —
+/// see `fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES` and
+/// `fluxvm-guest-agent`'s own `put_file`, which enforces the same limit
+/// guest-side on the decoded bytes.
+fn read_local_file_for_copy_to(path: &Path) -> Result<Vec<u8>> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.len() > fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES {
+        anyhow::bail!(
+            "{} is {} bytes, exceeds the guest agent's {}-byte file-transfer limit",
+            path.display(),
+            bytes.len(),
+            fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES,
+        );
+    }
+    Ok(bytes)
+}
+
+/// Writes a `copy-from` response's content to `local`, restoring the same
+/// Unix permission bits the guest reported the file had — so a copied-out
+/// script, key, or config keeps behaving the way its mode implies instead of
+/// silently landing at this process's umask default. Returns the number of
+/// bytes written.
+#[cfg(unix)]
+fn write_copy_from_response(local: &Path, content_base64: &str, mode: u32) -> Result<usize> {
+    use std::os::unix::fs::PermissionsExt;
+    let bytes = B64
+        .decode(content_base64)
+        .context("decoding file content from guest agent")?;
+    std::fs::write(local, &bytes).with_context(|| format!("writing {}", local.display()))?;
+    std::fs::set_permissions(local, std::fs::Permissions::from_mode(mode & 0o777))
+        .with_context(|| format!("setting permissions on {}", local.display()))?;
+    Ok(bytes.len())
+}
+
+/// Non-Unix hosts have no `mode` bits of their own to restore — write the
+/// content and leave permissions at whatever this platform defaults to.
+#[cfg(not(unix))]
+fn write_copy_from_response(local: &Path, content_base64: &str, _mode: u32) -> Result<usize> {
+    let bytes = B64
+        .decode(content_base64)
+        .context("decoding file content from guest agent")?;
+    std::fs::write(local, &bytes).with_context(|| format!("writing {}", local.display()))?;
+    Ok(bytes.len())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -587,6 +667,31 @@ async fn main() -> Result<()> {
             let response = m.exec(id, command.join(" "), timeout_seconds).await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
+        Command::Ping { id } => {
+            m.agent_ping(id).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::CopyTo {
+            id,
+            local,
+            remote,
+            mode,
+        } => {
+            let bytes = read_local_file_for_copy_to(&local)?;
+            let response = m.put_file(id, remote, B64.encode(&bytes), mode).await?;
+            println!("{}", serde_json::to_string_pretty(&response)?);
+        }
+        Command::CopyFrom { id, remote, local } => match m.get_file(id, remote).await? {
+            AgentResponse::FileContent {
+                content_base64,
+                mode,
+            } => {
+                let n = write_copy_from_response(&local, &content_base64, mode)?;
+                println!("{{\"ok\":true,\"bytes\":{n}}}");
+            }
+            AgentResponse::Error { message } => anyhow::bail!("guest agent error: {message}"),
+            other => anyhow::bail!("unexpected response to get-file: {other:?}"),
+        },
         Command::Qga { command } => match command {
             QgaCommand::Ping { id } => {
                 m.qga_ping(id).await?;
@@ -1303,5 +1408,213 @@ mod catalog_cli_tests {
                 command: CatalogCommand::Clean
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod agent_cli_tests {
+    use super::*;
+
+    /// `ping`/`copy-to`/`copy-from` parse into the field values documented
+    /// above, `mode` stays optional on `copy-to`, and the required
+    /// positionals can't be left off — the same clap-wiring-bug class the
+    /// sibling `catalog_cli_tests` module guards against for `catalog`.
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn ping_takes_only_the_vm_id() {
+        let id = Uuid::nil();
+        let Command::Ping { id: parsed } = parse(&["ping", &id.to_string()]) else {
+            panic!("expected Command::Ping");
+        };
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn ping_requires_an_id() {
+        assert!(Cli::try_parse_from(["fluxvm", "ping"]).is_err());
+    }
+
+    #[test]
+    fn copy_to_parses_positionals_and_defaults_mode_to_none() {
+        let id = Uuid::nil();
+        let Command::CopyTo {
+            id: parsed_id,
+            local,
+            remote,
+            mode,
+        } = parse(&[
+            "copy-to",
+            &id.to_string(),
+            "/tmp/local-file.txt",
+            "/etc/app/config.yaml",
+        ])
+        else {
+            panic!("expected Command::CopyTo");
+        };
+        assert_eq!(parsed_id, id);
+        assert_eq!(local, PathBuf::from("/tmp/local-file.txt"));
+        assert_eq!(remote, "/etc/app/config.yaml");
+        assert_eq!(
+            mode, None,
+            "mode must default to None (guest agent's own 0o644 default)"
+        );
+    }
+
+    #[test]
+    fn copy_to_parses_explicit_mode() {
+        let id = Uuid::nil();
+        let Command::CopyTo { mode, .. } = parse(&[
+            "copy-to",
+            &id.to_string(),
+            "/tmp/key",
+            "/etc/app/key",
+            "--mode",
+            "384", // 0o600
+        ]) else {
+            panic!("expected Command::CopyTo");
+        };
+        assert_eq!(mode, Some(384));
+    }
+
+    #[test]
+    fn copy_to_requires_both_local_and_remote_paths() {
+        let id = Uuid::nil().to_string();
+        assert!(Cli::try_parse_from(["fluxvm", "copy-to", &id, "/tmp/local-file.txt"]).is_err());
+    }
+
+    #[test]
+    fn copy_from_parses_positionals_in_remote_then_local_order() {
+        let id = Uuid::nil();
+        let Command::CopyFrom {
+            id: parsed_id,
+            remote,
+            local,
+        } = parse(&[
+            "copy-from",
+            &id.to_string(),
+            "/etc/app/config.yaml",
+            "/tmp/local-file.txt",
+        ])
+        else {
+            panic!("expected Command::CopyFrom");
+        };
+        assert_eq!(parsed_id, id);
+        assert_eq!(remote, "/etc/app/config.yaml");
+        assert_eq!(local, PathBuf::from("/tmp/local-file.txt"));
+    }
+
+    #[test]
+    fn copy_from_requires_both_remote_and_local_paths() {
+        let id = Uuid::nil().to_string();
+        assert!(Cli::try_parse_from(["fluxvm", "copy-from", &id, "/etc/app/config.yaml"]).is_err());
+    }
+
+    /// `read_local_file_for_copy_to` is what stands between a caller and a
+    /// wasted base64-encode + vsock round trip for content the guest
+    /// agent's own `put_file` would reject anyway — proves the cap is
+    /// actually enforced client-side, not just documented.
+    #[test]
+    fn read_local_file_for_copy_to_rejects_oversized_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxvm-cli-copy-to-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oversized.bin");
+        // One byte past the limit is enough to prove the boundary check —
+        // no need to actually write 64MB+1 to disk to exercise it.
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.seek(SeekFrom::Start(
+                fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES as u64,
+            ))
+            .unwrap();
+            f.write_all(b"x").unwrap();
+        }
+
+        let err = read_local_file_for_copy_to(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_local_file_for_copy_to_accepts_files_within_the_limit() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxvm-cli-copy-to-test-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("small.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+
+        let bytes = read_local_file_for_copy_to(&path).unwrap();
+        assert_eq!(bytes, b"hello world");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `write_copy_from_response` round-trips base64 content back to real
+    /// bytes on disk and restores the guest-reported Unix mode — the two
+    /// things `get_file`'s REST/CLI callers actually rely on, not just that
+    /// the base64 decodes.
+    #[cfg(unix)]
+    #[test]
+    fn write_copy_from_response_restores_content_and_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "fluxvm-cli-copy-from-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("restored.txt");
+
+        let n = write_copy_from_response(&path, &B64.encode(b"secret content"), 0o600).unwrap();
+        assert_eq!(n, "secret content".len());
+        assert_eq!(std::fs::read(&path).unwrap(), b"secret content");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_copy_from_response_rejects_invalid_base64() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxvm-cli-copy-from-test-bad-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("never-written.txt");
+
+        assert!(write_copy_from_response(&path, "not-valid-base64!!!", 0o644).is_err());
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

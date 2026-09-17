@@ -148,6 +148,9 @@ sudo fluxvm --config /etc/fluxvm.toml create --spec examples/qemu.json
 fluxvm list
 fluxvm get <id>                 # includes guest_ip for netns mode
 fluxvm exec <id> -- hostname
+fluxvm ping <id>                            # health-check the vsock guest agent
+fluxvm copy-to <id> ./local.txt /etc/app.cfg
+fluxvm copy-from <id> /etc/app.cfg ./local.txt
 fluxvm pause <id> && fluxvm resume <id>
 fluxvm delete <id>              # or wait for ttl_seconds
 ```
@@ -179,7 +182,7 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 
 | Area | What's there | Docs |
 |------|---------------|------|
-| **Backends** | QEMU/KVM, Cloud Hypervisor, Firecracker, and the in-tree FluxVM hypervisor (agent sandboxes: snapshots, AutoPause, HTTP proxy) behind one `VmBackend` trait; `"backend":"auto"` resolution; vsock guest agent (`exec`, PTY console with live mid-session resize, file transfer) with no SSH required | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [docs/operations.md](docs/operations.md#auto-backend-selection) |
+| **Backends** | QEMU/KVM, Cloud Hypervisor, Firecracker, and the in-tree FluxVM hypervisor (agent sandboxes: snapshots, AutoPause, HTTP proxy) behind one `VmBackend` trait; `"backend":"auto"` resolution; vsock guest agent (`exec`, `ping` health check, PTY console with live mid-session resize, file transfer via `copy-to`/`copy-from`) with no SSH required | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [docs/operations.md](docs/operations.md#auto-backend-selection) |
 | **Networking & Network Fabric** | TAP/bridge, macvtap, QEMU user-mode NAT, per-VM network namespaces; **Network Fabric** is GA (schema v4) — TC/eBPF or Cilium-coexistence dataplane with IPv4/IPv6 L3+L4 policy, rate limits, security groups, CNP, live reconfigure, and REST observability, falling back to nftables by default | [docs/network-fabric.md](docs/network-fabric.md) · [docs/ebpf-cilium.md](docs/ebpf-cilium.md) · [docs/network-policy.md](docs/network-policy.md) |
 | **Service Fabric** | Node-local Maglev VIP load balancing — dual-stack NAT/DSR/SNAT, health-aware routing, incremental reconcile, per-service EDT, flow export | [docs/service-fabric.md](docs/service-fabric.md) |
 | **Images** | virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, an Ed25519-signed image catalog with REST CRUD, and Windows/Kryton golden-image customization + live QGA | [docs/build-image-tutorials.md](docs/build-image-tutorials.md) · [docs/operations.md](docs/operations.md#image-catalog--signing) · [docs/windows-golden.md](docs/windows-golden.md) |

@@ -41,6 +41,7 @@ GET    /v1/vms/{uuid}/pressure
 GET    /v1/vms/{uuid}/logs
 GET    /v1/vms/{uuid}/console
 POST   /v1/vms/{uuid}/agent
+POST   /v1/vms/{uuid}/agent/ping
 POST   /v1/vms/{uuid}/agent/put-file
 POST   /v1/vms/{uuid}/agent/get-file
 GET    /v1/vms/{uuid}/qga/network-interfaces

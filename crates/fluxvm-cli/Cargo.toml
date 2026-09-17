@@ -15,9 +15,11 @@ fluxvm-api = { path = "../fluxvm-api" }
 fluxvm-image = { path = "../fluxvm-image" }
 fluxvm-network = { path = "../fluxvm-network" }
 fluxvm-intelligence = { path = "../fluxvm-intelligence" }
+fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 anyhow = "1"
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"

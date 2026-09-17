@@ -142,6 +142,31 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm ping`/`copy-to`/`copy-from` — CLI parity for the vsock guest
+  agent's health check and file transfer.** The REST API has exposed
+  `POST /v1/vms/{id}/agent/put-file` and `.../get-file` since the guest
+  agent itself gained `PutFile`/`GetFile` (see the "Add vsock guest agent
+  file transfer" entry further down this changelog), but the CLI only ever
+  grew an `exec` command alongside them — copying a file into or out of a
+  VM meant hand-rolling the HTTP call yourself, base64 and all, with no
+  local equivalent of the `scp`-style ergonomics `exec` already gets.
+  `fluxvm copy-to <id> <local> <remote> [--mode <bits>]` reads a local file,
+  rejects anything already over the guest agent's own
+  `MAX_FILE_TRANSFER_BYTES` cap before spending a base64 encode and a vsock
+  round trip on content that would just be rejected guest-side anyway, and
+  writes it in; `fluxvm copy-from <id> <remote> <local>` reads it back out
+  and restores the guest-reported Unix permission bits on the local copy,
+  not just its bytes — a copied-out private key or script keeps behaving
+  the way its mode implies instead of landing at this process's umask
+  default. `fluxvm ping <id>` adds the missing health check for this same
+  channel: `qga ping` has covered the separate QEMU guest-agent socket for a
+  while, but there was no way to ask "is the plain vsock agent even up"
+  without spending a real `exec` round trip to find out — a new
+  `VmManager::agent_ping` (and `POST /v1/vms/{id}/agent/ping`, gated the
+  same as every other agent route) answers that with one `AgentRequest::Ping`
+  instead. New CLI-argument-parsing tests for all three commands, plus unit
+  tests for the size-cap check and the base64-decode-and-restore-mode path
+  `copy-to`/`copy-from` are built on.
 - **All-features GitHub CI** — `.github/workflows/all-features.yml` runs portable
   suites on `push` to `main` and `workflow_dispatch` (vsock CSM, Network Fabric
   preflight/enable dry-run, devops gates, Secure Containers units + use-case

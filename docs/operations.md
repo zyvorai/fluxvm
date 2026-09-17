@@ -274,6 +274,36 @@ the correct token succeeds, and `eph exec` keeps working unmodified.
 shutdown` for Cloud Hypervisor, `SendCtrlAltDel` for Firecracker — x86_64 only, no ARM equivalent in
 Firecracker's API today) and only force-kills the process if it doesn't exit within a grace period.
 
+**`ping`, `copy-to`, `copy-from`: CLI parity for the rest of the vsock agent.** The REST API has had
+`POST /v1/vms/{id}/agent/put-file` and `.../get-file` since the guest agent gained `PutFile`/`GetFile`,
+but for a while `exec` was the only one of the vsock agent's operations the CLI itself exposed —
+copying a file into or out of a VM meant calling the HTTP route by hand, base64-encoding the content
+yourself. These three close that gap:
+
+```bash
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml ping <id>
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml copy-to <id> ./local-file.txt /etc/app/config.yaml --mode 600
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml copy-from <id> /etc/app/config.yaml ./local-file.txt
+```
+
+`ping` sends a bare `AgentRequest::Ping` — the same health check `POST /v1/vms/{id}/agent/ping` performs
+over the REST API — so a caller can confirm the guest agent is up (and, if a token is configured, that
+this VM's own token still authenticates) without spending a real `exec` round trip and whatever
+guest-side work that would imply just to find out. This is a distinct channel from `qga ping`, which
+checks the separate QEMU guest-agent (virtio-serial) socket instead — a VM can have either, both, or
+neither enabled.
+
+`copy-to` reads the local file and rejects anything already over the guest agent's own
+`fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES` cap (64MB) before spending a base64 encode and a vsock
+round trip on content the agent's own `put_file` would just reject anyway — the same cap `get_file`
+already enforced server-side on the way out, now checked client-side on the way in too. `copy-from`
+restores the guest-reported Unix permission bits on the local copy, not just its bytes: a key or script
+copied out of a VM keeps behaving the way its mode implies instead of silently landing at this
+process's umask default (`--mode` on `copy-to` is the same idea in the other direction — see `put_file`'s
+own `0o644` default when it's left unset). Both still go through the same 64MB single-message,
+no-chunking transfer `PutFile`/`GetFile` already used — bulk data still belongs in a disk image, not
+this channel; see `MAX_FILE_TRANSFER_BYTES`'s own doc comment in `fluxvm-guest-protocol`.
+
 **Firecracker-specific note:** pause/resume were verified correct and fast against Firecracker's own
 authoritative `GET /` state (not CPU-time heuristics — an idle guest and a paused one both show flat
 CPU time, which is a false "it's paused" signal either way). `exec` over vsock works before a VM is

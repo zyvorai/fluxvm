@@ -1793,6 +1793,17 @@ impl VmManager {
         .await
     }
 
+    /// Health-checks the vsock guest agent (`AgentRequest::Ping`) — proves
+    /// the agent is up and, if a token is configured, that this VM's own
+    /// token still authenticates, without spending a real `exec` round trip
+    /// (and whatever guest-side work that implies) just to find out.
+    /// Distinct from `qga_ping`, which checks the separate QEMU guest-agent
+    /// (virtio-serial) channel instead.
+    pub async fn agent_ping(&self, id: Uuid) -> Result<()> {
+        let vm = self.get(id).await?;
+        fluxvm_vsock_client::ping(&vm, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT).await
+    }
+
     fn qga_socket_for(vm: &VmRecord) -> Result<std::path::PathBuf> {
         vm.qga_socket
             .clone()

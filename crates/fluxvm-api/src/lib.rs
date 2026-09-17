@@ -461,6 +461,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
+        .route("/v1/vms/{id}/agent/ping", post(agent_ping))
         .route("/v1/vms/{id}/agent/put-file", post(agent_put_file))
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
         .route("/v1/vms/{id}/console", get(agent_console))
@@ -2183,6 +2184,23 @@ async fn agent_exec(
     require_admin(role)?;
     let response = m.exec(id, req.command, req.timeout_seconds).await?;
     Ok(Json(json!(response)))
+}
+
+/// `POST /v1/vms/{id}/agent/ping` — health-checks the vsock guest agent
+/// without spending a real `exec` round trip to find out whether it's
+/// reachable. Distinct from `/qga/ping` below, which checks the separate
+/// QEMU guest-agent (virtio-serial) channel instead. Gated the same as
+/// `agent_exec`/`agent_put_file`/`agent_get_file`: it still opens a vsock
+/// connection into a specific VM, so it carries the same admin requirement
+/// as every other agent operation, even though it changes nothing itself.
+async fn agent_ping(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.agent_ping(id).await?;
+    Ok(Json(json!({"ok": true})))
 }
 
 #[derive(Deserialize)]
