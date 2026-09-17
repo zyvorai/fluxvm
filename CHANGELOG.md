@@ -3,6 +3,32 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **Attempted the Set 9S guest `aya` ELF-parse fix** —
+  `docs/secure-containers-set9s.md` hypothesized the guest LSM MAC test's
+  intermittent "error parsing ELF data" failure as a version/feature-
+  unification mismatch between `aya` 0.13.1 and the workspace's pinned
+  `object 0.36.7`, naming a newer `aya`/`aya-obj`/`object` pin as the
+  likely fix. Bumped `fluxvm-container-agent`'s `aya` dependency to
+  `"0.14"` (pulling `aya-obj` to 0.3.0 and `object` to 0.39.1). `cargo
+  build`/`cargo test -p fluxvm-container-agent` (30 tests) pass clean, no
+  API breakage from the two non-patch bumps, and Set 8S's own
+  `aya`-loaded `cgroup_skb` test was confirmed to genuinely execute under
+  real root and pass. **Honest limit**: Set 9S's own test — the one that
+  actually exercises the failing code path — could not be run at all on
+  the available build host, even as root, because that host's kernel has
+  no `bpf` in its active `lsm=` boot parameters. This means the bump has
+  *not* been validated against the real failure mode; there is no more or
+  less confidence it's fixed than before, only that it doesn't regress
+  anything else. See `docs/secure-containers-set9s.md` for the full
+  account — not yet root-caused to a confirmed fix.
+- Fixed a stale Secure Containers CI gate: `secure-containers-coverage.yml`'s
+  `go-controller`/`go-observer` jobs were still pinned to Go 1.23 via
+  `actions/setup-go`, even though both
+  `controllers/fluxvm-networkpolicy-controller` and
+  `tools/fluxvm-policy-observer` require `go 1.27` in their own `go.mod` —
+  every run failed outright at the toolchain-version check, before a
+  single test ran. Switched both jobs to `go-version-file` pointing at
+  each module's own `go.mod`, so this can't silently drift again.
 - **`enforce_token_quotas` counted every VM on the node, not just the calling
   token's own, against `max_vms_per_token`/`max_memory_mib_per_token`** — the
   function's own prior comment called this "conservative," but with two
