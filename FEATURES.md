@@ -126,6 +126,9 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Per-node VM listing (`GET /fleet/nodes/{name}/vms`) — "what's actually running on this node?",
   answered directly against that node (so it still works when other nodes in the fleet are
   unreachable) rather than filtered client-side out of the fleet-wide `GET /fleet/vms` aggregate
+- Single-node lookup (`GET /fleet/nodes/{name}`) — one node's own `healthy`/`cordoned`/labels/
+  free-capacity record, without fetching and filtering the whole `GET /fleet/nodes` list just to
+  check one node's state; `404` for an unregistered name
 - Fleet-wide `GET /fleet/vms` names any node it couldn't account for in an `"unreachable_nodes"`
   field (stale heartbeat, connection error, bad status, or unparseable body — each with its own
   reason) instead of silently dropping that node's VMs from the list

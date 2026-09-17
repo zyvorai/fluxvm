@@ -52,6 +52,22 @@ pub async fn list_nodes(central: &str, token: Option<&str>) -> Result<Value> {
     resp.json().await.context("parsing /fleet/nodes response")
 }
 
+/// `GET /fleet/nodes/{name}` — one node's own record, the same shape a
+/// `GET /fleet/nodes` list entry has, without fetching and filtering the
+/// whole fleet just to check one node's `healthy`/`cordoned`/free-capacity
+/// state.
+pub async fn get_node(central: &str, token: Option<&str>, name: &str) -> Result<Value> {
+    let http = reqwest::Client::new();
+    let resp = authed(http.get(format!("{central}/fleet/nodes/{name}")), token)
+        .send()
+        .await
+        .with_context(|| format!("GET /fleet/nodes/{name}"))?;
+    let resp = check_success(resp, &format!("fetching node '{name}'")).await?;
+    resp.json()
+        .await
+        .with_context(|| format!("parsing /fleet/nodes/{name} response"))
+}
+
 async fn set_cordoned(
     central: &str,
     token: Option<&str>,
@@ -254,6 +270,29 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "worker-1");
         assert_eq!(items[0]["cordoned"], false);
+    }
+
+    #[tokio::test]
+    async fn get_node_returns_the_named_node_only() {
+        let (central, _dir) = spawn_central(None).await;
+        register_node(&central, "worker-1", "http://worker-1:7788").await;
+        register_node(&central, "worker-2", "http://worker-2:7788").await;
+
+        let body = get_node(&central, None, "worker-1").await.unwrap();
+        assert_eq!(body["name"], "worker-1");
+        assert_eq!(body["cordoned"], false);
+    }
+
+    #[tokio::test]
+    async fn get_node_unknown_name_is_a_readable_not_found_error() {
+        let (central, _dir) = spawn_central(None).await;
+        let err = get_node(&central, None, "ghost").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("404"), "expected a 404, got: {msg}");
+        assert!(
+            msg.contains("ghost"),
+            "error should name the unknown node: {msg}"
+        );
     }
 
     #[tokio::test]

@@ -287,10 +287,7 @@ pub fn router(cfg: CentralConfig) -> Router {
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/fleet/register", post(register))
         .route("/fleet/nodes", get(list_nodes))
-        .route(
-            "/fleet/nodes/{name}",
-            axum::routing::delete(deregister_node),
-        )
+        .route("/fleet/nodes/{name}", get(get_node).delete(deregister_node))
         .route("/fleet/nodes/{name}/cordon", post(cordon_node))
         .route("/fleet/nodes/{name}/uncordon", post(uncordon_node))
         .route("/fleet/vms", post(create_vm).get(list_vms))
@@ -357,6 +354,31 @@ async fn list_nodes(State(fleet): State<Fleet>) -> Json<Value> {
     let nodes = fleet.nodes.lock().await;
     let items: Vec<Value> = nodes.values().map(node_json).collect();
     Json(json!({"items": items}))
+}
+
+/// `GET /fleet/nodes/{name}` — exactly one node's own record (the same
+/// shape `GET /fleet/nodes`'s `"items"` entries already have), without a
+/// caller having to fetch the whole fleet and filter client-side just to
+/// check one node's `healthy`/`cordoned`/free-capacity state — the same
+/// "answer this one question without needing the rest of the fleet up"
+/// motivation `GET /fleet/nodes/{name}/vms` already established for VMs.
+/// `404` for a name that was never registered, same status
+/// `cordon`/`uncordon`/`deregister` already use for the identical case on
+/// this same path segment — unlike `GET /fleet/nodes/{name}/vms`'s `400`,
+/// since that route's unknown-name case is a bad *proxy target*, not a
+/// missing *resource*.
+async fn get_node(
+    State(fleet): State<Fleet>,
+    Path(name): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    let nodes = fleet.nodes.lock().await;
+    match nodes.get(&name) {
+        Some(n) => Ok(Json(node_json(n))),
+        None => Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("no registered node named '{name}'"),
+        )),
+    }
 }
 
 /// Set (or clear) a node's cordoned flag. Returns `None` if no node by
@@ -1381,6 +1403,31 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    // --- GET /fleet/nodes/{name} ---
+
+    #[tokio::test]
+    async fn get_node_returns_the_named_nodes_own_record() {
+        let mut nodes = HashMap::new();
+        nodes.insert("a".to_string(), node("a", 3, 0));
+        nodes.insert("b".to_string(), node("b", 0, 0));
+        let fleet = test_fleet(nodes);
+        let Json(body) = get_node(State(fleet), Path("a".to_string())).await.unwrap();
+        assert_eq!(body["name"], "a");
+        assert_eq!(body["vm_count"], 3);
+        assert_eq!(body["healthy"], true);
+        assert_eq!(body["cordoned"], false);
+    }
+
+    #[tokio::test]
+    async fn get_node_not_found_for_unknown_node() {
+        let fleet = test_fleet(HashMap::new());
+        let err = get_node(State(fleet), Path("ghost".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert!(err.1.contains("ghost"));
     }
 
     // --- GET /fleet/nodes/{name}/vms ---

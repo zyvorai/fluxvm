@@ -254,6 +254,11 @@ enum FleetCommand {
     /// List every registered node, each with its live `healthy`/`cordoned`
     /// state and free capacity. REST equivalent: `GET /fleet/nodes`.
     Nodes,
+    /// Exactly one node's own record -- the same shape a `Nodes` list entry
+    /// has, without fetching and filtering the whole fleet just to check one
+    /// node's `healthy`/`cordoned`/free-capacity state. REST equivalent:
+    /// `GET /fleet/nodes/{name}`.
+    Node { name: String },
     /// Exclude a node from automatic (residual-capacity) placement without
     /// touching any VM already on it or deregistering the node — same
     /// semantics as `kubectl cordon`. REST equivalent:
@@ -1451,6 +1456,14 @@ async fn main() -> Result<()> {
                         "{}",
                         serde_json::to_string_pretty(
                             &fleet_client::list_nodes(&central, token).await?
+                        )?
+                    );
+                }
+                FleetCommand::Node { name } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::get_node(&central, token, &name).await?
                         )?
                     );
                 }

@@ -862,6 +862,7 @@ subcommand — previously the only way to drive the central registry was a raw
 
 ```bash
 fluxvm fleet --central http://fleet-registry:7799 nodes
+fluxvm fleet --central http://fleet-registry:7799 node worker-1
 fluxvm fleet --central http://fleet-registry:7799 cordon worker-1
 fluxvm fleet --central http://fleet-registry:7799 uncordon worker-1
 fluxvm fleet --central http://fleet-registry:7799 node-vms worker-1
@@ -916,6 +917,24 @@ only-node-cordoned case, uncordon restoring eligibility, cordoning an unknown
 node reporting not-found rather than silently succeeding, heartbeat
 preserving an existing cordon vs. a brand-new node registering uncordoned,
 and both directions of the explicit-`"node"`-bypasses-cordon behavior).
+
+**Check one node's own state** without fetching and filtering the whole
+fleet:
+
+```bash
+curl http://fleet-registry:7799/fleet/nodes/worker-1
+```
+
+`GET /fleet/nodes/{name}` returns exactly the same JSON shape a
+`GET /fleet/nodes` list entry already has — `healthy`, `cordoned`, `labels`,
+`free_vcpus`/`free_memory_mib`, and the rest — for exactly one node, instead
+of an operator or script having to pull the whole registry and pick one entry
+back out client-side just to answer "is worker-1 cordoned right now?" or "did
+worker-1's last heartbeat actually land?". `404` for a name that was never
+registered, the same status `cordon`/`uncordon`/`deregister` already use for
+an unknown `{name}` on this same path — unlike `GET /fleet/nodes/{name}/vms`
+below, whose unknown-name case is a bad *proxy target* (`400`), not a missing
+*resource*. `fluxvm fleet node worker-1` is the CLI equivalent.
 
 **See what's actually running on a node** before deciding to cordon it (or
 after, to confirm nothing changed):
