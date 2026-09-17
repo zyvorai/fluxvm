@@ -3,6 +3,74 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **`enforce_token_quotas` counted every VM on the node, not just the calling
+  token's own, against `max_vms_per_token`/`max_memory_mib_per_token`** — the
+  function's own prior comment called this "conservative," but with two
+  tokens both configured with a quota of 10, the first token to reach 10 VMs
+  blocked every *other* token from creating any more: a quota meant to
+  contain one noisy tenant instead let that tenant deny service to every
+  other tenant, the opposite of what a per-token quota is for. Fixed by
+  stamping a new `CreateVmRequest.created_by_token` server-side in
+  `create_vm`/`create_sandbox` from the authenticated caller (never trusted
+  from the request body) and filtering by it. Deliberately *not*
+  `skip_deserializing`: `fluxvm-storage::Store` round-trips every `VmRecord`
+  through the same serde codec on every `list()`/`get()`, so a
+  `skip_deserializing` field silently comes back `None` after the first
+  storage round trip — this broke quota enforcement outright during
+  development (caught by a failing regression test) before being fixed by
+  relying on the handler's unconditional overwrite instead, proven by a
+  dedicated spoofing test. `enforce_token_quotas` also moved from
+  `fluxvm-api` into `VmManager` (`fluxvm-scheduler`) so `create_vm` and
+  `create_sandbox` share one implementation — `create_sandbox` previously
+  skipped quota enforcement entirely, a second real gap this closes. 3 new
+  tests: cross-token isolation, request-body spoofing resistance, and a
+  serde round-trip proving the persistence path the `skip_deserializing`
+  attempt broke.
+- **The sandbox HTTP proxy had no cap on the guest's response body** —
+  `sandbox_proxy_inner` capped the *request* body at 16 MiB but the
+  *response* read from the guest (`up.into_body().collect()`) had only a
+  30s timeout, no size limit at all: a malicious or compromised guest could
+  stream an effectively unbounded response for up to 30s per request, a
+  straightforward host-memory-exhaustion primitive from inside any tenant's
+  own sandbox. Fixed with one named constant,
+  `SANDBOX_PROXY_MAX_BODY_BYTES` (16 MiB), now shared by both the existing
+  request cap and a new response cap via
+  `Limited::new(up.into_body(), SANDBOX_PROXY_MAX_BODY_BYTES).collect()`.
+  Factored the handshake/send/receive half of `sandbox_proxy_inner` into a
+  new `proxy_over_tcp` helper, testable without `CAP_SYS_ADMIN`/
+  `connect_in_netns`: `oversized_guest_response_body_is_rejected_not_fully_buffered`
+  streams a genuine over-cap response from a real loopback `TcpListener`
+  standing in as the guest and asserts the proxy doesn't return it fully
+  buffered.
+- **The sandbox HTTP proxy routes had no role check at all** —
+  `sandbox_http_proxy`/`sandbox_http_proxy_default_port` took no
+  `Extension<Role>` parameter, unlike every other guest-reaching route
+  (`sandbox_fs_read`, `sandbox_process`, `agent_exec`, `qga_exec`, ...),
+  which all gate on `require_admin(role)?`. Since the route is registered
+  with `any(...)`, a `read-only` token could issue arbitrary HTTP methods
+  into a tenant's guest through it — the same shape as the already-fixed
+  `POST /v1/egress/check` gap above, missed by that earlier audit because
+  these two handlers return a bare `Response`, not `ApiResult<T>`, so the
+  `require_admin` error needs `.into_response()` instead of `?`. Fixed by
+  adding the same gate both handlers' siblings already have. 2 new tests
+  (`readonly_token_cannot_call_sandbox_proxy`/
+  `admin_token_can_reach_sandbox_proxy_role_gate`).
+- **A real, currently-exploitable cross-tenant bypass on the short-form
+  sandbox proxy route** — `extract_vm_uuid` only recognized `/v1/vms/` and
+  `/v1/sandboxes/` path prefixes; `tenant_guard_middleware` silently no-ops
+  when it returns `None`. The router registers a third, separately-named
+  proxy route matching neither prefix, `/sandbox/{id}/{*path}`
+  (`sandbox_http_proxy_default_port`) — the actual AI-agent-facing entry
+  point per `docs/agent-sandbox-gaps.md`'s "Guest HTTP reverse proxy"
+  description, distinct from the already-correctly-scoped long-form
+  `/v1/sandboxes/{id}/http/{port}/{*path}` route. Any authenticated caller
+  who knew or guessed another tenant's sandbox UUID could proxy HTTP
+  traffic straight into that tenant's guest through this specific route.
+  Fixed by teaching `extract_vm_uuid` the third prefix — no handler changes
+  needed, `tenant_guard_middleware` already wraps the whole router as an
+  outer layer. New test,
+  `short_form_sandbox_proxy_route_is_tenant_scoped`, mirroring the existing
+  `sandbox_id_routes_are_tenant_scoped_like_vm_routes` test exactly.
 - **A wedged `fluxvm-hypervisor` child could hang `pause`/`resume`/`shutdown`/
   snapshot control requests forever** — `control::request` had no timeout on
   its Unix-socket round trip, so a stuck vCPU thread still holding `VmState`'s
@@ -142,6 +210,69 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`GET /fleet/nodes/{name}`** — exactly one node's own fleet record
+  (`healthy`/`cordoned`/`labels`/free-capacity), without a caller having to
+  fetch and filter the whole `GET /fleet/nodes` list just to check one
+  node's state in isolation. `404` for a name that was never registered,
+  matching the status `cordon`/`uncordon`/`deregister` already use for the
+  identical case on this same path segment (unlike
+  `GET /fleet/nodes/{name}/vms`'s `400`, since that route's unknown-name
+  case is a bad *proxy target*, not a missing *resource*). `fluxvm fleet
+  node NAME` is the matching CLI form.
+- **Label/`nodeSelector`-aware placement for the fleet registry** —
+  automatic `POST /fleet/vms` placement was purely capacity-based
+  (`pick_best_capacity` scored nodes only on residual vCPU/memory), with no
+  way to express "only nodes in zone X" or "only nodes with a GPU" short of
+  pinning an exact `--node`, which throws away all failover. `NodeInfo`/
+  `RegisterRequest` gain a `labels: HashMap<String, String>` (serde-default,
+  backward compatible with an older node agent that predates labels);
+  `fluxvm-agent node` gains a repeatable `--label key=value` flag, carried
+  on every heartbeat. `POST /fleet/vms` accepts an optional `"nodeSelector"`
+  object; placement now filters candidates to nodes whose labels are a
+  superset of it (Kubernetes `nodeSelector` semantics) before scoring
+  capacity, threaded through every retry of the failover loop below, not
+  just the first pick. An unmatched selector fails with a clear 503 naming
+  it. An explicit `"node"` target still bypasses the selector entirely,
+  same as it bypasses cordoning. `GET /fleet/nodes` now reports each node's
+  labels; `fluxvm fleet create --node-selector key=value` is the matching
+  CLI form. 10 new tests.
+- **Automatic fleet-wide VM placement now fails over to the next-best node
+  when the first pick is unreachable**, instead of hard-failing the create
+  outright. `pick_best_capacity` chooses the highest-residual-capacity node
+  using only heartbeat data; a node only gets excluded once its heartbeat
+  has gone stale past `HEALTHY_WINDOW_SECS` (30s), so a node that crashed,
+  hung, or dropped off the network moments after its last heartbeat still
+  looked "healthy" and got picked, hard-failing the create even while other
+  schedulable nodes sat idle. New `pick_best_capacity_excluding` (exclusion-
+  set variant; `pick_best_capacity` is now a thin wrapper, so existing call
+  sites/tests are unaffected) and a `DispatchError::{Unreachable,Rejected}`
+  split: an unreachable node (connection failure, or a response that isn't
+  valid JSON) is excluded and the next-best remaining candidate tried,
+  looping until one accepts the create or every schedulable node has been
+  tried; a node that reached its own `fluxvm serve` and explicitly rejected
+  the request (bad fields) is never retried elsewhere, since every other
+  node would reject the identical body identically. An explicit `"node"`
+  target is unaffected — still a single, non-retried attempt, so a caller
+  who pinned a node gets an honest failure instead of a surprise landing
+  somewhere else. 4 new tests.
+- **`fluxvm fleet` — CLI parity for the fleet registry's REST API**
+  (`nodes`, `cordon`, `uncordon`, `deregister`, `capacity`, `create`,
+  `vms`, `node-vms`, `delete`, `node`). Every fleet operation used to mean
+  a raw `curl` call; this gives `fluxvm-agent central`'s multi-host fleet
+  registry the same CLI-parity treatment `migrate`/`ping`/`copy-to` already
+  gave the per-node REST API, just against the central registry instead of
+  a node's own `fluxvm serve`. New `crates/fluxvm-cli/src/fleet_client.rs`,
+  a thin `reqwest`-based client speaking the same opaque-JSON boundary
+  `fluxvm-agent::central` itself uses (it treats `CreateVmRequest`/
+  `VmRecord` bodies as opaque JSON rather than depending on `fluxvm-core`,
+  and this client sits on the other side of exactly that boundary). Real
+  integration tests spin up the actual `fluxvm-agent::central` router, not
+  mocks.
+- **`GET /fleet/capacity`** — a fleet-wide aggregate distinguishing total,
+  free, and schedulable capacity (a cordoned or unhealthy node still counts
+  toward total/free but not schedulable), closing the gap between
+  `GET /fleet/nodes` listing per-node numbers and there being any single
+  answer to "how much room is left in the fleet right now."
 - **`fluxvm resources` — CLI parity for the cgroup resource patch.**
   `POST /v1/vms/{id}/resources` has existed since cgroup v2 resource control
   landed, but was explicitly left REST-only when `freeze`/`thaw`/`frozen`
