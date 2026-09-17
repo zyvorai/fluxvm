@@ -902,11 +902,22 @@ async fn sandbox_process(
     )))
 }
 
+// Admin-only, like every other guest-reaching route (sandbox_fs_read,
+// sandbox_process, agent_exec, qga_exec, ...). These two handlers had no
+// role check of any kind before -- registered with `any(...)`, a
+// `read-only` token could issue arbitrary HTTP methods into a tenant's
+// guest through the proxy. They return a bare `Response` rather than an
+// `ApiResult<T>`, so the `require_admin` error has to be converted with
+// `.into_response()` explicitly instead of `?`.
 async fn sandbox_http_proxy_default_port(
     State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
     Path((id, path)): Path<(Uuid, String)>,
     req: Request,
 ) -> Response {
+    if let Err(e) = require_admin(role) {
+        return e.into_response();
+    }
     let port = match m.get(id).await {
         Ok(vm) => m.sandbox_http_proxy_port(&vm).await,
         Err(_) => m.cfg.sandbox.http_proxy_default_port,
@@ -916,9 +927,13 @@ async fn sandbox_http_proxy_default_port(
 
 async fn sandbox_http_proxy(
     State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
     Path((id, port, path)): Path<(Uuid, u16, String)>,
     req: Request,
 ) -> Response {
+    if let Err(e) = require_admin(role) {
+        return e.into_response();
+    }
     sandbox_proxy_inner(m, id, port, path, req).await
 }
 
@@ -3345,6 +3360,60 @@ mod tests {
             assert_ne!(
                 request(app, "GET", &format!("/sandbox/{id}/x"), Some("acme"), None).await,
                 StatusCode::NOT_FOUND
+            );
+        }
+
+        #[tokio::test]
+        async fn readonly_token_cannot_call_sandbox_proxy() {
+            // Regression test: sandbox_http_proxy/sandbox_http_proxy_default_port
+            // previously had no role check at all -- registered with
+            // `any(...)`, a read-only token could issue arbitrary HTTP
+            // methods (not just GET) into a tenant's guest through the
+            // proxy, unlike every other guest-reaching route
+            // (sandbox_fs_read, sandbox_process, agent_exec, qga_exec,
+            // ...), which all gate on Extension<Role> + require_admin.
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            assert_eq!(
+                request(app, "GET", &format!("/sandbox/{id}/x"), Some("ro"), None).await,
+                StatusCode::FORBIDDEN
+            );
+        }
+
+        #[tokio::test]
+        async fn admin_token_can_reach_sandbox_proxy_role_gate() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "admin".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            // Clears the role gate -- may still fail downstream (no real
+            // netns/guest in this test), but that's a different, later
+            // error, never the 403 a read-only token gets above.
+            assert_ne!(
+                request(app, "GET", &format!("/sandbox/{id}/x"), Some("admin"), None).await,
+                StatusCode::FORBIDDEN
             );
         }
 
