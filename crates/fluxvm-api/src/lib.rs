@@ -19,7 +19,7 @@ use fluxvm_core::{
 };
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::json;
@@ -982,6 +982,126 @@ async fn connect_in_netns(
     tokio::net::TcpStream::from_std(std_stream)
 }
 
+/// Caps both the request body read from the caller and the response body
+/// read back from the guest in `sandbox_proxy_inner`/`proxy_over_tcp`. A
+/// compromised or buggy guest can otherwise stream an effectively unbounded
+/// response for up to 30s per request (the only prior limit was the
+/// timeout, not a size) -- a straightforward host-memory-exhaustion
+/// primitive from inside any tenant's own sandbox.
+const SANDBOX_PROXY_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// The hyper-client half of the sandbox HTTP proxy: handshake over an
+/// already-connected stream to the guest, forward the request, and read
+/// back the response (capped at `SANDBOX_PROXY_MAX_BODY_BYTES`). Factored
+/// out of `sandbox_proxy_inner` so it's testable directly against a real
+/// loopback TCP "guest" -- `sandbox_proxy_inner`'s own connection setup
+/// (`connect_in_netns`) needs `CAP_SYS_ADMIN` for `setns()`, unavailable on
+/// this project's remote build host, let alone in a normal test run, so
+/// there was previously no way to exercise this half of the proxy at all.
+async fn proxy_over_tcp(
+    tcp: tokio::net::TcpStream,
+    method: Method,
+    uri: String,
+    headers: axum::http::HeaderMap,
+    body: bytes::Bytes,
+) -> Response {
+    let (mut sender, connection) =
+        match hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
+            }
+        };
+    // Drives the connection's I/O; must stay alive for `sender` to work at
+    // all, but its exit (guest closes the connection) isn't itself an error.
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut builder = hyper::Request::builder().method(method).uri(uri);
+    for (k, v) in headers.iter() {
+        // host: about the wrong peer once forwarded. content-length: hyper
+        // computes and sets its own from the `Full` body below -- forwarding
+        // the original value duplicates the header, and on a non-empty body
+        // (anything but the plain GETs this path was first exercised with)
+        // that framing mismatch left the guest's HTTP server waiting on body
+        // bytes that were never coming, hanging the request indefinitely
+        // instead of erroring.
+        if k == header::HOST || k == header::CONTENT_LENGTH || k == header::TRANSFER_ENCODING {
+            continue;
+        }
+        builder = builder.header(k, v);
+    }
+    let outgoing = match builder.body(Full::new(body)) {
+        Ok(r) => r,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, format!("building request: {e}")).into_response();
+        }
+    };
+
+    let up = match tokio::time::timeout(Duration::from_secs(30), sender.send_request(outgoing))
+        .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
+        }
+        Err(_) => {
+            return (StatusCode::BAD_GATEWAY, "guest upstream: request timed out").into_response();
+        }
+    };
+    let status = StatusCode::from_u16(up.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let headers = up.headers().clone();
+    let bytes = match tokio::time::timeout(
+        Duration::from_secs(30),
+        Limited::new(up.into_body(), SANDBOX_PROXY_MAX_BODY_BYTES).collect(),
+    )
+    .await
+    {
+        Ok(Ok(collected)) => collected.to_bytes(),
+        Ok(Err(e)) => {
+            // Covers both a genuine guest-connection error and a
+            // `Limited`-imposed cap violation (`LengthLimitError`) without a
+            // separate branch -- `Limited<B>::Error` is `Box<dyn
+            // std::error::Error + Send + Sync>`, which both `Display`s
+            // through the same `{e}` this arm already used for the
+            // unwrapped `hyper::Error` before this body was capped.
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: reading response body: {e}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                "guest upstream: reading response body timed out",
+            )
+                .into_response();
+        }
+    };
+    let mut response = Response::builder().status(status);
+    for (k, v) in headers.iter() {
+        // connection/keep-alive describe *this* handler's short-lived,
+        // one-shot connection to the guest (which we tear down right after
+        // this response regardless of what it says) -- forwarding them onto
+        // the outer response tells the caller's connection pool it can
+        // reuse this connection to fluxvm-api's own server for a "next
+        // request" that has nothing to do with the guest's keep-alive.
+        // Harmless when the semantics happen to line up; when they don't,
+        // the caller tries to reuse a connection axum's own server settings
+        // already closed, and reqwest reports it as a bare "connection
+        // closed before message completed" with no indication why.
+        if k == header::CONNECTION || k == header::HeaderName::from_static("keep-alive") {
+            continue;
+        }
+        response = response.header(k, v);
+    }
+    response
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+}
+
 async fn sandbox_proxy_inner(
     m: Arc<VmManager>,
     id: Uuid,
@@ -1045,95 +1165,11 @@ async fn sandbox_proxy_inner(
         }
     };
 
-    let (mut sender, connection) =
-        match hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await {
-            Ok(pair) => pair,
-            Err(e) => {
-                return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
-            }
-        };
-    // Drives the connection's I/O; must stay alive for `sender` to work at
-    // all, but its exit (guest closes the connection) isn't itself an error.
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
-
-    let body = match axum::body::to_bytes(req.into_body(), 16 * 1024 * 1024).await {
+    let body = match axum::body::to_bytes(req.into_body(), SANDBOX_PROXY_MAX_BODY_BYTES).await {
         Ok(b) => b,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("body: {e}")).into_response(),
     };
-    let mut builder = hyper::Request::builder().method(method).uri(uri);
-    for (k, v) in headers.iter() {
-        // host: about the wrong peer once forwarded. content-length: hyper
-        // computes and sets its own from the `Full` body below -- forwarding
-        // the original value duplicates the header, and on a non-empty body
-        // (anything but the plain GETs this path was first exercised with)
-        // that framing mismatch left the guest's HTTP server waiting on body
-        // bytes that were never coming, hanging the request indefinitely
-        // instead of erroring.
-        if k == header::HOST || k == header::CONTENT_LENGTH || k == header::TRANSFER_ENCODING {
-            continue;
-        }
-        builder = builder.header(k, v);
-    }
-    let outgoing = match builder.body(Full::new(body)) {
-        Ok(r) => r,
-        Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("building request: {e}")).into_response();
-        }
-    };
-
-    let up = match tokio::time::timeout(Duration::from_secs(30), sender.send_request(outgoing))
-        .await
-    {
-        Ok(Ok(r)) => r,
-        Ok(Err(e)) => {
-            return (StatusCode::BAD_GATEWAY, format!("guest upstream: {e}")).into_response();
-        }
-        Err(_) => {
-            return (StatusCode::BAD_GATEWAY, "guest upstream: request timed out").into_response();
-        }
-    };
-    let status = StatusCode::from_u16(up.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let headers = up.headers().clone();
-    let bytes = match tokio::time::timeout(Duration::from_secs(30), up.into_body().collect()).await
-    {
-        Ok(Ok(collected)) => collected.to_bytes(),
-        Ok(Err(e)) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("guest upstream: reading response body: {e}"),
-            )
-                .into_response();
-        }
-        Err(_) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                "guest upstream: reading response body timed out",
-            )
-                .into_response();
-        }
-    };
-    let mut response = Response::builder().status(status);
-    for (k, v) in headers.iter() {
-        // connection/keep-alive describe *this* handler's short-lived,
-        // one-shot connection to the guest (which we tear down right after
-        // this response regardless of what it says) -- forwarding them onto
-        // the outer response tells the caller's connection pool it can
-        // reuse this connection to fluxvm-api's own server for a "next
-        // request" that has nothing to do with the guest's keep-alive.
-        // Harmless when the semantics happen to line up; when they don't,
-        // the caller tries to reuse a connection axum's own server settings
-        // already closed, and reqwest reports it as a bare "connection
-        // closed before message completed" with no indication why.
-        if k == header::CONNECTION || k == header::HeaderName::from_static("keep-alive") {
-            continue;
-        }
-        response = response.header(k, v);
-    }
-    response
-        .body(Body::from(bytes))
-        .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
+    proxy_over_tcp(tcp, method, uri, headers, body).await
 }
 
 async fn list_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
@@ -3715,6 +3751,79 @@ mod tests {
                 ws_message_to_pty_frame(&Message::Pong(Vec::new().into())),
                 None
             );
+        }
+    }
+
+    mod sandbox_proxy_body_cap {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        #[tokio::test]
+        async fn oversized_guest_response_body_is_rejected_not_fully_buffered() {
+            // Regression test for the previously-unbounded response body
+            // read in sandbox_proxy_inner: `up.into_body().collect()` had
+            // no size cap at all, only the existing 30s timeout -- a
+            // compromised/buggy guest could stream an effectively
+            // unbounded response for up to 30s per request, a
+            // straightforward host-memory-exhaustion primitive from inside
+            // any tenant's own sandbox. The full proxy path needs
+            // CAP_SYS_ADMIN for connect_in_netns (not available on this
+            // project's remote build host either), so this exercises
+            // `proxy_over_tcp` -- the send/receive half factored out of
+            // `sandbox_proxy_inner` specifically to make this testable --
+            // directly against a real loopback TCP listener standing in
+            // for the "guest".
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+
+            let over_cap = SANDBOX_PROXY_MAX_BODY_BYTES + 4096;
+            let guest = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                // Drain the (empty-body GET) request before responding.
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap();
+                    if n == 0 || buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {over_cap}\r\n\r\n");
+                sock.write_all(header.as_bytes()).await.unwrap();
+                // A real Content-Length this large, fully written -- proves
+                // the cap fires on its own rather than relying on the
+                // guest ever running short or the connection erroring out.
+                // Errors past this point are expected once the capped
+                // client gives up and closes its side; ignored rather than
+                // unwrapped so this task always finishes promptly.
+                let chunk = vec![0u8; 64 * 1024];
+                let mut written = 0usize;
+                while written < over_cap {
+                    let n = chunk.len().min(over_cap - written);
+                    let _ = sock.write_all(&chunk[..n]).await;
+                    written += n;
+                }
+                let _ = sock.shutdown().await;
+            });
+
+            let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let response = proxy_over_tcp(
+                tcp,
+                Method::GET,
+                "/".to_string(),
+                axum::http::HeaderMap::new(),
+                bytes::Bytes::new(),
+            )
+            .await;
+
+            // Without the Limited::new(..., SANDBOX_PROXY_MAX_BODY_BYTES)
+            // cap, this would come back 200 OK with the full
+            // over-cap-byte body fully buffered (comfortably within the
+            // 30s timeout over loopback) -- the point of this test is
+            // that it does not.
+            assert_ne!(response.status(), StatusCode::OK);
+
+            guest.await.unwrap();
         }
     }
 }
