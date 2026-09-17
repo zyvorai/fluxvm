@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::json;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 pub struct NodeConfig {
     pub name: String,
@@ -24,6 +24,10 @@ pub struct NodeConfig {
     pub interval: Duration,
     /// Bearer token shared with `fluxvm-agent central --token`.
     pub token: Option<String>,
+    /// Operator-set labels (`--label key=value`, repeatable) carried on
+    /// every heartbeat -- see `central::NodeInfo::labels` for what they're
+    /// used for (`nodeSelector`-based placement).
+    pub labels: HashMap<String, String>,
 }
 
 /// Runs forever, heartbeating every `cfg.interval`. Logs and keeps going on
@@ -59,6 +63,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
         "vcpus_total": vcpus_total,
         "memory_mib_total": memory_mib_total,
         "vm_count": vm_count,
+        "labels": cfg.labels,
     });
     let mut req = http.post(format!("{}/fleet/register", cfg.central_url));
     if let Some(t) = &cfg.token {

@@ -17,6 +17,7 @@
 
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 fn authed(req: reqwest::RequestBuilder, token: Option<&str>) -> reqwest::RequestBuilder {
@@ -110,17 +111,32 @@ pub async fn capacity(central: &str, token: Option<&str>) -> Result<Value> {
 /// top-level `"node"` field central reads to bypass automatic placement —
 /// overriding whatever the spec file itself may have set, since an
 /// explicit `--node` flag on the command line is the more specific
-/// request.
+/// request. `node_selector`, when non-empty, is merged the same way into
+/// `body["nodeSelector"]` — one flag's keys overriding a same-named key the
+/// spec file's own `"nodeSelector"` object already set, the rest of that
+/// object's entries left untouched.
 pub async fn create_vm(
     central: &str,
     token: Option<&str>,
     mut body: Value,
     node: Option<String>,
+    node_selector: HashMap<String, String>,
 ) -> Result<Value> {
+    let obj = body
+        .as_object_mut()
+        .context("VM spec must be a JSON object")?;
     if let Some(node) = node {
-        body.as_object_mut()
-            .context("VM spec must be a JSON object")?
-            .insert("node".into(), Value::String(node));
+        obj.insert("node".into(), Value::String(node));
+    }
+    if !node_selector.is_empty() {
+        let existing = obj
+            .entry("nodeSelector")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .context("VM spec's \"nodeSelector\" must be a JSON object")?;
+        for (k, v) in node_selector {
+            existing.insert(k, Value::String(v));
+        }
     }
     let http = reqwest::Client::new();
     let resp = authed(http.post(format!("{central}/fleet/vms")), token)
@@ -198,7 +214,20 @@ mod tests {
     }
 
     async fn register_node(central: &str, name: &str, fluxvm_url: &str) {
+        register_node_with_labels(central, name, fluxvm_url, &[]).await;
+    }
+
+    async fn register_node_with_labels(
+        central: &str,
+        name: &str,
+        fluxvm_url: &str,
+        labels: &[(&str, &str)],
+    ) {
         let http = reqwest::Client::new();
+        let labels: HashMap<String, String> = labels
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         let resp = http
             .post(format!("{central}/fleet/register"))
             .json(&json!({
@@ -207,6 +236,7 @@ mod tests {
                 "vcpus_total": 8,
                 "memory_mib_total": 16384,
                 "vm_count": 0,
+                "labels": labels,
             }))
             .send()
             .await
@@ -317,9 +347,15 @@ mod tests {
         register_node(&central, "worker-1", &node_url).await;
 
         let spec = json!({"name": "test-vm"});
-        let result = create_vm(&central, None, spec, Some("worker-1".to_string()))
-            .await
-            .unwrap();
+        let result = create_vm(
+            &central,
+            None,
+            spec,
+            Some("worker-1".to_string()),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(result["node"], "worker-1");
         assert_eq!(result["vm"]["name"], "test-vm");
     }
@@ -327,10 +363,57 @@ mod tests {
     #[tokio::test]
     async fn create_vm_with_no_node_and_no_registered_nodes_fails_clearly() {
         let (central, _dir) = spawn_central(None).await;
-        let err = create_vm(&central, None, json!({"name": "x"}), None)
+        let err = create_vm(&central, None, json!({"name": "x"}), None, HashMap::new())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("503") || err.to_string().contains("no healthy"));
+    }
+
+    #[tokio::test]
+    async fn create_vm_merges_the_node_selector_flag_and_routes_to_a_matching_node() {
+        let node_app = axum::Router::new().route(
+            "/v1/vms",
+            axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+                axum::Json(
+                    json!({"id": "22222222-2222-2222-2222-222222222222", "name": body["name"]}),
+                )
+            }),
+        );
+        let node_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node_addr = node_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(node_listener, node_app).await.unwrap();
+        });
+        let node_url = format!("http://{node_addr}");
+
+        let (central, _dir) = spawn_central(None).await;
+        register_node_with_labels(&central, "worker-gpu", &node_url, &[("gpu", "true")]).await;
+
+        let spec = json!({"name": "test-vm"});
+        let selector: HashMap<String, String> = [("gpu".to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
+        let result = create_vm(&central, None, spec, None, selector)
+            .await
+            .unwrap();
+        assert_eq!(result["node"], "worker-gpu");
+    }
+
+    #[tokio::test]
+    async fn create_vm_node_selector_matching_nothing_is_a_readable_error() {
+        let (central, _dir) = spawn_central(None).await;
+        register_node(&central, "worker-1", "http://worker-1:7788").await;
+
+        let selector: HashMap<String, String> = [("gpu".to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
+        let err = create_vm(&central, None, json!({"name": "x"}), None, selector)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("nodeSelector"),
+            "error should name the unmatched selector: {err}"
+        );
     }
 
     #[tokio::test]

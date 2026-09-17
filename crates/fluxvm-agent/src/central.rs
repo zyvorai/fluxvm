@@ -58,11 +58,30 @@ pub struct NodeInfo {
     /// cleanly (as `false`, the honest "never cordoned" value).
     #[serde(default)]
     pub cordoned: bool,
+    /// Operator-defined labels this node reports on every heartbeat (e.g.
+    /// `zone=us-east`, `gpu=true`), set via `fluxvm-agent node --label
+    /// key=value` (repeatable). Purely a placement input: `POST /fleet/vms`
+    /// can carry a `"nodeSelector"` object, and automatic placement only
+    /// ever considers a node whose labels are a superset of it -- the same
+    /// exact-match semantics as Kubernetes' own `spec.nodeSelector`.
+    /// `#[serde(default)]` so a `fleet-nodes.json` written before this
+    /// field existed still loads cleanly (as the honest "no labels" empty
+    /// map).
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 impl NodeInfo {
     fn healthy(&self) -> bool {
         (Utc::now() - self.last_seen).num_seconds() < HEALTHY_WINDOW_SECS
+    }
+
+    /// True iff every key/value pair in `selector` is present, with an
+    /// exact-match value, in this node's own labels. An empty selector
+    /// always matches -- "no selector" means no placement constraint,
+    /// same as omitting `nodeSelector` entirely.
+    fn matches_selector(&self, selector: &HashMap<String, String>) -> bool {
+        selector.iter().all(|(k, v)| self.labels.get(k) == Some(v))
     }
 
     fn estimated_used_vcpus(&self) -> u32 {
@@ -124,6 +143,10 @@ pub struct RegisterRequest {
     pub vcpus_total: u32,
     pub memory_mib_total: u64,
     pub vm_count: usize,
+    /// See `NodeInfo::labels`. `#[serde(default)]` so an older node agent
+    /// that predates labels can still heartbeat successfully.
+    #[serde(default)]
+    pub labels: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -300,6 +323,7 @@ fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
             vm_count: req.vm_count,
             last_seen: Utc::now(),
             cordoned,
+            labels: req.labels,
         },
     );
 }
@@ -323,6 +347,7 @@ fn node_json(n: &NodeInfo) -> Value {
         "last_seen": n.last_seen,
         "healthy": n.healthy(),
         "cordoned": n.cordoned,
+        "labels": n.labels,
         "free_vcpus": n.free_vcpus(),
         "free_memory_mib": n.free_memory_mib(),
     })
@@ -446,29 +471,44 @@ async fn deregister_node(
 
 /// Residual-capacity placement: prefer the healthy node with the highest
 /// free CPU/memory fraction that can fit the request; tie-break by fewest
-/// VMs then name.
+/// VMs then name. No label constraint -- equivalent to an empty
+/// `nodeSelector`. `#[cfg(test)]`: `resolve_target`/`create_vm` now call
+/// `pick_best_capacity_excluding` directly (they always have a selector,
+/// even if empty), but this 3-arg convenience form is still handy for
+/// tests that don't care about selectors at all.
+#[cfg(test)]
 fn pick_best_capacity(
     nodes: &HashMap<String, NodeInfo>,
     request_vcpus: u32,
     request_mem: u64,
 ) -> Option<NodeInfo> {
-    pick_best_capacity_excluding(nodes, request_vcpus, request_mem, &HashSet::new())
+    pick_best_capacity_excluding(
+        nodes,
+        request_vcpus,
+        request_mem,
+        &HashSet::new(),
+        &HashMap::new(),
+    )
 }
 
 /// Same as `pick_best_capacity`, but never considers a node whose name is
-/// in `exclude`. Used by `create_vm`'s automatic-placement failover loop:
-/// each candidate that turns out to be unreachable gets added to `exclude`
-/// so the next iteration picks the next-best *remaining* node instead of
-/// picking the same dead one again.
+/// in `exclude`, and only ever considers a node whose labels satisfy
+/// `selector` (see `NodeInfo::matches_selector`; an empty selector matches
+/// every node). `exclude` is used by `create_vm`'s automatic-placement
+/// failover loop: each candidate that turns out to be unreachable gets
+/// added to `exclude` so the next iteration picks the next-best
+/// *remaining* node instead of picking the same dead one again.
 fn pick_best_capacity_excluding(
     nodes: &HashMap<String, NodeInfo>,
     request_vcpus: u32,
     request_mem: u64,
     exclude: &HashSet<String>,
+    selector: &HashMap<String, String>,
 ) -> Option<NodeInfo> {
     nodes
         .values()
         .filter(|n| !exclude.contains(&n.name))
+        .filter(|n| n.matches_selector(selector))
         .filter_map(|n| {
             n.capacity_score(request_vcpus, request_mem)
                 .map(|score| (score, n))
@@ -479,6 +519,53 @@ fn pick_best_capacity_excluding(
                 .then(a.3.cmp(&b.3).reverse())
         })
         .map(|(_, n)| n.clone())
+}
+
+/// Renders a `nodeSelector` map deterministically (sorted keys) for an
+/// error message -- a `HashMap`'s own iteration order is unspecified, and
+/// an operator staring at an error needs the same selector spelled the
+/// same way every time, not something that shuffles between requests.
+fn format_selector(selector: &HashMap<String, String>) -> String {
+    let mut pairs: Vec<String> = selector.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    pairs.sort();
+    format!("{{{}}}", pairs.join(", "))
+}
+
+/// The error message for "automatic placement found no candidate",
+/// distinguishing a plain capacity/health exhaustion from a `nodeSelector`
+/// that simply doesn't match any registered node's labels -- otherwise an
+/// operator who typo'd a label value sees the exact same unhelpful "no
+/// healthy, uncordoned nodes registered" as a genuinely empty fleet.
+fn no_candidate_message(selector: &HashMap<String, String>) -> String {
+    if selector.is_empty() {
+        "no healthy, uncordoned nodes registered".into()
+    } else {
+        format!(
+            "no healthy, uncordoned node matches nodeSelector {}",
+            format_selector(selector)
+        )
+    }
+}
+
+/// Pulls `"nodeSelector"` (a flat string->string object, e.g.
+/// `{"zone": "us-east"}`) out of a `POST /fleet/vms` body, removing it in
+/// the process -- like `"node"`, it's a routing instruction for `central`
+/// itself, not part of the `CreateVmRequest` a node's own `fluxvm serve`
+/// understands, so it must never be forwarded downstream. A non-object
+/// value or a non-string entry is silently ignored rather than rejected,
+/// matching `request_sizes`' own lenient-default posture elsewhere in this
+/// same handler -- this module treats bodies as opaque JSON with minimal
+/// validation by design (see this file's own doc comment).
+fn extract_selector(body: &mut Value) -> HashMap<String, String> {
+    body.as_object_mut()
+        .and_then(|o| o.remove("nodeSelector"))
+        .and_then(|v| v.as_object().cloned())
+        .map(|obj| {
+            obj.into_iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn request_sizes(body: &Value) -> (u32, u64) {
@@ -495,18 +582,21 @@ fn request_sizes(body: &Value) -> (u32, u64) {
 }
 
 /// Resolve which node a `POST /fleet/vms` should land on. An explicit
-/// `"node"` name bypasses placement entirely — including a cordoned
-/// node — the same way a Kubernetes Pod with `spec.nodeName` set bypasses
-/// the scheduler and can still land on a cordoned node: cordoning only
-/// ever removes a node from *automatic* placement's candidate set, it was
-/// never a per-node admission check. Automatic (no `"node"` given)
-/// placement excludes cordoned nodes via `pick_best_capacity` ->
-/// `capacity_score` regardless of how much free capacity they have.
+/// `"node"` name bypasses placement entirely — including a cordoned node
+/// AND `selector` (`nodeSelector`) — the same way a Kubernetes Pod with
+/// `spec.nodeName` set bypasses the scheduler (and its own nodeSelector
+/// check) and can still land on a cordoned node: cordoning and
+/// `nodeSelector` only ever constrain *automatic* placement's candidate
+/// set, neither is a per-node admission check. Automatic (no `"node"`
+/// given) placement excludes cordoned and label-mismatched nodes via
+/// `pick_best_capacity_excluding` -> `capacity_score`/`matches_selector`
+/// regardless of how much free capacity they have.
 fn resolve_target(
     nodes: &HashMap<String, NodeInfo>,
     requested_node: Option<String>,
     req_vcpus: u32,
     req_mem: u64,
+    selector: &HashMap<String, String>,
 ) -> Result<NodeInfo, AppError> {
     match requested_node {
         Some(name) => nodes.get(&name).cloned().ok_or_else(|| {
@@ -515,12 +605,13 @@ fn resolve_target(
                 format!("no registered node named '{name}'"),
             )
         }),
-        None => pick_best_capacity(nodes, req_vcpus, req_mem).ok_or_else(|| {
-            AppError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "no healthy, uncordoned nodes registered".into(),
-            )
-        }),
+        None => pick_best_capacity_excluding(nodes, req_vcpus, req_mem, &HashSet::new(), selector)
+            .ok_or_else(|| {
+                AppError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    no_candidate_message(selector),
+                )
+            }),
     }
 }
 
@@ -568,16 +659,22 @@ async fn dispatch_create(
 }
 
 /// `POST /fleet/vms`. Body is a normal `CreateVmRequest` JSON, optionally
-/// with a top-level `"node"` field naming an exact node to target — when
-/// absent, residual-capacity placement picks a healthy, uncordoned node.
+/// with a top-level `"node"` field naming an exact node to target, and/or a
+/// `"nodeSelector"` object (flat string->string, e.g.
+/// `{"zone": "us-east"}`) constraining automatic placement to a node whose
+/// labels are a superset of it — when neither is given, residual-capacity
+/// placement picks any healthy, uncordoned node. Both fields are stripped
+/// before the body is forwarded to a node's own `fluxvm serve`, which knows
+/// nothing about either.
 ///
-/// An explicit `"node"` is a single, non-retried attempt — same
-/// bypass-the-scheduler semantics as `resolve_target` documents, so a
-/// caller that pinned a node gets an honest failure if that exact node is
-/// down rather than a surprise landing somewhere else.
+/// An explicit `"node"` is a single, non-retried attempt that bypasses
+/// `"nodeSelector"` entirely, same as it bypasses cordoning — see
+/// `resolve_target`'s doc comment — so a caller that pinned a node gets an
+/// honest failure if that exact node is down rather than a surprise landing
+/// somewhere else.
 ///
 /// Automatic placement (no `"node"`) instead fails over: if the node
-/// `pick_best_capacity` picked turns out to be unreachable — its heartbeat
+/// `pick_best_capacity_excluding` picked turns out to be unreachable — its heartbeat
 /// was fresh enough to look healthy, but it's actually down, wedged, or
 /// network-partitioned right now — that node is excluded and the
 /// next-best remaining candidate is tried, until one accepts the create or
@@ -593,13 +690,14 @@ async fn create_vm(
         .as_object_mut()
         .and_then(|o| o.remove("node"))
         .and_then(|v| v.as_str().map(str::to_string));
+    let selector = extract_selector(&mut body);
 
     let (req_vcpus, req_mem) = request_sizes(&body);
 
     if let Some(name) = requested_node {
         let target = {
             let nodes = fleet.nodes.lock().await;
-            resolve_target(&nodes, Some(name), req_vcpus, req_mem)?
+            resolve_target(&nodes, Some(name), req_vcpus, req_mem, &selector)?
         };
         return match dispatch_create(&fleet, &target, &body).await {
             Ok(record) => Ok(Json(json!({"node": target.name, "vm": record}))),
@@ -616,13 +714,13 @@ async fn create_vm(
     loop {
         let target = {
             let nodes = fleet.nodes.lock().await;
-            pick_best_capacity_excluding(&nodes, req_vcpus, req_mem, &tried)
+            pick_best_capacity_excluding(&nodes, req_vcpus, req_mem, &tried, &selector)
         };
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
                 AppError(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "no healthy, uncordoned nodes registered".into(),
+                    no_candidate_message(&selector),
                 )
             }));
         };
@@ -903,6 +1001,17 @@ mod tests {
             vm_count,
             last_seen: Utc::now() - chrono::Duration::seconds(age_secs),
             cordoned: false,
+            labels: HashMap::new(),
+        }
+    }
+
+    fn labeled_node(name: &str, vm_count: usize, labels: &[(&str, &str)]) -> NodeInfo {
+        NodeInfo {
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..node(name, vm_count, 0)
         }
     }
 
@@ -915,6 +1024,7 @@ mod tests {
             vm_count,
             last_seen: Utc::now(),
             cordoned: false,
+            labels: HashMap::new(),
         }
     }
 
@@ -1035,6 +1145,7 @@ mod tests {
                 vcpus_total: 8,
                 memory_mib_total: 16384,
                 vm_count: 1,
+                labels: HashMap::new(),
             },
         );
         assert!(nodes["a"].cordoned);
@@ -1052,6 +1163,7 @@ mod tests {
                 vcpus_total: 4,
                 memory_mib_total: 8192,
                 vm_count: 0,
+                labels: HashMap::new(),
             },
         );
         assert!(!nodes["new"].cordoned);
@@ -1067,14 +1179,16 @@ mod tests {
         assert!(pick_best_capacity(&nodes, 2, 2048).is_none());
         // ...but an explicit "node":"a" still resolves, same as a
         // Kubernetes Pod with spec.nodeName bypassing the scheduler.
-        let target = resolve_target(&nodes, Some("a".to_string()), 2, 2048).unwrap();
+        let target =
+            resolve_target(&nodes, Some("a".to_string()), 2, 2048, &HashMap::new()).unwrap();
         assert_eq!(target.name, "a");
     }
 
     #[test]
     fn explicit_node_targeting_unknown_name_still_errors() {
         let nodes: HashMap<String, NodeInfo> = HashMap::new();
-        let err = resolve_target(&nodes, Some("ghost".to_string()), 2, 2048).unwrap_err();
+        let err = resolve_target(&nodes, Some("ghost".to_string()), 2, 2048, &HashMap::new())
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
@@ -1085,8 +1199,86 @@ mod tests {
         roomy.cordoned = true;
         nodes.insert("roomy".to_string(), roomy);
         nodes.insert("tight".to_string(), node_cap("tight", 1, 4, 8192));
-        let target = resolve_target(&nodes, None, 2, 2048).unwrap();
+        let target = resolve_target(&nodes, None, 2, 2048, &HashMap::new()).unwrap();
         assert_eq!(target.name, "tight");
+    }
+
+    #[test]
+    fn node_selector_restricts_automatic_placement_to_matching_labels() {
+        let mut nodes = HashMap::new();
+        // "roomy" has far more free capacity but the wrong zone label.
+        let mut roomy = labeled_node("roomy", 0, &[("zone", "us-west")]);
+        roomy.vcpus_total = 64;
+        roomy.memory_mib_total = 131072;
+        nodes.insert("roomy".to_string(), roomy);
+        nodes.insert(
+            "tight".to_string(),
+            labeled_node("tight", 0, &[("zone", "us-east")]),
+        );
+        let selector: HashMap<String, String> = [("zone".to_string(), "us-east".to_string())]
+            .into_iter()
+            .collect();
+        let target = resolve_target(&nodes, None, 2, 2048, &selector).unwrap();
+        assert_eq!(target.name, "tight");
+    }
+
+    #[test]
+    fn node_selector_matching_no_node_is_a_clear_error() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            labeled_node("a", 0, &[("zone", "us-east")]),
+        );
+        let selector: HashMap<String, String> = [("gpu".to_string(), "true".to_string())]
+            .into_iter()
+            .collect();
+        let err = resolve_target(&nodes, None, 2, 2048, &selector).unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(err.1.contains("nodeSelector"), "message was: {}", err.1);
+        assert!(err.1.contains("gpu=true"), "message was: {}", err.1);
+    }
+
+    #[test]
+    fn empty_selector_matches_any_node() {
+        let mut nodes = HashMap::new();
+        nodes.insert("a".to_string(), node("a", 0, 0));
+        assert!(nodes["a"].matches_selector(&HashMap::new()));
+    }
+
+    #[test]
+    fn explicit_node_targeting_bypasses_a_non_matching_selector() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            labeled_node("a", 0, &[("zone", "us-east")]),
+        );
+        let selector: HashMap<String, String> = [("zone".to_string(), "us-west".to_string())]
+            .into_iter()
+            .collect();
+        // "a" doesn't match the selector at all, but naming it explicitly
+        // still resolves -- same bypass as an explicit node vs. cordoning.
+        let target = resolve_target(&nodes, Some("a".to_string()), 2, 2048, &selector).unwrap();
+        assert_eq!(target.name, "a");
+    }
+
+    #[test]
+    fn extract_selector_pulls_flat_string_map_and_strips_it_from_body() {
+        let mut body = json!({"vcpus": 2, "nodeSelector": {"zone": "us-east", "gpu": "true"}});
+        let selector = extract_selector(&mut body);
+        assert_eq!(selector.get("zone"), Some(&"us-east".to_string()));
+        assert_eq!(selector.get("gpu"), Some(&"true".to_string()));
+        assert!(body.get("nodeSelector").is_none());
+        assert_eq!(body["vcpus"], 2); // everything else untouched
+    }
+
+    #[test]
+    fn extract_selector_defaults_to_empty_when_absent_or_malformed() {
+        assert!(extract_selector(&mut json!({})).is_empty());
+        assert!(extract_selector(&mut json!({"nodeSelector": "not-an-object"})).is_empty());
+        // Non-string values are dropped rather than rejected.
+        let selector = extract_selector(&mut json!({"nodeSelector": {"a": 1, "b": "ok"}}));
+        assert_eq!(selector.len(), 1);
+        assert_eq!(selector.get("b"), Some(&"ok".to_string()));
     }
 
     // --- DELETE /fleet/nodes/{name} ---
@@ -1149,6 +1341,7 @@ mod tests {
                 vcpus_total: 8,
                 memory_mib_total: 16384,
                 vm_count: 0,
+                labels: HashMap::new(),
             },
         );
         assert!(!nodes["a"].cordoned);
@@ -1692,5 +1885,135 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_GATEWAY);
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn create_vm_routes_to_the_node_matching_node_selector() {
+        // "roomy" has vastly more free capacity, but only "picky" carries
+        // the requested label -- the selector must win over raw capacity.
+        let (roomy_url, roomy_hits) =
+            spawn_fake_create_node(StatusCode::OK, json!({"id": "vm-1"})).await;
+        let (picky_url, picky_hits) =
+            spawn_fake_create_node(StatusCode::OK, json!({"id": "vm-2"})).await;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "roomy".to_string(),
+            NodeInfo {
+                fluxvm_url: roomy_url,
+                vcpus_total: 64,
+                memory_mib_total: 131072,
+                ..node("roomy", 0, 0)
+            },
+        );
+        nodes.insert(
+            "picky".to_string(),
+            NodeInfo {
+                fluxvm_url: picky_url,
+                ..labeled_node("picky", 0, &[("gpu", "true")])
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        let Json(resp) = create_vm(State(fleet), Json(json!({"nodeSelector": {"gpu": "true"}})))
+            .await
+            .unwrap();
+        assert_eq!(resp["node"], "picky");
+        assert_eq!(picky_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(roomy_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn create_vm_with_unmatched_node_selector_fails_without_contacting_any_node() {
+        let (url, hits) = spawn_fake_create_node(StatusCode::OK, json!({"id": "vm-1"})).await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: url,
+                ..labeled_node("a", 0, &[("zone", "us-east")])
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        let err = create_vm(
+            State(fleet),
+            Json(json!({"nodeSelector": {"zone": "us-west"}})),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(err.1.contains("nodeSelector"), "message was: {}", err.1);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn create_vm_strips_node_selector_before_forwarding_to_the_node() {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_for_route = hits.clone();
+        let app = Router::new().route(
+            "/v1/vms",
+            post(move |Json(req): Json<Value>| {
+                let hits = hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    // A real `fluxvm serve` would reject an unknown field --
+                    // asserting it's simply absent proves central() actually
+                    // strips "nodeSelector" rather than forwarding it as-is.
+                    assert!(req.get("nodeSelector").is_none());
+                    assert_eq!(req["name"], "test-vm");
+                    (StatusCode::OK, Json(json!({"id": "vm-1"})))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: format!("http://{addr}"),
+                ..labeled_node("a", 0, &[("zone", "us-east")])
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        let Json(resp) = create_vm(
+            State(fleet),
+            Json(json!({"name": "test-vm", "nodeSelector": {"zone": "us-east"}})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["node"], "a");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn create_vm_explicit_node_ignores_a_non_matching_node_selector() {
+        let (url, hits) = spawn_fake_create_node(StatusCode::OK, json!({"id": "vm-1"})).await;
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: url,
+                ..labeled_node("a", 0, &[("zone", "us-east")])
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        // "node":"a" bypasses placement -- an unrelated nodeSelector must
+        // never block it, same as it never blocks a cordoned target.
+        let Json(resp) = create_vm(
+            State(fleet),
+            Json(json!({"node": "a", "nodeSelector": {"zone": "us-west"}})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp["node"], "a");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

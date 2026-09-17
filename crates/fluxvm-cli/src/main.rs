@@ -275,8 +275,8 @@ enum FleetCommand {
     /// Create a VM through the fleet: residual-capacity placement picks a
     /// healthy, uncordoned node unless `--node` names one explicitly (which
     /// bypasses placement entirely, same as `kubectl` with `spec.nodeName`
-    /// set — including landing on a cordoned node). REST equivalent:
-    /// `POST /fleet/vms`.
+    /// set — including landing on a cordoned node and ignoring any
+    /// `--node-selector`). REST equivalent: `POST /fleet/vms`.
     Create {
         /// Path to a `CreateVmRequest` JSON spec, same shape `fluxvm
         /// create --spec` takes.
@@ -285,6 +285,14 @@ enum FleetCommand {
         /// Exact node name to create on, bypassing automatic placement.
         #[arg(long)]
         node: Option<String>,
+        /// Restrict automatic placement to a node whose labels (set via
+        /// `fluxvm-agent node --label key=value`) match, as `key=value`.
+        /// Repeatable. Ignored when `--node` is also given. Merged with
+        /// (and overriding) any `"nodeSelector"` already in the spec file,
+        /// the same override relationship `--node` has with the spec's own
+        /// `"node"` field.
+        #[arg(long = "node-selector", value_parser = parse_label)]
+        node_selector: Vec<(String, String)>,
     },
     /// The fleet-wide VM list, each entry tagged with which node it's on.
     /// Any node this couldn't account for (unreachable, stale, or erroring)
@@ -636,6 +644,18 @@ fn parse_migration_mode(s: &str) -> Result<MigrationMode> {
         other => anyhow::bail!(
             "unknown migration mode {other:?}, expected \"pre-copy\" or \"post-copy\""
         ),
+    }
+}
+
+/// Parses `fleet create --node-selector key=value`. Splits on the FIRST
+/// `=` only, so a value containing `=` (unusual, but not invalid) still
+/// round-trips. Same shape as `fluxvm-agent node --label`'s own parser —
+/// duplicated rather than shared, since the two live in different binary
+/// crates and this is a two-line function.
+fn parse_label(s: &str) -> Result<(String, String)> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.is_empty() => Ok((k.to_string(), v.to_string())),
+        _ => anyhow::bail!("expected key=value, got '{s}'"),
     }
 }
 
@@ -1462,13 +1482,24 @@ async fn main() -> Result<()> {
                         )?
                     );
                 }
-                FleetCommand::Create { spec, node } => {
+                FleetCommand::Create {
+                    spec,
+                    node,
+                    node_selector,
+                } => {
                     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&spec)?)
                         .with_context(|| format!("parsing {}", spec.display()))?;
                     println!(
                         "{}",
                         serde_json::to_string_pretty(
-                            &fleet_client::create_vm(&central, token, body, node).await?
+                            &fleet_client::create_vm(
+                                &central,
+                                token,
+                                body,
+                                node,
+                                node_selector.into_iter().collect(),
+                            )
+                            .await?
                         )?
                     );
                 }

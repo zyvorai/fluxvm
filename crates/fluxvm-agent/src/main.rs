@@ -60,7 +60,23 @@ enum Command {
         /// Bearer token matching `fluxvm-agent central --token`.
         #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
         token: Option<String>,
+        /// Label this node reports on every heartbeat, as `key=value`.
+        /// Repeatable. Lets `fluxvm fleet create --node-selector
+        /// key=value` (or a plain `POST /fleet/vms` `"nodeSelector"`
+        /// object) constrain automatic placement to nodes carrying it —
+        /// e.g. `--label zone=us-east --label gpu=true`.
+        #[arg(long = "label", value_parser = parse_label)]
+        labels: Vec<(String, String)>,
     },
+}
+
+/// Parses one `--label key=value` argument. Splits on the FIRST `=` only,
+/// so a value containing `=` (unusual, but not invalid) still round-trips.
+fn parse_label(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.is_empty() => Ok((k.to_string(), v.to_string())),
+        _ => Err(format!("expected key=value, got '{s}'")),
+    }
 }
 
 #[tokio::main]
@@ -110,6 +126,7 @@ async fn main() -> Result<()> {
             advertise_url,
             interval_secs,
             token,
+            labels,
         } => {
             let advertise_url = advertise_url.unwrap_or_else(|| fluxvm_url.clone());
             fluxvm_agent::node::run(fluxvm_agent::node::NodeConfig {
@@ -119,6 +136,7 @@ async fn main() -> Result<()> {
                 advertise_url,
                 interval: Duration::from_secs(interval_secs.max(1)),
                 token,
+                labels: labels.into_iter().collect(),
             })
             .await;
         }

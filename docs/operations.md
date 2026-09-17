@@ -821,7 +821,8 @@ fluxvm-agent central --listen 0.0.0.0:7799
 fluxvm-agent node --name worker-1 \
     --central http://fleet-registry:7799 \
     --fluxvm-url http://127.0.0.1:7788 \
-    --advertise-url http://worker-1.internal:7788
+    --advertise-url http://worker-1.internal:7788 \
+    --label zone=us-east --label gpu=true
 ```
 
 Every `--interval-secs` (default 10), each node agent reports its name, real capacity (vCPUs off
@@ -866,7 +867,7 @@ fluxvm fleet --central http://fleet-registry:7799 uncordon worker-1
 fluxvm fleet --central http://fleet-registry:7799 node-vms worker-1
 fluxvm fleet --central http://fleet-registry:7799 vms
 fluxvm fleet --central http://fleet-registry:7799 capacity
-fluxvm fleet --central http://fleet-registry:7799 create --spec vm.json [--node worker-1]
+fluxvm fleet --central http://fleet-registry:7799 create --spec vm.json [--node worker-1] [--node-selector zone=us-east]
 fluxvm fleet --central http://fleet-registry:7799 delete worker-1 <vm-id>
 fluxvm fleet --central http://fleet-registry:7799 deregister worker-1
 ```
@@ -1049,6 +1050,50 @@ from `GET /fleet/nodes` on every poll. 4 new tests in
 uncordoned nodes sum correctly; a stale node contributes to none of the
 totals (not just placement); and a cordoned node's hardware counts toward
 `*_total` but is excluded from `*_free`/`nodes_schedulable`.
+
+**Constrain automatic placement by node label** — e.g. keep a create off
+every node except ones in a given zone, or ones that actually have a GPU —
+without hand-picking an exact `--node` and losing failover entirely. Each
+node agent reports its own operator-set labels on every heartbeat:
+
+```bash
+fluxvm-agent node --name worker-1 --central http://fleet-registry:7799 \
+    --label zone=us-east --label gpu=true
+```
+
+and an unaddressed create can require a subset of them via `"nodeSelector"`
+(exact-match key/value, same semantics as a Kubernetes Pod's own
+`spec.nodeSelector`):
+
+```bash
+curl -X POST http://fleet-registry:7799/fleet/vms \
+    -d '{"name": "gpu-job", "vcpus": 4, "memory_mib": 8192, "nodeSelector": {"gpu": "true"}}'
+# or:
+fluxvm fleet --central http://fleet-registry:7799 create --spec vm.json --node-selector gpu=true
+```
+
+`pick_best_capacity_excluding` only ever considers a node whose labels are a
+superset of `nodeSelector` before scoring residual capacity, so a node with
+far more free capacity but the wrong label is never picked over a smaller
+one that actually matches; a `nodeSelector` matching no registered node
+fails with a `503` naming the selector, the same "surface, don't hide"
+posture the rest of this fleet API already has (`no healthy, uncordoned
+node matches nodeSelector {gpu=true}`, not a generic "no nodes"). An
+explicit `"node"` bypasses `nodeSelector` entirely, exactly like it already
+bypasses cordoning — the same single-attempt, no-surprise-landing semantics
+`resolve_target` documents for cordoning apply here too. `"nodeSelector"` is
+stripped from the body before it's forwarded to the target node's own
+`fluxvm serve`, same as `"node"` already is — neither is part of
+`CreateVmRequest`. Labels are advisory metadata only: an older node agent
+that predates `--label` simply reports none and matches no non-empty
+selector, and `GET /fleet/nodes` includes each node's current labels
+alongside its capacity and health. 10 new tests in `fluxvm-agent::central`
+(selector picks the matching lower-capacity node over the non-matching
+higher-capacity one, an unmatched selector's error naming, an empty
+selector matching everything, both directions of explicit-`"node"`
+bypassing a non-matching selector, `nodeSelector` extraction/stripping
+edge cases) plus 2 more in `fluxvm-cli::fleet_client` exercising the
+`--node-selector` flag end to end against a real router.
 
 ## State layout
 
