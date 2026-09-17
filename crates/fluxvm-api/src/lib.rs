@@ -185,16 +185,28 @@ struct TokenTenant(pub String);
 fn extract_vm_uuid(path: &str) -> Option<Uuid> {
     let rest = path
         .strip_prefix("/v1/vms/")
-        .or_else(|| path.strip_prefix("/v1/sandboxes/"))?;
+        .or_else(|| path.strip_prefix("/v1/sandboxes/"))
+        // The short-form proxy route ("/sandbox/{id}/{*path}", registered
+        // separately from "/v1/sandboxes/{id}/http/{port}/{*path}") matched
+        // neither prefix above, so tenant_guard_middleware silently no-op'd
+        // for it below -- any authenticated caller who knew or guessed
+        // another tenant's sandbox UUID could proxy HTTP traffic straight
+        // into that tenant's guest through this route, unscoped, even
+        // though the equivalent long-form route was already correctly
+        // tenant-checked. See sandbox_id_routes_are_tenant_scoped_like_vm_routes
+        // for the long-form route's existing coverage, and
+        // short_form_sandbox_proxy_route_is_tenant_scoped below for this fix.
+        .or_else(|| path.strip_prefix("/sandbox/"))?;
     let id = rest.split('/').next()?;
     Uuid::parse_str(id).ok()
 }
 
-/// When a token carries a tenant, scope all `/v1/vms/{uuid}…` and
-/// `/v1/sandboxes/{uuid}…` access to that tenant -- a sandbox is a
-/// `VmRecord` like any other (`VmManager::create_sandbox` funnels through
-/// the same `create()`), so the same per-record tenant check applies to
-/// both id spaces uniformly rather than needing a second copy of this
+/// When a token carries a tenant, scope all `/v1/vms/{uuid}…`,
+/// `/v1/sandboxes/{uuid}…`, and `/sandbox/{uuid}…` access to that tenant --
+/// a sandbox is a `VmRecord` like any other (`VmManager::create_sandbox`
+/// funnels through the same `create()`), so the same per-record tenant
+/// check applies to all three id-bearing path spaces uniformly rather than
+/// needing a second copy of this
 /// logic.
 async fn tenant_guard_middleware(
     State(m): State<Arc<VmManager>>,
@@ -3291,6 +3303,47 @@ mod tests {
                     Some(r#"{"command":["true"]}"#),
                 )
                 .await,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        #[tokio::test]
+        async fn short_form_sandbox_proxy_route_is_tenant_scoped() {
+            // Regression test: extract_vm_uuid only recognized "/v1/vms/"
+            // and "/v1/sandboxes/" -- the short-form "/sandbox/{id}/..."
+            // proxy route (the one AI-agent callers actually use, per
+            // docs/agent-sandbox-gaps.md's "Guest HTTP reverse proxy") never
+            // matched either prefix, so tenant_guard_middleware silently
+            // no-op'd for it: any tenant-scoped token could proxy HTTP
+            // traffic into another tenant's guest by UUID through this
+            // specific route, even though the equivalent long-form
+            // "/v1/sandboxes/{id}/http/{port}/..." route was already
+            // correctly scoped (see the test above).
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let id = acme_sandbox.id;
+            m.store.insert(acme_sandbox).await.unwrap();
+
+            let app = router(m);
+            // Wrong tenant: the same 404 the long-form route already
+            // returns for a mismatched sandbox.
+            assert_eq!(
+                request(
+                    app.clone(),
+                    "GET",
+                    &format!("/sandbox/{id}/x"),
+                    Some("other"),
+                    None
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+            // Owning tenant: clears the tenant guard -- may still fail
+            // downstream (no real netns/guest in this test), but that's a
+            // different, later error, never a 404 "not found".
+            assert_ne!(
+                request(app, "GET", &format!("/sandbox/{id}/x"), Some("acme"), None).await,
                 StatusCode::NOT_FOUND
             );
         }
