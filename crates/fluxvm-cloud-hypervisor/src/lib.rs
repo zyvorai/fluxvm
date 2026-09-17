@@ -732,6 +732,15 @@ mod tests {
         path.display().to_string()
     }
 
+    /// Process-wide lock for hotplug fake-`ch-remote` tests. GitHub-hosted
+    /// runners intermittently return ETXTBSY (os error 26) when parallel
+    /// tokio tests exec freshly written shell scripts; holding this for the
+    /// whole test body serializes those execs.
+    fn hotplug_fake_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Writes an executable fake `ch-remote` for `hotplug_cpu`/
     /// `hotplug_memory` tests: `info` prints `info_json` verbatim to
     /// stdout, `resize` appends its own full argv to `log` (one line) and
@@ -739,35 +748,42 @@ mod tests {
     /// assert both the *target* this crate computed (from `log`) and the
     /// resulting `Result` (from `resize_exit`), without a real
     /// `cloud-hypervisor` VMM behind the socket.
+    ///
+    /// Caller must hold [`hotplug_fake_lock`] for the whole test that execs
+    /// the returned path.
     fn fake_ch_remote_hotplug(
         dir: &std::path::Path,
         info_json: &str,
         resize_exit: i32,
         log: &std::path::Path,
     ) -> String {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
         let script = format!(
             "#!/bin/sh\nargs=\" $* \"\ncase \"$args\" in\n  *\" info \"*) cat <<'CH_INFO_JSON'\n{info_json}\nCH_INFO_JSON\n    exit 0 ;;\n  *\" resize \"*) echo \"$*\" >> {log:?} ; exit {resize_exit} ;;\n  *) exit 0 ;;\nesac\n"
         );
-        let path = dir.join("fake-ch-remote-hotplug.sh");
-        // Write via a temp name then rename so we never hit ETXTBSY when
-        // parallel tokio tests exec a script whose inode is still open for
-        // write (observed as "Text file busy" on GitHub-hosted runners).
-        let tmp = dir.join(format!(
-            "fake-ch-remote-hotplug.{}.sh.tmp",
-            std::process::id()
-        ));
-        std::fs::write(&tmp, script).unwrap();
+        // Unique final path per call — never overwrite an inode another
+        // thread might still be exec'ing.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("fake-ch-remote-hotplug-{n}.sh"));
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(script.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        std::fs::rename(&tmp, &path).unwrap();
         path.display().to_string()
     }
 
     #[tokio::test]
     async fn hotplug_cpu_resizes_to_current_plus_add() {
+        let _lock = hotplug_fake_lock();
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();
@@ -789,6 +805,7 @@ mod tests {
 
     #[tokio::test]
     async fn hotplug_cpu_rejects_exceeding_max_vcpus_headroom() {
+        let _lock = hotplug_fake_lock();
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();
@@ -821,6 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn hotplug_cpu_propagates_a_real_resize_failure() {
+        let _lock = hotplug_fake_lock();
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();
@@ -837,6 +855,7 @@ mod tests {
 
     #[tokio::test]
     async fn hotplug_memory_resizes_to_current_plus_add() {
+        let _lock = hotplug_fake_lock();
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();

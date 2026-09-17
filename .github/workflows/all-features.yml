@@ -153,11 +153,27 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev \
+            linux-tools-common linux-tools-generic pkg-config
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Shell syntax for build/install helpers
+        working-directory: fluxvm
         run: |
           set -euo pipefail
           for f in \
@@ -178,6 +194,7 @@ jobs:
             fi
           done
       - name: Sentinel / feature static gates
+        working-directory: fluxvm
         run: |
           set -euo pipefail
           # Each *-static.sh that asserts "no __pycache__" expects a clean tree;

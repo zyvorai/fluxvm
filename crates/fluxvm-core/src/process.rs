@@ -12,10 +12,30 @@ use tokio::process::{Child, Command};
 /// `fluxvm-qemu`'s `virtiofsd` spawn loop) to appear before giving up.
 const SIDECAR_SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// `Command::output` with a short retry on Linux ETXTBSY (os error 26).
+/// Freshly written shell-script fixtures on GitHub-hosted runners can race
+/// the first exec against a still-busy text inode; one or two retries clear it.
+async fn command_output_retry_etxtbsy(
+    program: &str,
+    args: &[String],
+) -> std::io::Result<std::process::Output> {
+    const ATTEMPTS: u32 = 5;
+    let mut last = None;
+    for attempt in 0..ATTEMPTS {
+        match Command::new(program).args(args).output().await {
+            Ok(out) => return Ok(out),
+            Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < ATTEMPTS => {
+                tokio::time::sleep(Duration::from_millis(25 * (attempt as u64 + 1))).await;
+                last = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::from_raw_os_error(26)))
+}
+
 pub async fn run_checked(program: &str, args: &[String]) -> Result<()> {
-    let out = Command::new(program)
-        .args(args)
-        .output()
+    let out = command_output_retry_etxtbsy(program, args)
         .await
         .with_context(|| format!("starting {program}"))?;
     if !out.status.success() {
@@ -43,9 +63,7 @@ pub async fn run_checked_timeout(
 }
 
 pub async fn output_checked(program: &str, args: &[String]) -> Result<String> {
-    let out = Command::new(program)
-        .args(args)
-        .output()
+    let out = command_output_retry_etxtbsy(program, args)
         .await
         .with_context(|| format!("starting {program}"))?;
     if !out.status.success() {
