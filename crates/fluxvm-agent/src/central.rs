@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     os::unix::io::AsRawFd,
     path::{Path as FsPath, PathBuf},
@@ -452,8 +452,23 @@ fn pick_best_capacity(
     request_vcpus: u32,
     request_mem: u64,
 ) -> Option<NodeInfo> {
+    pick_best_capacity_excluding(nodes, request_vcpus, request_mem, &HashSet::new())
+}
+
+/// Same as `pick_best_capacity`, but never considers a node whose name is
+/// in `exclude`. Used by `create_vm`'s automatic-placement failover loop:
+/// each candidate that turns out to be unreachable gets added to `exclude`
+/// so the next iteration picks the next-best *remaining* node instead of
+/// picking the same dead one again.
+fn pick_best_capacity_excluding(
+    nodes: &HashMap<String, NodeInfo>,
+    request_vcpus: u32,
+    request_mem: u64,
+    exclude: &HashSet<String>,
+) -> Option<NodeInfo> {
     nodes
         .values()
+        .filter(|n| !exclude.contains(&n.name))
         .filter_map(|n| {
             n.capacity_score(request_vcpus, request_mem)
                 .map(|score| (score, n))
@@ -509,9 +524,67 @@ fn resolve_target(
     }
 }
 
+/// Outcome of trying to actually dispatch a create to one candidate node,
+/// distinguished so `create_vm`'s automatic-placement loop knows whether
+/// it's worth trying the next-best node or whether retrying anywhere would
+/// just repeat the same failure.
+enum DispatchError {
+    /// Couldn't get a well-formed response out of the node at all —
+    /// connection refused/reset/timed out, or it answered with a body that
+    /// isn't valid JSON. This is exactly the "heartbeat was fresh but the
+    /// node is actually down or wedged right now" case
+    /// `HEALTHY_WINDOW_SECS` can't catch — the node hasn't missed enough
+    /// beats yet to be marked unhealthy. Worth failing over.
+    Unreachable(String),
+    /// The node answered just fine but its own `fluxvm serve` rejected the
+    /// request (e.g. bad `CreateVmRequest` fields). Every other node would
+    /// reject the identical body for the identical reason, so failing over
+    /// would just waste time re-discovering the same error — surface it
+    /// immediately instead.
+    Rejected(String),
+}
+
+async fn dispatch_create(
+    fleet: &Fleet,
+    target: &NodeInfo,
+    body: &Value,
+) -> Result<Value, DispatchError> {
+    let resp = fleet
+        .http
+        .post(format!("{}/v1/vms", target.fluxvm_url))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| DispatchError::Unreachable(e.to_string()))?;
+    let status = resp.status();
+    let record: Value = resp
+        .json()
+        .await
+        .map_err(|e| DispatchError::Unreachable(e.to_string()))?;
+    if !status.is_success() {
+        return Err(DispatchError::Rejected(record.to_string()));
+    }
+    Ok(record)
+}
+
 /// `POST /fleet/vms`. Body is a normal `CreateVmRequest` JSON, optionally
 /// with a top-level `"node"` field naming an exact node to target — when
 /// absent, residual-capacity placement picks a healthy, uncordoned node.
+///
+/// An explicit `"node"` is a single, non-retried attempt — same
+/// bypass-the-scheduler semantics as `resolve_target` documents, so a
+/// caller that pinned a node gets an honest failure if that exact node is
+/// down rather than a surprise landing somewhere else.
+///
+/// Automatic placement (no `"node"`) instead fails over: if the node
+/// `pick_best_capacity` picked turns out to be unreachable — its heartbeat
+/// was fresh enough to look healthy, but it's actually down, wedged, or
+/// network-partitioned right now — that node is excluded and the
+/// next-best remaining candidate is tried, until one accepts the create or
+/// every schedulable node has been tried. A node that reaches its own
+/// `fluxvm serve` and gets an explicit rejection (bad request fields) is
+/// never retried elsewhere, since every other node would reject the same
+/// body identically.
 async fn create_vm(
     State(fleet): State<Fleet>,
     Json(mut body): Json<Value>,
@@ -523,26 +596,62 @@ async fn create_vm(
 
     let (req_vcpus, req_mem) = request_sizes(&body);
 
-    let target = {
-        let nodes = fleet.nodes.lock().await;
-        resolve_target(&nodes, requested_node, req_vcpus, req_mem)?
-    };
-
-    let resp = fleet
-        .http
-        .post(format!("{}/v1/vms", target.fluxvm_url))
-        .json(&body)
-        .send()
-        .await?;
-    let status = resp.status();
-    let record: Value = resp.json().await?;
-    if !status.is_success() {
-        return Err(AppError(
-            StatusCode::BAD_GATEWAY,
-            format!("node '{}' rejected create: {record}", target.name),
-        ));
+    if let Some(name) = requested_node {
+        let target = {
+            let nodes = fleet.nodes.lock().await;
+            resolve_target(&nodes, Some(name), req_vcpus, req_mem)?
+        };
+        return match dispatch_create(&fleet, &target, &body).await {
+            Ok(record) => Ok(Json(json!({"node": target.name, "vm": record}))),
+            Err(DispatchError::Unreachable(msg)) => Err(AppError(StatusCode::BAD_GATEWAY, msg)),
+            Err(DispatchError::Rejected(msg)) => Err(AppError(
+                StatusCode::BAD_GATEWAY,
+                format!("node '{}' rejected create: {msg}", target.name),
+            )),
+        };
     }
-    Ok(Json(json!({"node": target.name, "vm": record})))
+
+    let mut tried: HashSet<String> = HashSet::new();
+    let mut last_unreachable: Option<AppError> = None;
+    loop {
+        let target = {
+            let nodes = fleet.nodes.lock().await;
+            pick_best_capacity_excluding(&nodes, req_vcpus, req_mem, &tried)
+        };
+        let Some(target) = target else {
+            return Err(last_unreachable.unwrap_or_else(|| {
+                AppError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "no healthy, uncordoned nodes registered".into(),
+                )
+            }));
+        };
+        tried.insert(target.name.clone());
+        match dispatch_create(&fleet, &target, &body).await {
+            Ok(record) => return Ok(Json(json!({"node": target.name, "vm": record}))),
+            Err(DispatchError::Unreachable(msg)) => {
+                tracing::warn!(
+                    node = %target.name,
+                    error = %msg,
+                    "placement candidate unreachable, trying next best node"
+                );
+                last_unreachable = Some(AppError(
+                    StatusCode::BAD_GATEWAY,
+                    format!(
+                        "node '{}' unreachable and no other schedulable node accepted the create: {msg}",
+                        target.name
+                    ),
+                ));
+                continue;
+            }
+            Err(DispatchError::Rejected(msg)) => {
+                return Err(AppError(
+                    StatusCode::BAD_GATEWAY,
+                    format!("node '{}' rejected create: {msg}", target.name),
+                ));
+            }
+        }
+    }
 }
 
 /// `GET /fleet/vms` — the fleet-wide aggregate. Every node this couldn't
@@ -1114,6 +1223,36 @@ mod tests {
         format!("http://{addr}")
     }
 
+    /// Like `spawn_fake_node`, but answers `POST /v1/vms` (for `create_vm`
+    /// dispatch tests) and counts how many times it was hit. The counter is
+    /// what lets a test prove a node was *never contacted* — the only way
+    /// to show create_vm's failover loop stopped after a rejection instead
+    /// of trying every other node too.
+    async fn spawn_fake_create_node(
+        status: StatusCode,
+        body: Value,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hits_for_route = hits.clone();
+        let app = Router::new().route(
+            "/v1/vms",
+            post(move |Json(_req): Json<Value>| {
+                let body = body.clone();
+                let hits = hits_for_route.clone();
+                async move {
+                    hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (status, Json(body))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), hits)
+    }
+
     #[tokio::test]
     async fn node_vms_returns_only_that_nodes_vms_tagged_with_its_name() {
         let url = spawn_fake_node(
@@ -1411,5 +1550,147 @@ mod tests {
         // ...but only "b" (uncordoned) contributes to what's actually free.
         assert_eq!(resp["vcpus_free"], 8);
         assert_eq!(resp["memory_mib_free"], 16384);
+    }
+
+    // --- POST /fleet/vms (create) ---
+
+    #[tokio::test]
+    async fn automatic_placement_fails_over_when_the_best_pick_is_unreachable() {
+        // "roomy" has more free capacity (0 VMs) than "tight" (2 VMs) so
+        // pick_best_capacity would choose it first -- but nothing is
+        // listening on its port. Automatic placement must notice the
+        // dead connection and land on "tight" instead of just failing.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let (good_url, hits) = spawn_fake_create_node(StatusCode::OK, json!({"id": "vm-1"})).await;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "roomy".to_string(),
+            NodeInfo {
+                fluxvm_url: format!("http://{dead_addr}"),
+                ..node("roomy", 0, 0)
+            },
+        );
+        nodes.insert(
+            "tight".to_string(),
+            NodeInfo {
+                fluxvm_url: good_url,
+                ..node("tight", 2, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        let Json(resp) = create_vm(State(fleet), Json(json!({})))
+            .await
+            .expect("should fail over to the reachable node");
+        assert_eq!(resp["node"], "tight");
+        assert_eq!(resp["vm"]["id"], "vm-1");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn automatic_placement_errors_once_every_candidate_is_unreachable() {
+        let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead1 = l1.local_addr().unwrap();
+        drop(l1);
+        let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead2 = l2.local_addr().unwrap();
+        drop(l2);
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: format!("http://{dead1}"),
+                ..node("a", 0, 0)
+            },
+        );
+        nodes.insert(
+            "b".to_string(),
+            NodeInfo {
+                fluxvm_url: format!("http://{dead2}"),
+                ..node("b", 0, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        let err = create_vm(State(fleet), Json(json!({}))).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_GATEWAY);
+        assert!(err.1.contains("unreachable"));
+    }
+
+    #[tokio::test]
+    async fn automatic_placement_does_not_fail_over_on_an_explicit_rejection() {
+        // "picked" has more free capacity so it's chosen first. It answers
+        // (unlike the unreachable case) but its own fluxvm serve rejects
+        // the body -- every other node would reject the identical body
+        // identically, so "spare" must never even be contacted.
+        let (picked_url, picked_hits) = spawn_fake_create_node(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "invalid disk size"}),
+        )
+        .await;
+        let (spare_url, spare_hits) =
+            spawn_fake_create_node(StatusCode::OK, json!({"id": "vm-1"})).await;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "picked".to_string(),
+            NodeInfo {
+                fluxvm_url: picked_url,
+                ..node("picked", 0, 0)
+            },
+        );
+        nodes.insert(
+            "spare".to_string(),
+            NodeInfo {
+                fluxvm_url: spare_url,
+                ..node("spare", 2, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        let err = create_vm(State(fleet), Json(json!({}))).await.unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_GATEWAY);
+        assert!(err.1.contains("invalid disk size"));
+        assert_eq!(picked_hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(spare_hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_node_target_does_not_fail_over_when_that_node_is_down() {
+        // Pinning "node":"a" bypasses the scheduler entirely -- even though
+        // "b" is up and would happily accept the create, an explicit
+        // target must fail honestly rather than silently landing elsewhere.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = listener.local_addr().unwrap();
+        drop(listener);
+        let (good_url, hits) = spawn_fake_create_node(StatusCode::OK, json!({"id": "vm-1"})).await;
+
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            NodeInfo {
+                fluxvm_url: format!("http://{dead_addr}"),
+                ..node("a", 0, 0)
+            },
+        );
+        nodes.insert(
+            "b".to_string(),
+            NodeInfo {
+                fluxvm_url: good_url,
+                ..node("b", 0, 0)
+            },
+        );
+        let fleet = test_fleet(nodes);
+
+        let err = create_vm(State(fleet), Json(json!({"node": "a"})))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_GATEWAY);
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
