@@ -409,11 +409,13 @@ curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/frozen            # {"frozen": true
 curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/stats              # CPU%, memory, disk I/O, read from the cgroup
 curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/pressure           # PSI: cpu/memory/io some+full, avg10/60/300 + total
 
-# CLI equivalent of freeze/thaw/frozen (no CLI form for resources/stats/pressure yet — those
+# CLI equivalent of freeze/thaw/frozen/resources (no CLI form for stats/pressure yet — those
 # still require a raw HTTP call, same as before):
 sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml freeze <uuid>
 sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml frozen <uuid>   # {"frozen": true|false}
 sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml thaw <uuid>
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml resources <uuid> \
+    --cpu-quota-percent 150 --memory-max-bytes 536870912 --pids-max 64
 ```
 
 `resources` (`ResourcePatch`) is a partial patch — only the fields you set are touched: `cpu_quota_percent`
@@ -443,11 +445,42 @@ VMM's own control socket is wedged or unresponsive, which is exactly the scenari
 `stop`/`ch-remote pause`) can't help with, since that goes through the same socket. `fluxvm thaw <id>`
 reverses it, and `fluxvm frozen <id>` reports the freezer's current state as `{"frozen": true|false}`
 without changing anything, matching the REST route exactly (both are plain GETs/POSTs with no request
-body — no new wire types were needed). `resources`/`stats`/`pressure` stay REST-only for now: `resources`
-takes a multi-field JSON patch that would need real flag design to do justice, and `stats`/`pressure`
-are read-only introspection with no urgency behind a CLI form yet. 7 new CLI-argument-parsing tests
-covering all three commands plus a check that they aren't accidentally aliased to each other or to
-`pause`/`resume`.
+body — no new wire types were needed). `resources`/`stats`/`pressure` stayed REST-only at the time:
+`resources` takes a multi-field JSON patch that would need real flag design to do justice, and
+`stats`/`pressure` are read-only introspection with no urgency behind a CLI form yet. 7 new
+CLI-argument-parsing tests covering all three commands plus a check that they aren't accidentally
+aliased to each other or to `pause`/`resume`.
+
+**`resources`: CLI parity for the cgroup resource patch.** `POST /v1/vms/{id}/resources` deserved
+the real flag design called out above instead of a JSON blob shoved onto the command line: `fluxvm
+resources <id> [--cpu-quota-percent N] [--memory-max-bytes N] [--io-weight N] [--pids-max N]
+[--cpuset-cpus SPEC]` maps one flag onto each `ResourcePatch` field, and — matching the wire type's
+own "only touch what's set" contract exactly — a field is left alone unless its flag is passed; there
+is no `--clear-cpu-quota` or similar, because omitting a flag already means "don't touch this."
+Passing none of the five is refused outright at the CLI layer (`ResourcePatch`'s own shape gives clap
+no way to express "at least one of these," so the check is a plain `bail!` in the match arm) rather
+than silently issuing a no-op `POST` with an empty body. `--cpuset-cpus` takes the exact same range
+syntax `cpuset.cpus`/`cpuset.cpus.effective` themselves use when read back (`fluxvm_cgroup::cpuset`'s
+`parse_set`/`format_set`) — `"0-3"`, `"0,2,4"`, `"0-1,4-5"` — so a value copied straight out of
+`cpuset.cpus` round-trips, but it is deliberately its own independent parser (`parse_cpuset_spec` in
+`fluxvm-cli`), not a reuse of that one, because it enforces two things the internal parser doesn't need
+to: an empty string is rejected rather than accepted as "no CPUs" (the flag is already `Option<String>`,
+so "leave cpuset pinning untouched" is expressed by omitting `--cpuset-cpus` entirely, not by passing
+`""`), and a reversed range like `"5-2"` is a hard error instead of silently expanding to an empty
+range under plain `start..=end` and applying an empty cpuset — a typo that would otherwise fail open
+into "pin this VM to no CPUs at all" with no error at all. 17 new tests: CLI-argument-parsing coverage
+for every flag alone and all five together, the "zero flags parses fine at the clap layer but the
+match arm still refuses it" split, a distinctness check against `freeze`/`pause`, and dedicated
+`parse_cpuset_spec` coverage (ranges, comma lists, mixed, sort+dedup, whitespace, and all three
+rejection cases). Verified building, `cargo test -p fluxvm-cli` (50/50 passing, including the 17 new),
+`cargo clippy -p fluxvm-cli --no-deps` (clean against this change; the two pre-existing warnings it
+reports belong to `CatalogCommand`'s enum size and an unrelated `PrivateKeyDer` conversion), and
+`cargo fmt -p fluxvm-cli -- --check` on the Linux remote, the same way prior CLI-parity work in this
+section was verified — `fluxvm-cli` doesn't build on macOS (it pulls in `fluxvm-network`, which uses
+Linux-only syscalls). Not verified against a real running VM's cgroup in this pass — `set_resources`
+itself (the code this command calls) was already proven against real `memory.max`/`cgroup.procs` files
+by `scripts/test-cgroup-resources.sh` when `resources` first landed as a REST route; this change adds
+no new behavior to that path, only a CLI front end for it.
 
 ## Warm VM pools
 

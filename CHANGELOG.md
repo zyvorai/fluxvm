@@ -142,6 +142,40 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm resources` — CLI parity for the cgroup resource patch.**
+  `POST /v1/vms/{id}/resources` has existed since cgroup v2 resource control
+  landed, but was explicitly left REST-only when `freeze`/`thaw`/`frozen`
+  closed the rest of this section's CLI gap (see that entry above): it takes
+  a multi-field `ResourcePatch` that deserved real flag design instead of a
+  JSON blob shoved onto the command line. `fluxvm resources <id>
+  [--cpu-quota-percent N] [--memory-max-bytes N] [--io-weight N]
+  [--pids-max N] [--cpuset-cpus SPEC]` maps one flag per `ResourcePatch`
+  field and preserves its "only touch what's set" contract exactly — a
+  field omitted from the command line is left alone, not reset — with the
+  CLI itself refusing a bare `fluxvm resources <id>` with no flags at all
+  (a plain `bail!` in the match arm; clap's own `Option`-only shape has no
+  way to express "at least one of these" at the parser level) rather than
+  silently issuing a no-op `POST`. `--cpuset-cpus` accepts the exact set
+  syntax `cpuset.cpus`/`cpuset.cpus.effective` themselves read back in
+  (`"0-3"`, `"0,2,4"`, `"0-1,4-5"`, per `fluxvm_cgroup::cpuset`'s own
+  `parse_set`/`format_set`), via a new, independent `parse_cpuset_spec` that
+  additionally rejects an empty string (ambiguous here, since "leave
+  cpuset pinning untouched" is already expressed by omitting the flag) and
+  a reversed range like `"5-2"` — which the existing cgroup-side parser
+  would silently expand to an empty range under plain `start..=end` and
+  apply as "pin this VM to no CPUs at all," a typo failing open into a
+  much worse outcome than a parse error. 17 new tests: CLI-argument-parsing
+  coverage per flag and for all five together, the "parses fine at the
+  clap layer but the match arm still refuses zero flags" split, a
+  distinctness check against `freeze`/`pause`, and dedicated
+  `parse_cpuset_spec` coverage of every accepted and rejected shape.
+  Verified building, `cargo test -p fluxvm-cli` (50/50), `cargo clippy -p
+  fluxvm-cli --no-deps` (clean against this change), and `cargo fmt -p
+  fluxvm-cli -- --check` on the Linux remote (this crate doesn't build on
+  macOS, same as always). `set_resources` itself is unchanged and was
+  already verified against real `memory.max`/`cgroup.procs` files by
+  `scripts/test-cgroup-resources.sh` when the REST route first landed —
+  this only adds a CLI front end for it.
 - **`fluxvm freeze`/`thaw`/`frozen` — CLI parity for the cgroup v2 freezer.**
   `POST /v1/vms/{id}/freeze`, `POST .../thaw`, and `GET .../frozen` have
   existed since cgroup v2 resource control landed (see "Resource control

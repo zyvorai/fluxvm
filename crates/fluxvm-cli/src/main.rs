@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use fluxvm_api as api;
 use fluxvm_core::{
     config::Config,
-    model::{ClaimOverrides, CreateVmRequest, MigrationMode, MigrationStartRequest},
+    model::{ClaimOverrides, CreateVmRequest, MigrationMode, MigrationStartRequest, ResourcePatch},
 };
 use fluxvm_guest_protocol::AgentResponse;
 use fluxvm_image::{self as image, BuildImageRequest};
@@ -92,6 +92,35 @@ enum Command {
     /// `GET /v1/vms/{id}/frozen`.
     Frozen {
         id: Uuid,
+    },
+    /// Apply cgroup v2 resource-control settings to a running VM — CPU
+    /// quota, memory limit, I/O weight, max PIDs, and/or host CPU pinning.
+    /// REST equivalent: `POST /v1/vms/{id}/resources`. See
+    /// docs/operations.md's "Resource control (cgroup v2)" section. Every
+    /// flag is optional and, like the `ResourcePatch` body it becomes, only
+    /// the fields you actually pass are touched — omitting a flag leaves
+    /// that control untouched, it does not reset it. At least one flag is
+    /// required; a bare `fluxvm resources <id>` with nothing to change is
+    /// rejected rather than silently doing nothing.
+    Resources {
+        id: Uuid,
+        /// CPU quota as a percentage of one core (150 = 1.5 cores).
+        #[arg(long)]
+        cpu_quota_percent: Option<u32>,
+        /// Memory limit in bytes.
+        #[arg(long)]
+        memory_max_bytes: Option<u64>,
+        /// I/O weight, 1-10000 (cgroup default: 100).
+        #[arg(long)]
+        io_weight: Option<u32>,
+        /// Maximum number of PIDs allowed in the VM's cgroup.
+        #[arg(long)]
+        pids_max: Option<u64>,
+        /// Host CPU cores to pin the VM to, in the same set syntax
+        /// `cpuset.cpus` itself reads back, e.g. `0-3`, `0,2,4`, or
+        /// `0-1,4-5`.
+        #[arg(long)]
+        cpuset_cpus: Option<String>,
     },
     /// Run a command inside the guest over vsock (requires agent.enabled in the VM spec).
     Exec {
@@ -538,6 +567,57 @@ fn parse_migration_mode(s: &str) -> Result<MigrationMode> {
     }
 }
 
+/// Parses `--cpuset-cpus`' set syntax (`"0-3"`, `"0,2,4"`, `"0-1,4-5"`) into
+/// a sorted, deduplicated list of CPU ids — the same notation
+/// `fluxvm_cgroup::cpuset` reads `cpuset.cpus`/`cpuset.cpus.effective` back
+/// as (see `parse_set`/`format_set` there), so a value copied straight out
+/// of `fluxvm resources`'s own prior output, or read directly from
+/// `cpuset.cpus`, round-trips. Deliberately its own, independent parser
+/// rather than importing that one: this one additionally rejects an empty
+/// spec (ambiguous here — the flag is `Option<String>`, so "clear the
+/// pinning" is already expressed by simply omitting the flag, not by
+/// passing an empty string) and a reversed range like `"5-2"` (silently
+/// empty under plain `start..=end`, which would apply an empty cpuset
+/// instead of erroring the way a typo like this should).
+fn parse_cpuset_spec(s: &str) -> Result<Vec<u32>> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!(
+            "--cpuset-cpus was empty; omit the flag entirely to leave cpuset pinning untouched"
+        );
+    }
+    let mut ids = Vec::new();
+    for part in trimmed.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            anyhow::bail!("--cpuset-cpus {trimmed:?} has an empty entry between commas");
+        }
+        match part.split_once('-') {
+            Some((start_str, end_str)) => {
+                let start: u32 = start_str.trim().parse().with_context(|| {
+                    format!("--cpuset-cpus {trimmed:?}: invalid range start {start_str:?}")
+                })?;
+                let end: u32 = end_str.trim().parse().with_context(|| {
+                    format!("--cpuset-cpus {trimmed:?}: invalid range end {end_str:?}")
+                })?;
+                if start > end {
+                    anyhow::bail!("--cpuset-cpus {trimmed:?}: range {start}-{end} has start > end");
+                }
+                ids.extend(start..=end);
+            }
+            None => {
+                let id: u32 = part.parse().with_context(|| {
+                    format!("--cpuset-cpus {trimmed:?}: invalid cpu id {part:?}")
+                })?;
+                ids.push(id);
+            }
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids)
+}
+
 /// Reads a local file for `copy-to`, rejecting anything already too big for
 /// the guest agent's own file-transfer cap before spending a base64 encode
 /// and a vsock round trip on content the agent would just reject anyway —
@@ -746,6 +826,39 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"frozen": frozen}))?
             );
+        }
+        Command::Resources {
+            id,
+            cpu_quota_percent,
+            memory_max_bytes,
+            io_weight,
+            pids_max,
+            cpuset_cpus,
+        } => {
+            if cpu_quota_percent.is_none()
+                && memory_max_bytes.is_none()
+                && io_weight.is_none()
+                && pids_max.is_none()
+                && cpuset_cpus.is_none()
+            {
+                anyhow::bail!(
+                    "no fields to update; pass at least one of --cpu-quota-percent, \
+                     --memory-max-bytes, --io-weight, --pids-max, --cpuset-cpus"
+                );
+            }
+            let cpuset_cpus = cpuset_cpus.map(|s| parse_cpuset_spec(&s)).transpose()?;
+            m.set_resources(
+                id,
+                ResourcePatch {
+                    cpu_quota_percent,
+                    memory_max_bytes,
+                    io_weight,
+                    pids_max,
+                    cpuset_cpus,
+                },
+            )
+            .await?;
+            println!("{{\"ok\":true}}");
         }
         Command::Exec {
             id,
@@ -1811,6 +1924,155 @@ mod freeze_cli_tests {
         assert!(matches!(parse(&["frozen", &id]), Command::Frozen { .. }));
         assert!(matches!(parse(&["pause", &id]), Command::Pause { .. }));
         assert!(matches!(parse(&["resume", &id]), Command::Resume { .. }));
+    }
+}
+
+#[cfg(test)]
+mod resources_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn parses_a_single_flag() {
+        let id = Uuid::nil();
+        let Command::Resources {
+            id: parsed_id,
+            cpu_quota_percent,
+            memory_max_bytes,
+            io_weight,
+            pids_max,
+            cpuset_cpus,
+        } = parse(&["resources", &id.to_string(), "--cpu-quota-percent", "150"])
+        else {
+            panic!("expected Command::Resources");
+        };
+        assert_eq!(parsed_id, id);
+        assert_eq!(cpu_quota_percent, Some(150));
+        assert_eq!(memory_max_bytes, None);
+        assert_eq!(io_weight, None);
+        assert_eq!(pids_max, None);
+        assert_eq!(cpuset_cpus, None);
+    }
+
+    #[test]
+    fn parses_every_flag_together() {
+        let id = Uuid::nil();
+        let Command::Resources {
+            id: parsed_id,
+            cpu_quota_percent,
+            memory_max_bytes,
+            io_weight,
+            pids_max,
+            cpuset_cpus,
+        } = parse(&[
+            "resources",
+            &id.to_string(),
+            "--cpu-quota-percent",
+            "150",
+            "--memory-max-bytes",
+            "536870912",
+            "--io-weight",
+            "250",
+            "--pids-max",
+            "64",
+            "--cpuset-cpus",
+            "0-1,4",
+        ])
+        else {
+            panic!("expected Command::Resources");
+        };
+        assert_eq!(parsed_id, id);
+        assert_eq!(cpu_quota_percent, Some(150));
+        assert_eq!(memory_max_bytes, Some(536_870_912));
+        assert_eq!(io_weight, Some(250));
+        assert_eq!(pids_max, Some(64));
+        assert_eq!(cpuset_cpus.as_deref(), Some("0-1,4"));
+    }
+
+    #[test]
+    fn requires_an_id() {
+        assert!(Cli::try_parse_from(["fluxvm", "resources"]).is_err());
+    }
+
+    #[test]
+    fn all_flags_are_optional_at_the_clap_layer() {
+        // clap itself allows zero flags -- the "at least one field" rule is
+        // enforced at runtime in main()'s match arm, not by clap, since
+        // ResourcePatch's own all-Option shape gives clap no way to express
+        // "at least one of these".
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["resources", &id.to_string()]),
+            Command::Resources { .. }
+        ));
+    }
+
+    #[test]
+    fn is_distinct_from_freeze_and_pause() {
+        let id = Uuid::nil().to_string();
+        assert!(matches!(
+            parse(&["resources", &id, "--pids-max", "8"]),
+            Command::Resources { .. }
+        ));
+        assert!(matches!(parse(&["freeze", &id]), Command::Freeze { .. }));
+        assert!(matches!(parse(&["pause", &id]), Command::Pause { .. }));
+    }
+
+    // --- parse_cpuset_spec ---
+
+    #[test]
+    fn cpuset_spec_parses_a_single_range() {
+        assert_eq!(parse_cpuset_spec("0-3").unwrap(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn cpuset_spec_parses_a_comma_list() {
+        assert_eq!(parse_cpuset_spec("0,2,4").unwrap(), vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn cpuset_spec_parses_mixed_ranges_and_singletons() {
+        assert_eq!(parse_cpuset_spec("0-1,4,6-7").unwrap(), vec![0, 1, 4, 6, 7]);
+    }
+
+    #[test]
+    fn cpuset_spec_sorts_and_dedups() {
+        assert_eq!(parse_cpuset_spec("4,0-1,1,0").unwrap(), vec![0, 1, 4]);
+    }
+
+    #[test]
+    fn cpuset_spec_tolerates_surrounding_whitespace() {
+        assert_eq!(parse_cpuset_spec(" 0-1, 4 ").unwrap(), vec![0, 1, 4]);
+    }
+
+    #[test]
+    fn cpuset_spec_rejects_empty_string() {
+        let err = parse_cpuset_spec("").unwrap_err();
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn cpuset_spec_rejects_an_empty_entry_between_commas() {
+        assert!(parse_cpuset_spec("0,,1").is_err());
+    }
+
+    #[test]
+    fn cpuset_spec_rejects_non_numeric_input() {
+        assert!(parse_cpuset_spec("abc").is_err());
+    }
+
+    #[test]
+    fn cpuset_spec_rejects_a_reversed_range_instead_of_silently_returning_empty() {
+        // Plain `start..=end` with start > end is a silently-empty Rust
+        // range -- without this check a typo like "5-2" would apply an
+        // empty cpuset instead of erroring.
+        let err = parse_cpuset_spec("5-2").unwrap_err();
+        assert!(err.to_string().contains("start > end"));
     }
 }
 
