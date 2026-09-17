@@ -18,6 +18,9 @@
 #   updates via heartbeat — real load-aware placement, not round-robin
 # - `GET /fleet/vms` aggregates real VMs from both hosts, correctly tagged,
 #   and reports an empty `unreachable_nodes` when both real hosts are up
+# - `GET /fleet/capacity` reports the real two-host totals (node counts,
+#   vCPU/memory totals, and the same vm_count both other checks already
+#   confirmed) without proxying to either host
 # - `DELETE /fleet/vms/{node}/{id}` proxies to the right host and reaps the
 #   real VM there, leaving the other host's VM untouched
 #
@@ -186,6 +189,14 @@ print('ok' if ids.get('$VM1_ID') == '$VM1_NODE' and ids.get('$VM2_ID') == '$VM2_
 [ "$FOUND" = "ok" ] && pass "fleet-wide list shows both VMs tagged with their correct real node" || fail "fleet-wide list did not correctly aggregate/tag both VMs"
 UNREACHABLE_COUNT=$(echo "$LIST" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('unreachable_nodes', ['missing'])))")
 [ "$UNREACHABLE_COUNT" = "0" ] && pass "fleet-wide list reports zero unreachable nodes with both real hosts up" || fail "fleet-wide list's unreachable_nodes was not an empty list (got: ${UNREACHABLE_COUNT})"
+
+section "GET /fleet/capacity reports real two-host totals"
+CAPACITY=$(ssh "$CENTRAL" "curl -sS -H '${AUTH_H}' http://127.0.0.1:${CENTRAL_FLEET_PORT}/fleet/capacity")
+echo "$CAPACITY" | python3 -m json.tool
+CAP_NODES_HEALTHY=$(echo "$CAPACITY" | python3 -c "import json,sys; print(json.load(sys.stdin)['nodes_healthy'])")
+CAP_VM_COUNT=$(echo "$CAPACITY" | python3 -c "import json,sys; print(json.load(sys.stdin)['vm_count'])")
+[ "$CAP_NODES_HEALTHY" = "2" ] && pass "capacity endpoint counts both real hosts as healthy" || fail "expected nodes_healthy=2, got ${CAP_NODES_HEALTHY}"
+[ "$CAP_VM_COUNT" = "2" ] && pass "capacity endpoint's vm_count matches the two real VMs both other checks confirmed" || fail "expected vm_count=2, got ${CAP_VM_COUNT}"
 
 section "Deleting via the fleet proxy reaps the right VM on the right host"
 if [ "$VM2_NODE" = "node-a" ]; then VM2_HOST="$CENTRAL"; else VM2_HOST="$NODE"; fi

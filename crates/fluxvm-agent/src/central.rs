@@ -273,6 +273,7 @@ pub fn router(cfg: CentralConfig) -> Router {
         .route("/fleet/vms", post(create_vm).get(list_vms))
         .route("/fleet/nodes/{name}/vms", get(node_vms))
         .route("/fleet/vms/{node}/{id}", axum::routing::delete(delete_vm))
+        .route("/fleet/capacity", get(fleet_capacity))
         .layer(middleware::from_fn_with_state(
             fleet.clone(),
             auth_middleware,
@@ -702,6 +703,82 @@ async fn delete_vm(
             format!("node '{node}' rejected delete: {body}"),
         ))
     }
+}
+
+/// `GET /fleet/capacity` — a fleet-wide capacity summary, computed purely
+/// from each node's own last-reported heartbeat already sitting in the
+/// registry (no proxy calls to any node's `fluxvm serve`). Unlike
+/// `GET /fleet/vms`, this never blocks on or is degraded by a node being
+/// unreachable right now — a stale node is simply excluded from every
+/// total below, the same "excluded, not silently guessed" posture
+/// `GET /fleet/vms`'s own `unreachable_nodes` field documents for the
+/// harder, per-node-proxied aggregate. Answers, in one cheap call, what an
+/// operator or an autoscaler would otherwise have to derive by fetching
+/// `GET /fleet/nodes` and summing every node's `free_vcpus`/
+/// `free_memory_mib` client-side themselves.
+///
+/// `vcpus_total`/`memory_mib_total` sum every *healthy* node regardless of
+/// `cordoned` — cordoned hardware still physically exists and still counts
+/// as real fleet capacity, it's just not accepting new placements right
+/// now. `vcpus_free`/`memory_mib_free` sum only the *schedulable* subset
+/// (healthy AND not cordoned) — exactly the node set `pick_best_capacity`
+/// itself draws from for an unaddressed `POST /fleet/vms`, so this free
+/// figure answers "would an unaddressed create fit right now" precisely,
+/// not approximately. `vcpus_used`/`memory_mib_used` reuse the same
+/// per-node capacity estimate `capacity_score` already applies
+/// (`vm_count * DEFAULT_VM_VCPUS`/`DEFAULT_VM_MEMORY_MIB`) — an estimate
+/// for the same reason it is there: neither central nor this route ever
+/// asks a node for each VM's real configured size, only its count.
+async fn fleet_capacity(State(fleet): State<Fleet>) -> Json<Value> {
+    let nodes = fleet.nodes.lock().await;
+
+    let mut nodes_total = 0usize;
+    let mut nodes_healthy = 0usize;
+    let mut nodes_cordoned = 0usize;
+    let mut nodes_schedulable = 0usize;
+    let mut vm_count = 0usize;
+    let mut vcpus_total = 0u64;
+    let mut memory_mib_total = 0u64;
+    let mut vcpus_used = 0u64;
+    let mut memory_mib_used = 0u64;
+    let mut vcpus_free = 0u64;
+    let mut memory_mib_free = 0u64;
+
+    for n in nodes.values() {
+        nodes_total += 1;
+        if n.cordoned {
+            nodes_cordoned += 1;
+        }
+        if !n.healthy() {
+            continue;
+        }
+        nodes_healthy += 1;
+        vm_count += n.vm_count;
+        vcpus_total += u64::from(n.vcpus_total);
+        memory_mib_total += n.memory_mib_total;
+        vcpus_used += u64::from(n.estimated_used_vcpus());
+        memory_mib_used += n.estimated_used_memory_mib();
+        if n.cordoned {
+            continue;
+        }
+        nodes_schedulable += 1;
+        vcpus_free += u64::from(n.free_vcpus());
+        memory_mib_free += n.free_memory_mib();
+    }
+
+    Json(json!({
+        "nodes_total": nodes_total,
+        "nodes_healthy": nodes_healthy,
+        "nodes_cordoned": nodes_cordoned,
+        "nodes_schedulable": nodes_schedulable,
+        "vm_count": vm_count,
+        "vcpus_total": vcpus_total,
+        "vcpus_used": vcpus_used,
+        "vcpus_free": vcpus_free,
+        "memory_mib_total": memory_mib_total,
+        "memory_mib_used": memory_mib_used,
+        "memory_mib_free": memory_mib_free,
+    }))
 }
 
 #[cfg(test)]
@@ -1252,5 +1329,87 @@ mod tests {
                 .unwrap()
                 .contains("local fluxvm serve is unhappy")
         );
+    }
+
+    // --- GET /fleet/capacity ---
+
+    #[tokio::test]
+    async fn capacity_is_all_zero_for_an_empty_fleet() {
+        let fleet = test_fleet(HashMap::new());
+        let Json(resp) = fleet_capacity(State(fleet)).await;
+        assert_eq!(resp["nodes_total"], 0);
+        assert_eq!(resp["nodes_healthy"], 0);
+        assert_eq!(resp["nodes_schedulable"], 0);
+        assert_eq!(resp["vcpus_total"], 0);
+        assert_eq!(resp["vcpus_free"], 0);
+        assert_eq!(resp["memory_mib_total"], 0);
+        assert_eq!(resp["memory_mib_free"], 0);
+    }
+
+    #[tokio::test]
+    async fn capacity_sums_healthy_uncordoned_nodes() {
+        // a: 8 vCPU/16Gi, 1 VM (~2 used, 6 free); b: 8 vCPU/16Gi, 3 VMs (~6 used, 2 free)
+        let mut nodes = HashMap::new();
+        nodes.insert("a".to_string(), node("a", 1, 0));
+        nodes.insert("b".to_string(), node("b", 3, 0));
+        let fleet = test_fleet(nodes);
+        let Json(resp) = fleet_capacity(State(fleet)).await;
+
+        assert_eq!(resp["nodes_total"], 2);
+        assert_eq!(resp["nodes_healthy"], 2);
+        assert_eq!(resp["nodes_schedulable"], 2);
+        assert_eq!(resp["nodes_cordoned"], 0);
+        assert_eq!(resp["vm_count"], 4);
+        assert_eq!(resp["vcpus_total"], 16);
+        assert_eq!(resp["memory_mib_total"], 32768);
+        assert_eq!(resp["vcpus_used"], 8); // (1+3) VMs * DEFAULT_VM_VCPUS(2)
+        assert_eq!(resp["memory_mib_used"], 8192); // (1+3) VMs * 2048
+        assert_eq!(resp["vcpus_free"], 8);
+        assert_eq!(resp["memory_mib_free"], 24576);
+    }
+
+    #[tokio::test]
+    async fn capacity_counts_a_stale_node_toward_nothing() {
+        // Well past HEALTHY_WINDOW_SECS (30s) -- excluded from every total,
+        // not just from placement, exactly like GET /fleet/vms's own
+        // unreachable_nodes handling excludes it from "items".
+        let mut nodes = HashMap::new();
+        nodes.insert("fresh".to_string(), node("fresh", 1, 0));
+        nodes.insert("stale".to_string(), node("stale", 5, 300));
+        let fleet = test_fleet(nodes);
+        let Json(resp) = fleet_capacity(State(fleet)).await;
+
+        assert_eq!(resp["nodes_total"], 2);
+        assert_eq!(resp["nodes_healthy"], 1);
+        assert_eq!(resp["vm_count"], 1); // stale node's 5 VMs are not counted
+        assert_eq!(resp["vcpus_total"], 8);
+        assert_eq!(resp["memory_mib_total"], 16384);
+    }
+
+    #[tokio::test]
+    async fn capacity_reports_cordoned_hardware_as_real_but_unschedulable() {
+        // Cordoned hardware still exists (counts toward *_total) but is
+        // excluded from pick_best_capacity's own candidate set, so it must
+        // also be excluded from *_free -- otherwise this endpoint would
+        // promise free capacity an unaddressed create could never actually
+        // land on.
+        let mut nodes = HashMap::new();
+        let mut a = node("a", 0, 0);
+        a.cordoned = true;
+        nodes.insert("a".to_string(), a);
+        nodes.insert("b".to_string(), node("b", 0, 0));
+        let fleet = test_fleet(nodes);
+        let Json(resp) = fleet_capacity(State(fleet)).await;
+
+        assert_eq!(resp["nodes_total"], 2);
+        assert_eq!(resp["nodes_healthy"], 2);
+        assert_eq!(resp["nodes_cordoned"], 1);
+        assert_eq!(resp["nodes_schedulable"], 1);
+        // Both nodes' hardware counts toward the fleet's real totals...
+        assert_eq!(resp["vcpus_total"], 16);
+        assert_eq!(resp["memory_mib_total"], 32768);
+        // ...but only "b" (uncordoned) contributes to what's actually free.
+        assert_eq!(resp["vcpus_free"], 8);
+        assert_eq!(resp["memory_mib_free"], 16384);
     }
 }

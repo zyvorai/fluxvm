@@ -986,6 +986,48 @@ test documents the exact hazard the health check guards against — deleting
 a cordoned-but-stale node's record, then feeding it a fresh heartbeat,
 recreates it uncordoned.
 
+**See the fleet's total capacity** without fetching `GET /fleet/nodes` and
+summing every node's `free_vcpus`/`free_memory_mib` yourself:
+
+```bash
+curl http://fleet-registry:7799/fleet/capacity
+# {
+#   "nodes_total": 3, "nodes_healthy": 2, "nodes_cordoned": 1, "nodes_schedulable": 1,
+#   "vm_count": 4,
+#   "vcpus_total": 16, "vcpus_used": 8, "vcpus_free": 8,
+#   "memory_mib_total": 32768, "memory_mib_used": 8192, "memory_mib_free": 24576
+# }
+```
+
+Computed entirely from what each node already reported in its own last
+heartbeat, sitting in the registry — unlike `GET /fleet/vms`, this never
+proxies a single call to any node's own `fluxvm serve`, so it's cheap and
+never degrades or blocks because one node happens to be slow or briefly
+unreachable right now (a stale node is simply excluded from every total,
+same as it already is from `pick_best_capacity`'s own candidate set — not
+guessed at). `nodes_total`/`nodes_healthy`/`nodes_cordoned` count against
+the whole registry regardless of reachability; every other field counts
+only *healthy* nodes. `vcpus_total`/`memory_mib_total` sum every healthy
+node whether cordoned or not — cordoned hardware still physically exists
+and still counts as real fleet capacity, it's simply not accepting new
+placements right now — while `vcpus_free`/`memory_mib_free` (and
+`nodes_schedulable`) sum only the healthy-and-uncordoned subset: exactly
+the same node set an unaddressed `POST /fleet/vms` itself draws from via
+`pick_best_capacity`, so a nonzero `*_free` here is a precise answer to
+"would an unaddressed create fit right now," not an approximation that
+then has to account for cordoning separately. `vcpus_used`/
+`memory_mib_used` reuse `capacity_score`'s own existing per-VM estimate
+(`vm_count * DEFAULT_VM_VCPUS`/`DEFAULT_VM_MEMORY_MIB`) rather than asking
+any node for each VM's real configured size — an estimate for the same
+reason placement's own scoring already is one. This is the natural single
+call for a capacity-planning dashboard or an autoscaler deciding whether
+the fleet needs another host, instead of it re-deriving these same sums
+from `GET /fleet/nodes` on every poll. 4 new tests in
+`fluxvm-agent::central`: an empty fleet reports all zeros; healthy
+uncordoned nodes sum correctly; a stale node contributes to none of the
+totals (not just placement); and a cordoned node's hardware counts toward
+`*_total` but is excluded from `*_free`/`nodes_schedulable`.
+
 ## State layout
 
 ```text
