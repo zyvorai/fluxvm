@@ -172,6 +172,8 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Install Python deps for static gates
+        run: pip install pyyaml
       - name: Shell syntax for build/install helpers
         working-directory: fluxvm
         run: |
