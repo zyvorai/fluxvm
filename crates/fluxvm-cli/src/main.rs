@@ -20,6 +20,8 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod fleet_client;
+
 #[derive(Parser)]
 #[command(
     name = "fluxvm",
@@ -227,6 +229,76 @@ enum Command {
         #[command(subcommand)]
         command: HubbleCommand,
     },
+    /// Manage a multi-host fleet through its central registry
+    /// (`fluxvm-agent central`) — see docs/operations.md's "Distributed
+    /// node-agent" section. Previously every one of these operations meant
+    /// a raw `curl` call against `/fleet/*`; this closes the same
+    /// no-CLI-equivalent gap `migrate`/`ping`/`copy-to` already closed for
+    /// the per-node REST API, for the fleet-wide one.
+    Fleet {
+        /// Base URL of the `fluxvm-agent central` instance, e.g.
+        /// `http://fleet-registry:7799`.
+        #[arg(long, env = "CENTRAL_URL")]
+        central: String,
+        /// Bearer token matching `fluxvm-agent central --token`. Omit if
+        /// the registry has no token configured.
+        #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
+        token: Option<String>,
+        #[command(subcommand)]
+        command: FleetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum FleetCommand {
+    /// List every registered node, each with its live `healthy`/`cordoned`
+    /// state and free capacity. REST equivalent: `GET /fleet/nodes`.
+    Nodes,
+    /// Exclude a node from automatic (residual-capacity) placement without
+    /// touching any VM already on it or deregistering the node — same
+    /// semantics as `kubectl cordon`. REST equivalent:
+    /// `POST /fleet/nodes/{name}/cordon`.
+    Cordon { name: String },
+    /// Clear a node's cordon, re-admitting it to automatic placement. REST
+    /// equivalent: `POST /fleet/nodes/{name}/uncordon`.
+    Uncordon { name: String },
+    /// Permanently forget a decommissioned node's registry entry. Only
+    /// works once the node's heartbeat has already gone stale — the
+    /// registry rejects deregistering a still-healthy node (409), since its
+    /// very next heartbeat would just re-add it. REST equivalent:
+    /// `DELETE /fleet/nodes/{name}`.
+    Deregister { name: String },
+    /// Fleet-wide capacity summary computed from each node's last
+    /// heartbeat — no proxy calls to any node's own `fluxvm serve`. REST
+    /// equivalent: `GET /fleet/capacity`.
+    Capacity,
+    /// Create a VM through the fleet: residual-capacity placement picks a
+    /// healthy, uncordoned node unless `--node` names one explicitly (which
+    /// bypasses placement entirely, same as `kubectl` with `spec.nodeName`
+    /// set — including landing on a cordoned node). REST equivalent:
+    /// `POST /fleet/vms`.
+    Create {
+        /// Path to a `CreateVmRequest` JSON spec, same shape `fluxvm
+        /// create --spec` takes.
+        #[arg(long)]
+        spec: PathBuf,
+        /// Exact node name to create on, bypassing automatic placement.
+        #[arg(long)]
+        node: Option<String>,
+    },
+    /// The fleet-wide VM list, each entry tagged with which node it's on.
+    /// Any node this couldn't account for (unreachable, stale, or erroring)
+    /// is named in the response's `unreachable_nodes` field rather than
+    /// silently missing from `items`. REST equivalent: `GET /fleet/vms`.
+    Vms,
+    /// The VMs on exactly one node, queried directly against that node
+    /// rather than filtered out of the fleet-wide list — works even when
+    /// other nodes in the fleet are unreachable. REST equivalent:
+    /// `GET /fleet/nodes/{name}/vms`.
+    NodeVms { name: String },
+    /// Delete a VM on a specific node through the fleet proxy. REST
+    /// equivalent: `DELETE /fleet/vms/{node}/{id}`.
+    Delete { node: String, id: Uuid },
 }
 
 #[derive(Subcommand)]
@@ -1347,6 +1419,81 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Command::Fleet {
+            central,
+            token,
+            command,
+        } => {
+            let token = token.as_deref();
+            match command {
+                FleetCommand::Nodes => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::list_nodes(&central, token).await?
+                        )?
+                    );
+                }
+                FleetCommand::Cordon { name } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::cordon(&central, token, &name).await?
+                        )?
+                    );
+                }
+                FleetCommand::Uncordon { name } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::uncordon(&central, token, &name).await?
+                        )?
+                    );
+                }
+                FleetCommand::Deregister { name } => {
+                    fleet_client::deregister(&central, token, &name).await?;
+                    println!("{{\"ok\":true}}");
+                }
+                FleetCommand::Capacity => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::capacity(&central, token).await?
+                        )?
+                    );
+                }
+                FleetCommand::Create { spec, node } => {
+                    let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&spec)?)
+                        .with_context(|| format!("parsing {}", spec.display()))?;
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::create_vm(&central, token, body, node).await?
+                        )?
+                    );
+                }
+                FleetCommand::Vms => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::list_vms(&central, token).await?
+                        )?
+                    );
+                }
+                FleetCommand::NodeVms { name } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &fleet_client::node_vms(&central, token, &name).await?
+                        )?
+                    );
+                }
+                FleetCommand::Delete { node, id } => {
+                    fleet_client::delete_vm(&central, token, &node, id).await?;
+                    println!("{{\"ok\":true}}");
+                }
+            }
+        }
     }
     Ok(())
 }

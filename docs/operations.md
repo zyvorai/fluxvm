@@ -855,6 +855,28 @@ before it ever reached the real target process, leaving the actual `fluxvm serve
 time with no error surfaced. Fixed with the standard `[t]arget/...` bracket-escape idiom that keeps
 `pgrep`/`pkill -f` from matching their own invocation.
 
+**CLI equivalents.** Every `/fleet/*` route below also has a `fluxvm fleet ...`
+subcommand — previously the only way to drive the central registry was a raw
+`curl` call:
+
+```bash
+fluxvm fleet --central http://fleet-registry:7799 nodes
+fluxvm fleet --central http://fleet-registry:7799 cordon worker-1
+fluxvm fleet --central http://fleet-registry:7799 uncordon worker-1
+fluxvm fleet --central http://fleet-registry:7799 node-vms worker-1
+fluxvm fleet --central http://fleet-registry:7799 vms
+fluxvm fleet --central http://fleet-registry:7799 capacity
+fluxvm fleet --central http://fleet-registry:7799 create --spec vm.json [--node worker-1]
+fluxvm fleet --central http://fleet-registry:7799 delete worker-1 <vm-id>
+fluxvm fleet --central http://fleet-registry:7799 deregister worker-1
+```
+
+`--central` also reads `CENTRAL_URL`; pass `--token`/`FLUXVM_AGENT_TOKEN` the
+same way `fluxvm-agent node` does when the registry has a bearer token
+configured. Bodies, status codes, and error text are unchanged from the raw
+HTTP routes documented throughout this section — this is a thin client, not
+a second implementation of any of it.
+
 **Auth / TLS / persistence / placement**: set `--token` / `FLUXVM_AGENT_TOKEN` on both
 `central` and `node` (Bearer on all `/fleet/*` except `/healthz`). Optional
 `--tls-cert`/`--tls-key` on central. Registry persists to
