@@ -189,9 +189,13 @@ and Kata/fleet/migration lab gates remain open — see
 [secure-containers-set17.md](secure-containers-set17.md),
 [secure-containers-set18.md](secure-containers-set18.md), and
 [secure-containers-set19.md](secure-containers-set19.md). Sentinel
-in-guest per-container network policy (Set 8S) as inheriting a Pod's Set 6S
-policy automatically — every container is enforced fail-closed by default,
-but the shim does not yet forward Pod policy content per container. Sentinel
+in-guest per-container network policy (Set 8S) inherits a Pod's Set 6S
+policy automatically as of Set 19 — every container is enforced fail-closed
+by default, and the shim now fetches and forwards Pod policy content per
+container at create time, kept in sync afterward via a continuous watch
+(see [secure-containers-set8s.md](secure-containers-set8s.md)); still open
+is a live multi-container Pod e2e proof against a real Kubernetes cluster
+with the `fluxvm` RuntimeClass installed. Sentinel
 in-guest eBPF LSM MAC (Set 9S) is off by default
 (`FLUXVM_CONTAINER_LSM=1`) and audit-only unless
 `FLUXVM_CONTAINER_LSM_ENFORCE=1` is also set; the guest-embedded `aya`

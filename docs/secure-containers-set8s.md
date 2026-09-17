@@ -66,17 +66,27 @@ built and tested the same way, not assumed to work by analogy.
   delete (`forget_container_policy`) so the shared maps don't grow
   unboundedly across a long-lived Pod VM's container churn.
 
-## Deliberately out of scope for this Set
+## Deliberately out of scope for this Set (closed by Set 19)
 
-**The shim does not yet fetch a Pod's Set 6S policy and forward it per
-container.** Every container today gets Set 8S's fail-closed-by-default
-enforcement attached unconditionally, but with an empty policy
-(`network_policy: None` from the shim) until that wiring lands — matching
-Set 6S's own precedent of shipping the mechanism ahead of its primary
-population source. The natural next step, once a Kubernetes `NetworkPolicy`
-watcher exists (Set 6S's own open item) or as a standalone piece before
-that: the shim queries `GET /v1/vms/{id}/network/pod-policy` and passes the
-result into each container's `Create` call.
+At the time this Set shipped, the shim did not yet fetch a Pod's Set 6S
+policy and forward it per container — every container got Set 8S's
+fail-closed-by-default enforcement attached unconditionally, but with an
+empty policy (`network_policy: None` from the shim), matching Set 6S's own
+precedent of shipping the mechanism ahead of its primary population source.
+
+**This wiring has since landed, in Set 19** (`fluxvm-containerd-shim`'s
+`guest_network_policy`): the shim queries `GET /v1/vms/{id}/network/
+pod-policy`, maps the response into a `ContainerNetworkPolicy` (inverting
+`default_deny` into `default_allow`, de-duplicating `rules`, carrying
+`schema_version`/`ingress_isolated`/`egress_isolated`), and passes it into
+each container's own `Create` call — the call site's own comment states the
+design plainly: "Set 19: fetch the current host Pod policy before Create.
+Failure is fail-closed because `None` keeps Set 8S's deny-non-loopback
+default." A second path, `spawn_network_policy_watch`, continuously polls
+the same endpoint after creation and pushes a live `ContainerRequest::
+UpdateNetworkPolicy` whenever the fetched policy changes, so a container's
+enforcement doesn't go stale for the rest of its lifetime. See Set 19's own
+notes for that work's full scope.
 
 ## Validation performed
 
@@ -111,9 +121,12 @@ result into each container's `Create` call.
 
 ## Remaining gates
 
-- Wire the shim to fetch and forward a Pod's Set 6S policy per container
-  (see "Deliberately out of scope" above).
-- A live multi-container Pod e2e test (see "Not yet run" above).
+- The live multi-container Pod e2e test named in "Validation performed"
+  above (container B denied from reaching container A's port, proven
+  against a real Kubernetes cluster with the `fluxvm` RuntimeClass
+  installed) — the per-container policy-forwarding wiring itself is no
+  longer an open gate (see "Deliberately out of scope" above), only its
+  live multi-container-Pod proof is.
 - `CLONE_NEWUSER`/full namespace isolation (Set 6R) and this Set's cgroup
   scoping are complementary, not sequenced — Set 6R's own doc already notes
   where a future per-container LSM identity model would hook in; this Set's
