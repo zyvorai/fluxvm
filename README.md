@@ -154,6 +154,7 @@ fluxvm copy-from <id> /etc/app.cfg ./local.txt
 fluxvm migrate start <id> --destination tcp:10.0.0.9:49152   # QEMU/CH source-side live migration
 fluxvm migrate status <id>      # QEMU only -- Cloud Hypervisor's send-migration is fire-and-forget
 fluxvm pause <id> && fluxvm resume <id>
+fluxvm freeze <id> && fluxvm frozen <id> && fluxvm thaw <id>  # cgroup-level, independent of the VMM's own API
 fluxvm delete <id>              # or wait for ttl_seconds
 ```
 

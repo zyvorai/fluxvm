@@ -408,6 +408,12 @@ curl -sS -X POST http://127.0.0.1:7788/v1/vms/<uuid>/thaw
 curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/frozen            # {"frozen": true|false}
 curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/stats              # CPU%, memory, disk I/O, read from the cgroup
 curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/pressure           # PSI: cpu/memory/io some+full, avg10/60/300 + total
+
+# CLI equivalent of freeze/thaw/frozen (no CLI form for resources/stats/pressure yet — those
+# still require a raw HTTP call, same as before):
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml freeze <uuid>
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml frozen <uuid>   # {"frozen": true|false}
+sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml thaw <uuid>
 ```
 
 `resources` (`ResourcePatch`) is a partial patch — only the fields you set are touched: `cpu_quota_percent`
@@ -426,6 +432,22 @@ really written to `memory.max` and reads back correctly; `freeze` really stops t
 time frozen with a forced busy-loop running in the guest, same technique used to verify QMP-level
 pause) and `thaw` really resumes it; `stats`/`pressure` return real nonzero, cgroup-derived numbers;
 `delete` removes the VM's cgroup directory.
+
+**`freeze`/`thaw`/`frozen`: CLI parity for the cgroup-level freezer.** `POST /v1/vms/{id}/freeze`,
+`POST .../thaw`, and `GET .../frozen` have existed since cgroup v2 resource control landed, but like
+`resources`/`stats`/`pressure` above them, triggering one meant a raw `curl` call — there was no CLI
+form at all, unlike `pause`/`resume`, the VMM-level operation these are easy to reach for by mistake
+instead of. `fluxvm freeze <id>` calls `cgroup.freeze` directly via `VmManager::freeze`, stopping every
+process in the VM's `fluxvm.slice/{id}.scope` at the kernel level — this keeps working even when the
+VMM's own control socket is wedged or unresponsive, which is exactly the scenario `pause` (QMP
+`stop`/`ch-remote pause`) can't help with, since that goes through the same socket. `fluxvm thaw <id>`
+reverses it, and `fluxvm frozen <id>` reports the freezer's current state as `{"frozen": true|false}`
+without changing anything, matching the REST route exactly (both are plain GETs/POSTs with no request
+body — no new wire types were needed). `resources`/`stats`/`pressure` stay REST-only for now: `resources`
+takes a multi-field JSON patch that would need real flag design to do justice, and `stats`/`pressure`
+are read-only introspection with no urgency behind a CLI form yet. 7 new CLI-argument-parsing tests
+covering all three commands plus a check that they aren't accidentally aliased to each other or to
+`pause`/`resume`.
 
 ## Warm VM pools
 

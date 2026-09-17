@@ -74,6 +74,25 @@ enum Command {
     Resume {
         id: Uuid,
     },
+    /// Freeze every process in the VM's cgroup via the cgroup v2 freezer
+    /// (`cgroup.freeze`) — a kernel-level stop that works even if the VMM's
+    /// own control socket is unresponsive, unlike `pause` (QMP/API-level
+    /// vCPU stop, tracked as the VM's `Paused` status). REST equivalent:
+    /// `POST /v1/vms/{id}/freeze`. See docs/operations.md's "Resource
+    /// control (cgroup v2)" section.
+    Freeze {
+        id: Uuid,
+    },
+    /// Thaw a VM previously frozen with `freeze`. REST equivalent:
+    /// `POST /v1/vms/{id}/thaw`.
+    Thaw {
+        id: Uuid,
+    },
+    /// Report whether a VM's cgroup is currently frozen. REST equivalent:
+    /// `GET /v1/vms/{id}/frozen`.
+    Frozen {
+        id: Uuid,
+    },
     /// Run a command inside the guest over vsock (requires agent.enabled in the VM spec).
     Exec {
         id: Uuid,
@@ -712,6 +731,21 @@ async fn main() -> Result<()> {
         Command::Pause { id } => println!("{}", serde_json::to_string_pretty(&m.pause(id).await?)?),
         Command::Resume { id } => {
             println!("{}", serde_json::to_string_pretty(&m.resume(id).await?)?)
+        }
+        Command::Freeze { id } => {
+            m.freeze(id).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Thaw { id } => {
+            m.thaw(id).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Frozen { id } => {
+            let frozen = m.is_frozen(id).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"frozen": frozen}))?
+            );
         }
         Command::Exec {
             id,
@@ -1704,6 +1738,79 @@ mod agent_cli_tests {
         assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod freeze_cli_tests {
+    use super::*;
+
+    /// `freeze`/`thaw`/`frozen` all take a single VM-id positional and
+    /// nothing else — proves the clap wiring actually produces the three
+    /// distinct variants (not, say, all three silently parsing into the
+    /// same one) and that the id can't be left off, the same clap-wiring-bug
+    /// class `catalog_cli_tests`/`agent_cli_tests` guard against elsewhere
+    /// in this file.
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn freeze_takes_only_the_vm_id() {
+        let id = Uuid::nil();
+        let Command::Freeze { id: parsed } = parse(&["freeze", &id.to_string()]) else {
+            panic!("expected Command::Freeze");
+        };
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn freeze_requires_an_id() {
+        assert!(Cli::try_parse_from(["fluxvm", "freeze"]).is_err());
+    }
+
+    #[test]
+    fn thaw_takes_only_the_vm_id() {
+        let id = Uuid::nil();
+        let Command::Thaw { id: parsed } = parse(&["thaw", &id.to_string()]) else {
+            panic!("expected Command::Thaw");
+        };
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn thaw_requires_an_id() {
+        assert!(Cli::try_parse_from(["fluxvm", "thaw"]).is_err());
+    }
+
+    #[test]
+    fn frozen_takes_only_the_vm_id() {
+        let id = Uuid::nil();
+        let Command::Frozen { id: parsed } = parse(&["frozen", &id.to_string()]) else {
+            panic!("expected Command::Frozen");
+        };
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn frozen_requires_an_id() {
+        assert!(Cli::try_parse_from(["fluxvm", "frozen"]).is_err());
+    }
+
+    /// `freeze`/`thaw`/`frozen` are three distinct commands, not aliases of
+    /// each other or of `pause`/`resume` — a copy-paste bug wiring `thaw`'s
+    /// arm to call `m.freeze()` (both take just an id, so the type checker
+    /// wouldn't catch it) would otherwise only surface at runtime.
+    #[test]
+    fn freeze_thaw_frozen_are_distinct_from_each_other_and_from_pause_resume() {
+        let id = Uuid::nil().to_string();
+        assert!(matches!(parse(&["freeze", &id]), Command::Freeze { .. }));
+        assert!(matches!(parse(&["thaw", &id]), Command::Thaw { .. }));
+        assert!(matches!(parse(&["frozen", &id]), Command::Frozen { .. }));
+        assert!(matches!(parse(&["pause", &id]), Command::Pause { .. }));
+        assert!(matches!(parse(&["resume", &id]), Command::Resume { .. }));
     }
 }
 

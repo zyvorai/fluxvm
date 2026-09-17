@@ -142,6 +142,30 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **`fluxvm freeze`/`thaw`/`frozen` — CLI parity for the cgroup v2 freezer.**
+  `POST /v1/vms/{id}/freeze`, `POST .../thaw`, and `GET .../frozen` have
+  existed since cgroup v2 resource control landed (see "Resource control
+  (cgroup v2)" further down this changelog), but — like `resources`,
+  `stats`, and `pressure` alongside them — there was no CLI form at all;
+  triggering one meant a raw `curl` call. This one mattered more than the
+  other three cgroup routes because it's easy to reach for by mistake:
+  `freeze`/`thaw` act on the cgroup freezer directly (`cgroup.freeze`),
+  stopping every process in the VM's `fluxvm.slice/{id}.scope` at the
+  kernel level, which is a different mechanism from `pause`/`resume`
+  (already CLI-native) — those go through the VMM's own control socket
+  (QMP `stop`/`cont` for QEMU, `ch-remote pause`/`resume` for Cloud
+  Hypervisor) and do nothing to help when that socket itself is wedged,
+  exactly the case `freeze` covers. `fluxvm freeze <id>` and `fluxvm thaw
+  <id>` call `VmManager::freeze`/`::thaw` directly; `fluxvm frozen <id>`
+  reports the freezer's current state as `{"frozen": true|false}` without
+  changing anything, matching `GET .../frozen` exactly. All three are
+  bodyless GETs/POSTs against an existing `VmManager` method, so no new
+  wire types were needed; `resources`/`stats`/`pressure` stay REST-only —
+  `resources` takes a multi-field patch that deserves real flag design of
+  its own, and the other two are read-only introspection with no CLI
+  urgency yet. 7 new CLI-argument-parsing tests, including one proving the
+  three new commands aren't accidentally aliased to each other or to
+  `pause`/`resume`.
 - **`fluxvm migrate start`/`status`/`cancel` — CLI parity for live migration.**
   `POST /v1/vms/{id}/migration/start`, `GET .../migration/status`, and
   `POST .../migration/cancel` have existed since the QEMU (and, more
