@@ -132,6 +132,21 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Fleet-wide `GET /fleet/vms` names any node it couldn't account for in an `"unreachable_nodes"`
   field (stale heartbeat, connection error, bad status, or unparseable body — each with its own
   reason) instead of silently dropping that node's VMs from the list
+- Fleet-wide capacity aggregate (`GET /fleet/capacity`) — `nodes_total`/`nodes_healthy`/
+  `nodes_cordoned`/`nodes_schedulable`, `vcpus_total`/`used`/`free`, `memory_mib_total`/`used`/`free`,
+  computed entirely from each node's last heartbeat (no per-node proxy calls, so it stays cheap and
+  never degrades when one node is briefly unreachable)
+- Automatic (unaddressed) placement fails over to the next-best node when the first pick is
+  unreachable (connection failure or an unparseable response) — an explicit rejection from a node
+  that was actually reached is never retried elsewhere, and an explicit `"node"`/`--node` target
+  stays a single, non-retried attempt either way
+- Label/`nodeSelector`-aware placement — `fluxvm-agent node --label k=v` (repeatable) advertises a
+  node's labels on every heartbeat, and an unaddressed create can require a subset of them via
+  `"nodeSelector"` (exact-match key/value, same semantics as a Kubernetes Pod's `spec.nodeSelector`)
+  without giving up failover the way hand-picking an exact `--node` would
+- `fluxvm fleet ...` CLI subcommand — full parity with every `/fleet/*` REST route (`nodes`, `node`,
+  `cordon`, `uncordon`, `node-vms`, `vms`, `capacity`, `create` incl. `--node`/`--node-selector`,
+  `delete`, `deregister`), previously reachable only via raw `curl`
 - Verified across two real, physically separate hosts
 
 ## Secure Containers (developer preview — not production-ready)

@@ -1114,6 +1114,29 @@ bypassing a non-matching selector, `nodeSelector` extraction/stripping
 edge cases) plus 2 more in `fluxvm-cli::fleet_client` exercising the
 `--node-selector` flag end to end against a real router.
 
+**Automatic placement fails over to the next-best node when the first pick
+is unreachable.** A node's heartbeat only goes stale (and drops out of
+placement) after `HEALTHY_WINDOW_SECS` (30s) with no beat — a node that
+crashed, wedged, or dropped off the network moments after its last
+heartbeat still looks perfectly healthy to `pick_best_capacity` and gets
+picked anyway. Before this existed, an unaddressed `POST /fleet/vms`
+dispatched to that single best-scoring node with no retry, so the create
+failed outright even while other schedulable nodes sat idle. `create_vm`
+now distinguishes a genuinely *unreachable* node (a connection failure, or
+a response that isn't valid JSON) from one that reached its own `fluxvm
+serve` and explicitly rejected the request: only the former triggers
+failover — the unreachable node is excluded and
+`pick_best_capacity_excluding` tries the next-best remaining candidate,
+looping until one accepts the create or every schedulable node has been
+tried and found unreachable, at which point the `502` names the last node
+tried. A rejection is never retried elsewhere, since every other node
+would reject the identical request body identically — only connectivity
+failures are worth a second attempt. An explicit `"node"`/`--node` target
+is unaffected by any of this: it stays a single, non-retried attempt (the
+same "bypasses the scheduler" semantics `nodeSelector`/cordoning already
+have above), so a caller who pinned a node gets an honest failure instead
+of a surprise landing somewhere else.
+
 ## State layout
 
 ```text

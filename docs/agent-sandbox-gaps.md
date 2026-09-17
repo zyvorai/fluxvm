@@ -73,6 +73,55 @@ Shipped: concurrent density (`scripts/bench-density.sh`), Cilium-agent CEP
 identity enrich (no private maps), in-tree KVM `FLUXKVM1` v2 memory snapshots
 (all vCPUs), MicroVM schedule→Running histograms.
 
+**Resolved:** the guest HTTP reverse proxy hung indefinitely for a
+`tap`+`netns=true` sandbox. `guest_ip` there is only routable from inside
+that VM's own network namespace — the daemon's default namespace has no
+path to it, so the proxy's plain `reqwest::Client` (which always connects
+from the calling thread's ambient namespace) silently hung until timeout.
+vsock-based guest-agent calls (`exec`, fs read/write) were unaffected,
+since vsock doesn't route through the guest's netns at all — a fully
+working guest still looked completely unreachable over this one path. Fix:
+a new `connect_in_netns()` `setns()`s a throwaway `std::thread` (never
+`tokio::task::spawn_blocking`, whose pool reuses threads and would leak
+the namespace change into unrelated work) before calling `connect()`, then
+hands the connected socket back to the async runtime — a namespace only
+governs which sockets a thread's *syscalls* create, not fds it already
+holds. Since `reqwest` has no way to accept a pre-connected socket, the
+proxy now speaks HTTP/1.1 directly over that stream via `hyper` instead.
+
+**Resolved:** two more ways the same guest HTTP proxy could hang or return
+a broken response, found immediately after the netns fix above while
+auditing the same code path. First, every incoming header except `Host`
+was forwarded verbatim to the guest — but `hyper`'s own body wrapper
+computes and sets its own `Content-Length`, so forwarding the original
+value duplicated the header; on any non-empty body, the resulting framing
+conflict left the guest's HTTP server waiting on body bytes that were
+never coming, hanging the request indefinitely instead of erroring
+(`Transfer-Encoding` has the same problem for a chunked-transfer client) —
+both are now stripped before forwarding, alongside `Host`. Second, the
+connect and request-send steps were already timeout-bounded, but the
+subsequent guest-response body read had no timeout at all — a guest that
+accepted the request but never finished (or never sent) its response body
+hung the whole proxy call forever; it now shares the same 30s
+`tokio::time::timeout` pattern already used for connect/send. The proxy
+also no longer forwards the guest response's `Connection`/`keep-alive`
+headers onto the caller: those describe the handler's own short-lived,
+one-shot connection to the guest (torn down right after this response
+regardless of what it says), not the caller's connection to
+`fluxvm-api`'s own server — forwarding them could make the caller's
+connection pool try to reuse a connection axum's own server settings had
+already closed, surfacing as a bare "connection closed before message
+completed" with no indication why.
+
+**Resolved:** a Firecracker guest kernel with no fast entropy source (no
+RDRAND passthrough, no other virtio-rng) boots with `crng_init=0` —
+anything that calls `getrandom()` before enough environmental noise
+accumulates (in practice, the guest's own init/runtime startup) blocks
+forever, indistinguishable from a hung process from the outside: alive, no
+output, nothing listening. `firecracker_config()` now unconditionally
+requests Firecracker's built-in entropy device on every boot, regardless
+of what other boot options (tap, vsock) are set.
+
 ## Host config
 
 ```toml
