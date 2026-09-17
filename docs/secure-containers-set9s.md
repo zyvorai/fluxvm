@@ -107,9 +107,29 @@ data" despite the embedded object bytes being independently confirmed
 correct — traced to a version/feature-unification interaction between `aya`
 0.13.1 (which unconditionally requires `object`'s `write` feature family)
 and this workspace's pinned `object 0.36.7`, not a logic bug in this Set's
-Rust or BPF C code (see the test's own doc comment for the full trace). A
-newer `aya`/`aya-obj`/`object` pin is the likely fix and is tracked as a
-follow-up rather than blocking this Set.
+Rust or BPF C code (see the test's own doc comment for the full trace).
+
+**Update**: the hypothesized fix (`aya` 0.13.1 → 0.14.0, which pulls
+`aya-obj` 0.3.0 and `object` forward to 0.39.1) has been attempted.
+`cargo build`/`cargo test -p fluxvm-container-agent` (30 tests) pass clean
+on the remote build host with no API breakage from the two non-patch
+version bumps, and `guest_cgroup_policy_attaches_and_enforces` (Set 8S's
+own `aya`-loaded `cgroup_skb` test) was confirmed to genuinely execute
+under real root (not silently self-skip) and pass. **This specific
+Set 9S test could not be exercised at all on that host**, though: even
+running as root, it self-skips with "bpf LSM is not active" —
+`/sys/kernel/security/lsm` there lists only
+`lockdown,capability,landlock,yama,apparmor`, no `bpf`, a kernel boot-
+parameter limitation distinct from and unrelated to the dependency
+versions. This means the dependency bump has **not** been validated
+against the one code path that actually triggers the original ELF-parse
+failure — there is no more or less confidence that the intermittent
+failure is fixed than before this update, only that the bump itself
+doesn't regress anything else. Proving or disproving the fix still needs
+a real host with `bpf` active in its `lsm=` kernel parameter, run
+repeatedly given the failure's own intermittency — not yet available.
+The version bump is otherwise safe to keep; not yet root-caused to a
+confirmed fix.
 
 ## Guest-image prerequisite
 

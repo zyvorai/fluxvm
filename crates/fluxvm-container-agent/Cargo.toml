@@ -26,4 +26,4 @@ fluxvm-container-protocol = { path = "../fluxvm-container-protocol" }
 # bpftool installed the way the host always does. See
 # docs/secure-containers-set8s.md for the reasoning and empirical
 # confirmation that aya loads a plain clang-compiled BTF object fine.
-aya = "0.13"
+aya = "0.14"
