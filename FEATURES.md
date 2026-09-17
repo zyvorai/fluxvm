@@ -119,6 +119,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
   automatic placement for planned maintenance without deregistering it or touching any VM already
   running on it; an explicit `POST /fleet/vms {"node": "..."}` can still target a cordoned node
   directly, same precedent as a Kubernetes Pod's `spec.nodeName` bypassing the scheduler
+- Per-node deregistration (`DELETE /fleet/nodes/{name}`) — permanently forget a decommissioned
+  node instead of it sitting stale in the registry forever; refuses with `409` while the node's
+  heartbeat is still fresh, so a live node's cordon state can't be silently wiped by its own next
+  heartbeat re-registering it uncordoned
 - Per-node VM listing (`GET /fleet/nodes/{name}/vms`) — "what's actually running on this node?",
   answered directly against that node (so it still works when other nodes in the fleet are
   unreachable) rather than filtered client-side out of the fleet-wide `GET /fleet/vms` aggregate

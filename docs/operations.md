@@ -919,6 +919,40 @@ node's real VMs; a stale-heartbeat node is named without ever being
 contacted; a node that rejects the call with a non-2xx is named with its
 own error message included in the reason.
 
+**Permanently forget a decommissioned node.** Cordoning and a stale
+heartbeat both take a node out of automatic placement, but neither ever
+actually removes its record — retire a host for good (old hardware
+decommissioned, migrated to a different fleet) and it sits in the registry,
+excluded from scheduling but still cluttering `GET /fleet/nodes`, forever.
+`DELETE /fleet/nodes/{name}` removes the record outright:
+
+```bash
+curl -X DELETE http://fleet-registry:7799/fleet/nodes/worker-1
+```
+
+It refuses with a `409` if that node's heartbeat is still fresh
+(`healthy()`, same `HEALTHY_WINDOW_SECS` window as everywhere else) rather
+than deleting it anyway. That's a deliberate fail-closed choice, not
+laziness: `apply_register` treats a name with no existing record as a
+brand-new node and inserts it uncordoned (see its doc comment) — so
+deregistering a *live* node and letting its very next heartbeat re-create
+the record would silently drop any cordon an operator had set on it,
+undoing the exact maintenance state cordoning exists to hold in place.
+Requiring staleness first gives an operator one unambiguous path to
+decommission a live host: stop that host's `fluxvm-agent node` process (or
+otherwise let its heartbeat lapse), wait out `HEALTHY_WINDOW_SECS`, then
+deregister — never a race between "delete" and "the next heartbeat wins".
+An unknown node name is a `404`, same as every other `/fleet/*` route
+keyed by `{name}`. Deregistering also persists immediately to
+`--state-dir/fleet-nodes.json`, same as cordon/uncordon, so the removal
+survives a central restart. 7 new tests in `fluxvm-agent::central`: a
+stale node is removed (both at the pure-function level and through the
+HTTP handler); a healthy node is refused and its record left untouched
+(both levels); an unknown name reports not-found (both levels); and one
+test documents the exact hazard the health check guards against — deleting
+a cordoned-but-stale node's record, then feeding it a fresh heartbeat,
+recreates it uncordoned.
+
 ## State layout
 
 ```text

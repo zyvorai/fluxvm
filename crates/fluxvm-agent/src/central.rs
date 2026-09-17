@@ -264,6 +264,10 @@ pub fn router(cfg: CentralConfig) -> Router {
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/fleet/register", post(register))
         .route("/fleet/nodes", get(list_nodes))
+        .route(
+            "/fleet/nodes/{name}",
+            axum::routing::delete(deregister_node),
+        )
         .route("/fleet/nodes/{name}/cordon", post(cordon_node))
         .route("/fleet/nodes/{name}/uncordon", post(uncordon_node))
         .route("/fleet/vms", post(create_vm).get(list_vms))
@@ -369,6 +373,74 @@ async fn set_node_cordoned(
         persist_nodes(path, lock, &nodes);
     }
     Ok(Json(updated))
+}
+
+/// Outcome of attempting to permanently remove a node's registry entry.
+/// Kept as its own enum (rather than folding into `set_cordoned`'s
+/// `Option<()>`) because deregistration has a second failure mode —
+/// refusing to touch a node that's still heartbeating — that needs its own
+/// HTTP status, not just "found or not".
+enum DeregisterOutcome {
+    Removed,
+    NotFound,
+    StillHealthy,
+}
+
+/// Remove a node's entry entirely, but only once its heartbeat has already
+/// gone stale. Deliberately narrower than cordoning: cordoning suppresses
+/// *future* automatic placement while leaving the record (and its
+/// `cordoned` flag) intact forever; this erases the record outright, which
+/// is only safe once nothing will resurrect it with the wrong state. If
+/// the node were still healthy, `apply_register` would treat its very next
+/// heartbeat as a brand-new node and re-insert it uncordoned (see
+/// `apply_register`'s doc comment) — silently undoing any cordon an
+/// operator had set and defeating the maintenance workflow cordon exists
+/// for. Requiring staleness first means an operator decommissioning a live
+/// host has one unambiguous path: stop that host's `fluxvm-agent node`
+/// process (or otherwise let its heartbeat lapse) and wait past
+/// `HEALTHY_WINDOW_SECS`, then deregister — never a race between "delete"
+/// and "the next heartbeat wins".
+fn deregister(nodes: &mut HashMap<String, NodeInfo>, name: &str) -> DeregisterOutcome {
+    match nodes.get(name) {
+        None => DeregisterOutcome::NotFound,
+        Some(n) if n.healthy() => DeregisterOutcome::StillHealthy,
+        Some(_) => {
+            nodes.remove(name);
+            DeregisterOutcome::Removed
+        }
+    }
+}
+
+/// `DELETE /fleet/nodes/{name}` — permanently forget a decommissioned or
+/// retired node, so it stops appearing in `GET /fleet/nodes` forever (a
+/// stale node otherwise sits in the registry indefinitely, excluded from
+/// placement by its own staleness but never actually cleaned up). Returns
+/// `404` for a name that was never registered, and `409` for a node whose
+/// heartbeat is still fresh — see `deregister`'s doc comment for why a
+/// live node can't be deregistered directly.
+async fn deregister_node(
+    State(fleet): State<Fleet>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, AppError> {
+    let mut nodes = fleet.nodes.lock().await;
+    match deregister(&mut nodes, &name) {
+        DeregisterOutcome::Removed => {
+            if let (Some(path), Some(lock)) = (&fleet.persist_path, &fleet.lock_path) {
+                persist_nodes(path, lock, &nodes);
+            }
+            Ok(StatusCode::NO_CONTENT)
+        }
+        DeregisterOutcome::NotFound => Err(AppError(
+            StatusCode::NOT_FOUND,
+            format!("no registered node named '{name}'"),
+        )),
+        DeregisterOutcome::StillHealthy => Err(AppError(
+            StatusCode::CONFLICT,
+            format!(
+                "node '{name}' is still heartbeating; stop its fluxvm-agent node process (or otherwise let its heartbeat lapse) and wait for it to go stale before deregistering, or its next heartbeat will simply re-register it"
+            ),
+        )),
+    }
 }
 
 /// Residual-capacity placement: prefer the healthy node with the highest
@@ -829,6 +901,107 @@ mod tests {
         nodes.insert("tight".to_string(), node_cap("tight", 1, 4, 8192));
         let target = resolve_target(&nodes, None, 2, 2048).unwrap();
         assert_eq!(target.name, "tight");
+    }
+
+    // --- DELETE /fleet/nodes/{name} ---
+
+    #[test]
+    fn deregister_removes_a_stale_node() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "stale".to_string(),
+            node("stale", 0, HEALTHY_WINDOW_SECS + 5),
+        );
+        assert!(matches!(
+            deregister(&mut nodes, "stale"),
+            DeregisterOutcome::Removed
+        ));
+        assert!(!nodes.contains_key("stale"));
+    }
+
+    #[test]
+    fn deregister_refuses_a_healthy_node() {
+        let mut nodes = HashMap::new();
+        nodes.insert("fresh".to_string(), node("fresh", 0, 0));
+        assert!(matches!(
+            deregister(&mut nodes, "fresh"),
+            DeregisterOutcome::StillHealthy
+        ));
+        // Refused — the record must still be there afterward.
+        assert!(nodes.contains_key("fresh"));
+    }
+
+    #[test]
+    fn deregister_unknown_node_is_not_found() {
+        let mut nodes: HashMap<String, NodeInfo> = HashMap::new();
+        assert!(matches!(
+            deregister(&mut nodes, "ghost"),
+            DeregisterOutcome::NotFound
+        ));
+    }
+
+    #[test]
+    fn deregister_then_new_heartbeat_recreates_uncordoned() {
+        // Documents the exact hazard `deregister` refusing a healthy node
+        // guards against: once a record is actually gone, the next
+        // heartbeat for that name is indistinguishable from a brand-new
+        // node and re-registers uncordoned, regardless of what the erased
+        // record's `cordoned` flag used to say.
+        let mut nodes = HashMap::new();
+        let mut a = node("a", 0, HEALTHY_WINDOW_SECS + 5);
+        a.cordoned = true;
+        nodes.insert("a".to_string(), a);
+        assert!(matches!(
+            deregister(&mut nodes, "a"),
+            DeregisterOutcome::Removed
+        ));
+        apply_register(
+            &mut nodes,
+            RegisterRequest {
+                name: "a".into(),
+                fluxvm_url: "http://a".into(),
+                vcpus_total: 8,
+                memory_mib_total: 16384,
+                vm_count: 0,
+            },
+        );
+        assert!(!nodes["a"].cordoned);
+    }
+
+    #[tokio::test]
+    async fn deregister_node_http_removes_a_stale_node() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "stale".to_string(),
+            node("stale", 0, HEALTHY_WINDOW_SECS + 5),
+        );
+        let fleet = test_fleet(nodes);
+        let status = deregister_node(State(fleet.clone()), Path("stale".to_string()))
+            .await
+            .unwrap();
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(!fleet.nodes.lock().await.contains_key("stale"));
+    }
+
+    #[tokio::test]
+    async fn deregister_node_http_conflicts_on_a_healthy_node() {
+        let mut nodes = HashMap::new();
+        nodes.insert("fresh".to_string(), node("fresh", 0, 0));
+        let fleet = test_fleet(nodes);
+        let err = deregister_node(State(fleet.clone()), Path("fresh".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::CONFLICT);
+        assert!(fleet.nodes.lock().await.contains_key("fresh"));
+    }
+
+    #[tokio::test]
+    async fn deregister_node_http_not_found_for_unknown_node() {
+        let fleet = test_fleet(HashMap::new());
+        let err = deregister_node(State(fleet), Path("ghost".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
     // --- GET /fleet/nodes/{name}/vms ---
