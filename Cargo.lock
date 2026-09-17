@@ -1949,6 +1949,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fluxvm-core",
+ "fluxvm-guest-protocol",
  "fluxvm-image",
  "fluxvm-network",
  "fluxvm-scheduler",

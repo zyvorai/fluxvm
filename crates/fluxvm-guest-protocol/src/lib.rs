@@ -57,10 +57,12 @@ pub enum AgentRequest {
     /// Open an interactive PTY-backed shell. Unlike every other request,
     /// this is the *last* JSON line the agent reads on this connection —
     /// once it answers [`AgentResponse::ShellOpened`], the connection stops
-    /// being newline-JSON-framed entirely and becomes a raw byte pipe
-    /// wired straight to the shell's PTY until either side closes it.
-    /// Terminal resize isn't supported (no control channel once the
-    /// connection goes raw) — the PTY is sized once at open time.
+    /// being newline-JSON-framed and every message read from the client
+    /// becomes a [`PtyFrame`] instead: keystrokes ride in `PtyFrame::Data`,
+    /// and a client can resize the PTY at any point during the session with
+    /// `PtyFrame::Resize` — no reconnect needed. PTY output flowing back to
+    /// the client stays completely unframed raw bytes (see [`PtyFrame`]'s
+    /// own docs for why this is intentionally one-directional).
     OpenShell {
         #[serde(default = "default_pty_cols")]
         cols: u16,
@@ -131,14 +133,133 @@ pub enum AgentResponse {
         /// Unix permission bits the file had on the guest, e.g. `0o644`.
         mode: u32,
     },
-    /// Acknowledges `AgentRequest::OpenShell` — the last framed message on
-    /// this connection; every byte after this response's trailing `\n` is
-    /// raw PTY traffic, not JSON.
+    /// Acknowledges `AgentRequest::OpenShell` — the last JSON-framed message
+    /// on this connection; every byte the client sends after this
+    /// response's trailing `\n` is a [`PtyFrame`], and every byte the
+    /// client reads back is raw PTY output (not JSON, not framed).
     ShellOpened,
     ShuttingDown,
     Error {
         message: String,
     },
+}
+
+/// Bounds a single [`PtyFrame::Data`] frame's payload — generous for a
+/// paste or a fast-scrolling command's worth of keystrokes batched into one
+/// write, small enough that a corrupt or hostile length header can't make
+/// the guest agent allocate an unbounded buffer before it's even had a
+/// chance to reject the frame (see [`PtyFrame::read_from`]).
+pub const MAX_PTY_FRAME_BYTES: usize = 1024 * 1024;
+
+const PTY_FRAME_TAG_DATA: u8 = 0;
+const PTY_FRAME_TAG_RESIZE: u8 = 1;
+
+/// One message on the wire *after* `AgentResponse::ShellOpened` — i.e. once
+/// an `OpenShell` connection has left newline-JSON framing behind. Unlike
+/// every other message this crate defines, a `PtyFrame` is hand-rolled
+/// binary (`[tag: u8]` then type-specific bytes), not JSON: JSON can't
+/// safely carry a shell's actual byte-for-byte keystrokes (arbitrary,
+/// possibly non-UTF-8 bytes) without an encoding round trip on every single
+/// byte typed, which defeats the point of a raw low-latency PTY pipe.
+///
+/// Only ever sent host -> guest (`fluxvm-vsock-client`'s caller encodes,
+/// `fluxvm-guest-agent` decodes via [`PtyFrame::read_from`]). PTY output
+/// flowing guest -> host stays completely unframed raw bytes: the guest
+/// agent never has anything of its own to signal back mid-session, and
+/// framing that direction too would force every reader of PTY output
+/// (a terminal emulator on the other end) to speak this protocol instead
+/// of just rendering bytes as they arrive.
+///
+/// This is deliberately in-band on the *same* connection rather than a
+/// second control connection identified by a session ID — the pattern
+/// `fluxvm-container-protocol`'s `ResizePty` uses for exec sessions, where
+/// a long-lived container-agent process already keeps a registry of live
+/// sessions to address into. The plain guest agent's `OpenShell` handler
+/// deliberately has no such registry: each session runs in its own
+/// double-forked, fully detached process specifically so the long-lived
+/// vsock listener never keeps a handle on it (see `docs/operations.md`'s
+/// "Fixed — process isolation" note on why that isolation exists). Adding
+/// a session registry back into the listener just to address resize
+/// commands would reintroduce the exact shared state that fix removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtyFrame {
+    /// Bytes to write to the shell's stdin (keystrokes, pasted text, etc).
+    Data(Vec<u8>),
+    /// Resize the shell's PTY to `cols`x`rows`, effective immediately — the
+    /// shell sees a real `SIGWINCH`, exactly as if a real terminal had been
+    /// resized. No reconnect needed, and no acknowledgement is sent back:
+    /// this is the same fire-and-forget guarantee level as a keystroke.
+    Resize { cols: u16, rows: u16 },
+}
+
+impl PtyFrame {
+    /// Encodes this frame for the wire: `[tag][type-specific bytes]`. A
+    /// `Data` frame is `[0][len: u32 big-endian][len bytes]`; a `Resize`
+    /// frame is `[1][cols: u16 big-endian][rows: u16 big-endian]`.
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            PtyFrame::Data(bytes) => {
+                let mut out = Vec::with_capacity(5 + bytes.len());
+                out.push(PTY_FRAME_TAG_DATA);
+                out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                out.extend_from_slice(bytes);
+                out
+            }
+            PtyFrame::Resize { cols, rows } => {
+                let mut out = Vec::with_capacity(5);
+                out.push(PTY_FRAME_TAG_RESIZE);
+                out.extend_from_slice(&cols.to_be_bytes());
+                out.extend_from_slice(&rows.to_be_bytes());
+                out
+            }
+        }
+    }
+
+    /// Blocks until one full frame has been read from `r`. Returns
+    /// `Ok(None)` on a clean EOF *before* any byte of a new frame arrives
+    /// (the connection closing between frames — the normal way an
+    /// `OpenShell` session ends). An EOF *mid*-frame, an oversized `Data`
+    /// length header (over [`MAX_PTY_FRAME_BYTES`]), or an unrecognized tag
+    /// byte are all reported as `Err` rather than silently truncating,
+    /// accepting a partial frame, or best-effort-guessing at an unknown
+    /// tag's shape — matching this crate's fail-closed convention on the
+    /// wire (a malformed frame ends the session, it doesn't get
+    /// half-interpreted).
+    pub fn read_from<R: std::io::Read>(r: &mut R) -> std::io::Result<Option<PtyFrame>> {
+        let mut tag = [0u8; 1];
+        if r.read(&mut tag)? == 0 {
+            return Ok(None);
+        }
+        match tag[0] {
+            PTY_FRAME_TAG_DATA => {
+                let mut len_buf = [0u8; 4];
+                r.read_exact(&mut len_buf)?;
+                let len = u32::from_be_bytes(len_buf) as usize;
+                if len > MAX_PTY_FRAME_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "pty data frame of {len} bytes exceeds the {MAX_PTY_FRAME_BYTES}-byte limit"
+                        ),
+                    ));
+                }
+                let mut payload = vec![0u8; len];
+                r.read_exact(&mut payload)?;
+                Ok(Some(PtyFrame::Data(payload)))
+            }
+            PTY_FRAME_TAG_RESIZE => {
+                let mut buf = [0u8; 4];
+                r.read_exact(&mut buf)?;
+                let cols = u16::from_be_bytes([buf[0], buf[1]]);
+                let rows = u16::from_be_bytes([buf[2], buf[3]]);
+                Ok(Some(PtyFrame::Resize { cols, rows }))
+            }
+            other => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown pty frame tag {other}"),
+            )),
+        }
+    }
 }
 
 /// Serializes `value` as one line of JSON terminated by `\n`, ready to write
@@ -266,5 +387,79 @@ mod tests {
 
         let opened = encode_line(&AgentResponse::ShellOpened).unwrap();
         assert!(opened.contains("\"result\":\"shell-opened\""));
+    }
+
+    #[test]
+    fn pty_data_frame_round_trips() {
+        let frame = PtyFrame::Data(b"echo hi\n".to_vec());
+        let bytes = frame.encode();
+        assert_eq!(bytes[0], PTY_FRAME_TAG_DATA);
+        let mut cursor = std::io::Cursor::new(bytes);
+        let back = PtyFrame::read_from(&mut cursor).unwrap().unwrap();
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn pty_resize_frame_round_trips() {
+        let frame = PtyFrame::Resize {
+            cols: 132,
+            rows: 43,
+        };
+        let bytes = frame.encode();
+        assert_eq!(bytes, vec![PTY_FRAME_TAG_RESIZE, 0, 132, 0, 43]);
+        let mut cursor = std::io::Cursor::new(bytes);
+        let back = PtyFrame::read_from(&mut cursor).unwrap().unwrap();
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn pty_frame_stream_of_multiple_frames_reads_each_in_order() {
+        let mut bytes = PtyFrame::Data(b"a".to_vec()).encode();
+        bytes.extend(PtyFrame::Resize { cols: 1, rows: 2 }.encode());
+        bytes.extend(PtyFrame::Data(b"b".to_vec()).encode());
+        let mut cursor = std::io::Cursor::new(bytes);
+        assert_eq!(
+            PtyFrame::read_from(&mut cursor).unwrap().unwrap(),
+            PtyFrame::Data(b"a".to_vec())
+        );
+        assert_eq!(
+            PtyFrame::read_from(&mut cursor).unwrap().unwrap(),
+            PtyFrame::Resize { cols: 1, rows: 2 }
+        );
+        assert_eq!(
+            PtyFrame::read_from(&mut cursor).unwrap().unwrap(),
+            PtyFrame::Data(b"b".to_vec())
+        );
+        assert!(PtyFrame::read_from(&mut cursor).unwrap().is_none());
+    }
+
+    #[test]
+    fn pty_frame_clean_eof_before_any_frame_is_none() {
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        assert!(PtyFrame::read_from(&mut cursor).unwrap().is_none());
+    }
+
+    #[test]
+    fn pty_frame_eof_mid_frame_is_an_error() {
+        // A `Data` tag promising a length, but the connection closes before
+        // even the length header arrives.
+        let mut cursor = std::io::Cursor::new(vec![PTY_FRAME_TAG_DATA, 0, 0]);
+        assert!(PtyFrame::read_from(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn pty_frame_oversized_data_length_is_rejected() {
+        let mut bytes = vec![PTY_FRAME_TAG_DATA];
+        bytes.extend(((MAX_PTY_FRAME_BYTES + 1) as u32).to_be_bytes());
+        let mut cursor = std::io::Cursor::new(bytes);
+        let err = PtyFrame::read_from(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pty_frame_unknown_tag_is_rejected() {
+        let mut cursor = std::io::Cursor::new(vec![0xFFu8]);
+        let err = PtyFrame::read_from(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

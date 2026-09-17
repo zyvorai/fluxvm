@@ -287,6 +287,30 @@ end-to-end to a real PTY-backed `/bin/sh` in the guest over the same vsock agent
 `exec` (see `fluxvm_vsock_client::open_shell`) — real keystrokes, real job control, verified live
 against a real QEMU VM (connect, `echo` a marker string, see it echoed back through the PTY).
 
+**Live resize, no reconnect.** The console's initial `cols`/`rows` used to be the PTY's size for the
+whole session — a client whose terminal window changed mid-session (a browser tab resized, an
+`xterm.js` container relayout) had no way to tell the guest. Once the WS upgrade completes, a
+**binary** WS frame is a keystroke (unchanged); a **text** WS frame is now read as a resize control
+message, `{"cols":<u16>,"rows":<u16>}`, applied to the guest's PTY immediately via a real
+`ioctl(TIOCSWINSZ)` — the shell sees an actual `SIGWINCH`, not just a cosmetic size report, so
+full-screen programs (`vim`, `htop`, `less`) redraw correctly right after. A malformed text frame
+(not valid JSON in that shape) is dropped, not treated as an error — it costs the client one missed
+resize, not the console session. On the wire between `fluxvm-api` and the guest agent this rides as
+a new `fluxvm_guest_protocol::PtyFrame`: every byte written to the guest after `ShellOpened` is now
+`PtyFrame::Data` (keystrokes) or `PtyFrame::Resize`, while output flowing back stays completely
+unframed raw PTY bytes (see `PtyFrame`'s own doc comment for why only one direction needed framing,
+and why this uses in-band frames on the existing connection rather than a second control connection
+addressed by session ID the way `fluxvm-container-protocol`'s `ResizePty` does for exec sessions —
+the plain guest agent's `OpenShell` handler has no session registry to address into by design, see
+the "Fixed — process isolation" note just below). **Verified:** a real `/bin/sh` spawned on a real
+PTY, resized mid-session, running `stty size` and getting back the new size — proves the ioctl lands
+on the actual PTY the shell is attached to, not just that the resize frame parses
+(`fluxvm-guest-agent`'s `open_shell_resize_frame_changes_the_ptys_window_size` test). **Not
+verified:** the full path through a real QEMU/Cloud Hypervisor vsock connection and a real browser
+WebSocket client sending a text frame — that would need a live VM and a live client, neither
+exercised here; the wire format and the guest-side PTY behavior are each independently verified for
+real, but not the two ends wired together end to end against real hardware.
+
 **Fixed — process isolation, not a kernel-level root cause.** For a while, roughly 1-in-3 console
 sessions left the guest agent's vsock listener unable to accept any further connections afterward
 (`exec`/console/file-copy calls to the same VM would then fail with a raw `Connection reset by peer`),

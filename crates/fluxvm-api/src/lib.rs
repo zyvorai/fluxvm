@@ -2369,9 +2369,16 @@ fn default_console_rows() -> u16 {
 
 /// `GET /v1/vms/{id}/console` — upgrades to a WebSocket carrying a live
 /// interactive shell (`AgentRequest::OpenShell` under the hood). Once the
-/// vsock handshake completes, this is a raw byte relay in both directions
-/// — binary WS frames in, binary WS frames out, no further framing on
-/// either side.
+/// vsock handshake completes: binary WS frames in are keystrokes, relayed
+/// to the guest as `PtyFrame::Data`; binary WS frames out are the guest's
+/// raw PTY output, unmodified. Text WS frames in are read as a resize
+/// control message instead of data — `{"cols":<u16>,"rows":<u16>}` — and
+/// relayed as `PtyFrame::Resize`, so a client (an xterm.js-style terminal
+/// reacting to its own container resizing, say) can resize the PTY at any
+/// point in the session without reconnecting. A text frame that isn't
+/// valid JSON in that shape is silently ignored rather than closing the
+/// session — a malformed control message costs the client a missed resize,
+/// not the whole interactive shell.
 async fn agent_console(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -2388,6 +2395,40 @@ async fn agent_console(
     Ok(ws.on_upgrade(move |socket| relay_console(socket, console)))
 }
 
+/// A console-resize control message sent as a WS *text* frame — see
+/// `agent_console`'s doc comment for why text/binary carry different
+/// meanings on this route.
+#[derive(Deserialize)]
+struct ConsoleResizeMessage {
+    cols: u16,
+    rows: u16,
+}
+
+/// Maps one inbound WS message to the `PtyFrame` it should become on the
+/// guest connection, or `None` if there's nothing to forward — a
+/// ping/pong, or a text frame that isn't valid `ConsoleResizeMessage` JSON
+/// (see `agent_console`'s doc comment: a malformed control message is
+/// dropped, not treated as an error). `Message::Close` is handled by the
+/// caller instead of here since it ends the whole relay loop rather than
+/// mapping to a frame. Split out from `relay_console` purely so this
+/// mapping is unit-testable without a real WebSocket or vsock connection.
+fn ws_message_to_pty_frame(
+    msg: &axum::extract::ws::Message,
+) -> Option<fluxvm_guest_protocol::PtyFrame> {
+    use axum::extract::ws::Message;
+    use fluxvm_guest_protocol::PtyFrame;
+    match msg {
+        Message::Binary(b) => Some(PtyFrame::Data(b.to_vec())),
+        Message::Text(t) => serde_json::from_str::<ConsoleResizeMessage>(t)
+            .ok()
+            .map(|r| PtyFrame::Resize {
+                cols: r.cols,
+                rows: r.rows,
+            }),
+        _ => None,
+    }
+}
+
 async fn relay_console(
     socket: axum::extract::ws::WebSocket,
     console: fluxvm_vsock_client::ConsoleStream,
@@ -2401,13 +2442,13 @@ async fn relay_console(
 
     let to_console = async {
         while let Some(Ok(msg)) = ws_rx.next().await {
-            let bytes = match msg {
-                Message::Binary(b) => b,
-                Message::Text(t) => t.as_bytes().to_vec().into(),
-                Message::Close(_) => break,
-                _ => continue,
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+            let Some(frame) = ws_message_to_pty_frame(&msg) else {
+                continue;
             };
-            if console_tx.write_all(&bytes).await.is_err() {
+            if console_tx.write_all(&frame.encode()).await.is_err() {
                 break;
             }
         }
@@ -3482,6 +3523,57 @@ mod tests {
             assert_eq!(
                 request(app, "POST", "/v1/pools", Some("acme"), Some(body)).await,
                 StatusCode::FORBIDDEN
+            );
+        }
+    }
+
+    mod console_ws_message_mapping {
+        use super::*;
+        use axum::extract::ws::Message;
+        use fluxvm_guest_protocol::PtyFrame;
+
+        #[test]
+        fn binary_message_becomes_a_data_frame() {
+            let frame = ws_message_to_pty_frame(&Message::Binary(b"echo hi\n".to_vec().into()));
+            assert_eq!(frame, Some(PtyFrame::Data(b"echo hi\n".to_vec())));
+        }
+
+        #[test]
+        fn valid_resize_text_message_becomes_a_resize_frame() {
+            let frame = ws_message_to_pty_frame(&Message::Text(r#"{"cols":120,"rows":40}"#.into()));
+            assert_eq!(
+                frame,
+                Some(PtyFrame::Resize {
+                    cols: 120,
+                    rows: 40
+                })
+            );
+        }
+
+        #[test]
+        fn malformed_text_message_is_dropped_not_forwarded_as_data() {
+            // Would previously have been forwarded to the shell as literal
+            // keystrokes (`t.as_bytes()`) -- now it's a control channel, so
+            // anything that isn't a valid resize message is simply ignored.
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Text("not json".into())),
+                None
+            );
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Text(r#"{"cols":120}"#.into())),
+                None
+            );
+        }
+
+        #[test]
+        fn ping_pong_messages_are_dropped() {
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Ping(Vec::new().into())),
+                None
+            );
+            assert_eq!(
+                ws_message_to_pty_frame(&Message::Pong(Vec::new().into())),
+                None
             );
         }
     }

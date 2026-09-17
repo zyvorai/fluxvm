@@ -14,6 +14,7 @@ fluxvm-scheduler = { path = "../fluxvm-scheduler" }
 fluxvm-image = { path = "../fluxvm-image" }
 fluxvm-network = { path = "../fluxvm-network" }
 fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
+fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 anyhow = "1"
 async-stream = "0.3"
 axum = { version = "0.8", features = ["ws"] }

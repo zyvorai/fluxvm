@@ -260,11 +260,16 @@ fn spawn_open_shell_session(
 
 /// Allocates a PTY, spawns `/bin/sh` attached to it as its own session
 /// leader with the slave as controlling terminal (so job control — Ctrl-C,
-/// Ctrl-Z — works normally), acks `ShellOpened`, then relays raw bytes
-/// between `conn`/`writer` (the vsock connection, already split into its
-/// two halves by the caller) and the PTY master until either side closes.
-/// `pending` is forwarded to the shell first — bytes the client already
-/// sent past the request line before this function took over reading.
+/// Ctrl-Z — works normally), acks `ShellOpened`, then relays between
+/// `conn`/`writer` (the vsock connection, already split into its two halves
+/// by the caller) and the PTY master until either side closes: `conn` is
+/// read as a stream of [`fluxvm_guest_protocol::PtyFrame`]s (keystrokes and
+/// live resizes), `writer` gets the PTY's raw output completely unframed —
+/// see `PtyFrame`'s own docs for why the two directions differ.
+/// `pending` is forwarded to the shell's stdin as raw bytes, unframed —
+/// bytes the client already sent past the request line before this
+/// function took over reading, which by definition predate the client
+/// having seen `ShellOpened` and switching to `PtyFrame`s itself.
 /// Always runs inside its own detached, double-forked process (see
 /// `spawn_open_shell_session`) except in the unit test below, which calls
 /// this directly to exercise the PTY logic in-process.
@@ -407,17 +412,30 @@ fn open_shell(
     // sidesteps whatever that was and is more idiomatic anyway.)
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
 
-    // conn -> PTY master (client keystrokes into the shell)
+    // conn -> PTY master: client keystrokes (`PtyFrame::Data`) and live
+    // resizes (`PtyFrame::Resize`) into the shell. `master_fd` is a plain
+    // `Copy` int, still valid here even though `master_in`/`master_out`
+    // above already wrap the same underlying fd in a `File` -- the ioctl
+    // below doesn't touch Rust-side ownership of it at all, exactly like
+    // the initial `TIOCSWINSZ` call earlier in this function.
     let to_shell_tx = done_tx.clone();
     let to_shell = std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        loop {
-            let n = match std::io::Read::read(&mut conn, &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => n,
-            };
-            if std::io::Write::write_all(&mut master_in, &buf[..n]).is_err() {
-                break;
+        while let Ok(Some(frame)) = fluxvm_guest_protocol::PtyFrame::read_from(&mut conn) {
+            match frame {
+                fluxvm_guest_protocol::PtyFrame::Data(bytes) => {
+                    if std::io::Write::write_all(&mut master_in, &bytes).is_err() {
+                        break;
+                    }
+                }
+                fluxvm_guest_protocol::PtyFrame::Resize { cols, rows } => {
+                    let winsize = libc::winsize {
+                        ws_row: rows,
+                        ws_col: cols,
+                        ws_xpixel: 0,
+                        ws_ypixel: 0,
+                    };
+                    unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &winsize) };
+                }
             }
         }
         let _ = to_shell_tx.send(());
@@ -720,11 +738,15 @@ mod tests {
         client_reader.read_line(&mut ack).unwrap();
         assert!(ack.contains("shell-opened"), "unexpected ack: {ack:?}");
 
-        // Everything after that is raw PTY bytes — echo a marker and read
-        // until we see it (the shell's own echo of our input, then its
-        // command's output, both arrive on the same raw stream).
+        // Everything the client writes from here on must be a `PtyFrame`
+        // (see the module-level doc comment) — echo a marker and read until
+        // we see it (the shell's own echo of our input, then its command's
+        // output, both arrive on the same raw, unframed output stream).
         client_writer
-            .write_all(b"echo PTY_ECHO_TEST_MARKER\n")
+            .write_all(
+                &fluxvm_guest_protocol::PtyFrame::Data(b"echo PTY_ECHO_TEST_MARKER\n".to_vec())
+                    .encode(),
+            )
             .unwrap();
         client_writer.flush().unwrap();
 
@@ -765,6 +787,82 @@ mod tests {
         // Both ends must close for the peer to see EOF — client_reader
         // holds a dup'd fd of the same socket, so dropping client_writer
         // alone leaves the connection open from the agent's point of view.
+        drop(client_writer);
+        drop(client_reader);
+        shell.join().unwrap();
+    }
+
+    /// A live `PtyFrame::Resize` mid-session must actually reach the PTY —
+    /// not just be accepted without error. `stty size` (prints "rows cols")
+    /// run *inside* the shell after the resize is the real, kernel-level
+    /// proof: it reads the PTY's current `TIOCGWINSZ`, so this only passes
+    /// if the resize frame's `ioctl(TIOCSWINSZ)` genuinely landed on the
+    /// same PTY the shell is attached to.
+    #[test]
+    fn open_shell_resize_frame_changes_the_ptys_window_size() {
+        let (agent_end, client_end) = socketpair();
+        let agent_end2 = agent_end.try_clone().unwrap();
+
+        let shell = std::thread::spawn(move || {
+            open_shell(agent_end, agent_end2, 80, 24, &[]).unwrap();
+        });
+
+        let mut client_reader = BufReader::new(client_end.try_clone().unwrap());
+        let mut client_writer = client_end;
+
+        let mut ack = String::new();
+        client_reader.read_line(&mut ack).unwrap();
+        assert!(ack.contains("shell-opened"), "unexpected ack: {ack:?}");
+
+        client_writer
+            .write_all(
+                &fluxvm_guest_protocol::PtyFrame::Resize {
+                    cols: 123,
+                    rows: 45,
+                }
+                .encode(),
+            )
+            .unwrap();
+        client_writer
+            .write_all(&fluxvm_guest_protocol::PtyFrame::Data(b"stty size\n".to_vec()).encode())
+            .unwrap();
+        client_writer.flush().unwrap();
+
+        unsafe {
+            use std::os::fd::AsRawFd;
+            let fd = client_reader.get_ref().as_raw_fd();
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+        let mut seen = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        // `stty size` prints "<rows> <cols>" — the resize was applied
+        // *before* the command ran, so its own output must reflect it.
+        let saw_resized_output = loop {
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            let mut buf = [0u8; 1024];
+            match std::io::Read::read(&mut client_reader, &mut buf) {
+                Ok(0) => break false,
+                Ok(n) => {
+                    seen.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&seen).contains("45 123") {
+                        break true;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break false,
+            }
+        };
+        assert!(
+            saw_resized_output,
+            "never saw the resized `stty size` output (\"45 123\"); got: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+
         drop(client_writer);
         drop(client_reader);
         shell.join().unwrap();

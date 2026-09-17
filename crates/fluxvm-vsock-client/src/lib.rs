@@ -192,10 +192,14 @@ pub async fn ping(vm: &VmRecord, timeout: Duration) -> Result<()> {
 pub const DEFAULT_CALL_TIMEOUT: Duration = DEFAULT_TIMEOUT;
 
 /// A live, already-authenticated interactive shell session — see
-/// [`open_shell`]. Implements `AsyncRead`/`AsyncWrite` directly: after
-/// construction there is no more protocol framing, just the guest's raw
-/// PTY byte stream (matches `AgentRequest::OpenShell`'s doc comment on the
-/// guest-agent side of this same connection).
+/// [`open_shell`]. Implements `AsyncRead`/`AsyncWrite` directly, but the two
+/// directions are no longer symmetric once JSON framing ends: **reading**
+/// from this stream yields the guest's raw PTY output byte-for-byte, while
+/// **writing** to it must be one or more `fluxvm_guest_protocol::PtyFrame`s
+/// (`PtyFrame::encode()`), not raw keystroke bytes — that's how a caller
+/// resizes the PTY mid-session without a second connection. See
+/// `PtyFrame`'s own docs, and `AgentRequest::OpenShell`'s doc comment on the
+/// guest-agent side of this same connection, for the full picture.
 pub enum ConsoleStream {
     #[cfg(target_os = "linux")]
     Native(NativeVsockStream),
@@ -250,11 +254,12 @@ impl tokio::io::AsyncWrite for ConsoleStream {
     }
 }
 
-/// Opens an interactive shell on `vm` and returns the raw byte stream once
-/// the guest agent has acked `ShellOpened` — everything read from/written
-/// to the returned stream after that point is PTY traffic, not JSON. Bound
-/// only the handshake by `timeout`; the returned stream itself has no
-/// timeout (an interactive session has no natural deadline).
+/// Opens an interactive shell on `vm` and returns the stream once the guest
+/// agent has acked `ShellOpened` — see [`ConsoleStream`]'s doc comment for
+/// what reading/writing it means from here on (PTY traffic, not JSON, but
+/// framed as `PtyFrame`s in the write direction only). Bound only the
+/// handshake by `timeout`; the returned stream itself has no timeout (an
+/// interactive session has no natural deadline).
 pub async fn open_shell(
     vm: &VmRecord,
     cols: u16,
