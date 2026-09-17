@@ -1068,18 +1068,39 @@ async fn sandbox_proxy_inner(
     };
     let status = StatusCode::from_u16(up.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let headers = up.headers().clone();
-    let bytes = match up.into_body().collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(e) => {
+    let bytes = match tokio::time::timeout(Duration::from_secs(30), up.into_body().collect()).await
+    {
+        Ok(Ok(collected)) => collected.to_bytes(),
+        Ok(Err(e)) => {
             return (
                 StatusCode::BAD_GATEWAY,
                 format!("guest upstream: reading response body: {e}"),
             )
                 .into_response();
         }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                "guest upstream: reading response body timed out",
+            )
+                .into_response();
+        }
     };
     let mut response = Response::builder().status(status);
     for (k, v) in headers.iter() {
+        // connection/keep-alive describe *this* handler's short-lived,
+        // one-shot connection to the guest (which we tear down right after
+        // this response regardless of what it says) -- forwarding them onto
+        // the outer response tells the caller's connection pool it can
+        // reuse this connection to fluxvm-api's own server for a "next
+        // request" that has nothing to do with the guest's keep-alive.
+        // Harmless when the semantics happen to line up; when they don't,
+        // the caller tries to reuse a connection axum's own server settings
+        // already closed, and reqwest reports it as a bare "connection
+        // closed before message completed" with no indication why.
+        if k == header::CONNECTION || k == header::HeaderName::from_static("keep-alive") {
+            continue;
+        }
         response = response.header(k, v);
     }
     response
