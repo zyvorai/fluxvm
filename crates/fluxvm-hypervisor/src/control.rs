@@ -10,10 +10,43 @@ use crate::state::{VmLifecycle, VmState};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+/// Default bound for a one-shot [`request`] against a running hypervisor API
+/// socket. Covers Ping/Pause/Resume/Shutdown/Metrics: each is already
+/// internally bounded where it talks to Firecracker (see `guest.rs`'s
+/// `FC_API_TIMEOUT`), but this timeout is what actually protects the caller
+/// if the fluxvm-hypervisor process itself has wedged (a stuck vCPU thread
+/// holding the `VmState` lock, a hung KVM ioctl, etc.) and never gets around
+/// to writing a response line at all.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// `SnapshotSave`/`SnapshotRestore` chain guest-pause + the actual
+/// snapshot I/O + guest-resume inside a single `dispatch()` call -- each
+/// step already individually bounded, but three of them in sequence can
+/// legitimately exceed `DEFAULT_REQUEST_TIMEOUT` even when nothing is
+/// actually stuck. Give these two request kinds more headroom.
+const SNAPSHOT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Short, stable label for a request kind, used only in timeout/error
+/// messages -- deliberately not the full `Debug` output, which for `Boot`
+/// would dump the entire `BootConfig`.
+fn request_kind(req: &ApiRequest) -> &'static str {
+    match req {
+        ApiRequest::Boot(_) => "boot",
+        ApiRequest::Pause => "pause",
+        ApiRequest::Resume => "resume",
+        ApiRequest::Shutdown => "shutdown",
+        ApiRequest::SnapshotSave { .. } => "snapshot_save",
+        ApiRequest::SnapshotRestore { .. } => "snapshot_restore",
+        ApiRequest::Metrics => "metrics",
+        ApiRequest::Ping => "ping",
+    }
+}
 
 /// Serve JSON-line requests on `api_sock` until shutdown.
 pub async fn serve(
@@ -262,8 +295,53 @@ async fn boot_inner(st: &mut VmState, cfg: BootConfig, workspace: &Path) -> Resu
     Ok(())
 }
 
-/// One-shot JSON request against a running hypervisor API socket.
+/// One-shot JSON request against a running hypervisor API socket, bounded by
+/// [`DEFAULT_REQUEST_TIMEOUT`] (or [`SNAPSHOT_REQUEST_TIMEOUT`] for the two
+/// snapshot request kinds). Use [`request_with_timeout`] to override.
+///
+/// Before this bound existed, a wedged fluxvm-hypervisor child (a stuck vCPU
+/// thread still holding the `VmState` lock, a hung KVM ioctl inside
+/// `dispatch()`) left this call's `next_line().await` blocked forever --
+/// the same class of "no timeout on I/O to something outside this process's
+/// control" bug already fixed three times over in fluxvm-api's sandbox proxy
+/// path (see `f5dfbd6`, `869b6dd`), just one layer down: here the peer is
+/// the hypervisor subprocess itself, not a guest.
 pub async fn request(api_sock: &Path, req: &ApiRequest) -> Result<ApiResponse> {
+    request_with_timeout(api_sock, req, timeout_for(req)).await
+}
+
+/// Which of [`DEFAULT_REQUEST_TIMEOUT`]/[`SNAPSHOT_REQUEST_TIMEOUT`] applies
+/// to a given request kind. Split out from [`request`] as a small pure
+/// function so the choice itself is directly unit-testable without needing
+/// to actually wait out a 45s timeout in a test.
+fn timeout_for(req: &ApiRequest) -> Duration {
+    match req {
+        ApiRequest::SnapshotSave { .. } | ApiRequest::SnapshotRestore { .. } => {
+            SNAPSHOT_REQUEST_TIMEOUT
+        }
+        _ => DEFAULT_REQUEST_TIMEOUT,
+    }
+}
+
+/// [`request`] with an explicit timeout, for callers that know their
+/// request kind needs a different bound than the default.
+pub async fn request_with_timeout(
+    api_sock: &Path,
+    req: &ApiRequest,
+    timeout: Duration,
+) -> Result<ApiResponse> {
+    tokio::time::timeout(timeout, request_inner(api_sock, req))
+        .await
+        .with_context(|| {
+            format!(
+                "hypervisor control request '{}' to {} timed out after {timeout:?}",
+                request_kind(req),
+                api_sock.display()
+            )
+        })?
+}
+
+async fn request_inner(api_sock: &Path, req: &ApiRequest) -> Result<ApiResponse> {
     let stream = UnixStream::connect(api_sock)
         .await
         .with_context(|| format!("connecting to {}", api_sock.display()))?;
@@ -276,4 +354,124 @@ pub async fn request(api_sock: &Path, req: &ApiRequest) -> Result<ApiResponse> {
     let mut lines = BufReader::new(reader).lines();
     let line = lines.next_line().await?.context("empty API response")?;
     Ok(serde_json::from_str(&line)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_for_uses_the_longer_bound_for_snapshot_requests() {
+        assert_eq!(
+            timeout_for(&ApiRequest::SnapshotSave {
+                path: PathBuf::from("/tmp/x")
+            }),
+            SNAPSHOT_REQUEST_TIMEOUT,
+        );
+        assert_eq!(
+            timeout_for(&ApiRequest::SnapshotRestore {
+                path: PathBuf::from("/tmp/x")
+            }),
+            SNAPSHOT_REQUEST_TIMEOUT,
+        );
+        for req in [
+            ApiRequest::Ping,
+            ApiRequest::Pause,
+            ApiRequest::Resume,
+            ApiRequest::Shutdown,
+            ApiRequest::Metrics,
+        ] {
+            assert_eq!(timeout_for(&req), DEFAULT_REQUEST_TIMEOUT);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_returns_the_response_when_the_hypervisor_answers_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("api.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ApiRequest = serde_json::from_str(&line).unwrap();
+            assert!(matches!(req, ApiRequest::Ping));
+            let resp = ApiResponse::Ok {
+                message: "pong".into(),
+            };
+            writer
+                .write_all(serde_json::to_string(&resp).unwrap().as_bytes())
+                .await
+                .unwrap();
+            writer.write_all(b"\n").await.unwrap();
+        });
+
+        let resp = request(&sock, &ApiRequest::Ping).await.unwrap();
+        assert!(matches!(resp, ApiResponse::Ok { message } if message == "pong"));
+        server.await.unwrap();
+    }
+
+    /// Regression test for the exact bug this module now guards against:
+    /// before `request`/`request_with_timeout` existed, a fluxvm-hypervisor
+    /// child that accepted the connection and read the request but then
+    /// wedged (a stuck vCPU thread still holding `VmState`'s lock, a hung
+    /// KVM ioctl inside `dispatch()`) left `next_line().await` blocked
+    /// forever -- the caller (a `pause`/`resume`/`snapshot` request from
+    /// fluxvm-scheduler or fluxvm-hypervisor's own backend) hung
+    /// indefinitely too, with no way to notice or recover. This simulates
+    /// that exact wedge: the server accepts and reads the request, then
+    /// simply never writes a response.
+    #[tokio::test]
+    async fn request_times_out_instead_of_hanging_forever_when_the_hypervisor_never_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("api.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, _writer) = stream.into_split();
+            // Read the request so the client's write side doesn't itself
+            // block, then simply never respond -- and hold the connection
+            // open (don't drop it) so the client can't mistake this for a
+            // clean EOF either.
+            let mut lines = BufReader::new(reader).lines();
+            let _ = lines.next_line().await;
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        let start = tokio::time::Instant::now();
+        let result =
+            request_with_timeout(&sock, &ApiRequest::Pause, Duration::from_millis(200)).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "expected a timeout error, got {result:?}");
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("timed out"),
+            "expected a 'timed out' error, got: {msg}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "request_with_timeout took {elapsed:?}, should have given up almost immediately \
+             after its 200ms bound instead of hanging"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn request_reports_connect_failure_promptly_when_no_one_is_listening() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("nobody-here.sock"); // never bound
+
+        let start = tokio::time::Instant::now();
+        let result = request(&sock, &ApiRequest::Ping).await;
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "connecting to a socket nobody bound should fail immediately, took {elapsed:?}"
+        );
+    }
 }

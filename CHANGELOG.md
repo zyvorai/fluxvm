@@ -3,6 +3,52 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **A wedged `fluxvm-hypervisor` child could hang `pause`/`resume`/`shutdown`/
+  snapshot control requests forever** — `control::request` had no timeout on
+  its Unix-socket round trip, so a stuck vCPU thread still holding `VmState`'s
+  lock, or a hung KVM ioctl inside `dispatch()`, left the caller's
+  `next_line().await` blocked with no way to notice or recover — the same
+  class of "no timeout on I/O to something outside this process's control"
+  bug already fixed for the sandbox HTTP proxy, below, just one layer down:
+  the peer here is the hypervisor subprocess itself, not a guest. Every
+  request kind now gets a default 15s bound, with snapshot save/restore
+  (which chain pause + snapshot I/O + resume inside one call) given 45s of
+  headroom. 4 new tests, including a regression test that reproduces the
+  exact wedge (server accepts and reads the request, then never answers).
+- **A `tap`+`netns=true` sandbox's HTTP proxy hung indefinitely instead of
+  reaching the guest** — `sandbox_proxy_inner` connected via a plain
+  `reqwest::Client`, which always dials from the calling thread's ambient
+  network namespace; a netns-sandboxed guest's `guest_ip` is only routable
+  from inside that VM's own namespace, so every request over this path
+  silently hung until timeout (vsock-based guest exec/file access was
+  unaffected, since vsock doesn't route through the guest's netns at all —
+  a fully healthy guest looked completely unreachable over HTTP alone). New
+  `connect_in_netns()` `setns()`s a throwaway `std::thread` (never tokio's
+  blocking pool, which reuses threads and would leak the namespace change
+  into unrelated work) before calling `connect()`, then hands the connected
+  socket back to the async runtime; since `reqwest` has no way to accept a
+  pre-connected socket, the proxy now speaks HTTP/1.1 directly over that
+  stream via `hyper`. Two related framing/hang bugs surfaced once this path
+  was actually exercised end-to-end and fixed alongside it: forwarding the
+  inbound `Content-Length`/`Transfer-Encoding` headers onto hyper's own
+  `Full` body (which computes its own) duplicated them, leaving the guest's
+  HTTP server waiting on body bytes that were never coming on any non-empty
+  request; and the guest-response body read had no timeout of its own,
+  so a guest that accepted a request but never finished its response body
+  hung the whole proxy call, while forwarding the guest response's
+  `Connection`/`keep-alive` headers onto the caller's own connection made
+  the caller's pool try to reuse a connection axum had already closed,
+  surfacing as an unexplained "connection closed before message completed".
+- **A Firecracker guest kernel could block forever on `getrandom()` before
+  its CRNG was seeded** — with no fast entropy source (no RDRAND passthrough,
+  no virtio-rng), a guest boots with `crng_init=0`, and anything that calls
+  `getrandom()` before enough environmental noise accumulates — in practice,
+  the guest's own init/runtime startup — blocks indefinitely, indistinguishable
+  from a hung process from the outside: alive, no output, nothing listening.
+  `firecracker_config()` now unconditionally attaches Firecracker's built-in
+  entropy device, and `FluxVmBackend`'s default kernel command line adds
+  `random.trust_cpu=on rdrand=force` so the guest trusts RDRAND directly and
+  seeds fully at boot even without a virtio-rng driver built into its kernel.
 - **`start_from_snapshot` silently ignored a `loadvm_tag` on `Firecracker`/`FluxVm`
   VMs instead of rejecting it** — `create_vm_snapshot` (the save side) already
   correctly bails with "snapshot not supported for backend ..." for every
