@@ -749,12 +749,20 @@ mod tests {
             "#!/bin/sh\nargs=\" $* \"\ncase \"$args\" in\n  *\" info \"*) cat <<'CH_INFO_JSON'\n{info_json}\nCH_INFO_JSON\n    exit 0 ;;\n  *\" resize \"*) echo \"$*\" >> {log:?} ; exit {resize_exit} ;;\n  *) exit 0 ;;\nesac\n"
         );
         let path = dir.join("fake-ch-remote-hotplug.sh");
-        std::fs::write(&path, script).unwrap();
+        // Write via a temp name then rename so we never hit ETXTBSY when
+        // parallel tokio tests exec a script whose inode is still open for
+        // write (observed as "Text file busy" on GitHub-hosted runners).
+        let tmp = dir.join(format!(
+            "fake-ch-remote-hotplug.{}.sh.tmp",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, script).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        std::fs::rename(&tmp, &path).unwrap();
         path.display().to_string()
     }
 

@@ -150,6 +150,8 @@ jobs:
   sentinel-static:
     name: Sentinel / intelligence static
     runs-on: ubuntu-24.04
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -178,20 +180,32 @@ jobs:
       - name: Sentinel / feature static gates
         run: |
           set -euo pipefail
-          ./scripts/test-sentinel-ga-static.sh
-          ./scripts/test-sentinel-fleet-guard-static.sh
-          ./scripts/test-sentinel-fleet-rollout-static.sh
-          ./scripts/test-sentinel-release-admission-static.sh
-          ./scripts/test-sentinel-upgrade-manager-static.sh
-          ./scripts/test-migration-orchestrator-static.sh
-          ./scripts/test-runtime-intelligence-static.sh
-          ./scripts/test-flight-recorder-static.sh
-          ./scripts/test-memory-profiler-static.sh
-          ./scripts/test-vmm-guard-qos-static.sh
-          ./scripts/test-xdp-tcp-intelligence-static.sh
-          ./scripts/test-topology-static.sh
-          ./scripts/test-afxdp-static.sh
-          ./scripts/test-quiclb-static.sh
-          ./scripts/test-scx-static.sh
-          ./scripts/test-tcx-drop-detective-static.sh
-          ./scripts/test-drop-reason-migration-static.sh
+          # Each *-static.sh that asserts "no __pycache__" expects a clean tree;
+          # earlier unittest runs can leave caches even with PYTHONDONTWRITEBYTECODE.
+          clean_pycache() {
+            find . -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+          }
+          clean_pycache
+          for s in \
+            scripts/test-sentinel-ga-static.sh \
+            scripts/test-sentinel-fleet-guard-static.sh \
+            scripts/test-sentinel-fleet-rollout-static.sh \
+            scripts/test-sentinel-release-admission-static.sh \
+            scripts/test-sentinel-upgrade-manager-static.sh \
+            scripts/test-migration-orchestrator-static.sh \
+            scripts/test-runtime-intelligence-static.sh \
+            scripts/test-flight-recorder-static.sh \
+            scripts/test-memory-profiler-static.sh \
+            scripts/test-vmm-guard-qos-static.sh \
+            scripts/test-xdp-tcp-intelligence-static.sh \
+            scripts/test-topology-static.sh \
+            scripts/test-afxdp-static.sh \
+            scripts/test-quiclb-static.sh \
+            scripts/test-scx-static.sh \
+            scripts/test-tcx-drop-detective-static.sh \
+            scripts/test-drop-reason-migration-static.sh
+          do
+            clean_pycache
+            echo "==> $s"
+            "./$s"
+          done
