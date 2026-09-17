@@ -3048,7 +3048,10 @@ impl Task for Service {
             match self.stage_rootfs_and_config(&req).await {
                 Ok(staged) => staged,
                 Err(e) => {
-                    shim_diag(format!("create stage_rootfs_and_config failed id={}: {e:#}", req.id));
+                    shim_diag(format!(
+                        "create stage_rootfs_and_config failed id={}: {e:#}",
+                        req.id
+                    ));
                     self.cleanup_process_staging(&req.id, None).await;
                     return Err(rpc_other(e));
                 }
@@ -3114,7 +3117,10 @@ impl Task for Service {
             )
             .await
         {
-            shim_diag(format!("create attach_stream_relays failed id={}: {e:#}", req.id));
+            shim_diag(format!(
+                "create attach_stream_relays failed id={}: {e:#}",
+                req.id
+            ));
             let _ = self
                 .call_agent(
                     &vm,
@@ -3208,7 +3214,10 @@ impl Task for Service {
         let pid = match response {
             ContainerResponse::Started { pid } => pid,
             other => {
-                shim_diag(format!("start unexpected response id={}: {other:?}", req.id));
+                shim_diag(format!(
+                    "start unexpected response id={}: {other:?}",
+                    req.id
+                ));
                 return Err(rpc_other(format!("unexpected start response: {other:?}")));
             }
         };
@@ -3316,10 +3325,7 @@ impl Task for Service {
                 exit_code,
                 exited_at_unix_nano,
             } => {
-                shim_diag(format!(
-                    "wait exited id={} code={}",
-                    req.id, exit_code
-                ));
+                shim_diag(format!("wait exited id={} code={}", req.id, exit_code));
                 self.flush_stdio_after_exit(&req.id, exec_id.as_deref())
                     .await;
                 let pid = if let Some(exec) = exec_id.as_deref() {

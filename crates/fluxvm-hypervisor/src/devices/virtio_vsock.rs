@@ -306,9 +306,21 @@ impl VsockInner {
 
         for host_port in keys {
             enum Action {
-                CreditRequest { hp: u32, gp: u32, rx: u32 },
-                Shutdown { hp: u32, gp: u32, rx: u32 },
-                Rst { hp: u32, gp: u32, rx: u32 },
+                CreditRequest {
+                    hp: u32,
+                    gp: u32,
+                    rx: u32,
+                },
+                Shutdown {
+                    hp: u32,
+                    gp: u32,
+                    rx: u32,
+                },
+                Rst {
+                    hp: u32,
+                    gp: u32,
+                    rx: u32,
+                },
                 Rw {
                     hp: u32,
                     gp: u32,
@@ -818,10 +830,7 @@ mod tests {
         let mut buf = [0u8; 64];
         let k = client.read(&mut buf).unwrap();
         let ack = std::str::from_utf8(&buf[..k]).unwrap();
-        assert!(
-            ack.starts_with(&format!("OK {host_port}")),
-            "ack={ack:?}"
-        );
+        assert!(ack.starts_with(&format!("OK {host_port}")), "ack={ack:?}");
 
         client.write_all(b"hi").unwrap();
         for _ in 0..50 {

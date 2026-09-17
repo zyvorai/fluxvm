@@ -2206,7 +2206,8 @@ fn apply_seccomp_on_handle(
     let init: Init = unsafe { dlsym_required(handle, b"seccomp_init\0")? };
     let release: Release = unsafe { dlsym_required(handle, b"seccomp_release\0")? };
     let resolve: Resolve = unsafe { dlsym_required(handle, b"seccomp_syscall_resolve_name\0")? };
-    let rule_add_array: RuleAddArray = unsafe { dlsym_required(handle, b"seccomp_rule_add_array\0")? };
+    let rule_add_array: RuleAddArray =
+        unsafe { dlsym_required(handle, b"seccomp_rule_add_array\0")? };
     let load: Load = unsafe { dlsym_required(handle, b"seccomp_load\0")? };
     let notify_fd_fn: Option<NotifyFd> = if needs_notify {
         Some(unsafe { dlsym_required(handle, b"seccomp_notify_fd\0")? })
