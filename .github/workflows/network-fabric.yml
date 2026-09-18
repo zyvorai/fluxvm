@@ -42,6 +42,8 @@ name: Network Fabric
       - 'scripts/test-service-fabric-rss.sh'
       - 'scripts/export_network_flows.py'
       - 'scripts/test_flow_exporter.py'
+      - '.github/workflows/network-fabric.yml'
+  workflow_dispatch:
 
 jobs:
   build-test:

@@ -17,6 +17,8 @@ on:
       - 'docs/secure-containers-set15.md'
       - 'scripts/e2e-networkpolicy-set15.sh'
       - 'scripts/benchmark-policy-observer-set15.sh'
+      - '.github/workflows/secure-containers-set15.yml'
+  workflow_dispatch:
 
 jobs:
   observer:
