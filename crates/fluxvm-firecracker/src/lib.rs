@@ -119,10 +119,9 @@ fn config_json(
                     .unwrap()
                     .insert("rate_limiter".into(), rl);
             }
-            root.as_object_mut().unwrap().insert(
-                "network-interfaces".into(),
-                json!([iface]),
-            );
+            root.as_object_mut()
+                .unwrap()
+                .insert("network-interfaces".into(), json!([iface]));
         }
         NetworkSpec::Tap { tap_name: None, .. } => bail!("tap network was not prepared"),
         NetworkSpec::Macvtap { .. } => bail!(

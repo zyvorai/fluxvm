@@ -1139,7 +1139,8 @@ impl Service {
         let cni = if self.cfg.cni_enabled {
             if let Some(path) = hints.netns_path.as_ref() {
                 let provider = resolve_cni_provider(&self.cfg.cni_provider, path).await;
-                let primary = resolve_cni_interface(&self.cfg.cni_interface, path, provider).await?;
+                let primary =
+                    resolve_cni_interface(&self.cfg.cni_interface, path, provider).await?;
                 if self.cfg.cni_strict_multi_interface {
                     let extras = detect_additional_cni_interfaces(path, &primary, provider).await?;
                     if !extras.is_empty() {
@@ -4218,10 +4219,7 @@ async fn inventory_cni_links(netns_path: &Path) -> AnyResult<Vec<Value>> {
     ];
     let text = command_output("nsenter", &args).await?;
     let links: Value = serde_json::from_str(&text).context("parsing CNI interface inventory")?;
-    Ok(links
-        .as_array()
-        .cloned()
-        .unwrap_or_default())
+    Ok(links.as_array().cloned().unwrap_or_default())
 }
 
 async fn resolve_cni_provider(configured: &str, netns_path: &Path) -> CniProvider {

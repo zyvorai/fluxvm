@@ -142,7 +142,10 @@ pub fn after_help() -> String {
         (
             "🔭 Observability:",
             &[
-                ("diagnose", "Correlate Runtime Intelligence with VM-edge state"),
+                (
+                    "diagnose",
+                    "Correlate Runtime Intelligence with VM-edge state",
+                ),
                 ("trace", "Live VM Flight Recorder events"),
                 ("observe", "Snapshot of identities, groups, CNPs, and VMs"),
                 ("hubble", "Hubble-lite flows and CiliumEndpoint views"),
@@ -152,7 +155,10 @@ pub fn after_help() -> String {
             "🌐 Cluster:",
             &[
                 ("migrate", "Live VM migration (QEMU / Cloud Hypervisor)"),
-                ("fleet", "Manage a multi-host fleet via the central registry"),
+                (
+                    "fleet",
+                    "Manage a multi-host fleet via the central registry",
+                ),
             ],
         ),
     ];

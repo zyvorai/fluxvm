@@ -160,10 +160,7 @@ impl VhostNet {
             }
             let nq = queues.max(1).min(2);
             for index in 0..nq {
-                let file = VhostVringFile {
-                    index,
-                    fd: tap_fd,
-                };
+                let file = VhostVringFile { index, fd: tap_fd };
                 let rc = unsafe {
                     libc::ioctl(
                         self.fd,
@@ -271,8 +268,7 @@ impl VhostNet {
                     index: index as u32,
                     num: q.num,
                 };
-                let rc =
-                    unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_NUM, &state as *const _) };
+                let rc = unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_NUM, &state as *const _) };
                 if rc < 0 {
                     return Err(FluxError::Hypervisor(format!(
                         "VHOST_SET_VRING_NUM {index}: {}",
@@ -288,8 +284,7 @@ impl VhostNet {
                     avail_user_addr: host_base as u64 + q.avail,
                     log_guest_addr: 0,
                 };
-                let rc =
-                    unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_ADDR, &addr as *const _) };
+                let rc = unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_ADDR, &addr as *const _) };
                 if rc < 0 {
                     return Err(FluxError::Hypervisor(format!(
                         "VHOST_SET_VRING_ADDR {index}: {}",
@@ -301,8 +296,7 @@ impl VhostNet {
                     index: index as u32,
                     num: q.last_avail as u32,
                 };
-                let rc =
-                    unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_BASE, &base as *const _) };
+                let rc = unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_BASE, &base as *const _) };
                 if rc < 0 {
                     return Err(FluxError::Hypervisor(format!(
                         "VHOST_SET_VRING_BASE {index}: {}",
@@ -332,9 +326,8 @@ impl VhostNet {
                     index: index as u32,
                     fd: kick,
                 };
-                let rc = unsafe {
-                    libc::ioctl(self.fd, VHOST_SET_VRING_KICK, &kick_file as *const _)
-                };
+                let rc =
+                    unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_KICK, &kick_file as *const _) };
                 if rc < 0 {
                     unsafe {
                         let _ = libc::close(kick);
@@ -349,9 +342,8 @@ impl VhostNet {
                     index: index as u32,
                     fd: call,
                 };
-                let rc = unsafe {
-                    libc::ioctl(self.fd, VHOST_SET_VRING_CALL, &call_file as *const _)
-                };
+                let rc =
+                    unsafe { libc::ioctl(self.fd, VHOST_SET_VRING_CALL, &call_file as *const _) };
                 if rc < 0 {
                     unsafe {
                         let _ = libc::close(kick);

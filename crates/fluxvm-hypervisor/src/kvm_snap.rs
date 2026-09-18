@@ -282,7 +282,10 @@ pub fn restore_vcpus(kvm: &KvmVm, snap: &CpuSnapshot) -> Result<()> {
 
 /// Overlay packed virtio live-state onto live device backends (matched by
 /// `device_id`). Backends (disk path, TAP) stay from boot config.
-pub fn restore_virtio(targets: &[&std::sync::Arc<crate::devices::virtio_mmio::VirtioMmio>], snap: &[VirtioState]) {
+pub fn restore_virtio(
+    targets: &[&std::sync::Arc<crate::devices::virtio_mmio::VirtioMmio>],
+    snap: &[VirtioState],
+) {
     for packed in snap {
         for target in targets {
             let Ok(mut live) = target.state.lock() else {

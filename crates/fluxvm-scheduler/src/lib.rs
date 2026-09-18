@@ -212,7 +212,9 @@ fn validate_cpu_template(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
         return Ok(());
     };
     if t.trim().is_empty() {
-        bail!("cpu_template must be a non-empty Firecracker static template name (e.g. T2, T2A, C3)");
+        bail!(
+            "cpu_template must be a non-empty Firecracker static template name (e.g. T2, T2A, C3)"
+        );
     }
     match req.backend {
         BackendKind::Firecracker => Ok(()),
@@ -927,9 +929,7 @@ impl VmManager {
                 continue;
             }
             let ep = endpoints.iter().find(|e| e.uuid == vm.id);
-            let labels = ep
-                .map(|e| e.identity_labels.clone())
-                .unwrap_or_default();
+            let labels = ep.map(|e| e.identity_labels.clone()).unwrap_or_default();
             // F1: prefer CEP SecurityIdentity (cilium-agent or fluxvm-hash) over
             // the Fabric CT sample id so hubble observe shows the same SID as
             // `fluxctl hubble endpoints`.
@@ -1801,9 +1801,7 @@ impl VmManager {
                     .control_socket
                     .as_ref()
                     .context("FluxVm VM has no control socket")?;
-                let req = fluxvm_hypervisor::ApiRequest::SnapshotSave {
-                    path: meta,
-                };
+                let req = fluxvm_hypervisor::ApiRequest::SnapshotSave { path: meta };
                 let resp = fluxvm_hypervisor::control::request(sock, &req).await?;
                 match resp {
                     fluxvm_hypervisor::ApiResponse::Ok { .. } => Ok(()),

@@ -275,7 +275,6 @@ enum Command {
     },
 }
 
-
 #[derive(Subcommand)]
 enum FleetCommand {
     /// List every registered node, each with its live `healthy`/`cordoned`

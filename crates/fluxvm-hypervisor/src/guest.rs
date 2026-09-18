@@ -406,10 +406,9 @@ fn firecracker_config(cfg: &BootConfig) -> Result<serde_json::Value> {
                 .unwrap()
                 .insert("rate_limiter".into(), rl);
         }
-        root.as_object_mut().unwrap().insert(
-            "network-interfaces".into(),
-            json!([iface]),
-        );
+        root.as_object_mut()
+            .unwrap()
+            .insert("network-interfaces".into(), json!([iface]));
     }
 
     if let (Some(cid), Some(uds)) = (cfg.vsock_cid, &cfg.vsock_uds) {
@@ -692,8 +691,14 @@ mod tests {
         c.blk_mbit_limit = Some(200);
         c.blk_ops_limit = Some(10_000);
         let cfg = firecracker_config(&c).expect("config");
-        assert_eq!(cfg["drives"][0]["rate_limiter"]["bandwidth"]["size"], 25_000_000);
-        assert_eq!(cfg["network-interfaces"][0]["rate_limiter"]["ops"]["size"], 50_000);
+        assert_eq!(
+            cfg["drives"][0]["rate_limiter"]["bandwidth"]["size"],
+            25_000_000
+        );
+        assert_eq!(
+            cfg["network-interfaces"][0]["rate_limiter"]["ops"]["size"],
+            50_000
+        );
     }
 
     #[test]

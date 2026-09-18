@@ -84,10 +84,16 @@ pub fn snapshot_paths(dest: &Path) -> (PathBuf, PathBuf) {
 pub fn assert_snapshot_dir(dest: &Path) -> Result<()> {
     let (vmstate, memory) = snapshot_paths(dest);
     if !vmstate.exists() {
-        bail!("Firecracker snapshot missing vmstate at {}", vmstate.display());
+        bail!(
+            "Firecracker snapshot missing vmstate at {}",
+            vmstate.display()
+        );
     }
     if !memory.exists() {
-        bail!("Firecracker snapshot missing memory at {}", memory.display());
+        bail!(
+            "Firecracker snapshot missing memory at {}",
+            memory.display()
+        );
     }
     Ok(())
 }

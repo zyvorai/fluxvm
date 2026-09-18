@@ -480,11 +480,12 @@ impl VirtualMachine {
             while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
                 if let Some(rx) = snap_rx.as_ref() {
                     while let Ok(cmd) = rx.try_recv() {
-                        let virtio: Vec<_> = [&this.net, &this.blk, &this.vsock, &this.balloon, &this.rng]
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|d| d.state.lock().ok().map(|s| s.clone()))
-                            .collect();
+                        let virtio: Vec<_> =
+                            [&this.net, &this.blk, &this.vsock, &this.balloon, &this.rng]
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|d| d.state.lock().ok().map(|s| s.clone()))
+                                .collect();
                         let r = kvm_snap::dump(&kvm, &this.mem, &cmd.vmstate, &cmd.mem, &virtio)
                             .map_err(|e| e.to_string());
                         let _ = cmd.reply.send(r);

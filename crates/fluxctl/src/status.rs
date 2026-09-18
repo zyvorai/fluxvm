@@ -7,10 +7,7 @@
 //! rows on the right, then a tab-aligned summary block.
 
 use anyhow::Result;
-use fluxvm_core::{
-    config::Config,
-    model::VmStatus,
-};
+use fluxvm_core::{config::Config, model::VmStatus};
 use fluxvm_scheduler::VmManager;
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};
@@ -84,11 +81,7 @@ fn path_ok(p: Option<&Path>) -> bool {
 /// `manager` may be `None` when the state dir is not readable (e.g. non-root
 /// user) — host/config rows still render, matching `cilium status` partial
 /// output when the cluster is unreachable.
-pub async fn print_status(
-    manager: Option<&VmManager>,
-    cfg: &Config,
-    verbose: bool,
-) -> Result<()> {
+pub async fn print_status(manager: Option<&VmManager>, cfg: &Config, verbose: bool) -> Result<()> {
     let on = color_enabled();
     let vms = if let Some(m) = manager {
         m.list().await
@@ -178,13 +171,12 @@ pub async fn print_status(
         }
     };
 
-    let kernel_status = if path_ok(cfg.firecracker_kernel.as_deref())
-        || path_ok(cfg.fluxvm_kernel.as_deref())
-    {
-        ok(on)
-    } else {
-        warn(on, "no kernel configured")
-    };
+    let kernel_status =
+        if path_ok(cfg.firecracker_kernel.as_deref()) || path_ok(cfg.fluxvm_kernel.as_deref()) {
+            ok(on)
+        } else {
+            warn(on, "no kernel configured")
+        };
 
     let vm_line = if !vms_readable {
         warn(on, "state dir not readable")
@@ -248,10 +240,7 @@ pub async fn print_status(
     out.push_str(&format!("{:<22} {}\n", "VMs:", vm_line.trim_start()));
     out.push_str(&format!("{:<22} {}\n", "Kernels:", kernel_status));
     if !by_backend.is_empty() {
-        let backends: Vec<_> = by_backend
-            .iter()
-            .map(|(k, n)| format!("{k}={n}"))
-            .collect();
+        let backends: Vec<_> = by_backend.iter().map(|(k, n)| format!("{k}={n}")).collect();
         out.push_str(&format!(
             "{:<22} {}\n",
             "Backends in use:",

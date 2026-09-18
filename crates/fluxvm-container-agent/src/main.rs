@@ -1697,7 +1697,10 @@ fn parse_seccomp_notify_policy(config: &Value) -> Result<SeccompNotifyPolicy> {
     let addfd_src = annotations
         .and_then(|a| a.get("io.zyvor.seccomp.notify.addfd-src"))
         .and_then(Value::as_str)
-        .map(|v| v.parse::<i32>().context("parsing io.zyvor.seccomp.notify.addfd-src"))
+        .map(|v| {
+            v.parse::<i32>()
+                .context("parsing io.zyvor.seccomp.notify.addfd-src")
+        })
         .transpose()?
         .unwrap_or(-1);
     if mode == SeccompNotifyMode::AddFd && addfd_src < 0 {

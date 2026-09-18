@@ -47,7 +47,7 @@ impl PciEcam {
         cfg[0x0a] = 0x00;
         cfg[0x0b] = 0x02; // class code network
         cfg[0x0e] = 0x00; // header type 0
-        // BAR0: 32-bit memory, non-prefetch, initially sized via 0xffffffff probe
+                          // BAR0: 32-bit memory, non-prefetch, initially sized via 0xffffffff probe
         write_u32(&mut cfg, 0x10, (MMIO_WINDOW as u32) | 0x0);
         write_u32(&mut cfg, 0x14, 0);
         write_u32(&mut cfg, 0x18, 0);
