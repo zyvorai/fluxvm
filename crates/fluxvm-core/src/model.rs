@@ -149,7 +149,7 @@ impl Default for AgentSpec {
 }
 
 /// QEMU guest-agent (virtio-serial `org.qemu.guest_agent.0`) channel.
-/// Used for Zyvor/GuestKit Windows agent live control (`fluxvm qga …`).
+/// Used for Zyvor/GuestKit Windows agent live control (`fluxctl qga …`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct QgaSpec {
     #[serde(default)]
@@ -333,6 +333,30 @@ pub struct CreateVmRequest {
     /// (measured boot, disk encryption unseal), not only under UEFI.
     #[serde(default)]
     pub tpm: Option<bool>,
+    /// Firecracker virtio-net bandwidth cap (Mbit/s). `None` or `0` =
+    /// unlimited. Mapped to Firecracker's iface `rate_limiter.bandwidth`
+    /// (threat-containment barrier at the VMM, complementary to Fabric
+    /// egress Mbps). Ignored by QEMU/CH.
+    #[serde(default)]
+    pub net_mbit_limit: Option<u32>,
+    /// Firecracker virtio-net operations (packets) per second cap.
+    /// Mapped to iface `rate_limiter.ops`. Ignored by QEMU/CH.
+    #[serde(default)]
+    pub net_pps_limit: Option<u64>,
+    /// Firecracker virtio-block bandwidth cap (Mbit/s). Mapped to drive
+    /// `rate_limiter.bandwidth`. Ignored by QEMU/CH.
+    #[serde(default)]
+    pub blk_mbit_limit: Option<u32>,
+    /// Firecracker virtio-block operations per second cap. Mapped to drive
+    /// `rate_limiter.ops`. Ignored by QEMU/CH.
+    #[serde(default)]
+    pub blk_ops_limit: Option<u64>,
+    /// Firecracker static CPU template name (e.g. `T2`, `T2A`, `C3`).
+    /// Emitted into Firecracker `machine-config.cpu_template` and into
+    /// FluxVm when `fluxvm_engine=firecracker`. Rejected on QEMU, Cloud
+    /// Hypervisor, and FluxVm+kvm (no FC-style template ABI).
+    #[serde(default)]
+    pub cpu_template: Option<String>,
 }
 fn default_vcpus() -> u8 {
     2
@@ -590,7 +614,7 @@ pub struct PoolRecord {
 /// Read-only view of a [`PoolRecord`] returned by the pool API/CLI surfaces,
 /// augmenting the persisted fields with occupancy stats a caller would
 /// otherwise have to derive itself. Before this, `GET /v1/pools/{name}` (and
-/// `fluxvm pool get`/`list`) returned only `size` (the *target* member
+/// `fluxctl pool get`/`list`) returned only `size` (the *target* member
 /// count) and `members` (the ids of members currently ready) — nothing
 /// named which was which, so telling "fully backfilled" apart from "still
 /// catching up" meant a caller had to know, unprompted, to compare
@@ -635,7 +659,7 @@ pub struct ClaimOverrides {
     pub ttl_seconds: Option<u64>,
 }
 
-/// Body of `POST /v1/pools/{name}/resize` / `fluxvm pool resize` — the new
+/// Body of `POST /v1/pools/{name}/resize` / `fluxctl pool resize` — the new
 /// target `size` for an existing pool. See `VmManager::resize_pool`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolResizeRequest {

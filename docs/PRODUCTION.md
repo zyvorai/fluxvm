@@ -27,11 +27,16 @@ images — not only the dataplane.
 ## 2. Compute
 
 - [ ] `/dev/kvm` present; cgroup v2 delegated
-- [ ] Firecracker jailer on for untrusted guests
+- [ ] Firecracker jailer on for untrusted guests (`[jailer] enabled = true`; set `enforce = true` or use `auth.require` + non-loopback listen so serve/launch fail closed) — merge [configs/production-hardening.toml](../configs/production-hardening.toml)
+- [ ] Jailed FC boots use serial-off defaults (`8250.nr_uarts=0`) unless you override `kernel_args`
+- [ ] VMM logs bounded (journald/logrotate or redirect) — guest can influence FC stdout/log volume
 - [ ] `allowed_backends` pinned
 - [ ] Warm pools only on dedicated hosts
-- [ ] Snapshots tested for the backends you run (QEMU `savevm`, CH `ch-remote`)
+- [ ] Snapshots tested for the backends you run (QEMU `savevm`, CH `ch-remote`, Firecracker `/snapshot/*`, FluxVm control SnapshotSave — restore via `start_from_snapshot`)
+- [ ] Optional `[policy] default_cpu_quota_percent` / `memory_max_equals_guest` when you want launch-time oversub caps ([oversubscription.md](oversubscription.md))
+- [ ] Optional Firecracker `cpu_template` on create (static names only; not for CH/QEMU/kvm)
 - [ ] Windows + QGA only on QEMU ([ch-windows-qga.md](ch-windows-qga.md)); `fluxvm_engine=kvm` lab-only
+- [ ] Capability figures: Track A isolation checklist done; Track B density numbers measured only if you quote microVM packing ([capability-figures.md](capability-figures.md))
 
 ## 3. Images & storage
 
@@ -43,9 +48,11 @@ images — not only the dataplane.
 ## 4. Network
 
 - [ ] Merge `configs/network-fabric-prod.toml` when VMs have a host edge
+- [ ] Threat-containment egress barrier: Fabric policy **or** `network.mode=none` for every untrusted guest (Firecracker does not filter egress inside the VMM)
+- [ ] Optional per-VM virtio caps on Firecracker: `net_mbit_limit` / `net_pps_limit` / `blk_mbit_limit` / `blk_ops_limit` on create (VMM-side token buckets; complementary to Fabric `max_egress_mbps`/`max_egress_pps`)
 - [ ] `fluxvm dataplane health` ok
-- [ ] CNP/groups for tenant labels; `fluxvm observe`
-- [ ] Packet flow: `fluxvm hubble observe --output color` and `--output plain`; UI `/v1/network/hubble/ui` ([packet-flow.md](packet-flow.md))
+- [ ] CNP/groups for tenant labels; `fluxctl observe`
+- [ ] Packet flow: `fluxctl hubble observe --output color` and `--output plain`; UI `/v1/network/hubble/ui` ([packet-flow.md](packet-flow.md))
 - [ ] Cilium coexistence (`mode=cilium`) only if sock/bpffs present — not Cilium-native endpoints
 - [ ] Cilium nodes: no FluxVM XDP on the shared datapath
 - [ ] See [production-dataplane.md](production-dataplane.md)

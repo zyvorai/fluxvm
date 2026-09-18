@@ -9,7 +9,7 @@ CNP JSON document.
 ## 1. Create a group
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group set web \
+sudo fluxctl --config /etc/fluxvm.toml group set web \
   --label app=web --label env=prod \
   --priority 10 \
   --description "HTTPS + DNS egress" \
@@ -31,8 +31,8 @@ curl -s -X POST http://127.0.0.1:7788/v1/network/groups \
 ```
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group list
-sudo fluxvm --config /etc/fluxvm.toml group get web
+sudo fluxctl --config /etc/fluxvm.toml group list
+sudo fluxctl --config /etc/fluxvm.toml group get web
 ```
 
 ## 2. Select the group from a VM
@@ -70,7 +70,7 @@ curl -s "http://127.0.0.1:7788/v1/vms/${ID}/network/effective" | python3 -m json
 ## 4. Named attachment (no labels on the group)
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group set egress-only \
+sudo fluxctl --config /etc/fluxvm.toml group set egress-only \
   --default-allow false \
   --allow-cidr 1.1.1.1/32 \
   --deny-cidr 0.0.0.0/0 \
@@ -85,8 +85,8 @@ curl -s -X POST "http://127.0.0.1:7788/v1/vms/${ID}/network/policy" \
 ## Cleanup
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group delete web
-sudo fluxvm --config /etc/fluxvm.toml group delete egress-only
+sudo fluxctl --config /etc/fluxvm.toml group delete web
+sudo fluxctl --config /etc/fluxvm.toml group delete egress-only
 ```
 
 ## Next

@@ -446,6 +446,7 @@ async fn native_vsock_call(
     _cid: u32,
     _port: u32,
     _envelope: &ContainerEnvelope,
+    _timeout: Duration,
 ) -> Result<ContainerResponse> {
     bail!("native AF_VSOCK is supported on Linux only")
 }

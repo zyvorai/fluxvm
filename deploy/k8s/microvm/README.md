@@ -1,10 +1,10 @@
 # Deploying FluxVM MicroVM
 
-Apply the existing FluxVM DaemonSet first so `fluxvm serve` is on
+Apply the existing FluxVM DaemonSet first so `fluxctl serve` is on
 `127.0.0.1:7788` (see [../README.md](../README.md)). Then:
 
 ```bash
-# Token for node-agent → local fluxvm serve (required when [[auth.tokens]] is set)
+# Token for node-agent → local fluxctl serve (required when [[auth.tokens]] is set)
 kubectl create ns fluxvm-system --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n fluxvm-system create secret generic fluxvm-microvm-token \
   --from-literal=token="$FLUXVM_TOKEN" --dry-run=client -o yaml | kubectl apply -f -
@@ -13,6 +13,9 @@ kubectl apply -f crd.yaml
 kubectl apply -f rbac.yaml
 kubectl apply -f controller.yaml
 kubectl apply -f node-agent.yaml
+# Optional Prometheus Operator scrape of MICROVM_METRICS_ADDR (:9108):
+# kubectl apply -f servicemonitor.yaml
+# Or vanilla Prometheus: include deploy/prometheus/fluxvm-scrape.yaml
 ```
 
 Or `fluxvm-microvm --print-crd | kubectl apply -f -` for CRDs (includes printer

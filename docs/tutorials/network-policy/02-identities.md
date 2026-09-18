@@ -25,19 +25,19 @@ and [`groups.rs`](../../../crates/fluxvm-network/src/groups.rs).
 ## Hands-on
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml identity list | python3 -m json.tool
+sudo fluxctl --config /etc/fluxvm.toml identity list | python3 -m json.tool
 ```
 
 Create a security group and note its identity:
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group set demo-id \
+sudo fluxctl --config /etc/fluxvm.toml group set demo-id \
   --label app=demo \
   --default-allow false \
   --allow-cidr 10.0.0.0/8 \
   --allow-port tcp/443
 
-sudo fluxvm --config /etc/fluxvm.toml group get demo-id \
+sudo fluxctl --config /etc/fluxvm.toml group get demo-id \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["identity"]); assert d["identity"]>=0x10000'
 ```
 
@@ -58,7 +58,7 @@ contains the same `≥0x10000` value, `vm_identity` is in `1..=0xffff`.
 Cleanup:
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group delete demo-id
+sudo fluxctl --config /etc/fluxvm.toml group delete demo-id
 ```
 
 ## Next

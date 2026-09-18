@@ -26,11 +26,11 @@ Runtime Intelligence gains:
 
 ```
 GET /v1/intelligence/vms/<uuid>/diagnose
-fluxvm diagnose <uuid>
+fluxctl diagnose <uuid>
 fluxvm-intelligence diagnose <uuid>
 ```
 
-`fluxvm diagnose` is a direct one-shot path: it reads the VM record through the local manager, samples Runtime Intelligence, and correlates policy/flow state without requiring the companion intelligence HTTP daemon. The HTTP endpoint and `fluxvm-intelligence diagnose` remain useful for long-running observability integrations.
+`fluxctl diagnose` is a direct one-shot path: it reads the VM record through the local manager, samples Runtime Intelligence, and correlates policy/flow state without requiring the companion intelligence HTTP daemon. The HTTP endpoint and `fluxvm-intelligence diagnose` remain useful for long-running observability integrations.
 
 It correlates the VM's stable identity/runtime snapshot with:
 

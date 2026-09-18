@@ -46,7 +46,7 @@
             "description": "Auto-generated derived type for DisposableVmSpec via `CustomResource`",
             "properties": {
               "spec": {
-                "description": "A disposable VM, declared as a Kubernetes custom resource. The operator running on each node (see `crate::controller`) watches these and drives a *local* `fluxvm serve` instance's REST API to create/delete the underlying VM — it never talks to another node's fluxvm, matching the \"node-local daemonset\" model described in the project README rather than a centralized scheduler that place VMs across a fleet.",
+                "description": "A disposable VM, declared as a Kubernetes custom resource. The operator running on each node (see `crate::controller`) watches these and drives a *local* `fluxctl serve` instance's REST API to create/delete the underlying VM — it never talks to another node's fluxvm, matching the \"node-local daemonset\" model described in the project README rather than a centralized scheduler that place VMs across a fleet.",
                 "properties": {
                   "backend": {
                     "default": "qemu",

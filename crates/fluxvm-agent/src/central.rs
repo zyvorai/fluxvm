@@ -3,11 +3,11 @@
 
 //! Central fleet registry + proxy. Deliberately doesn't depend on
 //! `fluxvm-core` — it treats `CreateVmRequest`/`VmRecord` bodies as opaque
-//! JSON and just forwards them to the right node's own `fluxvm serve`,
+//! JSON and just forwards them to the right node's own `fluxctl serve`,
 //! the same way `fluxvm-kube`'s client does. This keeps the binary small
 //! and means it never goes stale against the request/record schema; the
 //! cost is no server-side validation beyond "is this valid JSON" — a node's
-//! own `fluxvm serve` still does the real validation.
+//! own `fluxctl serve` still does the real validation.
 
 use axum::{
     Json, Router,
@@ -572,7 +572,7 @@ fn no_candidate_message(selector: &HashMap<String, String>) -> String {
 /// Pulls `"nodeSelector"` (a flat string->string object, e.g.
 /// `{"zone": "us-east"}`) out of a `POST /fleet/vms` body, removing it in
 /// the process -- like `"node"`, it's a routing instruction for `central`
-/// itself, not part of the `CreateVmRequest` a node's own `fluxvm serve`
+/// itself, not part of the `CreateVmRequest` a node's own `fluxctl serve`
 /// understands, so it must never be forwarded downstream. A non-object
 /// value or a non-string entry is silently ignored rather than rejected,
 /// matching `request_sizes`' own lenient-default posture elsewhere in this
@@ -649,7 +649,7 @@ enum DispatchError {
     /// `HEALTHY_WINDOW_SECS` can't catch — the node hasn't missed enough
     /// beats yet to be marked unhealthy. Worth failing over.
     Unreachable(String),
-    /// The node answered just fine but its own `fluxvm serve` rejected the
+    /// The node answered just fine but its own `fluxctl serve` rejected the
     /// request (e.g. bad `CreateVmRequest` fields). Every other node would
     /// reject the identical body for the identical reason, so failing over
     /// would just waste time re-discovering the same error — surface it
@@ -686,7 +686,7 @@ async fn dispatch_create(
 /// `{"zone": "us-east"}`) constraining automatic placement to a node whose
 /// labels are a superset of it — when neither is given, residual-capacity
 /// placement picks any healthy, uncordoned node. Both fields are stripped
-/// before the body is forwarded to a node's own `fluxvm serve`, which knows
+/// before the body is forwarded to a node's own `fluxctl serve`, which knows
 /// nothing about either.
 ///
 /// An explicit `"node"` is a single, non-retried attempt that bypasses
@@ -701,7 +701,7 @@ async fn dispatch_create(
 /// network-partitioned right now — that node is excluded and the
 /// next-best remaining candidate is tried, until one accepts the create or
 /// every schedulable node has been tried. A node that reaches its own
-/// `fluxvm serve` and gets an explicit rejection (bad request fields) is
+/// `fluxctl serve` and gets an explicit rejection (bad request fields) is
 /// never retried elsewhere, since every other node would reject the same
 /// body identically.
 async fn create_vm(
@@ -851,7 +851,7 @@ async fn list_vms(State(fleet): State<Fleet>) -> Json<Value> {
 }
 
 /// `GET /fleet/nodes/{name}/vms` — the VMs on exactly one node, queried
-/// directly against that node's own `fluxvm serve` rather than the
+/// directly against that node's own `fluxctl serve` rather than the
 /// fleet-wide aggregate `GET /fleet/vms` produces. Two reasons this earns
 /// its own route instead of leaving callers to filter the fleet-wide list
 /// client-side: it works even when *other* nodes in the fleet are
@@ -936,7 +936,7 @@ async fn delete_vm(
 
 /// `GET /fleet/capacity` — a fleet-wide capacity summary, computed purely
 /// from each node's own last-reported heartbeat already sitting in the
-/// registry (no proxy calls to any node's `fluxvm serve`). Unlike
+/// registry (no proxy calls to any node's `fluxctl serve`). Unlike
 /// `GET /fleet/vms`, this never blocks on or is degraded by a node being
 /// unreachable right now — a stale node is simply excluded from every
 /// total below, the same "excluded, not silently guessed" posture
@@ -1558,7 +1558,7 @@ mod tests {
     async fn node_vms_propagates_the_nodes_own_error_status() {
         let url = spawn_fake_node(
             StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": "local fluxvm serve is unhappy"}),
+            json!({"error": "local fluxctl serve is unhappy"}),
         )
         .await;
         let mut nodes = HashMap::new();
@@ -1574,7 +1574,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_GATEWAY);
-        assert!(err.1.contains("local fluxvm serve is unhappy"));
+        assert!(err.1.contains("local fluxctl serve is unhappy"));
     }
 
     #[tokio::test]
@@ -1684,7 +1684,7 @@ mod tests {
     async fn list_vms_names_a_node_that_rejects_the_list_call_as_unreachable() {
         let url = spawn_fake_node(
             StatusCode::INTERNAL_SERVER_ERROR,
-            json!({"error": "local fluxvm serve is unhappy"}),
+            json!({"error": "local fluxctl serve is unhappy"}),
         )
         .await;
         let mut nodes = HashMap::new();
@@ -1706,7 +1706,7 @@ mod tests {
             unreachable[0]["reason"]
                 .as_str()
                 .unwrap()
-                .contains("local fluxvm serve is unhappy")
+                .contains("local fluxctl serve is unhappy")
         );
     }
 
@@ -1865,7 +1865,7 @@ mod tests {
     #[tokio::test]
     async fn automatic_placement_does_not_fail_over_on_an_explicit_rejection() {
         // "picked" has more free capacity so it's chosen first. It answers
-        // (unlike the unreachable case) but its own fluxvm serve rejects
+        // (unlike the unreachable case) but its own fluxctl serve rejects
         // the body -- every other node would reject the identical body
         // identically, so "spare" must never even be contacted.
         let (picked_url, picked_hits) = spawn_fake_create_node(
@@ -2004,7 +2004,7 @@ mod tests {
                 let hits = hits_for_route.clone();
                 async move {
                     hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    // A real `fluxvm serve` would reject an unknown field --
+                    // A real `fluxctl serve` would reject an unknown field --
                     // asserting it's simply absent proves central() actually
                     // strips "nodeSelector" rather than forwarding it as-is.
                     assert!(req.get("nodeSelector").is_none());

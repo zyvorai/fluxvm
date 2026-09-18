@@ -14,10 +14,10 @@ forwards the packet and records the audited drop path instead of
 ## Apply an audit CNP
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp apply \
+sudo fluxctl --config /etc/fluxvm.toml cnp apply \
   --spec examples/cnp/cnp-audit-mode.json
 
-sudo fluxvm --config /etc/fluxvm.toml group get audit-web \
+sudo fluxctl --config /etc/fluxvm.toml group get audit-web \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d["policy"]["audit_mode"] is True; print("audit_mode ok")'
 ```
 
@@ -44,7 +44,7 @@ rules become hard drops.
 ## Cleanup
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp delete audit-web
+sudo fluxctl --config /etc/fluxvm.toml cnp delete audit-web
 ```
 
 ## Next

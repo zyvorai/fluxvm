@@ -49,7 +49,7 @@ fresh BPF object from `./scripts/build-ebpf.sh`.
 ```bash
 export FLUXVM_CONFIG=/etc/fluxvm.toml
 # Prefer sudo when state_dir is /var/lib/fluxvm (root-owned).
-alias fx='sudo fluxvm --config /etc/fluxvm.toml'
+alias fx='sudo fluxctl --config /etc/fluxvm.toml'
 ```
 
 3. Optional: a running FluxVm sandbox with TAP + netns when a live VM is
@@ -68,10 +68,10 @@ fx list
 | Readiness | `curl -sf localhost:7788/readyz` |
 | API / VM list | `curl -s localhost:7788/v1/vms` |
 | Per-VM dataplane status | `GET …/v1/vms/{id}/network/status` |
-| List identities | `fluxvm identity list` |
+| List identities | `fluxctl identity list` |
 | Apply / list CNP | `fluxvm cnp apply\|list\|get\|delete` |
 | Security groups | `fluxvm group …` |
-| Observe snapshot | `fluxvm observe` |
+| Observe snapshot | `fluxctl observe` |
 | Dataplane health | `fluxvm dataplane health` |
 | Guest IP → identity | `fluxvm dataplane ipcache` |
 | Refresh FQDN allowlist | `fluxvm dataplane refresh-dns` |

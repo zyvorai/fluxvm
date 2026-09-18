@@ -1,17 +1,64 @@
 # Copyright 2026 Zyvor
 # SPDX-License-Identifier: Apache-2.0
 #
-# AppArmor profile for fluxvm / fluxvm-hypervisor.
+# AppArmor profile for fluxctl / fluxvm-hypervisor.
 # Install: sudo cp deploy/apparmor/fluxvm /etc/apparmor.d/fluxvm
 #          sudo apparmor_parser -r /etc/apparmor.d/fluxvm
 
 #include <tunables/global>
 
+profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+
+  /usr/local/bin/fluxctl mr,
+  /usr/local/bin/fluxvm mr,
+  /usr/local/bin/fluxvm-hypervisor Px,
+  /usr/bin/qemu-system-x86_64 Px,
+  /usr/local/bin/cloud-hypervisor Px,
+  /usr/local/bin/firecracker Px,
+  /usr/local/bin/jailer Px,
+  /usr/bin/qemu-img rix,
+  /usr/bin/cloud-localds rix,
+  /usr/bin/ip rix,
+  /usr/sbin/nft rix,
+  /usr/sbin/iptables rix,
+  /usr/bin/qemu-nbd rix,
+
+  /dev/kvm rw,
+  /dev/net/tun rw,
+  /dev/null rw,
+  /dev/urandom r,
+  /dev/random r,
+
+  /var/lib/fluxvm/** rwk,
+  /run/fluxvm/** rwk,
+  /etc/fluxvm.toml r,
+  /etc/ceph/** r,
+  /proc/*/ns/* r,
+  /sys/fs/cgroup/** rwk,
+  /run/netns/** rwk,
+
+  capability net_admin,
+  capability sys_admin,
+  capability sys_chroot,
+  capability dac_override,
+  capability setuid,
+  capability setgid,
+
+  network inet,
+  network inet6,
+  network netlink raw,
+  network unix,
+}
+
+# Compat: old binary path if still present as a real file (prefer fluxctl).
 profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   #include <abstractions/base>
   #include <abstractions/nameservice>
 
   /usr/local/bin/fluxvm mr,
+  /usr/local/bin/fluxctl mr,
   /usr/local/bin/fluxvm-hypervisor Px,
   /usr/bin/qemu-system-x86_64 Px,
   /usr/local/bin/cloud-hypervisor Px,

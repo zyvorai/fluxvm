@@ -14,15 +14,15 @@ function HomepageHeader() {
       <div className="container">
         <div className={clsx(styles.heroGridSingle, 'text--center')}>
           <Heading as="h1" className="hero__title">
-            Disposable Compute Engine
+            FluxVM
           </Heading>
           <p className="hero__subtitle">
-            Create secure, isolated, short-lived virtual machines — via
-            Firecracker, Cloud Hypervisor, QEMU/KVM, or the in-tree FluxVM
-            hypervisor — from one Rust-native control plane with a real
-            REST API. Run it standalone as a libvirt replacement, or as
-            the VM engine under another Zyvor product; it's the same
-            binary and the same API either way.
+            Secure, isolated virtual machines — via Firecracker, Cloud
+            Hypervisor, QEMU/KVM, or the in-tree FluxVM hypervisor — from one
+            Rust-native control plane with a real REST API. Run it standalone
+            as a libvirt replacement, or as the VM engine under another Zyvor
+            product. Use optional TTL and CoW when you want disposable
+            compute; longer-lived guests use the same API.
           </p>
           <div className={styles.buttons}>
             <Link
@@ -52,23 +52,23 @@ function ProblemStatement() {
               Why FluxVM
             </Heading>
             <p>
-              Teams that need short-lived, isolated VMs — CI runners,
-              sandboxed code execution, per-branch dev environments,
-              Kubernetes-native disposable workloads — are usually stuck
+              Teams that need a host-local VM control plane — CI runners,
+              sandboxed code execution, per-branch environments, Kubernetes
+              VM workloads, or longer-lived guests — are usually stuck
               choosing between manual libvirt/virsh scripting (XML, no REST
               API, no built-in TTL cleanup), a full private-cloud platform
-              (disproportionate overhead for something meant to be
-              lightweight and short-lived), or container-only isolation
-              (fine until the workload needs a real kernel boundary).
+              (disproportionate overhead when you only need a solid VM API),
+              or container-only isolation (fine until the workload needs a
+              real kernel boundary).
             </p>
             <p>
-              FluxVM fills that specific gap: a control plane built around
-              VMs that are supposed to be short-lived, with a real API and
-              no libvirtd, no XML domain definitions, and TTL-guaranteed
-              cleanup — <code>fluxvm create</code> ≈{' '}
+              FluxVM fills that gap: a Rust-native control plane with a real
+              API, no libvirtd, no XML domain definitions —{' '}
+              <code>fluxctl create</code> ≈{' '}
               <code>virsh define</code>+<code>start</code>,{' '}
-              <code>fluxvm delete</code> ≈ <code>virsh destroy</code>, plus
-              a REST API libvirt doesn't have.
+              <code>fluxctl delete</code> ≈ <code>virsh destroy</code>, plus
+              optional TTL-guaranteed cleanup when you want disposable
+              compute.
             </p>
           </div>
         </Reveal>
@@ -145,8 +145,8 @@ function EnterpriseCTA() {
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="FluxVM — Disposable Compute Engine"
-      description="Create secure, isolated, short-lived virtual machines via Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor, from one Rust-native control plane.">
+      title="FluxVM — Rust-native VM control plane"
+      description="Secure, isolated virtual machines via Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor, from one Rust-native control plane. Optional TTL/CoW for disposable workloads.">
       <HomepageHeader />
       <main>
         <ProblemStatement />

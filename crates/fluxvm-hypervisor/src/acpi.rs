@@ -28,17 +28,19 @@ fn write_header(buf: &mut [u8], sig: &[u8; 4], len: u32, rev: u8) {
     buf[32..36].copy_from_slice(&1u32.to_le_bytes());
 }
 
-/// Install RSDP + XSDT + FADT + MADT. Returns RSDP GPA for PVH `rsdp_paddr`.
+/// Install RSDP + XSDT + FADT + MADT (+ MCFG for ECAM). Returns RSDP GPA.
 pub fn write_tables(mem: &mut GuestMemory, num_cpus: u8) -> Result<u64> {
     // Layout inside [SYSTEM_MEM_START, RSDP_ADDR):
     //   0x9fc00 MP table (existing)
     //   0xa0000 FADT
     //   0xa1000 MADT
     //   0xa2000 XSDT
+    //   0xa3000 MCFG (H2 — points at PCI_MMCONFIG_START)
     // RSDP at 0xe0000
     const FADT: u64 = 0xa_0000;
     const MADT: u64 = 0xa_1000;
     const XSDT: u64 = 0xa_2000;
+    const MCFG: u64 = 0xa_3000;
     let rsdp = memory::RSDP_ADDR;
 
     // ---- FADT (FACP) — include PM1a blocks so the interpreter can start.
@@ -80,12 +82,25 @@ pub fn write_tables(mem: &mut GuestMemory, num_cpus: u8) -> Result<u64> {
     madt[9] = checksum(&madt);
     mem.write_at(MADT, &madt)?;
 
-    // ---- XSDT ----
-    let xsdt_len = 36 + 8 * 2;
+    // ---- MCFG (H2) — ECAM base for segment 0, buses 0–0 ----
+    // struct: header(36) + reserved(8) + allocation(16) = 60
+    let mut mcfg = vec![0u8; 60];
+    write_header(&mut mcfg, b"MCFG", 60, 1);
+    // allocation @ 44: base_addr(8), segment(2), start_bus(1), end_bus(1), reserved(4)
+    mcfg[44..52].copy_from_slice(&memory::PCI_MMCONFIG_START.to_le_bytes());
+    mcfg[52..54].copy_from_slice(&0u16.to_le_bytes()); // segment
+    mcfg[54] = 0; // start bus
+    mcfg[55] = 0; // end bus
+    mcfg[9] = checksum(&mcfg);
+    mem.write_at(MCFG, &mcfg)?;
+
+    // ---- XSDT (FADT + MADT + MCFG) ----
+    let xsdt_len = 36 + 8 * 3;
     let mut xsdt = vec![0u8; xsdt_len];
     write_header(&mut xsdt, b"XSDT", xsdt_len as u32, 1);
     xsdt[36..44].copy_from_slice(&FADT.to_le_bytes());
     xsdt[44..52].copy_from_slice(&MADT.to_le_bytes());
+    xsdt[52..60].copy_from_slice(&MCFG.to_le_bytes());
     xsdt[9] = checksum(&xsdt);
     mem.write_at(XSDT, &xsdt)?;
 

@@ -42,7 +42,7 @@ section() { echo ""; echo "=== $1 ==="; }
 [ "$(id -u)" -eq 0 ] || { echo "run as root (sudo -E $0)" >&2; exit 1; }
 [ -f "$CONFIG" ] || { echo "config not found: $CONFIG" >&2; exit 1; }
 
-EPH="${FLUXVM_BIN:-$(command -v fluxvm)}"
+EPH="${FLUXVM_BIN:-$(command -v fluxctl)}"
 STATE_DIR=$(python3 - "$CONFIG" <<'PY'
 import sys, tomllib
 with open(sys.argv[1], "rb") as f:

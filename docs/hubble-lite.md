@@ -4,10 +4,10 @@ FluxVM still does **not** write Cilium-private maps. It now persists a
 CiliumEndpoint-*shaped* object per VM and serves Hubble-like JSON flows.
 
 ```bash
-fluxvm hubble endpoints
-fluxvm hubble observe                  # colorful one-liners
-fluxvm hubble observe --output plain   # normal, no ANSI
-fluxvm hubble flow --output color      # detailed packet path
+fluxctl hubble endpoints
+fluxctl hubble observe                  # colorful one-liners
+fluxctl hubble observe --output plain   # normal, no ANSI
+fluxctl hubble flow --output color      # detailed packet path
 # UI (Colorful / Normal toggle)
 curl -sS http://127.0.0.1:7788/v1/network/hubble/ui
 ```

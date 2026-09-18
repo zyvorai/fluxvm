@@ -19,7 +19,7 @@ const FeatureList: FeatureItem[] = [
   {
     title: 'Host-local libvirt replacement',
     description:
-      'No libvirtd, no XML domain definitions — a direct command mapping (fluxvm create ≈ virsh define+start, fluxvm delete ≈ virsh destroy) plus a real REST API libvirt doesn\'t have.',
+      'No libvirtd, no XML domain definitions — a direct command mapping (fluxctl create ≈ virsh define+start, fluxctl delete ≈ virsh destroy) plus a real REST API libvirt doesn\'t have.',
     to: '/docs/POSITIONING',
   },
   {
@@ -35,9 +35,9 @@ const FeatureList: FeatureItem[] = [
     to: '/docs/microvm',
   },
   {
-    title: 'TTL-guaranteed cleanup',
+    title: 'Optional TTL cleanup',
     description:
-      'ttl_seconds on any VM spec means a forgotten or crashed job still gets torn down. Combined with the Firecracker jailer, cgroup v2, and network.mode:"none", this is the same isolation shape used for sandboxed/untrusted code execution.',
+      'ttl_seconds on a VM spec means a forgotten or crashed job still gets torn down when you opt in. Combined with the Firecracker jailer, cgroup v2, and network.mode:"none", this supports disposable / sandboxed execution without defining the whole product.',
     to: '/docs/use-cases',
   },
   {

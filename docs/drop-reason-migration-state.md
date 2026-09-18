@@ -105,7 +105,7 @@ All mutation/export operations use the existing admin-role enforcement. Drop rea
 ## CLI
 
 ```bash
-fluxvm diagnose <uuid>
+fluxctl diagnose <uuid>
 fluxvm dataplane migration-state <uuid>
 fluxvm dataplane migration-quiesce <uuid>
 fluxvm dataplane migration-export <uuid> --output /tmp/vm-net.json
@@ -113,7 +113,7 @@ fluxvm dataplane migration-restore <uuid> --input /tmp/vm-net.json
 fluxvm dataplane migration-resume <uuid>
 ```
 
-`fluxvm diagnose` automatically prefers schema-v6 kernel reasons and falls back to Set-2 policy inference when running against an older node.
+`fluxctl diagnose` automatically prefers schema-v6 kernel reasons and falls back to Set-2 policy inference when running against an older node.
 
 ## What is intentionally not transferred
 

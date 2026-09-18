@@ -43,10 +43,10 @@ guestkit plan apply virtio.yaml --vm /var/lib/fluxvm/images/tiny11-base.qcow2 --
 ## Customize then boot
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml build-image --spec examples/build-image-tiny11.json
-sudo fluxvm --config /etc/fluxvm.toml create --spec examples/tiny11-qga.json
-fluxvm list
-fluxvm get <id>
+sudo fluxctl --config /etc/fluxvm.toml build-image --spec examples/build-image-tiny11.json
+sudo fluxctl --config /etc/fluxvm.toml create --spec examples/tiny11-qga.json
+fluxctl list
+fluxctl get <id>
 ```
 
 RDP to host port 3389 (user-mode forward). For a known guest IP use
@@ -55,8 +55,8 @@ RDP to host port 3389 (user-mode forward). For a known guest IP use
 ## Live QGA
 
 ```bash
-fluxvm qga ping <id>
-fluxvm qga powershell <id> -- 'hostname; Get-Content C:\fluxvm-ready.txt'
+fluxctl qga ping <id>
+fluxctl qga powershell <id> -- 'hostname; Get-Content C:\fluxvm-ready.txt'
 ```
 
 ## Smoke

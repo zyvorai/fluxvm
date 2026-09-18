@@ -89,8 +89,8 @@ Cmdline discovery: VMM appends `virtio_mmio.device=<size>@<base>:<irq>` like Fir
 | Device        | Status                                                |
 |---------------|-------------------------------------------------------|
 | UEFI firmware | `--firmware` / `--guest windows` loads image          |
-| ACPI tables   | RSDP/XSDT/FADT/MADT written; full DSDT/AML follow-up  |
-| PCI ECAM      | `--pci` reserves MMCONFIG; virtio-pci BARs follow-up  |
+| ACPI tables   | RSDP/XSDT/FADT/MADT/MCFG; DSDT/AML still follow-up for full Windows |
+| PCI ECAM      | `--pci` ECAM + virtio-net @ 00:01.0 BAR0 (H2); MSI-X/Windows → CH SoT |
 
 ### Demand-driven (P3 stubs)
 
@@ -199,11 +199,11 @@ for agent sandboxes and functions.
 | 1 | Serial + tiny 16-bit/64-bit test payload | **Done** |
 | 2 | linux-loader + boot_params / PVH; serial console | **Done** |
 | 3 | virtio-blk + virtio-net TAP | **Done** |
-| 4 | vhost-net open + rate limits (`--net/blk-mbit-limit`); multi-queue bind still follow-up | **Partial** |
-| 5 | balloon, vsock, rng, irqfd, seccomp jailer | **Done** |
-| 6 | Minimal ACPI + PCI ECAM + Windows/UEFI path | **Partial** (ACPI/ECAM yes; full virtio-pci BAR / Windows → CH SoT) |
+| 4 | vhost-net open + rate limits; TAP backend + mem-table/VRING GPA/KICK/CALL (H3) | **Done** (userspace pump fallback) |
+| 5 | balloon, vsock, rng, irqfd, seccomp jailer + FLUXKVM1 **v3** virtio live-state | **Done** (lab snap; not FC-compatible) |
+| 6 | Minimal ACPI + PCI ECAM + virtio-pci BAR0 net (H2); Windows/UEFI MSI-X | **Partial** (Linux BAR path done; Windows → CH SoT) |
 
-Boot hang past `init_zbud` is **resolved** (Firecracker-matched TSS/MSRs/FPU/LAPIC/serial). Lab snapshots: `FLUXKVM1` v2. See [README.md](README.md), [docs/kvm-density.md](../../docs/kvm-density.md), [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md).
+Boot hang past `init_zbud` is **resolved** (Firecracker-matched TSS/MSRs/FPU/LAPIC/serial). Lab snapshots: `FLUXKVM1` v3. See [README.md](README.md), [docs/kvm-density.md](../../docs/kvm-density.md), [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md).
 
 Do not expand Windows/PCI until Linux boot + net benches stay green.
 

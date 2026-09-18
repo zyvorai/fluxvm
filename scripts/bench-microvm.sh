@@ -2,7 +2,7 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
 #
-# MicroVM create → Running latency against a live k3s + fluxvm serve stack.
+# MicroVM create → Running latency against a live k3s + fluxctl serve stack.
 # Requires: kubectl (sudo if needed), fluxvm-microvm controller+node-agent,
 #           host image, FLUXVM_TOKEN when auth is on.
 #

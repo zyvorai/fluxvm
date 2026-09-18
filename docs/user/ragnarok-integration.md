@@ -1,15 +1,15 @@
 # Using FluxVM with Ragnarok
 
-[Ragnarok](https://zyvor.dev/ragnarok) is the primary product UI/API that consumes FluxVM’s Kubernetes path (`DisposableVm` + `fluxvm-kube`). FluxVM stays a focused disposable-VM engine; Ragnarok is the operator console, RBAC, and SSO layer on top.
+[Ragnarok](https://zyvor.dev/ragnarok) is the primary product UI/API that consumes FluxVM’s Kubernetes path (`DisposableVm` + `fluxvm-kube`). FluxVM stays a focused VM engine; Ragnarok is the operator console, RBAC, and SSO layer on top.
 
 ## Roles
 
 | Layer | Owns |
 |-------|------|
-| **FluxVM** | QEMU / Cloud Hypervisor / Firecracker VMs, TTL reaper, `fluxvm serve`, `DisposableVm` CRD + node DaemonSet |
+| **FluxVM** | QEMU / Cloud Hypervisor / Firecracker VMs, TTL reaper, `fluxctl serve`, `DisposableVm` CRD + node DaemonSet |
 | **Ragnarok** | KubeVirt fleet + FluxVM Hub UI/API, JWT/OIDC/LDAP auth, RBAC, audit |
 
-Ragnarok never calls `fluxvm serve` over the host REST API from the product path — it creates/reads/deletes `DisposableVm` CRs and lets the per-node operator talk to a **local** `fluxvm serve`.
+Ragnarok never calls `fluxctl serve` over the host REST API from the product path — it creates/reads/deletes `DisposableVm` CRs and lets the per-node operator talk to a **local** `fluxctl serve`.
 
 ## Install order (user / lab)
 
@@ -69,7 +69,7 @@ No Ragnarok-specific CRD fields: anything you can `kubectl apply` as a `Disposab
 
 SSO (Keycloak OIDC), local break-glass, LDAP, and the Ragnarok signed
 `trial.token` / commercial JWT live entirely in **Ragnarok** (proprietary).
-FluxVM’s own REST API uses optional bearer tokens for direct `fluxvm serve`
+FluxVM’s own REST API uses optional bearer tokens for direct `fluxctl serve`
 callers; that is separate from the Ragnarok dashboard login and from Ragnarok
 trial tokens (`scripts/trial-tool.py` stays in the private Ragnarok repo only).
 

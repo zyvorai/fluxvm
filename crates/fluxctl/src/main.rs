@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use clap::{Parser, Subcommand};
+use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
 use fluxvm_api as api;
 use fluxvm_core::{
     config::Config,
@@ -13,6 +13,7 @@ use fluxvm_guest_protocol::AgentResponse;
 use fluxvm_image::{self as image, BuildImageRequest};
 use fluxvm_scheduler::VmManager;
 use std::{
+    io::IsTerminal,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -21,15 +22,22 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod fleet_client;
+mod status;
+mod styles;
 
 #[derive(Parser)]
 #[command(
-    name = "fluxvm",
+    name = "fluxctl",
     version,
-    about = "Zyvor FluxVM: disposable compute engine for QEMU, Cloud Hypervisor, Firecracker, and FluxVM hypervisor"
+    about = "CLI to install, manage, and troubleshoot FluxVM hosts",
+    long_about = styles::LONG_ABOUT,
+    help_template = styles::HELP_TEMPLATE,
+    styles = styles::STYLES,
+    arg_required_else_help = true,
+    propagate_version = true,
 )]
 struct Cli {
-    #[arg(long, env = "FLUXVM_CONFIG")]
+    #[arg(long, env = "FLUXVM_CONFIG", help_heading = "Global Flags")]
     config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -37,30 +45,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(next_help_heading = "Basic Commands")]
+    /// Start the FluxVM control-plane daemon (REST API).
     Serve,
+    /// Display status (Cilium-style panel).
+    Status {
+        /// Print host binary / kernel paths.
+        #[arg(long, short = 'v')]
+        verbose: bool,
+    },
+    #[command(next_help_heading = "Lifecycle Commands")]
+    /// Create a VM from a JSON spec file.
     Create {
         #[arg(long)]
         spec: PathBuf,
     },
+    /// List VMs.
     List,
+    /// Get a VM by id.
     Get {
         id: Uuid,
-    },
-    /// Correlate Runtime Intelligence with VM-edge policy and flow state.
-    /// Works as a direct one-shot and does not require the intelligence HTTP daemon.
-    Diagnose {
-        id: Uuid,
-    },
-    /// Live VM Flight Recorder events from KVM/scheduler/block/vhost eBPF probes.
-    Trace {
-        id: Uuid,
-        #[arg(long, default_value_t = 5)]
-        seconds: u64,
-        #[arg(long, default_value_t = 128)]
-        limit: usize,
-        /// json | jsonl
-        #[arg(long, default_value = "json")]
-        output: String,
     },
     /// Relaunch a Stopped VM from its existing disk (skips image
     /// clone/cloud-init reseed — see VmManager::start).
@@ -76,6 +80,10 @@ enum Command {
     Resume {
         id: Uuid,
     },
+    Delete {
+        id: Uuid,
+    },
+    #[command(next_help_heading = "Runtime Control")]
     /// Freeze every process in the VM's cgroup via the cgroup v2 freezer
     /// (`cgroup.freeze`) — a kernel-level stop that works even if the VMM's
     /// own control socket is unresponsive, unlike `pause` (QMP/API-level
@@ -102,7 +110,7 @@ enum Command {
     /// flag is optional and, like the `ResourcePatch` body it becomes, only
     /// the fields you actually pass are touched — omitting a flag leaves
     /// that control untouched, it does not reset it. At least one flag is
-    /// required; a bare `fluxvm resources <id>` with nothing to change is
+    /// required; a bare `fluxctl resources <id>` with nothing to change is
     /// rejected rather than silently doing nothing.
     Resources {
         id: Uuid,
@@ -124,6 +132,7 @@ enum Command {
         #[arg(long)]
         cpuset_cpus: Option<String>,
     },
+    #[command(next_help_heading = "Guest Access")]
     /// Run a command inside the guest over vsock (requires agent.enabled in the VM spec).
     Exec {
         id: Uuid,
@@ -163,28 +172,25 @@ enum Command {
         /// Path to write on this host.
         local: PathBuf,
     },
-    /// Live VM migration -- source-side VMM transport only (QEMU and Cloud
-    /// Hypervisor; see docs/runtime-boundary.md's runtime contract v1).
-    /// Fabric owns host selection, storage, and target-arming; this is the
-    /// standalone-mode escape hatch for triggering the same
-    /// `/v1/vms/{id}/migration/*` REST primitives without Fabric or a raw
-    /// HTTP call, the same reasoning `ping`/`copy-to`/`copy-from` closed for
-    /// the vsock agent.
-    Migrate {
-        #[command(subcommand)]
-        command: MigrateCommand,
-    },
     /// QEMU guest-agent (virtio-serial) helpers — Zyvor/GuestKit Windows agent.
     Qga {
         #[command(subcommand)]
         command: QgaCommand,
     },
-    Delete {
-        id: Uuid,
-    },
+    #[command(next_help_heading = "Images & Pools")]
     BuildImage {
         #[arg(long)]
         spec: PathBuf,
+    },
+    /// Manage the named/checksummed/optionally-signed image catalog (see
+    /// config.catalog). Referencing a catalog name in a VM spec's `image`
+    /// field (instead of a raw path) is handled automatically by `create` —
+    /// these subcommands are only for building/signing/administering the
+    /// catalog itself, and work offline against `catalog.path` with no
+    /// `fluxctl serve` required.
+    Catalog {
+        #[command(subcommand)]
+        command: CatalogCommand,
     },
     /// Manage warm VM pools — pre-booted, paused VMs handed out on claim in
     /// roughly resume time instead of full create time.
@@ -192,16 +198,7 @@ enum Command {
         #[command(subcommand)]
         command: PoolCommand,
     },
-    /// Manage the named/checksummed/optionally-signed image catalog (see
-    /// config.catalog). Referencing a catalog name in a VM spec's `image`
-    /// field (instead of a raw path) is handled automatically by `create` —
-    /// these subcommands are only for building/signing/administering the
-    /// catalog itself, and work offline against `catalog.path` with no
-    /// `fluxvm serve` required.
-    Catalog {
-        #[command(subcommand)]
-        command: CatalogCommand,
-    },
+    #[command(next_help_heading = "Network Policy")]
     /// Security groups for the VM-edge dataplane.
     Group {
         #[command(subcommand)]
@@ -217,17 +214,46 @@ enum Command {
         #[command(subcommand)]
         command: IdentityCommand,
     },
-    /// Snapshot of identities, groups, CNPs, and labeled VMs.
-    Observe,
     /// Production dataplane health, ipcache, and FQDN refresh.
     Dataplane {
         #[command(subcommand)]
         command: DataplaneCommand,
     },
+    #[command(next_help_heading = "Observability")]
+    /// Correlate Runtime Intelligence with VM-edge policy and flow state.
+    /// Works as a direct one-shot and does not require the intelligence HTTP daemon.
+    Diagnose {
+        id: Uuid,
+    },
+    /// Live VM Flight Recorder events from KVM/scheduler/block/vhost eBPF probes.
+    Trace {
+        id: Uuid,
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        #[arg(long, default_value_t = 128)]
+        limit: usize,
+        /// json | jsonl
+        #[arg(long, default_value = "json")]
+        output: String,
+    },
+    /// Snapshot of identities, groups, CNPs, and labeled VMs.
+    Observe,
     /// Hubble-lite flows and CiliumEndpoint views.
     Hubble {
         #[command(subcommand)]
         command: HubbleCommand,
+    },
+    #[command(next_help_heading = "Cluster")]
+    /// Live VM migration -- source-side VMM transport only (QEMU and Cloud
+    /// Hypervisor; see docs/runtime-boundary.md's runtime contract v1).
+    /// Fabric owns host selection, storage, and target-arming; this is the
+    /// standalone-mode escape hatch for triggering the same
+    /// `/v1/vms/{id}/migration/*` REST primitives without Fabric or a raw
+    /// HTTP call, the same reasoning `ping`/`copy-to`/`copy-from` closed for
+    /// the vsock agent.
+    Migrate {
+        #[command(subcommand)]
+        command: MigrateCommand,
     },
     /// Manage a multi-host fleet through its central registry
     /// (`fluxvm-agent central`) — see docs/operations.md's "Distributed
@@ -248,6 +274,7 @@ enum Command {
         command: FleetCommand,
     },
 }
+
 
 #[derive(Subcommand)]
 enum FleetCommand {
@@ -274,7 +301,7 @@ enum FleetCommand {
     /// `DELETE /fleet/nodes/{name}`.
     Deregister { name: String },
     /// Fleet-wide capacity summary computed from each node's last
-    /// heartbeat — no proxy calls to any node's own `fluxvm serve`. REST
+    /// heartbeat — no proxy calls to any node's own `fluxctl serve`. REST
     /// equivalent: `GET /fleet/capacity`.
     Capacity,
     /// Create a VM through the fleet: residual-capacity placement picks a
@@ -555,7 +582,7 @@ enum CatalogCommand {
     },
     /// List every catalog entry, each with a computed `signature_valid` /
     /// `signed_by` (see `GET /v1/images/catalog`). Reads `catalog.json`
-    /// directly — works with no `fluxvm serve` running.
+    /// directly — works with no `fluxctl serve` running.
     List,
     /// Register a new catalog entry: fetches `source` first if it's a URL,
     /// then hashes whatever actually landed on disk (never trusts a
@@ -605,7 +632,7 @@ enum PoolCommand {
     },
     /// Claim one ready VM from the pool. Replenishment is fired off as a
     /// background task so this command stays fast, which means it only
-    /// reliably completes if `fluxvm serve` is already running against
+    /// reliably completes if `fluxctl serve` is already running against
     /// the same state_dir — this one-shot process exits right after
     /// printing the claimed VM, taking any still-in-flight replenishment
     /// down with it. Prefer `POST /v1/pools/{name}/claim` against a running
@@ -668,7 +695,7 @@ fn parse_label(s: &str) -> Result<(String, String)> {
 /// a sorted, deduplicated list of CPU ids — the same notation
 /// `fluxvm_cgroup::cpuset` reads `cpuset.cpus`/`cpuset.cpus.effective` back
 /// as (see `parse_set`/`format_set` there), so a value copied straight out
-/// of `fluxvm resources`'s own prior output, or read directly from
+/// of `fluxctl resources`'s own prior output, or read directly from
 /// `cpuset.cpus`, round-trips. Deliberately its own, independent parser
 /// rather than importing that one: this one additionally rejects an empty
 /// spec (ambiguous here — the flag is `Option<String>`, so "clear the
@@ -771,11 +798,42 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "fluxvm=info,tower_http=info".into()),
         )
         .init();
-    let cli = Cli::parse();
+    let cli = {
+        let color = if std::env::var_os("NO_COLOR").is_some() {
+            ColorChoice::Never
+        } else if std::env::var_os("FORCE_COLOR").is_some()
+            || std::env::var_os("CLICOLOR_FORCE").is_some()
+            || std::io::stdout().is_terminal()
+        {
+            ColorChoice::Always
+        } else {
+            ColorChoice::Auto
+        };
+        let mut cmd = Cli::command()
+            .color(color)
+            .override_usage("fluxctl [OPTIONS] <COMMAND>")
+            .after_help(styles::after_help())
+            // Clap cannot group subcommands into sections (Cobra can). Hide the
+            // flat Commands list so our Cilium-style grouped after_help is the
+            // only command listing; parsing/completions are unaffected.
+            .mut_subcommands(|s| s.hide(true));
+        let matches = cmd.get_matches_mut();
+        Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
+    };
     let cfg = Config::load(cli.config.as_deref())?;
+
+    // `status` is read-mostly and must work without write access to state_dir
+    // (Cilium-style partial panel). Other commands still require a manager.
+    if let Command::Status { verbose } = &cli.command {
+        let m = manager(cfg.clone()).await.ok();
+        status::print_status(m.as_deref(), &cfg, *verbose).await?;
+        return Ok(());
+    }
+
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
+        Command::Status { .. } => unreachable!("handled above"),
         Command::Serve => {
             if cfg.auth.must_authenticate(&cfg.listen) && !cfg.auth.has_credentials() {
                 anyhow::bail!(
@@ -783,6 +841,22 @@ async fn main() -> Result<()> {
                      configured — add tokens, set auth.oidc_issuer+oidc_audience, or bind \
                      127.0.0.1 / set auth.require=false for loopback-only lab use",
                     cfg.listen
+                );
+            }
+            if cfg.jailer_required() && !cfg.jailer.enabled {
+                anyhow::bail!(
+                    "Firecracker jailer is required (jailer.enforce or auth.require on \
+                     non-loopback listen={}) but jailer.enabled is false — set \
+                     [jailer] enabled = true (and an absolute firecracker_binary), or \
+                     clear jailer.enforce / use loopback listen for lab",
+                    cfg.listen
+                );
+            }
+            if cfg.jailer.enabled {
+                tracing::info!(
+                    uid = cfg.jailer.uid,
+                    gid = cfg.jailer.gid,
+                    "Firecracker jailer enabled"
                 );
             }
             if !cfg.auth.has_credentials() {
@@ -1947,7 +2021,7 @@ mod agent_cli_tests {
     #[test]
     fn read_local_file_for_copy_to_rejects_oversized_files() {
         let dir = std::env::temp_dir().join(format!(
-            "fluxvm-cli-copy-to-test-{}-{}",
+            "fluxctl-copy-to-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1980,7 +2054,7 @@ mod agent_cli_tests {
     #[test]
     fn read_local_file_for_copy_to_accepts_files_within_the_limit() {
         let dir = std::env::temp_dir().join(format!(
-            "fluxvm-cli-copy-to-test-ok-{}-{}",
+            "fluxctl-copy-to-test-ok-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2006,7 +2080,7 @@ mod agent_cli_tests {
     fn write_copy_from_response_restores_content_and_mode() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!(
-            "fluxvm-cli-copy-from-test-{}-{}",
+            "fluxctl-copy-from-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2028,7 +2102,7 @@ mod agent_cli_tests {
     #[test]
     fn write_copy_from_response_rejects_invalid_base64() {
         let dir = std::env::temp_dir().join(format!(
-            "fluxvm-cli-copy-from-test-bad-{}-{}",
+            "fluxctl-copy-from-test-bad-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

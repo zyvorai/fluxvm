@@ -1,0 +1,39 @@
+# H5 density archive — sus@80.79.5.173 (NLDW4-4-16-36)
+# 2026-09-18 — scripts/bench-density.sh against live fluxvm serve
+# Image: /var/lib/fluxvm/images/bionic-fabric-rootfs.ext4  kernel: vmlinux
+# Backend: flux-vm sandboxes, network=none
+
+## Run A — BENCH_N=8 DENSITY_MEMORY_MIB=256
+concurrent_requested=8
+concurrent_alive=8
+create_failures=0
+wall_ms=70493
+avg_create_ms=65360
+boot_to_ready_ms=65360
+p50_create_ms=64629
+p95_create_ms=64629
+mutation_per_sec=0.11
+mutation_per_core_sec=0.01
+host_cores=12
+fc_mutation_target_per_core_sec=5
+memory_mib_each=256
+approx_guest_ram_mib=2048
+sample_vmm_rss_kib=5612
+fc_overhead_target_mib=5
+
+## Run B — BENCH_N=4 DENSITY_MEMORY_MIB=256
+concurrent_requested=4
+concurrent_alive=4
+create_failures=0
+wall_ms=28961
+avg_create_ms=28520
+boot_to_ready_ms=28520
+mutation_per_sec=0.14
+mutation_per_core_sec=0.01
+sample_vmm_rss_kib=5616
+
+## Reading
+Track B FC design targets (5 microVMs/core/sec, ≤5 MiB overhead) are not met
+by this flux-vm sandbox cold-create path (~28–65s create, ~5.5 MiB VMM RSS).
+Use Firecracker warm pools / snapshots for density claims; this archive is a
+host baseline for H5, not a product density identity claim.

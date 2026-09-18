@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Node agent: the only process that talks to local `fluxvm serve`.
+//! Node agent: the only process that talks to local `fluxctl serve`.
 
 use crate::crd::{GuestImage, MicroVM, MicroVMStatus};
 use crate::fluxvm_client::{FluxVMClient, record_guest_ip, record_id, record_pid, record_status};

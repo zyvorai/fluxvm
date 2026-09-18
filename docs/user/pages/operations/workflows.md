@@ -20,10 +20,10 @@ Service Fabric jobs.
 
 | Workflow | Steps |
 |----------|-------|
-| CI/sandbox VM | `fluxvm create` + `ttl_seconds` → `fluxvm exec` → delete or TTL reaper |
-| Warm pool | `fluxvm pool create` → `fluxvm pool claim` |
-| Image build | `fluxvm build-image` — [build-image-tutorial](../images/build-image-tutorial.md) · [Kryton](../../../windows-golden.md) |
-| Windows + QGA | `build-image` windows{} → `create` windows-qga → `fluxvm qga …` |
+| CI/sandbox VM | `fluxctl create` + `ttl_seconds` → `fluxctl exec` → delete or TTL reaper |
+| Warm pool | `fluxctl pool create` → `fluxctl pool claim` |
+| Image build | `fluxctl build-image` — [build-image-tutorial](../images/build-image-tutorial.md) · [Kryton](../../../windows-golden.md) |
+| Windows + QGA | `build-image` windows{} → `create` windows-qga → `fluxctl qga …` |
 | Fleet | `fluxvm-agent central` + `node` → `POST /fleet/vms` |
 | Kubernetes | DisposableVm CRD + `fluxvm-kube` — [kubernetes-deployment](../deploy/kubernetes-deployment.md) |
 | Network Fabric v4 | `mode=ebpf` + bridged VM — [network-policy tutorials](../../../tutorials/network-policy/README.md) |

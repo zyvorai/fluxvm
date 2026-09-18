@@ -16,7 +16,7 @@
 #           to rely on here) via a second, host-side macvtap sibling.
 #
 # All three also verify cleanup: the QEMU process and (for TAP/macvtap) the
-# tap/macvtap interface must be gone after `fluxvm delete`.
+# tap/macvtap interface must be gone after `fluxctl delete`.
 #
 # Usage:
 #   sudo ./scripts/test-networking.sh [--bridge NAME] [--macvtap-parent NAME] [--image PATH] [--config PATH]
@@ -62,12 +62,12 @@ section() { echo ""; echo "=== $1 ==="; }
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-    if command -v fluxvm >/dev/null 2>&1; then
-        EPH="$(command -v fluxvm)"
-    elif [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-        EPH="${PROJECT_DIR}/target/release/fluxvm"
+    if command -v fluxctl >/dev/null 2>&1; then
+        EPH="$(command -v fluxctl)"
+    elif [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+        EPH="${PROJECT_DIR}/target/release/fluxctl"
     else
-        echo "fluxvm binary not found. Build it (cargo build --release -p fluxvm-cli) or set FLUXVM_BIN." >&2
+        echo "fluxvm binary not found. Build it (cargo build --release -p fluxctl) or set FLUXVM_BIN." >&2
         exit 1
     fi
 fi

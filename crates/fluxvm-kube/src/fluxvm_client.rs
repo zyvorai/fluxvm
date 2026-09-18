@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Thin REST client against a *local* `fluxvm serve` — see
+//! Thin REST client against a *local* `fluxctl serve` — see
 //! `crate::crd::DisposableVmSpec` for why this is local-only, not a
 //! fan-out to arbitrary nodes.
 
@@ -89,7 +89,7 @@ impl FluxVMClient {
     /// TTL) rather than a transient error.
     ///
     /// Real API characteristic found while testing this against a live
-    /// `fluxvm serve`: every error this API returns — "not found"
+    /// `fluxctl serve`: every error this API returns — "not found"
     /// included — comes back as a generic `400 Bad Request` with an
     /// `{"error": "..."}` body (`ApiError`'s blanket `From<E>` impl maps
     /// *all* errors to 400, there is no distinct 404 anywhere in this API).
@@ -155,7 +155,7 @@ async fn response_json_or_err(resp: reqwest::Response) -> Result<Value> {
 
 /// A short, filesystem/name-safe suffix for the VM's display name — the
 /// CR's own name is already the stable identity kubectl/etcd care about,
-/// this only needs to be readable in `fluxvm list` output.
+/// this only needs to be readable in `fluxctl list` output.
 fn uuid_like_suffix() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()

@@ -17,7 +17,7 @@ API="${FLUXVM_API:-http://127.0.0.1:7788}"
 KERN="${KERNEL:-/var/lib/fluxvm/kernels/vmlinux}"
 IMG="${IMAGE:-/var/lib/fluxvm/images/bionic-fabric-rootfs.ext4}"
 CFG="${FLUXVM_CONFIG:-/etc/fluxvm.toml}"
-BIN="${FLUXVM_BIN:-$(command -v fluxvm || echo /usr/local/bin/fluxvm)}"
+BIN="${FLUXVM_BIN:-$(command -v fluxctl || echo /usr/local/bin/fluxctl)}"
 
 PASS=0
 FAIL=0

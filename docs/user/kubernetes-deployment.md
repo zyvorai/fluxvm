@@ -7,7 +7,7 @@ per-node DaemonSet instead of only as a host-native systemd service.
 This is a different model from a Pod-per-workload platform: a `DisposableVm` never goes through
 RuntimeClass or a container runtime shim. Each object maps directly to a raw VM process on
 whichever node its `spec.node` names, driven by that node's own `fluxvm-kube` instance talking
-to a *local* `fluxvm serve` REST API. There is no scheduler — placement is always explicit.
+to a *local* `fluxctl serve` REST API. There is no scheduler — placement is always explicit.
 
 For the separate **Secure Containers** path (containerd RuntimeClass `fluxvm` /
 `io.containerd.fluxvm.v2` for OCI workloads inside a FluxVM; Sets 2–5: CNI/cgroups,
@@ -25,7 +25,7 @@ One pod per capable node, two containers sharing the pod's network namespace:
 
 | Container | Runs | Privileges |
 |-----------|------|------------|
-| `fluxvm` | `fluxvm serve` — the VMM control plane | `/dev/kvm`, `NET_ADMIN`/`SYS_ADMIN`/`NET_BIND_SERVICE`/`NET_RAW`, `hostNetwork: true` |
+| `fluxvm` | `fluxctl serve` — the VMM control plane | `/dev/kvm`, `NET_ADMIN`/`SYS_ADMIN`/`NET_BIND_SERVICE`/`NET_RAW`, `hostNetwork: true` |
 | `fluxvm-kube` | The `DisposableVm` reconcile loop | None — `runAsNonRoot`, read-only root filesystem |
 
 ## Node prerequisites
@@ -73,7 +73,7 @@ VM is torn down, so a brief pause there is expected, not a hang.
 |---|---|---|
 | API | `fluxvm.zyvor.io` | `microvm.fluxvm.zyvor.io` |
 | Placement | Explicit `spec.node` (optional placer) | kube-scheduler via shadow Pod |
-| Where the VMM runs | Host `fluxvm serve` | Host `fluxvm serve` (same DaemonSet) |
+| Where the VMM runs | Host `fluxctl serve` | Host `fluxctl serve` (same DaemonSet) |
 | Extra kinds | — | `MicroVMJob`, `MicroVMPool`, `GuestImage` (host-file Ready) |
 
 Deploy MicroVM **after** this DaemonSet: `kubectl apply -f deploy/k8s/microvm/`.
@@ -86,7 +86,7 @@ Shadow Pods request `10m`/`32Mi` only.
 ## Known limitations
 
 - **Networking**: MicroVM CRD maps `networkMode` `none` / `user` / `tap` /
-  `macvtap` through to `fluxvm serve`. Bridged TAP still needs the bridge/TAP
+  `macvtap` through to `fluxctl serve`. Bridged TAP still needs the bridge/TAP
   present on the scheduled node and a clear story with the DaemonSet's
   `hostNetwork: true` vs cluster CNI — validate per site before production.
 - **No scheduler on DisposableVm**: whatever creates `DisposableVm` objects —

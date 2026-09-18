@@ -1,0 +1,11 @@
+{
+  "ociVersion": "1.1.0",
+  "linux": {
+    "namespaces": [
+      {"type": "pid"},
+      {"type": "mount"},
+      {"type": "ipc"},
+      {"type": "uts"}
+    ]
+  }
+}

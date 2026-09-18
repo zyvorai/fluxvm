@@ -106,6 +106,9 @@ struct RuntimeConfig {
     cni_interface: String,
     cni_enabled: bool,
     cni_strict_multi_interface: bool,
+    /// `auto` | `cilium` | `generic` — Cilium gets Multus-safe iface filtering
+    /// and prefers eth0 (Cilium datapath). See docs/cilium-cni.md.
+    cni_provider: String,
     streaming_stdio: bool,
     recovery_enabled: bool,
     oom_poll_ms: u64,
@@ -190,6 +193,9 @@ impl Default for RuntimeConfig {
             .ok()
             .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off"))
             .unwrap_or(true),
+            cni_provider: std::env::var("FLUXVM_CONTAINER_CNI_PROVIDER")
+                .unwrap_or_else(|_| "auto".into())
+                .to_ascii_lowercase(),
             streaming_stdio: std::env::var("FLUXVM_CONTAINER_STREAMING_STDIO")
                 .ok()
                 .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off"))
@@ -1132,18 +1138,27 @@ impl Service {
         // before POST /v1/vms.
         let cni = if self.cfg.cni_enabled {
             if let Some(path) = hints.netns_path.as_ref() {
+                let provider = resolve_cni_provider(&self.cfg.cni_provider, path).await;
+                let primary = resolve_cni_interface(&self.cfg.cni_interface, path, provider).await?;
                 if self.cfg.cni_strict_multi_interface {
-                    let extras =
-                        detect_additional_cni_interfaces(path, &self.cfg.cni_interface).await?;
+                    let extras = detect_additional_cni_interfaces(path, &primary, provider).await?;
                     if !extras.is_empty() {
                         bail!(
-                            "CNI namespace has additional routable interfaces {:?};                              FluxVM Set 6 refuses silent partial Multus/multi-interface configuration.                              Set FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0 only for controlled testing",
+                            "CNI namespace has additional routable interfaces {:?}; \
+                             FluxVM refuses silent partial Multus/multi-interface configuration \
+                             (provider={provider:?}). Set \
+                             FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0 only for controlled testing",
                             extras
                         );
                     }
                 }
+                if provider == CniProvider::Cilium {
+                    info!(
+                        "Cilium CNI detected — L2 handoff keeps Pod IP/MAC on {primary} peer (Cilium TC stays on host lxc*)"
+                    );
+                }
                 Some(
-                    prepare_cni_l2(&self.group, path, &self.cfg.cni_interface)
+                    prepare_cni_l2(&self.group, path, &primary)
                         .await
                         .map_err(|e| {
                             let msg = format!("preparing CNI L2 attachment: {e:#}");
@@ -4129,10 +4144,70 @@ fn address_is_routable(addr: IpAddr) -> bool {
     }
 }
 
-async fn detect_additional_cni_interfaces(
-    netns_path: &Path,
-    primary: &str,
-) -> AnyResult<Vec<String>> {
+/// How the shim interprets Pod-netns CNI topology.
+///
+/// `Cilium` prefers `eth0`, treats Multus `netN` secondaries as ignorable for
+/// the primary L2 handoff (still not full Multus NIC hotplug), and never
+/// writes Cilium-private BPF maps — see `docs/cilium-cni.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CniProvider {
+    Cilium,
+    Generic,
+}
+
+fn parse_cni_provider_label(raw: &str) -> Option<CniProvider> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "cilium" => Some(CniProvider::Cilium),
+        "generic" | "bridge" | "calico" | "flannel" | "cni" => Some(CniProvider::Generic),
+        "auto" | "" => None,
+        _ => None,
+    }
+}
+
+/// Multus delegates typically name secondary interfaces `net1`, `net2`, …
+fn is_multus_secondary_iface(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("net") else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+}
+
+fn host_looks_like_cilium() -> bool {
+    if Path::new("/var/run/cilium/cilium.sock").exists() {
+        return true;
+    }
+    if Path::new("/opt/cni/bin/cilium-cni").is_file() || Path::new("/opt/cni/bin/cilium").is_file()
+    {
+        return true;
+    }
+    if let Ok(entries) = std::fs::read_dir("/etc/cni/net.d") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains("cilium") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn link_has_routable_addr(link: &Value) -> bool {
+    link.get("addr_info")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|info| {
+            if info.get("scope").and_then(Value::as_str) == Some("link") {
+                return false;
+            }
+            info.get("local")
+                .and_then(Value::as_str)
+                .and_then(|v| v.parse::<IpAddr>().ok())
+                .is_some_and(address_is_routable)
+        })
+}
+
+async fn inventory_cni_links(netns_path: &Path) -> AnyResult<Vec<Value>> {
     let args = vec![
         format!("--net={}", netns_path.display()),
         "--".into(),
@@ -4143,31 +4218,111 @@ async fn detect_additional_cni_interfaces(
     ];
     let text = command_output("nsenter", &args).await?;
     let links: Value = serde_json::from_str(&text).context("parsing CNI interface inventory")?;
+    Ok(links
+        .as_array()
+        .cloned()
+        .unwrap_or_default())
+}
+
+async fn resolve_cni_provider(configured: &str, netns_path: &Path) -> CniProvider {
+    if let Some(forced) = parse_cni_provider_label(configured) {
+        return forced;
+    }
+    if host_looks_like_cilium() {
+        return CniProvider::Cilium;
+    }
+    // Pod-side hint: Cilium sometimes leaves cilium_net_* / cilium_vxlan peers
+    // visible briefly; prefer eth0 + Cilium profile when present.
+    if let Ok(links) = inventory_cni_links(netns_path).await {
+        for link in &links {
+            let Some(name) = link.get("ifname").and_then(Value::as_str) else {
+                continue;
+            };
+            let lower = name.to_ascii_lowercase();
+            if lower.starts_with("cilium") || lower == "lxc_health" {
+                return CniProvider::Cilium;
+            }
+        }
+    }
+    CniProvider::Generic
+}
+
+async fn resolve_cni_interface(
+    configured: &str,
+    netns_path: &Path,
+    provider: CniProvider,
+) -> AnyResult<String> {
+    let links = inventory_cni_links(netns_path).await?;
+    let preferred = if !configured.is_empty() && valid_iface_name(configured) {
+        configured.to_string()
+    } else if provider == CniProvider::Cilium {
+        "eth0".into()
+    } else {
+        "eth0".into()
+    };
+
+    if links.iter().any(|link| {
+        link.get("ifname").and_then(Value::as_str) == Some(preferred.as_str())
+            && link_has_routable_addr(link)
+    }) {
+        return Ok(preferred);
+    }
+
+    // Fall back to the first routable non-lo interface (deterministic order).
+    let mut candidates: Vec<String> = links
+        .iter()
+        .filter_map(|link| {
+            let name = link.get("ifname").and_then(Value::as_str)?;
+            if name == "lo" || is_multus_secondary_iface(name) {
+                return None;
+            }
+            if link_has_routable_addr(link) {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    candidates.into_iter().next().with_context(|| {
+        format!(
+            "no routable CNI interface in {} (wanted {preferred}, provider={provider:?})",
+            netns_path.display()
+        )
+    })
+}
+
+async fn detect_additional_cni_interfaces(
+    netns_path: &Path,
+    primary: &str,
+    provider: CniProvider,
+) -> AnyResult<Vec<String>> {
+    let links = inventory_cni_links(netns_path).await?;
     let mut extras = Vec::new();
-    for link in links.as_array().into_iter().flatten() {
+    let mut ignored_multus = Vec::new();
+    for link in &links {
         let Some(name) = link.get("ifname").and_then(Value::as_str) else {
             continue;
         };
         if name == "lo" || name == primary {
             continue;
         }
-        let routable = link
-            .get("addr_info")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .any(|info| {
-                if info.get("scope").and_then(Value::as_str) == Some("link") {
-                    return false;
-                }
-                info.get("local")
-                    .and_then(Value::as_str)
-                    .and_then(|v| v.parse::<IpAddr>().ok())
-                    .is_some_and(address_is_routable)
-            });
-        if routable {
-            extras.push(name.to_string());
+        if !link_has_routable_addr(link) {
+            continue;
         }
+        // Cilium + Multus: keep primary eth0 handoff; do not fail closed on
+        // Multus netN delegates (full Multus guest NIC hotplug remains open).
+        if provider == CniProvider::Cilium && is_multus_secondary_iface(name) {
+            ignored_multus.push(name.to_string());
+            continue;
+        }
+        extras.push(name.to_string());
+    }
+    if !ignored_multus.is_empty() {
+        warn!(
+            "Cilium CNI: ignoring Multus secondary interfaces {ignored_multus:?} for primary {primary} L2 handoff (not attached to guest)"
+        );
     }
     extras.sort();
     extras.dedup();
@@ -5049,6 +5204,7 @@ async fn stage_bind_mounts(
     guest_ctr: &str,
     pod_uid: Option<&str>,
 ) -> AnyResult<()> {
+    let allow_root = hostpath_allow_root(spec);
     let Some(mounts) = spec.get_mut("mounts").and_then(Value::as_array_mut) else {
         return Ok(());
     };
@@ -5101,6 +5257,23 @@ async fn stage_bind_mounts(
             }
         }
 
+        // S9 / P0 hostPath broker: only paths under an explicit allowlist root
+        // (annotation `fluxvm.io/hostpath-allow` or env FLUXVM_HOSTPATH_ALLOW)
+        // may pass through write-through. Everything else stays snapshotted.
+        if let Some(ref allow_root) = allow_root {
+            if let Ok(rel) = source_path.strip_prefix(allow_root) {
+                let guest = Path::new("/run/fluxvm/hostpath-allow").join(rel);
+                mount["source"] = Value::String(guest.to_string_lossy().into_owned());
+                mount["fluxvm.io/hostpath-broker"] = Value::String("allowlisted".into());
+                continue;
+            }
+            bail!(
+                "OCI bind source {} is outside hostPath allowlist {} (set annotation fluxvm.io/hostpath-allow or FLUXVM_HOSTPATH_ALLOW)",
+                source_path.display(),
+                allow_root.display()
+            );
+        }
+
         // Non-Pod-scoped bind sources stay snapshot-based. This avoids
         // exposing arbitrary hostPath content to the guest by accident.
         let host = host_ctr.join("mounts").join(idx.to_string());
@@ -5116,6 +5289,27 @@ async fn stage_bind_mounts(
         mount["source"] = Value::String(format!("{guest_ctr}/mounts/{idx}"));
     }
     Ok(())
+}
+
+/// Explicit hostPath broker allowlist root (S9 P0). Empty / unset → no
+/// arbitrary hostPath passthrough (snapshot-only for non-kubelet binds).
+fn hostpath_allow_root(spec: &Value) -> Option<PathBuf> {
+    let from_ann = spec
+        .get("annotations")
+        .and_then(Value::as_object)
+        .and_then(|a| {
+            a.get("fluxvm.io/hostpath-allow")
+                .or_else(|| a.get("io.zyvor.fluxvm.hostpath-allow"))
+        })
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
+    from_ann.or_else(|| {
+        std::env::var_os("FLUXVM_HOSTPATH_ALLOW")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+    })
 }
 
 fn create_stdio_file(path: &Path) -> AnyResult<()> {
@@ -5216,6 +5410,24 @@ mod tests {
         assert!(command.contains("ip -6 addr add fd00::9/64"));
         assert!(command.contains("ip -4 route replace default via 10.244.1.1"));
         assert!(command.contains("ip -6 route replace default via fd00::1"));
+    }
+
+    #[test]
+    fn cni_provider_labels_and_multus_names() {
+        assert_eq!(
+            parse_cni_provider_label("cilium"),
+            Some(CniProvider::Cilium)
+        );
+        assert_eq!(
+            parse_cni_provider_label("GENERIC"),
+            Some(CniProvider::Generic)
+        );
+        assert_eq!(parse_cni_provider_label("auto"), None);
+        assert!(is_multus_secondary_iface("net1"));
+        assert!(is_multus_secondary_iface("net12"));
+        assert!(!is_multus_secondary_iface("eth0"));
+        assert!(!is_multus_secondary_iface("net"));
+        assert!(!is_multus_secondary_iface("network1"));
     }
 
     #[test]

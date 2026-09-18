@@ -9,7 +9,7 @@ actual Kubernetes workload.
 `fluxvm-kube` never touches the Pod/CRI pipeline for `DisposableVm`: no RuntimeClass,
 no containerd shim, no Pod objects created on your behalf. A `DisposableVm` CR
 maps 1:1 to a raw VM process on the node named in `spec.node`, driven by a
-per-node operator instance talking to a *local* `fluxvm serve` REST API.
+per-node operator instance talking to a *local* `fluxctl serve` REST API.
 This DaemonSet is a straight containerization of that model — one pod per
 `fluxvm-capable` node, two containers sharing the pod's network namespace.
 

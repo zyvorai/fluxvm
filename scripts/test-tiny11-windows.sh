@@ -14,7 +14,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="${FLUXVM_CONFIG:-/etc/fluxvm.toml}"
-BIN="${FLUXVM_BIN:-$ROOT/target/release/fluxvm}"
+BIN="${FLUXVM_BIN:-$ROOT/target/release/fluxctl}"
 FIRMWARE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE.fd}"
 
 WINDOWS_IMAGE="${WINDOWS_IMAGE:-${KRYTON_WINDOWS_IMAGE:-}}"
@@ -30,12 +30,12 @@ if [[ ! -f "$WINDOWS_IMAGE" ]]; then
 fi
 
 if [[ ! -x "$BIN" ]]; then
-  if command -v fluxvm >/dev/null 2>&1; then
-    BIN="$(command -v fluxvm)"
+  if command -v fluxctl >/dev/null 2>&1; then
+    BIN="$(command -v fluxctl)"
   else
-    echo "Building fluxvm-cli…"
-    (cd "$ROOT" && cargo build --release -p fluxvm-cli -p fluxvm-image)
-    BIN="$ROOT/target/release/fluxvm"
+    echo "Building fluxctl…"
+    (cd "$ROOT" && cargo build --release -p fluxctl -p fluxvm-image)
+    BIN="$ROOT/target/release/fluxctl"
   fi
 fi
 

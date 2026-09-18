@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod http;
+pub mod snapshot;
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -37,18 +38,32 @@ fn config_json(
     req: &CreateVmRequest,
     ctx: &LaunchContext,
     paths: &ResourcePaths,
+    jailed: bool,
 ) -> Result<serde_json::Value> {
-    let boot_args = req
-        .kernel_args
-        .clone()
-        .unwrap_or_else(|| "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw".into());
+    let boot_args = req.kernel_args.clone().unwrap_or_else(|| {
+        // Firecracker prod-host-setup: disable serial in production (jailed)
+        // so guest cannot unbounded-flood host stdout. Lab/direct keeps
+        // console=ttyS0 for debugging.
+        if jailed {
+            "reboot=k panic=1 pci=off root=/dev/vda rw quiet 8250.nr_uarts=0".into()
+        } else {
+            "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw".into()
+        }
+    });
 
-    let mut drives = vec![json!({
+    let mut root_drive = json!({
         "drive_id": "rootfs",
         "path_on_host": paths.rootfs.display().to_string(),
         "is_root_device": true,
         "is_read_only": false
-    })];
+    });
+    if let Some(rl) = fc_rate_limiter(req.blk_mbit_limit, req.blk_ops_limit) {
+        root_drive
+            .as_object_mut()
+            .unwrap()
+            .insert("rate_limiter".into(), rl);
+    }
+    let mut drives = vec![root_drive];
     if let Some(seed) = &paths.seed {
         drives.push(json!({
             "drive_id": "seed",
@@ -58,18 +73,31 @@ fn config_json(
         }));
     }
 
+    let mut machine = json!({
+        "vcpu_count": req.vcpus,
+        "mem_size_mib": req.memory_mib,
+        "smt": false,
+        "track_dirty_pages": false
+    });
+    if let Some(t) = req
+        .cpu_template
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        machine
+            .as_object_mut()
+            .unwrap()
+            .insert("cpu_template".into(), json!(t));
+    }
+
     let mut root = json!({
         "boot-source": {
             "kernel_image_path": paths.kernel.display().to_string(),
             "boot_args": boot_args
         },
         "drives": drives,
-        "machine-config": {
-            "vcpu_count": req.vcpus,
-            "mem_size_mib": req.memory_mib,
-            "smt": false,
-            "track_dirty_pages": false
-        }
+        "machine-config": machine
     });
 
     match &ctx.network.spec {
@@ -80,13 +108,20 @@ fn config_json(
             ..
         } => {
             let guest_mac = mac.clone().unwrap_or_else(|| "06:00:AC:10:00:02".into());
+            let mut iface = json!({
+                "iface_id": "eth0",
+                "guest_mac": guest_mac,
+                "host_dev_name": tap
+            });
+            if let Some(rl) = fc_rate_limiter(req.net_mbit_limit, req.net_pps_limit) {
+                iface
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("rate_limiter".into(), rl);
+            }
             root.as_object_mut().unwrap().insert(
                 "network-interfaces".into(),
-                json!([{
-                    "iface_id": "eth0",
-                    "guest_mac": guest_mac,
-                    "host_dev_name": tap
-                }]),
+                json!([iface]),
             );
         }
         NetworkSpec::Tap { tap_name: None, .. } => bail!("tap network was not prepared"),
@@ -115,6 +150,40 @@ fn config_json(
     Ok(root)
 }
 
+/// Build a Firecracker `rate_limiter` object from optional Mbit/s and
+/// ops/s caps. `None` or `0` for both means no limiter (omit the field).
+/// Token bucket: refill the full `size` every `refill_time` ms → rate =
+/// size * 1000 / refill_time per second.
+fn fc_rate_limiter(mbit: Option<u32>, ops: Option<u64>) -> Option<serde_json::Value> {
+    let mut obj = serde_json::Map::new();
+    if let Some(mb) = mbit.filter(|&v| v > 0) {
+        let bytes_per_sec = (mb as u64) * 1_000_000 / 8;
+        obj.insert(
+            "bandwidth".into(),
+            json!({
+                "size": bytes_per_sec,
+                "one_time_burst": bytes_per_sec,
+                "refill_time": 1000
+            }),
+        );
+    }
+    if let Some(n) = ops.filter(|&v| v > 0) {
+        obj.insert(
+            "ops".into(),
+            json!({
+                "size": n,
+                "one_time_burst": n,
+                "refill_time": 1000
+            }),
+        );
+    }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
+}
+
 #[async_trait]
 impl VmBackend for FirecrackerBackend {
     fn kind(&self) -> BackendKind {
@@ -127,6 +196,13 @@ impl VmBackend for FirecrackerBackend {
         req: &CreateVmRequest,
         ctx: &LaunchContext,
     ) -> Result<LaunchResult> {
+        if cfg.jailer_required() && !cfg.jailer.enabled {
+            bail!(
+                "Firecracker jailer is required (jailer.enforce or auth.require on non-loopback \
+                 listen) but jailer.enabled is false — set [jailer] enabled = true, or disable \
+                 enforce / use loopback listen for lab"
+            );
+        }
         if cfg.jailer.enabled {
             launch_jailed(cfg, req, ctx).await
         } else {
@@ -178,7 +254,7 @@ async fn launch_direct(
     let cfg_path = ctx.workspace.join("firecracker.json");
     fs::write(
         &cfg_path,
-        serde_json::to_vec_pretty(&config_json(req, ctx, &paths)?)?,
+        serde_json::to_vec_pretty(&config_json(req, ctx, &paths, false)?)?,
     )?;
     let args = vec![
         "--api-sock".into(),
@@ -278,7 +354,7 @@ async fn launch_jailed(
     let cfg_json_path = chroot_root.join("config.json");
     fs::write(
         &cfg_json_path,
-        serde_json::to_vec_pretty(&config_json(req, ctx, &paths)?)?,
+        serde_json::to_vec_pretty(&config_json(req, ctx, &paths, true)?)?,
     )?;
 
     // Everything placed above is root-owned by default; Firecracker runs as
@@ -369,4 +445,128 @@ async fn set_vm_state(vm: &VmRecord, state: &str) -> Result<()> {
         API_TIMEOUT,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fluxvm_core::backend::PreparedNetwork;
+    use uuid::Uuid;
+
+    fn bare_req() -> CreateVmRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": "t",
+            "backend": "firecracker",
+            "image": "/tmp/rootfs.ext4",
+            "vcpus": 1,
+            "memory_mib": 128,
+            "network": {"mode": "none"},
+        }))
+        .unwrap()
+    }
+
+    fn bare_ctx() -> LaunchContext {
+        LaunchContext {
+            id: Uuid::nil(),
+            workspace: PathBuf::from("/tmp/ws"),
+            disk: PathBuf::from("/tmp/rootfs.ext4"),
+            seed_disk: None,
+            log_path: PathBuf::from("/tmp/fc.log"),
+            network: PreparedNetwork {
+                spec: NetworkSpec::None,
+                tap_name: None,
+                macvtap_fd: None,
+                netns: None,
+                dhcp_leasefile: None,
+                guest_ip: None,
+                guest_cidr: None,
+                gateway: None,
+            },
+            guest_cid: None,
+            vsock_socket: None,
+            disk_format: "raw".into(),
+            nbd_export: None,
+        }
+    }
+
+    #[test]
+    fn rate_limiter_omitted_when_unset() {
+        assert!(fc_rate_limiter(None, None).is_none());
+        assert!(fc_rate_limiter(Some(0), Some(0)).is_none());
+    }
+
+    #[test]
+    fn rate_limiter_bandwidth_bytes_per_sec() {
+        let rl = fc_rate_limiter(Some(8), None).unwrap();
+        // 8 Mbit/s = 1_000_000 bytes/s
+        assert_eq!(rl["bandwidth"]["size"], 1_000_000);
+        assert_eq!(rl["bandwidth"]["refill_time"], 1000);
+        assert!(rl.get("ops").is_none());
+    }
+
+    #[test]
+    fn rate_limiter_ops_and_bandwidth_combined() {
+        let rl = fc_rate_limiter(Some(1), Some(100)).unwrap();
+        assert!(rl.get("bandwidth").is_some());
+        assert_eq!(rl["ops"]["size"], 100);
+    }
+
+    #[test]
+    fn config_json_embeds_net_and_blk_limiters() {
+        let mut req = bare_req();
+        req.net_mbit_limit = Some(100);
+        req.net_pps_limit = Some(50_000);
+        req.blk_mbit_limit = Some(200);
+        req.blk_ops_limit = Some(10_000);
+        let mut ctx = bare_ctx();
+        ctx.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: None,
+            mac: Some("06:00:00:00:00:01".into()),
+            netns: false,
+        };
+        let paths = ResourcePaths {
+            kernel: PathBuf::from("/vmlinux"),
+            rootfs: PathBuf::from("/rootfs"),
+            seed: None,
+            vsock_uds: None,
+        };
+        let cfg = config_json(&req, &ctx, &paths, false).unwrap();
+        let drives = cfg["drives"].as_array().unwrap();
+        assert!(drives[0].get("rate_limiter").is_some());
+        assert_eq!(drives[0]["rate_limiter"]["bandwidth"]["size"], 25_000_000);
+        let ifaces = cfg["network-interfaces"].as_array().unwrap();
+        assert_eq!(ifaces[0]["rate_limiter"]["ops"]["size"], 50_000);
+    }
+
+    #[test]
+    fn config_json_embeds_cpu_template() {
+        let mut req = bare_req();
+        req.cpu_template = Some("T2".into());
+        let ctx = bare_ctx();
+        let paths = ResourcePaths {
+            kernel: PathBuf::from("/vmlinux"),
+            rootfs: PathBuf::from("/rootfs"),
+            seed: None,
+            vsock_uds: None,
+        };
+        let cfg = config_json(&req, &ctx, &paths, false).unwrap();
+        assert_eq!(cfg["machine-config"]["cpu_template"], "T2");
+    }
+
+    #[test]
+    fn jailed_default_boot_args_disable_serial() {
+        let req = bare_req();
+        let ctx = bare_ctx();
+        let paths = ResourcePaths {
+            kernel: PathBuf::from("/vmlinux"),
+            rootfs: PathBuf::from("/rootfs"),
+            seed: None,
+            vsock_uds: None,
+        };
+        let cfg = config_json(&req, &ctx, &paths, true).unwrap();
+        let args = cfg["boot-source"]["boot_args"].as_str().unwrap();
+        assert!(args.contains("8250.nr_uarts=0"));
+        assert!(!args.contains("console=ttyS0"));
+    }
 }

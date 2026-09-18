@@ -1,0 +1,11 @@
+{
+  "ociVersion": "1.1.0",
+  "linux": {
+    "resources": {
+      "devices": [
+        {"allow": false, "access": "rwm"},
+        {"allow": true, "type": "c", "major": 1, "minor": 3, "access": "rw"}
+      ]
+    }
+  }
+}

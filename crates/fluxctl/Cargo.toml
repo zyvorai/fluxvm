@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "fluxvm-cli"
+name = "fluxctl"
 version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "Zyvor FluxVM command-line interface"
+description = "Zyvor FluxVM command-line interface (fluxctl)"
 
 [dependencies]
 fluxvm-core = { path = "../fluxvm-core" }
@@ -20,7 +20,8 @@ anyhow = "1"
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 base64 = "0.22"
-clap = { version = "4", features = ["derive", "env"] }
+clap = { version = "4", features = ["derive", "env", "color", "wrap_help"] }
+anstyle = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
@@ -35,5 +36,5 @@ fluxvm-agent = { path = "../fluxvm-agent" }
 tempfile = "3"
 
 [[bin]]
-name = "fluxvm"
+name = "fluxctl"
 path = "src/main.rs"

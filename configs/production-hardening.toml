@@ -1,0 +1,41 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Production isolation profile (Firecracker Track A) for a general FluxVM
+# control plane — long-lived or short-lived guests. Merge with your listen,
+# auth tokens, and Network Fabric settings; do not use as a standalone
+# config without filling absolute paths and credentials.
+#
+# See docs/capability-figures.md (Track A) and docs/PRODUCTION.md.
+#
+# Example:
+#   cat config.example.toml configs/production-hardening.toml > /etc/fluxvm/config.toml
+#   # then edit listen, tokens, firecracker_binary (absolute), dataplane
+
+# Require jailer for Firecracker (fail-closed at serve + launch).
+[jailer]
+enabled = true
+enforce = true
+jailer_binary = "jailer"
+uid = 123
+gid = 100
+chroot_base_dir = "/srv/jailer"
+
+# Pair with non-loopback listen in your main config:
+#   listen = "0.0.0.0:7788"
+#   [auth]
+#   require = true
+#   [[auth.tokens]]
+#   ...
+#
+# firecracker_binary MUST be an absolute path when jailer.enabled is true.
+# firecracker_binary = "/usr/bin/firecracker"
+# firecracker_kernel = "/var/lib/fluxvm/kernels/vmlinux"
+
+# Prefer pinning backends you actually run:
+# [policy]
+# allowed_backends = ["qemu", "cloud-hypervisor", "firecracker", "flux-vm"]
+
+# Host egress barrier (Track A): either Network Fabric GA or network.mode=none
+# on untrusted guests. Merge configs/network-fabric-prod.toml when VMs have
+# a host edge — see docs/production-dataplane.md.

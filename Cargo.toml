@@ -18,7 +18,7 @@ members = [
     "crates/fluxvm-hypervisor",
     "crates/fluxvm-scheduler",
     "crates/fluxvm-api",
-    "crates/fluxvm-cli",
+    "crates/fluxctl",
     "crates/fluxvm-agent",
     "crates/fluxvm-kube",
     "crates/fluxvm-microvm",

@@ -14,7 +14,7 @@ bash scripts/test-upgrade-snapshot.sh
 
 ```bash
 sudo ./scripts/bootstrap-host.sh
-# fluxvm serve --config /etc/fluxvm.toml
+# fluxctl serve --config /etc/fluxvm.toml
 export FLUXVM_URL=http://127.0.0.1:7788
 unset FABRIC_URL   # auto-picks https://127.0.0.1:9095 then http (curl -k)
 ZYVOR_CHECK_FLUXVM=1 bash scripts/devops-gate.sh
@@ -26,7 +26,7 @@ ZYVOR_CHECK_FLUXVM=1 bash scripts/devops-gate.sh
 Create a guest from the production spec:
 
 ```bash
-fluxvm --config /etc/fluxvm.toml create --spec examples/create-vm-prod.json
+fluxctl --config /etc/fluxvm.toml create --spec examples/create-vm-prod.json
 ```
 
 ## GitOps packaging

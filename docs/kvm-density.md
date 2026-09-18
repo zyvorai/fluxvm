@@ -25,7 +25,8 @@ Pause the guest, then `snapshot_save` / `snapshot_restore` on the hypervisor
 control socket. The in-tree engine writes:
 
 - `*.mem` — raw guest RAM (mmap dump)
-- `*.vmstate` — `FLUXKVM1` **v2**: all vCPU regs/sregs + virtio watermark
+- `*.vmstate` — `FLUXKVM1` **v3**: all vCPU regs/sregs + virtio queue live-state
+  (rings/status/features); disk/TAP paths re-attach from boot config
   (not Firecracker-compatible)
 
 ```bash
@@ -44,7 +45,10 @@ Firecracker for production warm-pool snapshots.
 ## Concurrent density
 
 ```bash
-BENCH_N=8 ./scripts/bench-density.sh
+BENCH_N=8 DENSITY_MEMORY_MIB=128 ./scripts/bench-density.sh
 ```
 
-See [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md) and [benchmarks](benchmarks/README.md).
+Reports `mutation_per_sec`, `mutation_per_core_sec` (Firecracker design
+target: 5 / host-core / sec), and optional `sample_vmm_rss_kib`. See
+[capability-figures.md](capability-figures.md) and [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md)
+and [benchmarks](benchmarks/README.md).

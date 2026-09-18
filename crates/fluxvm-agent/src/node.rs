@@ -3,7 +3,7 @@
 
 //! The per-host half: periodically reports this node's identity, capacity,
 //! and current VM count to a central `fluxvm-agent central` registry.
-//! Runs alongside a local `fluxvm serve` — it never touches VMs directly,
+//! Runs alongside a local `fluxctl serve` — it never touches VMs directly,
 //! only reads `GET /v1/vms` off the local REST API to count them.
 
 use anyhow::{Context, Result};
@@ -13,12 +13,12 @@ use std::{collections::HashMap, time::Duration};
 pub struct NodeConfig {
     pub name: String,
     pub central_url: String,
-    /// Address this agent itself uses to reach the local `fluxvm serve`
+    /// Address this agent itself uses to reach the local `fluxctl serve`
     /// for counting VMs — almost always a loopback address
     /// (`http://127.0.0.1:7788`).
     pub fluxvm_url: String,
     /// Address a REMOTE central registry should use to reach this same
-    /// `fluxvm serve` — this has to be this host's real, externally
+    /// `fluxctl serve` — this has to be this host's real, externally
     /// routable address, not `fluxvm_url` unchanged.
     pub advertise_url: String,
     pub interval: Duration,

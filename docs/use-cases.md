@@ -1,11 +1,12 @@
 # Use cases
 
-FluxVM is a Disposable Compute Engine: create a short-lived, isolated
-virtual machine backed by QEMU/KVM, Cloud Hypervisor, Firecracker, or the
-in-tree FluxVM hypervisor, use it, and let a TTL reaper clean it up. This doc
-walks through the use cases that map directly onto what's actually
-implemented (see the main [README](../README.md#feature-highlights) for the
-full feature list) — nothing here is aspirational.
+FluxVM is a Rust-native VM control plane: create and manage isolated
+virtual machines backed by QEMU/KVM, Cloud Hypervisor, Firecracker, or the
+in-tree FluxVM hypervisor. Short-lived / disposable patterns (optional
+`ttl_seconds`, cheap CoW clones) are supported but not required. This doc
+walks through use cases that map onto what's actually implemented (see the
+main [README](../README.md#feature-highlights) for the full feature list) —
+nothing here is aspirational.
 
 
 ## FluxVM CI/CD build and test runners
@@ -28,8 +29,8 @@ cat > ci-job.json <<'JSON'
 }
 JSON
 
-id=$(fluxvm create --spec ci-job.json | jq -r .id)
-fluxvm exec "$id" -- ./run-tests.sh
+id=$(fluxctl create --spec ci-job.json | jq -r .id)
+fluxctl exec "$id" -- ./run-tests.sh
 ```
 
 Firecracker's jailer (chroot + uid/gid drop, see "Firecracker jailer" in the
@@ -58,7 +59,7 @@ cat > golden-image.json <<'JSON'
 }
 JSON
 
-sudo fluxvm build-image --spec golden-image.json
+sudo fluxctl build-image --spec golden-image.json
 ```
 
 See [`docs/build-image-tutorials.md`](build-image-tutorials.md) for the same
@@ -70,7 +71,7 @@ catalog & signing" in the README) to give every VM a provenance guarantee —
 image by name and have the daemon refuse anything that isn't a known,
 signed entry.
 
-## Kubernetes-native disposable workloads
+## Kubernetes-native VM workloads (`DisposableVm`)
 
 For teams already running Kubernetes who want a real VM (not a container)
 for a specific workload — untrusted code, a kernel-dependent test, a legacy
@@ -171,7 +172,7 @@ maps — [docs/network-fabric.md](network-fabric.md),
 [docs/production-dataplane.md](production-dataplane.md),
 [docs/ebpf-cilium.md](ebpf-cilium.md)).
 
-## Disposable dev/test environments
+## Ephemeral / disposable dev/test environments
 
 Give every branch, PR, or engineer their own real VM — not a shared
 staging box — with automatic cleanup via `ttl_seconds` so nothing lingers

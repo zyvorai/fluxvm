@@ -198,12 +198,17 @@ struct SeccompProfile {
 enum SeccompNotifyMode {
     Deny,
     Continue,
+    /// Inject a supervisor-owned fd into the notify target via
+    /// `SECCOMP_IOCTL_NOTIF_ADDFD` (S9 / Set 11 follow-up), then continue.
+    AddFd,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct SeccompNotifyPolicy {
     mode: SeccompNotifyMode,
     errno: i32,
+    /// Source fd in the supervisor process for AddFd mode (`-1` if unused).
+    addfd_src: i32,
 }
 
 impl Default for SeccompNotifyPolicy {
@@ -211,6 +216,7 @@ impl Default for SeccompNotifyPolicy {
         Self {
             mode: SeccompNotifyMode::Deny,
             errno: libc::EPERM,
+            addfd_src: -1,
         }
     }
 }
@@ -1618,6 +1624,18 @@ const SCMP_ACT_NOTIFY: u32 = 0x7fc0_0000;
 const SCMP_ACT_LOG: u32 = 0x7ffc_0000;
 const SCMP_ACT_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
+/// linux/seccomp.h — `SECCOMP_IOCTL_NOTIF_ADDFD` (`_IOW('!', 3, struct seccomp_notif_addfd)`).
+#[cfg(target_os = "linux")]
+const SECCOMP_IOCTL_NOTIF_ADDFD: libc::c_ulong = 0xc018_2103;
+
+#[repr(C)]
+struct SeccompNotifAddfd {
+    id: u64,
+    flags: u32,
+    srcfd: u32,
+    newfd: u32,
+    newfd_flags: u32,
+}
 
 const SCMP_CMP_NE: u32 = 1;
 const SCMP_CMP_LT: u32 = 2;
@@ -1659,7 +1677,10 @@ fn parse_seccomp_notify_policy(config: &Value) -> Result<SeccompNotifyPolicy> {
     let mode = match mode {
         "deny" => SeccompNotifyMode::Deny,
         "continue" => SeccompNotifyMode::Continue,
-        other => bail!("invalid io.zyvor.seccomp.notify.mode {other:?}; expected deny or continue"),
+        "addfd" => SeccompNotifyMode::AddFd,
+        other => bail!(
+            "invalid io.zyvor.seccomp.notify.mode {other:?}; expected deny, continue, or addfd"
+        ),
     };
     let errno = annotations
         .and_then(|a| a.get("io.zyvor.seccomp.notify.errno"))
@@ -1673,7 +1694,20 @@ fn parse_seccomp_notify_policy(config: &Value) -> Result<SeccompNotifyPolicy> {
     if !(1..=4095).contains(&errno) {
         bail!("io.zyvor.seccomp.notify.errno must be in 1..=4095");
     }
-    Ok(SeccompNotifyPolicy { mode, errno })
+    let addfd_src = annotations
+        .and_then(|a| a.get("io.zyvor.seccomp.notify.addfd-src"))
+        .and_then(Value::as_str)
+        .map(|v| v.parse::<i32>().context("parsing io.zyvor.seccomp.notify.addfd-src"))
+        .transpose()?
+        .unwrap_or(-1);
+    if mode == SeccompNotifyMode::AddFd && addfd_src < 0 {
+        bail!("io.zyvor.seccomp.notify.mode=addfd requires io.zyvor.seccomp.notify.addfd-src");
+    }
+    Ok(SeccompNotifyPolicy {
+        mode,
+        errno,
+        addfd_src,
+    })
 }
 
 fn seccomp_action_base(action: u32) -> u32 {
@@ -2137,6 +2171,51 @@ fn run_seccomp_notify_broker(
                         "security audit: seccomp-notify {label} nr={} pid={} decision=continue",
                         request.data.nr, request.pid
                     );
+                }
+                SeccompNotifyMode::AddFd => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let addfd = SeccompNotifAddfd {
+                            id: request.id,
+                            flags: 0,
+                            srcfd: policy.addfd_src as u32,
+                            newfd: 0,
+                            newfd_flags: 0,
+                        };
+                        let rc = unsafe {
+                            libc::ioctl(notify_fd, SECCOMP_IOCTL_NOTIF_ADDFD, &addfd as *const _)
+                        };
+                        if rc < 0 {
+                            response.error = -libc::EPERM;
+                            security_counters()
+                                .seccomp_notify_denied
+                                .fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "security audit: seccomp-notify {label} nr={} pid={} decision=addfd-fail errno={}",
+                                request.data.nr,
+                                request.pid,
+                                std::io::Error::last_os_error()
+                            );
+                        } else {
+                            // Return the installed fd number as the syscall result.
+                            response.val = rc as i64;
+                            response.error = 0;
+                            security_counters()
+                                .seccomp_notify_continued
+                                .fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "security audit: seccomp-notify {label} nr={} pid={} decision=addfd newfd={}",
+                                request.data.nr, request.pid, rc
+                            );
+                        }
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        response.error = -policy.errno;
+                        security_counters()
+                            .seccomp_notify_denied
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             let rc = unsafe { respond(notify_fd, response) };
@@ -5397,6 +5476,7 @@ mod tests {
         let deny = run_notify_case(SeccompNotifyPolicy {
             mode: SeccompNotifyMode::Deny,
             errno: libc::EACCES,
+            addfd_src: -1,
         });
         assert_eq!(
             deny,
@@ -5407,6 +5487,7 @@ mod tests {
         let cont = run_notify_case(SeccompNotifyPolicy {
             mode: SeccompNotifyMode::Continue,
             errno: libc::EPERM,
+            addfd_src: -1,
         });
         assert!(
             cont >= 0,

@@ -145,7 +145,7 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:1.2em 0}
 </thead>
 <tbody><tr>
 <td><strong>Service</strong></td>
-<td>Run <code>fluxvm serve</code> under the provided systemd unit; the TTL reaper and pool backfill only run while <code>serve</code> is up</td>
+<td>Run <code>fluxctl serve</code> under the provided systemd unit; the TTL reaper and pool backfill only run while <code>serve</code> is up</td>
 </tr>
 <tr>
 <td><strong>Logs</strong></td>
@@ -194,7 +194,7 @@ per-node DaemonSet instead of only as a host-native systemd service.</p>
 <p>This is a different model from a Pod-per-workload platform: a <code>DisposableVm</code> never goes through
 RuntimeClass or a container runtime shim. Each object maps directly to a raw VM process on
 whichever node its <code>spec.node</code> names, driven by that node&#39;s own <code>fluxvm-kube</code> instance talking
-to a <em>local</em> <code>fluxvm serve</code> REST API. There is no scheduler — placement is always explicit.</p>
+to a <em>local</em> <code>fluxctl serve</code> REST API. There is no scheduler — placement is always explicit.</p>
 <h3>What gets deployed</h3>
 <p>One pod per capable node, two containers sharing the pod&#39;s network namespace:</p>
 <table>
@@ -207,7 +207,7 @@ to a <em>local</em> <code>fluxvm serve</code> REST API. There is no scheduler �
 </thead>
 <tbody><tr>
 <td><code>fluxvm</code></td>
-<td><code>fluxvm serve</code> — the VMM control plane</td>
+<td><code>fluxctl serve</code> — the VMM control plane</td>
 <td><code>/dev/kvm</code>, <code>NET_ADMIN</code>/<code>SYS_ADMIN</code>/<code>NET_BIND_SERVICE</code>/<code>NET_RAW</code>, <code>hostNetwork: true</code></td>
 </tr>
 <tr>
@@ -292,7 +292,7 @@ process labels it.</li>
 <li>Section: <strong>Images → Build Custom Images</strong></li>
 </ul>
 <h3>Guide</h3>
-<p><code>fluxvm build-image</code> takes a base disk image and applies customizations —
+<p><code>fluxctl build-image</code> takes a base disk image and applies customizations —
 hostname, package installs, arbitrary commands, SSH-key injection, file
 copy-in, and systemd service enablement — to produce a new, ready-to-boot
 image. It does this through <a href="/guestkit">GuestKit</a> mounting the image
@@ -373,7 +373,7 @@ the base image plus the output image — no VMM, no <code>/dev/kvm</code>.</p>
   &quot;enable_services&quot;: [&quot;qemu-guest-agent&quot;, &quot;cron&quot;]
 }
 </code></pre>
-<pre><code class="language-bash">sudo fluxvm build-image --spec ubuntu-dev.json
+<pre><code class="language-bash">sudo fluxctl build-image --spec ubuntu-dev.json
 </code></pre>
 <p>Ubuntu&#39;s stock cloud image enables the <code>universe</code> component by default, so
 most common CLI tools install with no extra repo configuration. The system
@@ -390,7 +390,7 @@ name).</p>
   &quot;enable_services&quot;: [&quot;crond&quot;]
 }
 </code></pre>
-<pre><code class="language-bash">sudo fluxvm build-image --spec rocky-dev.json
+<pre><code class="language-bash">sudo fluxctl build-image --spec rocky-dev.json
 </code></pre>
 <p>Rocky&#39;s <code>GenericCloud</code> image ships <code>cronie</code> (providing <code>crond.service</code>)
 pre-installed — <code>enable_services: [&quot;crond&quot;]</code> works without needing
@@ -407,7 +407,7 @@ pre-installed — <code>enable_services: [&quot;crond&quot;]</code> works withou
   &quot;enable_services&quot;: [&quot;sshd&quot;]
 }
 </code></pre>
-<pre><code class="language-bash">sudo fluxvm build-image --spec arch-dev.json
+<pre><code class="language-bash">sudo fluxctl build-image --spec arch-dev.json
 </code></pre>
 <p>Arch needs two things every other distro here doesn&#39;t — both handled for
 you automatically:</p>
@@ -486,14 +486,14 @@ providing it isn&#39;t installed yet.</li>
 </thead>
 <tbody><tr>
 <td><strong>FluxVM</strong></td>
-<td>QEMU / Cloud Hypervisor / Firecracker VMs, TTL reaper, <code>fluxvm serve</code>, <code>DisposableVm</code> CRD + node DaemonSet</td>
+<td>QEMU / Cloud Hypervisor / Firecracker VMs, TTL reaper, <code>fluxctl serve</code>, <code>DisposableVm</code> CRD + node DaemonSet</td>
 </tr>
 <tr>
 <td><strong>Ragnarok</strong></td>
 <td>KubeVirt fleet + FluxVM Hub UI/API, JWT/OIDC/LDAP auth, RBAC, audit</td>
 </tr>
 </tbody></table>
-<p>Ragnarok never calls <code>fluxvm serve</code> over the host REST API from the product path — it creates/reads/deletes <code>DisposableVm</code> CRs and lets the per-node operator talk to a <strong>local</strong> <code>fluxvm serve</code>.</p>
+<p>Ragnarok never calls <code>fluxctl serve</code> over the host REST API from the product path — it creates/reads/deletes <code>DisposableVm</code> CRs and lets the per-node operator talk to a <strong>local</strong> <code>fluxctl serve</code>.</p>
 <h3>Install order (user / lab)</h3>
 <ol start="0">
 <li><p><strong>Optional — Ragnarok binary trial</strong> (proprietary; FluxVM stays free):</p>
@@ -560,7 +560,7 @@ kubectl label node &lt;node&gt; ragnarok.io/fluxvm-capable=true
 <p><strong>FluxVM is free</strong> (Apache-2.0) — no Ragnarok license token applies to it.</p>
 <p>SSO (Keycloak OIDC), local break-glass, LDAP, and the Ragnarok signed
 <code>trial.token</code> / commercial JWT live entirely in <strong>Ragnarok</strong> (proprietary).
-FluxVM’s own REST API uses optional bearer tokens for direct <code>fluxvm serve</code>
+FluxVM’s own REST API uses optional bearer tokens for direct <code>fluxctl serve</code>
 callers; that is separate from the Ragnarok dashboard login and from Ragnarok
 trial tokens (<code>scripts/trial-tool.py</code> stays in the private Ragnarok repo only).</p>
 <p>See also the longer integration notes in the <a href="../README.md#using-fluxvm-through-ragnarok">root README — Using FluxVM through Ragnarok</a>.</p>
@@ -596,21 +596,21 @@ trial tokens (<code>scripts/trial-tool.py</code> stays in the private Ragnarok r
 </ul>
 <h3>1. Build and install</h3>
 <pre><code class="language-bash">cargo build --release
-sudo install -m 0755 target/release/fluxvm /usr/local/bin/fluxvm
+sudo install -m 0755 target/release/fluxctl /usr/local/bin/fluxctl
 sudo install -m 0644 config.example.toml /etc/fluxvm.toml
 </code></pre>
 <p>A one-command host bootstrap script (<code>scripts/bootstrap-host.sh</code>) installs the system packages, Cloud Hypervisor, and Firecracker for you; <code>scripts/deploy-remote.sh</code> does the same over SSH to a remote host.</p>
 <h3>2. Create your first VM</h3>
-<pre><code class="language-bash">fluxvm create --spec examples/qemu.json
+<pre><code class="language-bash">fluxctl create --spec examples/qemu.json
 </code></pre>
 <p>The response is the VM&#39;s full record — id, status, disk path, PID. It boots from a disposable copy-on-write overlay of the base image named in the spec, so the base image itself is never modified.</p>
 <h3>3. Run something inside it</h3>
-<pre><code class="language-bash">fluxvm exec &lt;id&gt; -- echo hello
+<pre><code class="language-bash">fluxctl exec &lt;id&gt; -- echo hello
 </code></pre>
 <p>This runs over the vsock guest agent — no SSH, no network path required at all, as long as the guest image has the agent installed and <code>agent.enabled: true</code> was set on the create request.</p>
 <h3>4. Let it clean up on its own</h3>
 <p>Set <code>ttl_seconds</code> on the create request and FluxVM&#39;s TTL reaper deletes the VM automatically once it expires — or delete it yourself:</p>
-<pre><code class="language-bash">fluxvm delete &lt;id&gt;
+<pre><code class="language-bash">fluxctl delete &lt;id&gt;
 </code></pre>
 <h3>Troubleshooting</h3>
 <ul>
@@ -647,12 +647,12 @@ sudo install -m 0644 config.example.toml /etc/fluxvm.toml
 <li>Section: <strong>Onboarding → Use Cases</strong></li>
 </ul>
 <h3>Guide</h3>
-<p>FluxVM is a disposable-VM control plane: create a short-lived, isolated
-virtual machine backed by QEMU/KVM, Cloud Hypervisor, or Firecracker, use
-it, and let a TTL reaper clean it up. Every use case below maps directly
-onto what&#39;s implemented today — see the
-<a href="/docs/fluxvm">technical docs</a> or the project&#39;s
-<a href="https://github.com/zyvorai/fluxvm#what-is-implemented">README</a> for the
+<p>FluxVM is a Rust-native VM control plane: create and manage isolated
+virtual machines backed by QEMU/KVM, Cloud Hypervisor, or Firecracker.
+Optional <code>ttl_seconds</code> supports disposable / short-lived patterns. Every use
+case below maps directly onto what's implemented today — see the
+[technical docs](/docs/fluxvm) or the project's
+[README](https://github.com/zyvorai/fluxvm#what-is-implemented) for the
 full feature list.</p>
 <h3>FluxVMl CI/CD build and test runners</h3>
 <p>Spin up a real VM per job, run the job inside it over vsock <code>exec</code> (no SSH,
@@ -671,8 +671,8 @@ even if the job crashes or the runner disappears mid-job.</p>
 }
 JSON
 
-id=$(fluxvm create --spec ci-job.json | jq -r .id)
-fluxvm exec &quot;$id&quot; -- ./run-tests.sh
+id=$(fluxctl create --spec ci-job.json | jq -r .id)
+fluxctl exec &quot;$id&quot; -- ./run-tests.sh
 </code></pre>
 <p>Firecracker&#39;s jailer (chroot + uid/gid drop) gives each job its own
 privilege-dropped sandbox, and cgroup v2 resource control caps what a
@@ -794,11 +794,11 @@ tests.</p>
 </thead>
 <tbody><tr>
 <td>CI/sandbox VM</td>
-<td><code>fluxvm create</code> with <code>ttl_seconds</code> set → <code>fluxvm exec</code> the build/test command → let the TTL reaper delete it, or <code>fluxvm delete</code> explicitly</td>
+<td><code>fluxctl create</code> with <code>ttl_seconds</code> set → <code>fluxctl exec</code> the build/test command → let the TTL reaper delete it, or <code>fluxctl delete</code> explicitly</td>
 </tr>
 <tr>
 <td>Warm pool for fast handoff</td>
-<td><code>fluxvm pool create</code> with a template + size → <code>fluxvm pool claim</code> hands back an already-booted, paused VM in roughly resume time</td>
+<td><code>fluxctl pool create</code> with a template + size → <code>fluxctl pool claim</code> hands back an already-booted, paused VM in roughly resume time</td>
 </tr>
 <tr>
 <td>Multi-host fleet</td>
@@ -810,7 +810,7 @@ tests.</p>
 </tr>
 <tr>
 <td>Image build</td>
-<td><code>fluxvm build-image --spec examples/build-image.json</code> — download, verify SHA-256, resize, and customize a base image once, reuse it for every VM. See <a href="build-image-tutorial.md">Building custom OS images</a> for a per-distro walkthrough (apt/dnf/pacman).</td>
+<td><code>fluxctl build-image --spec examples/build-image.json</code> — download, verify SHA-256, resize, and customize a base image once, reuse it for every VM. See <a href="build-image-tutorial.md">Building custom OS images</a> for a per-distro walkthrough (apt/dnf/pacman).</td>
 </tr>
 </tbody></table>
 <p>For full command references, see the <a href="/docs/fluxvm">technical docs</a> and the project&#39;s own <a href="https://github.com/zyvorai/fluxvm#readme">README</a>. See also: <a href="use-cases.md">Use cases</a>.</p>

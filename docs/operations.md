@@ -82,7 +82,7 @@ actually reachable over SSH — not just that the process launched:
   macvtap sibling on the same parent to reach the guest's statically-assigned IP.
 
 All three also assert cleanup: the QEMU process and (for TAP/macvtap) the interface must actually be
-gone after `fluxvm delete` — this is what caught a TAP-interface leak during development (fixed
+gone after `fluxctl delete` — this is what caught a TAP-interface leak during development (fixed
 by making VM shutdown wait for the process to actually exit before releasing its network resources).
 
 ```bash
@@ -113,17 +113,30 @@ sudo ./scripts/test-lifecycle.sh --image /path/to/base.qcow2
 
 ## Firecracker jailer (chroot, uid/gid isolation, cgroups)
 
-Opt-in, off by default, config-only (no per-VM flag) — every Firecracker VM either goes through
+Lab default is off. Production and untrusted multi-tenant hosts should enable
+jailer (Firecracker's own rule: start via `jailer` only in production). Config
+is host-wide (no per-VM flag) — every Firecracker VM either goes through
 `jailer` or none do:
 
 ```toml
 [jailer]
 enabled = true
+enforce = true                 # fail closed at serve + launch if enabled is false
 jailer_binary = "jailer"          # resolved via $PATH unless you give an absolute path
 uid = 123                         # must be non-root; unique per tenant for a real isolation boundary
 gid = 100
 chroot_base_dir = "/srv/jailer"   # should be on the same filesystem as state_dir (see below)
 ```
+
+`jailer.enforce = true`, or `auth.require = true` with a non-loopback `listen`,
+makes jailer **required**: `fluxctl serve` and Firecracker launches refuse to
+proceed until `enabled = true`. Loopback lab with `auth.require` alone does
+not force jailer.
+
+When jailer is on and the request omits `kernel_args`, FluxVM uses production
+boot args (`quiet 8250.nr_uarts=0`, no `console=ttyS0`) so the guest cannot
+unbounded-flood host stdout via the 8250 serial (Firecracker prod-host-setup).
+Override with an explicit `kernel_args` if you need a serial console.
 
 `firecracker_binary` must be an absolute path when jailer is enabled — `jailer`'s `--exec-file` needs
 a real path, not a bare command resolved via `$PATH`.
@@ -141,6 +154,11 @@ really runs as the configured unprivileged uid/gid (confirmed via `ps`, not just
 error"); the guest boots and answers `exec` over vsock through the relocated proxy socket;
 pause/resume/stop all work against the relocated API socket; `delete` cleans up both the normal
 workspace and the separate jail chroot tree, leaving no orphaned files or process.
+
+Threat-containment mapping (jailer + virtio rate limiters + Fabric egress) —
+Track A for the general control plane (not disposable-only):
+[capability-figures.md](capability-figures.md). Production merge profile:
+[configs/production-hardening.toml](../configs/production-hardening.toml).
 
 ## Auto backend selection
 
@@ -247,9 +265,9 @@ is allowed to contain.
 ## Pause, resume, and exec
 
 ```bash
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml pause <id>
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml resume <id>
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml exec <id> -- echo hello
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pause <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml resume <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml exec <id> -- echo hello
 ```
 
 `exec` requires `agent.enabled: true` in the VM spec (see [the JSON contract](api.md#vm-json-contract))
@@ -281,9 +299,9 @@ copying a file into or out of a VM meant calling the HTTP route by hand, base64-
 yourself. These three close that gap:
 
 ```bash
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml ping <id>
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml copy-to <id> ./local-file.txt /etc/app/config.yaml --mode 600
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml copy-from <id> /etc/app/config.yaml ./local-file.txt
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml ping <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-to <id> ./local-file.txt /etc/app/config.yaml --mode 600
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-from <id> /etc/app/config.yaml ./local-file.txt
 ```
 
 `ping` sends a bare `AgentRequest::Ping` — the same health check `POST /v1/vms/{id}/agent/ping` performs
@@ -313,11 +331,11 @@ deployment with no Fabric orchestrator driving these routes over HTTP still need
 a node by hand.
 
 ```bash
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate start <id> --destination tcp:10.0.0.9:49152
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate start <id> --destination unix:/run/fluxvm/migrate.sock \
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate start <id> --destination tcp:10.0.0.9:49152
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate start <id> --destination unix:/run/fluxvm/migrate.sock \
     --mode post-copy --bandwidth-mbps 500 --max-downtime-ms 300 --multifd-channels 4
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate status <id>
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml migrate cancel <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate status <id>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate cancel <id>
 ```
 
 `start` requires the VM to already be `Running` and refuses anything but a `tcp:`/`unix:` destination —
@@ -411,10 +429,10 @@ curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/pressure           # PSI: cpu/memor
 
 # CLI equivalent of freeze/thaw/frozen/resources (no CLI form for stats/pressure yet — those
 # still require a raw HTTP call, same as before):
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml freeze <uuid>
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml frozen <uuid>   # {"frozen": true|false}
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml thaw <uuid>
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml resources <uuid> \
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml freeze <uuid>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml frozen <uuid>   # {"frozen": true|false}
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml thaw <uuid>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml resources <uuid> \
     --cpu-quota-percent 150 --memory-max-bytes 536870912 --pids-max 64
 ```
 
@@ -428,7 +446,7 @@ insufficient privilege), resource control/metrics are unavailable for that run b
 are otherwise unaffected — a warning is logged, not a hard failure.
 
 Verified on real hardware (`scripts/test-cgroup-resources.sh`, all through the REST API against a
-running `fluxvm serve`): a launched VM really lands in its own cgroup (confirmed by reading
+running `fluxctl serve`): a launched VM really lands in its own cgroup (confirmed by reading
 `cgroup.procs` directly, not just trusting the recorded path); a memory limit set via `resources` is
 really written to `memory.max` and reads back correctly; `freeze` really stops the VMM process (CPU
 time frozen with a forced busy-loop running in the guest, same technique used to verify QMP-level
@@ -439,11 +457,11 @@ pause) and `thaw` really resumes it; `stats`/`pressure` return real nonzero, cgr
 `POST .../thaw`, and `GET .../frozen` have existed since cgroup v2 resource control landed, but like
 `resources`/`stats`/`pressure` above them, triggering one meant a raw `curl` call — there was no CLI
 form at all, unlike `pause`/`resume`, the VMM-level operation these are easy to reach for by mistake
-instead of. `fluxvm freeze <id>` calls `cgroup.freeze` directly via `VmManager::freeze`, stopping every
+instead of. `fluxctl freeze <id>` calls `cgroup.freeze` directly via `VmManager::freeze`, stopping every
 process in the VM's `fluxvm.slice/{id}.scope` at the kernel level — this keeps working even when the
 VMM's own control socket is wedged or unresponsive, which is exactly the scenario `pause` (QMP
-`stop`/`ch-remote pause`) can't help with, since that goes through the same socket. `fluxvm thaw <id>`
-reverses it, and `fluxvm frozen <id>` reports the freezer's current state as `{"frozen": true|false}`
+`stop`/`ch-remote pause`) can't help with, since that goes through the same socket. `fluxctl thaw <id>`
+reverses it, and `fluxctl frozen <id>` reports the freezer's current state as `{"frozen": true|false}`
 without changing anything, matching the REST route exactly (both are plain GETs/POSTs with no request
 body — no new wire types were needed). `resources`/`stats`/`pressure` stayed REST-only at the time:
 `resources` takes a multi-field JSON patch that would need real flag design to do justice, and
@@ -452,7 +470,7 @@ CLI-argument-parsing tests covering all three commands plus a check that they ar
 aliased to each other or to `pause`/`resume`.
 
 **`resources`: CLI parity for the cgroup resource patch.** `POST /v1/vms/{id}/resources` deserved
-the real flag design called out above instead of a JSON blob shoved onto the command line: `fluxvm
+the real flag design called out above instead of a JSON blob shoved onto the command line: `fluxctl
 resources <id> [--cpu-quota-percent N] [--memory-max-bytes N] [--io-weight N] [--pids-max N]
 [--cpuset-cpus SPEC]` maps one flag onto each `ResourcePatch` field, and — matching the wire type's
 own "only touch what's set" contract exactly — a field is left alone unless its flag is passed; there
@@ -463,7 +481,7 @@ than silently issuing a no-op `POST` with an empty body. `--cpuset-cpus` takes t
 syntax `cpuset.cpus`/`cpuset.cpus.effective` themselves use when read back (`fluxvm_cgroup::cpuset`'s
 `parse_set`/`format_set`) — `"0-3"`, `"0,2,4"`, `"0-1,4-5"` — so a value copied straight out of
 `cpuset.cpus` round-trips, but it is deliberately its own independent parser (`parse_cpuset_spec` in
-`fluxvm-cli`), not a reuse of that one, because it enforces two things the internal parser doesn't need
+`fluxctl`), not a reuse of that one, because it enforces two things the internal parser doesn't need
 to: an empty string is rejected rather than accepted as "no CPUs" (the flag is already `Option<String>`,
 so "leave cpuset pinning untouched" is expressed by omitting `--cpuset-cpus` entirely, not by passing
 `""`), and a reversed range like `"5-2"` is a hard error instead of silently expanding to an empty
@@ -472,11 +490,11 @@ into "pin this VM to no CPUs at all" with no error at all. 17 new tests: CLI-arg
 for every flag alone and all five together, the "zero flags parses fine at the clap layer but the
 match arm still refuses it" split, a distinctness check against `freeze`/`pause`, and dedicated
 `parse_cpuset_spec` coverage (ranges, comma lists, mixed, sort+dedup, whitespace, and all three
-rejection cases). Verified building, `cargo test -p fluxvm-cli` (50/50 passing, including the 17 new),
-`cargo clippy -p fluxvm-cli --no-deps` (clean against this change; the two pre-existing warnings it
+rejection cases). Verified building, `cargo test -p fluxctl` (50/50 passing, including the 17 new),
+`cargo clippy -p fluxctl --no-deps` (clean against this change; the two pre-existing warnings it
 reports belong to `CatalogCommand`'s enum size and an unrelated `PrivateKeyDer` conversion), and
-`cargo fmt -p fluxvm-cli -- --check` on the Linux remote, the same way prior CLI-parity work in this
-section was verified — `fluxvm-cli` doesn't build on macOS (it pulls in `fluxvm-network`, which uses
+`cargo fmt -p fluxctl -- --check` on the Linux remote, the same way prior CLI-parity work in this
+section was verified — `fluxctl` doesn't build on macOS (it pulls in `fluxvm-network`, which uses
 Linux-only syscalls). Not verified against a real running VM's cgroup in this pass — `set_resources`
 itself (the code this command calls) was already proven against real `memory.max`/`cgroup.procs` files
 by `scripts/test-cgroup-resources.sh` when `resources` first landed as a REST route; this change adds
@@ -488,9 +506,9 @@ A pool keeps `size` VMs booted from a template sitting `Paused`, ready to be han
 a fraction of a full `create`'s time instead of a full boot:
 
 ```bash
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml pool create --spec examples/pool.json
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml pool list
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml pool get my-pool
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool create --spec examples/pool.json
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool list
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool get my-pool
 ```
 
 Pool spec (`template` is a normal `CreateVmRequest` — its `name`/`ttl_seconds` are ignored for pool
@@ -512,7 +530,7 @@ members, which must never expire on their own while sitting idle):
 }
 ```
 
-Claim one through REST against a running `fluxvm serve` daemon — the recommended way, since a
+Claim one through REST against a running `fluxctl serve` daemon — the recommended way, since a
 claim's own backfill-the-pool-back-up work runs as a background task inside that long-lived process:
 
 ```bash
@@ -521,11 +539,11 @@ curl -sS -X POST http://127.0.0.1:7788/v1/pools/my-pool/claim \
   -d '{"name": "job-123", "ttl_seconds": 900}' | jq
 ```
 
-`fluxvm pool claim <name>` also exists on the CLI, but as a **one-shot process** it exits right
+`fluxctl pool claim <name>` also exists on the CLI, but as a **one-shot process** it exits right
 after printing the claimed VM — which can take its own backfill-replenishment task down with it
-mid-flight before the process exits. `fluxvm pool create` avoids this by blocking until the pool is
+mid-flight before the process exits. `fluxctl pool create` avoids this by blocking until the pool is
 genuinely full before its own process exits; `pool claim` deliberately doesn't, to keep a claim fast.
-A separately-running `fluxvm serve` daemon's reaper independently tops up every pool on its own
+A separately-running `fluxctl serve` daemon's reaper independently tops up every pool on its own
 schedule regardless of which process's claim under-filled it, so pool health converges either way —
 but for a claim's *own* immediate replenishment to be reliable, use REST against a running daemon.
 
@@ -541,7 +559,7 @@ curl -sS -X POST http://127.0.0.1:7788/v1/pools/my-pool/resize \
 Growing behaves exactly like `pool create`'s own initial fill — the target size is updated
 immediately and a background backfill (same code path, same reaper backstop) brings membership up
 to it. Shrinking is synchronous: excess ready members are popped and deleted right away, not left
-for the reaper. `fluxvm pool resize <name> --size N` exists on the CLI too, and — like `pool
+for the reaper. `fluxctl pool resize <name> --size N` exists on the CLI too, and — like `pool
 create` but unlike `pool claim` — blocks on `backfill_pool_sync` when growing, so this one-shot
 process doesn't take its own background backfill down with it before the pool actually reaches the
 requested size.
@@ -550,7 +568,7 @@ requested size.
 stored fields, so you don't have to derive it yourself:
 
 ```bash
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml pool get my-pool
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pool get my-pool
 ```
 
 ```json
@@ -700,11 +718,11 @@ this project's CLI had for a while (offline-signing needs to stay CLI/offline; p
 the API surface), leaving list/add/remove/rename/clone/export/lock unlock/clean reachable only over
 REST even though the underlying `fluxvm_image::catalog` functions backing all of it (`add_entry`,
 `remove_entry`, ...) always covered them. That meant a one-shot admin task against a `catalog.json` no
-`fluxvm serve` was currently serving — seeding a fresh host's catalog before the daemon is even up, or a
+`fluxctl serve` was currently serving — seeding a fresh host's catalog before the daemon is even up, or a
 script that would rather shell out than depend on a running HTTP endpoint — had no CLI path at all. Each
 subcommand below is a thin wrapper: it operates on `catalog.path` from `--config`/`FLUXVM_CONFIG`
-directly (same one-shot-process model as `fluxvm pool claim`, see its own doc comment), so it works
-identically whether or not `fluxvm serve` happens to be running against the same `state_dir`:
+directly (same one-shot-process model as `fluxctl pool claim`, see its own doc comment), so it works
+identically whether or not `fluxctl serve` happens to be running against the same `state_dir`:
 
 ```bash
 fluxvm catalog list
@@ -817,7 +835,7 @@ against a *local* fluxvm. One binary, two modes:
 # Central fleet registry + create/list/delete proxy — one instance for the whole fleet.
 fluxvm-agent central --listen 0.0.0.0:7799
 
-# Per-host heartbeat client — one instance per hypervisor host, alongside a local `fluxvm serve`.
+# Per-host heartbeat client — one instance per hypervisor host, alongside a local `fluxctl serve`.
 fluxvm-agent node --name worker-1 \
     --central http://fleet-registry:7799 \
     --fluxvm-url http://127.0.0.1:7788 \
@@ -850,27 +868,27 @@ would then silently hit whatever was listening on *central's own* localhost inst
 all. Fixed by splitting `--fluxvm-url` (what this agent uses to reach its own local fluxvm) from
 `--advertise-url` (what a remote central should use to reach this same fluxvm — must be a real,
 externally routable address). Separately, this test script's own cleanup function first tried
-`sudo pkill -f "target/release/fluxvm --config ..."` over SSH — which matched **its own** command
+`sudo pkill -f "target/release/fluxctl --config ..."` over SSH — which matched **its own** command
 line (the pattern string is a substring of the `pkill` invocation's own argv) and SIGTERMed itself
-before it ever reached the real target process, leaving the actual `fluxvm serve` running every
+before it ever reached the real target process, leaving the actual `fluxctl serve` running every
 time with no error surfaced. Fixed with the standard `[t]arget/...` bracket-escape idiom that keeps
 `pgrep`/`pkill -f` from matching their own invocation.
 
-**CLI equivalents.** Every `/fleet/*` route below also has a `fluxvm fleet ...`
+**CLI equivalents.** Every `/fleet/*` route below also has a `fluxctl fleet ...`
 subcommand — previously the only way to drive the central registry was a raw
 `curl` call:
 
 ```bash
-fluxvm fleet --central http://fleet-registry:7799 nodes
-fluxvm fleet --central http://fleet-registry:7799 node worker-1
-fluxvm fleet --central http://fleet-registry:7799 cordon worker-1
-fluxvm fleet --central http://fleet-registry:7799 uncordon worker-1
-fluxvm fleet --central http://fleet-registry:7799 node-vms worker-1
-fluxvm fleet --central http://fleet-registry:7799 vms
-fluxvm fleet --central http://fleet-registry:7799 capacity
-fluxvm fleet --central http://fleet-registry:7799 create --spec vm.json [--node worker-1] [--node-selector zone=us-east]
-fluxvm fleet --central http://fleet-registry:7799 delete worker-1 <vm-id>
-fluxvm fleet --central http://fleet-registry:7799 deregister worker-1
+fluxctl fleet --central http://fleet-registry:7799 nodes
+fluxctl fleet --central http://fleet-registry:7799 node worker-1
+fluxctl fleet --central http://fleet-registry:7799 cordon worker-1
+fluxctl fleet --central http://fleet-registry:7799 uncordon worker-1
+fluxctl fleet --central http://fleet-registry:7799 node-vms worker-1
+fluxctl fleet --central http://fleet-registry:7799 vms
+fluxctl fleet --central http://fleet-registry:7799 capacity
+fluxctl fleet --central http://fleet-registry:7799 create --spec vm.json [--node worker-1] [--node-selector zone=us-east]
+fluxctl fleet --central http://fleet-registry:7799 delete worker-1 <vm-id>
+fluxctl fleet --central http://fleet-registry:7799 deregister worker-1
 ```
 
 `--central` also reads `CENTRAL_URL`; pass `--token`/`FLUXVM_AGENT_TOKEN` the
@@ -934,7 +952,7 @@ worker-1's last heartbeat actually land?". `404` for a name that was never
 registered, the same status `cordon`/`uncordon`/`deregister` already use for
 an unknown `{name}` on this same path — unlike `GET /fleet/nodes/{name}/vms`
 below, whose unknown-name case is a bad *proxy target* (`400`), not a missing
-*resource*. `fluxvm fleet node worker-1` is the CLI equivalent.
+*resource*. `fluxctl fleet node worker-1` is the CLI equivalent.
 
 **See what's actually running on a node** before deciding to cordon it (or
 after, to confirm nothing changed):
@@ -1043,7 +1061,7 @@ curl http://fleet-registry:7799/fleet/capacity
 
 Computed entirely from what each node already reported in its own last
 heartbeat, sitting in the registry — unlike `GET /fleet/vms`, this never
-proxies a single call to any node's own `fluxvm serve`, so it's cheap and
+proxies a single call to any node's own `fluxctl serve`, so it's cheap and
 never degrades or blocks because one node happens to be slow or briefly
 unreachable right now (a stale node is simply excluded from every total,
 same as it already is from `pick_best_capacity`'s own candidate set — not
@@ -1088,7 +1106,7 @@ and an unaddressed create can require a subset of them via `"nodeSelector"`
 curl -X POST http://fleet-registry:7799/fleet/vms \
     -d '{"name": "gpu-job", "vcpus": 4, "memory_mib": 8192, "nodeSelector": {"gpu": "true"}}'
 # or:
-fluxvm fleet --central http://fleet-registry:7799 create --spec vm.json --node-selector gpu=true
+fluxctl fleet --central http://fleet-registry:7799 create --spec vm.json --node-selector gpu=true
 ```
 
 `pick_best_capacity_excluding` only ever considers a node whose labels are a
@@ -1102,7 +1120,7 @@ explicit `"node"` bypasses `nodeSelector` entirely, exactly like it already
 bypasses cordoning — the same single-attempt, no-surprise-landing semantics
 `resolve_target` documents for cordoning apply here too. `"nodeSelector"` is
 stripped from the body before it's forwarded to the target node's own
-`fluxvm serve`, same as `"node"` already is — neither is part of
+`fluxctl serve`, same as `"node"` already is — neither is part of
 `CreateVmRequest`. Labels are advisory metadata only: an older node agent
 that predates `--label` simply reports none and matches no non-empty
 selector, and `GET /fleet/nodes` includes each node's current labels
@@ -1111,7 +1129,7 @@ alongside its capacity and health. 10 new tests in `fluxvm-agent::central`
 higher-capacity one, an unmatched selector's error naming, an empty
 selector matching everything, both directions of explicit-`"node"`
 bypassing a non-matching selector, `nodeSelector` extraction/stripping
-edge cases) plus 2 more in `fluxvm-cli::fleet_client` exercising the
+edge cases) plus 2 more in `fluxctl::fleet_client` exercising the
 `--node-selector` flag end to end against a real router.
 
 **Automatic placement fails over to the next-best node when the first pick
@@ -1123,7 +1141,7 @@ picked anyway. Before this existed, an unaddressed `POST /fleet/vms`
 dispatched to that single best-scoring node with no retry, so the create
 failed outright even while other schedulable nodes sat idle. `create_vm`
 now distinguishes a genuinely *unreachable* node (a connection failure, or
-a response that isn't valid JSON) from one that reached its own `fluxvm
+a response that isn't valid JSON) from one that reached its own `fluxctl
 serve` and explicitly rejected the request: only the former triggers
 failover — the unreachable node is excluded and
 `pick_best_capacity_excluding` tries the next-best remaining candidate,

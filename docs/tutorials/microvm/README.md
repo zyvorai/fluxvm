@@ -18,7 +18,7 @@ API group: `microvm.fluxvm.zyvor.io`. Controllers: `fluxvm-system`. Design:
 
 1. Linux nodes with KVM and images staged under `/var/lib/fluxvm/images` (or your
    `state_dir`).
-2. `fluxvm-kube` DaemonSet running so `fluxvm serve` is on `127.0.0.1:7788`
+2. `fluxvm-kube` DaemonSet running so `fluxctl serve` is on `127.0.0.1:7788`
    ([deploy/k8s/README.md](../../../deploy/k8s/README.md)).
 3. Nodes labeled `ragnarok.io/fluxvm-capable=true`.
 4. `fluxvm-microvm` binary (or image `ghcr.io/zyvorai/fluxvm` with that entrypoint).

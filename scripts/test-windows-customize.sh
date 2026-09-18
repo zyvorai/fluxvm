@@ -15,7 +15,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FLUXVM_BIN="${FLUXVM_BIN:-$ROOT/target/release/fluxvm}"
+FLUXVM_BIN="${FLUXVM_BIN:-$ROOT/target/release/fluxctl}"
 OUT_DIR="${OUT_DIR:-/tmp/fluxvm-windows-customize}"
 mkdir -p "$OUT_DIR"
 
@@ -32,9 +32,9 @@ if [[ ! -f "$WINDOWS_IMAGE" ]]; then
 fi
 
 if [[ ! -x "$FLUXVM_BIN" ]]; then
-  echo "Building fluxvm-cli…"
-  (cd "$ROOT" && cargo build --release -p fluxvm-cli -p fluxvm-image)
-  FLUXVM_BIN="$ROOT/target/release/fluxvm"
+  echo "Building fluxctl…"
+  (cd "$ROOT" && cargo build --release -p fluxctl -p fluxvm-image)
+  FLUXVM_BIN="$ROOT/target/release/fluxctl"
 fi
 
 SPEC="$OUT_DIR/build-image-windows.json"

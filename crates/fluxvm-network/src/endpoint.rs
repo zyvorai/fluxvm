@@ -4,7 +4,7 @@
 //! CiliumEndpoint-shaped control-plane objects for FluxVM VMs.
 //!
 //! These are **not** written into Cilium's private BPF maps. They are FluxVM
-//! state that Hubble-lite and `fluxvm hubble observe` can consume, and that
+//! state that Hubble-lite and `fluxctl hubble observe` can consume, and that
 //! an operator can diff against `cilium endpoint list` on the same node.
 
 use anyhow::Result;

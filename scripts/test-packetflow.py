@@ -11,7 +11,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RS = ROOT / "crates/fluxvm-network/src/packetflow.rs"
-CLI = ROOT / "crates/fluxvm-cli/src/main.rs"
+CLI = ROOT / "crates/fluxctl/src/main.rs"
 DOC = ROOT / "docs/packet-flow.md"
 
 

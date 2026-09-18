@@ -7,7 +7,7 @@ on:
       - 'tools/fluxvm-intelligence-loader.c'
       - 'tools/fluxvm-flight-reader.c'
       - 'crates/fluxvm-intelligence/**'
-      - 'crates/fluxvm-cli/**'
+      - 'crates/fluxctl/**'
       - 'scripts/*flight*'
       - 'scripts/build-runtime-intelligence.sh'
       - 'scripts/install-runtime-intelligence.sh'
@@ -19,7 +19,7 @@ on:
       - 'tools/fluxvm-intelligence-loader.c'
       - 'tools/fluxvm-flight-reader.c'
       - 'crates/fluxvm-intelligence/**'
-      - 'crates/fluxvm-cli/**'
+      - 'crates/fluxctl/**'
       - 'scripts/*flight*'
 
 jobs:
@@ -45,7 +45,7 @@ jobs:
         run: ./scripts/ci-fmt-check.sh
       - name: Affected Rust tests
         working-directory: fluxvm
-        run: cargo test -p fluxvm-intelligence -p fluxvm-cli
+        run: cargo test -p fluxvm-intelligence -p fluxctl
       - name: Build production eBPF objects
         working-directory: fluxvm
         run: ./scripts/build-ebpf.sh

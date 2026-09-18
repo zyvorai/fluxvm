@@ -31,7 +31,7 @@ key = "/etc/fluxvm/tls/server.key"
 client_ca = "/etc/fluxvm/tls/client-ca.crt"
 ```
 
-`fluxvm serve` uses rustls with `WebPkiClientVerifier`. After the handshake,
+`fluxctl serve` uses rustls with `WebPkiClientVerifier`. After the handshake,
 identity can also be passed as headers (for a trusted frontend):
 
 - `X-Client-Cert-CN` — actor

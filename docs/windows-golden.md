@@ -46,10 +46,10 @@ Kryton details: [GOLDEN-IMAGES.md](https://github.com/zyvorai/kryton/blob/main/d
 
 ```bash
 # Edit agent paths, then:
-sudo fluxvm --config /etc/fluxvm.toml \
+sudo fluxctl --config /etc/fluxvm.toml \
   build-image --spec examples/build-image-kryton-golden.json
 
-sudo fluxvm --config /etc/fluxvm.toml \
+sudo fluxctl --config /etc/fluxvm.toml \
   create --spec examples/windows-qga.json
 ```
 

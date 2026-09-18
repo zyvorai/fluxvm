@@ -919,6 +919,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -1910,6 +1911,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxctl"
+version = "0.3.0"
+dependencies = [
+ "anstyle",
+ "anyhow",
+ "axum",
+ "axum-server",
+ "base64",
+ "clap",
+ "fluxvm-agent",
+ "fluxvm-api",
+ "fluxvm-core",
+ "fluxvm-guest-protocol",
+ "fluxvm-image",
+ "fluxvm-intelligence",
+ "fluxvm-network",
+ "fluxvm-scheduler",
+ "reqwest",
+ "rustls",
+ "rustls-pemfile",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "fluxvm-agent"
 version = "0.3.0"
 dependencies = [
@@ -1970,34 +2000,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
-]
-
-[[package]]
-name = "fluxvm-cli"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-server",
- "base64",
- "clap",
- "fluxvm-agent",
- "fluxvm-api",
- "fluxvm-core",
- "fluxvm-guest-protocol",
- "fluxvm-image",
- "fluxvm-intelligence",
- "fluxvm-network",
- "fluxvm-scheduler",
- "reqwest",
- "rustls",
- "rustls-pemfile",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -2093,6 +2095,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

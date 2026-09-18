@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-# Real-hardware regression for `fluxvm build-image` via **guestkit only**
+# Real-hardware regression for `fluxctl build-image` via **guestkit only**
 # (fluxvm_image::customize_image) — every BuildImageRequest field that mutates
 # the guest filesystem: hostname, packages, commands, ssh_key, copy_in,
 # enable_services. Never libguestfs / virt-customize / guestfish — guestkit
 # mounts with qemu-nbd and runs in chroot, same as production `build-image`.
 #
 # Proves:
-# - `fluxvm build-image` accepts a spec exercising every customization
+# - `fluxctl build-image` accepts a spec exercising every customization
 #   field at once and exits 0
 # - hostname is written into /etc/hostname
 # - packages actually installs a real package via the guest's own package
@@ -64,12 +64,12 @@ modprobe nbd max_part=16 2>/dev/null || true
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-    if [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-        EPH="${PROJECT_DIR}/target/release/fluxvm"
-    elif command -v fluxvm >/dev/null 2>&1; then
-        EPH="$(command -v fluxvm)"
+    if [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+        EPH="${PROJECT_DIR}/target/release/fluxctl"
+    elif command -v fluxctl >/dev/null 2>&1; then
+        EPH="$(command -v fluxctl)"
     else
-        echo "fluxvm binary not found. Build it (cargo build --release -p fluxvm-cli) or set FLUXVM_BIN." >&2
+        echo "fluxvm binary not found. Build it (cargo build --release -p fluxctl) or set FLUXVM_BIN." >&2
         exit 1
     fi
 fi
@@ -98,7 +98,7 @@ cp "$IMAGE" "$BASE_COPY"
 
 SSH_KEY_PUB="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINtestNotARealKeyUsedOnlyByThisRegressionTestXX test@fluxvm-regression"
 COPY_IN_SRC="${TMP}/copyfile.txt"
-echo "fluxvm build-image regression marker" > "$COPY_IN_SRC"
+echo "fluxctl build-image regression marker" > "$COPY_IN_SRC"
 
 cat > "${TMP}/spec.json" <<JSON
 {
@@ -116,9 +116,9 @@ JSON
 
 section "build-image applies every customization field in one pass"
 if "$EPH" build-image --spec "${TMP}/spec.json" > "${TMP}/build.log" 2>&1; then
-    pass "fluxvm build-image exited 0"
+    pass "fluxctl build-image exited 0"
 else
-    fail "fluxvm build-image failed"
+    fail "fluxctl build-image failed"
     cat "${TMP}/build.log" >&2
     exit 1
 fi
@@ -161,7 +161,7 @@ else
 fi
 
 section "copy_in"
-if [ "$(cat "${MOUNT_DIR}/etc/fluxvm-customize-test-copyfile.txt" 2>/dev/null)" = "fluxvm build-image regression marker" ]; then
+if [ "$(cat "${MOUNT_DIR}/etc/fluxvm-customize-test-copyfile.txt" 2>/dev/null)" = "fluxctl build-image regression marker" ]; then
     pass "copy_in placed the exact file contents"
 else
     fail "copy_in destination file missing or wrong content"

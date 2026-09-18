@@ -6,11 +6,11 @@ then verify the compiled security group and effective VM policy.
 ## 1. Apply the sample CNP
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp apply \
+sudo fluxctl --config /etc/fluxvm.toml cnp apply \
   --spec examples/cnp-web.json
 
-sudo fluxvm --config /etc/fluxvm.toml cnp list
-sudo fluxvm --config /etc/fluxvm.toml cnp get web-egress
+sudo fluxctl --config /etc/fluxvm.toml cnp list
+sudo fluxctl --config /etc/fluxvm.toml cnp get web-egress
 ```
 
 REST equivalent:
@@ -31,7 +31,7 @@ curl -s -X POST http://127.0.0.1:7788/v1/network/cnp \
 - `labels` derived from `endpointSelector.matchLabels` → `app=web`
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group get web-egress | python3 -m json.tool
+sudo fluxctl --config /etc/fluxvm.toml group get web-egress | python3 -m json.tool
 ```
 
 ## 2. Select endpoints (VMs) with labels
@@ -55,16 +55,16 @@ Editing/re-applying a CNP reconfigures Running/Paused VMs that already match
 the group (no delete/recreate required):
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp apply \
+sudo fluxctl --config /etc/fluxvm.toml cnp apply \
   --spec examples/cnp-web.json
 ```
 
 ## 4. Delete
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp delete web-egress
+sudo fluxctl --config /etc/fluxvm.toml cnp delete web-egress
 # compiled group is removed with the CNP store entry
-sudo fluxvm --config /etc/fluxvm.toml group list
+sudo fluxctl --config /etc/fluxvm.toml group list
 ```
 
 ## Anatomy of the example

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-# Minimal real-hardware smoke test: `fluxvm serve` comes up, answers
+# Minimal real-hardware smoke test: `fluxctl serve` comes up, answers
 # /healthz, boots a real QEMU VM via the REST API (no agent, no network —
 # just the bare create path), and the VM actually reaches a real systemd
 # boot sequence (not just "a qemu-system-x86_64 process exists"). Then
@@ -44,12 +44,12 @@ done
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-    if [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-        EPH="${PROJECT_DIR}/target/release/fluxvm"
-    elif command -v fluxvm >/dev/null 2>&1; then
-        EPH="$(command -v fluxvm)"
+    if [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+        EPH="${PROJECT_DIR}/target/release/fluxctl"
+    elif command -v fluxctl >/dev/null 2>&1; then
+        EPH="$(command -v fluxctl)"
     else
-        echo "fluxvm binary not found. Build it (cargo build --release -p fluxvm-cli) or set FLUXVM_BIN." >&2
+        echo "fluxvm binary not found. Build it (cargo build --release -p fluxctl) or set FLUXVM_BIN." >&2
         exit 1
     fi
 fi
@@ -87,12 +87,12 @@ default_bridge = "vmbr0"
 reaper_interval_secs = 5
 TOML
 
-section "fluxvm serve starts and answers /healthz"
+section "fluxctl serve starts and answers /healthz"
 "$EPH" --config "${TMP}/fluxvm.toml" serve > "${TMP}/serve.log" 2>&1 &
 SERVE_PID=$!
 sleep 2
-kill -0 "$SERVE_PID" 2>/dev/null || { fail "fluxvm serve failed to start"; cat "${TMP}/serve.log" >&2; exit 1; }
-pass "fluxvm serve is running (pid ${SERVE_PID})"
+kill -0 "$SERVE_PID" 2>/dev/null || { fail "fluxctl serve failed to start"; cat "${TMP}/serve.log" >&2; exit 1; }
+pass "fluxctl serve is running (pid ${SERVE_PID})"
 if curl -sS -m 5 "${BASE_URL}/healthz" | grep -q '"ok":true'; then
     pass "/healthz reports ok"
 else

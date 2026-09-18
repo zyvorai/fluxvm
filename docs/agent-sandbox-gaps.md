@@ -1,8 +1,9 @@
 # AI-agent sandbox gaps
 
-FluxVM is a **multi-VMM disposable-VM control plane** (QEMU, Cloud Hypervisor,
+FluxVM is a **multi-VMM control plane** (QEMU, Cloud Hypervisor,
 Firecracker, and the in-tree **FluxVM hypervisor**) with CLI/REST, warm pools,
-and Kubernetes CRDs — a host-local libvirt/virsh-style lifecycle layer.
+and Kubernetes CRDs — a host-local libvirt/virsh-style lifecycle layer. Disposable
+patterns (TTL, CoW) are optional.
 
 The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 
@@ -59,10 +60,10 @@ optional for native). See [network-fabric.md](network-fabric.md),
 
 ## Remaining (optional hardening)
 
-- **Production-grade virtio device live-state** inside in-tree KVM snapshots (watermark only today; Firecracker remains production snap format)
-- Hubble SID attribution for VM traffic beyond agent CEP enrichment
-- Optional: scrape `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`) from Prometheus
-- Ranked backlog (Sentinel Set 16 candidates, vhost bind, etc.): [NEXT-FEATURES.md](NEXT-FEATURES.md)
+- **Production-grade virtio device live-state** inside in-tree KVM snapshots (**FLUXKVM1 v3** packs queue rings; Firecracker remains production snap format for FC guests)
+- ~~Hubble SID attribution for VM traffic beyond agent CEP enrichment~~ **Done** (F1)
+- ~~Optional: scrape `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`) from Prometheus~~ **Done** (F2)
+- Ranked backlog (Sentinel Set 16 candidates, vhost VRING GPA bind, etc.): [NEXT-FEATURES.md](NEXT-FEATURES.md)
 - SMP: 2+ vCPU boots with a full distro kernel cost a ~10s AP-wakeup stall (`do_boot_cpu failed`) before falling back to 1 CPU; not yet root-caused. Boot still completes.
 
 **Resolved:** in-tree KVM late-boot hang (`init_zbud`) — fixed by matching Firecracker/CH TSS, boot MSRs, FPU, LAPIC lint, and serial irqfd/THRE semantics. Linux guests now mount `root=/dev/vda` (auto `virtio_mmio.device=` cmdline) through `/sbin/init`.

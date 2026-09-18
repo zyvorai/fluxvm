@@ -47,7 +47,7 @@ else
 fi
 ok "system packages ready"
 
-# guestkit (used by `fluxvm build-image`'s copy_in) mounts qcow2/raw images
+# guestkit (used by `fluxctl build-image`'s copy_in) mounts qcow2/raw images
 # via qemu-nbd, which needs the nbd kernel module loaded.
 $SUDO modprobe nbd max_part=16 2>/dev/null || warn "modprobe nbd failed — image copy_in will not work until the nbd module is loaded"
 ok "nbd kernel module loaded"

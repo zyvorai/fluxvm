@@ -190,7 +190,7 @@ stats_path = os.environ.get("STATS_JSON", "")
 
 def fluxvm_pid():
     try:
-        out = subprocess.check_output(["pgrep", "-n", "-x", "fluxvm"], text=True).strip()
+        out = subprocess.check_output(["pgrep", "-n", "-x", "fluxctl"], text=True).strip()
         return int(out.splitlines()[0])
     except Exception:
         return None

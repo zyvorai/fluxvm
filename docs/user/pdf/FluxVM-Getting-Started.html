@@ -35,21 +35,21 @@ hr{border:none;border-top:1px solid #e5e7eb;margin:1.2em 0}
 </ul>
 <h2>1. Build and install</h2>
 <pre><code class="language-bash">cargo build --release
-sudo install -m 0755 target/release/fluxvm /usr/local/bin/fluxvm
+sudo install -m 0755 target/release/fluxctl /usr/local/bin/fluxctl
 sudo install -m 0644 config.example.toml /etc/fluxvm.toml
 </code></pre>
 <p>A one-command host bootstrap script (<code>scripts/bootstrap-host.sh</code>) installs the system packages, Cloud Hypervisor, and Firecracker for you; <code>scripts/deploy-remote.sh</code> does the same over SSH to a remote host.</p>
 <h2>2. Create your first VM</h2>
-<pre><code class="language-bash">fluxvm create --spec examples/qemu.json
+<pre><code class="language-bash">fluxctl create --spec examples/qemu.json
 </code></pre>
 <p>The response is the VM&#39;s full record — id, status, disk path, PID. It boots from a disposable copy-on-write overlay of the base image named in the spec, so the base image itself is never modified.</p>
 <h2>3. Run something inside it</h2>
-<pre><code class="language-bash">fluxvm exec &lt;id&gt; -- echo hello
+<pre><code class="language-bash">fluxctl exec &lt;id&gt; -- echo hello
 </code></pre>
 <p>This runs over the vsock guest agent — no SSH, no network path required at all, as long as the guest image has the agent installed and <code>agent.enabled: true</code> was set on the create request.</p>
 <h2>4. Let it clean up on its own</h2>
 <p>Set <code>ttl_seconds</code> on the create request and FluxVM&#39;s TTL reaper deletes the VM automatically once it expires — or delete it yourself:</p>
-<pre><code class="language-bash">fluxvm delete &lt;id&gt;
+<pre><code class="language-bash">fluxctl delete &lt;id&gt;
 </code></pre>
 <h2>Troubleshooting</h2>
 <ul>
@@ -74,10 +74,10 @@ sudo install -m 0644 config.example.toml /etc/fluxvm.toml
 <hr>
 <p>FluxVM is primarily a <strong>CLI + REST</strong> control plane (no first-party web console). Day-to-day work uses <code>fluxvm</code> on the host, or the HTTP API the same binary serves.</p>
 <h2>CLI essentials</h2>
-<pre><code class="language-bash">fluxvm create --spec examples/qemu.json
-fluxvm list
-fluxvm exec &lt;id&gt; -- echo hello
-fluxvm delete &lt;id&gt;
+<pre><code class="language-bash">fluxctl create --spec examples/qemu.json
+fluxctl list
+fluxctl exec &lt;id&gt; -- echo hello
+fluxctl delete &lt;id&gt;
 </code></pre>
 <h2>REST surface</h2>
 <p>The control plane exposes HTTP endpoints for create/list/get/delete/exec and related lifecycle calls. Point clients (including Ragnarok and Zyvor Fabric) at the configured listen address.</p>
@@ -128,11 +128,11 @@ fluxvm delete &lt;id&gt;
 </thead>
 <tbody><tr>
 <td>CI/sandbox VM</td>
-<td><code>fluxvm create</code> with <code>ttl_seconds</code> set → <code>fluxvm exec</code> the build/test command → let the TTL reaper delete it, or <code>fluxvm delete</code> explicitly</td>
+<td><code>fluxctl create</code> with <code>ttl_seconds</code> set → <code>fluxctl exec</code> the build/test command → let the TTL reaper delete it, or <code>fluxctl delete</code> explicitly</td>
 </tr>
 <tr>
 <td>Warm pool for fast handoff</td>
-<td><code>fluxvm pool create</code> with a template + size → <code>fluxvm pool claim</code> hands back an already-booted, paused VM in roughly resume time</td>
+<td><code>fluxctl pool create</code> with a template + size → <code>fluxctl pool claim</code> hands back an already-booted, paused VM in roughly resume time</td>
 </tr>
 <tr>
 <td>Multi-host fleet</td>
@@ -144,7 +144,7 @@ fluxvm delete &lt;id&gt;
 </tr>
 <tr>
 <td>Image build</td>
-<td><code>fluxvm build-image --spec examples/build-image.json</code> — download, verify SHA-256, resize, and customize a base image once, reuse it for every VM. See <a href="build-image-tutorial.md">Building custom OS images</a> for a per-distro walkthrough (apt/dnf/pacman).</td>
+<td><code>fluxctl build-image --spec examples/build-image.json</code> — download, verify SHA-256, resize, and customize a base image once, reuse it for every VM. See <a href="build-image-tutorial.md">Building custom OS images</a> for a per-distro walkthrough (apt/dnf/pacman).</td>
 </tr>
 </tbody></table>
 <p>For full command references, see the <a href="/docs/fluxvm">technical docs</a> and the project&#39;s own <a href="https://github.com/zyvorai/fluxvm#readme">README</a>. See also: <a href="use-cases.md">Use cases</a>.</p>

@@ -168,8 +168,9 @@ impl VirtualMachine {
         if cfg.pci {
             bus.add_mmio(Arc::new(PciEcam::new()));
             notes.push(format!(
-                "PCI ECAM at {:#x} (cloud-hypervisor / FC --enable-pci layout)",
-                memory::PCI_MMCONFIG_START
+                "PCI ECAM at {:#x} + virtio-net @ 00:01.0 BAR0→{:#x} (H2)",
+                memory::PCI_MMCONFIG_START,
+                MMIO_WINDOW
             ));
         }
 
@@ -255,11 +256,27 @@ impl VirtualMachine {
 
         let vhost = if cfg.vhost_net {
             match VhostNet::open() {
-                Ok(v) => {
-                    notes.push(
-                        "vhost-net opened (/dev/vhost-net); queues still userspace until full bind"
-                            .into(),
-                    );
+                Ok(mut v) => {
+                    if let Some(ref tap) = tap {
+                        match v.bind_tap(tap.fd, 2) {
+                            Ok(()) => {
+                                notes.push(
+                                    "vhost-net bound to TAP (queue 0/1 backend; VRING GPA on driver ready)"
+                                        .into(),
+                                );
+                            }
+                            Err(e) => {
+                                notes.push(format!(
+                                    "vhost-net open ok, bind deferred to userspace pump: {e}"
+                                ));
+                            }
+                        }
+                    } else {
+                        notes.push(
+                            "vhost-net opened (/dev/vhost-net); no TAP to bind — userspace path"
+                                .into(),
+                        );
+                    }
                     Some(v)
                 }
                 Err(e) => {
@@ -371,9 +388,17 @@ impl VirtualMachine {
         jailer::apply(&jail)?;
         if let Some(cpu) = restore {
             kvm_snap::restore_vcpus(&kvm, &cpu)?;
+            let targets: Vec<_> = [&self.net, &self.blk, &self.vsock, &self.balloon, &self.rng]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect();
+            let refs: Vec<_> = targets.iter().collect();
+            kvm_snap::restore_virtio(&refs, &cpu.virtio);
             eprintln!(
-                "[kvm] restored FLUXKVM1 snapshot vcpus={} rip={:#x} cr3={:#x}",
+                "[kvm] restored FLUXKVM1 snapshot vcpus={} virtio_devs={} rip={:#x} cr3={:#x}",
                 cpu.all_vcpus.len(),
+                cpu.virtio.len(),
                 cpu.regs.rip,
                 cpu.sregs.cr3
             );
@@ -455,7 +480,12 @@ impl VirtualMachine {
             while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
                 if let Some(rx) = snap_rx.as_ref() {
                     while let Ok(cmd) = rx.try_recv() {
-                        let r = kvm_snap::dump(&kvm, &this.mem, &cmd.vmstate, &cmd.mem)
+                        let virtio: Vec<_> = [&this.net, &this.blk, &this.vsock, &this.balloon, &this.rng]
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|d| d.state.lock().ok().map(|s| s.clone()))
+                            .collect();
+                        let r = kvm_snap::dump(&kvm, &this.mem, &cmd.vmstate, &cmd.mem, &virtio)
                             .map_err(|e| e.to_string());
                         let _ = cmd.reply.send(r);
                     }
@@ -619,22 +649,86 @@ impl VirtualMachine {
                         let _ = this.bus.mmio_read(addr, &mut buf);
                         kvm.mmio_set_data(0, &buf);
                     }
-                    if let Some(net) = &this.net {
+                    let net_dev = this.net.clone();
+                    if let Some(net) = net_dev {
                         if let Some(q) = virtio_mmio::take_notify(&net.state) {
-                            let mut st = net.state.lock().unwrap();
-                            match virtio_net::handle_notify(
-                                &mut this.mem,
-                                &mut st,
-                                this.tap.as_ref(),
-                                q,
-                                Some(this.net_limiter.as_ref()),
-                            ) {
-                                Ok(n) => {
-                                    eprintln!("[net] processed q={q} frames={n}");
-                                    drop(st);
-                                    net.raise_vring_interrupt();
+                            // H3: when vhost rings are programmed, kick the
+                            // kernel datapath instead of the userspace pump.
+                            let use_vhost = this
+                                .vhost
+                                .as_ref()
+                                .map(|v| v.kernel_datapath())
+                                .unwrap_or(false);
+                            if use_vhost {
+                                if let Some(v) = this.vhost.as_ref() {
+                                    if let Err(e) = v.signal_kick(q as usize) {
+                                        eprintln!("[net] vhost kick q={q}: {e}");
+                                    }
                                 }
-                                Err(e) => eprintln!("[net] notify err {e}"),
+                            } else {
+                                // Late-bind VRING GPA once the guest marks
+                                // both net queues ready (desc/avail/used set).
+                                if let Some(v) = this.vhost.as_mut() {
+                                    if v.bound && !v.rings_programmed {
+                                        let qs = {
+                                            let st = net.state.lock().unwrap();
+                                            st.queues[..st.num_queues.min(2) as usize].to_vec()
+                                        };
+                                        let ready = qs.len() >= 2
+                                            && qs.iter().all(|qq| {
+                                                qq.ready != 0
+                                                    && qq.num > 0
+                                                    && qq.desc != 0
+                                                    && qq.avail != 0
+                                                    && qq.used != 0
+                                            });
+                                        if ready {
+                                            match v.program_vrings(
+                                                this.mem.host_ptr(),
+                                                this.mem.len(),
+                                                &qs,
+                                            ) {
+                                                Ok(()) => {
+                                                    eprintln!(
+                                                        "[net] vhost VRING GPA programmed (H3)"
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    eprintln!(
+                                                        "[net] vhost VRING program deferred: {e}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                // If programming just succeeded, kick instead of pump.
+                                if this
+                                    .vhost
+                                    .as_ref()
+                                    .map(|v| v.kernel_datapath())
+                                    .unwrap_or(false)
+                                {
+                                    if let Some(v) = this.vhost.as_ref() {
+                                        let _ = v.signal_kick(q as usize);
+                                    }
+                                } else {
+                                    let mut st = net.state.lock().unwrap();
+                                    match virtio_net::handle_notify(
+                                        &mut this.mem,
+                                        &mut st,
+                                        this.tap.as_ref(),
+                                        q,
+                                        Some(this.net_limiter.as_ref()),
+                                    ) {
+                                        Ok(n) => {
+                                            eprintln!("[net] processed q={q} frames={n}");
+                                            drop(st);
+                                            net.raise_vring_interrupt();
+                                        }
+                                        Err(e) => eprintln!("[net] notify err {e}"),
+                                    }
+                                }
                             }
                         }
                     }

@@ -65,6 +65,12 @@ Pod netns already contains another interface with a routable IPv4/IPv6 address,
 Set 6 rejects the sandbox by default rather than silently dropping the
 secondary network.
 
+**Cilium exception:** when `FLUXVM_CONTAINER_CNI_PROVIDER` resolves to
+`cilium` (or `auto` detects Cilium), Multus-style `netN` secondaries are
+ignored for the strict check so the primary `eth0` L2 handoff can proceed.
+Those secondaries are **not** attached to the guest. See
+[cilium-cni.md](cilium-cni.md).
+
 For controlled labs only:
 
 ```bash

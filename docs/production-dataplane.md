@@ -30,8 +30,8 @@ profile, optional restart). Dataplane knobs match
 ```bash
 fluxvm dataplane health
 fluxvm cnp apply --spec examples/cnp-web.json
-fluxvm identity list
-fluxvm observe
+fluxctl identity list
+fluxctl observe
 fluxvm dataplane ipcache
 fluxvm dataplane refresh-dns   # after FQDN allowlist / DNS TTL change
 ```

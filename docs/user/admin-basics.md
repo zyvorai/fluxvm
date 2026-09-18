@@ -7,7 +7,7 @@ Operate FluxVM on a host: service, ports, auth, logs, and production gates.
 ```bash
 sudo systemctl enable --now fluxvm    # if unit installed by deploy
 # or foreground:
-sudo fluxvm --config /etc/fluxvm.toml serve
+sudo fluxctl --config /etc/fluxvm.toml serve
 ```
 
 TTL reaper and warm-pool backfill run only while `serve` is up.
@@ -26,7 +26,7 @@ Remote: `./scripts/deploy-remote.sh USER@HOST`.
 
 | Port | Role |
 |------|------|
-| **7788** | FluxVM REST (`fluxvm serve`) |
+| **7788** | FluxVM REST (`fluxctl serve`) |
 | **9108** | Optional MicroVM Prometheus (`MICROVM_METRICS_ADDR`) |
 
 Fabric (separate product) typically listens on **9095** and proxies FluxVM.

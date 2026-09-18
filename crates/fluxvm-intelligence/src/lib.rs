@@ -1480,7 +1480,7 @@ fn explain_drop(
             "probable",
             "The flow passes visible CIDR/L4/Pod checks and this VM has an eBPF rate ceiling."
                 .into(),
-            "Inspect fluxvm network stats and traffic rate; raise the ceiling only after confirming sustained legitimate demand.",
+            "Inspect fluxctl network stats and traffic rate; raise the ceiling only after confirming sustained legitimate demand.",
         );
     }
 

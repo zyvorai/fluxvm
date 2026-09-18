@@ -1,6 +1,6 @@
 # FluxVM — User Documentation
 
-A standalone, minimal-dependency disposable-VM control plane — QEMU/KVM, Cloud Hypervisor, and Firecracker behind one API.
+A standalone, minimal-dependency VM control plane — QEMU/KVM, Cloud Hypervisor, and Firecracker behind one API. Optional TTL/CoW for disposable workloads.
 
 | You want to… | Open |
 |--------------|------|

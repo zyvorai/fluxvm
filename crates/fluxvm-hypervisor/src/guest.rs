@@ -313,8 +313,8 @@ fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
                 .into()
         }),
         firmware: None,
-        net_mbit_limit: 0,
-        blk_mbit_limit: 0,
+        net_mbit_limit: cfg.net_mbit_limit.unwrap_or(0),
+        blk_mbit_limit: cfg.blk_mbit_limit.unwrap_or(0),
         dry_run: false,
         print_host_net: false,
         gdb: None,
@@ -334,12 +334,19 @@ fn firecracker_config(cfg: &BootConfig) -> Result<serde_json::Value> {
         .clone()
         .unwrap_or_else(|| "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw".into());
 
-    let mut drives = vec![json!({
+    let mut root_drive = json!({
         "drive_id": "rootfs",
         "path_on_host": cfg.rootfs.display().to_string(),
         "is_root_device": true,
         "is_read_only": false
-    })];
+    });
+    if let Some(rl) = fc_rate_limiter(cfg.blk_mbit_limit, cfg.blk_ops_limit) {
+        root_drive
+            .as_object_mut()
+            .unwrap()
+            .insert("rate_limiter".into(), rl);
+    }
+    let mut drives = vec![root_drive];
     if let Some(seed) = &cfg.seed {
         drives.push(json!({
             "drive_id": "seed",
@@ -349,18 +356,31 @@ fn firecracker_config(cfg: &BootConfig) -> Result<serde_json::Value> {
         }));
     }
 
+    let mut machine = json!({
+        "vcpu_count": cfg.vcpus,
+        "mem_size_mib": cfg.memory_mib,
+        "smt": false,
+        "track_dirty_pages": true
+    });
+    if let Some(t) = cfg
+        .cpu_template
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        machine
+            .as_object_mut()
+            .unwrap()
+            .insert("cpu_template".into(), json!(t));
+    }
+
     let mut root = json!({
         "boot-source": {
             "kernel_image_path": cfg.kernel.display().to_string(),
             "boot_args": boot_args
         },
         "drives": drives,
-        "machine-config": {
-            "vcpu_count": cfg.vcpus,
-            "mem_size_mib": cfg.memory_mib,
-            "smt": false,
-            "track_dirty_pages": true
-        },
+        "machine-config": machine,
         // Without this, the guest kernel has no fast entropy source (no
         // RDRAND passthrough, no other virtio-rng) and boots with
         // crng_init=0. Anything that calls getrandom() before enough
@@ -375,13 +395,20 @@ fn firecracker_config(cfg: &BootConfig) -> Result<serde_json::Value> {
             .mac
             .clone()
             .unwrap_or_else(|| "06:00:AC:10:00:02".into());
+        let mut iface = json!({
+            "iface_id": "eth0",
+            "guest_mac": guest_mac,
+            "host_dev_name": tap
+        });
+        if let Some(rl) = fc_rate_limiter(cfg.net_mbit_limit, cfg.net_pps_limit) {
+            iface
+                .as_object_mut()
+                .unwrap()
+                .insert("rate_limiter".into(), rl);
+        }
         root.as_object_mut().unwrap().insert(
             "network-interfaces".into(),
-            json!([{
-                "iface_id": "eth0",
-                "guest_mac": guest_mac,
-                "host_dev_name": tap
-            }]),
+            json!([iface]),
         );
     }
 
@@ -396,6 +423,37 @@ fn firecracker_config(cfg: &BootConfig) -> Result<serde_json::Value> {
     }
 
     Ok(root)
+}
+
+/// Firecracker token-bucket `rate_limiter` from optional Mbit/s and ops/s.
+fn fc_rate_limiter(mbit: Option<u32>, ops: Option<u64>) -> Option<serde_json::Value> {
+    let mut obj = serde_json::Map::new();
+    if let Some(mb) = mbit.filter(|&v| v > 0) {
+        let bytes_per_sec = (mb as u64) * 1_000_000 / 8;
+        obj.insert(
+            "bandwidth".into(),
+            json!({
+                "size": bytes_per_sec,
+                "one_time_burst": bytes_per_sec,
+                "refill_time": 1000
+            }),
+        );
+    }
+    if let Some(n) = ops.filter(|&v| v > 0) {
+        obj.insert(
+            "ops".into(),
+            json!({
+                "size": n,
+                "one_time_burst": n,
+                "refill_time": 1000
+            }),
+        );
+    }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
 }
 
 pub async fn pause(api: &Path) -> Result<()> {
@@ -604,6 +662,11 @@ mod tests {
             vsock_uds: None,
             seccomp: false,
             engine: FluxVmEngine::Firecracker,
+            net_mbit_limit: None,
+            net_pps_limit: None,
+            blk_mbit_limit: None,
+            blk_ops_limit: None,
+            cpu_template: None,
         }
     }
 
@@ -618,6 +681,19 @@ mod tests {
     fn firecracker_config_always_requests_an_entropy_device() {
         let cfg = firecracker_config(&base_config()).expect("config");
         assert_eq!(cfg["entropy"], json!({}));
+    }
+
+    #[test]
+    fn firecracker_config_embeds_virtio_rate_limiters() {
+        let mut c = base_config();
+        c.tap = Some("tap0".into());
+        c.net_mbit_limit = Some(100);
+        c.net_pps_limit = Some(50_000);
+        c.blk_mbit_limit = Some(200);
+        c.blk_ops_limit = Some(10_000);
+        let cfg = firecracker_config(&c).expect("config");
+        assert_eq!(cfg["drives"][0]["rate_limiter"]["bandwidth"]["size"], 25_000_000);
+        assert_eq!(cfg["network-interfaces"][0]["rate_limiter"]["ops"]["size"], 50_000);
     }
 
     #[test]

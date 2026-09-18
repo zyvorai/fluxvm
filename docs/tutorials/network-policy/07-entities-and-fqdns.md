@@ -9,10 +9,10 @@
 into concrete CIDRs folded into the group allowlist.
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp apply \
+sudo fluxctl --config /etc/fluxvm.toml cnp apply \
   --spec examples/cnp/cnp-entities-world.json
 
-sudo fluxvm --config /etc/fluxvm.toml group get talk-to-world | python3 -m json.tool
+sudo fluxctl --config /etc/fluxvm.toml group get talk-to-world | python3 -m json.tool
 ```
 
 **Expect:** `allow_cidrs` includes entity expansions (for example
@@ -22,7 +22,7 @@ explicit `toCIDR` entries.
 List the reserved identity table that backs entity names:
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml identity list \
+sudo fluxctl --config /etc/fluxvm.toml identity list \
   | python3 -c 'import json,sys;print([i["name"] for i in json.load(sys.stdin)])'
 ```
 
@@ -34,17 +34,17 @@ CIDRs (wildcards with `*` are skipped). This is not an inline DNS proxy inside
 the TC program. After DNS TTL or allowlist changes, refresh:
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml dataplane refresh-dns
+sudo fluxctl --config /etc/fluxvm.toml dataplane refresh-dns
 # or POST /v1/network/refresh-dns
 ```
 
 See [production-dataplane.md](../../production-dataplane.md).
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp apply \
+sudo fluxctl --config /etc/fluxvm.toml cnp apply \
   --spec examples/cnp-web.json
 
-sudo fluxvm --config /etc/fluxvm.toml group get web-egress \
+sudo fluxctl --config /etc/fluxvm.toml group get web-egress \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["policy"].get("allow_fqdns"))'
 ```
 
@@ -60,8 +60,8 @@ egress_allow_domains = ["example.com", ".github.com"]
 ## Cleanup
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp delete talk-to-world
-sudo fluxvm --config /etc/fluxvm.toml cnp delete web-egress
+sudo fluxctl --config /etc/fluxvm.toml cnp delete talk-to-world
+sudo fluxctl --config /etc/fluxvm.toml cnp delete web-egress
 ```
 
 ## Next

@@ -1,0 +1,42 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Host profile fragment for Secure Containers on Cilium nodes.
+#
+# This is NOT a FluxVM Network Fabric dataplane fragment (see
+# configs/network-fabric-*.toml and docs/ebpf-cilium.md). It documents the
+# shim/containerd environment expected when Cilium owns the Pod CNI path and
+# FluxVM performs the L2 Pod IP/MAC handoff into the guest.
+#
+# Apply by exporting the env vars below (systemd drop-in, containerd shim
+# environment, or kubelet RuntimeClass wrapper). Restart containerd / kill
+# leaked shims after changing them.
+#
+#   sudo ./scripts/evidence-cilium-cni.sh   # static + optional live gate
+#   docs/cilium-cni.md
+
+# --- shim environment (reference) ------------------------------------------
+# FLUXVM_CONTAINER_CNI=1
+# FLUXVM_CONTAINER_CNI_PROVIDER=auto          # auto | cilium | generic
+# FLUXVM_CONTAINER_CNI_INTERFACE=eth0         # Cilium primary; Multus netN ignored
+# FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=1
+#
+# Pair with Network Fabric coexistence (VM-edge policy, not Pod CNI):
+#   sudo ./scripts/enable-network-fabric-ga.sh --cilium --restart
+# which sets sandbox.dataplane.mode = "cilium" and leaves XDP disabled.
+
+[sandbox.dataplane]
+mode = "cilium"
+bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
+pin_root = "/sys/fs/bpf/fluxvm"
+required = true
+default_allow = false
+allow_cidrs = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+allow_ports = ["tcp/443", "tcp/80", "udp/53"]
+max_egress_mbps = 250
+max_egress_pps = 100000
+sample_rate = 100
+
+# Never enable FluxVM XDP alongside Cilium — Cilium owns the node XDP hook.
+# [sandbox.dataplane.xdp]
+# enabled = false

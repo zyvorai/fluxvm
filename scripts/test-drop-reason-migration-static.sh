@@ -18,8 +18,8 @@ grep -q 'pub fn export_snapshot' "$ROOT/crates/fluxvm-network/src/migration_stat
 grep -q 'pub fn restore_snapshot' "$ROOT/crates/fluxvm-network/src/migration_state.rs"
 grep -q 'network/drop-reasons' "$ROOT/crates/fluxvm-api/src/lib.rs"
 grep -q 'network/migration/quiesce' "$ROOT/crates/fluxvm-api/src/lib.rs"
-grep -q 'MigrationQuiesce' "$ROOT/crates/fluxvm-cli/src/main.rs"
-grep -q 'MigrationRestore' "$ROOT/crates/fluxvm-cli/src/main.rs"
+grep -q 'MigrationQuiesce' "$ROOT/crates/fluxctl/src/main.rs"
+grep -q 'MigrationRestore' "$ROOT/crates/fluxctl/src/main.rs"
 grep -q 'diagnose_vm_with_reasons' "$ROOT/crates/fluxvm-intelligence/src/lib.rs"
 grep -q 'exact-kernel' "$ROOT/crates/fluxvm-intelligence/src/lib.rs"
 
@@ -38,7 +38,7 @@ print('Rust structural gates: PASS')
 PY
 
 if command -v cargo >/dev/null 2>&1; then
-  cargo test -p fluxvm-network -p fluxvm-intelligence -p fluxvm-api -p fluxvm-cli
+  cargo test -p fluxvm-network -p fluxvm-intelligence -p fluxvm-api -p fluxctl
 else
   echo 'SKIP cargo tests: cargo not installed'
 fi

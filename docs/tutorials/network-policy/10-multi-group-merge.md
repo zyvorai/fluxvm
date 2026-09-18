@@ -15,7 +15,7 @@ Fabric **union** semantics on the effective policy.
 ## Setup
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group set web \
+sudo fluxctl --config /etc/fluxvm.toml group set web \
   --label app=web \
   --default-allow false \
   --allow-cidr 10.0.0.0/8 \
@@ -23,7 +23,7 @@ sudo fluxvm --config /etc/fluxvm.toml group set web \
   --max-egress-mbps 250 \
   --allow-icmp
 
-sudo fluxvm --config /etc/fluxvm.toml group set db \
+sudo fluxctl --config /etc/fluxvm.toml group set db \
   --label app=db --label tier=data \
   --priority 5 \
   --default-allow false \
@@ -33,7 +33,7 @@ sudo fluxvm --config /etc/fluxvm.toml group set db \
   --max-egress-mbps 40 \
   --max-egress-pps 20000
 
-sudo fluxvm --config /etc/fluxvm.toml group set egress-only \
+sudo fluxctl --config /etc/fluxvm.toml group set egress-only \
   --default-allow false \
   --allow-cidr 1.1.1.1/32 \
   --deny-cidr 0.0.0.0/0 \
@@ -79,16 +79,16 @@ PY
 ## Observe
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml observe \
+sudo fluxctl --config /etc/fluxvm.toml observe \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);print(len(d["groups"]), "groups")'
 ```
 
 ## Cleanup
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml group delete web
-sudo fluxvm --config /etc/fluxvm.toml group delete db
-sudo fluxvm --config /etc/fluxvm.toml group delete egress-only
+sudo fluxctl --config /etc/fluxvm.toml group delete web
+sudo fluxctl --config /etc/fluxvm.toml group delete db
+sudo fluxctl --config /etc/fluxvm.toml group delete egress-only
 ```
 
 ## Next

@@ -10,20 +10,20 @@ Kubernetes — as short copy-paste tutorials.
 
 ```bash
 # examples/qemu.json plus ttl_seconds in the JSON, or:
-fluxvm create --spec examples/qemu.json
+fluxctl create --spec examples/qemu.json
 ID=…   # from response
-fluxvm exec "$ID" -- ./run-tests.sh
-fluxvm delete "$ID"
+fluxctl exec "$ID" -- ./run-tests.sh
+fluxctl delete "$ID"
 # Or set "ttl_seconds": 900 on create and let the reaper delete it
 ```
 
-`fluxvm serve` must be running for the TTL reaper.
+`fluxctl serve` must be running for the TTL reaper.
 
 ## 2. Warm pool (fast claim)
 
 ```bash
-fluxvm pool create --name ci --template examples/qemu.json --size 4
-fluxvm pool claim --name ci    # returns a paused, ready VM
+fluxctl pool create --name ci --template examples/qemu.json --size 4
+fluxctl pool claim --name ci    # returns a paused, ready VM
 # resume / exec / delete as usual
 ```
 
@@ -35,14 +35,14 @@ Linux:
 
 ```bash
 sudo modprobe nbd max_part=16
-sudo fluxvm build-image --spec examples/build-image.json
+sudo fluxctl build-image --spec examples/build-image.json
 ```
 
 Windows (Kryton golden → offline customize):
 
 ```bash
 ./scripts/prepare-windows-golden.sh --build --version 11e
-sudo fluxvm build-image --spec examples/build-image-kryton-golden.json
+sudo fluxctl build-image --spec examples/build-image-kryton-golden.json
 ```
 
 Full walkthrough: [build-image-tutorial.md](build-image-tutorial.md) ·
@@ -51,13 +51,13 @@ Full walkthrough: [build-image-tutorial.md](build-image-tutorial.md) ·
 ## 4. Windows lab VM + QGA
 
 ```bash
-sudo fluxvm build-image --spec examples/build-image-windows.json
-fluxvm create --spec examples/windows-qga.json
-fluxvm qga ping <id>
-fluxvm qga firewall-open <id> --name Lab --port 8080 --protocol tcp
+sudo fluxctl build-image --spec examples/build-image-windows.json
+fluxctl create --spec examples/windows-qga.json
+fluxctl qga ping <id>
+fluxctl qga firewall-open <id> --name Lab --port 8080 --protocol tcp
 ```
 
-QEMU only for this path. Do not use vsock `fluxvm exec` for Windows.
+QEMU only for this path. Do not use vsock `fluxctl exec` for Windows.
 
 ## 5. Multi-host fleet
 
@@ -86,7 +86,7 @@ See [Kubernetes deployment](kubernetes-deployment.md) and
 
 ```bash
 # /etc/fluxvm.toml: [sandbox.dataplane] mode = "ebpf"
-fluxvm create --spec examples/create-vm-prod.json   # network_tap / netns
+fluxctl create --spec examples/create-vm-prod.json   # network_tap / netns
 curl -sS -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:7788/v1/vms/$ID/network/status | jq .
 ```

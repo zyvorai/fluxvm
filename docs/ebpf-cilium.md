@@ -19,6 +19,10 @@ Diagrams:
 | `ebpf` | Load FluxVM’s TC classifier (`bpf/fluxvm_tc.bpf.c`), pin programs/maps under `pin_root`, attach to the host-visible VM interface. |
 | `cilium` | Same FluxVM VM-edge eBPF path, but only after verifying the Cilium agent socket and bpffs are visible. **Never** writes Cilium private BPF maps. |
 
+For **Secure Containers Pod CNI** on Cilium (L2 handoff of `eth0` into the
+guest, Multus-safe filtering), see [cilium-cni.md](cilium-cni.md) — that path
+is separate from this VM-edge Fabric mode.
+
 Default remains `sandbox.dataplane.mode = "legacy"`. Existing configs that omit
 `[sandbox.dataplane]` keep using nftables.
 

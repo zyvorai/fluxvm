@@ -51,7 +51,7 @@ enum Command {
         #[arg(long, env = "FLUXVM_URL", default_value = "http://127.0.0.1:7788")]
         fluxvm_url: String,
         /// Base URL the CENTRAL registry should use to reach this same
-        /// `fluxvm serve` — must be this host's real, externally
+        /// `fluxctl serve` — must be this host's real, externally
         /// routable address when central runs elsewhere.
         #[arg(long, env = "ADVERTISE_URL")]
         advertise_url: Option<String>,
@@ -61,7 +61,7 @@ enum Command {
         #[arg(long, env = "FLUXVM_AGENT_TOKEN")]
         token: Option<String>,
         /// Label this node reports on every heartbeat, as `key=value`.
-        /// Repeatable. Lets `fluxvm fleet create --node-selector
+        /// Repeatable. Lets `fluxctl fleet create --node-selector
         /// key=value` (or a plain `POST /fleet/vms` `"nodeSelector"`
         /// object) constrain automatic placement to nodes carrying it —
         /// e.g. `--label zone=us-east --label gpu=true`.

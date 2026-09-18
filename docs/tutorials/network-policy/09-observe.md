@@ -6,7 +6,7 @@ labeled VM endpoints — a quick fabric dashboard glance over policy state.
 ## CLI
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml observe | python3 -m json.tool
+sudo fluxctl --config /etc/fluxvm.toml observe | python3 -m json.tool
 ```
 
 ## REST

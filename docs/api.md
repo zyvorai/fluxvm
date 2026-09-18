@@ -3,7 +3,7 @@
 Start the server:
 
 ```bash
-sudo /usr/local/bin/fluxvm --config /etc/fluxvm.toml serve
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml serve
 ```
 
 Default bind address:
@@ -236,7 +236,7 @@ always shows the resolved concrete backend, never `"auto"`).
 Optional `tenant` is a first-class string for multi-team hosts (`GET /v1/vms?tenant=`). See
 `examples/create-vm-prod.json`.
 
-`agent.enabled` turns on the vsock guest agent (`fluxvm exec`) for this VM — the guest image must
+`agent.enabled` turns on the vsock guest agent (`fluxctl exec`) for this VM — the guest image must
 have `fluxvm-guest-agent` installed and enabled (see the README's
 [Quick start](../README.md#quick-start) section and [build-image-tutorials.md](build-image-tutorials.md)).
 `agent.port` is the AF_VSOCK port the guest listens on (not a host TCP port); it defaults to `17777`

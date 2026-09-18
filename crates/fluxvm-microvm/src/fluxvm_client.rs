@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local `fluxvm serve` client. Same "not-found is a 400 with
+//! Local `fluxctl serve` client. Same "not-found is a 400 with
 //! `VM not found` in the body" contract as `fluxvm-kube`.
 
 use crate::crd::MicroVMSpec;

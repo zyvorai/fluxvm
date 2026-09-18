@@ -6,7 +6,7 @@ name = "fluxvm-microvm"
 version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
-description = "FluxVM MicroVM — Kubernetes-native disposable compute without KubeVirt"
+description = "FluxVM MicroVM — Kubernetes-native MicroVM compute without KubeVirt"
 
 [[bin]]
 name = "fluxvm-microvm"

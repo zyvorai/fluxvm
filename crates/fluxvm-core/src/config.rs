@@ -374,10 +374,21 @@ pub struct TrustedSigner {
 /// directly. `enabled: false` (the default) is a full no-op — every
 /// Firecracker VM launches exactly as it did before this existed. QEMU and
 /// Cloud Hypervisor have no jailer equivalent and ignore this entirely.
+///
+/// Production profiles should set `enforce = true` (or `auth.require` with a
+/// non-loopback `listen`): Firecracker launches then fail closed unless
+/// `enabled` is also true. See docs/capability-figures.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JailerConfig {
     pub enabled: bool,
+    /// When true, refuse Firecracker launches (and `fluxctl serve` if
+    /// Firecracker is an allowed backend) unless `enabled` is also true.
+    /// Independently, `Config::jailer_required` is true when
+    /// `auth.require` and listen is non-loopback — matching Firecracker's
+    /// "production via jailer only" rule without surprising loopback labs.
+    #[serde(default)]
+    pub enforce: bool,
     pub jailer_binary: String,
     /// The uid/gid `jailer` drops privileges to after chrooting — must be
     /// non-root and (for a real security boundary) not shared with any
@@ -397,6 +408,7 @@ impl Default for JailerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            enforce: false,
             jailer_binary: "jailer".into(),
             uid: 123,
             gid: 100,
@@ -405,7 +417,7 @@ impl Default for JailerConfig {
     }
 }
 
-/// TLS termination for `fluxvm serve`. When `cert` + `key` are set the API
+/// TLS termination for `fluxctl serve`. When `cert` + `key` are set the API
 /// listens with HTTPS. When `client_ca` is also set, clients must present a
 /// certificate signed by that CA (mTLS). Bearer tokens / OIDC still apply.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -577,6 +589,16 @@ pub struct Policy {
     /// When false (default), non-empty `extra_args` is rejected.
     #[serde(default)]
     pub allow_extra_args: bool,
+    /// Applied at cgroup attach for every backend: set `cpu.max` to this
+    /// percent of one host CPU (see `CpuMax::from_percent`). `None` =
+    /// leave cpu.max unlimited (operator can still PATCH resources later).
+    #[serde(default)]
+    pub default_cpu_quota_percent: Option<u8>,
+    /// When true, set `memory.max` to the guest's `memory_mib` in bytes at
+    /// cgroup attach so host overcommit is explicit. Default false keeps
+    /// today's unlimited memory.max (cgroup still tracks usage).
+    #[serde(default)]
+    pub memory_max_equals_guest: bool,
     /// Per-tenant aggregate caps, keyed by `CreateVmRequest.tenant` --
     /// `[[policy.tenants]]`, the same array-of-tables-with-a-keying-field
     /// shape `[[auth.tokens]]` already uses (`ApiToken.tenant`), rather
@@ -627,5 +649,46 @@ impl Config {
         fs::create_dir_all(&self.state_dir)?;
         fs::create_dir_all(&self.run_dir)?;
         Ok(())
+    }
+
+    /// True when Firecracker must run under jailer: explicit `[jailer]
+    /// enforce`, or production-shaped `auth.require` on a non-loopback
+    /// listen (Firecracker's "jailer only in production" rule).
+    pub fn jailer_required(&self) -> bool {
+        self.jailer.enforce || (self.auth.require && !is_loopback_listen(&self.listen))
+    }
+}
+
+#[cfg(test)]
+mod jailer_required_tests {
+    use super::*;
+
+    #[test]
+    fn default_lab_does_not_require_jailer() {
+        let cfg = Config::default();
+        assert!(!cfg.jailer_required());
+    }
+
+    #[test]
+    fn enforce_flag_requires_jailer() {
+        let mut cfg = Config::default();
+        cfg.jailer.enforce = true;
+        assert!(cfg.jailer_required());
+    }
+
+    #[test]
+    fn auth_require_on_non_loopback_requires_jailer() {
+        let mut cfg = Config::default();
+        cfg.auth.require = true;
+        cfg.listen = "0.0.0.0:7788".into();
+        assert!(cfg.jailer_required());
+    }
+
+    #[test]
+    fn auth_require_on_loopback_does_not_require_jailer() {
+        let mut cfg = Config::default();
+        cfg.auth.require = true;
+        cfg.listen = "127.0.0.1:7788".into();
+        assert!(!cfg.jailer_required());
     }
 }

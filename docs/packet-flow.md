@@ -26,23 +26,23 @@ Ingress is the reverse, used when the flow destination equals the guest IP.
 
 ```bash
 # Colorful one-liners (ANSI). NO_COLOR=1 forces plain.
-fluxvm hubble observe
-fluxvm hubble observe --output color
+fluxctl hubble observe
+fluxctl hubble observe --output color
 
 # Normal / plain text (no ANSI) — logs, tickets, CI
-fluxvm hubble observe --output plain
-fluxvm hubble observe --output normal
+fluxctl hubble observe --output plain
+fluxctl hubble observe --output normal
 
 # Full hop path (detailed)
-fluxvm hubble observe --detailed
-fluxvm hubble flow --output color
-fluxvm hubble flow --output plain
+fluxctl hubble observe --detailed
+fluxctl hubble flow --output color
+fluxctl hubble flow --output plain
 
 # Filters
-fluxvm hubble observe --verdict DROPPED --protocol tcp --limit 100
+fluxctl hubble observe --verdict DROPPED --protocol tcp --limit 100
 
 # Machine
-fluxvm hubble observe --output json
+fluxctl hubble observe --output json
 ```
 
 Color map:

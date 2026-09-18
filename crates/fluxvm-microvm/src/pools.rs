@@ -88,7 +88,7 @@ async fn reconcile(obj: Arc<MicroVMPool>, ctx: Arc<Context>) -> Result<Action, E
         },
         ready,
         claimed: 0,
-        message: Some(format!("fluxvm pool {name} on {}", ctx.node_name)),
+        message: Some(format!("fluxctl pool {name} on {}", ctx.node_name)),
     };
     api.patch_status(
         &obj.name_any(),

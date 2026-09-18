@@ -1,7 +1,7 @@
 # Copyright 2026 Zyvor
 # SPDX-License-Identifier: Apache-2.0
 
-# Runs INSIDE a guest image (baked in via fluxvm build-image's copy_in),
+# Runs INSIDE a guest image (baked in via fluxctl build-image's copy_in),
 # not on the host. Distinct from fluxvm.service (the host control plane).
 
 [Unit]

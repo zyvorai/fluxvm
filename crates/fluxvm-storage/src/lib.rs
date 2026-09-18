@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! Every `fluxvm create`/`stop`/`pause`/... invocation is a fresh, one-shot
+//! Every `fluxctl create`/`stop`/`pause`/... invocation is a fresh, one-shot
 //! CLI process (not just concurrent tasks inside one `serve` daemon), so an
 //! in-memory cache populated once at startup is not enough to stay correct:
 //! two such processes racing would each load a stale view, each write back
@@ -391,6 +391,11 @@ mod tests {
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,
+                net_mbit_limit: None,
+                net_pps_limit: None,
+                blk_mbit_limit: None,
+                blk_ops_limit: None,
+                cpu_template: None,
             },
             guest_cid: None,
             jail_path: None,
@@ -468,7 +473,7 @@ mod tests {
         // inserting via a separate insert() call let two concurrent
         // processes both compute the same "lowest free" CID before either
         // persisted, so they'd collide (confirmed via a live 4-way
-        // concurrent `fluxvm create` stress test before this was fixed).
+        // concurrent `fluxctl create` stress test before this was fixed).
         // Each spawned task here gets its OWN Store — a fresh `load()`, not
         // a shared handle — to accurately simulate separate OS processes
         // racing on the same vms.json rather than just concurrent tasks
@@ -607,7 +612,7 @@ mod tests {
     async fn pop_member_is_race_free_across_concurrent_processes() {
         // Same regression shape as insert_with_cid_is_race_free_across_concurrent_processes:
         // each task gets its OWN PoolStore (a fresh load(), simulating a
-        // separate `fluxvm pool claim` CLI invocation), racing to pop
+        // separate `fluxctl pool claim` CLI invocation), racing to pop
         // members off a pool pre-seeded with 8 — a real bug here would let
         // two concurrent claims hand out the same VM id.
         let dir = tempfile::tempdir().unwrap();

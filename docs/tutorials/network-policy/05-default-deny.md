@@ -12,10 +12,10 @@ zero-trust pattern — and confirm deny lists win over allow.
 ## 1. Apply a lock-down CNP
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp apply \
+sudo fluxctl --config /etc/fluxvm.toml cnp apply \
   --spec examples/cnp/cnp-default-deny-dns.json
 
-sudo fluxvm --config /etc/fluxvm.toml group get dns-only | python3 -m json.tool
+sudo fluxctl --config /etc/fluxvm.toml group get dns-only | python3 -m json.tool
 ```
 
 **Expect:** `default_allow=false`, allow ports include `udp/53` (and/or
@@ -51,7 +51,7 @@ entries for DNS.
 ## Cleanup
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp delete dns-only
+sudo fluxctl --config /etc/fluxvm.toml cnp delete dns-only
 ```
 
 ## Next

@@ -193,7 +193,7 @@ ephemeral per launch; its socket is torn down and respawned fresh on every
   for an intentionally blank test disk, confirming the firmware itself
   loaded and ran); real `cloud-hypervisor --firmware CLOUDHV.fd --tpm
   socket=...` does the same.
-- **A real `fluxvm create` call with `secure_boot`/`tpm` was also driven
+- **A real `fluxctl create` call with `secure_boot`/`tpm` was also driven
   through the actual compiled binary and REST API** (not just the
   argument-syntax smoke test above) on a real Ubuntu host, and surfaced a
   genuine, environment-specific obstacle worth naming plainly:

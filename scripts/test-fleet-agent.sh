@@ -69,10 +69,10 @@ cleanup() {
     # The bracket trick (`[t]arget/...` instead of `target/...`) keeps
     # pgrep/pkill's own invocation from matching its own command line — a
     # real, hard-learned bug in an earlier version of this cleanup: a plain
-    # `sudo pkill -f "target/release/fluxvm --config ..."` matches ITS
+    # `sudo pkill -f "target/release/fluxctl --config ..."` matches ITS
     # OWN argv too (which literally contains that same pattern string),
     # SIGTERMing itself before it ever reached the real target process —
-    # the remote `fluxvm serve` survived, silently, every time.
+    # the remote `fluxctl serve` survived, silently, every time.
     ssh "$CENTRAL" 'pgrep -f "[t]arget/release/fluxvm-agent (central|node)" | xargs -r kill 2>/dev/null; sudo pkill -f "[t]arget/release/fluxvm --config /tmp/fluxvm-fleet-test" 2>/dev/null; sudo rm -rf /tmp/fluxvm-fleet-test' >/dev/null 2>&1 || true
     ssh "$NODE" 'pgrep -f "[t]arget/release/fluxvm-agent node" | xargs -r kill 2>/dev/null; sudo pkill -f "[t]arget/release/fluxvm --config /tmp/fluxvm-fleet-test" 2>/dev/null; sudo rm -rf /tmp/fluxvm-fleet-test' >/dev/null 2>&1 || true
 }
@@ -81,7 +81,7 @@ trap cleanup EXIT
 start_fluxvm() {
     local target="$1" image_dir_hint="$2"
     ssh "$target" "
-        EPH=\$(ls \$HOME/.deployments/fluxvm/target/release/fluxvm 2>/dev/null || command -v fluxvm)
+        EPH=\$(ls \$HOME/.deployments/fluxvm/target/release/fluxctl 2>/dev/null || command -v fluxctl)
         TMP=/tmp/fluxvm-fleet-test
         sudo rm -rf \"\$TMP\"; mkdir -p \"\$TMP/state\" \"\$TMP/run\"
         cat > \"\$TMP/fluxvm.toml\" <<TOML
@@ -104,13 +104,13 @@ TOML
     "
 }
 
-section "Starting a real fluxvm serve on each host"
+section "Starting a real fluxctl serve on each host"
 start_fluxvm "$CENTRAL" "$CENTRAL_IMAGE" | grep -q '"ok":true' \
-    && pass "fluxvm serve up on central host ($CENTRAL_HOST)" \
-    || { fail "fluxvm serve failed on central host"; exit 1; }
+    && pass "fluxctl serve up on central host ($CENTRAL_HOST)" \
+    || { fail "fluxctl serve failed on central host"; exit 1; }
 start_fluxvm "$NODE" "$NODE_IMAGE" | grep -q '"ok":true' \
-    && pass "fluxvm serve up on node host ($NODE_HOST)" \
-    || { fail "fluxvm serve failed on node host"; exit 1; }
+    && pass "fluxctl serve up on node host ($NODE_HOST)" \
+    || { fail "fluxctl serve failed on node host"; exit 1; }
 
 FLEET_TOKEN="${FLEET_TOKEN:-fleet-test-token}"
 AUTH_H="Authorization: Bearer ${FLEET_TOKEN}"

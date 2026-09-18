@@ -6,7 +6,7 @@ on a KVM lab host.
 ## Prerequisites
 
 - Linux x86_64 host with `/dev/kvm`
-- `fluxvm serve` running (default `127.0.0.1:7788`)
+- `fluxctl serve` running (default `127.0.0.1:7788`)
 - For MicroVM: k3s/`kubectl`, CRDs, and `fluxvm-microvm` controller + node-agent
 - Boot assets (script defaults / env):
 
@@ -22,9 +22,14 @@ export KERNEL="${KERNEL:-/var/lib/fluxvm/kernels/vmlinux}"
 chmod +x scripts/bench-sandbox.sh
 IMAGE=/var/lib/fluxvm/images/bionic-fabric-rootfs.ext4 \
   KERNEL=/var/lib/fluxvm/kernels/vmlinux \
-  FLUXVM_API=http://127.0.0.1:7788 BENCH_N=5 \
+  FLUXVM_API=http://127.0.0.1:7788 BENCH_N=5 MEMORY_MIB=128 REPORT_RSS=1 \
   FLUXVM_TOKEN=… ./scripts/bench-sandbox.sh
 ```
+
+Reports `avg_create_ms` / `boot_to_ready_ms`, `mutation_per_sec`,
+`mutation_per_core_sec`, and with `REPORT_RSS=1` approximate
+`vmm_overhead_mib_approx` for comparison to Firecracker's ≤5 MiB overhead
+target. Full figure map: [capability-figures.md](../capability-figures.md).
 
 ### Engine comparison
 
@@ -35,7 +40,7 @@ fluxvm_engine = "firecracker"   # default — Firecracker child under fluxvm-hyp
 # fluxvm_engine = "kvm"         # pure in-tree KVM (no Firecracker child)
 ```
 
-Restart `fluxvm serve` between runs and compare `avg_create_ms`.
+Restart `fluxctl serve` between runs and compare `avg_create_ms`.
 
 ## Concurrent density (keep-alive)
 
@@ -44,10 +49,11 @@ the run (then deletes unless `DENSITY_CLEANUP=0`):
 
 ```bash
 chmod +x scripts/bench-density.sh
-BENCH_N=8 IMAGE=… KERNEL=… FLUXVM_TOKEN=… ./scripts/bench-density.sh
+BENCH_N=8 DENSITY_MEMORY_MIB=128 IMAGE=… KERNEL=… FLUXVM_TOKEN=… ./scripts/bench-density.sh
 ```
 
-Reports `concurrent_alive`, `wall_ms`, `p50_create_ms` / `p95_create_ms`, and
+Reports `concurrent_alive`, `wall_ms`, `p50_create_ms` / `p95_create_ms`,
+`mutation_per_core_sec` (FC design target: 5), and
 `approx_guest_ram_mib`. This is the density signal; cold-start sequential
 benches above are not.
 
@@ -103,7 +109,7 @@ Earlier same-lab snapshot (2026-09-07): firecracker **6905** ms avg, kvm
 
 ### MicroVM (`backend: qemu`, `networkMode: user`, qcow2)
 
-Image `fluxvm-lifecycle-test.qcow2`. Shadow Pod + node-agent → local `fluxvm
+Image `fluxvm-lifecycle-test.qcow2`. Shadow Pod + node-agent → local `fluxctl
 serve`.
 
 | Metric | Value |
@@ -129,3 +135,19 @@ serve`.
 |-------------|---------------|-------|
 | firecracker | **6905**      | production density engine; memory snapshots OK |
 | kvm         | **5783**      | lab only — pause/resume + in-tree `FLUXKVM1` v2 memory snapshots (not FC-compatible) |
+
+## Density archive (2026-09-18, `80.79.5.173`)
+
+`scripts/bench-density.sh` against live `fluxctl serve` (auth token), image
+`bionic-fabric-rootfs.ext4`, kernel `vmlinux`, `network=none`, backend
+`flux-vm` sandboxes. Full transcript:
+[evidence/density-20260918-80.79.5.173.txt](evidence/density-20260918-80.79.5.173.txt).
+
+| N | wall_ms | avg_create_ms | mutation_per_core_sec | sample_vmm_rss_kib | notes |
+|---|---------|---------------|------------------------|--------------------|-------|
+| 8 | 70493 | 65360 | **0.01** | 5612 | cold create; FC target is 5/core/sec |
+| 4 | 28961 | 28520 | **0.01** | 5616 | same host |
+
+Track B mutation targets are **not** claimed from this cold-create path —
+Firecracker warm pools/snapshots remain the density SoT. This closes the H5
+“archive a host run” evidence gate.

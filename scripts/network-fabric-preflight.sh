@@ -99,11 +99,11 @@ else
 fi
 
 if [[ $CHECK_HEALTH -eq 1 ]]; then
-  if command -v fluxvm >/dev/null 2>&1; then
+  if command -v fluxctl >/dev/null 2>&1; then
     if fluxvm dataplane health >/dev/null 2>&1; then
       ok "fluxvm dataplane health"
     else
-      fail "fluxvm dataplane health failed (is fluxvm serve running with Fabric enabled?)"
+      fail "fluxvm dataplane health failed (is fluxctl serve running with Fabric enabled?)"
     fi
   else
     fail "fluxvm binary not on PATH for --health"

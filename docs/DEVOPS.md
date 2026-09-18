@@ -3,9 +3,9 @@
 FluxVM is the sibling engine under [zyvorai/fabric](https://github.com/zyvorai/fabric). Platform pipelines should:
 
 1. Bootstrap the host (`scripts/bootstrap-host.sh` — KVM, nbd, dirs).
-2. Run `fluxvm serve`.
+2. Run `fluxctl serve`.
 3. Gate on `GET /healthz` (alive) and `GET /readyz` (state dir + dataplane when required).
-4. Let Fabric (or `fluxvm create --spec`) be the only writer.
+4. Let Fabric (or `fluxctl create --spec`) be the only writer.
 
 ## Probes
 

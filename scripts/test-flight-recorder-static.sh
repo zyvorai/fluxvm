@@ -21,7 +21,7 @@ grep -q '/v1/intelligence/vms/{id}/flight' "$ROOT/crates/fluxvm-intelligence/src
 grep -q 'fluxvm_intel_kvm_exit_reason_total' "$ROOT/crates/fluxvm-intelligence/src/main.rs"
 grep -q 'ring_buffer__new' "$ROOT/tools/fluxvm-flight-reader.c"
 grep -q 'kernel_symbol_available' "$ROOT/tools/fluxvm-intelligence-loader.c"
-grep -q 'Trace {' "$ROOT/crates/fluxvm-cli/src/main.rs"
+grep -q 'Trace {' "$ROOT/crates/fluxctl/src/main.rs"
 
 python3 - "$ROOT" <<'PY'
 import pathlib, sys, tomllib
@@ -61,7 +61,7 @@ print('Rust/TOML/YAML portable sanity: PASS')
 PY
 
 if command -v cargo >/dev/null 2>&1; then
-  (cd "$ROOT" && cargo test -p fluxvm-intelligence -p fluxvm-cli)
+  (cd "$ROOT" && cargo test -p fluxvm-intelligence -p fluxctl)
 else
   echo "SKIP cargo tests: cargo unavailable"
 fi

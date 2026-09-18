@@ -54,9 +54,10 @@ unless noted. Live rows use `secure-containers-live.yml` (opt-in via
 | UC-SHELL-03 | NP controller RBAC lists EndpointSlices | 18 | `controllers/fluxvm-networkpolicy-controller/deploy/rbac.yaml` | shell-contracts | no |
 | UC-MATRIX | Matrix targets resolve on disk | * | `scripts/check-use-case-matrix.sh` | matrix-lint | no |
 | UC-S1 | Live CT-bypass + revocation TCP (S1) | 14/16 | `scripts/test-networkpolicy-stateful-set17.sh` | live-stateful | yes |
-| UC-S2 | Multi-node + second CNI (S2) | 14 | `scripts/secure-containers-ga-gate-set19.sh` | live-ga | yes |
-| UC-S9 | Kata P0/P1 fixtures (S9) | * | `scripts/secure-containers-ga-gate-set19.sh` | live-ga | yes |
-| UC-S10 | Real multi-host fleet (S10) | 15E | `scripts/secure-containers-ga-gate-set19.sh` | live-ga | yes |
-| UC-S11 | Attached-VM migration (S11) | 13E | `scripts/secure-containers-ga-gate-set19.sh` | live-ga | yes |
+| UC-S1 | S1 depth mid-flow + SYN anti-replay | 16/17 | `scripts/e2e-networkpolicy-s1-depth.sh` | live-ga | yes |
+| UC-S2 | Multi-node + second CNI (S2) | 14 | `scripts/evidence-networkpolicy-second-cni.sh` (+ Set17 `REQUIRE_MULTI_NODE=1`) | live-ga | yes |
+| UC-S9 | Kata P0/P1 fixtures (S9) | * | `scripts/evidence-kata-p0p1-matrix.sh` | live-ga | yes |
+| UC-S10 | Real multi-host fleet (S10) | 15E | `scripts/evidence-fleet-multihost.sh` | live-ga | yes |
+| UC-S11 | Attached-VM migration (S11) | 13E | `scripts/evidence-migration-attached-vm.sh` | live-ga | yes |
 
 See also [NEXT-FEATURES.md](NEXT-FEATURES.md) and [secure-containers-set19.md](secure-containers-set19.md).

@@ -34,7 +34,7 @@ max_ttl_seconds = 86400
 allowed_backends = ["qemu", "cloud-hypervisor", "firecracker"]
 ```
 
-4. Restart `fluxvm serve` and verify:
+4. Restart `fluxctl serve` and verify:
 
 ```bash
 curl -sf -H "Authorization: Bearer ops-token" http://127.0.0.1:7788/readyz | jq .

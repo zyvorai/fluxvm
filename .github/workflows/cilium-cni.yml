@@ -1,0 +1,93 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Portable gates for Cilium CNI, fluxctl Cilium-style help, and the
+# Secure Containers evidence scripts that do not need a lab cluster.
+# Live legs (S1 pods, S10 fleet, S11 attached migration, Cilium RuntimeClass)
+# stay opt-in and are not required for this workflow to go green.
+name: Cilium CNI and evidence
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/cilium-cni.yml'
+      - 'crates/fluxctl/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'crates/fluxvm-container-client/**'
+      - 'crates/fluxvm-hypervisor/**'
+      - 'configs/cilium-cni.toml'
+      - 'deploy/k8s/cilium/**'
+      - 'docs/cilium-cni.md'
+      - 'scripts/evidence-*.sh'
+      - 'scripts/e2e-networkpolicy-s1-depth.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cilium-cni.yml'
+      - 'crates/fluxctl/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'crates/fluxvm-container-client/**'
+      - 'crates/fluxvm-hypervisor/**'
+      - 'configs/cilium-cni.toml'
+      - 'deploy/k8s/cilium/**'
+      - 'docs/cilium-cni.md'
+      - 'scripts/evidence-*.sh'
+      - 'scripts/e2e-networkpolicy-s1-depth.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cilium-cni:
+    name: Cilium CNI + fluxctl help
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: System dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: cilium-cni
+      - name: Cilium CNI evidence
+        working-directory: fluxvm
+        run: ./scripts/evidence-cilium-cni.sh
+      - name: fluxctl emoji help unit test
+        working-directory: fluxvm
+        run: cargo test -p fluxctl grouped_help_uses_emoji_sections -- --nocapture
+
+  evidence-portable:
+    name: Evidence scripts (portable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Shell syntax
+        run: |
+          set -euo pipefail
+          for f in scripts/evidence-*.sh scripts/e2e-networkpolicy-s1-depth.sh; do
+            bash -n "$f"
+            echo "OK bash -n $f"
+          done
+      - name: S10 skips without a fleet lab
+        run: ./scripts/evidence-fleet-multihost.sh
+      - name: S11 skips when attached migration is off
+        run: FLUXVM_ATTACHED_MIGRATION=0 ./scripts/evidence-migration-attached-vm.sh
+      - name: Install nftables for S2
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables iproute2 python3
+      - name: S2 second policy-engine stand-in
+        run: sudo -E ./scripts/evidence-networkpolicy-second-cni.sh

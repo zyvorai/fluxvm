@@ -8,7 +8,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - 4 VMM backends (QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree FluxVM hypervisor)
 - 4 storage backends (qcow2/raw default, LVM thin, NBD, Ceph RBD)
 - 4 network modes (user-mode NAT, TAP+bridge, netns+DHCP, macvtap)
-- 1 REST API (`fluxvm serve`), 1 CLI (`fluxvm`)
+- 1 REST API (`fluxctl serve`), 1 CLI (`fluxvm`)
 - Kubernetes: 2 CRD paths (`DisposableVm` via `fluxvm-kube`, MicroVM via `fluxvm-microvm`)
 
 ---
@@ -76,13 +76,17 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 - **cgroup v2 resource control** — CPU/memory/IO limits, freeze/thaw, PSI (pressure stall information)
 - **Warm VM pools** — pre-started VMs for lower cold-start latency, resizable after creation
-  (`POST /v1/pools/{name}/resize`, `fluxvm pool resize`) without deleting and recreating the pool.
-  `GET /v1/pools`/`/v1/pools/{name}` and `fluxvm pool list`/`get` report computed `ready` (members
+  (`POST /v1/pools/{name}/resize`, `fluxctl pool resize`) without deleting and recreating the pool.
+  `GET /v1/pools`/`/v1/pools/{name}` and `fluxctl pool list`/`get` report computed `ready` (members
   paused and claimable right now) and `pending` (how many more are needed to reach target `size`)
   counts alongside a lifetime `claimed_total`, so "fully backfilled" vs "still catching up" vs
   "never actually claimed from" don't require inferring anything from `members.len()` vs `size`
   yourself
-- **Firecracker jailer** — chroot + uid/gid drop per VM
+- **Firecracker jailer** — chroot + uid/gid drop per VM; optional `enforce` for production fail-closed ([docs/capability-figures.md](docs/capability-figures.md))
+- **Firecracker virtio rate limiters** — `net_mbit_limit` / `net_pps_limit` / `blk_mbit_limit` / `blk_ops_limit` on create (plain Firecracker backend + FluxVm/`fluxvm-hypervisor` boot config)
+- **Oversubscription policy** — `default_cpu_quota_percent` / `memory_max_equals_guest` ([docs/oversubscription.md](docs/oversubscription.md))
+- **Firecracker static `cpu_template`** — create field; FluxVm when `fluxvm_engine=firecracker`
+- **VM snapshots** — QEMU, Cloud Hypervisor, Firecracker, and FluxVm on `POST /v1/vms/{id}/snapshot`
 - **Admission policy limits** — caps on what a request is allowed to provision
 - **Bearer-token auth/RBAC** — on the REST API
 - **State layout** — durable per-VM state under a documented path structure, see [docs/operations.md — State layout](docs/operations.md#state-layout)
@@ -99,14 +103,14 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 ### `DisposableVm` CRD (`fluxvm-kube`)
 
 - Node-local operator, one instance per node, reconciles only CRs whose `spec.node` matches
-- Verified end to end against a real k3s cluster — 9/9 checks passing (CRD acceptance; `fluxvm serve` reachability; operator running; CR reconciles to a real running VM with live PID; out-of-band VM delete triggers self-healing replacement; CR delete blocks on finalizer until the real VM is actually gone with no leaked QEMU process — see [`scripts/test-kube-operator.sh`](scripts/test-kube-operator.sh))
+- Verified end to end against a real k3s cluster — 9/9 checks passing (CRD acceptance; `fluxctl serve` reachability; operator running; CR reconciles to a real running VM with live PID; out-of-band VM delete triggers self-healing replacement; CR delete blocks on finalizer until the real VM is actually gone with no leaked QEMU process — see [`scripts/test-kube-operator.sh`](scripts/test-kube-operator.sh))
 - Declarative, not one-shot — a TTL-expired or externally-deleted VM gets replaced automatically on next reconcile, `Deployment`-style semantics
 - `spec.networkMode`: `none` / `user` / `tap` / `macvtap`
 - Placement: explicit `spec.node`, or `fluxvm-kube --enable-placement` to pin to the least-loaded capable node
 
 ### MicroVM (`fluxvm-microvm`)
 
-- Scheduler-native alternative — kube-scheduler places a shadow Pod (capacity ticket only), VMM still runs on the host under `fluxvm serve`
+- Scheduler-native alternative — kube-scheduler places a shadow Pod (capacity ticket only), VMM still runs on the host under `fluxctl serve`
 - `MicroVMJob`, `MicroVMPool` CRs for job/pool patterns
 - `MicroVMJob.spec.ttlSecondsAfterFinished` — Kubernetes-`Job`-style auto-cleanup: the Job controller deletes a finished `MicroVMJob` (and, via ownerReferences, its child `MicroVM`s) once it has sat in `Succeeded`/`Failed` for that long, instead of it (and every completed CI-style child VM) needing to be deleted by hand
 - Not KubeVirt — no live migration, CDI, or `virtctl`; see [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison table against `DisposableVm` and KubeVirt
@@ -144,7 +148,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
   node's labels on every heartbeat, and an unaddressed create can require a subset of them via
   `"nodeSelector"` (exact-match key/value, same semantics as a Kubernetes Pod's `spec.nodeSelector`)
   without giving up failover the way hand-picking an exact `--node` would
-- `fluxvm fleet ...` CLI subcommand — full parity with every `/fleet/*` REST route (`nodes`, `node`,
+- `fluxctl fleet ...` CLI subcommand — full parity with every `/fleet/*` REST route (`nodes`, `node`,
   `cordon`, `uncordon`, `node-vms`, `vms`, `capacity`, `create` incl. `--node`/`--node-selector`,
   `delete`, `deregister`), previously reachable only via raw `curl`
 - Verified across two real, physically separate hosts
@@ -178,7 +182,7 @@ This mirrors the [maturity caveat](README.md#maturity-whats-real-today) in the R
 
 | Implemented today | Still open before untrusted multi-tenant use |
 |---|---|
-| Firecracker jailer (chroot + uid/gid isolation) | seccomp/AppArmor/SELinux policy beyond what Secure Containers guests get |
+| Firecracker jailer (chroot + uid/gid isolation; `enforce` fail-closed) + virtio rate limiters | seccomp/AppArmor/SELinux policy beyond what Secure Containers guests get |
 | cgroup v2 resource control, per-request `[policy]` caps, and per-tenant aggregate quotas (`[[policy.tenants]]`) | — |
 | Per-VM network namespaces | — |
 | Bearer-token auth/RBAC on the REST API | — |

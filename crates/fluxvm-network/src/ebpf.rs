@@ -1753,7 +1753,7 @@ fn require_tc() -> Result<()> {
 
 fn require_version(name: &str, args: &[&str]) -> Result<()> {
     // Capture output: bpftool/tc print version banners on stdout, which would
-    // otherwise pollute `fluxvm create` JSON on the CLI.
+    // otherwise pollute `fluxctl create` JSON on the CLI.
     let out = Command::new(name)
         .args(args)
         .stdout(Stdio::null())

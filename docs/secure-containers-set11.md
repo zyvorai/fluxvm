@@ -30,11 +30,10 @@ between inspection and execution; Set 11 deliberately does not claim that
 CONTINUE provides a TOCTOU-safe syscall emulation boundary. No syscall argument
 values are exported in the audit line.
 
-Two filter shapes fail closed during OCI parsing: `SCMP_ACT_NOTIFY` as
-`defaultAction`, and an explicit NOTIFY rule for `sendmsg`. Both are required to
-avoid deadlocking the listener bootstrap path before the supervisor owns the
-notification fd. Set 11 also does not implement remote policy RPC or
-`SECCOMP_IOCTL_NOTIF_ADDFD`; decisions are local and bounded to deny/continue.
+`io.zyvor.seccomp.notify.mode=addfd` (S9) enables `SECCOMP_IOCTL_NOTIF_ADDFD`:
+the supervisor injects `io.zyvor.seccomp.notify.addfd-src` into the notify
+target and returns the installed fd number as the syscall result. Remote
+policy RPC remains out of scope.
 
 Guest requirements for this feature are kernel seccomp user notification
 (kernel 5.0+) and a `libseccomp.so.2` exposing the v2.5-era notification API.

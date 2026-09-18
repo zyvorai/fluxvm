@@ -4,7 +4,12 @@ metadata: {name: fluxvm-microvm-node, namespace: fluxvm-system}
 spec:
   selector: {matchLabels: {app: fluxvm-microvm-node}}
   template:
-    metadata: {labels: {app: fluxvm-microvm-node}}
+    metadata:
+      labels: {app: fluxvm-microvm-node}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9108"
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: fluxvm-microvm-node
       hostNetwork: true
@@ -27,8 +32,15 @@ spec:
                   optional: true
             - name: MICROVM_KVM_SLOTS
               value: "16"
+            - name: MICROVM_METRICS_ADDR
+              value: "0.0.0.0:9108"
             - name: RUST_LOG
               value: info
+          ports:
+            - name: metrics
+              containerPort: 9108
+              hostPort: 9108
+              protocol: TCP
           securityContext:
             runAsNonRoot: true
             runAsUser: 65532

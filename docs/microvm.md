@@ -1,11 +1,12 @@
 # FluxVM MicroVM
 
-Kubernetes-native disposable compute for FluxVM — **without KubeVirt**.
+Kubernetes-native MicroVM compute for FluxVM — **without KubeVirt**.
+Supports short-lived / disposable jobs when you set TTLs; not limited to them.
 
-The VMM process lives on the host under `fluxvm serve`. The Pod is only a
+The VMM process lives on the host under `fluxctl serve`. The Pod is only a
 **capacity ticket** (`registry.k8s.io/pause` plus CPU/memory requests). The one
 privileged surface stays the existing `fluxvm-kube` DaemonSet that already runs
-`fluxvm serve` on capable nodes.
+`fluxctl serve` on capable nodes.
 
 | | |
 |---|---|
@@ -22,7 +23,7 @@ privileged surface stays the existing `fluxvm-kube` DaemonSet that already runs
 |---|---|---|---|
 | API group | `fluxvm.zyvor.io` | `microvm.fluxvm.zyvor.io` | `kubevirt.io` |
 | Placement | Explicit `spec.node` (or optional placer) | kube-scheduler via shadow Pod | virt-launcher Pod |
-| Where QEMU/CH/FC runs | Host under `fluxvm serve` | Host under `fluxvm serve` | Inside virt-launcher container |
+| Where QEMU/CH/FC runs | Host under `fluxctl serve` | Host under `fluxctl serve` | Inside virt-launcher container |
 | Privileged surface | `fluxvm-kube` DaemonSet | Same DaemonSet + thin node-agent | virt-handler / launcher |
 | Capacity accounting | Operator / placer heuristics | Pod requests (CPU/memory) | Pod + CDI |
 | Jobs / pools | Warm pools via REST | `MicroVMJob`, `MicroVMPool` CRs | Jobs / DataVolumes (different model) |
@@ -30,7 +31,7 @@ privileged surface stays the existing `fluxvm-kube` DaemonSet that already runs
 
 Use **DisposableVm** when Ragnarok (or another controller) already pins `spec.node`.
 Use **MicroVM** when you want scheduler-driven placement and Job/Pool CRs on the
-same host VMM. Both talk to local `fluxvm serve` — neither is KubeVirt.
+same host VMM. Both talk to local `fluxctl serve` — neither is KubeVirt.
 
 ## Architecture
 
@@ -47,7 +48,7 @@ status.phase=Scheduled, status.runtime.node=<node>
 node-agent (DaemonSet, hostNetwork)
     │  FLUXVM_URL=http://127.0.0.1:7788
     ▼
-fluxvm serve ──► QEMU / Cloud Hypervisor / Firecracker on the host
+fluxctl serve ──► QEMU / Cloud Hypervisor / Firecracker on the host
 ```
 
 Phases (typical): `Pending` → `Scheduled` → `Provisioning` → `Running`
@@ -77,7 +78,7 @@ kubectl apply -f deploy/k8s/microvm/crd.yaml
 
 ## Deploy
 
-**1. DaemonSet `fluxvm-kube` first** so `fluxvm serve` listens on
+**1. DaemonSet `fluxvm-kube` first** so `fluxctl serve` listens on
 `127.0.0.1:7788` on capable nodes:
 
 ```bash
@@ -207,7 +208,7 @@ Firecracker's direct-kernel boot — its presence on the node is confirmed the
 same way before `status.ready` flips true, and the confirmed path is
 recorded in `status.kernelPath`. Every `MicroVM` that resolves its
 `spec.image` to this catalog entry gets `status.kernelPath` forwarded as
-`kernel` on the underlying `fluxvm serve` create request automatically —
+`kernel` on the underlying `fluxctl serve` create request automatically —
 there's nothing to set on the `MicroVM` itself. A GuestImage that names a
 kernel but doesn't have one staged is never marked Ready (fail closed): a
 missing kernel must block the whole catalog entry, not launch a Firecracker
@@ -273,7 +274,7 @@ python3 scripts/test-microvm-policy.py
 ## Limitations (v1)
 
 - No virt-launcher, virtctl, CDI, or live migration.
-- No second privileged VMM DaemonSet — reuse `fluxvm-kube` / host `fluxvm serve`.
+- No second privileged VMM DaemonSet — reuse `fluxvm-kube` / host `fluxctl serve`.
 - No k8s-native image pull — host-staged paths only (`GuestImage` Ready when the file exists on the node).
 - Shadow Pod is capacity accounting, not the VMM process.
 - Images and TAP/bridges must exist on the scheduled node before Running.

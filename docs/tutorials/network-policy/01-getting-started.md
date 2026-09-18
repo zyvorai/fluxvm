@@ -3,7 +3,7 @@
 **Goal:** Turn on the Fabric eBPF edge, confirm schema **v4**, and
 take a first observe glance at identities and network status.
 
-**You will use:** `fluxvm identity list`, `fluxvm observe`, REST
+**You will use:** `fluxctl identity list`, `fluxctl observe`, REST
 `/v1/network/status`.
 
 ## 1. Enable the dataplane
@@ -25,11 +25,11 @@ curl -sf http://127.0.0.1:7788/v1/vms >/dev/null && echo API_OK
 
 ## 2. List reserved identities
 
-`fluxvm identity list` shows reserved destinations such as `reserved:world`,
+`fluxctl identity list` shows reserved destinations such as `reserved:world`,
 `reserved:host`, and related fabric identities:
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml identity list
+sudo fluxctl --config /etc/fluxvm.toml identity list
 ```
 
 **Expect:** entries with `id` 0–8 plus world-ipv4/ipv6 (19/20),
@@ -42,7 +42,7 @@ curl -s http://127.0.0.1:7788/v1/network/identities | python3 -m json.tool | hea
 ## 3. First observe snapshot
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml observe
+sudo fluxctl --config /etc/fluxvm.toml observe
 # or
 curl -s http://127.0.0.1:7788/v1/network/observe | python3 -m json.tool
 ```

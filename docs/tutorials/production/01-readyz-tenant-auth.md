@@ -1,6 +1,6 @@
 # 01 — Readyz, tenant, and auth
 
-**Time:** ~15 min · **Level:** Beginner · **Prereq:** `fluxvm serve` on loopback
+**Time:** ~15 min · **Level:** Beginner · **Prereq:** `fluxctl serve` on loopback
 
 Confirm liveness vs readiness, create a VM with a tenant, and filter the list.
 

@@ -164,7 +164,7 @@ if [[ $RESTART -eq 1 ]]; then
     systemctl restart fluxvm
     systemctl --no-pager -l status fluxvm | head -20
     echo "==> post-restart health (best-effort)"
-    if command -v fluxvm >/dev/null 2>&1; then
+    if command -v fluxctl >/dev/null 2>&1; then
       fluxvm dataplane health || true
     else
       echo "fluxvm not on PATH; skip dataplane health"

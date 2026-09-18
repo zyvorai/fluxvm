@@ -118,6 +118,12 @@ reaper_interval_secs = 5
 # [policy]
 # max_vcpus = 8
 # max_memory_mib = 16384
+# # FC1 oversubscription defaults (all backends, applied at cgroup attach):
+# default_cpu_quota_percent = 50
+# memory_max_equals_guest = true
+# See docs/oversubscription.md
+# max_vcpus = 8
+# max_memory_mib = 16384
 # max_disk_gib = 100
 # max_ttl_seconds = 86400          # every request must set a ttl_seconds <= this; unbounded VMs are rejected
 # allowed_backends = ["qemu", "firecracker"]
@@ -185,13 +191,20 @@ reaper_interval_secs = 5
 
 # Firecracker only: run every Firecracker VM through Firecracker's own
 # `jailer` binary (chroot, uid/gid drop) instead of exec'ing it directly.
-# Opt-in, off by default. When enabled, firecracker_binary above must be an
+# Lab default is off. Production / untrusted tenants: set enabled = true
+# (and usually enforce = true). When jailer_required (enforce, or
+# auth.require + non-loopback listen), serve and Firecracker launch fail
+# closed unless enabled is also true. firecracker_binary above must be an
 # absolute path (jailer's --exec-file needs a real path, not one resolved
 # via $PATH), and chroot_base_dir should be on the same filesystem as
 # state_dir so resource placement can hardlink instead of copying a
-# multi-GB rootfs per VM.
+# multi-GB rootfs per VM. See docs/capability-figures.md.
+#
+# Production Track A profile (jailer enforce + checklist): merge
+# configs/production-hardening.toml — docs/capability-figures.md.
 # [jailer]
 # enabled = true
+# enforce = true
 # jailer_binary = "jailer"
 # uid = 123
 # gid = 100

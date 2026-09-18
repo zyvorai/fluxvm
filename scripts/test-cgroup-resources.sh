@@ -4,7 +4,7 @@
 # Real-hardware regression test for cgroup v2 resource control
 # (fluxvm-cgroup, VmManager::set_resources/freeze/thaw/metrics/pressure).
 # Boots a real QEMU VM and drives it entirely through the REST API against
-# a running `fluxvm serve` daemon.
+# a running `fluxctl serve` daemon.
 #
 # Proves:
 # - a VM launched by `create` actually lands in its own cgroup
@@ -54,12 +54,12 @@ done
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-    if command -v fluxvm >/dev/null 2>&1; then
-        EPH="$(command -v fluxvm)"
-    elif [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-        EPH="${PROJECT_DIR}/target/release/fluxvm"
+    if command -v fluxctl >/dev/null 2>&1; then
+        EPH="$(command -v fluxctl)"
+    elif [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+        EPH="${PROJECT_DIR}/target/release/fluxctl"
     else
-        echo "fluxvm binary not found. Build it (cargo build --release -p fluxvm-cli) or set FLUXVM_BIN." >&2
+        echo "fluxvm binary not found. Build it (cargo build --release -p fluxctl) or set FLUXVM_BIN." >&2
         exit 1
     fi
 fi
@@ -94,14 +94,14 @@ wait_exec() {
     return 1
 }
 
-section "Start a real 'fluxvm serve' daemon"
+section "Start a real 'fluxctl serve' daemon"
 "$EPH" "${CFG_ARGS[@]}" serve > "${TMP}/serve.log" 2>&1 &
 SERVE_PID=$!
 sleep 2
 if kill -0 "$SERVE_PID" 2>/dev/null; then
-    pass "fluxvm serve started (pid ${SERVE_PID})"
+    pass "fluxctl serve started (pid ${SERVE_PID})"
 else
-    fail "fluxvm serve failed to start — see ${TMP}/serve.log"
+    fail "fluxctl serve failed to start — see ${TMP}/serve.log"
     cat "${TMP}/serve.log" >&2 || true
     exit 1
 fi

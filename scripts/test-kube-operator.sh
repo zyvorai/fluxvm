@@ -51,12 +51,12 @@ kubectl get nodes >/dev/null 2>&1 || { echo "kubectl can't reach a cluster — c
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-    if [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-        EPH="${PROJECT_DIR}/target/release/fluxvm"
-    elif command -v fluxvm >/dev/null 2>&1; then
-        EPH="$(command -v fluxvm)"
+    if [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+        EPH="${PROJECT_DIR}/target/release/fluxctl"
+    elif command -v fluxctl >/dev/null 2>&1; then
+        EPH="$(command -v fluxctl)"
     else
-        echo "fluxvm binary not found. Build it (cargo build --release -p fluxvm-cli) or set FLUXVM_BIN." >&2
+        echo "fluxvm binary not found. Build it (cargo build --release -p fluxctl) or set FLUXVM_BIN." >&2
         exit 1
     fi
 fi
@@ -117,12 +117,12 @@ default_bridge = "vmbr0"
 reaper_interval_secs = 5
 TOML
 
-section "Starting a local fluxvm serve + the fluxvm-kube operator"
+section "Starting a local fluxctl serve + the fluxvm-kube operator"
 "$EPH" --config "${TMP}/fluxvm.toml" serve > "${TMP}/serve.log" 2>&1 &
 SERVE_PID=$!
 sleep 2
-kill -0 "$SERVE_PID" 2>/dev/null || { fail "fluxvm serve failed to start"; cat "${TMP}/serve.log" >&2; exit 1; }
-pass "fluxvm serve is up on ${BASE_URL}"
+kill -0 "$SERVE_PID" 2>/dev/null || { fail "fluxctl serve failed to start"; cat "${TMP}/serve.log" >&2; exit 1; }
+pass "fluxctl serve is up on ${BASE_URL}"
 
 NODE_NAME="$NODE_NAME" FLUXVM_URL="$BASE_URL" RUST_LOG=info "$KUBE" > "${TMP}/operator.log" 2>&1 &
 OPERATOR_PID=$!

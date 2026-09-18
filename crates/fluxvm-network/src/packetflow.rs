@@ -212,6 +212,32 @@ pub fn from_flow_record(
     guest_ip: Option<&str>,
     dataplane_mode: &str,
 ) -> PacketFlowView {
+    from_flow_record_attributed(
+        rec,
+        src_labels,
+        vm_name,
+        guest_ip,
+        dataplane_mode,
+        None,
+        None,
+    )
+}
+
+/// Like [`from_flow_record`], but overlays CEP / Cilium SecurityIdentity on
+/// the Hubble endpoints when known (F1: SID attribution for VM traffic).
+///
+/// `src_sid` / `dst_sid` come from FluxVM CEP views (optionally enriched
+/// from the Cilium agent). When absent, Fabric CT `rec.identity` and
+/// `reserved:world` remain the fallback — never invents Cilium map writes.
+pub fn from_flow_record_attributed(
+    rec: &FlowRecord,
+    src_labels: &[String],
+    vm_name: Option<&str>,
+    guest_ip: Option<&str>,
+    dataplane_mode: &str,
+    src_sid: Option<(u32, Vec<String>)>,
+    dst_sid: Option<(u32, Vec<String>)>,
+) -> PacketFlowView {
     let verdict = normalize_verdict(&rec.verdict);
     let protocol = proto_name(rec.protocol).to_string();
     let direction = infer_direction(rec, guest_ip);
@@ -224,6 +250,14 @@ pub fn from_flow_record(
         &protocol,
         rec.destination_port,
     );
+    let (src_id, src_lbl) = match src_sid {
+        Some((id, labels)) if id > 0 => (id, labels),
+        _ => (rec.identity, src_labels.to_vec()),
+    };
+    let (dst_id, dst_lbl) = match dst_sid {
+        Some((id, labels)) if id > 0 => (id, labels),
+        _ => (RESERVED_WORLD, vec!["reserved:world".into()]),
+    };
     let mut view = PacketFlowView {
         time: rec.last_seen_ns.to_string(),
         verdict: verdict.clone(),
@@ -240,13 +274,13 @@ pub fn from_flow_record(
         source_port: rec.source_port,
         destination_port: rec.destination_port,
         source: HubbleEndpoint {
-            identity: rec.identity,
-            labels: src_labels.to_vec(),
+            identity: src_id,
+            labels: src_lbl,
             pod_name: vm_name.map(str::to_string),
         },
         destination: HubbleEndpoint {
-            identity: RESERVED_WORLD,
-            labels: vec!["reserved:world".into()],
+            identity: dst_id,
+            labels: dst_lbl,
             pod_name: None,
         },
         packets: rec.packets,
@@ -559,5 +593,25 @@ mod tests {
         assert_eq!(FlowOutput::parse("plain"), FlowOutput::Plain);
         assert_eq!(FlowOutput::parse("color"), FlowOutput::Color);
         assert_eq!(FlowOutput::parse("json"), FlowOutput::Json);
+    }
+
+    #[test]
+    fn attributed_sid_overrides_fabric_ct_identity() {
+        let rec = sample_rec("allow");
+        let view = from_flow_record_attributed(
+            &rec,
+            &["app=web".into()],
+            Some("web-1"),
+            Some("10.0.0.2"),
+            "cilium",
+            Some((4242, vec!["k8s:app=web".into()])),
+            Some((7, vec!["k8s:app=peer".into()])),
+        );
+        assert_eq!(view.source.identity, 4242);
+        assert_eq!(view.source.labels, vec!["k8s:app=web".to_string()]);
+        assert_eq!(view.destination.identity, 7);
+        let flow = to_hubble_flow(&view);
+        assert_eq!(flow.source.identity, 4242);
+        assert_eq!(flow.destination.identity, 7);
     }
 }

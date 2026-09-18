@@ -90,6 +90,11 @@ impl VmBackend for FluxVmBackend {
                 FluxVmEngine::Firecracker => crate::api::FluxVmEngine::Firecracker,
                 FluxVmEngine::Kvm => crate::api::FluxVmEngine::Kvm,
             },
+            net_mbit_limit: req.net_mbit_limit,
+            net_pps_limit: req.net_pps_limit,
+            blk_mbit_limit: req.blk_mbit_limit,
+            blk_ops_limit: req.blk_ops_limit,
+            cpu_template: req.cpu_template.clone(),
         };
 
         let boot_path = ctx.workspace.join("fluxvm-boot.json");

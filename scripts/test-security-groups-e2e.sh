@@ -54,10 +54,10 @@ section() { echo ""; echo "=== $1 ==="; }
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-  if command -v fluxvm >/dev/null 2>&1; then
-    EPH="$(command -v fluxvm)"
-  elif [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-    EPH="${PROJECT_DIR}/target/release/fluxvm"
+  if command -v fluxctl >/dev/null 2>&1; then
+    EPH="$(command -v fluxctl)"
+  elif [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+    EPH="${PROJECT_DIR}/target/release/fluxctl"
   else
     echo "fluxvm binary not found" >&2
     exit 1

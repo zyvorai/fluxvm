@@ -10,10 +10,10 @@ Supported names (case-insensitive): `http`→80, `https`→443, `dns`→53,
 ## Apply
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp apply \
+sudo fluxctl --config /etc/fluxvm.toml cnp apply \
   --spec examples/cnp/cnp-named-ports.json
 
-sudo fluxvm --config /etc/fluxvm.toml group get named-ports-demo \
+sudo fluxctl --config /etc/fluxvm.toml group get named-ports-demo \
   | python3 -c 'import json,sys;d=json.load(sys.stdin);p=d["policy"]["allow_ports"];
 assert "tcp/443" in p and "udp/53" in p, p; print("ok", p)'
 ```
@@ -28,7 +28,7 @@ python3 scripts/test-network-policy.py
 ## Cleanup
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml cnp delete named-ports-demo
+sudo fluxctl --config /etc/fluxvm.toml cnp delete named-ports-demo
 ```
 
 ## Next

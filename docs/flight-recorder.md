@@ -48,8 +48,8 @@ curl http://127.0.0.1:7790/v1/intelligence/vms/<uuid>/flight
 Live trace from the normal FluxVM CLI:
 
 ```bash
-fluxvm trace <uuid> --seconds 5 --limit 128
-fluxvm trace <uuid> --seconds 10 --limit 500 --output jsonl
+fluxctl trace <uuid> --seconds 5 --limit 128
+fluxctl trace <uuid> --seconds 10 --limit 500 --output jsonl
 ```
 
 The companion binary also supports:
@@ -58,7 +58,7 @@ The companion binary also supports:
 fluxvm-intelligence trace <uuid> 5 128
 ```
 
-`fluxvm trace` consumes the live Flight Recorder ring buffer. Use one active live consumer per node/stream when complete event delivery matters; the persistent histogram/counter maps are the canonical summary metrics.
+`fluxctl trace` consumes the live Flight Recorder ring buffer. Use one active live consumer per node/stream when complete event delivery matters; the persistent histogram/counter maps are the canonical summary metrics.
 
 ## Prometheus
 

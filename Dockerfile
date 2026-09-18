@@ -1,6 +1,6 @@
 # Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 # SPDX-License-Identifier: Apache-2.0
-# Builds one image with three entrypoints: `fluxvm serve` (VMM REST API),
+# Builds one image with three entrypoints: `fluxctl serve` (VMM REST API),
 # `fluxvm-kube` (DisposableVm operator), and `fluxvm-microvm` (scheduled
 # MicroVM controller / node-agent). Deploy selects via each container's
 # `command:` — see deploy/k8s/daemonset.yaml and deploy/k8s/microvm/.
@@ -38,7 +38,7 @@ COPY . ./fluxvm
 COPY --from=guestkit . ./guestkit
 
 WORKDIR /build/fluxvm
-RUN cargo build --locked --release -p fluxvm-cli -p fluxvm-kube -p fluxvm-microvm -p fluxvm-hypervisor
+RUN cargo build --locked --release -p fluxctl -p fluxvm-kube -p fluxvm-microvm -p fluxvm-hypervisor
 RUN ./scripts/build-ebpf.sh
 
 FROM docker.io/library/debian:bookworm-slim AS runtime
@@ -59,7 +59,8 @@ RUN bash /tmp/install-cloud-hypervisor.sh \
     && bash /tmp/install-firecracker.sh \
     && rm -f /tmp/install-cloud-hypervisor.sh /tmp/install-firecracker.sh
 
-COPY --from=builder /build/fluxvm/target/release/fluxvm /usr/local/bin/fluxvm
+COPY --from=builder /build/fluxvm/target/release/fluxctl /usr/local/bin/fluxctl
+RUN ln -sfn fluxctl /usr/local/bin/fluxvm
 COPY --from=builder /build/fluxvm/target/release/fluxvm-kube /usr/local/bin/fluxvm-kube
 COPY --from=builder /build/fluxvm/target/release/fluxvm-microvm /usr/local/bin/fluxvm-microvm
 COPY --from=builder /build/fluxvm/target/release/fluxvm-hypervisor /usr/local/bin/fluxvm-hypervisor

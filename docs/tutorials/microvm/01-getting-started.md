@@ -6,7 +6,7 @@
 **You will use:** `fluxvm-microvm --print-crd`, `deploy/k8s/microvm/`,
 `examples/microvm/microvm.yaml`.
 
-## 1. Confirm fluxvm serve on the node
+## 1. Confirm fluxctl serve on the node
 
 The MicroVM node-agent only talks to a **local** API:
 

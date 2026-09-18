@@ -1,0 +1,7 @@
+{
+  "ociVersion": "1.1.0",
+  "process": {
+    "terminal": true,
+    "args": ["sh", "-c", "for i in 1 2 3; do sleep 0.2; done"]
+  }
+}

@@ -646,6 +646,11 @@ mod tests {
             pod_uid: None,
             secure_boot: None,
             tpm: None,
+            net_mbit_limit: None,
+            net_pps_limit: None,
+            blk_mbit_limit: None,
+            blk_ops_limit: None,
+            cpu_template: None,
         }
     }
 

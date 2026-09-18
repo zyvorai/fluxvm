@@ -215,6 +215,11 @@ impl VmManager {
             pod_uid: None,
             secure_boot: None,
             tpm: None,
+            net_mbit_limit: None,
+            net_pps_limit: None,
+            blk_mbit_limit: None,
+            blk_ops_limit: None,
+            cpu_template: None,
         };
         tokio::fs::write(tdir.join("spec.json"), serde_json::to_vec_pretty(&spec)?).await?;
         Ok(TemplateInfo {
@@ -356,6 +361,11 @@ mod tests {
             pod_uid: None,
             secure_boot: None,
             tpm: None,
+            net_mbit_limit: None,
+            net_pps_limit: None,
+            blk_mbit_limit: None,
+            blk_ops_limit: None,
+            cpu_template: None,
         }
     }
 

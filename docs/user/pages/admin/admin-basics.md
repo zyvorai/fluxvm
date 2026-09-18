@@ -6,7 +6,7 @@ Deploy, systemd, ports, host prep, auth, and production operations.
 
 ## When to use it
 
-- Standing up `fluxvm serve` under systemd
+- Standing up `fluxctl serve` under systemd
 - Enabling bearer tokens before exposing the API
 - Debugging readiness / console logs
 
@@ -20,7 +20,7 @@ Deploy, systemd, ports, host prep, auth, and production operations.
 
 | Topic | Guidance |
 |-------|----------|
-| **Service** | `fluxvm serve` / systemd unit; TTL + pool backfill need serve |
+| **Service** | `fluxctl serve` / systemd unit; TTL + pool backfill need serve |
 | **Host deps** | `scripts/bootstrap-host.sh`; `nbd` + `libhivex` for Windows build-image |
 | **Ports** | FluxVM REST **7788**; Fabric (if used) **9095** |
 | **Health** | `curl -sf http://127.0.0.1:7788/healthz` · `/readyz` |

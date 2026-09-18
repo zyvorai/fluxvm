@@ -1,0 +1,14 @@
+{
+  "ociVersion": "1.1.0",
+  "annotations": {
+    "fluxvm.io/hostpath-allow": "/var/fluxvm-hostpath-allow"
+  },
+  "mounts": [
+    {
+      "destination": "/hostpath",
+      "type": "bind",
+      "source": "/var/fluxvm-hostpath-allow/demo",
+      "options": ["rbind", "rprivate"]
+    }
+  ]
+}

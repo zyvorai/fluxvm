@@ -68,6 +68,10 @@ journal fails closed to avoid duplicate Pod VMs.
 The primary CNI interface now supports IPv4/IPv6 dual-stack replay. Extra
 routable interfaces are rejected by default; use
 `FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0` only in controlled labs.
+On Cilium nodes set `FLUXVM_CONTAINER_CNI_PROVIDER=auto` (default) or
+`cilium` — Multus `netN` ifaces are ignored for the primary handoff; see
+[docs/cilium-cni.md](../../docs/cilium-cni.md) and
+`deploy/k8s/cilium/runtime-env.env`.
 
 Set 6 does not change containerd dead-shim supervision policy. It provides
 safe recovery when a replacement shim is launched.

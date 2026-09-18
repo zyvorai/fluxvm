@@ -65,7 +65,7 @@ jobs:
         working-directory: fluxvm
         run: cargo clippy --workspace --all-targets || true
 
-  # Real-hardware regression test for `fluxvm build-image`'s guestkit-based
+  # Real-hardware regression test for `fluxctl build-image`'s guestkit-based
   # customization path (see scripts/test-image-customize.sh) across every
   # package-manager branch install_packages() supports. Doesn't need KVM —
   # build-image never boots a VM, it mounts the image directly via
@@ -110,9 +110,9 @@ jobs:
           workspaces: fluxvm
           key: image-customize-${{ matrix.distro }}
 
-      - name: Build fluxvm-cli + fluxvm-image (release)
+      - name: Build fluxctl + fluxvm-image (release)
         working-directory: fluxvm
-        run: cargo build --release -p fluxvm-cli -p fluxvm-image
+        run: cargo build --release -p fluxctl -p fluxvm-image
 
       # Base cloud images are 500MB+ and rarely change — cache by URL so
       # only the first run per distro per cache-eviction cycle pays for it.
@@ -133,7 +133,7 @@ jobs:
       - name: Run test-image-customize.sh
         working-directory: fluxvm
         env:
-          FLUXVM_BIN: ${{ github.workspace }}/fluxvm/target/release/fluxvm
+          FLUXVM_BIN: ${{ github.workspace }}/fluxvm/target/release/fluxctl
           TEST_PACKAGE: tree
           TEST_SERVICE: ${{ matrix.test_service }}
         run: sudo -E ./scripts/test-image-customize.sh --image /tmp/base-image.qcow2

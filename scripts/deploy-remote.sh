@@ -46,7 +46,7 @@ Usage:
 Profiles:
   (default)     Full remote build + system deps (qemu, cloud-utils)
   --quick       Rsync + cargo build on remote (skip dep install)
-  --quick --build-local   Install locally built target/release/fluxvm (Linux only)
+  --quick --build-local   Install locally built target/release/fluxctl (Linux only)
 
 Options:
   --help              Show this help
@@ -257,14 +257,14 @@ REMOTE
 build_local_artifacts() {
     step_begin "Local build (release)"
     if [ "$DRY_RUN" = true ]; then
-        dry "would run: cargo build --release -p fluxvm-cli -p fluxvm-guest-agent"
+        dry "would run: cargo build --release -p fluxctl -p fluxvm-guest-agent"
         return 0
     fi
     if [ "$(uname -s)" != "Linux" ]; then
         fail "--build-local requires a Linux build host (same arch as remote). Use full deploy without --build-local."
     fi
-    (cd "${PROJECT_DIR}" && cargo build --release -p fluxvm-cli -p fluxvm-guest-agent)
-    [ -f "${PROJECT_DIR}/target/release/fluxvm" ] || fail "target/release/fluxvm missing"
+    (cd "${PROJECT_DIR}" && cargo build --release -p fluxctl -p fluxvm-guest-agent)
+    [ -f "${PROJECT_DIR}/target/release/fluxctl" ] || fail "target/release/fluxctl missing"
     ok "Local binary ready"
     step_end
 }
@@ -301,10 +301,10 @@ sync_files() {
 }
 
 sync_binary_only() {
-    local bin="${PROJECT_DIR}/target/release/fluxvm"
+    local bin="${PROJECT_DIR}/target/release/fluxctl"
     [ -f "$bin" ] || fail "Missing $bin — run with --build-local after building on Linux"
     _ssh "mkdir -p '${REMOTE_DIR}/bin'"
-    _rsync "$bin" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/bin/fluxvm"
+    _rsync "$bin" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/bin/fluxctl"
     _rsync "${PROJECT_DIR}/config.example.toml" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/config.example.toml"
     _rsync "${PROJECT_DIR}/systemd/fluxvm.service" "${TARGET_USER}@${TARGET_HOST}:${REMOTE_DIR}/fluxvm.service"
     ok "Release binary synced"
@@ -346,7 +346,7 @@ else
         systemd-devel hivex-devel
 fi
 
-# guestkit (used by `fluxvm build-image`'s image customization) mounts
+# guestkit (used by `fluxctl build-image`'s image customization) mounts
 # qcow2/raw images via qemu-nbd, which needs the nbd kernel module loaded.
 $SUDO modprobe nbd max_part=16 2>/dev/null || echo "WARN: modprobe nbd failed — image customization will not work until the nbd module is loaded" >&2
 
@@ -383,15 +383,18 @@ SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 source "$HOME/.cargo/env" 2>/dev/null || true
 cd "${REMOTE_STAGING}"
-cargo build --release -p fluxvm-cli -p fluxvm-guest-agent -p fluxvm-hypervisor -p fluxvm-microvm -p fluxvm-kube 2>&1 | tail -30
-$SUDO install -m755 target/release/fluxvm /usr/local/bin/fluxvm
+set -o pipefail
+cargo build --release -p fluxctl -p fluxvm-guest-agent -p fluxvm-hypervisor -p fluxvm-microvm -p fluxvm-kube 2>&1 | tee /tmp/fluxvm-cargo-build.log | tail -30
+set +o pipefail
+$SUDO install -m755 target/release/fluxctl /usr/local/bin/fluxctl
+$SUDO ln -sfn fluxctl /usr/local/bin/fluxvm
 $SUDO install -m755 target/release/fluxvm-hypervisor /usr/local/bin/fluxvm-hypervisor
 $SUDO install -m755 target/release/fluxvm-microvm /usr/local/bin/fluxvm-microvm
 $SUDO install -m755 target/release/fluxvm-kube /usr/local/bin/fluxvm-kube
 [ -f /etc/fluxvm.toml ] || $SUDO install -m644 config.example.toml /etc/fluxvm.toml
 $SUDO install -m644 systemd/fluxvm.service /etc/systemd/system/fluxvm.service
 $SUDO systemctl daemon-reload 2>/dev/null || true
-echo "Installed: $(fluxvm --version 2>/dev/null || echo ok) + fluxvm-hypervisor + fluxvm-microvm + fluxvm-kube"
+echo "Installed: $(fluxctl --version 2>/dev/null || echo ok) + fluxvm-hypervisor + fluxvm-microvm + fluxvm-kube"
 REMOTE
 }
 
@@ -400,11 +403,12 @@ install_binary_quick() {
 set -e
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
-$SUDO install -m755 "${REMOTE_STAGING}/bin/fluxvm" /usr/local/bin/fluxvm
+$SUDO install -m755 "${REMOTE_STAGING}/bin/fluxctl" /usr/local/bin/fluxctl
+$SUDO ln -sfn fluxctl /usr/local/bin/fluxvm
 [ -f /etc/fluxvm.toml ] || $SUDO install -m644 "${REMOTE_STAGING}/config.example.toml" /etc/fluxvm.toml
 $SUDO install -m644 "${REMOTE_STAGING}/fluxvm.service" /etc/systemd/system/fluxvm.service
 $SUDO systemctl daemon-reload 2>/dev/null || true
-echo "Installed: $(fluxvm --version 2>/dev/null || echo ok)"
+echo "Installed: $(fluxctl --version 2>/dev/null || echo ok)"
 REMOTE
 }
 
@@ -477,7 +481,7 @@ SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 $SUDO systemctl stop fluxvm 2>/dev/null || true
 $SUDO systemctl disable fluxvm 2>/dev/null || true
-$SUDO rm -f /usr/local/bin/fluxvm /etc/systemd/system/fluxvm.service
+$SUDO rm -f /usr/local/bin/fluxctl /usr/local/bin/fluxvm /etc/systemd/system/fluxvm.service
 rm -rf "${REMOTE_STAGING}"
 echo "fluxvm removed (config /etc/fluxvm.toml and /var/lib/fluxvm left in place)"
 REMOTE
@@ -513,7 +517,7 @@ print_deployment_summary() {
     echo ""
     echo "  ssh ${TARGET_USER}@${TARGET_HOST}"
     echo "  systemctl status fluxvm"
-    echo "  fluxvm --config /etc/fluxvm.toml create --spec examples/qemu.json"
+    echo "  fluxctl --config /etc/fluxvm.toml create --spec examples/qemu.json"
     echo "  bash ${REMOTE_DIR}/scripts/preflight.sh"
     echo ""
 }

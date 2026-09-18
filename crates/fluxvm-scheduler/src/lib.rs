@@ -117,19 +117,15 @@ fn secure_boot_or_tpm_backend_error(req: &CreateVmRequest) -> Option<String> {
     None
 }
 
-/// VM-state snapshot save/restore is only implemented for `Qemu`
-/// (`savevm`/`-loadvm`) and `CloudHypervisor` (its own snapshot directory) --
-/// `Firecracker` and `FluxVm` have neither. Shared by `create_vm_snapshot`
-/// (the save side) and `start_from_snapshot` (the restore side) so the two
-/// can never drift: before this existed, `start_from_snapshot` set
-/// `loadvm_tag` on the launch request and called `start_impl` unconditionally,
-/// with no backend check of its own -- since neither `FirecrackerBackend`'s
-/// nor `FluxVmBackend`'s `launch` ever reads `req.loadvm_tag` at all, that
-/// silently produced an ordinary cold boot instead of a restore, with no
-/// error telling the caller their snapshot tag was ignored.
+/// VM-state snapshot save/restore: QEMU (`savevm`/`-loadvm`), Cloud Hypervisor
+/// (snapshot dir + `--restore`), Firecracker (`/snapshot/create`+`/load`), and
+/// FluxVm (hypervisor control SnapshotSave/Restore — FC or FLUXKVM1 by engine).
 fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
     match backend {
-        BackendKind::Qemu | BackendKind::CloudHypervisor => None,
+        BackendKind::Qemu
+        | BackendKind::CloudHypervisor
+        | BackendKind::Firecracker
+        | BackendKind::FluxVm => None,
         other => Some(format!("snapshot not supported for backend {other:?}")),
     }
 }
@@ -206,7 +202,30 @@ fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
     if !p.allow_extra_args && !req.extra_args.is_empty() {
         bail!("policy forbids extra_args (set policy.allow_extra_args = true to permit)");
     }
+    validate_cpu_template(req, cfg)?;
     Ok(())
+}
+
+/// Firecracker static CPU templates only — CH/QEMU/kvm have no FC-style ABI.
+fn validate_cpu_template(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
+    let Some(ref t) = req.cpu_template else {
+        return Ok(());
+    };
+    if t.trim().is_empty() {
+        bail!("cpu_template must be a non-empty Firecracker static template name (e.g. T2, T2A, C3)");
+    }
+    match req.backend {
+        BackendKind::Firecracker => Ok(()),
+        BackendKind::FluxVm => match cfg.fluxvm_engine {
+            fluxvm_core::config::FluxVmEngine::Firecracker => Ok(()),
+            fluxvm_core::config::FluxVmEngine::Kvm => bail!(
+                "cpu_template requires fluxvm_engine=firecracker (in-tree kvm has no FC CPU templates)"
+            ),
+        },
+        other => bail!(
+            "cpu_template is Firecracker-only (got backend {other:?}; Cloud Hypervisor/QEMU have no FC-style CPU templates)"
+        ),
+    }
 }
 
 /// Aggregate per-tenant admission check -- see `Policy::tenants`'s own doc
@@ -400,6 +419,21 @@ impl VmManager {
             Ok(mgr) => {
                 let cgroup_path = mgr.path().to_path_buf();
                 record.cgroup_path = Some(cgroup_path.clone());
+                // FC1: optional host oversubscription defaults from [policy].
+                if let Some(pct) = self.cfg.policy.default_cpu_quota_percent {
+                    if let Err(e) = mgr
+                        .cpu()
+                        .set_max(&fluxvm_cgroup::CpuMax::from_percent(pct as u64))
+                    {
+                        tracing::warn!(vm = %id, error = %e, "policy default_cpu_quota_percent apply failed");
+                    }
+                }
+                if self.cfg.policy.memory_max_equals_guest {
+                    let bytes = record.request.memory_mib.saturating_mul(1024 * 1024);
+                    if let Err(e) = mgr.memory().set_max(bytes) {
+                        tracing::warn!(vm = %id, error = %e, "policy memory_max_equals_guest apply failed");
+                    }
+                }
                 // Sentinel Set 7S: device-cgroup + outbound-IP hardening for
                 // the QEMU process, layered on the cgroup we just created.
                 // Best-effort like the cgroup creation above it — a failure
@@ -892,19 +926,33 @@ impl VmManager {
             if vm.status != VmStatus::Running {
                 continue;
             }
-            let labels = endpoints
-                .iter()
-                .find(|e| e.uuid == vm.id)
+            let ep = endpoints.iter().find(|e| e.uuid == vm.id);
+            let labels = ep
                 .map(|e| e.identity_labels.clone())
                 .unwrap_or_default();
+            // F1: prefer CEP SecurityIdentity (cilium-agent or fluxvm-hash) over
+            // the Fabric CT sample id so hubble observe shows the same SID as
+            // `fluxctl hubble endpoints`.
+            let src_sid = ep.map(|e| (e.identity, e.identity_labels.clone()));
             if let Ok(items) = self.network_flows(vm.id, limit.min(32)).await {
                 for item in items {
-                    flows.push(fluxvm_network::packetflow::from_flow_record(
+                    let dst_sid = endpoints
+                        .iter()
+                        .find(|e| {
+                            e.networking.addressing.iter().any(|a| {
+                                a.ipv4.as_deref() == Some(item.destination.as_str())
+                                    || a.ipv6.as_deref() == Some(item.destination.as_str())
+                            })
+                        })
+                        .map(|e| (e.identity, e.identity_labels.clone()));
+                    flows.push(fluxvm_network::packetflow::from_flow_record_attributed(
                         &item,
                         &labels,
                         Some(&vm.name),
                         vm.guest_ip.as_deref(),
                         &mode,
+                        src_sid.clone(),
+                        dst_sid,
                     ));
                 }
             }
@@ -1509,19 +1557,166 @@ impl VmManager {
         self.start_impl(id, None).await
     }
 
-    /// Same as [`Self::start`], but relaunches with an existing internal
-    /// (`snapshot-save`) tag on this VM's own disk as a one-shot
-    /// `-loadvm` override -- restores CPU/memory/device state instead of
-    /// an ordinary cold boot. The tag is applied to this single launch
-    /// only, never written into the VM's stored `CreateVmRequest`, so a
-    /// later plain `start` doesn't keep trying to load a now-stale
-    /// snapshot. Added for zyvor-fabric's hibernate/resume feature.
+    /// Same as [`Self::start`], but restores from a prior [`Self::create_vm_snapshot`]
+    /// tag. QEMU/CH use `loadvm_tag` / `--restore`; Firecracker and FluxVm use
+    /// dedicated snapshot-load paths (they ignore `loadvm_tag` on cold launch).
     pub async fn start_from_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
         let vm = self.get(id).await?;
         if let Some(e) = snapshot_backend_error(vm.backend) {
             bail!(e);
         }
-        self.start_impl(id, Some(tag)).await
+        match vm.backend {
+            BackendKind::Firecracker => self.start_firecracker_from_snapshot(id, tag).await,
+            BackendKind::FluxVm => self.start_fluxvm_from_snapshot(id, tag).await,
+            _ => self.start_impl(id, Some(tag)).await,
+        }
+    }
+
+    async fn start_firecracker_from_snapshot(
+        self: &Arc<Self>,
+        id: Uuid,
+        tag: &str,
+    ) -> Result<VmRecord> {
+        let started = std::time::Instant::now();
+        let mut vm = self.get(id).await?;
+        if vm.status == VmStatus::Running {
+            return Ok(vm);
+        }
+        let dest = vm.workspace.join("snapshots").join(tag);
+        fluxvm_firecracker::snapshot::assert_snapshot_dir(&dest)?;
+
+        let network = fluxvm_network::prepare(&self.cfg, id, &vm.request.network).await?;
+        vm.tap_name = network.tap_name.clone();
+        vm.netns = network.netns.clone();
+        vm.dhcp_leasefile = network.dhcp_leasefile.clone();
+        vm.guest_ip = network.guest_ip.clone();
+
+        let log_path = vm.workspace.join("vm.log");
+        let vsock = vm.vsock_socket.clone();
+        let result = fluxvm_firecracker::snapshot::snapshot_restore(
+            &self.cfg,
+            &vm.workspace,
+            &dest,
+            &log_path,
+            vsock.as_deref(),
+            network.netns.as_deref(),
+        )
+        .await;
+
+        match result {
+            Ok((pid, api)) => {
+                vm.pid = Some(pid);
+                vm.control_socket = Some(api);
+                let vfio = vm.request.vfio_devices.clone();
+                self.attach_cgroup(id, pid, &mut vm, &vfio);
+                vm.status = VmStatus::Running;
+                vm.error = None;
+                self.store.update(vm.clone()).await?;
+                metrics::record_vm_start(started.elapsed().as_millis() as u64);
+                Ok(vm)
+            }
+            Err(e) => {
+                if let Some(tap) = &vm.tap_name {
+                    let _ = fluxvm_network::cleanup(
+                        &self.cfg.state_dir,
+                        id,
+                        &vm.request.network,
+                        tap,
+                        vm.netns.as_deref(),
+                    )
+                    .await;
+                }
+                vm.status = VmStatus::Failed;
+                vm.error = Some(format!("{e:#}"));
+                self.store.update(vm.clone()).await?;
+                Err(e)
+            }
+        }
+    }
+
+    async fn start_fluxvm_from_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
+        let started = std::time::Instant::now();
+        let mut vm = self.get(id).await?;
+        if vm.status == VmStatus::Running {
+            return Ok(vm);
+        }
+        let dest = vm.workspace.join("snapshots").join(tag);
+        let meta = dest.join("snap");
+        if !meta.exists() {
+            bail!(
+                "FluxVm snapshot metadata missing at {} (create with POST .../snapshot first)",
+                meta.display()
+            );
+        }
+
+        let network = fluxvm_network::prepare(&self.cfg, id, &vm.request.network).await?;
+        vm.tap_name = network.tap_name.clone();
+        vm.netns = network.netns.clone();
+        vm.dhcp_leasefile = network.dhcp_leasefile.clone();
+        vm.guest_ip = network.guest_ip.clone();
+
+        let api = vm.workspace.join("fluxvm.sock");
+        let _ = tokio::fs::remove_file(&api).await;
+        let log_path = vm.workspace.join("vm.log");
+        let args = vec!["--api-sock".into(), api.display().to_string()];
+        let (program, args) = fluxvm_core::process::netns_wrap(
+            network.netns.as_deref(),
+            &self.cfg.fluxvm_hypervisor_binary,
+            &args,
+        );
+        let child = fluxvm_core::process::spawn_logged_with_env(
+            &program,
+            &args,
+            &log_path,
+            &[
+                (
+                    "FLUXVM_FIRECRACKER_BINARY",
+                    self.cfg.firecracker_binary.as_str(),
+                ),
+                (
+                    "FLUXVM_ENGINE",
+                    match self.cfg.fluxvm_engine {
+                        fluxvm_core::config::FluxVmEngine::Firecracker => "firecracker",
+                        fluxvm_core::config::FluxVmEngine::Kvm => "kvm",
+                    },
+                ),
+            ],
+        )
+        .await?;
+        let pid = child
+            .id()
+            .context("fluxvm-hypervisor exited before PID was available")?;
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if tokio::time::Instant::now() > deadline {
+                bail!("fluxvm-hypervisor API not ready for snapshot restore");
+            }
+            match fluxvm_hypervisor::control::request(&api, &fluxvm_hypervisor::ApiRequest::Ping)
+                .await
+            {
+                Ok(_) => break,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+
+        let req = fluxvm_hypervisor::ApiRequest::SnapshotRestore { path: meta };
+        let resp = fluxvm_hypervisor::control::request(&api, &req).await?;
+        match resp {
+            fluxvm_hypervisor::ApiResponse::Ok { .. } => {}
+            fluxvm_hypervisor::ApiResponse::Error { message } => bail!("{message}"),
+            other => bail!("unexpected restore response: {other:?}"),
+        }
+
+        vm.pid = Some(pid);
+        vm.control_socket = Some(api);
+        let vfio = vm.request.vfio_devices.clone();
+        self.attach_cgroup(id, pid, &mut vm, &vfio);
+        vm.status = VmStatus::Running;
+        vm.error = None;
+        self.store.update(vm.clone()).await?;
+        metrics::record_vm_start(started.elapsed().as_millis() as u64);
+        Ok(vm)
     }
 
     // ZYVOR_RUNTIME_BOUNDARY_V1: FluxVM performs the VMM transport; Fabric chooses hosts/policy.
@@ -1571,8 +1766,9 @@ impl VmManager {
     }
 
     /// Save full VM state so a later [`Self::start_from_snapshot`] can restore it.
-    /// QEMU uses an internal `savevm` tag on the VM disk; Cloud Hypervisor writes
-    /// a snapshot directory under `<workspace>/snapshots/<tag>/`.
+    /// QEMU uses an internal `savevm` tag on the VM disk; Cloud Hypervisor /
+    /// Firecracker write under `<workspace>/snapshots/<tag>/`; FluxVm uses the
+    /// hypervisor control SnapshotSave path (same layout as sandbox snaps).
     pub async fn create_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
         let vm = self.get(id).await?;
         if vm.status != VmStatus::Running && vm.status != VmStatus::Paused {
@@ -1590,6 +1786,30 @@ impl VmManager {
                 let dest = vm.workspace.join("snapshots").join(tag);
                 tokio::fs::create_dir_all(&dest).await?;
                 fluxvm_cloud_hypervisor::snapshot_save(&self.cfg, &vm, &dest).await
+            }
+            BackendKind::Firecracker => {
+                let dest = vm.workspace.join("snapshots").join(tag);
+                tokio::fs::create_dir_all(&dest).await?;
+                fluxvm_firecracker::snapshot::snapshot_save(&self.cfg, &vm, &dest).await
+            }
+            BackendKind::FluxVm => {
+                let dest = vm.workspace.join("snapshots").join(tag);
+                tokio::fs::create_dir_all(&dest).await?;
+                // Metadata JSON path; hypervisor writes sibling .mem/.vmstate/.rootfs.
+                let meta = dest.join("snap");
+                let sock = vm
+                    .control_socket
+                    .as_ref()
+                    .context("FluxVm VM has no control socket")?;
+                let req = fluxvm_hypervisor::ApiRequest::SnapshotSave {
+                    path: meta,
+                };
+                let resp = fluxvm_hypervisor::control::request(sock, &req).await?;
+                match resp {
+                    fluxvm_hypervisor::ApiResponse::Ok { .. } => Ok(()),
+                    fluxvm_hypervisor::ApiResponse::Error { message } => bail!("{message}"),
+                    other => bail!("unexpected snapshot response: {other:?}"),
+                }
             }
             _ => unreachable!("snapshot_backend_error already rejected every other backend"),
         }
@@ -2172,7 +2392,7 @@ impl VmManager {
                 // Failed as its very last step — a record still Creating
                 // this long after `created_at` means the process running
                 // that `create()` call was killed or crashed mid-flight
-                // (real trigger: `fluxvm serve` killed while a pool
+                // (real trigger: `fluxctl serve` killed while a pool
                 // backfill's `create()` was in progress) before it could
                 // reach either outcome. Nothing else will ever finish or
                 // clean up this placeholder, so reclaim it here rather than
@@ -2201,7 +2421,7 @@ impl VmManager {
     /// `claim_from_pool` also fire off a best-effort background top-up via
     /// `tokio::spawn`, but that only actually finishes if the calling
     /// process stays alive long enough — true for a request handled inside
-    /// this `serve` process, but NOT true for a one-shot `fluxvm pool
+    /// this `serve` process, but NOT true for a one-shot `fluxctl pool
     /// create`/`claim` CLI invocation, which exits (killing every task it
     /// spawned, finished or not) right after printing its result. This tick
     /// is the backstop that keeps every pool topped up regardless of which
@@ -2294,7 +2514,7 @@ impl VmManager {
     /// `claim_from_pool` already use -- the reaper's per-tick top-up is the
     /// same backstop for a resize as it is for those two, so a caller
     /// inside `serve` needs nothing further; a one-shot CLI caller should
-    /// follow up with `backfill_pool_sync` exactly as `fluxvm pool create`
+    /// follow up with `backfill_pool_sync` exactly as `fluxctl pool create`
     /// already does, for the same reason (see its own doc comment).
     ///
     /// Shrinking (`size` < current) is handled synchronously and
@@ -2423,9 +2643,9 @@ impl VmManager {
     /// Blocking variant of the backfill that `create_pool`/`claim_from_pool`
     /// otherwise only fire off in the background: waits for `name`'s pool
     /// to actually reach its target size before returning. Meant for
-    /// one-shot callers — the CLI's `fluxvm pool create` uses this so the
+    /// one-shot callers — the CLI's `fluxctl pool create` uses this so the
     /// pool is genuinely ready by the time that (short-lived) process
-    /// exits, without depending on a separately-running `fluxvm serve`
+    /// exits, without depending on a separately-running `fluxctl serve`
     /// daemon's reaper tick to finish the job later. A REST caller inside
     /// `serve` has no need for this — the process outlives the background
     /// task either way.
@@ -2578,6 +2798,11 @@ mod tests {
             pod_uid: None,
             secure_boot: None,
             tpm: None,
+            net_mbit_limit: None,
+            net_pps_limit: None,
+            blk_mbit_limit: None,
+            blk_ops_limit: None,
+            cpu_template: None,
         }
     }
 
@@ -2721,8 +2946,13 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_is_allowed_on_qemu_and_cloud_hypervisor() {
-        for backend in [BackendKind::Qemu, BackendKind::CloudHypervisor] {
+    fn snapshot_is_allowed_on_all_vmm_backends() {
+        for backend in [
+            BackendKind::Qemu,
+            BackendKind::CloudHypervisor,
+            BackendKind::Firecracker,
+            BackendKind::FluxVm,
+        ] {
             assert!(
                 snapshot_backend_error(backend).is_none(),
                 "expected snapshot to be allowed on {backend:?}"
@@ -2731,13 +2961,33 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_is_rejected_on_firecracker_and_fluxvm() {
-        for backend in [BackendKind::Firecracker, BackendKind::FluxVm] {
+    fn cpu_template_accepted_on_firecracker() {
+        let cfg = Config::default();
+        let mut r = req(BackendKind::Firecracker, Some("/boot/vmlinux"), None);
+        r.cpu_template = Some("T2".into());
+        assert!(validate_cpu_template(&r, &cfg).is_ok());
+    }
+
+    #[test]
+    fn cpu_template_rejected_on_qemu_and_ch() {
+        let cfg = Config::default();
+        for backend in [BackendKind::Qemu, BackendKind::CloudHypervisor] {
+            let mut r = req(backend, None, None);
+            r.cpu_template = Some("T2".into());
             assert!(
-                snapshot_backend_error(backend).is_some(),
-                "expected snapshot to be rejected on {backend:?}, matching create_vm_snapshot's own rejection -- a start_from_snapshot call must fail the same way rather than silently ignoring the tag and cold-booting"
+                validate_cpu_template(&r, &cfg).is_err(),
+                "expected cpu_template rejected on {backend:?}"
             );
         }
+    }
+
+    #[test]
+    fn cpu_template_rejected_on_fluxvm_kvm_engine() {
+        let mut cfg = Config::default();
+        cfg.fluxvm_engine = fluxvm_core::config::FluxVmEngine::Kvm;
+        let mut r = req(BackendKind::FluxVm, Some("/boot/vmlinux"), None);
+        r.cpu_template = Some("T2".into());
+        assert!(validate_cpu_template(&r, &cfg).is_err());
     }
 
     #[test]

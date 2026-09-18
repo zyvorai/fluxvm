@@ -50,14 +50,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
-        with: {go-version: "1.23"}
+        with:
+          go-version-file: controllers/fluxvm-networkpolicy-controller/go.mod
       - run: cd controllers/fluxvm-networkpolicy-controller && go test -count=1 ./... && go test -race -count=1 ./... && go vet ./...
   observer:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
-        with: {go-version: "1.23"}
+        with:
+          go-version-file: tools/fluxvm-policy-observer/go.mod
       - run: |
           cd tools/fluxvm-policy-observer
           test -z "$(gofmt -l .)"

@@ -5,10 +5,10 @@
 # claim_from_pool / delete_pool). Boots real QEMU VMs.
 #
 # Proves:
-# - `fluxvm pool create` (a one-shot CLI process) leaves the pool actually
+# - `fluxctl pool create` (a one-shot CLI process) leaves the pool actually
 #   full by the time it exits, not just "eventually, if something else
 #   happens to finish the job" (see VmManager::backfill_pool_sync)
-# - claiming through the REST API against a running `fluxvm serve` daemon
+# - claiming through the REST API against a running `fluxctl serve` daemon
 #   pops a ready member and resumes it MUCH faster than a full create would
 #   take (timed against a plain create for comparison)
 # - the daemon backfills the pool again after each claim on its own reaper
@@ -17,7 +17,7 @@
 # - deleting a pool cleans up every member VM it still owns
 #
 # Claims specifically go through REST against a running `serve` daemon, NOT
-# the bare `fluxvm pool claim` CLI command — `claim_from_pool` fires its
+# the bare `fluxctl pool claim` CLI command — `claim_from_pool` fires its
 # replenishment off as a background task (see VmManager::spawn_backfill),
 # which only actually finishes if the process that started it stays alive.
 # Inside `serve` that's true by construction; a one-shot CLI invocation of
@@ -60,12 +60,12 @@ done
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-    if command -v fluxvm >/dev/null 2>&1; then
-        EPH="$(command -v fluxvm)"
-    elif [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-        EPH="${PROJECT_DIR}/target/release/fluxvm"
+    if command -v fluxctl >/dev/null 2>&1; then
+        EPH="$(command -v fluxctl)"
+    elif [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+        EPH="${PROJECT_DIR}/target/release/fluxctl"
     else
-        echo "fluxvm binary not found. Build it (cargo build --release -p fluxvm-cli) or set FLUXVM_BIN." >&2
+        echo "fluxvm binary not found. Build it (cargo build --release -p fluxctl) or set FLUXVM_BIN." >&2
         exit 1
     fi
 fi
@@ -156,14 +156,14 @@ CREATE_SECS=$(python3 -c "print(f'{$(date +%s.%N) - $T0:.1f}')")
 echo "  plain create took ${CREATE_SECS}s"
 eph delete "$PLAIN_ID" >/dev/null 2>&1 || true
 
-section "Start a real 'fluxvm serve' daemon"
+section "Start a real 'fluxctl serve' daemon"
 "$EPH" "${CFG_ARGS[@]}" serve > "${TMP}/serve.log" 2>&1 &
 SERVE_PID=$!
 sleep 2
 if kill -0 "$SERVE_PID" 2>/dev/null; then
-    pass "fluxvm serve started (pid ${SERVE_PID})"
+    pass "fluxctl serve started (pid ${SERVE_PID})"
 else
-    fail "fluxvm serve failed to start — see ${TMP}/serve.log"
+    fail "fluxctl serve failed to start — see ${TMP}/serve.log"
     cat "${TMP}/serve.log" >&2 || true
 fi
 
@@ -221,7 +221,7 @@ section "Stop the daemon before deleting the pool (avoid racing its reaper)"
 kill "$SERVE_PID" >/dev/null 2>&1 || true
 wait "$SERVE_PID" 2>/dev/null || true
 SERVE_PID=""
-pass "fluxvm serve stopped"
+pass "fluxctl serve stopped"
 
 section "Delete pool cleans up remaining members"
 REMAINING=$(eph pool get "$POOL" | python3 -c "import json,sys;print(len(json.load(sys.stdin)['members']))" 2>/dev/null || echo 0)

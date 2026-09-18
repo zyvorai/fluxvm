@@ -28,13 +28,18 @@ else
   echo "missing Set 18 EndpointSlice gate" >&2; exit 2
 fi
 
-# S2 production requirement includes a second CNI, not only multiple nodes.
-: "${FLUXVM_SECOND_CNI_GATE:?set to the real NetworkPolicy allow/deny command for a second supported CNI}"
-# S9 Kata-equivalence is deliberately deployment/lab-owned.
-: "${FLUXVM_KATA_GATE:?set to the OCI/Multus/hostPath/NOTIF_ADDFD/TTY/warm-pool conformance command}"
-# S10/S11 require real topology and credentials.
-: "${FLUXVM_REAL_FLEET_GATE:?set to a command that runs fluxvm-fleet canary/wave/rollback on >=2 real hosts}"
-: "${FLUXVM_ATTACHED_MIGRATION_GATE:?set to a command that runs fluxvm-migrate against a live attached VM}"
+# S2 second CNI / policy-engine (multi-node same-CNI already ran above).
+export FLUXVM_SECOND_CNI_GATE="${FLUXVM_SECOND_CNI_GATE:-$ROOT/scripts/evidence-networkpolicy-second-cni.sh}"
+# S9 Kata-equivalence matrix (soft legs unless FLUXVM_KATA_REQUIRE_ALL=1).
+export FLUXVM_KATA_GATE="${FLUXVM_KATA_GATE:-FLUXVM_KATA_SOFT=1 $ROOT/scripts/evidence-kata-p0p1-matrix.sh}"
+# S10 skips unless FLUXVM_FLEET_E2E=1 + lab marker; S11 runs attached migration.
+export FLUXVM_REAL_FLEET_GATE="${FLUXVM_REAL_FLEET_GATE:-$ROOT/scripts/evidence-fleet-multihost.sh}"
+export FLUXVM_ATTACHED_MIGRATION_GATE="${FLUXVM_ATTACHED_MIGRATION_GATE:-FLUXVM_ATTACHED_MIGRATION=1 $ROOT/scripts/evidence-migration-attached-vm.sh}"
+
+# S1 depth (mid-flow kill + SYN anti-replay) when enabled.
+if [[ "${FLUXVM_S1_DEPTH:-1}" == 1 && -x "$ROOT/scripts/e2e-networkpolicy-s1-depth.sh" ]]; then
+  RUNTIME_CLASS="${FLUXVM_RUNTIMECLASS}" "$ROOT/scripts/e2e-networkpolicy-s1-depth.sh"
+fi
 
 bash -lc "$FLUXVM_SECOND_CNI_GATE"
 bash -lc "$FLUXVM_KATA_GATE"

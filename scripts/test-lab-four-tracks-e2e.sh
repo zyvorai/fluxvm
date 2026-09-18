@@ -6,7 +6,7 @@
 #   mTLS header identity, Hubble-lite CEP views, CH QGA serial socket,
 #   KVM FLUXVM_KVM_LOCK_MEM + pause/resume.
 #
-# Run on a Linux/KVM host with fluxvm serve (auth token in /etc/fluxvm.toml).
+# Run on a Linux/KVM host with fluxctl serve (auth token in /etc/fluxvm.toml).
 #
 #   sudo -E ./scripts/test-lab-four-tracks-e2e.sh   # CH/QGA + pause need root tools
 #   ./scripts/test-lab-four-tracks-e2e.sh             # most checks as kvm-group user
@@ -206,9 +206,9 @@ cert = "$TLS/server.crt"
 key = "$TLS/server.key"
 client_ca = "$TLS/ca.crt"
 EOF
-pkill -f "fluxvm --config $TLS/fluxvm.toml" 2>/dev/null || true
-BIN="${FLUXVM_BIN:-$(command -v fluxvm || true)}"
-[[ -x "$BIN" ]] || BIN=/usr/local/bin/fluxvm
+pkill -f "fluxctl --config $TLS/fluxvm.toml" 2>/dev/null || true
+BIN="${FLUXVM_BIN:-$(command -v fluxctl || true)}"
+[[ -x "$BIN" ]] || BIN=/usr/local/bin/fluxctl
 "$BIN" --config "$TLS/fluxvm.toml" serve >"$TLS/serve.log" 2>&1 &
 SPID=$!
 UP=0

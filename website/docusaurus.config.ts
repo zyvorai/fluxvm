@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'FluxVM',
-  tagline: 'Disposable Compute Engine — secure, isolated, short-lived VMs via Firecracker, Cloud Hypervisor, QEMU/KVM, and the FluxVM hypervisor.',
+  tagline: 'Rust-native VM control plane — secure, isolated VMs via Firecracker, Cloud Hypervisor, QEMU/KVM, and the FluxVM hypervisor.',
   favicon: 'img/favicon.svg',
 
   future: {

@@ -47,12 +47,12 @@ done
 
 EPH="${FLUXVM_BIN:-}"
 if [ -z "$EPH" ]; then
-    if command -v fluxvm >/dev/null 2>&1; then
-        EPH="$(command -v fluxvm)"
-    elif [ -x "${PROJECT_DIR}/target/release/fluxvm" ]; then
-        EPH="${PROJECT_DIR}/target/release/fluxvm"
+    if command -v fluxctl >/dev/null 2>&1; then
+        EPH="$(command -v fluxctl)"
+    elif [ -x "${PROJECT_DIR}/target/release/fluxctl" ]; then
+        EPH="${PROJECT_DIR}/target/release/fluxctl"
     else
-        echo "fluxvm binary not found. Build it (cargo build --release -p fluxvm-cli) or set FLUXVM_BIN." >&2
+        echo "fluxvm binary not found. Build it (cargo build --release -p fluxctl) or set FLUXVM_BIN." >&2
         exit 1
     fi
 fi
@@ -195,7 +195,7 @@ section "GET /v1/images/catalog reports signature_valid correctly"
 SERVE_PID=$!
 sleep 2
 if ! kill -0 "$SERVE_PID" 2>/dev/null; then
-    fail "fluxvm serve failed to start (port ${BASE_URL} likely in use by something else) — see ${TMP}/serve.log"
+    fail "fluxctl serve failed to start (port ${BASE_URL} likely in use by something else) — see ${TMP}/serve.log"
     cat "${TMP}/serve.log" >&2 || true
     SERVE_PID=""
 fi

@@ -23,7 +23,7 @@ Live migration primitives:
 - `GET /v1/vms/{id}/migration/status`
 - `POST /v1/vms/{id}/migration/cancel`
 
-`fluxvm migrate start|status|cancel` is the CLI equivalent of the three
+`fluxctl migrate start|status|cancel` is the CLI equivalent of the three
 routes above -- for the standalone mode mentioned below, where there is no
 Fabric orchestrator to drive them over HTTP.
 
@@ -57,6 +57,21 @@ Contract v1 is intentionally narrow:
 The legacy `fluxvm-agent` multi-host registry remains a lightweight standalone
 mode for users who do not run Fabric. It must not grow Fabric-class HA, DRS,
 site recovery, tenant scheduling, or datacenter semantics.
+
+## Threat containment (Firecracker figures)
+
+FluxVM maps Firecracker's host-integration and threat-containment figures to
+node-local layers:
+
+| Barrier | Owner |
+|---|---|
+| KVM + minimal virtio device model | VMM backends (FC / in-tree / CH / QEMU) |
+| Virtio I/O rate limiters | Firecracker `rate_limiter` from create fields; in-tree token buckets; Fabric Mbps/PPS |
+| Jailer + cgroups + seccomp | `[jailer]` + `fluxvm-cgroup` + stock FC / in-tree seccomp |
+| Host egress filter | Network Fabric or `network.mode=none` (required outside the VMM) |
+
+Capability numbers (Track A isolation vs optional Track B density):
+[capability-figures.md](capability-figures.md).
 
 ## Target receiver
 

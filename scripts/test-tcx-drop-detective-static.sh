@@ -16,8 +16,8 @@ grep -q 'diagnose_vm' "$ROOT/crates/fluxvm-intelligence/src/lib.rs"
 grep -q '/v1/intelligence/vms/{id}/diagnose' "$ROOT/crates/fluxvm-intelligence/src/main.rs"
 grep -q 'network/effective' "$ROOT/crates/fluxvm-intelligence/src/main.rs"
 grep -q 'network/flows?limit=' "$ROOT/crates/fluxvm-intelligence/src/main.rs"
-grep -q 'Diagnose {' "$ROOT/crates/fluxvm-cli/src/main.rs"
-grep -q 'fluxvm_intelligence::diagnose_vm' "$ROOT/crates/fluxvm-cli/src/main.rs"
+grep -q 'Diagnose {' "$ROOT/crates/fluxctl/src/main.rs"
+grep -q 'fluxvm_intelligence::diagnose_vm' "$ROOT/crates/fluxctl/src/main.rs"
 
 python3 - "$ROOT" <<'PY'
 import pathlib, sys, tomllib
@@ -32,7 +32,7 @@ print('TOML + Rust structural checks: PASS')
 PY
 
 if command -v cargo >/dev/null 2>&1; then
-  cargo test -p fluxvm-network -p fluxvm-intelligence -p fluxvm-cli
+  cargo test -p fluxvm-network -p fluxvm-intelligence -p fluxctl
 else
   echo 'SKIP cargo tests: cargo not installed'
 fi

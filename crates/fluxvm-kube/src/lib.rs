@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! `DisposableVm` CRD + a node-local operator that reconciles them against a
-//! *local* `fluxvm serve` instance's REST API. See `crd::DisposableVmSpec`
+//! *local* `fluxctl serve` instance's REST API. See `crd::DisposableVmSpec`
 //! for the per-node targeting model and `controller` for the reconcile loop.
 
 pub mod controller;

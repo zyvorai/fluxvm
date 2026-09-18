@@ -11,10 +11,10 @@ Concrete scenarios — CI runners, golden images, fleets, sandboxes.
 
 ## Guide
 
-FluxVM is a disposable-VM control plane: create a short-lived, isolated
-virtual machine backed by QEMU/KVM, Cloud Hypervisor, or Firecracker, use
-it, and let a TTL reaper clean it up. Every use case below maps directly
-onto what's implemented today — see the
+FluxVM is a Rust-native VM control plane: create and manage isolated
+virtual machines backed by QEMU/KVM, Cloud Hypervisor, or Firecracker.
+Optional `ttl_seconds` supports disposable / short-lived patterns. Every use
+case below maps directly onto what's implemented today — see the
 [technical docs](/docs/fluxvm) or the project's
 [README](https://github.com/zyvorai/fluxvm#what-is-implemented) for the
 full feature list.
@@ -39,8 +39,8 @@ cat > ci-job.json <<'JSON'
 }
 JSON
 
-id=$(fluxvm create --spec ci-job.json | jq -r .id)
-fluxvm exec "$id" -- ./run-tests.sh
+id=$(fluxctl create --spec ci-job.json | jq -r .id)
+fluxctl exec "$id" -- ./run-tests.sh
 ```
 
 Firecracker's jailer (chroot + uid/gid drop) gives each job its own

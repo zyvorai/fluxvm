@@ -1,6 +1,6 @@
-# Building custom OS images with `fluxvm build-image`
+# Building custom OS images with `fluxctl build-image`
 
-`fluxvm build-image` takes a base disk image and applies customizations —
+`fluxctl build-image` takes a base disk image and applies customizations —
 hostname, package installs, arbitrary commands, SSH-key injection, file
 copy-in, and systemd service enablement — to produce a new, ready-to-boot
 image. Everything runs through [`guestkit`](https://github.com/zyvorai/guestkit)
@@ -34,7 +34,7 @@ For each field in the request:
 
 `packages` is the one field that needs real outbound networking from
 whatever host you run `build-image` on — the guest's package manager has to
-actually reach its package repositories. `fluxvm build-image` handles this
+actually reach its package repositories. `fluxctl build-image` handles this
 automatically: it stages a working `/etc/resolv.conf` into the guest for the
 duration of the install (a stock cloud image's own `resolv.conf` is usually
 a dangling symlink that only resolves under a running systemd instance) and
@@ -90,7 +90,7 @@ the actual VM backends are involved in building an image.
 ```
 
 ```bash
-sudo fluxvm build-image --spec ubuntu-dev.json
+sudo fluxctl build-image --spec ubuntu-dev.json
 ```
 
 Notes:
@@ -118,7 +118,7 @@ Notes:
 ```
 
 ```bash
-sudo fluxvm build-image --spec rocky-dev.json
+sudo fluxctl build-image --spec rocky-dev.json
 ```
 
 Notes:
@@ -148,7 +148,7 @@ Notes:
 ```
 
 ```bash
-sudo fluxvm build-image --spec arch-dev.json
+sudo fluxctl build-image --spec arch-dev.json
 ```
 
 Notes — Arch needs two things every other distro here doesn't, and
@@ -222,7 +222,7 @@ Use a `windows{}` block instead of Linux fields. Host needs `libhivex-dev` /
 `hivex-devel` (see `scripts/bootstrap-host.sh`).
 
 ```bash
-sudo fluxvm build-image --spec examples/build-image-windows.json
+sudo fluxctl build-image --spec examples/build-image-windows.json
 ```
 
 | Field | What it does |
@@ -236,5 +236,5 @@ sudo fluxvm build-image --spec examples/build-image-windows.json
 
 Do not mix `windows{}` with `packages` / `commands` / `enable_services` / `ssh_key` /
 top-level `hostname`. After boot with `qga.enabled` (QEMU only), use
-`fluxvm qga …` or `POST /v1/vms/{id}/qga/…` for live PowerShell and firewall
+`fluxctl qga …` or `POST /v1/vms/{id}/qga/…` for live PowerShell and firewall
 changes. Gated smoke: `WINDOWS_IMAGE=… sudo -E ./scripts/test-windows-customize.sh`.

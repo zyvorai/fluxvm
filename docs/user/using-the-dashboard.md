@@ -8,14 +8,14 @@ orchestration UI lives in [Zyvor Fabric](https://github.com/zyvorai/fabric)
 
 | Job | Command |
 |-----|---------|
-| Create | `fluxvm create --spec examples/qemu.json` |
-| List | `fluxvm list` |
-| Exec (Linux agent) | `fluxvm exec <id> -- cmd` |
-| QGA (Windows) | `fluxvm qga ping\|powershell\|firewall-open <id> …` |
-| Delete | `fluxvm delete <id>` |
-| Build image | `fluxvm build-image --spec examples/build-image.json` |
-| Pool | `fluxvm pool create\|claim\|list …` |
-| Serve API | `fluxvm serve` |
+| Create | `fluxctl create --spec examples/qemu.json` |
+| List | `fluxctl list` |
+| Exec (Linux agent) | `fluxctl exec <id> -- cmd` |
+| QGA (Windows) | `fluxctl qga ping\|powershell\|firewall-open <id> …` |
+| Delete | `fluxctl delete <id>` |
+| Build image | `fluxctl build-image --spec examples/build-image.json` |
+| Pool | `fluxctl pool create\|claim\|list …` |
+| Serve API | `fluxctl serve` |
 
 Always pass `--config /etc/fluxvm.toml` when not using defaults.
 

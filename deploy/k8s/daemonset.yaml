@@ -40,7 +40,7 @@ spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
       containers:
-        - name: fluxvm
+        - name: fluxctl
           image: ghcr.io/zyvorai/fluxvm:0.1.0
           command: ["fluxvm", "--config", "/etc/fluxvm.toml", "serve"]
           securityContext:

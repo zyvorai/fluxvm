@@ -12,7 +12,7 @@ ship in-tree; Phase 2b now enriches CEP views from the Cilium agent HTTP API
 | **1** | Coexistence `mode=cilium`; Fabric `network.hubble_ui_url` + Edge Dataplane **Open Hubble** link; FluxVM `/flows` observe | **Done** |
 | **2a** | CiliumEndpoint-*shaped* objects per VM + Hubble-lite JSON/UI (`/v1/network/endpoints`, `/hubble/*`) | **Done** (no Cilium private maps) — [hubble-lite.md](hubble-lite.md) |
 | **2b** | CiliumEndpoint + SecurityIdentity from Cilium agent — no private map hacks | **Done** (agent HTTP GET enrich; soft-fail → fluxvm-hash) |
-| **3** | Hubble SID attribution for VM traffic; optional flow export bridge | **Not started** (Hubble-lite flows use Fabric CT samples; SID via 2b when agent matches) |
+| **3** | Hubble SID attribution for VM traffic; optional flow export bridge | **Done** (F1: hubble observe overlays CEP/agent SID; CT samples remain Fabric) |
 
 Non-goals forever-as-fake: embedding Hubble UI inside Fabric; writing Cilium private maps from FluxVM.
 
@@ -22,7 +22,7 @@ Non-goals forever-as-fake: embedding Hubble UI inside Fabric; writing Cilium pri
 |-------|-------------|--------|
 | **1** | CH Windows **boot**: `hyperv: true` → `kvm_hyperv=on`, UEFI firmware, `examples/windows-ch.json` | **Done** |
 | **2** | Host↔guest day-2 channel on CH (`--serial socket=qga.sock`) | **Done** (host path) — [ch-windows-qga.md](ch-windows-qga.md) |
-| **3** | `fluxvm qga …` on CH when the guest speaks QGA on that serial | **Done** at host path; guest must run qemu-ga on COM/serial. Named virtio-serial `org.qemu.guest_agent.0` remains QEMU-only |
+| **3** | `fluxctl qga …` on CH when the guest speaks QGA on that serial | **Done** at host path; guest must run qemu-ga on COM/serial. Named virtio-serial `org.qemu.guest_agent.0` remains QEMU-only |
 
 QEMU + `examples/windows-qga.json` remains the GA QGA path.
 

@@ -5,7 +5,7 @@
 | Capability | Status |
 |------------|--------|
 | CH Windows **boot** (UEFI + `hyperv: true`) | **Done** (Phase-1) |
-| Live QGA (`fluxvm qga …`) on CH | **Host path shipped** — `--serial socket=qga.sock`; guest must speak QGA |
+| Live QGA (`fluxctl qga …`) on CH | **Host path shipped** — `--serial socket=qga.sock`; guest must speak QGA |
 | Named virtio-serial `org.qemu.guest_agent.0` | **QEMU-only** |
 | In-tree Hubble-lite / CEP-*shaped* views | **Done** — see [hubble-lite.md](hubble-lite.md); agent identity enrich when `mode=cilium` |
 
@@ -16,7 +16,7 @@
 3. Create with `backend: cloud-hypervisor`, `hyperv: true`, and `firmware` (or `cloud_hypervisor_firmware` in config):
 
 ```bash
-fluxvm create --spec examples/windows-ch.json
+fluxctl create --spec examples/windows-ch.json
 ```
 
 `hyperv: true` passes `kvm_hyperv=on` on CH `--cpus` (required for most Windows guests).
@@ -28,7 +28,7 @@ Console: CH Windows uses serial (SAC); `console` is off. Use RDP once the guest 
 ## QGA
 
 `qga.enabled` on Cloud Hypervisor now opens `--serial socket=<workspace>/qga.sock`
-and keeps boot logs on `--console file=…`. `fluxvm qga ping|exec|powershell`
+and keeps boot logs on `--console file=…`. `fluxctl qga ping|exec|powershell`
 uses the same `fluxvm_image::qga` client as QEMU.
 
 The guest must speak the QEMU guest-agent JSON protocol on that serial

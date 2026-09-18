@@ -11,7 +11,7 @@ Build and customize guest OS images for disposable VMs.
 
 ## Guide
 
-`fluxvm build-image` takes a base disk image and applies customizations —
+`fluxctl build-image` takes a base disk image and applies customizations —
 hostname, package installs, arbitrary commands, SSH-key injection, file
 copy-in, and systemd service enablement — to produce a new, ready-to-boot
 image. It does this through [GuestKit](/guestkit) (`qemu-nbd` + `chroot`).
@@ -80,7 +80,7 @@ offline customize, also install `libhivex-dev` (Debian/Ubuntu) or
 ```
 
 ```bash
-sudo fluxvm build-image --spec ubuntu-dev.json
+sudo fluxctl build-image --spec ubuntu-dev.json
 ```
 
 Ubuntu's stock cloud image enables the `universe` component by default, so
@@ -103,7 +103,7 @@ name).
 ```
 
 ```bash
-sudo fluxvm build-image --spec rocky-dev.json
+sudo fluxctl build-image --spec rocky-dev.json
 ```
 
 Rocky's `GenericCloud` image ships `cronie` (providing `crond.service`)
@@ -126,7 +126,7 @@ pre-installed — `enable_services: ["crond"]` works without needing
 ```
 
 ```bash
-sudo fluxvm build-image --spec arch-dev.json
+sudo fluxctl build-image --spec arch-dev.json
 ```
 
 Arch needs two things every other distro here doesn't — both handled for
@@ -184,7 +184,7 @@ Use a `windows{}` block instead of Linux fields. Do **not** mix
 ```
 
 ```bash
-sudo fluxvm build-image --spec examples/build-image-windows.json
+sudo fluxctl build-image --spec examples/build-image-windows.json
 ```
 
 | Field | What it does |
@@ -203,14 +203,14 @@ virtio-serial `org.qemu.guest_agent.0` channel (see
 `examples/windows-qga.json`). After the GuestKit Windows agent is up:
 
 ```bash
-fluxvm qga ping <id>
-fluxvm qga powershell <id> -- 'Get-NetFirewallRule | Select-Object -First 5'
-fluxvm qga firewall-open <id> --name ZyvorApp --port 8080 --protocol tcp
-fluxvm qga firewall-close <id> --name ZyvorApp
+fluxctl qga ping <id>
+fluxctl qga powershell <id> -- 'Get-NetFirewallRule | Select-Object -First 5'
+fluxctl qga firewall-open <id> --name ZyvorApp --port 8080 --protocol tcp
+fluxctl qga firewall-close <id> --name ZyvorApp
 ```
 
 REST: `POST /v1/vms/{id}/qga/ping`, `/qga/exec`, `/qga/firewall/open`,
-`/qga/firewall/close`. Linux vsock `fluxvm exec` is unchanged and separate.
+`/qga/firewall/close`. Linux vsock `fluxctl exec` is unchanged and separate.
 
 Gated smoke (skips without a fixture):  
 `WINDOWS_IMAGE=… sudo -E ./scripts/test-windows-customize.sh`.

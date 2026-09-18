@@ -1,9 +1,10 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! FluxVM MicroVM: Kubernetes-native disposable compute.
+//! FluxVM MicroVM: Kubernetes-native MicroVM compute (not KubeVirt).
+//! Supports short-lived / disposable jobs via TTL when configured.
 //! QEMU does not live in a Pod. kube-scheduler places a capacity ticket;
-//! the node agent drives local `fluxvm serve`.
+//! the node agent drives local `fluxctl serve`.
 
 pub mod capacity;
 pub mod controller;

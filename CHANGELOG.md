@@ -2,6 +2,33 @@
 
 ## 0.4.0 (unreleased)
 
+### Added
+- **Cilium CNI (Secure Containers)** — shim `FLUXVM_CONTAINER_CNI_PROVIDER`
+  (`auto`/`cilium`/`generic`) with Multus-safe `netN` filtering, eth0-preferring
+  L2 handoff, `configs/cilium-cni.toml`, `docs/cilium-cni.md`,
+  `deploy/k8s/cilium/`, and `scripts/evidence-cilium-cni.sh`. Does not write
+  Cilium private maps.
+- **S1 depth** — `scripts/e2e-networkpolicy-s1-depth.sh` proves mid-flow TCP
+  kill after CT-clear revoke and SYN anti-replay under reconnect churn.
+- **S2** — `scripts/evidence-networkpolicy-second-cni.sh` (second kubeconfig or
+  nftables policy-engine stand-in) alongside `REQUIRE_MULTI_NODE=1` Set 17.
+- **S9** — Kata P0/P1 matrix (`scripts/evidence-kata-p0p1-matrix.sh`,
+  `tests/oci-fixtures/`), hostPath allowlist broker
+  (`fluxvm.io/hostpath-allow` / `FLUXVM_HOSTPATH_ALLOW`), and
+  `SECCOMP_IOCTL_NOTIF_ADDFD` notify mode (`io.zyvor.seccomp.notify.mode=addfd`).
+- **S10 / S11** — `scripts/evidence-fleet-multihost.sh` and
+  `scripts/evidence-migration-attached-vm.sh` wired into the Set 19 GA gate.
+- **H2** — virtio-pci ECAM device at `00:01.0` with BAR0 sizing + ACPI MCFG.
+- **H3** — vhost-net mem-table + VRING NUM/ADDR/BASE/KICK/CALL; kernel datapath
+  kicks when rings are programmed (userspace pump remains fallback).
+
+### Changed
+- **CLI rename: `fluxvm-cli` → `fluxctl`** — crate path `crates/fluxctl`,
+  package `fluxctl`, binary `/usr/local/bin/fluxctl` (clap name `fluxctl`).
+  `fluxctl serve` is the control-plane daemon. Deploy/Makefile also install a
+  `fluxvm` → `fluxctl` symlink for one release of command compatibility;
+  prefer `fluxctl` in new scripts and docs.
+
 ### Fixed
 - **Attempted the Set 9S guest `aya` ELF-parse fix** —
   `docs/secure-containers-set9s.md` hypothesized the guest LSM MAC test's
@@ -236,6 +263,40 @@
   `admin_token_can_call_egress_check`).
 
 ### Added
+- **F1 Hubble SID attribution** — `packetflow::from_flow_record_attributed`
+  overlays CEP / Cilium-agent SecurityIdentity onto hubble observe flows
+  (source + peer-VM destination); Fabric CT id remains the fallback. Never
+  writes Cilium private maps.
+- **F2 Prometheus scrape for `:9108`** — microvm node-agent exposes
+  `MICROVM_METRICS_ADDR=0.0.0.0:9108` with scrape annotations;
+  `deploy/k8s/microvm/servicemonitor.yaml` + `deploy/prometheus/fluxvm-scrape.yaml`.
+- **S8 Observer evidence path** — `scripts/evidence-policy-observer-scrape.sh`
+  archives `/metrics` + RSS into `docs/benchmarks/evidence/`.
+- **H1 FLUXKVM1 v3 virtio live-state** — snapshot packs/restores virtio queue
+  rings + status/features; disk/TAP paths still from boot config.
+- **H3 vhost-net partial bind** — `VHOST_SET_OWNER` + `VHOST_NET_SET_BACKEND`
+  for queues 0/1; VRING GPA / mem-table programming remains follow-up.
+- **Firecracker capability-figure adoption** — [docs/capability-figures.md](docs/capability-figures.md)
+  maps FC design/SPEC targets (≤5 MiB overhead, ≤125 ms boot, 5 microVMs/core/sec)
+  onto FluxVM benches and threat-containment layers. `[jailer] enforce` (or
+  `auth.require` + non-loopback listen) fail-closes serve/launch unless jailer
+  is enabled; jailed boots default to `8250.nr_uarts=0`. Create fields
+  `net_mbit_limit` / `net_pps_limit` / `blk_mbit_limit` / `blk_ops_limit` wire
+  Firecracker virtio `rate_limiter` JSON. Benches report
+  `mutation_per_core_sec`, `boot_to_ready_ms`, optional VMM RSS.
+- **Positioning** — FluxVM is no longer framed as a “Disposable Compute Engine”;
+  it is a general Rust-native VM control plane. Disposable / short-lived
+  workloads remain a supported use pattern (optional TTL, CoW), not the product
+  identity. `DisposableVm` CRD name unchanged.
+- **Firecracker adoption reframed for general CP** — [docs/capability-figures.md](docs/capability-figures.md)
+  splits Track A (production isolation for all guests) vs Track B (optional
+  microVM density). Virtio rate limits now propagate through `fluxvm-hypervisor`
+  BootConfig as well as the plain Firecracker backend; added
+  `configs/production-hardening.toml` and NEXT-FEATURES FC1–FC3.
+- **FC1–FC3 complete (multi-backend)** — oversub policy defaults +
+  [docs/oversubscription.md](docs/oversubscription.md); static `cpu_template`
+  for Firecracker/FluxVm-firecracker; `/v1/vms/{id}/snapshot` for Firecracker
+  and FluxVm (CH/QEMU already supported).
 - **`GET /fleet/nodes/{name}`** — exactly one node's own fleet record
   (`healthy`/`cordoned`/`labels`/free-capacity), without a caller having to
   fetch and filter the whole `GET /fleet/nodes` list just to check one
@@ -243,7 +304,7 @@
   matching the status `cordon`/`uncordon`/`deregister` already use for the
   identical case on this same path segment (unlike
   `GET /fleet/nodes/{name}/vms`'s `400`, since that route's unknown-name
-  case is a bad *proxy target*, not a missing *resource*). `fluxvm fleet
+  case is a bad *proxy target*, not a missing *resource*). `fluxctl fleet
   node NAME` is the matching CLI form.
 - **Label/`nodeSelector`-aware placement for the fleet registry** —
   automatic `POST /fleet/vms` placement was purely capacity-based
@@ -260,7 +321,7 @@
   just the first pick. An unmatched selector fails with a clear 503 naming
   it. An explicit `"node"` target still bypasses the selector entirely,
   same as it bypasses cordoning. `GET /fleet/nodes` now reports each node's
-  labels; `fluxvm fleet create --node-selector key=value` is the matching
+  labels; `fluxctl fleet create --node-selector key=value` is the matching
   CLI form. 10 new tests.
 - **Automatic fleet-wide VM placement now fails over to the next-best node
   when the first pick is unreachable**, instead of hard-failing the create
@@ -275,19 +336,19 @@
   split: an unreachable node (connection failure, or a response that isn't
   valid JSON) is excluded and the next-best remaining candidate tried,
   looping until one accepts the create or every schedulable node has been
-  tried; a node that reached its own `fluxvm serve` and explicitly rejected
+  tried; a node that reached its own `fluxctl serve` and explicitly rejected
   the request (bad fields) is never retried elsewhere, since every other
   node would reject the identical body identically. An explicit `"node"`
   target is unaffected — still a single, non-retried attempt, so a caller
   who pinned a node gets an honest failure instead of a surprise landing
   somewhere else. 4 new tests.
-- **`fluxvm fleet` — CLI parity for the fleet registry's REST API**
+- **`fluxctl fleet` — CLI parity for the fleet registry's REST API**
   (`nodes`, `cordon`, `uncordon`, `deregister`, `capacity`, `create`,
   `vms`, `node-vms`, `delete`, `node`). Every fleet operation used to mean
   a raw `curl` call; this gives `fluxvm-agent central`'s multi-host fleet
   registry the same CLI-parity treatment `migrate`/`ping`/`copy-to` already
   gave the per-node REST API, just against the central registry instead of
-  a node's own `fluxvm serve`. New `crates/fluxvm-cli/src/fleet_client.rs`,
+  a node's own `fluxctl serve`. New `crates/fluxctl/src/fleet_client.rs`,
   a thin `reqwest`-based client speaking the same opaque-JSON boundary
   `fluxvm-agent::central` itself uses (it treats `CreateVmRequest`/
   `VmRecord` bodies as opaque JSON rather than depending on `fluxvm-core`,
@@ -299,17 +360,17 @@
   toward total/free but not schedulable), closing the gap between
   `GET /fleet/nodes` listing per-node numbers and there being any single
   answer to "how much room is left in the fleet right now."
-- **`fluxvm resources` — CLI parity for the cgroup resource patch.**
+- **`fluxctl resources` — CLI parity for the cgroup resource patch.**
   `POST /v1/vms/{id}/resources` has existed since cgroup v2 resource control
   landed, but was explicitly left REST-only when `freeze`/`thaw`/`frozen`
   closed the rest of this section's CLI gap (see that entry above): it takes
   a multi-field `ResourcePatch` that deserved real flag design instead of a
-  JSON blob shoved onto the command line. `fluxvm resources <id>
+  JSON blob shoved onto the command line. `fluxctl resources <id>
   [--cpu-quota-percent N] [--memory-max-bytes N] [--io-weight N]
   [--pids-max N] [--cpuset-cpus SPEC]` maps one flag per `ResourcePatch`
   field and preserves its "only touch what's set" contract exactly — a
   field omitted from the command line is left alone, not reset — with the
-  CLI itself refusing a bare `fluxvm resources <id>` with no flags at all
+  CLI itself refusing a bare `fluxctl resources <id>` with no flags at all
   (a plain `bail!` in the match arm; clap's own `Option`-only shape has no
   way to express "at least one of these" at the parser level) rather than
   silently issuing a no-op `POST`. `--cpuset-cpus` accepts the exact set
@@ -326,14 +387,14 @@
   clap layer but the match arm still refuses zero flags" split, a
   distinctness check against `freeze`/`pause`, and dedicated
   `parse_cpuset_spec` coverage of every accepted and rejected shape.
-  Verified building, `cargo test -p fluxvm-cli` (50/50), `cargo clippy -p
-  fluxvm-cli --no-deps` (clean against this change), and `cargo fmt -p
-  fluxvm-cli -- --check` on the Linux remote (this crate doesn't build on
+  Verified building, `cargo test -p fluxctl` (50/50), `cargo clippy -p
+  fluxctl --no-deps` (clean against this change), and `cargo fmt -p
+  fluxctl -- --check` on the Linux remote (this crate doesn't build on
   macOS, same as always). `set_resources` itself is unchanged and was
   already verified against real `memory.max`/`cgroup.procs` files by
   `scripts/test-cgroup-resources.sh` when the REST route first landed —
   this only adds a CLI front end for it.
-- **`fluxvm freeze`/`thaw`/`frozen` — CLI parity for the cgroup v2 freezer.**
+- **`fluxctl freeze`/`thaw`/`frozen` — CLI parity for the cgroup v2 freezer.**
   `POST /v1/vms/{id}/freeze`, `POST .../thaw`, and `GET .../frozen` have
   existed since cgroup v2 resource control landed (see "Resource control
   (cgroup v2)" further down this changelog), but — like `resources`,
@@ -346,8 +407,8 @@
   (already CLI-native) — those go through the VMM's own control socket
   (QMP `stop`/`cont` for QEMU, `ch-remote pause`/`resume` for Cloud
   Hypervisor) and do nothing to help when that socket itself is wedged,
-  exactly the case `freeze` covers. `fluxvm freeze <id>` and `fluxvm thaw
-  <id>` call `VmManager::freeze`/`::thaw` directly; `fluxvm frozen <id>`
+  exactly the case `freeze` covers. `fluxctl freeze <id>` and `fluxctl thaw
+  <id>` call `VmManager::freeze`/`::thaw` directly; `fluxctl frozen <id>`
   reports the freezer's current state as `{"frozen": true|false}` without
   changing anything, matching `GET .../frozen` exactly. All three are
   bodyless GETs/POSTs against an existing `VmManager` method, so no new
@@ -357,7 +418,7 @@
   urgency yet. 7 new CLI-argument-parsing tests, including one proving the
   three new commands aren't accidentally aliased to each other or to
   `pause`/`resume`.
-- **`fluxvm migrate start`/`status`/`cancel` — CLI parity for live migration.**
+- **`fluxctl migrate start`/`status`/`cancel` — CLI parity for live migration.**
   `POST /v1/vms/{id}/migration/start`, `GET .../migration/status`, and
   `POST .../migration/cancel` have existed since the QEMU (and, more
   recently, Cloud Hypervisor) source-side live-migration transport landed
@@ -367,7 +428,7 @@
   that gap for the standalone mode the runtime-boundary doc already calls
   out: a deployment with no Fabric orchestrator driving these routes over
   HTTP still needs a way to move a VM off a node by hand.
-  `fluxvm migrate start <id> --destination <tcp:host:port|unix:/path>
+  `fluxctl migrate start <id> --destination <tcp:host:port|unix:/path>
   [--mode pre-copy|post-copy] [--bandwidth-mbps N] [--max-downtime-ms N]
   [--multifd-channels N]` requires the VM to already be `Running` and
   refuses anything but a `tcp:`/`unix:` destination, same shared allowlist
@@ -381,7 +442,7 @@
   discoverable by reading the REST handler's source. 5 new
   CLI-argument-parsing tests plus 2 for the `--mode` parser; verified on the
   Linux remote alongside the rest of this crate's suite.
-- **`fluxvm ping`/`copy-to`/`copy-from` — CLI parity for the vsock guest
+- **`fluxctl ping`/`copy-to`/`copy-from` — CLI parity for the vsock guest
   agent's health check and file transfer.** The REST API has exposed
   `POST /v1/vms/{id}/agent/put-file` and `.../get-file` since the guest
   agent itself gained `PutFile`/`GetFile` (see the "Add vsock guest agent
@@ -389,15 +450,15 @@
   grew an `exec` command alongside them — copying a file into or out of a
   VM meant hand-rolling the HTTP call yourself, base64 and all, with no
   local equivalent of the `scp`-style ergonomics `exec` already gets.
-  `fluxvm copy-to <id> <local> <remote> [--mode <bits>]` reads a local file,
+  `fluxctl copy-to <id> <local> <remote> [--mode <bits>]` reads a local file,
   rejects anything already over the guest agent's own
   `MAX_FILE_TRANSFER_BYTES` cap before spending a base64 encode and a vsock
   round trip on content that would just be rejected guest-side anyway, and
-  writes it in; `fluxvm copy-from <id> <remote> <local>` reads it back out
+  writes it in; `fluxctl copy-from <id> <remote> <local>` reads it back out
   and restores the guest-reported Unix permission bits on the local copy,
   not just its bytes — a copied-out private key or script keeps behaving
   the way its mode implies instead of landing at this process's umask
-  default. `fluxvm ping <id>` adds the missing health check for this same
+  default. `fluxctl ping <id>` adds the missing health check for this same
   channel: `qga ping` has covered the separate QEMU guest-agent socket for a
   while, but there was no way to ask "is the plain vsock agent even up"
   without spending a real `exec` round trip to find out — a new
@@ -439,7 +500,7 @@
   direct-kernel boot silently had no way to actually get its kernel to the
   VM it named. `CreateVmRequest.kernel` (`fluxvm-core`) and the scheduler's
   own Firecracker-eligibility check (`req.kernel.is_some()`) were already
-  real and load-bearing on the `fluxvm serve` side — the microvm CRD layer
+  real and load-bearing on the `fluxctl serve` side — the microvm CRD layer
   was the missing link. Wired now: `guest_images::reconcile` verifies
   `spec.kernel` is present on the node (same fail-closed contract as
   `spec.sha256` above — a GuestImage naming a kernel that isn't staged is
@@ -708,7 +769,7 @@
   entirely, with only a server-side `tracing::warn!` the caller never
   sees, if that one node happens to be unreachable — exactly the node an
   operator is most likely asking about mid-maintenance) or bypassing
-  `fluxvm-agent` altogether and querying that host's local `fluxvm serve`
+  `fluxvm-agent` altogether and querying that host's local `fluxctl serve`
   directly (which means already knowing, and having direct network access
   to, that host — the whole point of the fleet registry is not needing
   that). The new route proxies straight to the named node's own
@@ -720,7 +781,7 @@
   cordoned, or one that just went stale, still gets a real answer or a
   real error, never silence). 5 new tests in `fluxvm-agent::central`
   against a real (not mocked) minimal axum server bound to an OS-assigned
-  loopback port standing in for the target node's `fluxvm serve` — the
+  loopback port standing in for the target node's `fluxctl serve` — the
   same shape `fluxvm-container-agent`'s own tests already use for this —
   covering the happy path (VMs returned and correctly tagged with the
   node name), an unknown node name (400, not a panic or an empty list),
@@ -796,20 +857,20 @@
   `clean_downloads`, `list_with_verification`) already backed all of this
   over REST (`POST/GET/DELETE /v1/images/catalog...`) — the CLI itself had
   never grown past the two offline-signing verbs, so managing a catalog
-  without a running `fluxvm serve` (seeding a fresh host before the daemon
+  without a running `fluxctl serve` (seeding a fresh host before the daemon
   is up, or a script that would rather shell out than depend on an HTTP
   endpoint) had no path at all. Each new subcommand is a thin wrapper
   reading `catalog.path` straight off `--config`/`FLUXVM_CONFIG`, the same
-  one-shot-process model `fluxvm pool claim` already uses — works whether
-  or not `fluxvm serve` happens to be running against the same
+  one-shot-process model `fluxctl pool claim` already uses — works whether
+  or not `fluxctl serve` happens to be running against the same
   `state_dir`. `lock`/`unlock` replace the REST route's boolean
   `{"read_only": bool}` body with two verbs, clearer on a command line.
   9 new tests (clap parsing for every new subcommand, including that
   `catalog add` rejects a missing `--source`). Docs:
   [docs/operations.md — Image catalog & signing](docs/operations.md#image-catalog--signing).
 - **Warm VM pools now report computed occupancy, not just raw membership** —
-  `GET /v1/pools`, `GET /v1/pools/{name}`, `fluxvm pool list`, and
-  `fluxvm pool get` previously returned the bare `PoolRecord`: `size` (the
+  `GET /v1/pools`, `GET /v1/pools/{name}`, `fluxctl pool list`, and
+  `fluxctl pool get` previously returned the bare `PoolRecord`: `size` (the
   *target* member count) and `members` (the ids of members currently ready),
   with nothing naming which was which. Telling "fully backfilled" apart
   from "still catching up after a resize or a burst of claims" meant a
@@ -843,7 +904,7 @@
   by-name routes). Docs: `FEATURES.md`'s "Warm VM pools" bullet.
 - **Warm VM pools can now be resized after creation** —
   `POST /v1/pools/{name}/resize` (admin-only, body `{"size": N}`) and
-  `fluxvm pool resize <name> --size N`. Previously `PoolSpec::size` was
+  `fluxctl pool resize <name> --size N`. Previously `PoolSpec::size` was
   fixed for the life of a pool: an operator whose real load outgrew (or
   shrank below) a pool's original size had no way to change it short of
   `DELETE`-ing the pool outright and `POST`-ing a new one from the same
@@ -898,7 +959,7 @@
   `docs/operations.md`'s "REST API rate limiting" section.
 - **AppArmor local-include for `swtpm` on Debian/Ubuntu** —
   `packaging/apparmor/usr.bin.swtpm.fluxvm`. Found by actually driving a
-  real `fluxvm create` call with `tpm: true` through the compiled binary
+  real `fluxctl create` call with `tpm: true` through the compiled binary
   on a real Ubuntu host (not just the argument-syntax smoke test the
   Secure Boot/vTPM change shipped with): the distro's own `swtpm` package
   ships an AppArmor profile confining it to libvirt's conventional paths,
@@ -1127,12 +1188,12 @@
 - **MicroVM** (`fluxvm-microvm`) — Kubernetes-native disposable compute without
   KubeVirt: `MicroVM` / `MicroVMJob` / `MicroVMPool` / `GuestImage` on
   `microvm.fluxvm.zyvor.io`, shadow-Pod capacity tickets, cluster controller +
-  node agent against local `fluxvm serve`, optional `DisposableVm` → `MicroVM`
+  node agent against local `fluxctl serve`, optional `DisposableVm` → `MicroVM`
   conversion. Docs: [docs/microvm.md](docs/microvm.md). Manifests:
   `deploy/k8s/microvm/`. Tests: `cargo test -p fluxvm-microvm` /
   `scripts/test-microvm.sh`. (Formerly internal aether design.)
 - Hubble-style **packet flow** renderer: hop path (guest → tap → tc/eBPF →
-  uplink → peer), `--output color|plain|json`, `fluxvm hubble flow` detailed
+  uplink → peer), `--output color|plain|json`, `fluxctl hubble flow` detailed
   view, `/v1/network/hubble/flows/text`, and a Colorful/Normal Hubble-lite UI
   ([docs/packet-flow.md](docs/packet-flow.md)).
 - DevOps pack paired with Fabric: probe contract
@@ -1196,8 +1257,8 @@
 - **Network policy (Fabric v4)** — CNP compiler (`toCIDR`,
   `toCIDRSet`, `toEntities`, `toFQDNs`, `toPorts` ranges/named ports, deny,
   `enableDefaultDeny`, `auditMode`), reserved identities, `fluxvm_gid`
-  updates, conntrack learn/hit, `fluxvm cnp` / `fluxvm identity` /
-  `fluxvm observe`, REST `/v1/network/cnp`, `/v1/network/identities`,
+  updates, conntrack learn/hit, `fluxvm cnp` / `fluxctl identity` /
+  `fluxctl observe`, REST `/v1/network/cnp`, `/v1/network/identities`,
   `/v1/network/observe`.
   Docs: [docs/network-policy.md](docs/network-policy.md).
   Tutorials: [docs/tutorials/network-policy/](docs/tutorials/network-policy/README.md).
@@ -1253,7 +1314,7 @@
 
 ### Added
 - **Windows offline customize** — a `windows{}` block on `build-image` (RDP/WinRM/firewall/scripts + Zyvor GuestKit agent inject), via GuestKit registry plans and `inject_windows_agent` (needs host `libhivex`/`hivex-devel` and guestkit's `registry-write` + `agent` features). Linux-only fields (`packages`, `commands`, `enable_services`, `ssh_key`, top-level `hostname`) can't be combined with it.
-- **Live QGA control** — QEMU virtio-serial guest-agent CLI/REST for PowerShell and firewall rules after boot: `fluxvm qga ping|powershell|exec|firewall-open|firewall-close`, mirrored at `POST /v1/vms/{id}/qga/ping|exec|firewall/open|firewall/close`.
+- **Live QGA control** — QEMU virtio-serial guest-agent CLI/REST for PowerShell and firewall rules after boot: `fluxctl qga ping|powershell|exec|firewall-open|firewall-close`, mirrored at `POST /v1/vms/{id}/qga/ping|exec|firewall/open|firewall/close`.
 - Gated offline smoke test: `scripts/test-windows-customize.sh`.
 - Client presentation decks (`docs/client-presentations/`).
 

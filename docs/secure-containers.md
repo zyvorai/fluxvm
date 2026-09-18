@@ -168,10 +168,11 @@ Containers compatibility.
 
 1. **QEMU is the supported Secure Containers VMM.** Cloud Hypervisor and
    Firecracker still need equivalent shared-rootfs/volume plumbing.
-2. **CNI coverage is not yet broad conformance.** The L2 handoff now replays
-   IPv4/IPv6 dual-stack on the primary interface and rejects extra routable
-   interfaces by default; real Multus/secondary-NIC hotplug and unusual CNI
-   layouts remain open.
+2. **CNI coverage is Cilium-aware on the primary interface.** The L2 handoff
+   auto-detects Cilium (`FLUXVM_CONTAINER_CNI_PROVIDER=auto`), prefers `eth0`,
+   and ignores Multus `netN` secondaries under the Cilium provider so primary
+   handoff proceeds ([cilium-cni.md](cilium-cni.md)). Real Multus/secondary-NIC
+   hotplug into the guest and unusual non-Cilium layouts remain open.
 3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
    Pod volume roots are scoped by sandbox UID; other binds remain copied unless
    an explicit broker/hotplug model is added.
@@ -212,8 +213,9 @@ covering the full matrix of these controls together.
 
 ### P0 — CNI conformance
 
-Exercise Cilium/Calico bridge/veth paths under churn, then add IPv6, dual-stack
-and multi-interface/Multus coverage.
+Cilium primary-path support is in-tree ([cilium-cni.md](cilium-cni.md),
+`scripts/evidence-cilium-cni.sh`). Remaining: Calico/flannel bridge/veth churn,
+full Multus guest NIC hotplug, and multi-CNI conformance under load.
 
 ### P0 — volume broker / explicit hostPath
 

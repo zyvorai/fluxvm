@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Thin HTTP client for `fluxvm-agent central`'s `/fleet/*` API, backing
-//! the `fluxvm fleet ...` subcommands. Every fleet operation used to mean a
+//! the `fluxctl fleet ...` subcommands. Every fleet operation used to mean a
 //! raw `curl` call (see docs/operations.md's "Distributed node-agent"
 //! section) — this gives it the same CLI-parity treatment
 //! `migrate`/`ping`/`copy-to` already gave the per-node REST API, just
-//! against the central registry instead of a node's own `fluxvm serve`.
+//! against the central registry instead of a node's own `fluxctl serve`.
 //!
 //! Deliberately request/response-untyped (`serde_json::Value` in and out):
 //! `fluxvm-agent::central` itself treats `CreateVmRequest`/`VmRecord`
@@ -365,7 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_vm_merges_the_node_flag_and_routes_to_it() {
-        // Fake a node's own `fluxvm serve` /v1/vms create endpoint so the
+        // Fake a node's own `fluxctl serve` /v1/vms create endpoint so the
         // fleet proxy has somewhere real to forward to.
         let node_app = axum::Router::new().route(
             "/v1/vms",

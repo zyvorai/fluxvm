@@ -14,7 +14,7 @@ use kube::CustomResourceExt;
 #[derive(Parser)]
 #[command(
     name = "fluxvm-microvm",
-    about = "FluxVM MicroVM — Kubernetes-native disposable compute (not KubeVirt)"
+    about = "FluxVM MicroVM — Kubernetes-native MicroVM compute (not KubeVirt)"
 )]
 struct Cli {
     #[arg(long)]

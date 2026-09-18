@@ -4,23 +4,23 @@ This doc is the capability tour and the one authoritative metrics table for Flux
 
 ## The Problem
 
-Teams that need short-lived, isolated VMs — CI runners, sandboxed code execution, per-branch dev environments, Kubernetes-native disposable workloads — are usually stuck choosing between:
+Teams that need a host-local VM control plane — CI runners, sandboxed code execution, per-branch environments, Kubernetes VM workloads, or longer-lived guests — are usually stuck choosing between:
 
-- **Manual libvirt/virsh scripting** — XML domain definitions, no REST API, no built-in TTL cleanup, easy for orphaned VMs to accumulate
-- **A full private-cloud platform** — adopting VMware/OpenStack/a KubeVirt cluster just to get disposable VMs is disproportionate overhead for a workload that's supposed to be lightweight and short-lived
+- **Manual libvirt/virsh scripting** — XML domain definitions, no REST API, no optional TTL cleanup, easy for orphaned VMs to accumulate
+- **A full private-cloud platform** — adopting VMware/OpenStack/a KubeVirt cluster just to get a solid VM API is disproportionate overhead for many teams
 - **Container-only isolation** — good enough until the workload needs a real kernel boundary (untrusted code, a kernel-dependent test, a legacy binary that needs its own kernel)
 
-FluxVM fills the specific gap: a control plane built around VMs that are supposed to be short-lived, with a real API and without requiring a whole private-cloud stack to get there.
+FluxVM fills that gap: a control plane with a real API, without requiring a whole private-cloud stack. Disposable / short-lived patterns (TTL, CoW) are available when you want them.
 
 ---
 
 ## What Is FluxVM?
 
-FluxVM is a Rust-native disposable-VM control plane. It provides:
+FluxVM is a Rust-native VM control plane. It provides:
 
-- **One binary, one REST API** — `fluxvm` CLI talks to `fluxvm serve`, no libvirtd, no XML
+- **One binary, one REST API** — `fluxvm` CLI talks to `fluxctl serve`, no libvirtd, no XML
 - **4 backends behind one trait** — QEMU/KVM, Cloud Hypervisor, Firecracker, and the in-tree FluxVM hypervisor, selectable per-VM or via `"backend":"auto"`
-- **TTL-guaranteed cleanup** — `ttl_seconds` on any VM spec means a forgotten or crashed job still gets torn down
+- **Optional TTL cleanup** — `ttl_seconds` on a VM spec means a forgotten or crashed job still gets torn down when you opt in
 - **A vsock guest agent** — `exec`, PTY console, file transfer, with no SSH or network path required
 
 ---
@@ -79,7 +79,7 @@ Full diagrams (image pipeline, Secure Containers request flow, Network Fabric pa
 | VM spec format | JSON | XML domain definitions | Kubernetes CRD YAML |
 | TTL-guaranteed cleanup | Yes (`ttl_seconds`) | No | No (Pod lifecycle only) |
 | Backends | QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree hypervisor | QEMU/KVM (broad hypervisor support via drivers) | KVM via virt-launcher |
-| Where the VMM runs | Host, under `fluxvm serve` | Host, under `libvirtd` | Inside a virt-launcher Pod |
+| Where the VMM runs | Host, under `fluxctl serve` | Host, under `libvirtd` | Inside a virt-launcher Pod |
 | Kubernetes-native | Yes (`DisposableVm` CRD, MicroVM) | No | Yes (native) |
 | Live migration / CDI / `virtctl` | No | No (needs orchestration layer) | Yes |
 | eBPF/TC dataplane | Yes — Network Fabric, GA schema v4 | No | Depends on CNI |
@@ -95,7 +95,7 @@ This table intentionally covers only what's verifiable today — no unpublished 
 
 ### Single host, standalone
 
-`fluxvm serve` on one Linux box with KVM. Suitable for CI runners, dev/test environments, and sandboxed execution on a single machine.
+`fluxctl serve` on one Linux box with KVM. Suitable for CI runners, dev/test environments, and sandboxed execution on a single machine.
 
 **Requirements:** Linux, KVM, current stable Rust toolchain to build.
 
@@ -107,7 +107,7 @@ This table intentionally covers only what's verifiable today — no unpublished 
 
 ### Kubernetes-native
 
-`fluxvm-kube` operator reconciling `DisposableVm` CRs against a local `fluxvm serve` instance per node, or `fluxvm-microvm` for scheduler-driven placement via shadow Pods.
+`fluxvm-kube` operator reconciling `DisposableVm` CRs against a local `fluxctl serve` instance per node, or `fluxvm-microvm` for scheduler-driven placement via shadow Pods.
 
 **Requirements:** A Kubernetes cluster (verified against k3s), nodes with `/dev/kvm`.
 

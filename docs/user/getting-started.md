@@ -15,7 +15,7 @@ using the FluxVM CLI and REST API.
 
 ```bash
 cargo build --release
-sudo install -m 0755 target/release/fluxvm /usr/local/bin/fluxvm
+sudo install -m 0755 target/release/fluxctl /usr/local/bin/fluxctl
 sudo install -m 0644 config.example.toml /etc/fluxvm.toml
 ```
 
@@ -29,7 +29,7 @@ One-shot host prep (packages, CH, Firecracker):
 ## 2. Start the API (optional for CLI-only create)
 
 ```bash
-sudo fluxvm --config /etc/fluxvm.toml serve
+sudo fluxctl --config /etc/fluxvm.toml serve
 curl -sf http://127.0.0.1:7788/healthz
 curl -sf http://127.0.0.1:7788/readyz | jq .
 ```
@@ -40,9 +40,9 @@ when Network Fabric or Service Fabric must be up before admitting work.
 ## 3. Create your first VM
 
 ```bash
-fluxvm create --spec examples/qemu.json
+fluxctl create --spec examples/qemu.json
 # Production-shaped (tenant + tap/netns):
-# fluxvm create --spec examples/create-vm-prod.json
+# fluxctl create --spec examples/create-vm-prod.json
 ```
 
 The response includes `id`, status, disk path, and PID. The guest boots from a
@@ -54,7 +54,7 @@ the JSON is filterable via `GET /v1/vms?tenant=`.
 Linux (vsock guest agent — no SSH required):
 
 ```bash
-fluxvm exec <id> -- echo hello
+fluxctl exec <id> -- echo hello
 ```
 
 Requires `"agent": {"enabled": true}` on create and `fluxvm-guest-agent` in the
@@ -63,9 +63,9 @@ image.
 Windows (QEMU + GuestKit / QGA):
 
 ```bash
-fluxvm create --spec examples/windows-qga.json
-fluxvm qga ping <id>
-fluxvm qga powershell <id> -- 'Get-ComputerInfo | Select-Object CsName'
+fluxctl create --spec examples/windows-qga.json
+fluxctl qga ping <id>
+fluxctl qga powershell <id> -- 'Get-ComputerInfo | Select-Object CsName'
 ```
 
 See [Building custom OS images](build-image-tutorial.md#windows-images) and
@@ -82,7 +82,7 @@ TTL auto-delete:
 Or delete yourself:
 
 ```bash
-fluxvm delete <id>
+fluxctl delete <id>
 ```
 
 ## Troubleshooting

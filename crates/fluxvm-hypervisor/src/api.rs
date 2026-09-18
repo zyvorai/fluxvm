@@ -42,6 +42,22 @@ pub struct BootConfig {
     /// Guest runner: Firecracker (default) or in-tree KVM.
     #[serde(default)]
     pub engine: FluxVmEngine,
+    /// Virtio-net bandwidth cap (Mbit/s). `None`/`0` = unlimited.
+    /// Applied to Firecracker `rate_limiter` and in-tree KVM token buckets.
+    #[serde(default)]
+    pub net_mbit_limit: Option<u32>,
+    /// Virtio-net ops (packets) per second — Firecracker `rate_limiter.ops` only.
+    #[serde(default)]
+    pub net_pps_limit: Option<u64>,
+    /// Virtio-block bandwidth cap (Mbit/s).
+    #[serde(default)]
+    pub blk_mbit_limit: Option<u32>,
+    /// Virtio-block ops per second — Firecracker `rate_limiter.ops` only.
+    #[serde(default)]
+    pub blk_ops_limit: Option<u64>,
+    /// Firecracker static CPU template (e.g. T2). Only used when engine is Firecracker.
+    #[serde(default)]
+    pub cpu_template: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

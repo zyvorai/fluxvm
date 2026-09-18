@@ -34,9 +34,9 @@ Security groups: [network-groups.md](network-groups.md).
 | `enableDefaultDeny` | `default_allow=false` |
 | `auditMode` | sample_rate bit 31; log drop, forward packet |
 | Conntrack | `fluxvm_ct` LRU learn/hit |
-| Identity list | `GET /v1/network/identities`, `fluxvm identity list` |
+| Identity list | `GET /v1/network/identities`, `fluxctl identity list` |
 | Group / identity policy | `fluxvm_gid` written at configure_maps |
-| Observe snapshot | `GET /v1/network/observe`, `fluxvm observe` |
+| Observe snapshot | `GET /v1/network/observe`, `fluxctl observe` |
 | toFQDNs live refresh | `POST /v1/network/refresh-dns`, `fluxvm dataplane refresh-dns` (best-effort fleet-wide; skipped VMs logged, call returns refreshed count) |
 | ipcache | Guest IP → identity (`GET /v1/network/ipcache`) |
 | Production health | `fluxvm dataplane health`, [production-dataplane.md](production-dataplane.md) |
@@ -54,8 +54,8 @@ Fabric policy (this doc) is orthogonal.
 ```bash
 fluxvm cnp apply --spec examples/cnp-web.json
 fluxvm cnp list
-fluxvm identity list
-fluxvm observe
+fluxctl identity list
+fluxctl observe
 ```
 
 Label the VM policy so the compiled group matches:
