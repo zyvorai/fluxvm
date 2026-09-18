@@ -544,6 +544,10 @@ enum CatalogCommand {
     /// Sign a catalog entry and print it as JSON, or append it to
     /// --catalog-file if given (creating the file with an empty array
     /// first if it doesn't exist yet).
+    ///
+    /// `disable_version_flag` keeps `--version` as the image version
+    /// instead of clap's auto-generated flag (same id, debug-assert panic).
+    #[command(disable_version_flag = true)]
     Sign {
         /// Base64 Ed25519 private key, as printed by `catalog keygen`.
         #[arg(long)]
