@@ -638,6 +638,7 @@ mod tests {
                 outer: "eth0".into(),
                 netns_path: Some("/run/netns/fvcni-abc".into()),
                 mode: fluxvm_core::model::DirectMode::PeerVeth,
+                guest_ips: vec![],
             }),
             extra: vec![],
         };

@@ -103,6 +103,17 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                      (the eBPF redirect is the only forwarding path for a bridge-less tap)"
                 );
             }
+            // An uplink that is a bridge/bond port would have its frames taken by the master
+            // before a TC hook sees them, so the redirect would silently never fire.
+            if direct.mode == fluxvm_core::model::DirectMode::L2Uplink
+                && direct.netns_path.is_none()
+            {
+                if let Some(why) =
+                    direct::uplink_problem(std::path::Path::new("/sys/class/net"), &direct.outer)
+                {
+                    bail!("network.direct: {why}");
+                }
+            }
             // No set_master and no default_bridge fallback: the whole point is
             // that nothing bridges this tap. A redirect program pairs it with
             // `direct.outer` instead (attached by the dataplane step).

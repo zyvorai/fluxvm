@@ -63,6 +63,20 @@ def _kernel_version_tuple() -> tuple[int, int, int]:
     return tuple(parts)  # type: ignore[return-value]
 
 
+def tc_helpers_from_feature_probe(parsed: Any) -> set[str]:
+    """Helper names a TC (sched_cls) program may call, from `bpftool feature probe kernel -j`.
+
+    Empty when the blob is not the expected shape, so every capability derived from it fails
+    closed (False) instead of being guessed from a kernel version number."""
+    if not isinstance(parsed, dict):
+        return set()
+    helpers = parsed.get("helpers")
+    if not isinstance(helpers, dict):
+        return set()
+    names = helpers.get("sched_cls_available_helpers")
+    return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
+
+
 def probe_capabilities() -> dict[str, Any]:
     lsm = _read(pathlib.Path("/sys/kernel/security/lsm"))
     sched_ext = pathlib.Path("/sys/kernel/sched_ext").exists()
@@ -80,6 +94,7 @@ def probe_capabilities() -> dict[str, Any]:
     # Linux 6.6.
     tcx = _kernel_version_tuple() >= (6, 6, 0)
     xdp = False
+    tc_helpers: set[str] = set()
     bpftool_feature: dict[str, Any] | None = None
     bpftool_feature_error: str | None = None
     if _which("bpftool"):
@@ -102,6 +117,7 @@ def probe_capabilities() -> dict[str, Any]:
                 elif isinstance(parsed, dict):
                     bpftool_feature = parsed
                     xdp = bool(parsed.get("program_types", {}).get("have_xdp_prog_type", False))
+                    tc_helpers = tc_helpers_from_feature_probe(parsed)
             except json.JSONDecodeError:
                 pass
     cgroup2 = pathlib.Path("/sys/fs/cgroup/cgroup.controllers").exists()
@@ -116,6 +132,11 @@ def probe_capabilities() -> dict[str, Any]:
         "kernel_btf": pathlib.Path("/sys/kernel/btf/vmlinux").exists(),
         "bpf_lsm": "bpf" in {x.strip() for x in lsm.split(",") if x.strip()},
         "tcx": tcx,
+        # Bridge-less direct datapath (docs/direct-datapath.md): the guest -> Pod-veth hop is
+        # bpf_redirect_peer (Linux >= 5.10). Read from the kernel's own helper list; False when the
+        # probe could not run (non-root, no bpftool) so a gate never passes on a guess.
+        "redirect_peer": "bpf_redirect_peer" in tc_helpers,
+        "redirect_neigh": "bpf_redirect_neigh" in tc_helpers,
         "xdp": xdp,
         "sched_ext": sched_ext,
         "af_xdp": af_xdp,

@@ -1519,7 +1519,11 @@ async fn hotplug_vm_nic(
     Json(req): Json<fluxvm_core::model::HotplugNicRequest>,
 ) -> ApiResult<StatusCode> {
     require_admin(role)?;
-    m.hotplug_nic(id, req.bridge, req.mac).await?;
+    req.validate().map_err(|e| anyhow::anyhow!(e))?;
+    match req.direct {
+        Some(direct) => m.hotplug_direct_nic(id, direct, req.mac).await?,
+        None => m.hotplug_nic(id, req.bridge, req.mac).await?,
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

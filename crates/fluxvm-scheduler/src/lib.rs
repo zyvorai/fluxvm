@@ -35,6 +35,72 @@ fn is_direct(spec: &NetworkSpec) -> bool {
     )
 }
 
+/// The orchestration behind [`VmManager::hotplug_direct_nic`], free of the manager and its store so
+/// it can be exercised against a mock QEMU. On success the returned network is what the VM record
+/// must hold; on any failure everything created here is removed again.
+pub(crate) async fn plug_direct_nic(
+    cfg: &Config,
+    vm: &VmRecord,
+    direct: fluxvm_core::model::DirectSpec,
+    mac: Option<String>,
+) -> Result<fluxvm_core::backend::PreparedNetwork> {
+    let id = vm.id;
+    if vm.backend != BackendKind::Qemu {
+        bail!("NIC hotplug is supported for the QEMU backend only");
+    }
+    if !matches!(vm.request.network, NetworkSpec::None) {
+        bail!(
+            "direct NIC hotplug needs a VM booted with network.mode=none (a warm-pool template); \
+             this VM already has a network"
+        );
+    }
+    let index = nic_hotplug_index(&vm.request.network); // 0: the primary NIC
+    let tap = format!("hn{index}{}", &id.simple().to_string()[..6]);
+    let spec = NetworkSpec::Tap {
+        tap_name: Some(tap.clone()),
+        bridge: None,
+        mac: mac.clone(),
+        netns: false,
+        extra: vec![],
+        direct: Some(direct),
+    };
+    // prepare() validates the spec, refuses legacy dataplane mode, creates the tap and records the
+    // wiring the loader needs.
+    let prepared = fluxvm_network::prepare(cfg, id, &spec)
+        .await
+        .context("creating the direct hotplug TAP")?;
+    let close_fd = |p: &fluxvm_core::backend::PreparedNetwork| {
+        if let Some(fd) = p.tap_fd {
+            fluxvm_core::process::close_fd(fd);
+        }
+    };
+    // The dataplane goes on BEFORE QEMU sees the NIC: a direct tap has no bridge, so without the
+    // redirect it carries nothing.
+    if let Err(e) = fluxvm_network::dataplane::apply_sandbox_policy(
+        cfg,
+        id,
+        prepared.tap_name.as_deref(),
+        None,
+        &[],
+        vm.request.pod_uid.as_deref(),
+    ) {
+        close_fd(&prepared);
+        let _ = fluxvm_network::cleanup(&cfg.state_dir, id, &prepared.spec, &tap, None).await;
+        return Err(e).context("applying the VM dataplane for the hotplugged direct NIC");
+    }
+    let plugged = match prepared.tap_fd {
+        Some(fd) => fluxvm_qemu::hotplug_nic_fd(vm, fd, mac.as_deref(), index).await,
+        None => fluxvm_qemu::hotplug_nic(vm, &tap, mac.as_deref(), index).await,
+    };
+    // QEMU holds its own copy of the descriptor now (or the attempt failed); ours is done.
+    close_fd(&prepared);
+    if let Err(e) = plugged {
+        let _ = fluxvm_network::cleanup(&cfg.state_dir, id, &prepared.spec, &tap, None).await;
+        return Err(e);
+    }
+    Ok(prepared)
+}
+
 fn nic_hotplug_index(spec: &NetworkSpec) -> u8 {
     match spec {
         NetworkSpec::Tap {
@@ -663,6 +729,25 @@ impl VmManager {
         Ok(())
     }
 
+    /// Hot-adds the VM's primary NIC on a bridge-less direct attach (the warm-pool counterpart of
+    /// creating a direct VM): the daemon creates the tap (inside the outer device's netns when one
+    /// is given), records the wiring and applies the dataplane FIRST -- a direct tap has no bridge,
+    /// so without the redirect it carries nothing -- and only then hands the tap to QEMU, as a
+    /// descriptor when it lives in another netns. Any failure removes what was created.
+    pub async fn hotplug_direct_nic(
+        &self,
+        id: Uuid,
+        direct: fluxvm_core::model::DirectSpec,
+        mac: Option<String>,
+    ) -> Result<()> {
+        let mut vm = self.get(id).await?;
+        let prepared = plug_direct_nic(&self.cfg, &vm, direct, mac).await?;
+        vm.request.network = prepared.spec.clone();
+        vm.tap_name = prepared.tap_name.clone();
+        self.store.update(vm).await?;
+        Ok(())
+    }
+
     /// The cpuset currently pinned via `set_resources`'s `cpuset_cpus`, or
     /// empty if never set (cgroup default: unrestricted).
     pub async fn get_cpuset(&self, id: Uuid) -> Result<Vec<u32>> {
@@ -1044,6 +1129,8 @@ impl VmManager {
             // the Fabric CT sample id so hubble observe shows the same SID as
             // `fluxctl hubble endpoints`.
             let src_sid = ep.map(|e| (e.identity, e.identity_labels.clone()));
+            // A bridge-less VM must not be shown behind a bridge it does not have.
+            let hop_path = fluxvm_network::packetflow::HopPath::for_vm(vm.id);
             if let Ok(items) = self.network_flows(vm.id, limit.min(32)).await {
                 for item in items {
                     let dst_sid = endpoints
@@ -1055,7 +1142,7 @@ impl VmManager {
                             })
                         })
                         .map(|e| (e.identity, e.identity_labels.clone()));
-                    flows.push(fluxvm_network::packetflow::from_flow_record_attributed(
+                    flows.push(fluxvm_network::packetflow::from_flow_record_on_path(
                         &item,
                         &labels,
                         Some(&vm.name),
@@ -1063,6 +1150,7 @@ impl VmManager {
                         &mode,
                         src_sid.clone(),
                         dst_sid,
+                        &hop_path,
                     ));
                 }
             }
@@ -3645,5 +3733,281 @@ mod nic_hotplug_tests {
             }),
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod direct_hotplug_tests {
+    //! Root + Linux test of the direct hotplug orchestration against a MOCK QEMU (no KVM, no
+    //! cgroups, no VmManager). Skipped unless root, the tools and FLUXVM_TEST_BPF_DIR are present.
+    use super::*;
+    use std::io::{BufRead, BufReader as StdBufReader, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixListener as StdListener;
+    use std::process::{Command, Stdio};
+
+    type Seen = (String, serde_json::Value, Option<String>);
+
+    fn sh(args: &[&str]) -> bool {
+        Command::new(args[0])
+            .args(&args[1..])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    /// The interface name behind a received tun descriptor (TUNGETIFF): proves the descriptor is
+    /// the tap the daemon created, not just some file.
+    fn tun_name(fd: i32) -> Option<String> {
+        #[repr(C)]
+        struct IfReq {
+            name: [u8; 16],
+            flags: i16,
+            _pad: [u8; 22],
+        }
+        const TUNGETIFF: libc::c_ulong = 0x8004_54d2;
+        let mut ifr = IfReq {
+            name: [0; 16],
+            flags: 0,
+            _pad: [0; 22],
+        };
+        // SAFETY: `ifr` is a live, correctly sized ifreq and `fd` is a caller-owned descriptor.
+        if unsafe { libc::ioctl(fd, TUNGETIFF, &mut ifr as *mut IfReq) } != 0 {
+            return None;
+        }
+        let end = ifr.name.iter().position(|&b| b == 0).unwrap_or(16);
+        Some(String::from_utf8_lossy(&ifr.name[..end]).into_owned())
+    }
+
+    /// Returns the line, the received descriptor's tap name, and the descriptor itself: the caller
+    /// keeps it open, exactly as a real QEMU does for the life of the VM (a tap is non-persistent
+    /// and disappears with its last descriptor).
+    fn recv_line(sock: &std::os::unix::net::UnixStream) -> (String, Option<String>, Option<i32>) {
+        let mut buf = vec![0u8; 4096];
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        };
+        // SAFETY: pure size computation.
+        let space = unsafe { libc::CMSG_SPACE(4) } as usize;
+        let mut control = vec![0u8; space];
+        // SAFETY: an all-zero msghdr is a valid initial value.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = space as _;
+        // SAFETY: msg points at live buffers for the duration of the call.
+        let n = unsafe { libc::recvmsg(sock.as_raw_fd(), &mut msg, 0) };
+        if n <= 0 {
+            return (String::new(), None, None);
+        }
+        let mut name = None;
+        let mut held = None;
+        // SAFETY: CMSG_* walk the control buffer recvmsg just filled.
+        unsafe {
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            if !c.is_null() && (*c).cmsg_type == libc::SCM_RIGHTS {
+                let mut fd: i32 = -1;
+                std::ptr::copy_nonoverlapping(libc::CMSG_DATA(c), &mut fd as *mut _ as *mut u8, 4);
+                name = tun_name(fd);
+                held = Some(fd);
+            }
+        }
+        buf.truncate(n as usize);
+        (String::from_utf8_lossy(&buf).trim().to_string(), name, held)
+    }
+
+    fn serve(
+        listener: StdListener,
+        fail_device_add: bool,
+    ) -> std::thread::JoinHandle<(Vec<Seen>, Vec<i32>)> {
+        std::thread::spawn(move || {
+            let mut all = Vec::new();
+            let mut fds = Vec::new();
+            for _ in 0..if fail_device_add { 2 } else { 1 } {
+                let (stream, _) = listener.accept().unwrap();
+                let mut w = stream.try_clone().unwrap();
+                w.write_all(b"{\"QMP\":{}}\n").unwrap();
+                let mut r = StdBufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                w.write_all(b"{\"return\":{}}\n").unwrap();
+                loop {
+                    let (text, fd_name, fd) = recv_line(&stream);
+                    fds.extend(fd);
+                    if text.is_empty() {
+                        break;
+                    }
+                    let req: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    let cmd = req["execute"].as_str().unwrap().to_string();
+                    all.push((cmd.clone(), req["arguments"].clone(), fd_name));
+                    let reply = if fail_device_add && cmd == "device_add" {
+                        "{\"error\":{\"class\":\"GenericError\",\"desc\":\"no free slot\"}}\n"
+                    } else {
+                        "{\"return\":{}}\n"
+                    };
+                    w.write_all(reply.as_bytes()).unwrap();
+                    if cmd == "device_add" || cmd == "netdev_del" {
+                        break;
+                    }
+                }
+            }
+            (all, fds)
+        })
+    }
+
+    struct Ns(String);
+    impl Drop for Ns {
+        fn drop(&mut self) {
+            let _ = sh(&["ip", "netns", "del", &self.0]);
+        }
+    }
+
+    fn warm_pool_member(workspace: &std::path::Path) -> VmRecord {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4().to_string(), "name": "pool-member", "backend": "qemu",
+            "status": "paused", "pid": 1, "created_at": "2026-01-01T00:00:00Z", "expires_at": null,
+            "workspace": workspace, "disk": workspace.join("disk"), "seed_disk": null,
+            "tap_name": null, "control_socket": null, "log_path": workspace.join("console.log"),
+            "error": null,
+            "request": {"name": "pool-member", "backend": "qemu", "image": "/img.qcow2", "network": {"mode": "none"}}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn direct_hotplug_wires_the_dataplane_then_hands_qemu_the_tap_descriptor() {
+        // SAFETY: geteuid has no preconditions.
+        let root = unsafe { libc::geteuid() } == 0;
+        let bpf = std::env::var_os("FLUXVM_TEST_BPF_DIR").map(std::path::PathBuf::from);
+        let (true, Some(bpf)) = (root, bpf) else {
+            return eprintln!("SKIP: needs root and FLUXVM_TEST_BPF_DIR");
+        };
+        if !bpf.join("fluxvm_direct.bpf.o").exists()
+            || !sh(&["ip", "-V"])
+            || !sh(&["nsenter", "--version"])
+        {
+            return eprintln!("SKIP: needs built BPF objects, ip and nsenter");
+        }
+        let pid = std::process::id();
+        let (pod, host) = (format!("fvhp{pid}-pod"), format!("fvhp{pid}-host"));
+        assert!(sh(&["ip", "netns", "add", &pod]) && sh(&["ip", "netns", "add", &host]));
+        let _g = (Ns(pod.clone()), Ns(host.clone()));
+        assert!(sh(&[
+            "ip", "-n", &host, "link", "add", "lxc0", "type", "veth", "peer", "name", "eth0",
+            "netns", &pod
+        ]));
+        assert!(
+            sh(&["ip", "-n", &pod, "link", "set", "eth0", "up"])
+                && sh(&["ip", "-n", &host, "link", "set", "lxc0", "up"])
+        );
+
+        let work = std::env::temp_dir().join(format!("fluxvm-hotplug-direct-{pid}"));
+        std::fs::create_dir_all(work.join("ws")).unwrap();
+        let mut cfg = Config::default();
+        cfg.state_dir = work.join("state");
+        std::fs::create_dir_all(&cfg.state_dir).unwrap();
+        cfg.sandbox.dataplane.mode = fluxvm_core::config::DataplaneMode::Ebpf;
+        cfg.sandbox.dataplane.bpf_object = bpf.join("fluxvm_tc.bpf.o");
+        cfg.sandbox.dataplane.required = true;
+        cfg.sandbox.dataplane.default_allow = true;
+        let direct = || fluxvm_core::model::DirectSpec {
+            outer: "eth0".into(),
+            netns_path: Some(format!("/run/netns/{pod}")),
+            mode: fluxvm_core::model::DirectMode::PeerVeth,
+            guest_ips: vec![],
+        };
+
+        // ── success: the mock QEMU must see getfd(with the tap) -> netdev_add -> device_add ──
+        let vm = warm_pool_member(&work.join("ws"));
+        let sock = vm.workspace.join("qmp.sock");
+        let server = serve(StdListener::bind(&sock).unwrap(), false);
+        let prepared = plug_direct_nic(&cfg, &vm, direct(), Some("02:00:00:00:00:07".into()))
+            .await
+            .expect("direct hotplug");
+        // `held` plays QEMU's copy of the descriptor: the tap lives while it is open.
+        let (seen, held) = server.join().unwrap();
+        let cmds: Vec<&str> = seen.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(cmds, ["getfd", "netdev_add", "device_add"]);
+        let tap = prepared.tap_name.clone().unwrap();
+        assert_eq!(
+            seen[0].2.as_deref(),
+            Some(tap.as_str()),
+            "the descriptor QEMU received IS the tap the daemon made"
+        );
+        assert_eq!(
+            seen[1].1["fd"], seen[0].1["fdname"],
+            "netdev_add must name the descriptor getfd stored"
+        );
+        assert_eq!(seen[2].1["mac"], "02:00:00:00:00:07");
+        assert!(
+            matches!(
+                &prepared.spec,
+                NetworkSpec::Tap {
+                    direct: Some(_),
+                    bridge: None,
+                    ..
+                }
+            ),
+            "the VM record must now describe a direct tap so stop/start re-creates it"
+        );
+        let st = fluxvm_network::ebpf::attachment_status(&cfg.sandbox.dataplane, vm.id).unwrap();
+        assert!(
+            st.attached && st.direct_attached,
+            "the dataplane must be live before QEMU got the NIC: {st:?}"
+        );
+        fluxvm_network::cleanup(&cfg.state_dir, vm.id, &prepared.spec, &tap, None)
+            .await
+            .unwrap();
+        for fd in held {
+            // SAFETY: the descriptors were received by the mock and are closed exactly once, here.
+            unsafe { libc::close(fd) };
+        }
+
+        // ── failure: QEMU rejects device_add -> everything the daemon created is removed ──
+        let vm2 = warm_pool_member(&work.join("ws"));
+        let _ = std::fs::remove_file(&sock);
+        let server = serve(StdListener::bind(&sock).unwrap(), true);
+        let err = plug_direct_nic(&cfg, &vm2, direct(), None)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no free slot"), "{err:#}");
+        for fd in server.join().unwrap().1 {
+            // SAFETY: as above.
+            unsafe { libc::close(fd) };
+        }
+        assert!(
+            fluxvm_network::direct::recorded(vm2.id).is_none(),
+            "the wiring record must be removed"
+        );
+        let st = fluxvm_network::ebpf::attachment_status(&cfg.sandbox.dataplane, vm2.id).unwrap();
+        assert!(
+            !st.attached && !st.direct_required,
+            "nothing may stay attached after a failed hotplug: {st:?}"
+        );
+
+        // ── preconditions ──
+        let mut has_net = warm_pool_member(&work.join("ws"));
+        has_net.request.network = NetworkSpec::User { forwards: vec![] };
+        assert!(
+            plug_direct_nic(&cfg, &has_net, direct(), None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("network.mode=none")
+        );
+        let mut not_qemu = warm_pool_member(&work.join("ws"));
+        not_qemu.backend = BackendKind::Firecracker;
+        assert!(
+            plug_direct_nic(&cfg, &not_qemu, direct(), None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("QEMU")
+        );
+        let _ = std::fs::remove_dir_all(&work);
     }
 }

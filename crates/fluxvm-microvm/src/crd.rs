@@ -45,6 +45,10 @@ pub struct MicroVMSpec {
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macvtap_mode: Option<String>,
+    /// IPv4 addresses the guest will use, for `networkMode: direct` (see docs/direct-datapath.md).
+    /// They let the uplink deliver an ARP request for them to this guest; unicast works without.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guest_ips: Vec<String>,
     #[serde(default = "default_storage")]
     pub storage: String,
     #[serde(default)]

@@ -221,6 +221,7 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
             outer: "eth0".into(),
             netns_path: Some(pod_path.clone()),
             mode: DirectMode::PeerVeth,
+            guest_ips: vec![],
         }),
     };
     let prepared = fluxvm_network::prepare(&cfg, id, &spec)

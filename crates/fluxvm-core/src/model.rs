@@ -103,7 +103,16 @@ pub struct DirectSpec {
     pub netns_path: Option<String>,
     #[serde(default)]
     pub mode: DirectMode,
+    /// IPv4 addresses the guest will use, for `l2-uplink` only. They let the datapath deliver an
+    /// ARP request for one of them (from the LAN, or from another guest on the same uplink) to
+    /// this guest's tap, since a bridge-less uplink has no other way to find it. Optional: without
+    /// them unicast still works by MAC, but a LAN peer cannot discover the guest by ARP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guest_ips: Vec<String>,
 }
+
+/// Most guest IPs one VM may declare for uplink ARP steering.
+pub const MAX_DIRECT_GUEST_IPS: usize = 8;
 
 impl DirectSpec {
     /// Structural checks that need no host access, so a bad request is
@@ -118,6 +127,23 @@ impl DirectSpec {
         if let Some(p) = &self.netns_path {
             if !p.starts_with('/') {
                 return Err("direct.netns_path must be an absolute path".into());
+            }
+        }
+        if !self.guest_ips.is_empty() {
+            if self.mode != DirectMode::L2Uplink {
+                return Err("direct.guest_ips only applies to mode=l2-uplink".into());
+            }
+            if self.guest_ips.len() > MAX_DIRECT_GUEST_IPS {
+                return Err(format!(
+                    "direct.guest_ips accepts at most {MAX_DIRECT_GUEST_IPS} addresses"
+                ));
+            }
+            for ip in &self.guest_ips {
+                if ip.parse::<std::net::Ipv4Addr>().is_err() {
+                    return Err(format!(
+                        "direct.guest_ips entry {ip:?} is not an IPv4 address (IPv6/NDP steering is not supported)"
+                    ));
+                }
             }
         }
         if self.mode == DirectMode::L2Uplink && self.netns_path.is_some() {
@@ -833,9 +859,30 @@ pub struct HotplugMemoryResult {
 /// claim, when the template VM was booted with `network.mode=none`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HotplugNicRequest {
+    /// Host bridge for a bridged NIC. Empty when `direct` is set.
+    #[serde(default)]
     pub bridge: String,
     #[serde(default)]
     pub mac: Option<String>,
+    /// Bridge-less attach instead of a bridge: the daemon creates the tap (inside the outer
+    /// device's netns when `netns_path` is set), wires the eBPF redirect, and hands the tap to QEMU
+    /// as a descriptor. Mutually exclusive with `bridge`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<DirectSpec>,
+}
+
+impl HotplugNicRequest {
+    /// Exactly one of `bridge` / `direct`, and a valid `direct`.
+    pub fn validate(&self) -> Result<(), String> {
+        match (&self.direct, self.bridge.is_empty()) {
+            (None, true) => Err("hotplug/nic needs either `bridge` or `direct`".into()),
+            (Some(_), false) => {
+                Err("hotplug/nic `bridge` and `direct` are mutually exclusive".into())
+            }
+            (Some(d), true) => d.validate(),
+            (None, false) => Ok(()),
+        }
+    }
 }
 
 /// Point-in-time resource usage for a VM, read from its cgroup.
@@ -1032,6 +1079,78 @@ mod create_vm_request_tests {
         )
         .unwrap();
         assert!(l2.validate_direct().is_ok());
+    }
+
+    #[test]
+    fn hotplug_requests_need_exactly_one_attach_mode() {
+        let ok_bridge: HotplugNicRequest =
+            serde_json::from_str(r#"{"bridge":"fvbh1","mac":"02:00:00:00:00:01"}"#).unwrap();
+        assert!(ok_bridge.validate().is_ok());
+        assert!(
+            ok_bridge.direct.is_none(),
+            "old bridge requests keep meaning a bridged NIC"
+        );
+        let ok_direct: HotplugNicRequest = serde_json::from_str(
+            r#"{"mac":"02:00:00:00:00:01","direct":{"outer":"eth0","netns_path":"/run/netns/fvcni-x"}}"#,
+        )
+        .unwrap();
+        assert!(ok_direct.validate().is_ok());
+        assert!(ok_direct.bridge.is_empty());
+        let neither: HotplugNicRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(neither.validate().unwrap_err().contains("either"));
+        let both: HotplugNicRequest =
+            serde_json::from_str(r#"{"bridge":"b","direct":{"outer":"eth0"}}"#).unwrap();
+        assert!(both.validate().unwrap_err().contains("mutually exclusive"));
+        let bad: HotplugNicRequest = serde_json::from_str(r#"{"direct":{"outer":""}}"#).unwrap();
+        assert!(bad.validate().is_err(), "the direct spec is validated too");
+        // a bridged request serialises without a `direct` key, so older daemons still accept it
+        assert!(
+            serde_json::to_value(&ok_bridge)
+                .unwrap()
+                .get("direct")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn guest_ips_are_validated_and_only_for_the_uplink_mode() {
+        fn check(json: &str) -> Result<(), String> {
+            serde_json::from_str::<NetworkSpec>(json)
+                .unwrap()
+                .validate_direct()
+        }
+        let ok = r#"{"mode":"tap","direct":{"outer":"enp1s0","mode":"l2-uplink","guest_ips":["10.0.0.5","192.168.1.9"]}}"#;
+        assert!(check(ok).is_ok());
+        // round-trips, and stays out of the JSON when empty (old records are unchanged)
+        let spec: NetworkSpec = serde_json::from_str(ok).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap()["direct"]["guest_ips"][1],
+            "192.168.1.9"
+        );
+        let bare: NetworkSpec =
+            serde_json::from_str(r#"{"mode":"tap","direct":{"outer":"eth0"}}"#).unwrap();
+        assert!(
+            serde_json::to_value(&bare).unwrap()["direct"]
+                .get("guest_ips")
+                .is_none()
+        );
+        assert!(
+            check(r#"{"mode":"tap","direct":{"outer":"eth0","guest_ips":["10.0.0.5"]}}"#)
+                .unwrap_err()
+                .contains("l2-uplink")
+        );
+        assert!(check(r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["fd00::5"]}}"#)
+            .unwrap_err()
+            .contains("IPv4"));
+        assert!(check(r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["not-an-ip"]}}"#).is_err());
+        let many = (1..=9)
+            .map(|i| format!("\"10.0.0.{i}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        let too_many = format!(
+            r#"{{"mode":"tap","direct":{{"outer":"e","mode":"l2-uplink","guest_ips":[{many}]}}}}"#
+        );
+        assert!(check(&too_many).unwrap_err().contains("at most"));
     }
 
     #[test]

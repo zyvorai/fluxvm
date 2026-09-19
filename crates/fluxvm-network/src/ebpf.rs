@@ -180,6 +180,16 @@ pub fn apply(
     let _netns =
         crate::netns_scope::enter(direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()));
     let _ = remove(cfg, id);
+    // L2-uplink VMs share steering maps with every other VM on the uplink. Create them (once) and
+    // remember how to reuse them by name, before any per-VM state exists so a failure leaves nothing.
+    let mut shared_map_args: Vec<String> = Vec::new();
+    if let Some(dir) = direct
+        .as_ref()
+        .and_then(|d| uplink_dir_for(&cfg.pin_root, d))
+    {
+        ensure_uplink_maps(&dir)?;
+        shared_map_args = uplink_reuse_args(&dir);
+    }
 
     let vm_dir = vm_pin_dir(&cfg.pin_root, id);
     let prog_dir = vm_dir.join("progs");
@@ -208,19 +218,17 @@ pub fn apply(
     // Set 14 -- the separate Pod-ingress object (`fluxvm_pod_ingress.bpf.o`)
     // is loaded lazily by `sync_pod_ingress_attachment` only when a Pod's
     // policy actually isolates ingress, sharing this object's pinned maps.
-    if let Err(e) = run(
-        "bpftool",
-        &[
-            "prog".into(),
-            "load".into(),
-            cfg.bpf_object.display().to_string(),
-            prog_pin.display().to_string(),
-            "type".into(),
-            "classifier".into(),
-            "pinmaps".into(),
-            map_dir.display().to_string(),
-        ],
-    ) {
+    let mut load_args: Vec<String> = vec![
+        "prog".into(),
+        "load".into(),
+        cfg.bpf_object.display().to_string(),
+        prog_pin.display().to_string(),
+        "type".into(),
+        "classifier".into(),
+    ];
+    load_args.extend(shared_map_args.iter().cloned());
+    load_args.extend(["pinmaps".into(), map_dir.display().to_string()]);
+    if let Err(e) = run("bpftool", &load_args) {
         let _ = fs::remove_dir_all(&vm_dir);
         let _ = fs::remove_dir_all(&meta_dir);
         return Err(e).context("loading FluxVM TC program");
@@ -403,6 +411,101 @@ fn configure_direct_out(
     .context("writing fluxvm_direct redirect config")
 }
 
+/// Creates (once per uplink) the pinned maps every VM on that uplink shares. Idempotent and safe
+/// against two VMs racing to create them.
+fn ensure_uplink_maps(dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir)
+        .with_context(|| format!("creating uplink map dir {}", dir.display()))?;
+    for (name, key, entries) in [
+        (crate::direct::DMAC_MAP, 8u32, crate::direct::DMAC_ENTRIES),
+        (crate::direct::DIP_MAP, 4u32, crate::direct::DIP_ENTRIES),
+    ] {
+        let path = dir.join(name);
+        if path.exists() {
+            continue;
+        }
+        let created = run(
+            "bpftool",
+            &[
+                "map".into(),
+                "create".into(),
+                path.display().to_string(),
+                "type".into(),
+                "hash".into(),
+                "key".into(),
+                key.to_string(),
+                "value".into(),
+                "4".into(),
+                "entries".into(),
+                entries.to_string(),
+                "name".into(),
+                name.into(),
+            ],
+        );
+        // Lost a race with another VM creating the same map: that is success.
+        if created.is_err() && !path.exists() {
+            return created.with_context(|| format!("creating shared map {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
+/// `bpftool prog load` arguments that make a program reuse the uplink's shared maps by name.
+fn uplink_reuse_args(dir: &Path) -> Vec<String> {
+    let mut a = Vec::new();
+    for name in [crate::direct::DMAC_MAP, crate::direct::DIP_MAP] {
+        a.extend([
+            "map".into(),
+            "name".into(),
+            name.into(),
+            "pinned".into(),
+            dir.join(name).display().to_string(),
+        ]);
+    }
+    a
+}
+
+/// The uplink's shared-map directory for an L2-uplink VM, or `None` for a Pod-veth VM.
+fn uplink_dir_for(pin_root: &Path, d: &crate::direct::DirectAttach) -> Option<PathBuf> {
+    (d.spec.mode == fluxvm_core::model::DirectMode::L2Uplink)
+        .then(|| crate::direct::uplink_dir(pin_root, &d.spec.outer))
+}
+
+/// Handles already used by bpf filters in `tc filter show` output.
+fn used_tc_handles(text: &str) -> std::collections::BTreeSet<u64> {
+    let mut used = std::collections::BTreeSet::new();
+    for line in text.lines().filter(|l| l.contains("bpf")) {
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        for pair in toks.windows(2) {
+            if pair[0] == "handle" {
+                let (raw, radix) = match pair[1].strip_prefix("0x") {
+                    Some(hex) => (hex, 16),
+                    None => (pair[1], 10),
+                };
+                if let Ok(h) = u64::from_str_radix(raw, radix) {
+                    used.insert(h);
+                }
+            }
+        }
+    }
+    used
+}
+
+/// Smallest handle >= the default that no filter at the direct preference uses yet. Several VMs on
+/// one uplink each need their own handle under the shared preference (legacy tc only; TCX needs none).
+fn free_tc_handle(used: &std::collections::BTreeSet<u64>) -> u64 {
+    let first: u64 = TC_DIRECT_HANDLE.parse().unwrap_or(3);
+    (first..).find(|h| !used.contains(h)).unwrap_or(first)
+}
+
+/// The legacy tc handle recorded for this VM's inbound program (the default when none was recorded).
+fn direct_tc_handle(id: Uuid) -> u64 {
+    fs::read_to_string(vm_meta_dir(id).join("direct_handle"))
+        .ok()
+        .and_then(|t| t.trim().parse().ok())
+        .unwrap_or_else(|| TC_DIRECT_HANDLE.parse().unwrap_or(3))
+}
+
 /// Loads `fluxvm_direct.bpf.o`, points it at the tap, and attaches it to the outer device's
 /// ingress (TCX when available, else legacy clsact at a reserved pref/handle).
 fn attach_direct_in(
@@ -426,20 +529,20 @@ fn attach_direct_in(
     fs::create_dir_all(&map_dir)
         .with_context(|| format!("creating direct map pin dir {}", map_dir.display()))?;
     fs::create_dir_all(vm_dir.join("links")).context("creating TCX link pin dir")?;
-    run(
-        "bpftool",
-        &[
-            "prog".into(),
-            "load".into(),
-            obj.display().to_string(),
-            prog_pin.display().to_string(),
-            "type".into(),
-            "classifier".into(),
-            "pinmaps".into(),
-            map_dir.display().to_string(),
-        ],
-    )
-    .context("loading FluxVM direct inbound program")?;
+    let uplink = uplink_dir_for(&cfg.pin_root, d);
+    let mut load_args: Vec<String> = vec![
+        "prog".into(),
+        "load".into(),
+        obj.display().to_string(),
+        prog_pin.display().to_string(),
+        "type".into(),
+        "classifier".into(),
+    ];
+    if let Some(dir) = &uplink {
+        load_args.extend(uplink_reuse_args(dir));
+    }
+    load_args.extend(["pinmaps".into(), map_dir.display().to_string()]);
+    run("bpftool", &load_args).context("loading FluxVM direct inbound program")?;
 
     let tap_idx = read_ifindex(tap).with_context(|| format!("resolving tap {tap}"))?;
     let outer_idx = read_ifindex(&d.spec.outer)
@@ -454,17 +557,26 @@ fn attach_direct_in(
         &crate::direct::in_value(tap_idx, in_mode),
     )
     .context("writing fluxvm_direct_in config")?;
-    if d.spec.mode == DirectMode::L2Uplink {
+    if let Some(dir) = &uplink {
         let mac = d
             .guest_mac
             .as_deref()
             .context("direct mode l2-uplink needs the guest MAC to steer inbound frames")?;
+        // The shared maps: this VM adds only its own entries and removes only those on detach.
         bpftool_map_update(
-            &map_dir.join("fluxvm_direct_mac"),
+            &dir.join(crate::direct::DMAC_MAP),
             &crate::direct::mac_key(crate::direct::parse_mac(mac)?),
             &tap_idx.to_ne_bytes(),
         )
-        .context("writing fluxvm_direct_mac steering entry")?;
+        .context("writing the shared fluxvm_dmac steering entry")?;
+        for ip in &d.spec.guest_ips {
+            bpftool_map_update(
+                &dir.join(crate::direct::DIP_MAP),
+                &crate::direct::ip_key(ip)?,
+                &tap_idx.to_ne_bytes(),
+            )
+            .with_context(|| format!("writing the shared fluxvm_dip entry for {ip}"))?;
+        }
     }
 
     let outer = d.spec.outer.as_str();
@@ -488,6 +600,21 @@ fn attach_direct_in(
     }
     require_tc()?;
     ensure_clsact(outer).context("installing clsact qdisc on the direct outer device")?;
+    // Several VMs on one uplink share the preference, so each needs its own handle.
+    let shown = crate::netns_scope::command("tc")
+        .args([
+            "filter",
+            "show",
+            "dev",
+            outer,
+            "ingress",
+            "pref",
+            TC_DIRECT_PRIORITY,
+        ])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    let handle = free_tc_handle(&used_tc_handles(&shown));
     run(
         "tc",
         &[
@@ -499,7 +626,7 @@ fn attach_direct_in(
             "pref".into(),
             TC_DIRECT_PRIORITY.into(),
             "handle".into(),
-            TC_DIRECT_HANDLE.into(),
+            handle.to_string(),
             "bpf".into(),
             "da".into(),
             "pinned".into(),
@@ -507,6 +634,8 @@ fn attach_direct_in(
         ],
     )
     .context("attaching FluxVM direct inbound program")?;
+    fs::write(meta_dir.join("direct_handle"), handle.to_string())
+        .context("recording direct tc handle")?;
     fs::write(meta_dir.join("direct_attach_mode"), "tc").context("recording direct attach mode")?;
     info!(%id, %outer, %tap, "attached FluxVM direct inbound redirect with clsact/tc");
     Ok(())
@@ -514,7 +643,7 @@ fn attach_direct_in(
 
 /// Is the direct inbound program live on `outer`? Checks the exact owned program id, like the
 /// egress and Pod-ingress hooks, so a foreign program at the same spot is never mistaken for ours.
-fn direct_in_attached(vm_dir: &Path, outer: &str) -> bool {
+fn direct_in_attached(vm_dir: &Path, outer: &str, handle: u64) -> bool {
     let Ok(owned) = pinned_program_id(&vm_dir.join("progs/fluxvm_direct_in")) else {
         return false;
     };
@@ -535,12 +664,7 @@ fn direct_in_attached(vm_dir: &Path, outer: &str) -> bool {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .and_then(|o| {
-            parse_tc_program_id_handle(
-                &String::from_utf8_lossy(&o.stdout),
-                TC_DIRECT_HANDLE.parse().unwrap_or(3),
-            )
-        })
+        .and_then(|o| parse_tc_program_id_handle(&String::from_utf8_lossy(&o.stdout), handle))
         == Some(owned)
 }
 
@@ -550,12 +674,14 @@ fn detach_direct_in_dir(id: Uuid, vm_dir: &Path) {
     let Some(d) = crate::direct::recorded(id) else {
         return;
     };
+    remove_uplink_entries(vm_dir, &d);
     let link = vm_dir.join("links/tcx_direct_in");
     if link.exists() {
         let _ = tcx::detach(&link);
         return;
     }
-    if direct_in_attached(vm_dir, &d.spec.outer) {
+    let handle = direct_tc_handle(id);
+    if direct_in_attached(vm_dir, &d.spec.outer, handle) {
         let _ = run(
             "tc",
             &[
@@ -567,10 +693,45 @@ fn detach_direct_in_dir(id: Uuid, vm_dir: &Path) {
                 "pref".into(),
                 TC_DIRECT_PRIORITY.into(),
                 "handle".into(),
-                TC_DIRECT_HANDLE.into(),
+                handle.to_string(),
                 "bpf".into(),
             ],
         );
+    }
+}
+
+/// Deletes THIS VM's entries from the uplink's shared steering maps (other VMs' entries stay).
+/// `vm_dir` is `<pin_root>/vms/<uuid>`, so the pin root is two levels up.
+fn remove_uplink_entries(vm_dir: &Path, d: &crate::direct::DirectAttach) {
+    let Some(pin_root) = vm_dir.parent().and_then(Path::parent) else {
+        return;
+    };
+    let Some(dir) = uplink_dir_for(pin_root, d) else {
+        return;
+    };
+    let delete = |map: &str, key: &[u8]| {
+        let mut args: Vec<String> = vec![
+            "map".into(),
+            "delete".into(),
+            "pinned".into(),
+            dir.join(map).display().to_string(),
+            "key".into(),
+            "hex".into(),
+        ];
+        args.extend(hex_args(key));
+        let _ = run("bpftool", &args);
+    };
+    if let Some(mac) = d
+        .guest_mac
+        .as_deref()
+        .and_then(|m| crate::direct::parse_mac(m).ok())
+    {
+        delete(crate::direct::DMAC_MAP, &crate::direct::mac_key(mac));
+    }
+    for ip in &d.spec.guest_ips {
+        if let Ok(key) = crate::direct::ip_key(ip) {
+            delete(crate::direct::DIP_MAP, &key);
+        }
     }
 }
 
@@ -768,7 +929,9 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
         };
     let direct_required = direct.is_some();
     let direct_attached = direct.as_ref().is_some_and(|d| {
-        iface.is_some() && schema_compatible && direct_in_attached(&vm_dir, &d.spec.outer)
+        iface.is_some()
+            && schema_compatible
+            && direct_in_attached(&vm_dir, &d.spec.outer, direct_tc_handle(id))
     });
     let attached = egress_attached
         && (!pod_ingress_required || pod_ingress_attached)
@@ -2350,6 +2513,29 @@ pub(crate) fn run(program: &str, args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tc_handles_are_allocated_per_vm_under_the_shared_preference() {
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(
+            free_tc_handle(&none),
+            3,
+            "the first VM keeps the historical handle"
+        );
+        let text = "filter protocol all pref 49154 bpf chain 0 \n\
+                    filter protocol all pref 49154 bpf chain 0 handle 0x3 a:[*fsobj] id 1\n\
+                    filter protocol all pref 49154 bpf chain 0 handle 0x4 b:[*fsobj] id 2\n\
+                    filter protocol all pref 49154 u32 chain 0 handle 0x5\n";
+        let used = used_tc_handles(text);
+        assert_eq!(
+            used,
+            [3u64, 4].into_iter().collect(),
+            "only bpf filters count"
+        );
+        assert_eq!(free_tc_handle(&used), 5);
+        let gap: std::collections::BTreeSet<u64> = [3u64, 5].into_iter().collect();
+        assert_eq!(free_tc_handle(&gap), 4, "a freed handle is reused");
+    }
 
     #[test]
     fn ip_link_ifindex_is_the_leading_number() {

@@ -237,6 +237,46 @@ pub(crate) fn in_value(tap_ifindex: u32, mode: u32) -> [u8; 8] {
     v
 }
 
+/// Shared per-uplink steering maps (bpf/fluxvm_direct.bpf.h). One pair per uplink, reused by name by
+/// every VM's programs; sizes MUST equal the header's or libbpf refuses the reuse.
+pub(crate) const DMAC_MAP: &str = "fluxvm_dmac";
+pub(crate) const DIP_MAP: &str = "fluxvm_dip";
+pub(crate) const DMAC_ENTRIES: u32 = 1024; // FLUXVM_DIRECT_MAC_ENTRIES
+pub(crate) const DIP_ENTRIES: u32 = 1024; // FLUXVM_DIRECT_IP_ENTRIES
+
+/// Where the shared maps for `outer` are pinned: `<pin_root>/uplinks/<outer>`.
+pub(crate) fn uplink_dir(pin_root: &Path, outer: &str) -> std::path::PathBuf {
+    pin_root.join("uplinks").join(outer)
+}
+
+/// The IPv4 address as it appears on the wire (network byte order): the `fluxvm_dip` key.
+pub(crate) fn ip_key(ip: &str) -> Result<[u8; 4]> {
+    Ok(ip
+        .parse::<std::net::Ipv4Addr>()
+        .with_context(|| format!("guest IP {ip:?} is not an IPv4 address"))?
+        .octets())
+}
+
+/// Why `outer` cannot be a bridge-less uplink, or `None` when it can. A device that is a port of a
+/// bridge or bond would have its frames consumed by the master before a TC hook could steer them.
+pub fn uplink_problem(sysfs_class_net: &Path, outer: &str) -> Option<String> {
+    let dev = sysfs_class_net.join(outer);
+    if !dev.exists() {
+        return Some(format!("uplink {outer} does not exist"));
+    }
+    if dev.join("master").exists() {
+        let master = std::fs::read_link(dev.join("master"))
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "?".into());
+        return Some(format!(
+            "uplink {outer} is a port of {master}; use the bridge/bond itself or an unenslaved NIC \
+             (a bridge-less tap needs the frames to reach the uplink's TC hook)"
+        ));
+    }
+    None
+}
+
 /// `struct mac_key { u8 addr[6]; u8 pad[2]; }` (8 B).
 pub(crate) fn mac_key(mac: [u8; 6]) -> [u8; 8] {
     let mut k = [0u8; 8];
@@ -255,6 +295,7 @@ mod tests {
                 outer: "eth0".into(),
                 netns_path: Some("/run/netns/fvcni-abc".into()),
                 mode: DirectMode::PeerVeth,
+                guest_ips: vec![],
             },
             guest_mac: Some("02:00:00:00:00:02".into()),
         }
@@ -291,6 +332,45 @@ mod tests {
         assert_eq!(&w[4..8], &2u32.to_ne_bytes());
         let k = mac_key([0x02, 0, 0, 0, 0, 0x2a]);
         assert_eq!(k, [0x02, 0, 0, 0, 0, 0x2a, 0, 0]);
+    }
+
+    #[test]
+    fn ip_keys_are_wire_order_and_garbage_is_rejected() {
+        assert_eq!(ip_key("10.1.2.3").unwrap(), [10, 1, 2, 3]);
+        assert!(ip_key("fd00::1").is_err());
+        assert!(ip_key("300.1.1.1").is_err());
+        assert!(ip_key("").is_err());
+    }
+
+    #[test]
+    fn uplink_dir_is_scoped_per_device() {
+        assert_eq!(
+            uplink_dir(Path::new("/sys/fs/bpf/fluxvm"), "enp1s0"),
+            Path::new("/sys/fs/bpf/fluxvm/uplinks/enp1s0")
+        );
+    }
+
+    #[test]
+    fn a_bridge_or_bond_port_and_a_missing_nic_are_not_uplinks() {
+        let root = tempfile::tempdir().unwrap();
+        let net = root.path();
+        assert!(
+            uplink_problem(net, "enp1s0")
+                .unwrap()
+                .contains("does not exist")
+        );
+        std::fs::create_dir_all(net.join("enp1s0")).unwrap();
+        assert_eq!(uplink_problem(net, "enp1s0"), None, "a plain NIC is fine");
+        // enslaved: sysfs exposes `master` as a symlink to the master device
+        std::fs::create_dir_all(net.join("vmbr0")).unwrap();
+        std::os::unix::fs::symlink(net.join("vmbr0"), net.join("enp1s0/master")).unwrap();
+        let why = uplink_problem(net, "enp1s0").unwrap();
+        assert!(why.contains("port of vmbr0"), "{why}");
+        assert_eq!(
+            uplink_problem(net, "vmbr0"),
+            None,
+            "the master itself is a valid outer"
+        );
     }
 
     #[test]

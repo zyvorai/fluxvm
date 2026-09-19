@@ -417,6 +417,222 @@ pub async fn hotplug_nic(
     Ok(())
 }
 
+/// One command of a [`execute_session`]. `fd` is attached to that command's request as
+/// `SCM_RIGHTS` ancillary data (what QMP's `getfd` requires).
+pub struct Step {
+    pub command: String,
+    pub args: Option<Value>,
+    pub fd: Option<std::os::fd::RawFd>,
+}
+
+impl Step {
+    pub fn new(command: &str, args: Option<Value>) -> Self {
+        Self {
+            command: command.into(),
+            args,
+            fd: None,
+        }
+    }
+
+    pub fn with_fd(mut self, fd: std::os::fd::RawFd) -> Self {
+        self.fd = Some(fd);
+        self
+    }
+}
+
+/// Runs `steps` in order on ONE QMP connection and returns each command's `return` value.
+///
+/// A session (not the per-command connections everything else here uses) is required whenever a
+/// command names a descriptor received earlier: QEMU keeps `getfd` descriptors on the *monitor*
+/// they arrived on, and `netdev_add ... fd=<name>` resolves the name through the monitor that is
+/// executing it. Runs on a blocking thread because passing a descriptor is a `sendmsg`.
+pub async fn execute_session(
+    socket: &Path,
+    steps: Vec<Step>,
+    timeout: Duration,
+) -> Result<Vec<Value>> {
+    let socket = socket.to_path_buf();
+    tokio::task::spawn_blocking(move || session_blocking(&socket, steps, timeout))
+        .await
+        .context("joining QMP session task")?
+}
+
+/// `sendmsg` of `data` with `fd` attached as `SCM_RIGHTS` (the descriptor travels with the first byte).
+fn send_with_fd(
+    sock: std::os::fd::RawFd,
+    data: &[u8],
+    fd: std::os::fd::RawFd,
+) -> std::io::Result<()> {
+    let mut iov = libc::iovec {
+        iov_base: data.as_ptr() as *mut libc::c_void,
+        iov_len: data.len(),
+    };
+    // SAFETY: CMSG_SPACE is a pure size computation.
+    let space =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<std::os::fd::RawFd>() as u32) } as usize;
+    let mut control = vec![0u8; space];
+    // SAFETY: an all-zero msghdr is a valid initial value for this plain C struct.
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = space as _;
+    // SAFETY: `control` is CMSG_SPACE bytes, so CMSG_FIRSTHDR points inside it and the CMSG_LEN /
+    // CMSG_DATA writes below stay in bounds; `msg` and the buffers outlive the sendmsg call.
+    let sent = unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<std::os::fd::RawFd>() as u32) as _;
+        std::ptr::copy_nonoverlapping(
+            &fd as *const _ as *const u8,
+            libc::CMSG_DATA(cmsg),
+            std::mem::size_of::<std::os::fd::RawFd>(),
+        );
+        libc::sendmsg(sock, &msg, 0)
+    };
+    if sent < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // The descriptor travelled with the first byte; anything sendmsg did not take is plain data.
+    let mut off = sent as usize;
+    while off < data.len() {
+        // SAFETY: `data[off..]` is a valid readable range for the given length.
+        let n = unsafe {
+            libc::write(
+                sock,
+                data[off..].as_ptr() as *const libc::c_void,
+                data.len() - off,
+            )
+        };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        off += n as usize;
+    }
+    Ok(())
+}
+
+fn session_blocking(socket: &Path, steps: Vec<Step>, timeout: Duration) -> Result<Vec<Value>> {
+    use std::io::{BufRead, BufReader as StdBufReader, Write};
+    use std::os::fd::AsRawFd;
+    let stream = std::os::unix::net::UnixStream::connect(socket)
+        .with_context(|| format!("connecting to QMP socket {}", socket.display()))?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let mut writer = stream.try_clone()?;
+    let mut reader = StdBufReader::new(stream);
+
+    let mut line = String::new();
+    if reader
+        .read_line(&mut line)
+        .context("reading QMP greeting")?
+        == 0
+        || serde_json::from_str::<Value>(&line)
+            .ok()
+            .and_then(|v| v.get("QMP").cloned())
+            .is_none()
+    {
+        bail!("unexpected QMP greeting: {line:?}");
+    }
+    writer.write_all(b"{\"execute\":\"qmp_capabilities\"}\n")?;
+    line.clear();
+    if reader
+        .read_line(&mut line)
+        .context("reading qmp_capabilities reply")?
+        == 0
+    {
+        bail!("QMP connection closed before the qmp_capabilities reply");
+    }
+    if let Some(err) = serde_json::from_str::<Value>(&line)
+        .ok()
+        .and_then(|v| v.get("error").cloned())
+    {
+        bail!("qmp_capabilities rejected: {err}");
+    }
+
+    let mut returns = Vec::with_capacity(steps.len());
+    for step in steps {
+        let mut request = json!({"execute": step.command});
+        if let Some(args) = step.args {
+            request["arguments"] = args;
+        }
+        let bytes = format!("{request}\n");
+        match step.fd {
+            Some(fd) => {
+                send_with_fd(writer.as_raw_fd(), bytes.as_bytes(), fd).with_context(|| {
+                    format!("sending QMP command {} with a descriptor", step.command)
+                })?
+            }
+            None => writer
+                .write_all(bytes.as_bytes())
+                .with_context(|| format!("sending QMP command {}", step.command))?,
+        }
+        loop {
+            line.clear();
+            if reader
+                .read_line(&mut line)
+                .context("reading QMP response")?
+                == 0
+            {
+                bail!(
+                    "QEMU closed the QMP connection without responding to {}",
+                    step.command
+                );
+            }
+            let response: Value = serde_json::from_str(&line)
+                .with_context(|| format!("parsing QMP response: {line}"))?;
+            if response.get("event").is_some() {
+                continue;
+            }
+            if let Some(err) = response.get("error") {
+                bail!("QMP {} failed: {err}", step.command);
+            }
+            returns.push(response.get("return").cloned().unwrap_or(Value::Null));
+            break;
+        }
+    }
+    Ok(returns)
+}
+
+/// Like [`hotplug_nic`], for a TAP the daemon already opened (it lives in another network
+/// namespace, so QEMU cannot open it by name): the descriptor is passed with `getfd` and the
+/// `netdev` references it by name. The caller keeps ownership of its own copy of `tap_fd`.
+pub async fn hotplug_nic_fd(
+    socket: &Path,
+    tap_fd: std::os::fd::RawFd,
+    mac: Option<&str>,
+    index: u8,
+    timeout: Duration,
+) -> Result<()> {
+    let net_id = format!("net{index}");
+    let nic_id = format!("nic{index}");
+    let fd_name = format!("fluxvm-tap{index}");
+    let mut device = json!({
+        "driver": "virtio-net-pci",
+        "id": nic_id,
+        "netdev": net_id,
+        "bus": format!("hotplug-pcie-{index}")
+    });
+    if let Some(mac) = mac {
+        device["mac"] = Value::from(mac);
+    }
+    let steps = vec![
+        Step::new("getfd", Some(json!({"fdname": fd_name}))).with_fd(tap_fd),
+        Step::new(
+            "netdev_add",
+            Some(json!({"type": "tap", "id": net_id, "fd": fd_name})),
+        ),
+        Step::new("device_add", Some(device)),
+    ];
+    if let Err(e) = execute_session(socket, steps, timeout).await {
+        // If netdev_add succeeded before device_add failed, remove it; harmless when it never existed.
+        let _ = execute(socket, "netdev_del", Some(json!({"id": net_id})), timeout).await;
+        return Err(e).context("hot-adding a NIC on a passed tap descriptor");
+    }
+    Ok(())
+}
+
 async fn query_memory_devices(socket: &Path, timeout: Duration) -> Result<Vec<Value>> {
     let value = execute(socket, "query-memory-devices", None, timeout).await?;
     value
@@ -935,5 +1151,178 @@ mod hotplug_tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("add_memory_mib must be >= 1"));
+    }
+}
+
+#[cfg(test)]
+mod fd_session_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader as StdBufReader, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixListener as StdListener;
+
+    /// (command, arguments, descriptor received with that request's bytes)
+    type Seen = (String, Value, Option<(u64, u64)>);
+
+    /// `recvmsg` one QMP line and any SCM_RIGHTS descriptor; returns the line and the received
+    /// descriptor's (dev, ino) so the test can prove it is the very file that was sent.
+    fn recv_line(sock: &std::os::unix::net::UnixStream) -> (String, Option<(u64, u64)>) {
+        let mut buf = vec![0u8; 4096];
+        let mut iov = libc::iovec {
+            iov_base: buf.as_mut_ptr() as *mut libc::c_void,
+            iov_len: buf.len(),
+        };
+        let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<i32>() as u32) } as usize;
+        let mut control = vec![0u8; space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = space as _;
+        let n = unsafe { libc::recvmsg(sock.as_raw_fd(), &mut msg, 0) };
+        assert!(n > 0, "recvmsg failed");
+        let mut ident = None;
+        unsafe {
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            if !c.is_null()
+                && (*c).cmsg_level == libc::SOL_SOCKET
+                && (*c).cmsg_type == libc::SCM_RIGHTS
+            {
+                let mut fd: i32 = -1;
+                std::ptr::copy_nonoverlapping(libc::CMSG_DATA(c), &mut fd as *mut _ as *mut u8, 4);
+                let mut st: libc::stat = std::mem::zeroed();
+                assert_eq!(libc::fstat(fd, &mut st), 0);
+                ident = Some((st.st_dev as u64, st.st_ino as u64));
+                libc::close(fd);
+            }
+        }
+        buf.truncate(n as usize);
+        (String::from_utf8_lossy(&buf).trim().to_string(), ident)
+    }
+
+    /// A QMP server that records every command; `fail` makes `device_add` return an error.
+    fn serve(listener: StdListener, fail: bool) -> std::thread::JoinHandle<Vec<Seen>> {
+        std::thread::spawn(move || {
+            let mut all = Vec::new();
+            // The session, then (on failure) the separate netdev_del connection.
+            for _ in 0..if fail { 2 } else { 1 } {
+                let (stream, _) = listener.accept().unwrap();
+                let mut w = stream.try_clone().unwrap();
+                w.write_all(b"{\"QMP\":{\"version\":{}}}\n").unwrap();
+                let mut r = StdBufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap(); // qmp_capabilities
+                w.write_all(b"{\"return\":{}}\n").unwrap();
+                loop {
+                    let (text, ident) = recv_line(&stream);
+                    if text.is_empty() {
+                        break;
+                    }
+                    let req: Value = serde_json::from_str(&text).unwrap();
+                    let cmd = req["execute"].as_str().unwrap().to_string();
+                    all.push((cmd.clone(), req["arguments"].clone(), ident));
+                    let reply = if fail && cmd == "device_add" {
+                        "{\"error\":{\"class\":\"GenericError\",\"desc\":\"no free slot\"}}\n"
+                    } else {
+                        "{\"return\":{}}\n"
+                    };
+                    w.write_all(reply.as_bytes()).unwrap();
+                    if cmd == "device_add" || cmd == "netdev_del" {
+                        break;
+                    }
+                }
+            }
+            all
+        })
+    }
+
+    fn ident_of(f: &std::fs::File) -> (u64, u64) {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(f.as_raw_fd(), &mut st) }, 0);
+        (st.st_dev as u64, st.st_ino as u64)
+    }
+
+    #[tokio::test]
+    async fn getfd_carries_the_descriptor_and_netdev_names_it_in_the_same_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("qmp.sock");
+        let server = serve(StdListener::bind(&sock).unwrap(), false);
+        let file = std::fs::File::open("/dev/null").unwrap(); // any fd; identity is what is checked
+
+        hotplug_nic_fd(
+            &sock,
+            file.as_raw_fd(),
+            Some("02:00:00:00:00:02"),
+            0,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let seen = server.join().unwrap();
+        let cmds: Vec<&str> = seen.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(
+            cmds,
+            ["getfd", "netdev_add", "device_add"],
+            "one ordered session"
+        );
+        assert_eq!(seen[0].1["fdname"], "fluxvm-tap0");
+        assert_eq!(
+            seen[0].2,
+            Some(ident_of(&file)),
+            "getfd must carry the very descriptor we sent"
+        );
+        assert!(
+            seen[1].2.is_none() && seen[2].2.is_none(),
+            "only getfd carries a descriptor"
+        );
+        assert_eq!(
+            seen[1].1,
+            json!({"type": "tap", "id": "net0", "fd": "fluxvm-tap0"})
+        );
+        assert_eq!(seen[2].1["driver"], "virtio-net-pci");
+        assert_eq!(seen[2].1["netdev"], "net0");
+        assert_eq!(seen[2].1["bus"], "hotplug-pcie-0");
+        assert_eq!(seen[2].1["mac"], "02:00:00:00:00:02");
+    }
+
+    #[tokio::test]
+    async fn a_failed_device_add_removes_the_netdev_on_a_second_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("qmp.sock");
+        let server = serve(StdListener::bind(&sock).unwrap(), true);
+        let file = std::fs::File::open("/dev/null").unwrap();
+
+        let err = hotplug_nic_fd(&sock, file.as_raw_fd(), None, 1, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("no free slot"), "{err:#}");
+
+        let seen = server.join().unwrap();
+        let cmds: Vec<&str> = seen.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(cmds, ["getfd", "netdev_add", "device_add", "netdev_del"]);
+        assert_eq!(seen[3].1, json!({"id": "net1"}));
+        assert_eq!(
+            seen[1].1["fd"], "fluxvm-tap1",
+            "the port index is part of the names"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_socket_is_a_clear_error_not_a_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = hotplug_nic_fd(
+            &dir.path().join("nope.sock"),
+            0,
+            None,
+            0,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("connecting to QMP socket"),
+            "{err:#}"
+        );
     }
 }

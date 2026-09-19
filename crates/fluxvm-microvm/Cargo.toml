@@ -34,3 +34,5 @@ fluxvm-kube = { path = "../fluxvm-kube" }
 
 [dev-dependencies]
 tempfile = "3"
+# The direct network body is checked against the daemon's own model.
+fluxvm-core = { path = "../fluxvm-core" }

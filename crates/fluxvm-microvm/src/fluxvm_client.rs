@@ -172,6 +172,20 @@ pub fn create_body(name: &str, spec: &MicroVMSpec, kernel: Option<&str>) -> Resu
                 .ok_or_else(|| anyhow::anyhow!("networkMode macvtap requires spec.parent"))?;
             json!({"mode": "macvtap", "parent": parent, "macvtap_mode": spec.macvtap_mode, "mac": spec.mac})
         }
+        // Bridge-less tap on a host uplink NIC: no bridge, no macvtap (docs/direct-datapath.md).
+        // `parent` names the uplink; `guestIps` lets the LAN discover the guest by ARP.
+        "direct" => {
+            let uplink = spec.parent.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("networkMode direct requires spec.parent (the uplink NIC)")
+            })?;
+            json!({
+                "mode": "tap",
+                "tap_name": spec.tap_name,
+                "mac": spec.mac,
+                "netns": false,
+                "direct": {"outer": uplink, "mode": "l2-uplink", "guest_ips": spec.guest_ips}
+            })
+        }
         other => bail!("network_mode '{other}' is not supported"),
     };
     let mut body = json!({
@@ -259,6 +273,31 @@ mod tests {
     fn macvtap_requires_parent() {
         let mut s = spec();
         s.network_mode = "macvtap".into();
+        s.parent = None;
+        assert!(create_body("x", &s, None).is_err());
+    }
+    #[test]
+    fn direct_maps_to_an_l2_uplink_tap_the_daemon_accepts() {
+        let mut s = spec();
+        s.network_mode = "direct".into();
+        s.parent = Some("enp1s0".into());
+        s.mac = Some("02:00:00:00:00:0a".into());
+        s.guest_ips = vec!["10.0.0.5".into()];
+        let body = create_body("x", &s, None).unwrap();
+        assert_eq!(body["network"]["mode"], "tap");
+        assert_eq!(body["network"]["netns"], false);
+        assert_eq!(body["network"]["direct"]["outer"], "enp1s0");
+        assert_eq!(body["network"]["direct"]["mode"], "l2-uplink");
+        assert_eq!(body["network"]["direct"]["guest_ips"][0], "10.0.0.5");
+        // and the daemon's own model must accept and validate exactly this shape
+        let net: fluxvm_core::model::NetworkSpec =
+            serde_json::from_value(body["network"].clone()).unwrap();
+        net.validate_direct().expect("daemon validation");
+    }
+    #[test]
+    fn direct_requires_the_uplink() {
+        let mut s = spec();
+        s.network_mode = "direct".into();
         s.parent = None;
         assert!(create_body("x", &s, None).is_err());
     }

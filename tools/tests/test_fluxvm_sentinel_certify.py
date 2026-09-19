@@ -28,6 +28,21 @@ class CertificationTests(unittest.TestCase):
         kernel = cert._kernel_version_tuple()
         self.assertEqual(probe["capabilities"]["tcx"], kernel >= (6, 6, 0))
 
+    def test_redirect_helpers_come_from_the_kernels_own_helper_list(self):
+        blob = {"helpers": {"sched_cls_available_helpers": ["bpf_redirect", "bpf_redirect_peer"]}}
+        self.assertEqual(
+            cert.tc_helpers_from_feature_probe(blob), {"bpf_redirect", "bpf_redirect_peer"}
+        )
+        # Anything that is not the expected shape must fail closed, never guess.
+        for bad in (None, [], {}, {"helpers": None}, {"helpers": {}}, {"helpers": {"sched_cls_available_helpers": "x"}}):
+            self.assertEqual(cert.tc_helpers_from_feature_probe(bad), set(), bad)
+
+    def test_probe_reports_boolean_redirect_capabilities(self):
+        caps = cert.probe_capabilities()["capabilities"]
+        for name in ("redirect_peer", "redirect_neigh"):
+            self.assertIn(name, caps)
+            self.assertIsInstance(caps[name], bool)
+
     def test_budget_max_and_min(self):
         with tempfile.TemporaryDirectory() as td:
             d = pathlib.Path(td)

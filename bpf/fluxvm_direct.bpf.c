@@ -19,9 +19,10 @@
 #include <linux/if_ether.h>
 #include <linux/pkt_cls.h>
 #include <bpf/bpf_helpers.h>
+#include "fluxvm_direct.bpf.h"
 
 #define FLUXVM_DIRECT_IN_PEER 1 /* outer is a veth: steer EVERYTHING to the tap */
-#define FLUXVM_DIRECT_IN_L2   2 /* outer is an uplink: steer by destination MAC */
+#define FLUXVM_DIRECT_IN_L2   2 /* outer is an uplink: steer by ARP target / destination MAC */
 
 struct direct_in {
     __u32 tap_ifindex;
@@ -36,49 +37,29 @@ struct {
     __type(value, struct direct_in);
 } fluxvm_direct_in SEC(".maps");
 
-struct mac_key {
-    __u8 addr[6];
-    __u8 pad[2];
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 256);
-    __type(key, struct mac_key);
-    __type(value, __u32); /* tap ifindex */
-} fluxvm_direct_mac SEC(".maps");
-
+/* "Not mine" is TC_ACT_UNSPEC, never TC_ACT_OK. On TCX, OK is TCX_PASS and ends the chain, which
+ * would hide the frame from the next VM's copy of this program on a shared uplink; UNSPEC
+ * (TCX_NEXT) lets the chain continue and, at the end, hands the frame to the host stack. Legacy
+ * cls_bpf treats UNSPEC the same way. */
 SEC("tc")
 int fluxvm_direct_in_prog(struct __sk_buff *skb)
 {
     __u32 ifindex = skb->ifindex;
     struct direct_in *d = bpf_map_lookup_elem(&fluxvm_direct_in, &ifindex);
-    /* Not configured: fail open to the normal stack. There is nothing to
-     * protect here -- a direct tap has no bridge for the packet to fall into,
-     * and VM-edge policy runs on the guest-originated direction. */
     if (!d)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (d->mode == FLUXVM_DIRECT_IN_PEER)
         return bpf_redirect(d->tap_ifindex, 0);
 
     if (d->mode == FLUXVM_DIRECT_IN_L2) {
-        void *data = (void *)(long)skb->data;
-        void *data_end = (void *)(long)skb->data_end;
-        struct ethhdr *eth = data;
-        if ((void *)(eth + 1) > data_end)
-            return TC_ACT_OK;
-        struct mac_key k = {};
-        __builtin_memcpy(k.addr, eth->h_dest, 6);
-        __u32 *tap = bpf_map_lookup_elem(&fluxvm_direct_mac, &k);
+        __u32 tap = fluxvm_direct_steer_local(skb);
         if (tap)
-            return bpf_redirect(*tap, 0);
-        /* Unknown / broadcast / multicast / the host's own MAC: the host
-         * stack. Guest discovery of broadcast traffic is a documented bound
-         * of the standalone mode. */
-        return TC_ACT_OK;
+            return bpf_redirect(tap, 0);
+        /* Unknown / broadcast / multicast / the host's own MAC: the host stack. */
+        return TC_ACT_UNSPEC;
     }
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 char LICENSE[] SEC("license") = "GPL";

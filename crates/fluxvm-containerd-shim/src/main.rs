@@ -1205,7 +1205,6 @@ impl Service {
                     kernel: kernel_version(),
                     link_kind: cni_link_kind(path, &primary).await,
                     secondaries: multus.len(),
-                    warm_pool: self.cfg.warm_pool.is_some(),
                 };
                 let (want_direct, why) = match resolve_datapath(self.cfg.cni_datapath, &facts) {
                     Ok(decision) => decision,
@@ -1408,8 +1407,25 @@ impl Service {
             }
 
             if self.cfg.warm_pool.is_some() {
-                if let Some(cni) = cni.as_ref() {
-                    self.hotplug_cni_nics(&vm, cni).await?;
+                if let Some(current) = cni.as_ref() {
+                    if let Err(e) = self.hotplug_cni_nics(&vm, current).await {
+                        // `auto`: the daemon could not honour a direct hotplug (legacy dataplane, an
+                        // eBPF attach failure, an older daemon that predates the request field).
+                        // It removes what it created, so the port is free for the bridge chain.
+                        let can_retry =
+                            self.cfg.cni_datapath == CniDatapath::Auto && current.direct;
+                        let Some((path, primary, multus)) =
+                            bridge_retry.as_ref().filter(|_| can_retry)
+                        else {
+                            return Err(e);
+                        };
+                        warn!("direct hotplug failed ({e:#}); falling back to the bridge chain");
+                        cleanup_cni_bridge(current).await;
+                        let bridge =
+                            prepare_bridge_chain(&self.group, path, primary, multus).await?;
+                        self.hotplug_cni_nics(&vm, &bridge).await?;
+                        cni = Some(bridge);
+                    }
                 }
             }
 
@@ -1471,6 +1487,19 @@ impl Service {
     }
 
     async fn hotplug_cni_nics(&self, vm: &VmRecord, cni: &CniBridge) -> AnyResult<()> {
+        if cni.direct {
+            // The daemon creates the tap inside the Pod netns, wires the redirect, and passes the
+            // tap to QEMU as a descriptor (QMP getfd), so there is no bridge to name.
+            let body = direct_hotplug_body(cni);
+            self.api(
+                Method::POST,
+                &format!("/v1/vms/{}/hotplug/nic", vm.id),
+                Some(body),
+            )
+            .await
+            .with_context(|| format!("hotplugging direct NIC {} onto {}", cni.interface, vm.id))?;
+            return Ok(());
+        }
         let mut nics = vec![(&cni.host_bridge, &cni.network.mac)];
         for sec in &cni.secondaries {
             nics.push((&sec.host_bridge, &sec.network.mac));
@@ -4324,8 +4353,6 @@ struct DirectFacts {
     link_kind: Option<String>,
     /// Multus `netN` secondaries that would need their own guest NIC.
     secondaries: usize,
-    /// Warm-pool claims hotplug NICs over QMP by tap *name*.
-    warm_pool: bool,
 }
 
 /// `bpf_redirect_peer` (the guest -> pod-veth hop) needs Linux >= 5.10.
@@ -4357,12 +4384,6 @@ fn direct_ineligibility(f: &DirectFacts) -> Option<String> {
             "{} Multus secondary NIC(s) are not supported with the direct datapath yet",
             f.secondaries
         ));
-    }
-    if f.warm_pool {
-        return Some(
-            "warm-pool claims hotplug NICs over QMP by name and cannot see a tap inside the Pod netns yet"
-                .into(),
-        );
     }
     None
 }
@@ -4418,6 +4439,18 @@ async fn cni_link_kind(netns_path: &Path, interface: &str) -> Option<String> {
         interface.into(),
     ];
     parse_link_kind(&command_output("nsenter", &args).await.ok()?)
+}
+
+/// The `POST /v1/vms/{id}/hotplug/nic` body for a direct attachment (a warm-pool claim).
+fn direct_hotplug_body(cni: &CniBridge) -> Value {
+    json!({
+        "mac": cni.network.mac,
+        "direct": {
+            "outer": cni.interface,
+            "netns_path": cni.netns_mount,
+            "mode": "peer-veth"
+        }
+    })
 }
 
 /// The `network` object of `POST /v1/vms` for a prepared CNI attachment.
@@ -6168,7 +6201,6 @@ mod direct_datapath_tests {
             kernel: Some((6, 1)),
             link_kind: Some("veth".into()),
             secondaries: 0,
-            warm_pool: false,
         }
     }
 
@@ -6248,15 +6280,14 @@ mod direct_datapath_tests {
         f.secondaries = 2;
         assert!(direct_ineligibility(&f).unwrap().contains("Multus"));
 
-        let mut f = ok_facts();
-        f.warm_pool = true;
-        assert!(direct_ineligibility(&f).unwrap().contains("warm-pool"));
+        // A warm pool is supported now: the daemon passes the tap to QEMU as a descriptor.
+        assert_eq!(direct_ineligibility(&ok_facts()), None);
     }
 
     #[test]
     fn modes_resolve_as_documented() {
         let bad = DirectFacts {
-            warm_pool: true,
+            secondaries: 1,
             ..ok_facts()
         };
         // bridge: never direct, even when everything would allow it
@@ -6275,13 +6306,13 @@ mod direct_datapath_tests {
         assert!(
             resolve_datapath(CniDatapath::Direct, &bad)
                 .unwrap_err()
-                .contains("warm-pool")
+                .contains("Multus")
         );
         // auto: direct when possible, otherwise the bridge chain with the reason in the message
         assert!(resolve_datapath(CniDatapath::Auto, &ok_facts()).unwrap().0);
         let (direct, why) = resolve_datapath(CniDatapath::Auto, &bad).unwrap();
         assert!(
-            !direct && why.contains("falling back") && why.contains("warm-pool"),
+            !direct && why.contains("falling back") && why.contains("Multus"),
             "{why}"
         );
     }
@@ -6359,6 +6390,26 @@ mod direct_datapath_tests {
         let spec: fluxvm_core::model::NetworkSpec = serde_json::from_value(v).unwrap();
         spec.validate_direct()
             .expect("the shim's direct body must pass the daemon's validation");
+    }
+
+    #[test]
+    fn direct_hotplug_body_is_what_the_daemon_validates() {
+        let mut c = bridge_cni();
+        c.direct = true;
+        c.secondaries.clear();
+        let body = direct_hotplug_body(&c);
+        assert!(
+            body.get("bridge").is_none(),
+            "no bridge key: it is bridge XOR direct"
+        );
+        let req: fluxvm_core::model::HotplugNicRequest = serde_json::from_value(body).unwrap();
+        req.validate()
+            .expect("the daemon must accept the shim's hotplug body");
+        assert_eq!(req.mac.as_deref(), Some("02:00:00:00:00:01"));
+        let d = req.direct.unwrap();
+        assert_eq!(d.outer, "eth0");
+        assert_eq!(d.netns_path.as_deref(), Some("/run/netns/fvcni-abc"));
+        assert_eq!(d.mode, fluxvm_core::model::DirectMode::PeerVeth);
     }
 
     #[test]

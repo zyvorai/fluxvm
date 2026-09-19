@@ -655,6 +655,25 @@ pub async fn hotplug_nic(vm: &VmRecord, tap: &str, mac: Option<&str>, index: u8)
     qmp::hotplug_nic(&vm.workspace.join("qmp.sock"), tap, mac, index, QMP_TIMEOUT).await
 }
 
+/// [`hotplug_nic`] for a TAP the daemon already opened, passed as a descriptor because it lives in
+/// another network namespace (a bridge-less direct tap inside a Pod netns). The caller keeps
+/// ownership of `tap_fd` and closes its own copy afterwards.
+pub async fn hotplug_nic_fd(
+    vm: &VmRecord,
+    tap_fd: std::os::fd::RawFd,
+    mac: Option<&str>,
+    index: u8,
+) -> Result<()> {
+    qmp::hotplug_nic_fd(
+        &vm.workspace.join("qmp.sock"),
+        tap_fd,
+        mac,
+        index,
+        QMP_TIMEOUT,
+    )
+    .await
+}
+
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was
 /// running. Pairs with `-loadvm` / [`VmManager::start_from_snapshot`].
 ///
@@ -1040,6 +1059,7 @@ mod tests {
                 outer: "eth0".into(),
                 netns_path: Some("/run/netns/fvcni-abc".into()),
                 mode: fluxvm_core::model::DirectMode::PeerVeth,
+                guest_ips: vec![],
             }),
             extra: vec![],
         };

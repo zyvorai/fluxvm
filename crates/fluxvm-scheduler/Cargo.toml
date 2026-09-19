@@ -27,3 +27,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+# The direct-hotplug test inspects the descriptors a mock QEMU receives.
+libc = "0.2"

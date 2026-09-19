@@ -117,6 +117,34 @@ fn infer_direction(rec: &FlowRecord, guest_ip: Option<&str>) -> TrafficDirection
     TrafficDirection::Egress
 }
 
+/// Which datapath a VM uses between its tap and the outer device.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum HopPath {
+    /// Tap on a host bridge (or the per-VM netns bridge chain).
+    #[default]
+    Bridge,
+    /// Bridge-less: an eBPF redirect pairs the tap with `outer` (docs/direct-datapath.md).
+    Direct {
+        /// The paired device: the Pod's veth (`eth0`) or the host uplink.
+        outer: String,
+        /// `true` for a host uplink (`l2-uplink`), `false` for a Pod veth (`peer-veth`).
+        l2_uplink: bool,
+    },
+}
+
+impl HopPath {
+    /// The path recorded for a VM: `Direct` when its loader wiring exists, else `Bridge`.
+    pub fn for_vm(id: uuid::Uuid) -> Self {
+        match crate::direct::recorded(id) {
+            Some(d) => Self::Direct {
+                outer: d.spec.outer,
+                l2_uplink: d.spec.mode == fluxvm_core::model::DirectMode::L2Uplink,
+            },
+            None => Self::Bridge,
+        }
+    }
+}
+
 /// Build the VM-edge hop path. Cilium coexistence is a labeled hop only —
 /// FluxVM never claims to own Cilium's packet path.
 pub fn build_hops(
@@ -127,6 +155,39 @@ pub fn build_hops(
     proto: &str,
     dport: u16,
 ) -> Vec<PacketHop> {
+    build_hops_for(
+        &HopPath::Bridge,
+        direction,
+        verdict,
+        dataplane_mode,
+        vm_name,
+        proto,
+        dport,
+    )
+}
+
+/// [`build_hops`] for an explicit datapath.
+pub fn build_hops_for(
+    path: &HopPath,
+    direction: TrafficDirection,
+    verdict: &str,
+    dataplane_mode: &str,
+    vm_name: &str,
+    proto: &str,
+    dport: u16,
+) -> Vec<PacketHop> {
+    if let HopPath::Direct { outer, l2_uplink } = path {
+        return build_direct_hops(
+            outer,
+            *l2_uplink,
+            direction,
+            verdict,
+            dataplane_mode,
+            vm_name,
+            proto,
+            dport,
+        );
+    }
     let policy =
         format!("FluxVM Network Fabric eBPF  proto={proto} dport={dport} verdict={verdict}");
     let cilium = matches!(dataplane_mode.to_ascii_lowercase().as_str(), "cilium");
@@ -185,6 +246,91 @@ pub fn build_hops(
     hops
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_direct_hops(
+    outer: &str,
+    l2_uplink: bool,
+    direction: TrafficDirection,
+    verdict: &str,
+    dataplane_mode: &str,
+    vm_name: &str,
+    proto: &str,
+    dport: u16,
+) -> Vec<PacketHop> {
+    let cilium = dataplane_mode.eq_ignore_ascii_case("cilium");
+    let mut hops = Vec::new();
+    let mut push = |name: &str, role: &str, detail: &str| {
+        hops.push(PacketHop {
+            index: hops.len() as u8,
+            name: name.into(),
+            role: role.into(),
+            detail: detail.into(),
+        });
+    };
+    let coexist = "mode=cilium — FluxVM does not write Cilium-private maps";
+    let tap = "tap (no bridge)";
+    match direction {
+        TrafficDirection::Egress => {
+            push(vm_name, "guest", "virtio-net in guest namespace");
+            push(
+                tap,
+                "l2",
+                "tap fd handed to the VMM; no host bridge or veth chain",
+            );
+            push(
+                "tc-clsact",
+                "dataplane",
+                &format!(
+                    "FluxVM Network Fabric eBPF  proto={proto} dport={dport} verdict={verdict}, then redirect"
+                ),
+            );
+            if l2_uplink {
+                push(outer, "host", "bpf_redirect straight to the uplink NIC");
+            } else {
+                push(
+                    outer,
+                    "l2",
+                    "bpf_redirect_peer into the host-side veth peer (as Cilium does)",
+                );
+                if cilium {
+                    push("cilium", "coexist", coexist);
+                }
+                push("uplink", "host", "underlay toward peer");
+            }
+            push("peer", "identity", "reserved:world or remote identity");
+        }
+        TrafficDirection::Ingress => {
+            push("peer", "identity", "reserved:world or remote identity");
+            if l2_uplink {
+                push(
+                    outer,
+                    "host",
+                    "uplink ingress: direct_in steers by destination MAC",
+                );
+            } else {
+                push("uplink", "host", "underlay from peer");
+                if cilium {
+                    push("cilium", "coexist", coexist);
+                }
+                push(
+                    outer,
+                    "l2",
+                    "Pod veth ingress: direct_in redirects to the tap",
+                );
+            }
+            push(
+                tap,
+                "l2",
+                &format!(
+                    "tap egress hook: Pod-ingress policy  proto={proto} dport={dport} verdict={verdict}"
+                ),
+            );
+            push(vm_name, "guest", "virtio-net in guest namespace");
+        }
+    }
+    hops
+}
+
 pub fn summary_line(view: &PacketFlowView) -> String {
     format!(
         "{time} {verdict:<10} {dir:<7} {proto}/{dport} {src}:{sport} → {dst}:{dport2}  {src_id}->{dst_id}  {pkts}p/{bytes}B  {vm}",
@@ -238,11 +384,37 @@ pub fn from_flow_record_attributed(
     src_sid: Option<(u32, Vec<String>)>,
     dst_sid: Option<(u32, Vec<String>)>,
 ) -> PacketFlowView {
+    from_flow_record_on_path(
+        rec,
+        src_labels,
+        vm_name,
+        guest_ip,
+        dataplane_mode,
+        src_sid,
+        dst_sid,
+        &HopPath::Bridge,
+    )
+}
+
+/// [`from_flow_record_attributed`] with the VM's actual datapath, so a bridge-less VM's hop view
+/// does not claim a bridge it does not have.
+#[allow(clippy::too_many_arguments)]
+pub fn from_flow_record_on_path(
+    rec: &FlowRecord,
+    src_labels: &[String],
+    vm_name: Option<&str>,
+    guest_ip: Option<&str>,
+    dataplane_mode: &str,
+    src_sid: Option<(u32, Vec<String>)>,
+    dst_sid: Option<(u32, Vec<String>)>,
+    path: &HopPath,
+) -> PacketFlowView {
     let verdict = normalize_verdict(&rec.verdict);
     let protocol = proto_name(rec.protocol).to_string();
     let direction = infer_direction(rec, guest_ip);
     let name = vm_name.unwrap_or("vm");
-    let hops = build_hops(
+    let hops = build_hops_for(
+        path,
         direction,
         &verdict,
         dataplane_mode,
@@ -613,5 +785,130 @@ mod tests {
         let flow = to_hubble_flow(&view);
         assert_eq!(flow.source.identity, 4242);
         assert_eq!(flow.destination.identity, 7);
+    }
+
+    #[cfg(test)]
+    mod direct_hops {
+        use super::*;
+
+        fn names(h: &[PacketHop]) -> Vec<&str> {
+            h.iter().map(|x| x.name.as_str()).collect()
+        }
+
+        fn direct(l2: bool) -> HopPath {
+            HopPath::Direct {
+                outer: if l2 { "enp1s0" } else { "eth0" }.into(),
+                l2_uplink: l2,
+            }
+        }
+
+        #[test]
+        fn bridge_hops_are_unchanged_by_the_new_entry_point() {
+            for dir in [TrafficDirection::Egress, TrafficDirection::Ingress] {
+                assert_eq!(
+                    build_hops(dir, "FORWARDED", "cilium", "vm", "tcp", 443),
+                    build_hops_for(
+                        &HopPath::Bridge,
+                        dir,
+                        "FORWARDED",
+                        "cilium",
+                        "vm",
+                        "tcp",
+                        443
+                    )
+                );
+            }
+        }
+
+        #[test]
+        fn pod_veth_egress_redirects_to_the_peer_and_shows_cilium() {
+            let h = build_hops_for(
+                &direct(false),
+                TrafficDirection::Egress,
+                "FORWARDED",
+                "cilium",
+                "vm",
+                "tcp",
+                443,
+            );
+            assert_eq!(
+                names(&h),
+                [
+                    "vm",
+                    "tap (no bridge)",
+                    "tc-clsact",
+                    "eth0",
+                    "cilium",
+                    "uplink",
+                    "peer"
+                ]
+            );
+            assert!(h[3].detail.contains("bpf_redirect_peer"));
+            assert!(
+                h.iter()
+                    .all(|x| !x.detail.to_lowercase().contains("bridge /")),
+                "no bridge hop is claimed"
+            );
+        }
+
+        #[test]
+        fn pod_veth_ingress_mirrors_it_and_the_policy_hook_is_on_the_tap() {
+            let h = build_hops_for(
+                &direct(false),
+                TrafficDirection::Ingress,
+                "DROPPED",
+                "ebpf",
+                "vm",
+                "udp",
+                53,
+            );
+            assert_eq!(
+                names(&h),
+                ["peer", "uplink", "eth0", "tap (no bridge)", "vm"]
+            );
+            assert!(h[3].detail.contains("Pod-ingress policy") && h[3].detail.contains("DROPPED"));
+            assert!(
+                !names(&h).contains(&"cilium"),
+                "cilium hop only when mode=cilium"
+            );
+        }
+
+        #[test]
+        fn uplink_mode_has_no_extra_uplink_hop_because_the_outer_is_the_uplink() {
+            let e = build_hops_for(
+                &direct(true),
+                TrafficDirection::Egress,
+                "FORWARDED",
+                "ebpf",
+                "vm",
+                "tcp",
+                80,
+            );
+            assert_eq!(
+                names(&e),
+                ["vm", "tap (no bridge)", "tc-clsact", "enp1s0", "peer"]
+            );
+            let i = build_hops_for(
+                &direct(true),
+                TrafficDirection::Ingress,
+                "FORWARDED",
+                "ebpf",
+                "vm",
+                "tcp",
+                80,
+            );
+            assert_eq!(names(&i), ["peer", "enp1s0", "tap (no bridge)", "vm"]);
+            assert!(i[1].detail.contains("destination MAC"));
+        }
+
+        #[test]
+        fn hop_indexes_are_sequential() {
+            for path in [direct(false), direct(true)] {
+                for dir in [TrafficDirection::Egress, TrafficDirection::Ingress] {
+                    let h = build_hops_for(&path, dir, "FORWARDED", "cilium", "vm", "tcp", 1);
+                    assert!(h.iter().enumerate().all(|(i, x)| x.index as usize == i));
+                }
+            }
+        }
     }
 }

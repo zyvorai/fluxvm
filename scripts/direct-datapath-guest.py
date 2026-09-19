@@ -6,15 +6,19 @@
 # tap and answers ARP requests and ICMP echo for one IPv4 address, standing in
 # for a VM's virtio-net so the redirect path can be exercised with no KVM.
 #
-#   direct-datapath-guest.py <tap|fd:N> <guest-ip> <guest-mac> <stats-file>
+#   direct-datapath-guest.py <tap|fd:N> <guest-ip> <guest-mac> <stats-file> [ping=<ip>]
 #
 # The stats file is rewritten after every handled frame as key=value lines
-# (rx_frames, arp_replies, icmp_replies) so the test can assert on them.
+# (rx_frames, arp_replies, icmp_replies, echo_sent, echo_replies_rx) so the test can assert on them.
+# With ping=<ip> the guest also INITIATES traffic: it ARPs for that address, learns its MAC and then
+# sends ICMP echo requests, counting the replies (guest -> LAN and guest <-> guest tests).
 import fcntl
 import os
+import select
 import socket
 import struct
 import sys
+import time
 
 TUNSETIFF = 0x400454CA
 IFF_TAP, IFF_NO_PI = 0x0002, 0x1000
@@ -48,7 +52,14 @@ def main() -> None:
     vnet = 10 if tap.startswith("fd:") else 0
     gip = socket.inet_aton(ip_s)
     gmac = bytes.fromhex(mac_s.replace(":", ""))
-    stats = {"rx_frames": 0, "arp_replies": 0, "icmp_replies": 0}
+    target = None
+    for extra in sys.argv[5:]:
+        if extra.startswith("ping="):
+            target = socket.inet_aton(extra[5:])
+    stats = {"rx_frames": 0, "arp_replies": 0, "icmp_replies": 0, "echo_sent": 0, "echo_replies_rx": 0}
+    target_mac = None
+    seq = 0
+    last_tx = 0.0
     fd = open_tap(tap)
 
     def flush() -> None:
@@ -57,8 +68,39 @@ def main() -> None:
             f.writelines("%s=%d\n" % kv for kv in stats.items())
         os.replace(tmp, stats_path)
 
+    def send_arp_request() -> None:
+        pkt = (
+            b"\xff" * 6 + gmac + b"\x08\x06"
+            + struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1)
+            + gmac + gip + b"\0" * 6 + target
+        )
+        os.write(fd, b"\0" * vnet + pkt)
+
+    def send_echo_request() -> None:
+        nonlocal seq
+        seq += 1
+        icmp = bytearray(struct.pack("!BBHHH", 8, 0, 0, 0x4655, seq) + b"fluxvm-direct-datapath")
+        struct.pack_into("!H", icmp, 2, checksum(bytes(icmp)))
+        iph = bytearray(20)
+        iph[0] = 0x45
+        struct.pack_into("!H", iph, 2, 20 + len(icmp))
+        iph[8], iph[9] = 64, 1
+        iph[12:16], iph[16:20] = gip, target
+        struct.pack_into("!H", iph, 10, checksum(bytes(iph)))
+        os.write(fd, b"\0" * vnet + target_mac + gmac + b"\x08\x00" + bytes(iph) + bytes(icmp))
+        stats["echo_sent"] += 1
+
     flush()
     while True:
+        if target is not None and time.monotonic() - last_tx > 0.3:
+            last_tx = time.monotonic()
+            if target_mac is None:
+                send_arp_request()
+            else:
+                send_echo_request()
+            flush()
+        if not select.select([fd], [], [], 0.1)[0]:
+            continue
         frame = os.read(fd, 65535)[vnet:]
         stats["rx_frames"] += 1
         if len(frame) >= 14:
@@ -66,6 +108,8 @@ def main() -> None:
             if etype == 0x0806 and len(frame) >= 42:  # ARP
                 op = struct.unpack("!H", frame[20:22])[0]
                 sha, spa, tpa = frame[22:28], frame[28:32], frame[38:42]
+                if op == 2 and target is not None and spa == target and tpa == gip:
+                    target_mac = sha  # learned the peer's MAC from its reply
                 if op == 1 and tpa == gip:
                     reply = (
                         src + gmac + b"\x08\x06"
@@ -76,6 +120,8 @@ def main() -> None:
                     stats["arp_replies"] += 1
             elif etype == 0x0800 and len(frame) >= 34:  # IPv4
                 ihl = (frame[14] & 0x0F) * 4
+                if frame[23] == 1 and frame[30:34] == gip and frame[14 + ihl] == 0:
+                    stats["echo_replies_rx"] += 1
                 if frame[23] == 1 and frame[30:34] == gip and frame[14 + ihl] == 8:
                     ip_src = frame[26:30]
                     icmp = bytearray(frame[14 + ihl:])
