@@ -34,3 +34,10 @@ Notes (not script output)
 - Not measured here: bridge-vs-direct latency/throughput on the live node (see direct-datapath.md).
 - Not exercised here: the shim's create-time `auto` fallback loop, warm-pool claims from a Pod,
   Multus secondaries, standalone `l2-uplink` with a real guest.
+- Pod deletion did NOT complete on this node, in either datapath: `kubectl delete` left Pods Terminating
+  for 20+ minutes (kubelet: "Kill container failed ... DeadlineExceeded"). The guest container-agent had
+  already logged the container exiting (code 143), so the shim's Kill/Wait handling stalled after the guest
+  side finished; the shim's stderr is /dev/null here, so no shim log exists. A bridge-mode Pod (same node,
+  same images) hung the same way, so this is not caused by the direct datapath, but teardown of a direct
+  Pod (CNI DEL restoring eth0) was therefore never observed. Cleanup used --force plus deleting the VMs
+  through the daemon API and crictl rmp -f; the daemon-side direct teardown did run (no tap/link left).
