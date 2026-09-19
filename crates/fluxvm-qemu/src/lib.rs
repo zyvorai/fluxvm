@@ -1065,7 +1065,10 @@ mod tests {
         };
         c.network.tap_fd = None;
         let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
-        assert!(args.iter().any(|a| a == "tap,id=net0,ifname=tap0,script=no,downscript=no"));
+        assert!(
+            args.iter()
+                .any(|a| a == "tap,id=net0,ifname=tap0,script=no,downscript=no")
+        );
     }
 }
 

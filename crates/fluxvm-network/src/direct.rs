@@ -18,12 +18,7 @@
 use anyhow::{Context, Result, bail};
 use fluxvm_core::{model::DirectSpec, process::run_checked};
 use serde::{Deserialize, Serialize};
-use std::{
-    ffi::CString,
-    fs::File,
-    os::fd::AsRawFd,
-    path::Path,
-};
+use std::{ffi::CString, fs::File, os::fd::AsRawFd, path::Path};
 use uuid::Uuid;
 
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
@@ -101,10 +96,7 @@ fn open_tap_in_netns_blocking(netns_path: &str, name: &str) -> Result<i32> {
     // the VMM.
     let fd = unsafe { libc::open(tun.as_ptr(), libc::O_RDWR) };
     if fd < 0 {
-        bail!(
-            "opening /dev/net/tun: {}",
-            std::io::Error::last_os_error()
-        );
+        bail!("opening /dev/net/tun: {}", std::io::Error::last_os_error());
     }
     // SAFETY: `ifr` is a live, correctly sized `struct ifreq`; `fd` is a tun fd.
     if unsafe { libc::ioctl(fd, TUNSETIFF, &mut ifr as *mut IfReqFlags) } != 0 {
@@ -307,7 +299,13 @@ mod tests {
             parse_mac("02:00:00:00:00:2A").unwrap(),
             [0x02, 0, 0, 0, 0, 0x2a]
         );
-        for bad in ["", "02:00:00:00:00", "02:00:00:00:00:00:00", "zz:00:00:00:00:00", "0200.0000.002a"] {
+        for bad in [
+            "",
+            "02:00:00:00:00",
+            "02:00:00:00:00:00:00",
+            "zz:00:00:00:00:00",
+            "0200.0000.002a",
+        ] {
             assert!(parse_mac(bad).is_err(), "{bad:?} must be rejected");
         }
     }
@@ -323,7 +321,10 @@ mod tests {
     #[test]
     fn ifreq_rejects_bad_names() {
         assert!(ifreq_for("").is_err());
-        assert!(ifreq_for("0123456789abcdef").is_err(), "16 chars leaves no NUL");
+        assert!(
+            ifreq_for("0123456789abcdef").is_err(),
+            "16 chars leaves no NUL"
+        );
         assert!(ifreq_for("a/b").is_err());
         assert!(ifreq_for("0123456789abcde").is_ok(), "15 chars is the max");
     }
@@ -356,14 +357,28 @@ mod tests {
         let path = "/run/netns/fvdt-unit";
         let fd = open_tap_in_netns(path, "fvdtu0").await.expect("open tap");
         let in_ns = std::process::Command::new("nsenter")
-            .args(["--net=/run/netns/fvdt-unit", "--", "ip", "link", "show", "fvdtu0"])
+            .args([
+                "--net=/run/netns/fvdt-unit",
+                "--",
+                "ip",
+                "link",
+                "show",
+                "fvdtu0",
+            ])
             .status()
             .unwrap()
             .success();
         let in_host = std::path::Path::new("/sys/class/net/fvdtu0").exists();
         unsafe { libc::close(fd) };
         let gone = !std::process::Command::new("nsenter")
-            .args(["--net=/run/netns/fvdt-unit", "--", "ip", "link", "show", "fvdtu0"])
+            .args([
+                "--net=/run/netns/fvdt-unit",
+                "--",
+                "ip",
+                "link",
+                "show",
+                "fvdtu0",
+            ])
             .status()
             .unwrap()
             .success();

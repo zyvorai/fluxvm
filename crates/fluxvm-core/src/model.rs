@@ -121,7 +121,9 @@ impl DirectSpec {
             }
         }
         if self.mode == DirectMode::L2Uplink && self.netns_path.is_some() {
-            return Err("direct.mode=l2-uplink attaches to a host uplink; netns_path must be unset".into());
+            return Err(
+                "direct.mode=l2-uplink attaches to a host uplink; netns_path must be unset".into(),
+            );
         }
         Ok(())
     }
@@ -149,7 +151,9 @@ impl NetworkSpec {
             return Err("network.direct and network.netns=true are mutually exclusive".into());
         }
         if !extra.is_empty() {
-            return Err("network.extra NICs are not supported together with network.direct yet".into());
+            return Err(
+                "network.extra NICs are not supported together with network.direct yet".into(),
+            );
         }
         Ok(())
     }

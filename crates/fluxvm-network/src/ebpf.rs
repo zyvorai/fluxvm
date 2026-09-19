@@ -177,9 +177,8 @@ pub fn apply(
     // repair/reconcile re-attach keeps the redirect wiring). Everything below that spawns
     // `tc`/the TCX helper or reads an ifindex must run in the outer device's namespace.
     let direct = crate::direct::recorded(id);
-    let _netns = crate::netns_scope::enter(
-        direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()),
-    );
+    let _netns =
+        crate::netns_scope::enter(direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()));
     let _ = remove(cfg, id);
 
     let vm_dir = vm_pin_dir(&cfg.pin_root, id);
@@ -384,7 +383,11 @@ fn vm_netns_scope(id: Uuid) -> crate::netns_scope::NetnsScope {
 }
 
 /// Writes the guest -> outer redirect config `fluxvm_egress` consults after it allows a packet.
-fn configure_direct_out(map_dir: &Path, tap_ifindex: u32, d: &crate::direct::DirectAttach) -> Result<()> {
+fn configure_direct_out(
+    map_dir: &Path,
+    tap_ifindex: u32,
+    d: &crate::direct::DirectAttach,
+) -> Result<()> {
     use fluxvm_core::model::DirectMode;
     let outer = read_ifindex(&d.spec.outer)
         .with_context(|| format!("resolving direct outer device {}", d.spec.outer))?;
@@ -413,7 +416,10 @@ fn attach_direct_in(
     use fluxvm_core::model::DirectMode;
     let obj = cfg.bpf_object.with_file_name("fluxvm_direct.bpf.o");
     if !obj.exists() {
-        bail!("FluxVM direct-attach eBPF object does not exist at {}", obj.display());
+        bail!(
+            "FluxVM direct-attach eBPF object does not exist at {}",
+            obj.display()
+        );
     }
     let prog_pin = vm_dir.join("progs/fluxvm_direct_in");
     let map_dir = vm_dir.join("direct_maps");
@@ -475,7 +481,9 @@ fn attach_direct_in(
             Err(e) if tcx_preference == TcxPreference::Required => {
                 return Err(e).context("attaching required FluxVM direct TCX program");
             }
-            Err(e) => warn!(%id, %outer, error = %e, "TCX unavailable for the direct inbound program; using clsact/tc"),
+            Err(e) => {
+                warn!(%id, %outer, error = %e, "TCX unavailable for the direct inbound program; using clsact/tc")
+            }
         }
     }
     require_tc()?;
@@ -515,12 +523,23 @@ fn direct_in_attached(vm_dir: &Path, outer: &str) -> bool {
         return tcx::status(&link).ok().and_then(|s| s.prog_id) == Some(owned);
     }
     crate::netns_scope::command("tc")
-        .args(["filter", "show", "dev", outer, "ingress", "pref", TC_DIRECT_PRIORITY])
+        .args([
+            "filter",
+            "show",
+            "dev",
+            outer,
+            "ingress",
+            "pref",
+            TC_DIRECT_PRIORITY,
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())
         .and_then(|o| {
-            parse_tc_program_id_handle(&String::from_utf8_lossy(&o.stdout), TC_DIRECT_HANDLE.parse().unwrap_or(3))
+            parse_tc_program_id_handle(
+                &String::from_utf8_lossy(&o.stdout),
+                TC_DIRECT_HANDLE.parse().unwrap_or(3),
+            )
         })
         == Some(owned)
 }
@@ -686,7 +705,8 @@ pub fn configure_pod_policy(
 
 pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttachmentStatus> {
     let direct = crate::direct::recorded(id);
-    let _netns = crate::netns_scope::enter(direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()));
+    let _netns =
+        crate::netns_scope::enter(direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()));
     let vm_dir = vm_pin_dir(&cfg.pin_root, id);
     let iface = read_recorded_iface(id);
     let prog_pin = vm_dir.join("progs/fluxvm_egress");
@@ -2333,8 +2353,14 @@ mod tests {
 
     #[test]
     fn ip_link_ifindex_is_the_leading_number() {
-        assert_eq!(parse_ip_link_ifindex("5: eth0@if7: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue\n"), Some(5));
-        assert_eq!(parse_ip_link_ifindex("12: tap0: <BROADCAST,MULTICAST> mtu 1500"), Some(12));
+        assert_eq!(
+            parse_ip_link_ifindex("5: eth0@if7: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue\n"),
+            Some(5)
+        );
+        assert_eq!(
+            parse_ip_link_ifindex("12: tap0: <BROADCAST,MULTICAST> mtu 1500"),
+            Some(12)
+        );
         assert_eq!(parse_ip_link_ifindex(""), None);
         assert_eq!(parse_ip_link_ifindex("Device \"x\" does not exist."), None);
     }

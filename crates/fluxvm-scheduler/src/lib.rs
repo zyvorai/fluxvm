@@ -26,7 +26,13 @@ pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 /// tap sits on a bridge and keeps working when the dataplane is missing, a failed attach must
 /// never be downgraded to a warning: the VM would boot with no connectivity at all.
 fn is_direct(spec: &NetworkSpec) -> bool {
-    matches!(spec, NetworkSpec::Tap { direct: Some(_), .. })
+    matches!(
+        spec,
+        NetworkSpec::Tap {
+            direct: Some(_),
+            ..
+        }
+    )
 }
 
 fn nic_hotplug_index(spec: &NetworkSpec) -> u8 {

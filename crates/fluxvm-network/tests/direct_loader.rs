@@ -95,19 +95,50 @@ fn ns_out(ns: &str, cmd: &[&str]) -> String {
 /// Everything needed to see why traffic does not flow, printed only on failure.
 fn diag(node: &str, pod: &str, tap: &str, id: Uuid, stats: &Path) {
     eprintln!("---- DIAG (ping failed) ----");
-    eprintln!("guest stats: {}", std::fs::read_to_string(stats).unwrap_or_default().replace('\n', " "));
-    eprintln!("pod eth0 ingress filters:\n{}", ns_out(pod, &["tc", "filter", "show", "dev", "eth0", "ingress"]));
-    eprintln!("pod {tap} ingress filters:\n{}", ns_out(pod, &["tc", "filter", "show", "dev", tap, "ingress"]));
-    eprintln!("pod bpftool net:\n{}", ns_out(pod, &["bpftool", "net", "show"]));
+    eprintln!(
+        "guest stats: {}",
+        std::fs::read_to_string(stats)
+            .unwrap_or_default()
+            .replace('\n', " ")
+    );
+    eprintln!(
+        "pod eth0 ingress filters:\n{}",
+        ns_out(pod, &["tc", "filter", "show", "dev", "eth0", "ingress"])
+    );
+    eprintln!(
+        "pod {tap} ingress filters:\n{}",
+        ns_out(pod, &["tc", "filter", "show", "dev", tap, "ingress"])
+    );
+    eprintln!(
+        "pod bpftool net:\n{}",
+        ns_out(pod, &["bpftool", "net", "show"])
+    );
     eprintln!("pod links:\n{}", ns_out(pod, &["ip", "-s", "link"]));
     eprintln!("node neigh: {}", ns_out(node, &["ip", "neigh"]));
     let dir = format!("/sys/fs/bpf/fluxvm/vms/{}", id.simple());
-    for m in ["maps/fluxvm_direct", "direct_maps/fluxvm_direct_in", "maps/fluxvm_id"] {
-        eprintln!("{m}:\n{}", String::from_utf8_lossy(
-            &Command::new("bpftool").args(["map", "dump", "pinned", &format!("{dir}/{m}")]).output().map(|o| o.stdout).unwrap_or_default()));
+    for m in [
+        "maps/fluxvm_direct",
+        "direct_maps/fluxvm_direct_in",
+        "maps/fluxvm_id",
+    ] {
+        eprintln!(
+            "{m}:\n{}",
+            String::from_utf8_lossy(
+                &Command::new("bpftool")
+                    .args(["map", "dump", "pinned", &format!("{dir}/{m}")])
+                    .output()
+                    .map(|o| o.stdout)
+                    .unwrap_or_default()
+            )
+        );
     }
-    eprintln!("meta: {:?}", std::fs::read_dir(format!("/run/fluxvm/ebpf/vms/{}", id.simple()))
-        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>()));
+    eprintln!(
+        "meta: {:?}",
+        std::fs::read_dir(format!("/run/fluxvm/ebpf/vms/{}", id.simple())).map(|d| d
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>())
+    );
     eprintln!("---- END DIAG ----");
 }
 
@@ -154,8 +185,17 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
     // ── topology: a Cilium-shaped pod (veth peer in the pod netns, no bridge anywhere) ──
     assert!(sh("ip", &["netns", "add", &node]));
     assert!(sh("ip", &["netns", "add", &pod]));
-    assert!(sh("ip", &["-n", &node, "link", "add", "lxc0", "type", "veth", "peer", "name", "eth0", "netns", &pod]));
-    assert!(sh("ip", &["-n", &node, "addr", "add", "10.97.0.1/24", "dev", "lxc0"]));
+    assert!(sh(
+        "ip",
+        &[
+            "-n", &node, "link", "add", "lxc0", "type", "veth", "peer", "name", "eth0", "netns",
+            &pod
+        ]
+    ));
+    assert!(sh(
+        "ip",
+        &["-n", &node, "addr", "add", "10.97.0.1/24", "dev", "lxc0"]
+    ));
     for (ns, dev) in [(&node, "lo"), (&node, "lxc0"), (&pod, "lo"), (&pod, "eth0")] {
         assert!(sh("ip", &["-n", ns, "link", "set", dev, "up"]));
     }
@@ -183,11 +223,18 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
             mode: DirectMode::PeerVeth,
         }),
     };
-    let prepared = fluxvm_network::prepare(&cfg, id, &spec).await.expect("prepare");
+    let prepared = fluxvm_network::prepare(&cfg, id, &spec)
+        .await
+        .expect("prepare");
     let tap = prepared.tap_name.clone().expect("tap name");
-    let fd = prepared.tap_fd.expect("a foreign-netns tap must be handed over as an fd");
+    let fd = prepared
+        .tap_fd
+        .expect("a foreign-netns tap must be handed over as an fd");
     cleanup.fd = Some(fd);
-    assert!(prepared.netns.is_none(), "the VMM must NOT be launched inside the pod netns");
+    assert!(
+        prepared.netns.is_none(),
+        "the VMM must NOT be launched inside the pod netns"
+    );
     assert!(
         fluxvm_network::direct::recorded(id).is_some(),
         "prepare() must record the direct attach for the loader"
@@ -197,16 +244,24 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
         "the tap must live in the pod netns, not the daemon's"
     );
 
-    fluxvm_network::dataplane::apply_sandbox_policy(&cfg, id, Some(&tap), None, &[], None)
-        .expect("apply_sandbox_policy must attach the egress program AND the direct inbound redirect");
+    fluxvm_network::dataplane::apply_sandbox_policy(&cfg, id, Some(&tap), None, &[], None).expect(
+        "apply_sandbox_policy must attach the egress program AND the direct inbound redirect",
+    );
 
     let st = fluxvm_network::ebpf::attachment_status(&cfg.sandbox.dataplane, id).unwrap();
-    assert!(st.direct_required && st.direct_attached, "direct hook must be live: {st:?}");
+    assert!(
+        st.direct_required && st.direct_attached,
+        "direct hook must be live: {st:?}"
+    );
     assert!(st.attached, "overall attachment must be healthy: {st:?}");
-    assert_eq!(st.schema_version, Some(fluxvm_network::ebpf::DATAPLANE_SCHEMA_VERSION));
+    assert_eq!(
+        st.schema_version,
+        Some(fluxvm_network::ebpf::DATAPLANE_SCHEMA_VERSION)
+    );
 
     // ── the "guest": adopts the inherited fd, never enters the pod netns ──
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/direct-datapath-guest.py");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/direct-datapath-guest.py");
     let child = Command::new("python3")
         .arg(&script)
         .arg(format!("fd:{fd}"))
@@ -227,15 +282,30 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
     }
     assert!(stats.exists(), "guest did not start");
 
-    let ping = || in_ns(&node, &["ping", "-c", "3", "-W", "1", "-i", "0.2", "-q", "10.97.0.2"]);
+    let ping = || {
+        in_ns(
+            &node,
+            &["ping", "-c", "3", "-W", "1", "-i", "0.2", "-q", "10.97.0.2"],
+        )
+    };
     if !ping() {
         diag(&node, &pod, &tap, id, &stats);
     }
-    assert!(ping(), "node must reach the guest through eth0 -> direct_in -> tap -> egress -> lxc0");
-    assert!(stat(&stats, "icmp_replies") >= 3, "guest must have answered the echo requests");
+    assert!(
+        ping(),
+        "node must reach the guest through eth0 -> direct_in -> tap -> egress -> lxc0"
+    );
+    assert!(
+        stat(&stats, "icmp_replies") >= 3,
+        "guest must have answered the echo requests"
+    );
 
-    let bridges = ns_out(&node, &["ip", "-d", "link"]).matches("bridge ").count()
-        + ns_out(&pod, &["ip", "-d", "link"]).matches("bridge ").count();
+    let bridges = ns_out(&node, &["ip", "-d", "link"])
+        .matches("bridge ")
+        .count()
+        + ns_out(&pod, &["ip", "-d", "link"])
+            .matches("bridge ")
+            .count();
     assert_eq!(bridges, 0, "no bridge device may exist in either namespace");
 
     // ── repair / restart: re-applying must keep the redirect wiring (it is re-derived from
@@ -243,7 +313,10 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
     fluxvm_network::dataplane::apply_sandbox_policy(&cfg, id, Some(&tap), None, &[], None)
         .expect("re-apply (reconcile/restart) must succeed");
     let st = fluxvm_network::ebpf::attachment_status(&cfg.sandbox.dataplane, id).unwrap();
-    assert!(st.attached && st.direct_attached, "still attached after re-apply: {st:?}");
+    assert!(
+        st.attached && st.direct_attached,
+        "still attached after re-apply: {st:?}"
+    );
     assert!(ping(), "connectivity must survive a re-apply");
 
     // ── teardown through the scheduler's cleanup entry point ──
@@ -251,7 +324,10 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
         .await
         .expect("cleanup");
     let st = fluxvm_network::ebpf::attachment_status(&cfg.sandbox.dataplane, id).unwrap();
-    assert!(!st.attached && !st.direct_required, "nothing may remain attached: {st:?}");
+    assert!(
+        !st.attached && !st.direct_required,
+        "nothing may remain attached: {st:?}"
+    );
     assert!(
         fluxvm_network::direct::recorded(id).is_none(),
         "the direct record must be removed with the rest of the per-VM metadata"
@@ -262,7 +338,12 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
         "the inbound program must be detached from the outer device:\n{filters}"
     );
     assert!(
-        !cfg.sandbox.dataplane.pin_root.join("vms").join(id.simple().to_string()).exists(),
+        !cfg.sandbox
+            .dataplane
+            .pin_root
+            .join("vms")
+            .join(id.simple().to_string())
+            .exists(),
         "bpffs pins must be removed"
     );
 }
