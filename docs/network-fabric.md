@@ -117,6 +117,18 @@ private pin tree. FluxVM never writes Cilium's private maps.
 IPv6 CIDRs and rate limits are native-only. FluxVM refuses silent fallback to
 legacy nftables when policy semantics cannot be preserved.
 
+### Kernel compatibility
+
+TCX attach needs Linux 6.6+ **and** the `fluxvm-tcx` helper
+(`/usr/libexec/fluxvm/fluxvm-tcx`); without either, `FLUXVM_TCX=auto` falls back to
+legacy clsact/tc (use `FLUXVM_TCX=required` to make that a hard error). The VM-edge program
+is verifier-complexity sensitive: on Linux 7.0 it was once rejected outright (over the
+1,000,000-instruction limit) until the pod-policy rule scan's per-rule match became a global
+BPF function (needs Linux ≥ 5.5). `scripts/test-verifier-budget.sh` loads every shipped TC
+object and fails above 50% of the limit, so a kernel or compiler change shows up as a budget
+regression long before an outright rejection. Current use on Linux 7.0.0-31: `fluxvm_tc` ≈ 17%,
+`fluxvm_pod_ingress` ≈ 5%.
+
 ## VM-edge attachment
 
 See the architecture diagrams above. In short:
@@ -133,8 +145,16 @@ Direct TAP/macvtap:
 VM -> host TAP/macvtap [TC ingress] -> bridge/routing
 ```
 
-The eBPF loader only needs the host-visible interface. Legacy nftables policy
-still needs a known guest source CIDR.
+Bridge-less direct TAP (`network.direct`, [direct-datapath.md](direct-datapath.md)):
+
+```text
+Pod   : VM -> tap (in the Pod netns) [TC ingress: policy, then redirect_peer] -> lxc* -> Cilium
+Uplink: VM -> tap [TC ingress: policy, then redirect] -> NIC        (or straight to another local VM's tap)
+```
+
+The eBPF loader only needs the host-visible interface (for a direct TAP in a Pod
+netns, that interface lives in the Pod namespace and the loader enters it). Legacy
+nftables policy still needs a known guest source CIDR.
 
 ### Network namespaces (real per-VM network isolation)
 
@@ -440,7 +460,12 @@ The kernel smoke covers:
 - TCP L4 allow/deny while both ports are actually listening;
 - one-packet-per-second limiter window/reset;
 - stats and flow map population;
-- IPv4 + IPv6 XDP source blocking and removal.
+- IPv4 + IPv6 XDP source blocking and removal;
+- Set 14 Pod-scoped rules (rich CIDR + L4 tuples, SCTP) enforced by both the egress and the separate
+  Pod-ingress program sharing pinned maps (including the Set 19 rule index `fluxvm_pridx`).
+
+Further privileged checks for the bridge-less datapath and the verifier budget are listed in
+[direct-datapath.md](direct-datapath.md#-evidence).
 
 The GitHub workflow additionally builds the full Rust workspace, runs all Rust
 unit tests, builds both BPF objects with real libbpf headers, and executes the

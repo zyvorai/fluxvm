@@ -71,7 +71,10 @@ routable interfaces are rejected by default; use
 On Cilium nodes set `FLUXVM_CONTAINER_CNI_PROVIDER=auto` (default) or
 `cilium` — Multus `netN` ifaces are ignored for the primary handoff; see
 [docs/cilium-cni.md](../../docs/cilium-cni.md) and
-`deploy/k8s/cilium/runtime-env.env`.
+`deploy/k8s/cilium/runtime-env.env`. Set `FLUXVM_CONTAINER_CNI_DATAPATH=auto` (or
+`direct`) to replace the primary NIC's bridge chain with a bridge-less eBPF redirect
+(default `bridge`; needs the daemon's dataplane mode `ebpf`/`cilium` and a veth Pod
+without Multus secondaries) — see [docs/direct-datapath.md](../../docs/direct-datapath.md).
 
 Set 6 does not change containerd dead-shim supervision policy. It provides
 safe recovery when a replacement shim is launched.

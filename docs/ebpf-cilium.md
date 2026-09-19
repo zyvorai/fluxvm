@@ -22,6 +22,8 @@ Diagrams:
 For **Secure Containers Pod CNI** on Cilium (L2 handoff of `eth0` into the
 guest, Multus-safe filtering), see [cilium-cni.md](cilium-cni.md) — that path
 is separate from this VM-edge Fabric mode.
+An opt-in bridge-less alternative to that bridge chain (a TC redirect between the Pod veth and the guest
+tap, with Cilium's `lxc*` hooks untouched) is described in [direct-datapath.md](direct-datapath.md).
 
 Default remains `sandbox.dataplane.mode = "legacy"`. Existing configs that omit
 `[sandbox.dataplane]` keep using nftables.

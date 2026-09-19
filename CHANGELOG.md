@@ -8,6 +8,17 @@
   L2 handoff, `configs/cilium-cni.toml`, `docs/cilium-cni.md`,
   `deploy/k8s/cilium/`, and `scripts/evidence-cilium-cni.sh`. Does not write
   Cilium private maps.
+- **Direct (bridge-less) datapath** — an eBPF redirect between the outer device and the
+  VM's tap in place of a bridge, with Cilium's `lxc*` hooks untouched
+  (`docs/direct-datapath.md`). Secure Containers: shim
+  `FLUXVM_CONTAINER_CNI_DATAPATH=bridge|direct|auto` (default `bridge`; live
+  Cilium + KVM evidence pending), tap created inside the Pod netns and handed to
+  QEMU as a descriptor, warm-pool NICs via QMP `getfd`. Standalone: `network.direct`
+  with `l2-uplink` (shared per-uplink steering maps, ARP steering by `guest_ips`,
+  several VMs on one unbridged NIC), `MicroVM.spec.networkMode: direct`,
+  `POST /v1/vms/{id}/hotplug/nic` `direct` body. Also: `redirect_peer` capability
+  probe, packet-flow hop view for bridge-less VMs, `scripts/bench-direct-datapath.sh`
+  (bridge vs direct forwarding cost), `scripts/evidence-direct-datapath.sh`.
 - **S1 depth** — `scripts/e2e-networkpolicy-s1-depth.sh` proves mid-flow TCP
   kill after CT-clear revoke and SYN anti-replay under reconnect churn.
 - **S2** — `scripts/evidence-networkpolicy-second-cni.sh` (second kubeconfig or
@@ -30,6 +41,14 @@
   prefer `fluxctl` in new scripts and docs.
 
 ### Fixed
+- **VM-edge eBPF program rejected on Linux 7.x** — `fluxvm_tc.bpf.o` exceeded the
+  verifier's 1,000,000-instruction limit on 7.0 (the pod-policy rule scan inlined
+  the whole rule match on each of 64 iterations, in both address-family paths). The
+  per-rule match is now a global BPF function verified once (needs Linux >= 5.5);
+  the object uses ~17% of the limit. `scripts/test-verifier-budget.sh` guards it,
+  `scripts/test-pod-policy-verdict.py` proves matching is unchanged, and
+  `scripts/test-ebpf-smoke.sh` (stale since Set 19: no `fluxvm_pridx` writes or
+  binding) passes again.
 - **Attempted the Set 9S guest `aya` ELF-parse fix** —
   `docs/secure-containers-set9s.md` hypothesized the guest LSM MAC test's
   intermittent "error parsing ELF data" failure as a version/feature-

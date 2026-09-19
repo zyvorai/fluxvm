@@ -137,7 +137,7 @@ Every figure below is counted directly from source, not estimated.
 | Kubernetes CRD operator validation | 9/9 checks passing | Real k3s cluster; see [`scripts/test-kube-operator.sh`](../scripts/test-kube-operator.sh) — covers CRD acceptance, live reconciliation to a real running VM, out-of-band-delete self-healing, and finalizer-blocked cleanup with no leaked QEMU process |
 | Multi-host fleet validation | Verified across 2 real, physically separate hosts | [docs/operations.md](operations.md#distributed-node-agent) |
 | Storage backends | 4 | qcow2/raw (default), LVM thin, NBD, Ceph RBD (RBD verified against a real Rook Ceph cluster) |
-| Network modes | 4 | user-mode NAT, TAP+bridge, netns+DHCP, macvtap — all 4 SSH-verified end to end in regression tests |
+| Network modes | 4 (+1 opt-in) | user-mode NAT, TAP+bridge, netns+DHCP, macvtap — all 4 SSH-verified end to end in regression tests; bridge-less `direct` is opt-in and netns/kernel-verified, not yet live ([direct-datapath.md](direct-datapath.md)) |
 | Boot latency / VM density / throughput | **Not yet published** | Tracked as open work in [docs/NEXT-FEATURES.md](NEXT-FEATURES.md) — we don't cite a number here because none has been benchmarked with a documented method |
 
 Unlike some of the figures in this table, we deliberately don't include a lines-of-code count or an aggregate REST-endpoint count — neither is currently asserted anywhere in this project's own docs, and inventing one here would just create the kind of stale, unverifiable claim this whole document is trying to avoid.

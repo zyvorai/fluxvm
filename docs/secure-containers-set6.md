@@ -68,7 +68,8 @@ secondary network.
 **Cilium exception:** when `FLUXVM_CONTAINER_CNI_PROVIDER` resolves to
 `cilium` (or `auto` detects Cilium), Multus-style `netN` secondaries are
 ignored for the strict check so the primary `eth0` L2 handoff can proceed.
-Those secondaries are **not** attached to the guest. See
+They are then attached to the guest as extra NICs over their own bridge chains
+(Set 7R follow-up; the Set 6 behavior of leaving them unattached is superseded). See
 [cilium-cni.md](cilium-cni.md).
 
 For controlled labs only:

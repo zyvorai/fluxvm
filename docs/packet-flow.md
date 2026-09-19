@@ -22,6 +22,22 @@ guest (virtio-net)
 
 Ingress is the reverse, used when the flow destination equals the guest IP.
 
+Bridge-less **direct** VMs ([direct-datapath.md](direct-datapath.md)) show the path they really take,
+never a bridge they do not have. Pod veth (`peer-veth`), egress:
+
+```
+guest (virtio-net)
+  → tap (no bridge)
+  → tc clsact + FluxVM eBPF (policy, then redirect)
+  → eth0 (bpf_redirect_peer into the host-side veth peer)
+  → [cilium coexistence, if mode=cilium]
+  → uplink → peer
+```
+
+Ingress mirrors it: `peer → uplink → [cilium] → eth0 (direct_in redirects) → tap (egress hook: Pod-ingress
+policy) → guest`. For a host uplink (`l2-uplink`) the outer device *is* the uplink, so there is no
+separate `uplink` hop: `guest → tap → tc/eBPF → uplink → peer` and `peer → uplink (steered by MAC) → tap → guest`.
+
 ## CLI — colorful and normal
 
 ```bash

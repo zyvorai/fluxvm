@@ -101,7 +101,7 @@ for each: [docs/use-cases.md](docs/use-cases.md).
 | **Sandboxed / untrusted code execution** | Firecracker jailer + cgroup v2 + netns + vsock `exec` + TTL reaper, the same isolation shape as gVisor/Firecracker-based CI sandboxes |
 | **Ephemeral / disposable dev/test environments** | Per-branch/PR VMs, cheap qcow2 CoW cloning, optional `ttl_seconds`, `pause`/`resume` to park instead of rebuild |
 | **Bring-your-own storage backend** | LVM thin, NBD, Ceph RBD (RBD verified against a real Rook Ceph cluster) |
-| **Networking that matches the environment** | QEMU user-mode NAT, TAP+bridge, or macvtap — all three SSH-verified end to end in this project's own regression tests |
+| **Networking that matches the environment** | QEMU user-mode NAT, TAP+bridge, or macvtap — all three SSH-verified end to end in this project's own regression tests; plus an opt-in bridge-less direct tap (eBPF redirect; verified in netns tests on a real kernel, [not yet live](docs/direct-datapath.md)) |
 
 ---
 
@@ -172,6 +172,7 @@ and `fluxvm-container-agent` — see [Feature highlights](#feature-highlights) b
 | LAN DHCP | `"network": {"mode":"tap","bridge":"vmbr0","mac":"06:…"}` | Your bridge's DHCP |
 | Known IP | `"network": {"mode":"tap","netns":true,"mac":"06:…"}` | FluxVM dnsmasq; see `fluxctl get` |
 | L2 macvtap | `"network": {"mode":"macvtap","parent":"eth0","mac":"06:…"}` | Your L2 / static via cloud-init |
+| Bridge-less direct (opt-in) | `"network": {"mode":"tap","mac":"06:…","direct":{"outer":"eth0","mode":"l2-uplink","guest_ips":["…"]}}` | Your L2 / static; eBPF redirect instead of a bridge — [docs/direct-datapath.md](docs/direct-datapath.md) |
 
 Full examples: [`examples/qemu.json`](examples/qemu.json) (user-mode lab),
 [`examples/create-vm-prod.json`](examples/create-vm-prod.json) (tenant + tap/netns),
@@ -315,7 +316,7 @@ NODE_NAME=$(hostname) FLUXVM_URL=http://127.0.0.1:7788 fluxvm-kube
 **Declarative, not one-shot** — a real, tested property: if the underlying VM disappears on its own
 (TTL expired, or deleted via the REST API directly) the operator notices on its next reconcile and
 creates a *new* VM to replace it, the same "keep this existing" semantics a `Deployment` has for
-Pods. `spec.networkMode` supports `none`/`user`/`tap`/`macvtap`. Placement: set `spec.node`
+Pods. `spec.networkMode` supports `none`/`user`/`tap`/`macvtap`, plus opt-in `direct` (bridge-less, `parent` = the uplink NIC; see [docs/direct-datapath.md](docs/direct-datapath.md)). Placement: set `spec.node`
 explicitly, or run one `fluxvm-kube --enable-placement` instance to pin to the least-loaded capable
 node.
 

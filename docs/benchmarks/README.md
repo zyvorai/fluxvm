@@ -151,3 +151,21 @@ serve`.
 Track B mutation targets are **not** claimed from this cold-create path —
 Firecracker warm pools/snapshots remain the density SoT. This closes the H5
 “archive a host run” evidence gate.
+
+## Direct datapath (host forwarding cost)
+
+`scripts/bench-direct-datapath.sh` compares today's bridge chains with the bridge-less direct paths using
+netns + veth stand-ins for the tap (no KVM, no QEMU; so it measures host forwarding cost only, not virtio
+or VMM cost). Bridge topologies are measured both bare and with FluxVM's real `fluxvm_egress` attached, so
+the direct path is compared with what a production bridge VM actually runs.
+
+```bash
+sudo FLUXVM_BPF_DIR=dist/bpf BENCH_INTERLEAVE=1 BENCH_RUNS=6 \
+  BENCH_OUT=docs/benchmarks/evidence/direct-datapath-<date>.txt BENCH_JSON=…json \
+  ./scripts/bench-direct-datapath.sh
+```
+
+Use `BENCH_INTERLEAVE=1` on shared machines: it measures every topology once per round so load drift lands
+on all of them equally (a sequential run on a busy node swung one topology by ~40%). Archived runs and their
+interpretation are in [../direct-datapath.md](../direct-datapath.md#-measured-forwarding-cost); `BENCH_TARGET_IP`
+runs the same measurements against a real guest.

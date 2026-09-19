@@ -59,5 +59,12 @@ unless noted. Live rows use `secure-containers-live.yml` (opt-in via
 | UC-S9 | Kata P0/P1 fixtures (S9) | * | `scripts/evidence-kata-p0p1-matrix.sh` | live-ga | yes |
 | UC-S10 | Real multi-host fleet (S10) | 15E | `scripts/evidence-fleet-multihost.sh` | live-ga | yes |
 | UC-S11 | Attached-VM migration (S11) | 13E | `scripts/evidence-migration-attached-vm.sh` | live-ga | yes |
+| UC-DP-01 | Direct datapath: node ⇄ Pod veth ⇄ tap ⇄ guest with no bridge; VM-edge policy runs before the redirect; the tap's egress hook still runs on redirected frames (Linux root) | DP | `scripts/test-direct-datapath.sh` | network-fabric (privileged) | no |
+| UC-DP-02 | Loader attaches, repairs and removes the direct wiring inside the Pod netns (TCX and legacy tc) | DP | `crates/fluxvm-network/tests/direct_loader.rs` | network-fabric (privileged) | no |
+| UC-DP-03 | Two VMs share one unbridged uplink: LAN→guest by ARP+MAC, guest→LAN, guest↔guest, per-VM removal | DP | `crates/fluxvm-network/tests/direct_uplink.rs` | network-fabric (privileged) | no |
+| UC-DP-04 | Shim datapath decision (bridge/direct/auto), netns prepare/restore, journal back-compat | DP | `crates/fluxvm-containerd-shim/src/main.rs` | network-fabric | no |
+| UC-DP-05 | Warm-pool direct hotplug: tap passed to QEMU as a descriptor (QMP getfd) after the dataplane is wired | DP | `crates/fluxvm-qemu/src/qmp.rs` | network-fabric | no |
+| UC-DP-06 | Pod-policy rule matching unchanged by the verifier fix; VM-edge program stays inside the verifier budget | DP | `scripts/test-pod-policy-verdict.py` | network-fabric (privileged) | no |
+| UC-DP-L1 | Live Cilium + KVM Pod in direct mode: reachable, no host bridge, NetworkPolicy still enforced | DP | `scripts/evidence-direct-datapath.sh` | live-ga | yes |
 
 See also [NEXT-FEATURES.md](NEXT-FEATURES.md) and [secure-containers-set19.md](secure-containers-set19.md).

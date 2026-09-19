@@ -149,9 +149,12 @@ adopting a new storage layer just for VM disks.
 - **TAP + Linux bridge** — a VM on the same L2 as the host.
 - **macvtap** — a VM's own MAC address directly on a parent link (no
   bridge).
+- **Bridge-less direct (opt-in)** — an eBPF redirect between the VM's tap and a
+  physical uplink instead of a bridge; see [direct-datapath](../direct-datapath.md).
 
-All three are SSH-verified end-to-end in the project's own regression
-tests.
+The first three are SSH-verified end-to-end in the project's own regression
+tests. The direct mode is verified in network-namespace tests on a real kernel,
+not yet end to end with a real guest.
 
 ## Next steps
 

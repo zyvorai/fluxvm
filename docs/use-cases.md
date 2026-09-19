@@ -198,6 +198,11 @@ instead of adopting a new storage layer just for VM disks.
 - **macvtap** — a VM's own MAC address directly on a parent link (no
   bridge), for environments where the VM needs to look like an independent
   host on the physical network.
+- **Bridge-less direct (opt-in)** — an eBPF redirect between the VM's tap and a
+  physical uplink (or a Pod's veth) instead of a bridge, with FluxVM policy
+  applied first ([direct-datapath.md](direct-datapath.md)).
 
-All three are SSH-verified end-to-end in this project's own regression
-tests, not just configured-and-hoped-for.
+The first three are SSH-verified end-to-end in this project's own regression
+tests, not just configured-and-hoped-for. The direct mode is verified in
+network-namespace tests on a real kernel with a userspace guest, not yet
+end to end with a real guest.

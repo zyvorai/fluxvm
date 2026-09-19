@@ -1,0 +1,146 @@
+== FluxVM direct-datapath baseline ==
+date: 2026-09-19T19:18:54Z
+host: Linux 7.0.0-31-generic x86_64 cpus=12
+loadavg(1/5/15m at start): 2.45 3.21 3.02  (other workloads inflate variance)
+iproute2: ip utility, iproute2-6.19.0, libbpf 1.6.3
+iperf3: iperf 3.20 (cJSON 1.7.15)
+br_netfilter: loaded (bridge-nf-call-iptables=1)
+runs=6 duration=4s ping_count=300 udp_len=64 mtu=1500
+scope: host forwarding cost only; veth stands in for the tap (no virtio/QEMU)
+bpf objects: /home/sus/fluxvm-dev/fluxvm/dist/bpf (fluxvm_egress + fluxvm_direct_in for the *-fx / *-direct topologies)
+bench-direct-datapath: == floor (hops=2, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0350ms p99=0.0660ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=45.835 Gbit/s udp64=0.4285 Mpps loss=0.03%
+bench-direct-datapath: == cni-bridge (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0540ms p99=0.0970ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=36.480 Gbit/s udp64=0.2266 Mpps loss=0.03%
+bench-direct-datapath: == cni-bridge-fx (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0680ms p99=0.1090ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=37.911 Gbit/s udp64=0.2159 Mpps loss=0.00%
+bench-direct-datapath: == cni-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0440ms p99=0.0750ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=43.626 Gbit/s udp64=0.3626 Mpps loss=0.00%
+bench-direct-datapath: == standalone-bridge (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0540ms p99=0.0880ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=40.615 Gbit/s udp64=0.2968 Mpps loss=0.00%
+bench-direct-datapath: == standalone-bridge-fx (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0510ms p99=0.0950ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=40.725 Gbit/s udp64=0.2950 Mpps loss=0.02%
+bench-direct-datapath: == standalone-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0480ms p99=0.0920ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=44.812 Gbit/s udp64=0.3621 Mpps loss=0.01%
+bench-direct-datapath: == floor (hops=2, target=10.99.0.2) ==
+bench-direct-datapath:   run 2: ping p50=0.0350ms p99=0.0630ms loss=0.0%
+bench-direct-datapath:   run 2: tcp=46.135 Gbit/s udp64=0.4279 Mpps loss=0.00%
+bench-direct-datapath: == cni-bridge (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 2: ping p50=0.0540ms p99=0.0930ms loss=0.0%
+bench-direct-datapath:   run 2: tcp=37.932 Gbit/s udp64=0.2285 Mpps loss=0.00%
+bench-direct-datapath: == cni-bridge-fx (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 2: ping p50=0.0630ms p99=0.1050ms loss=0.0%
+bench-direct-datapath:   run 2: tcp=37.020 Gbit/s udp64=0.2327 Mpps loss=0.09%
+bench-direct-datapath: == cni-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 2: ping p50=0.0410ms p99=0.0730ms loss=0.0%
+bench-direct-datapath:   run 2: tcp=43.518 Gbit/s udp64=0.3526 Mpps loss=0.03%
+bench-direct-datapath: == standalone-bridge (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 2: ping p50=0.0510ms p99=0.0900ms loss=0.0%
+bench-direct-datapath:   run 2: tcp=39.237 Gbit/s udp64=0.2890 Mpps loss=0.01%
+bench-direct-datapath: == standalone-bridge-fx (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 2: ping p50=0.0600ms p99=0.1030ms loss=0.0%
+bench-direct-datapath:   run 2: tcp=40.952 Gbit/s udp64=0.2878 Mpps loss=0.00%
+bench-direct-datapath: == standalone-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 2: ping p50=0.0540ms p99=0.0870ms loss=0.0%
+bench-direct-datapath:   run 2: tcp=44.477 Gbit/s udp64=0.3509 Mpps loss=0.00%
+bench-direct-datapath: == floor (hops=2, target=10.99.0.2) ==
+bench-direct-datapath:   run 3: ping p50=0.0370ms p99=0.0610ms loss=0.0%
+bench-direct-datapath:   run 3: tcp=45.399 Gbit/s udp64=0.4297 Mpps loss=0.01%
+bench-direct-datapath: == cni-bridge (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 3: ping p50=0.0600ms p99=0.1020ms loss=0.0%
+bench-direct-datapath:   run 3: tcp=36.942 Gbit/s udp64=0.2239 Mpps loss=0.11%
+bench-direct-datapath: == cni-bridge-fx (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 3: ping p50=0.0530ms p99=0.1230ms loss=0.0%
+bench-direct-datapath:   run 3: tcp=24.963 Gbit/s udp64=0.1351 Mpps loss=0.12%
+bench-direct-datapath: == cni-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 3: ping p50=0.0370ms p99=0.0630ms loss=0.0%
+bench-direct-datapath:   run 3: tcp=31.801 Gbit/s udp64=0.3052 Mpps loss=0.39%
+bench-direct-datapath: == standalone-bridge (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 3: ping p50=0.0580ms p99=0.0750ms loss=0.0%
+bench-direct-datapath:   run 3: tcp=27.773 Gbit/s udp64=0.2426 Mpps loss=0.17%
+bench-direct-datapath: == standalone-bridge-fx (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 3: ping p50=0.0650ms p99=0.0860ms loss=0.0%
+bench-direct-datapath:   run 3: tcp=27.043 Gbit/s udp64=0.1782 Mpps loss=0.29%
+bench-direct-datapath: == standalone-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 3: ping p50=0.0580ms p99=0.0770ms loss=0.0%
+bench-direct-datapath:   run 3: tcp=29.460 Gbit/s udp64=0.2106 Mpps loss=0.43%
+bench-direct-datapath: == floor (hops=2, target=10.99.0.2) ==
+bench-direct-datapath:   run 4: ping p50=0.0410ms p99=0.0550ms loss=0.0%
+bench-direct-datapath:   run 4: tcp=30.319 Gbit/s udp64=0.2729 Mpps loss=0.60%
+bench-direct-datapath: == cni-bridge (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 4: ping p50=0.0640ms p99=0.0900ms loss=0.0%
+bench-direct-datapath:   run 4: tcp=24.386 Gbit/s udp64=0.1637 Mpps loss=0.22%
+bench-direct-datapath: == cni-bridge-fx (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 4: ping p50=0.0690ms p99=0.0900ms loss=0.0%
+bench-direct-datapath:   run 4: tcp=24.522 Gbit/s udp64=0.1850 Mpps loss=0.13%
+bench-direct-datapath: == cni-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 4: ping p50=0.0410ms p99=0.0700ms loss=0.0%
+bench-direct-datapath:   run 4: tcp=43.229 Gbit/s udp64=0.3554 Mpps loss=0.00%
+bench-direct-datapath: == standalone-bridge (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 4: ping p50=0.0510ms p99=0.0850ms loss=0.0%
+bench-direct-datapath:   run 4: tcp=41.041 Gbit/s udp64=0.2871 Mpps loss=0.01%
+bench-direct-datapath: == standalone-bridge-fx (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 4: ping p50=0.0560ms p99=0.0990ms loss=0.0%
+bench-direct-datapath:   run 4: tcp=40.410 Gbit/s udp64=0.2901 Mpps loss=0.05%
+bench-direct-datapath: == standalone-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 4: ping p50=0.0460ms p99=0.0860ms loss=0.0%
+bench-direct-datapath:   run 4: tcp=42.877 Gbit/s udp64=0.3481 Mpps loss=0.03%
+bench-direct-datapath: == floor (hops=2, target=10.99.0.2) ==
+bench-direct-datapath:   run 5: ping p50=0.0370ms p99=0.0680ms loss=0.0%
+bench-direct-datapath:   run 5: tcp=45.683 Gbit/s udp64=0.4210 Mpps loss=0.01%
+bench-direct-datapath: == cni-bridge (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 5: ping p50=0.0590ms p99=0.0940ms loss=0.0%
+bench-direct-datapath:   run 5: tcp=36.818 Gbit/s udp64=0.2269 Mpps loss=0.00%
+bench-direct-datapath: == cni-bridge-fx (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 5: ping p50=0.0590ms p99=0.1100ms loss=0.0%
+bench-direct-datapath:   run 5: tcp=37.522 Gbit/s udp64=0.2290 Mpps loss=0.08%
+bench-direct-datapath: == cni-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 5: ping p50=0.0450ms p99=0.0720ms loss=0.0%
+bench-direct-datapath:   run 5: tcp=43.801 Gbit/s udp64=0.3546 Mpps loss=0.06%
+bench-direct-datapath: == standalone-bridge (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 5: ping p50=0.0510ms p99=0.0850ms loss=0.0%
+bench-direct-datapath:   run 5: tcp=40.176 Gbit/s udp64=0.2966 Mpps loss=0.00%
+bench-direct-datapath: == standalone-bridge-fx (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 5: ping p50=0.0530ms p99=0.0940ms loss=0.0%
+bench-direct-datapath:   run 5: tcp=41.078 Gbit/s udp64=0.2853 Mpps loss=0.00%
+bench-direct-datapath: == standalone-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 5: ping p50=0.0460ms p99=0.0930ms loss=0.0%
+bench-direct-datapath:   run 5: tcp=43.527 Gbit/s udp64=0.3459 Mpps loss=0.09%
+bench-direct-datapath: == floor (hops=2, target=10.99.0.2) ==
+bench-direct-datapath:   run 6: ping p50=0.0360ms p99=0.0600ms loss=0.0%
+bench-direct-datapath:   run 6: tcp=46.039 Gbit/s udp64=0.4276 Mpps loss=0.11%
+bench-direct-datapath: == cni-bridge (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 6: ping p50=0.0540ms p99=0.1040ms loss=0.0%
+bench-direct-datapath:   run 6: tcp=36.316 Gbit/s udp64=0.2309 Mpps loss=0.01%
+bench-direct-datapath: == cni-bridge-fx (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 6: ping p50=0.0610ms p99=0.1020ms loss=0.0%
+bench-direct-datapath:   run 6: tcp=37.155 Gbit/s udp64=0.2317 Mpps loss=0.00%
+bench-direct-datapath: == cni-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 6: ping p50=0.0460ms p99=0.0770ms loss=0.0%
+bench-direct-datapath:   run 6: tcp=42.608 Gbit/s udp64=0.3597 Mpps loss=0.00%
+bench-direct-datapath: == standalone-bridge (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 6: ping p50=0.0480ms p99=0.0920ms loss=0.0%
+bench-direct-datapath:   run 6: tcp=40.742 Gbit/s udp64=0.2938 Mpps loss=0.07%
+bench-direct-datapath: == standalone-bridge-fx (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 6: ping p50=0.0580ms p99=0.1010ms loss=0.0%
+bench-direct-datapath:   run 6: tcp=41.011 Gbit/s udp64=0.2828 Mpps loss=0.04%
+bench-direct-datapath: == standalone-direct (hops=4, target=10.99.0.2) ==
+bench-direct-datapath:   run 6: ping p50=0.0540ms p99=0.0930ms loss=0.0%
+bench-direct-datapath:   run 6: tcp=43.411 Gbit/s udp64=0.3628 Mpps loss=0.01%
+
+== summary (median of 6 runs; lower is better for ping, higher for tcp/udp) ==
+metric                      floor               cni-bridge          cni-bridge-fx       cni-direct          standalone-bridge   standalone-bridge-fxstandalone-direct   
+ping_loss_pct               0                   0                   0                   0                   0                   0                   0                   
+ping_p50_ms                 0.0365              0.0565              0.062               0.0425              0.051               0.057               0.051               
+ping_p99_ms                 0.062               0.0955              0.107               0.0725              0.0865              0.097               0.0895              
+tcp_gbps                    45.76               36.65               37.09               43.37               40.4                40.84               43.47               
+udp64_loss_pct              0.02                0.02                0.085               0.015               0.01                0.03                0.02                
+udp64_mpps                  0.4277              0.2268              0.2225              0.355               0.2914              0.2865              0.3495              
+json: /tmp/direct-bench.json

@@ -14,6 +14,13 @@ name: Network Fabric
       - 'scripts/test-pod-policy-verdict.py'
       - 'scripts/test-direct-datapath.sh'
       - 'scripts/direct-datapath-guest.py'
+      - 'scripts/test-direct-uplink.sh'
+      - 'scripts/evidence-direct-datapath.sh'
+      - 'scripts/bench-direct-datapath.sh'
+      - 'tools/fluxvm-tcx.c'
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-containerd-shim/**'
       - 'scripts/bpf-map-clear.py'
       - 'scripts/test-network-fabric.sh'
       - 'scripts/validate-network-fabric.sh'
@@ -41,6 +48,13 @@ name: Network Fabric
       - 'scripts/test-pod-policy-verdict.py'
       - 'scripts/test-direct-datapath.sh'
       - 'scripts/direct-datapath-guest.py'
+      - 'scripts/test-direct-uplink.sh'
+      - 'scripts/evidence-direct-datapath.sh'
+      - 'scripts/bench-direct-datapath.sh'
+      - 'tools/fluxvm-tcx.c'
+      - 'tools/fluxvm-sentinel-certify.py'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-containerd-shim/**'
       - 'scripts/bpf-map-clear.py'
       - 'scripts/test-network-fabric.sh'
       - 'scripts/validate-network-fabric.sh'
@@ -141,6 +155,9 @@ jobs:
         run: |
           bash -n scripts/test-verifier-budget.sh
           bash -n scripts/test-direct-datapath.sh
+          bash -n scripts/test-direct-uplink.sh
+          bash -n scripts/evidence-direct-datapath.sh
+          bash -n scripts/bench-direct-datapath.sh
           python3 -m py_compile scripts/test-pod-policy-verdict.py scripts/direct-datapath-guest.py scripts/bpf-map-clear.py
 
       # The VM-edge program's verifier cost is kernel- and compiler-dependent: on Linux 7.0 the
@@ -160,13 +177,36 @@ jobs:
         working-directory: fluxvm
         run: sudo -E env FLUXVM_BPF_DIR="$PWD/dist/bpf" ./scripts/test-direct-datapath.sh
 
-      - name: Bridge-less direct datapath (loader integration)
+      # Without this helper `FLUXVM_TCX=auto` silently falls back to legacy clsact/tc and the TCX
+      # path (the chain semantics several VMs on one uplink rely on) would go untested.
+      - name: Build the TCX helper
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: cc -O2 -g -Wall -Wextra -Werror tools/fluxvm-tcx.c -o "$RUNNER_TEMP/fluxvm-tcx" $(pkg-config --cflags --libs libbpf)
+
+      - name: Bridge-less direct datapath (loader integration; TCX required, then legacy tc)
         if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
         working-directory: fluxvm
         run: |
           cargo test -p fluxvm-network --test direct_loader --no-run
           BIN=$(ls -t target/debug/deps/direct_loader-* | grep -v '\.d$' | head -1)
-          sudo env FLUXVM_TEST_BPF_DIR="$PWD/dist/bpf" "$BIN" --nocapture
+          # TCX needs Linux >= 6.6; on an older runner kernel this leg is skipped, never faked.
+          if [ "$(uname -r | cut -d. -f1)" -gt 6 ] || { [ "$(uname -r | cut -d. -f1)" -eq 6 ] && [ "$(uname -r | cut -d. -f2)" -ge 6 ]; }; then
+            sudo env FLUXVM_TEST_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX_HELPER="$RUNNER_TEMP/fluxvm-tcx" FLUXVM_TCX=required "$BIN" --nocapture
+          fi
+          sudo env FLUXVM_TEST_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX=off "$BIN" --nocapture
+
+      - name: Bridge-less direct datapath (standalone uplink, two VMs)
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-network --test direct_uplink --no-run
+          BIN=$(ls -t target/debug/deps/direct_uplink-* | grep -v '\.d$' | head -1)
+          sudo env FLUXVM_UPLINK_TEST_BIN="$PWD/$BIN" FLUXVM_BPF_DIR="$PWD/dist/bpf" FLUXVM_TCX_HELPER="$RUNNER_TEMP/fluxvm-tcx" ./scripts/test-direct-uplink.sh
+
+      - name: Direct datapath static evidence
+        working-directory: fluxvm
+        run: ./scripts/evidence-direct-datapath.sh
 
       - name: Service Fabric SLO scripts (syntax)
         working-directory: fluxvm

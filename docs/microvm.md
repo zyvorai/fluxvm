@@ -149,6 +149,17 @@ spec:
 Adjust `image`, `bridge`, and `backend` to match the node. Prefer
 `networkMode: user` or `none` for a first smoke test if TAP/bridge is not ready.
 
+For a bridge-less tap on a physical uplink (no `vmbr0`), use `networkMode: direct`:
+`parent` names the unenslaved uplink NIC and `guestIps` lets the LAN discover the guest by ARP
+(needs `sandbox.dataplane.mode = ebpf`; see [direct-datapath.md](direct-datapath.md) for the bounds):
+
+```yaml
+  networkMode: direct
+  parent: enp1s0
+  mac: "02:00:00:00:0a:0a"
+  guestIps: ["192.168.1.50"]
+```
+
 ## MicroVMJob
 
 Run-to-completion: creates child MicroVMs from `spec.template`, tracks

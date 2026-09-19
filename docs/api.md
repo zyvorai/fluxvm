@@ -32,6 +32,7 @@ POST   /v1/vms/{uuid}/resume
 POST   /v1/vms/{uuid}/resources
 POST   /v1/vms/{uuid}/hotplug/cpu
 POST   /v1/vms/{uuid}/hotplug/memory
+POST   /v1/vms/{uuid}/hotplug/nic
 GET    /v1/vms/{uuid}/cpuset
 POST   /v1/vms/{uuid}/freeze
 POST   /v1/vms/{uuid}/thaw
@@ -293,3 +294,43 @@ macvtap device on `parent`, opens its `/dev/tapN` character device, and passes t
 directly to the VMM (`-netdev tap,fd=N` for QEMU, `--net fd=N` for Cloud Hypervisor) — there's no
 persistent named tap the VMM opens itself, which is why **Firecracker doesn't support this mode**:
 its API only accepts a host device name it opens via `/dev/net/tun`, with no fd-passing option.
+
+Direct — bridge-less tap (opt-in; [direct-datapath.md](direct-datapath.md)):
+
+```json
+{
+  "mode": "tap",
+  "mac": "02:00:00:00:0a:0a",
+  "direct": {"outer": "enp1s0", "mode": "l2-uplink", "guest_ips": ["192.168.1.50"]}
+}
+```
+
+An eBPF redirect pairs the VM's tap with `outer` instead of a bridge. `mode` is `l2-uplink` (a physical
+NIC that is not a bridge/bond port; frames are steered by destination MAC, and ARP requests by the
+declared `guest_ips`) or `peer-veth` (a Pod's veth, with `netns_path` naming the Pod network namespace
+the tap is created in; used by the Secure Containers shim). `bridge`, `netns: true` and `extra` NICs
+cannot be combined with `direct`. It requires `sandbox.dataplane.mode = "ebpf"` or `"cilium"`
+(`legacy` is rejected), a failed dataplane attach fails the create, and the tap is handed to QEMU or
+Cloud Hypervisor (by name, or as a descriptor when it lives in another namespace); **Firecracker and the
+native hypervisor accept only the host-namespace form** because they cannot take a descriptor.
+`Policy.allowed_network_modes` sees it as `tap`.
+
+### NIC hotplug (QEMU)
+
+`POST /v1/vms/{uuid}/hotplug/nic` (admin) attaches a NIC to a running VM, used by Secure Containers after
+a warm-pool claim (the pool template boots with `network.mode=none`). Send **either** a bridged NIC:
+
+```json
+{"bridge": "fvbhab12cd", "mac": "02:00:00:00:00:01"}
+```
+
+**or** a bridge-less one (the daemon creates the tap, applies the dataplane, then passes the tap to QEMU
+over QMP with `getfd` + `netdev_add fd=` on one session):
+
+```json
+{"mac": "02:00:00:00:00:01",
+ "direct": {"outer": "eth0", "netns_path": "/run/netns/fvcni-ab12cd", "mode": "peer-veth"}}
+```
+
+`bridge` and `direct` are mutually exclusive (400 otherwise). A direct hotplug needs a VM booted with
+`network.mode=none`; on any failure the daemon removes the tap and dataplane it created.
