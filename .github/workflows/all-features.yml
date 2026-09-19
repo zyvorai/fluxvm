@@ -146,6 +146,9 @@ jobs:
       - name: Secure-container unit tests
         working-directory: fluxvm
         run: ./scripts/test-secure-containers.sh
+      - name: Multus, warm-pool, and Windows unit tests
+        working-directory: fluxvm
+        run: ./scripts/test-multus-warm-windows.sh unit
 
   sentinel-static:
     name: Sentinel / intelligence static
@@ -247,3 +250,4 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq nftables iproute2 python3
           sudo -E ./scripts/evidence-networkpolicy-second-cni.sh
+          sudo -E env FLUXVM_CNI_CHURN_ROUNDS=3 bash scripts/evidence-cni-churn.sh

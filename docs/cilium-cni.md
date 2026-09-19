@@ -15,13 +15,13 @@ document covers the **containerd shim CNI L2** path.
 | Provider | `FLUXVM_CONTAINER_CNI_PROVIDER=auto\|cilium\|generic` (default `auto`) |
 | Detection | `auto` checks `cilium.sock`, `/opt/cni/bin/cilium-cni`, `/etc/cni/net.d/*cilium*`, and pod-side `cilium*` ifaces |
 | Primary iface | Prefers configured iface (default `eth0`); falls back to first routable non-Multus iface |
-| Multus | `netN` secondaries are **ignored** under provider=`cilium` so primary handoff proceeds; they are **not** attached to the guest |
+| Multus | `netN` secondaries are prepared as extra host bridges and attached as guest NICs (`network.extra` at create, or `POST /v1/vms/{id}/hotplug/nic` after a warm-pool claim) |
 | Dual-stack | IPv4 + IPv6 addresses/routes on the primary iface (Set 6) |
 | Host TC | Cilium programs stay on the host `lxc*` peer; FluxVM bridges the pod-side endpoint |
 
 ## ⚠️ What does not work (honesty bounds)
 
-- Full Multus / secondary-NIC hotplug into the guest (still open; Set 6 guard).
+- Non-`netN` extra interfaces still fail closed when `FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=1`.
 - Writing Cilium identity / ipcache / endpoints maps.
 - Replacing Cilium NetworkPolicy with FluxVM as the Pod CNI.
 - Claiming Hubble attribution for every guest packet without CEP enrich

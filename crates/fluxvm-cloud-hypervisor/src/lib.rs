@@ -142,6 +142,7 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
         NetworkSpec::Tap {
             tap_name: Some(tap),
             mac,
+            extra,
             ..
         } => {
             let mut n = format!("tap={tap}");
@@ -149,6 +150,16 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
                 n.push_str(&format!(",mac={mac}"));
             }
             a.extend(["--net".into(), n]);
+            for nic in extra {
+                let Some(tap) = &nic.tap_name else {
+                    continue;
+                };
+                let mut n = format!("tap={tap}");
+                if let Some(mac) = &nic.mac {
+                    n.push_str(&format!(",mac={mac}"));
+                }
+                a.extend(["--net".into(), n]);
+            }
         }
         NetworkSpec::Tap { tap_name: None, .. } => bail!("tap network was not prepared"),
         NetworkSpec::Macvtap { mac, .. } => {
@@ -607,6 +618,35 @@ mod tests {
         let flag = format!("socket={}", path_arg(&sock));
         assert!(flag.contains("qga.sock"));
         assert!(flag.starts_with("socket="));
+    }
+
+    #[test]
+    fn extra_nics_are_repeated_net_flags() {
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: Some("br0".into()),
+            mac: Some("02:00:00:00:00:01".into()),
+            netns: false,
+            extra: vec![fluxvm_core::model::ExtraNic {
+                bridge: "br1".into(),
+                mac: Some("02:00:00:00:00:02".into()),
+                tap_name: Some("tap1".into()),
+            }],
+        };
+        let args = build_args(&cfg(), &req(), &c).unwrap();
+        let nets: Vec<_> = args
+            .windows(2)
+            .filter(|w| w[0] == "--net")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(
+            nets,
+            vec![
+                "tap=tap0,mac=02:00:00:00:00:01",
+                "tap=tap1,mac=02:00:00:00:00:02"
+            ]
+        );
     }
 
     fn cfg() -> Config {

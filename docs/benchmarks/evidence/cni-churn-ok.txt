@@ -1,0 +1,2 @@
+✅ calico/flannel churn 20 rounds
+⚠️  no FLUXVM_SECOND_CNI_KUBECONFIG — live second-cluster S2 still uses the nftables stand-in

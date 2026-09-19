@@ -8,8 +8,8 @@ use fluxvm_core::{
     config::Config,
     metrics,
     model::{
-        BackendKind, ClaimOverrides, CloudInitSpec, CreateVmRequest, NetworkSpec, PoolRecord,
-        PoolSpec, StorageBackend, VmRecord, VmStatus,
+        BackendKind, ClaimOverrides, CloudInitSpec, CreateVmRequest, ExtraNic, NetworkSpec,
+        PoolRecord, PoolSpec, StorageBackend, VmRecord, VmStatus,
     },
     process,
 };
@@ -21,6 +21,64 @@ use uuid::Uuid;
 
 mod sandbox;
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
+
+fn nic_hotplug_index(spec: &NetworkSpec) -> u8 {
+    match spec {
+        NetworkSpec::Tap {
+            tap_name, extra, ..
+        } => {
+            let primary = u8::from(tap_name.is_some());
+            let extras = extra.iter().filter(|n| n.tap_name.is_some()).count() as u8;
+            primary.saturating_add(extras)
+        }
+        _ => 0,
+    }
+}
+
+fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Option<String>) {
+    let spec = std::mem::replace(&mut vm.request.network, NetworkSpec::None);
+    vm.request.network = match spec {
+        NetworkSpec::Tap {
+            tap_name: None,
+            netns,
+            extra,
+            ..
+        } if extra.is_empty() => NetworkSpec::Tap {
+            tap_name: Some(tap),
+            bridge: Some(bridge),
+            mac,
+            netns,
+            extra,
+        },
+        NetworkSpec::Tap {
+            tap_name,
+            bridge: existing_bridge,
+            mac: existing_mac,
+            netns,
+            mut extra,
+        } => {
+            extra.push(ExtraNic {
+                bridge,
+                mac,
+                tap_name: Some(tap),
+            });
+            NetworkSpec::Tap {
+                tap_name,
+                bridge: existing_bridge,
+                mac: existing_mac,
+                netns,
+                extra,
+            }
+        }
+        _ => NetworkSpec::Tap {
+            tap_name: Some(tap),
+            bridge: Some(bridge),
+            mac,
+            netns: false,
+            extra: vec![],
+        },
+    };
+}
 
 /// Linux reserves vsock CIDs 0–2 (hypervisor/local/host); guest CIDs start
 /// at 3 and must be unique across the whole host.
@@ -551,6 +609,41 @@ impl VmManager {
             }
             other => bail!("memory hotplug is not supported for backend {other:?}"),
         }
+    }
+
+    /// Hot-add a virtio-net NIC on `bridge`. QEMU only. The TAP is recorded
+    /// on the VM's `NetworkSpec` so stop/delete removes it. Warm-pool
+    /// templates should boot with `network.mode=none` so `hotplug-pcie-0`
+    /// is free; later calls fill `extra`.
+    pub async fn hotplug_nic(&self, id: Uuid, bridge: String, mac: Option<String>) -> Result<()> {
+        let mut vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu {
+            bail!("NIC hotplug is supported for the QEMU backend only");
+        }
+        if matches!(
+            vm.request.network,
+            NetworkSpec::User { .. } | NetworkSpec::Macvtap { .. }
+        ) {
+            bail!(
+                "NIC hotplug requires network.mode=none (warm-pool template) or tap; \
+                 user/macvtap already occupies the primary NIC"
+            );
+        }
+        let index = nic_hotplug_index(&vm.request.network);
+        if index >= 4 {
+            bail!("NIC hotplug headroom exhausted (4 PCIe root ports reserved at boot)");
+        }
+        let tap = format!("hn{index}{}", &id.simple().to_string()[..6]);
+        fluxvm_network::add_bridge_tap(&tap, &bridge)
+            .await
+            .context("creating hotplug TAP")?;
+        if let Err(e) = fluxvm_qemu::hotplug_nic(&vm, &tap, mac.as_deref(), index).await {
+            let _ = fluxvm_network::cleanup_tap(&tap).await;
+            return Err(e);
+        }
+        record_hotplugged_nic(&mut vm, tap, bridge, mac);
+        self.store.update(vm).await?;
+        Ok(())
     }
 
     /// The cpuset currently pinned via `set_resources`'s `cpuset_cpus`, or
@@ -3401,5 +3494,117 @@ mod tests {
                 "growing must leave existing members untouched (backfill tops up separately)"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod nic_hotplug_tests {
+    use super::{nic_hotplug_index, record_hotplugged_nic};
+    use fluxvm_core::model::{ExtraNic, NetworkSpec, VmRecord};
+
+    fn vm(network: serde_json::Value) -> VmRecord {
+        serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "pool-member",
+            "backend": "qemu",
+            "status": "paused",
+            "pid": 1,
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": null,
+            "workspace": "/tmp/w",
+            "disk": "/tmp/w/disk",
+            "seed_disk": null,
+            "tap_name": null,
+            "control_socket": null,
+            "log_path": "/tmp/w/console.log",
+            "error": null,
+            "request": {
+                "name": "pool-member",
+                "backend": "qemu",
+                "image": "/img.qcow2",
+                "network": network
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn warm_pool_none_network_claims_the_first_hotplug_slot() {
+        let spec = NetworkSpec::None;
+        assert_eq!(nic_hotplug_index(&spec), 0);
+        let mut record = vm(serde_json::json!({"mode": "none"}));
+        record_hotplugged_nic(
+            &mut record,
+            "hn0abcdef".into(),
+            "fvbhpod".into(),
+            Some("02:aa:bb:cc:dd:ee".into()),
+        );
+        match record.request.network {
+            NetworkSpec::Tap {
+                tap_name,
+                bridge,
+                mac,
+                extra,
+                netns,
+            } => {
+                assert_eq!(tap_name.as_deref(), Some("hn0abcdef"));
+                assert_eq!(bridge.as_deref(), Some("fvbhpod"));
+                assert_eq!(mac.as_deref(), Some("02:aa:bb:cc:dd:ee"));
+                assert!(extra.is_empty());
+                assert!(!netns);
+            }
+            other => panic!("expected tap after first hotplug, got {other:?}"),
+        }
+        assert_eq!(nic_hotplug_index(&record.request.network), 1);
+    }
+
+    #[test]
+    fn second_hotplug_appends_a_multus_extra() {
+        let mut record = vm(serde_json::json!({
+            "mode": "tap",
+            "tap_name": "hn0abcdef",
+            "bridge": "fvbhpod",
+            "mac": "02:aa:bb:cc:dd:ee",
+            "netns": false
+        }));
+        assert_eq!(nic_hotplug_index(&record.request.network), 1);
+        record_hotplugged_nic(
+            &mut record,
+            "hn1abcdef".into(),
+            "fvbhnet1".into(),
+            Some("02:11:22:33:44:55".into()),
+        );
+        let NetworkSpec::Tap {
+            tap_name, extra, ..
+        } = &record.request.network
+        else {
+            panic!("expected tap");
+        };
+        assert_eq!(tap_name.as_deref(), Some("hn0abcdef"));
+        assert_eq!(
+            extra,
+            &vec![ExtraNic {
+                bridge: "fvbhnet1".into(),
+                mac: Some("02:11:22:33:44:55".into()),
+                tap_name: Some("hn1abcdef".into()),
+            }]
+        );
+        assert_eq!(nic_hotplug_index(&record.request.network), 2);
+    }
+
+    #[test]
+    fn user_and_macvtap_do_not_consume_a_recorded_slot() {
+        assert_eq!(
+            nic_hotplug_index(&NetworkSpec::User { forwards: vec![] }),
+            0
+        );
+        assert_eq!(
+            nic_hotplug_index(&NetworkSpec::Macvtap {
+                parent: "eth0".into(),
+                macvtap_mode: None,
+                mac: None,
+            }),
+            0
+        );
     }
 }

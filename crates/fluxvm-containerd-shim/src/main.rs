@@ -109,6 +109,10 @@ struct RuntimeConfig {
     /// `auto` | `cilium` | `generic` — Cilium gets Multus-safe iface filtering
     /// and prefers eth0 (Cilium datapath). See docs/cilium-cni.md.
     cni_provider: String,
+    /// When set, claim a paused member from this FluxVM pool instead of
+    /// cold-creating, then hotplug the Pod's CNI bridges. The pool template
+    /// must use `network.mode=none` so `hotplug-pcie-0` is free.
+    warm_pool: Option<String>,
     streaming_stdio: bool,
     recovery_enabled: bool,
     oom_poll_ms: u64,
@@ -196,6 +200,10 @@ impl Default for RuntimeConfig {
             cni_provider: std::env::var("FLUXVM_CONTAINER_CNI_PROVIDER")
                 .unwrap_or_else(|_| "auto".into())
                 .to_ascii_lowercase(),
+            warm_pool: std::env::var("FLUXVM_CONTAINER_WARM_POOL")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty()),
             streaming_stdio: std::env::var("FLUXVM_CONTAINER_STREAMING_STDIO")
                 .ok()
                 .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off"))
@@ -434,6 +442,11 @@ struct CniBridge {
     cni_veth: String,
     interface: String,
     network: CniNetwork,
+    /// Multus `netN` L2 paths. Each has its own host bridge; the guest sees
+    /// them as extra virtio-net devices (boot-time `network.extra`, or NIC
+    /// hotplug after a warm-pool claim).
+    #[serde(default)]
+    secondaries: Vec<CniBridge>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1141,24 +1154,24 @@ impl Service {
                 let provider = resolve_cni_provider(&self.cfg.cni_provider, path).await;
                 let primary =
                     resolve_cni_interface(&self.cfg.cni_interface, path, provider).await?;
-                if self.cfg.cni_strict_multi_interface {
-                    let extras = detect_additional_cni_interfaces(path, &primary, provider).await?;
-                    if !extras.is_empty() {
-                        bail!(
-                            "CNI namespace has additional routable interfaces {:?}; \
-                             FluxVM refuses silent partial Multus/multi-interface configuration \
-                             (provider={provider:?}). Set \
-                             FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0 only for controlled testing",
-                            extras
-                        );
-                    }
+                let extras = detect_additional_cni_interfaces(path, &primary, provider).await?;
+                let (multus, unknown): (Vec<String>, Vec<String>) = extras
+                    .into_iter()
+                    .partition(|name| is_multus_secondary_iface(name));
+                if self.cfg.cni_strict_multi_interface && !unknown.is_empty() {
+                    bail!(
+                        "CNI namespace has additional routable interfaces {unknown:?} that are not Multus netN; \
+                         FluxVM refuses silent partial multi-interface configuration \
+                         (provider={provider:?}). Set \
+                         FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=0 only for controlled testing"
+                    );
                 }
                 if provider == CniProvider::Cilium {
                     info!(
                         "Cilium CNI detected — L2 handoff keeps Pod IP/MAC on {primary} peer (Cilium TC stays on host lxc*)"
                     );
                 }
-                Some(
+                let mut bridge =
                     prepare_cni_l2(&self.group, path, &primary)
                         .await
                         .map_err(|e| {
@@ -1173,8 +1186,23 @@ impl Service {
                                 let _ = writeln!(f, "{msg}");
                             }
                             anyhow::anyhow!(msg)
-                        })?,
-                )
+                        })?;
+                for (i, name) in multus.iter().enumerate() {
+                    match prepare_cni_l2(&format!("{}-n{i}", self.group), path, name).await {
+                        Ok(sec) => {
+                            info!(
+                                "Multus secondary {name} attached as guest NIC via bridge {}",
+                                sec.host_bridge
+                            );
+                            bridge.secondaries.push(sec);
+                        }
+                        Err(e) => {
+                            cleanup_cni_bridge(&bridge).await;
+                            bail!("preparing Multus secondary {name}: {e:#}");
+                        }
+                    }
+                }
+                Some(bridge)
             } else {
                 None
             }
@@ -1183,12 +1211,23 @@ impl Service {
         };
 
         let network = if let Some(cni) = cni.as_ref() {
+            let extra: Vec<_> = cni
+                .secondaries
+                .iter()
+                .map(|sec| {
+                    json!({
+                        "bridge": sec.host_bridge,
+                        "mac": sec.network.mac
+                    })
+                })
+                .collect();
             json!({
                 "mode": "tap",
                 "tap_name": null,
                 "bridge": cni.host_bridge,
                 "mac": cni.network.mac,
-                "netns": false
+                "netns": false,
+                "extra": extra
             })
         } else {
             json!({"mode": "user", "forwards": []})
@@ -1242,7 +1281,20 @@ impl Service {
             "pod_uid": hints.pod_uid
         });
 
-        let mut vm: VmRecord = match self.api(Method::POST, "/v1/vms", Some(create)).await {
+        let (create_path, create_body) = if let Some(pool) = &self.cfg.warm_pool {
+            info!("secure-container sandbox claiming warm pool {pool}");
+            (
+                format!("/v1/pools/{pool}/claim"),
+                json!({"name": format!("ctr-{}", safe_name(&self.group))}),
+            )
+        } else {
+            ("/v1/vms".into(), create)
+        };
+
+        let mut vm: VmRecord = match self
+            .api(Method::POST, &create_path, Some(create_body))
+            .await
+        {
             Ok(resp) => match resp.json().await {
                 Ok(vm) => vm,
                 Err(e) => {
@@ -1311,6 +1363,12 @@ impl Service {
                     .await?;
             }
 
+            if self.cfg.warm_pool.is_some() {
+                if let Some(cni) = cni.as_ref() {
+                    self.hotplug_cni_nics(&vm, cni).await?;
+                }
+            }
+
             if let Some(cni) = cni.as_ref() {
                 self.configure_guest_cni(&vm, cni).await?;
             }
@@ -1368,8 +1426,29 @@ impl Service {
         Ok(vm)
     }
 
+    async fn hotplug_cni_nics(&self, vm: &VmRecord, cni: &CniBridge) -> AnyResult<()> {
+        let mut nics = vec![(&cni.host_bridge, &cni.network.mac)];
+        for sec in &cni.secondaries {
+            nics.push((&sec.host_bridge, &sec.network.mac));
+        }
+        for (bridge, mac) in nics {
+            self.api(
+                Method::POST,
+                &format!("/v1/vms/{}/hotplug/nic", vm.id),
+                Some(json!({"bridge": bridge, "mac": mac})),
+            )
+            .await
+            .with_context(|| format!("hotplugging CNI bridge {bridge} onto {}", vm.id))?;
+        }
+        Ok(())
+    }
+
     async fn configure_guest_cni(&self, vm: &VmRecord, cni: &CniBridge) -> AnyResult<()> {
-        let command = guest_network_command(&cni.network)?;
+        let mut networks = vec![&cni.network];
+        for sec in &cni.secondaries {
+            networks.push(&sec.network);
+        }
+        let command = guest_network_command_all(&networks)?;
         match fluxvm_vsock_client::call(
             vm,
             AgentRequest::Exec {
@@ -4294,11 +4373,10 @@ async fn resolve_cni_interface(
 async fn detect_additional_cni_interfaces(
     netns_path: &Path,
     primary: &str,
-    provider: CniProvider,
+    _provider: CniProvider,
 ) -> AnyResult<Vec<String>> {
     let links = inventory_cni_links(netns_path).await?;
     let mut extras = Vec::new();
-    let mut ignored_multus = Vec::new();
     for link in &links {
         let Some(name) = link.get("ifname").and_then(Value::as_str) else {
             continue;
@@ -4309,18 +4387,7 @@ async fn detect_additional_cni_interfaces(
         if !link_has_routable_addr(link) {
             continue;
         }
-        // Cilium + Multus: keep primary eth0 handoff; do not fail closed on
-        // Multus netN delegates (full Multus guest NIC hotplug remains open).
-        if provider == CniProvider::Cilium && is_multus_secondary_iface(name) {
-            ignored_multus.push(name.to_string());
-            continue;
-        }
         extras.push(name.to_string());
-    }
-    if !ignored_multus.is_empty() {
-        warn!(
-            "Cilium CNI: ignoring Multus secondary interfaces {ignored_multus:?} for primary {primary} L2 handoff (not attached to guest)"
-        );
     }
     extras.sort();
     extras.dedup();
@@ -4475,43 +4542,54 @@ fn route_command(route: &CniRoute) -> String {
     }
 }
 
+#[cfg(test)]
 fn guest_network_command(network: &CniNetwork) -> AnyResult<String> {
-    parse_mac(&network.mac)?;
-    if network.addresses.is_empty() {
+    guest_network_command_all(&[network])
+}
+
+fn guest_network_command_all(networks: &[&CniNetwork]) -> AnyResult<String> {
+    if networks.is_empty() {
         bail!("CNI network contains no guest addresses");
     }
-    let mut lines = vec![
-        "set -eu".to_string(),
-        "IFACE=\"$(for p in /sys/class/net/*; do n=${p##*/}; [ \"$n\" = lo ] && continue; echo \"$n\"; break; done)\"".into(),
-        "[ -n \"$IFACE\" ]".into(),
-        "ip link set dev \"$IFACE\" up".into(),
-        "ip -4 addr flush dev \"$IFACE\" || true".into(),
-        "ip -6 addr flush dev \"$IFACE\" scope global || true".into(),
-        "ip -4 route flush dev \"$IFACE\" || true".into(),
-        "ip -6 route flush dev \"$IFACE\" || true".into(),
-    ];
-    for address in &network.addresses {
-        if !address.family.matches(address.address)
-            || address.prefix_len > address.family.max_prefix()
-        {
-            bail!("invalid CNI address {:?}", address);
+    let mut lines = vec!["set -eu".to_string()];
+    for (index, network) in networks.iter().enumerate() {
+        parse_mac(&network.mac)?;
+        if network.addresses.is_empty() {
+            bail!("CNI network contains no guest addresses");
         }
-        match address.family {
-            CniFamily::Ipv4 => lines.push(format!(
-                "ip -4 addr add {}/{} dev \"$IFACE\"",
-                address.address, address.prefix_len
-            )),
-            CniFamily::Ipv6 => lines.push(format!(
-                "ip -6 addr add {}/{} dev \"$IFACE\" nodad",
-                address.address, address.prefix_len
-            )),
+        let nth = index + 1;
+        lines.push(format!(
+            "IFACE=\"$(ls -1 /sys/class/net | grep -v '^lo$' | sort | sed -n '{nth}p')\""
+        ));
+        lines.push("[ -n \"$IFACE\" ]".into());
+        lines.push("ip link set dev \"$IFACE\" up".into());
+        lines.push("ip -4 addr flush dev \"$IFACE\" || true".into());
+        lines.push("ip -6 addr flush dev \"$IFACE\" scope global || true".into());
+        lines.push("ip -4 route flush dev \"$IFACE\" || true".into());
+        lines.push("ip -6 route flush dev \"$IFACE\" || true".into());
+        for address in &network.addresses {
+            if !address.family.matches(address.address)
+                || address.prefix_len > address.family.max_prefix()
+            {
+                bail!("invalid CNI address {:?}", address);
+            }
+            match address.family {
+                CniFamily::Ipv4 => lines.push(format!(
+                    "ip -4 addr add {}/{} dev \"$IFACE\"",
+                    address.address, address.prefix_len
+                )),
+                CniFamily::Ipv6 => lines.push(format!(
+                    "ip -6 addr add {}/{} dev \"$IFACE\" nodad",
+                    address.address, address.prefix_len
+                )),
+            }
+        }
+        for route in &network.routes {
+            lines.push(route_command(route));
         }
     }
-    for route in &network.routes {
-        lines.push(route_command(route));
-    }
-    lines.push("ip -4 addr show dev \"$IFACE\" || true".into());
-    lines.push("ip -6 addr show dev \"$IFACE\" || true".into());
+    lines.push("ip -4 addr show || true".into());
+    lines.push("ip -6 addr show || true".into());
     lines.push("ip -4 route show || true".into());
     lines.push("ip -6 route show || true".into());
     Ok(lines.join("\n"))
@@ -4580,6 +4658,7 @@ async fn prepare_cni_l2(group: &str, netns_path: &Path, interface: &str) -> AnyR
         cni_veth: cni_veth.clone(),
         interface: interface.to_string(),
         network: network.clone(),
+        secondaries: Vec::new(),
     };
 
     let port_mac = stable_mac(&format!("{group}:cni-port"));
@@ -4923,6 +5002,9 @@ async fn restore_cni_network(bridge: &CniBridge) {
 }
 
 async fn cleanup_cni_bridge(bridge: &CniBridge) {
+    for secondary in &bridge.secondaries {
+        Box::pin(cleanup_cni_bridge(secondary)).await;
+    }
     restore_cni_network(bridge).await;
     run_netns_best_effort(
         &bridge.netns_alias,
@@ -5426,6 +5508,44 @@ mod tests {
         assert!(!is_multus_secondary_iface("eth0"));
         assert!(!is_multus_secondary_iface("net"));
         assert!(!is_multus_secondary_iface("network1"));
+        assert!(is_multus_secondary_iface("net0"));
+        assert!(!is_multus_secondary_iface("lxc123"));
+        assert!(!is_multus_secondary_iface("cilium_host"));
+    }
+
+    #[test]
+    fn multus_guest_script_configures_nics_in_probe_order() {
+        let primary = CniNetwork {
+            addresses: vec![CniAddress {
+                family: CniFamily::Ipv4,
+                address: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                prefix_len: 24,
+            }],
+            mac: "02:00:00:00:00:01".into(),
+            routes: vec![CniRoute {
+                family: CniFamily::Ipv4,
+                destination: None,
+                gateway: Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+            }],
+        };
+        let secondary = CniNetwork {
+            addresses: vec![CniAddress {
+                family: CniFamily::Ipv4,
+                address: IpAddr::V4(Ipv4Addr::new(10, 1, 0, 2)),
+                prefix_len: 24,
+            }],
+            mac: "02:00:00:00:00:02".into(),
+            routes: vec![],
+        };
+        let command = guest_network_command_all(&[&primary, &secondary]).unwrap();
+        assert!(command.contains("sed -n '1p'"));
+        assert!(command.contains("sed -n '2p'"));
+        assert!(command.contains("ip -4 addr add 10.0.0.2/24"));
+        assert!(command.contains("ip -4 addr add 10.1.0.2/24"));
+        assert!(command.contains("ip -4 route replace default via 10.0.0.1"));
+        let first = command.find("10.0.0.2/24").unwrap();
+        let second = command.find("10.1.0.2/24").unwrap();
+        assert!(first < second);
     }
 
     #[test]

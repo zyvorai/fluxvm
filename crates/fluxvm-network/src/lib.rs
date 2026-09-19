@@ -27,7 +27,10 @@ pub mod xdp;
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::{
-    backend::PreparedNetwork, config::Config, model::NetworkSpec, process::run_checked,
+    backend::PreparedNetwork,
+    config::Config,
+    model::{ExtraNic, NetworkSpec},
+    process::run_checked,
 };
 use std::ffi::CString;
 use uuid::Uuid;
@@ -48,8 +51,12 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             tap_name,
             bridge,
             mac,
+            extra,
             netns: use_netns,
         } if *use_netns => {
+            if !extra.is_empty() {
+                bail!("Multus extra NICs require network.netns=false (host-bridge taps)");
+            }
             let handle = netns::prepare(&cfg.state_dir, id, mac.as_deref())
                 .await
                 .context("preparing network namespace")?;
@@ -59,6 +66,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     bridge: bridge.clone(),
                     mac: mac.clone(),
                     netns: true,
+                    extra: vec![],
                 },
                 tap_name: Some(handle.tap_name),
                 macvtap_fd: None,
@@ -73,6 +81,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             tap_name,
             bridge,
             mac,
+            extra,
             ..
         } => {
             let tap = tap_name
@@ -83,45 +92,48 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             }
             let bridge = bridge.clone().or_else(|| cfg.default_bridge.clone());
 
-            run_checked(
-                "ip",
-                &[
-                    "tuntap".into(),
-                    "add".into(),
-                    "dev".into(),
-                    tap.clone(),
-                    "mode".into(),
-                    "tap".into(),
-                ],
-            )
-            .await?;
-            run_checked(
-                "ip",
-                &[
-                    "link".into(),
-                    "set".into(),
-                    "dev".into(),
-                    tap.clone(),
-                    "up".into(),
-                ],
-            )
-            .await?;
+            if let Err(e) = create_tap(&tap).await {
+                return Err(e);
+            }
             if let Some(br) = &bridge {
-                if let Err(e) = run_checked(
-                    "ip",
-                    &[
-                        "link".into(),
-                        "set".into(),
-                        tap.clone(),
-                        "master".into(),
-                        br.clone(),
-                    ],
-                )
-                .await
-                {
+                if let Err(e) = set_master(&tap, br).await {
                     let _ = cleanup_tap(&tap).await;
                     return Err(e);
                 }
+            }
+            let mut prepared_extra: Vec<ExtraNic> = Vec::with_capacity(extra.len());
+            for (i, nic) in extra.iter().enumerate() {
+                if nic.bridge.is_empty() {
+                    let _ = cleanup_tap(&tap).await;
+                    for prev in &prepared_extra {
+                        if let Some(name) = &prev.tap_name {
+                            let _ = cleanup_tap(name).await;
+                        }
+                    }
+                    bail!("extra NIC {i} is missing a bridge");
+                }
+                let etap = nic
+                    .tap_name
+                    .clone()
+                    .unwrap_or_else(|| format!("x{i}{}", &id.simple().to_string()[..7]));
+                if etap.len() > 15 {
+                    let _ = cleanup_tap(&tap).await;
+                    bail!("extra tap interface name must be <= 15 characters");
+                }
+                if let Err(e) = add_bridge_tap(&etap, &nic.bridge).await {
+                    let _ = cleanup_tap(&tap).await;
+                    for prev in &prepared_extra {
+                        if let Some(name) = &prev.tap_name {
+                            let _ = cleanup_tap(name).await;
+                        }
+                    }
+                    return Err(e).context("preparing Multus extra NIC");
+                }
+                prepared_extra.push(ExtraNic {
+                    bridge: nic.bridge.clone(),
+                    mac: nic.mac.clone(),
+                    tap_name: Some(etap),
+                });
             }
             Ok(PreparedNetwork {
                 spec: NetworkSpec::Tap {
@@ -129,6 +141,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     bridge,
                     mac: mac.clone(),
                     netns: false,
+                    extra: prepared_extra,
                 },
                 tap_name: Some(tap),
                 macvtap_fd: None,
@@ -280,8 +293,75 @@ pub async fn cleanup(
     }
     match spec {
         NetworkSpec::Macvtap { .. } => cleanup_macvtap(tap_name).await,
+        NetworkSpec::Tap { extra, .. } => {
+            cleanup_tap(tap_name).await?;
+            for nic in extra {
+                if let Some(name) = &nic.tap_name {
+                    cleanup_tap(name).await?;
+                }
+            }
+            Ok(())
+        }
         _ => cleanup_tap(tap_name).await,
     }
+}
+
+/// Create a TAP and enslave it to `bridge`. Used for Multus extras and
+/// post-claim NIC hotplug.
+pub async fn add_bridge_tap(tap: &str, bridge: &str) -> Result<()> {
+    if tap.len() > 15 {
+        bail!("tap interface name must be <= 15 characters");
+    }
+    if bridge.is_empty() || bridge.len() > 15 {
+        bail!("bridge name must be 1..=15 characters");
+    }
+    create_tap(tap).await?;
+    if let Err(e) = set_master(tap, bridge).await {
+        let _ = cleanup_tap(tap).await;
+        return Err(e);
+    }
+    Ok(())
+}
+
+async fn create_tap(tap: &str) -> Result<()> {
+    run_checked(
+        "ip",
+        &[
+            "tuntap".into(),
+            "add".into(),
+            "dev".into(),
+            tap.into(),
+            "mode".into(),
+            "tap".into(),
+        ],
+    )
+    .await?;
+    run_checked(
+        "ip",
+        &[
+            "link".into(),
+            "set".into(),
+            "dev".into(),
+            tap.into(),
+            "up".into(),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn set_master(tap: &str, bridge: &str) -> Result<()> {
+    run_checked(
+        "ip",
+        &[
+            "link".into(),
+            "set".into(),
+            tap.into(),
+            "master".into(),
+            bridge.into(),
+        ],
+    )
+    .await
 }
 
 pub async fn cleanup_tap(tap: &str) -> Result<()> {

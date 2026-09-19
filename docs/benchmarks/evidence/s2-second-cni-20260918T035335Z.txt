@@ -1,0 +1,4 @@
+== S2.2 second CNI / policy engine ==
+PASS: second-engine allow
+PASS: second-engine deny
+S2 SECOND CNI (nftables policy-engine stand-in): PASS

@@ -91,3 +91,5 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq nftables iproute2 python3
       - name: S2 second policy-engine stand-in
         run: sudo -E ./scripts/evidence-networkpolicy-second-cni.sh
+      - name: Calico/flannel churn
+        run: sudo -E env FLUXVM_CNI_CHURN_ROUNDS=3 bash scripts/evidence-cni-churn.sh

@@ -17,6 +17,9 @@ pub struct BootInfo {
     /// transition itself (see `kvm::KvmVm::setup_pvh_entry`), instead of
     /// our own hand-built identity map + direct long-mode jump.
     pub pvh_start_info_gpa: Option<u64>,
+    /// Windows path: enter 32-bit protected mode at `entry_rip` (the
+    /// firmware image) instead of long mode. ACPI reset is I/O `0xCF9`.
+    pub firmware_reset: bool,
     pub notes: Vec<String>,
 }
 
@@ -108,6 +111,7 @@ fn prepare_linux_raw(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> 
         entry_rip: memory::KERNEL_LOAD_ADDR,
         boot_params_gpa: Some(memory::BOOT_PARAMS_ADDR),
         pvh_start_info_gpa: None,
+        firmware_reset: false,
         notes,
     })
 }
@@ -261,6 +265,7 @@ fn prepare_linux_with_loader(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<Bo
         entry_rip,
         boot_params_gpa: Some(memory::BOOT_PARAMS_ADDR),
         pvh_start_info_gpa: None,
+        firmware_reset: false,
         notes,
     })
 }
@@ -381,6 +386,7 @@ fn configure_pvh_boot(
         entry_rip: pvh_entry.raw_value(),
         boot_params_gpa: None,
         pvh_start_info_gpa: Some(memory::PVH_INFO_START),
+        firmware_reset: false,
         notes,
     })
 }
@@ -467,48 +473,75 @@ fn write_minimal_boot_params(mem: &mut GuestMemory, cfg: &VmConfig, initrd_len: 
 }
 
 fn prepare_windows(mem: &mut GuestMemory, cfg: &VmConfig) -> Result<BootInfo> {
-    let mut notes =
-        vec!["Windows path: OVMF/CLOUDHV.fd + ACPI + virtio-pci (cloud-hypervisor SoT)".into()];
+    let mut notes = vec![
+        "Windows path: firmware image at 0x01000000, 32-bit entry, DSDT PCI0, MSI-X, ACPI reset 0xCF9"
+            .into(),
+    ];
+    notes.push(
+        "Cloud Hypervisor remains the production Windows VMM until a virtio-win guest boots here"
+            .into(),
+    );
 
-    // CH-style: write ACPI early so firmware can find RSDP.
     match crate::acpi::write_tables(mem, cfg.cpus) {
-        Ok(rsdp) => notes.push(format!("ACPI RSDP at {rsdp:#x}")),
+        Ok(rsdp) => notes.push(format!("ACPI RSDP at {rsdp:#x} (DSDT @ 0xa4000)")),
         Err(e) => notes.push(format!("ACPI write failed: {e}")),
     }
 
+    const FIRMWARE_GPA: u64 = 0x0100_0000;
+    let mut loaded = false;
     if let Some(path) = cfg.firmware.as_ref().or(cfg.kernel.as_ref()) {
         if path.exists() {
             let bytes = std::fs::read(path)?;
-            // Load below 4GiB top like a simplified pflash image mapping.
-            let gpa = 0x0100_0000u64;
-            if gpa as usize + bytes.len() < mem.len() {
-                mem.write_at(gpa, &bytes)?;
+            if (FIRMWARE_GPA as usize)
+                .checked_add(bytes.len())
+                .is_some_and(|end| end <= mem.len())
+            {
+                mem.write_at(FIRMWARE_GPA, &bytes)?;
+                loaded = true;
+                notes.push(format!(
+                    "loaded firmware {} ({} bytes) at {FIRMWARE_GPA:#x}",
+                    path.display(),
+                    bytes.len()
+                ));
+            } else {
+                notes.push(format!(
+                    "firmware {} does not fit at {FIRMWARE_GPA:#x}",
+                    path.display()
+                ));
             }
-            notes.push(format!(
-                "loaded firmware {} ({} bytes) at {gpa:#x}",
-                path.display(),
-                bytes.len()
-            ));
         } else {
             notes.push(format!("firmware path {} missing", path.display()));
         }
     } else {
         notes.push("no --firmware provided (dry-run ok)".into());
     }
+    if !loaded && (FIRMWARE_GPA as usize + 16) <= mem.len() {
+        // hlt; jmp $-1 — keeps a dry-run from decoding zeros as random ops.
+        mem.write_at(FIRMWARE_GPA, &[0xf4, 0xeb, 0xfd])?;
+        notes.push(format!("firmware reset stub (hlt) at {FIRMWARE_GPA:#x}"));
+    }
+    if mem.len() as u64 > 0xFFFF_FFF0 {
+        // Real-mode reset vector alias, for guests whose RAM covers 4 GiB-16.
+        // The VMM itself enters at FIRMWARE_GPA in 32-bit protected mode.
+        mem.write_at(0xFFFF_FFF0, &[0xEA, 0x00, 0x00, 0x00, 0xF0])?;
+        notes.push("reset vector planted at 0xFFFFFFF0".into());
+    }
 
-    notes.push("Enable --pci for ECAM window; full virtio-pci BARs are P2 follow-up".into());
+    notes
+        .push("virtio-pci BAR0 + MSI-X table at BAR0+0x800; enable --pci so ECAM is mapped".into());
     notes.push(acpi_requirements().into());
 
     Ok(BootInfo {
-        entry_rip: 0xFFFF_FFF0,
+        entry_rip: FIRMWARE_GPA,
         boot_params_gpa: None,
         pvh_start_info_gpa: None,
+        firmware_reset: true,
         notes,
     })
 }
 
 pub fn acpi_requirements() -> &'static str {
-    "ACPI for Windows: RSDP, XSDT, FADT, MADT (LAPIC+IOAPIC), DSDT for virtio-pci, MCFG if ECAM."
+    "ACPI for Windows: RSDP, XSDT, FADT (DSDT + RESET_REG 0xCF9), MADT, DSDT PCI0, MCFG."
 }
 
 pub fn build_identity_page_tables(mem: &mut GuestMemory) -> Result<u64> {
@@ -555,5 +588,47 @@ mod tests {
         );
         assert!(both.contains("@0xfeb00000:5"));
         assert!(both.contains("@0xfeb00200:6"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn windows_path_enters_firmware_and_publishes_reset_register() {
+        use crate::config::{GuestKind, VmConfig};
+        use crate::memory::GuestMemory;
+
+        let mut cfg = VmConfig::default();
+        cfg.guest = GuestKind::Windows;
+        cfg.memory_mib = 32;
+        let mut mem = GuestMemory::allocate(cfg.memory_bytes()).expect("guest ram");
+        let info = super::prepare(&mut mem, &cfg).expect("windows boot");
+        assert!(info.firmware_reset);
+        assert_eq!(info.entry_rip, 0x0100_0000);
+        assert!(info.notes.iter().any(|n| n.contains("0xCF9")));
+
+        let mut fadt = [0u8; 149];
+        mem.read_at(0xa_0000, &mut fadt).unwrap();
+        assert_eq!(&fadt[0..4], b"FACP");
+        assert_eq!(
+            u32::from_le_bytes(fadt[40..44].try_into().unwrap()),
+            0xa_4000
+        );
+        assert_eq!(fadt[116], 1, "RESET_REG address space");
+        assert_eq!(
+            u64::from_le_bytes(fadt[120..128].try_into().unwrap()),
+            0xCF9
+        );
+        assert_eq!(fadt[128], 0x06);
+        assert_eq!(
+            u64::from_le_bytes(fadt[140..148].try_into().unwrap()),
+            0xa_4000
+        );
+
+        let mut stub = [0u8; 3];
+        mem.read_at(0x0100_0000, &mut stub).unwrap();
+        assert_eq!(stub, [0xf4, 0xeb, 0xfd], "dry-run firmware hlt stub");
+
+        let mut dsdt = [0u8; 4];
+        mem.read_at(0xa_4000, &mut dsdt).unwrap();
+        assert_eq!(&dsdt, b"DSDT");
     }
 }

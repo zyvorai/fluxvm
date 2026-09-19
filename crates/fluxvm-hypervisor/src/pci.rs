@@ -1,13 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! PCI ECAM + minimal virtio-pci BAR wiring (H2).
+//! PCI ECAM + virtio-pci BAR wiring (H2).
 //!
 //! `--pci` reserves MMCONFIG and exposes one modern virtio-net device at
-//! BDF `00:01.0` with BARs that alias the existing virtio-mmio net window so
-//! Linux/`virtio_pci` can probe. Full MSI-X / multi-device / Windows virtio-win
-//! remain CH SoT until those land; this closes the ECAM+BAR gap for Linux
-//! guests and Windows prep.
+//! BDF `00:01.0`. BAR0 aliases the virtio-mmio net window for the config
+//! region and holds an MSI-X table at offset `0x800` (virtio-win). Linux
+//! `virtio_pci` and a Windows guest that programs MSI-X can both probe.
+//! Cloud Hypervisor remains the production Windows VMM until a virtio-win
+//! guest actually boots here.
 
 use crate::bus::MmioDevice;
 use crate::error::Result;
@@ -26,6 +27,12 @@ const CAP_COMMON_CFG: u8 = 0x40;
 const CAP_NOTIFY_CFG: u8 = 0x50;
 const CAP_ISR_CFG: u8 = 0x60;
 const CAP_DEVICE_CFG: u8 = 0x70;
+const CAP_MSIX: u8 = 0x80;
+const PCI_CAP_ID_MSIX: u8 = 0x11;
+/// MSI-X table lives in BAR0, past the virtio-mmio window (`MMIO_LEN` is 0x200).
+pub const MSIX_BAR_OFFSET: u64 = 0x800;
+const MSIX_PBA_OFFSET: u32 = 0x900;
+const MSIX_ENTRIES: u16 = 4;
 
 pub struct PciEcam {
     base: u64,
@@ -97,12 +104,13 @@ impl PciEcam {
             &mut cfg,
             CAP_DEVICE_CFG,
             4, /* DEVICE_CFG */
-            0, /* end */
+            CAP_MSIX,
             0,
             0,
             0x300,
             0x100,
         );
+        write_msix_cap(&mut cfg);
 
         let _ = DEVICE_CLASS_NET;
         let _ = BAR0_SIZE;
@@ -175,6 +183,14 @@ impl MmioDevice for PciEcam {
                 if (0x40..0x80).contains(&(reg + i)) {
                     continue;
                 }
+                // MSI-X message control (enable / function mask) is guest-writable.
+                if (0x82..0x84).contains(&(reg + i)) {
+                    cfg[reg + i] = *b;
+                    continue;
+                }
+                if (0x80..0x90).contains(&(reg + i)) {
+                    continue;
+                }
                 if reg + i >= 0x10 {
                     cfg[reg + i] = *b;
                 }
@@ -235,4 +251,122 @@ fn write_virtio_cap(
     cfg[o + 7] = 0;
     write_u32(cfg, o + 8, offset);
     write_u32(cfg, o + 12, length);
+}
+
+fn write_msix_cap(cfg: &mut [u8]) {
+    let o = CAP_MSIX as usize;
+    cfg[o] = PCI_CAP_ID_MSIX;
+    cfg[o + 1] = 0; // end of chain
+                    // Table size is encoded as N-1 in bits 10:0. Enable (bit 15) stays clear
+                    // until the guest sets it.
+    write_u16(cfg, o + 2, MSIX_ENTRIES.saturating_sub(1));
+    // Table offset in BAR0, BIR = 0.
+    write_u32(cfg, o + 4, MSIX_BAR_OFFSET as u32);
+    write_u32(cfg, o + 8, MSIX_PBA_OFFSET);
+}
+
+/// MSI-X table + PBA window inside BAR0, after the virtio-mmio alias.
+pub struct MsixBar {
+    base: u64,
+    table: Mutex<[u8; 0x200]>,
+}
+
+impl MsixBar {
+    pub fn new() -> Self {
+        Self {
+            base: MMIO_WINDOW + MSIX_BAR_OFFSET,
+            table: Mutex::new([0; 0x200]),
+        }
+    }
+}
+
+impl Default for MsixBar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MmioDevice for MsixBar {
+    fn name(&self) -> &'static str {
+        "virtio-msix"
+    }
+
+    fn mmio_range(&self) -> std::ops::RangeInclusive<u64> {
+        self.base..=self.base + 0x1ff
+    }
+
+    fn mmio_write(&self, addr: u64, data: &[u8]) -> Result<()> {
+        let start = (addr - self.base) as usize;
+        let mut table = self.table.lock().unwrap();
+        for (i, b) in data.iter().enumerate() {
+            if start + i < table.len() {
+                table[start + i] = *b;
+            }
+        }
+        Ok(())
+    }
+
+    fn mmio_read(&self, addr: u64, data: &mut [u8]) -> Result<()> {
+        let start = (addr - self.base) as usize;
+        let table = self.table.lock().unwrap();
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = if start + i < table.len() {
+                table[start + i]
+            } else {
+                0
+            };
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn msix_cap_is_chained_from_device_cfg() {
+        let pci = PciEcam::new();
+        // ECAM: bus 0, device 1, function 0.
+        let base = PCI_MMCONFIG_START + (1 << 15);
+        let mut id = [0u8; 1];
+        pci.mmio_read(base + CAP_MSIX as u64, &mut id).unwrap();
+        assert_eq!(id[0], PCI_CAP_ID_MSIX);
+        let mut next = [0u8; 1];
+        pci.mmio_read(base + CAP_DEVICE_CFG as u64 + 1, &mut next)
+            .unwrap();
+        assert_eq!(next[0], CAP_MSIX);
+    }
+
+    #[test]
+    fn msix_message_control_enable_bit_is_writable() {
+        let pci = PciEcam::new();
+        let base = PCI_MMCONFIG_START + (1 << 15);
+        // Bit 15 of Message Control is the MSI-X enable bit.
+        pci.mmio_write(base + 0x82, &[0x00, 0x80]).unwrap();
+        let mut ctl = [0u8; 2];
+        pci.mmio_read(base + 0x82, &mut ctl).unwrap();
+        assert_eq!(ctl, [0x00, 0x80]);
+    }
+
+    #[test]
+    fn bar0_size_probe_reports_four_kib() {
+        let pci = PciEcam::new();
+        let base = PCI_MMCONFIG_START + (1 << 15);
+        pci.mmio_write(base + 0x10, &0xffff_ffffu32.to_le_bytes())
+            .unwrap();
+        let mut bar = [0u8; 4];
+        pci.mmio_read(base + 0x10, &mut bar).unwrap();
+        assert_eq!(u32::from_le_bytes(bar), !(BAR0_SIZE - 1));
+    }
+
+    #[test]
+    fn msix_table_window_accepts_a_vector() {
+        let bar = MsixBar::new();
+        let addr = MMIO_WINDOW + MSIX_BAR_OFFSET;
+        bar.mmio_write(addr, &0xfee0_0000u32.to_le_bytes()).unwrap();
+        let mut got = [0u8; 4];
+        bar.mmio_read(addr, &mut got).unwrap();
+        assert_eq!(got, 0xfee0_0000u32.to_le_bytes());
+    }
 }
