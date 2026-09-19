@@ -12,7 +12,7 @@ use fluxvm_core::{
     model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
     process::{run_checked, spawn_logged},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -105,9 +105,11 @@ fn config_json(
         NetworkSpec::Tap {
             tap_name: Some(tap),
             mac,
+            extra,
             ..
         } => {
             let guest_mac = mac.clone().unwrap_or_else(|| "06:00:AC:10:00:02".into());
+            let mut ifaces = Vec::new();
             let mut iface = json!({
                 "iface_id": "eth0",
                 "guest_mac": guest_mac,
@@ -119,9 +121,24 @@ fn config_json(
                     .unwrap()
                     .insert("rate_limiter".into(), rl);
             }
+            ifaces.push(iface);
+            for (i, nic) in extra.iter().enumerate() {
+                let Some(tap) = &nic.tap_name else {
+                    continue;
+                };
+                let guest_mac = nic
+                    .mac
+                    .clone()
+                    .unwrap_or_else(|| format!("06:00:AC:10:00:{:02x}", i + 3));
+                ifaces.push(json!({
+                    "iface_id": format!("eth{}", i + 1),
+                    "guest_mac": guest_mac,
+                    "host_dev_name": tap
+                }));
+            }
             root.as_object_mut()
                 .unwrap()
-                .insert("network-interfaces".into(), json!([iface]));
+                .insert("network-interfaces".into(), Value::from(ifaces));
         }
         NetworkSpec::Tap { tap_name: None, .. } => bail!("tap network was not prepared"),
         NetworkSpec::Macvtap { .. } => bail!(
@@ -523,6 +540,7 @@ mod tests {
             bridge: None,
             mac: Some("06:00:00:00:00:01".into()),
             netns: false,
+            extra: vec![],
         };
         let paths = ResourcePaths {
             kernel: PathBuf::from("/vmlinux"),
@@ -536,6 +554,37 @@ mod tests {
         assert_eq!(drives[0]["rate_limiter"]["bandwidth"]["size"], 25_000_000);
         let ifaces = cfg["network-interfaces"].as_array().unwrap();
         assert_eq!(ifaces[0]["rate_limiter"]["ops"]["size"], 50_000);
+    }
+
+    #[test]
+    fn config_json_attaches_multus_extra_nics() {
+        let req = bare_req();
+        let mut ctx = bare_ctx();
+        ctx.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: Some("br0".into()),
+            mac: Some("02:00:00:00:00:01".into()),
+            netns: false,
+            extra: vec![fluxvm_core::model::ExtraNic {
+                bridge: "br1".into(),
+                mac: Some("02:00:00:00:00:02".into()),
+                tap_name: Some("tap1".into()),
+            }],
+        };
+        let paths = ResourcePaths {
+            kernel: PathBuf::from("/vmlinux"),
+            rootfs: PathBuf::from("/rootfs"),
+            seed: None,
+            vsock_uds: None,
+        };
+        let cfg = config_json(&req, &ctx, &paths, false).unwrap();
+        let ifaces = cfg["network-interfaces"].as_array().unwrap();
+        assert_eq!(ifaces.len(), 2);
+        assert_eq!(ifaces[0]["iface_id"], "eth0");
+        assert_eq!(ifaces[0]["host_dev_name"], "tap0");
+        assert_eq!(ifaces[1]["iface_id"], "eth1");
+        assert_eq!(ifaces[1]["host_dev_name"], "tap1");
+        assert_eq!(ifaces[1]["guest_mac"], "02:00:00:00:00:02");
     }
 
     #[test]

@@ -264,17 +264,43 @@ pub fn build_args(
                 "virtio-net-pci,netdev=net0".into(),
             ]);
         }
-        NetworkSpec::Tap { tap_name, mac, .. } => {
+        NetworkSpec::Tap {
+            tap_name,
+            mac,
+            extra,
+            ..
+        } => {
             if let Some(tap) = tap_name {
+                let bus = if extra.is_empty() {
+                    String::new()
+                } else {
+                    ",bus=hotplug-pcie-0".into()
+                };
                 a.extend([
                     "-netdev".into(),
                     format!("tap,id=net0,ifname={tap},script=no,downscript=no"),
                 ]);
-                let dev = mac
-                    .as_ref()
-                    .map(|m| format!("virtio-net-pci,netdev=net0,mac={m}"))
-                    .unwrap_or_else(|| "virtio-net-pci,netdev=net0".into());
+                let dev = match mac {
+                    Some(m) => format!("virtio-net-pci,netdev=net0,mac={m}{bus}"),
+                    None => format!("virtio-net-pci,netdev=net0{bus}"),
+                };
                 a.extend(["-device".into(), dev]);
+            }
+            for (i, nic) in extra.iter().enumerate() {
+                let Some(tap) = &nic.tap_name else {
+                    continue;
+                };
+                let id = i + 1;
+                let mut dev = format!("virtio-net-pci,netdev=net{id},bus=hotplug-pcie-{id}");
+                if let Some(m) = &nic.mac {
+                    dev.push_str(&format!(",mac={m}"));
+                }
+                a.extend([
+                    "-netdev".into(),
+                    format!("tap,id=net{id},ifname={tap},script=no,downscript=no"),
+                    "-device".into(),
+                    dev,
+                ]);
             }
         }
         NetworkSpec::Macvtap { mac, .. } => {
@@ -619,6 +645,12 @@ pub async fn hotplug_memory(_cfg: &Config, vm: &VmRecord, add_memory_mib: u64) -
     Ok(vm.request.memory_mib.saturating_add(hotplugged))
 }
 
+/// Hot-add a virtio-net NIC on an already-created TAP. `index` selects
+/// `hotplug-pcie-{index}` (0..HOTPLUG_PCIE_PORTS). The caller owns the TAP.
+pub async fn hotplug_nic(vm: &VmRecord, tap: &str, mac: Option<&str>, index: u8) -> Result<()> {
+    qmp::hotplug_nic(&vm.workspace.join("qmp.sock"), tap, mac, index, QMP_TIMEOUT).await
+}
+
 /// Pause, save an internal snapshot tagged `name`, then resume if the VM was
 /// running. Pairs with `-loadvm` / [`VmManager::start_from_snapshot`].
 ///
@@ -743,6 +775,64 @@ mod tests {
                 "missing hotplug-pcie-{i} root port in {args:?}"
             );
         }
+    }
+
+    #[test]
+    fn primary_tap_without_extras_does_not_pin_a_hotplug_port() {
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: Some("br0".into()),
+            mac: Some("02:00:00:00:00:01".into()),
+            netns: false,
+            extra: vec![],
+        };
+        let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
+        let dev = args
+            .iter()
+            .find(|a| a.starts_with("virtio-net-pci,netdev=net0"))
+            .expect("primary nic");
+        assert!(!dev.contains("bus="));
+        assert!(dev.contains("mac=02:00:00:00:00:01"));
+    }
+
+    #[test]
+    fn multus_extra_nics_use_successive_hotplug_ports() {
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: Some("br0".into()),
+            mac: Some("02:00:00:00:00:01".into()),
+            netns: false,
+            extra: vec![
+                fluxvm_core::model::ExtraNic {
+                    bridge: "br1".into(),
+                    mac: Some("02:00:00:00:00:02".into()),
+                    tap_name: Some("tap1".into()),
+                },
+                fluxvm_core::model::ExtraNic {
+                    bridge: "br2".into(),
+                    mac: None,
+                    tap_name: Some("tap2".into()),
+                },
+            ],
+        };
+        let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
+        assert!(args.iter().any(|a| {
+            a.contains("virtio-net-pci,netdev=net0") && a.contains("bus=hotplug-pcie-0")
+        }));
+        assert!(
+            args.iter()
+                .any(|a| a == "tap,id=net1,ifname=tap1,script=no,downscript=no")
+        );
+        assert!(args.iter().any(|a| {
+            a.contains("netdev=net1")
+                && a.contains("bus=hotplug-pcie-1")
+                && a.contains("mac=02:00:00:00:00:02")
+        }));
+        assert!(args.iter().any(|a| {
+            a.contains("netdev=net2") && a.contains("bus=hotplug-pcie-2") && !a.contains("mac=")
+        }));
     }
 
     #[test]

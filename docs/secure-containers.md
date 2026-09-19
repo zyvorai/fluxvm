@@ -243,9 +243,12 @@ and abrupt-exit tests on self-hosted KVM/containerd nodes.
 
 Set 7 (Runtime) pipelines VM boot with the host-side rootfs copy (no longer
 strictly sequential) — see
-[docs/secure-containers-set7r.md](secure-containers-set7r.md). Full warm-pool
-integration (claim/resume a prepared sandbox instead of cold-booting every
-Pod group) remains open.
+[docs/secure-containers-set7r.md](secure-containers-set7r.md). Warm-pool
+claim is opt-in: set `FLUXVM_CONTAINER_WARM_POOL` to a pool whose template
+uses `network.mode=none`. The shim claims a paused member, then
+`POST /v1/vms/{id}/hotplug/nic` for the Pod CNI bridge (and each Multus
+`netN`). RuntimeClass is still a developer preview, not a Kata-equivalent
+product.
 
 ### P1 — additional VMMs
 

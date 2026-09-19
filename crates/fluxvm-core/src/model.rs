@@ -47,6 +47,12 @@ pub enum NetworkSpec {
         /// can see the tap at all.
         #[serde(default)]
         netns: bool,
+        /// Secondary guest NICs (Multus `netN`). Each entry is a host
+        /// bridge the scheduler attaches as an extra TAP at create time
+        /// (QEMU, Cloud Hypervisor, Firecracker) or via
+        /// `POST /v1/vms/{id}/hotplug/nic` after a warm-pool claim.
+        #[serde(default)]
+        extra: Vec<ExtraNic>,
     },
     /// A macvtap device on `parent`, giving the VM its own MAC directly on
     /// that link with no host bridge involved. Supported by the QEMU and
@@ -60,6 +66,17 @@ pub enum NetworkSpec {
         #[serde(default)]
         mac: Option<String>,
     },
+}
+
+/// One extra guest NIC on a host bridge. `tap_name` is filled by
+/// `fluxvm_network::prepare` (or NIC hotplug) and is what the VMM opens.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtraNic {
+    pub bridge: String,
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub tap_name: Option<String>,
 }
 
 impl Default for NetworkSpec {
@@ -719,6 +736,17 @@ pub struct HotplugMemoryResult {
     pub memory_mib: u64,
 }
 
+/// Request body for `POST /v1/vms/{id}/hotplug/nic`. QEMU only: creates a
+/// TAP on `bridge` and `device_add`s `virtio-net-pci` onto the next free
+/// `hotplug-pcie-*` root port. Used by Secure Containers after a warm-pool
+/// claim, when the template VM was booted with `network.mode=none`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugNicRequest {
+    pub bridge: String,
+    #[serde(default)]
+    pub mac: Option<String>,
+}
+
 /// Point-in-time resource usage for a VM, read from its cgroup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmMetrics {
@@ -832,5 +860,45 @@ mod create_vm_request_tests {
         let json = serde_json::to_string(&req).unwrap();
         let round_tripped: CreateVmRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(round_tripped.created_by_token.as_deref(), Some("tokenA"));
+    }
+
+    #[test]
+    fn tap_without_extra_deserializes_empty_multus_list() {
+        let spec: NetworkSpec = serde_json::from_str(
+            r#"{"mode":"tap","bridge":"br0","mac":"02:00:00:00:00:01","netns":false}"#,
+        )
+        .unwrap();
+        match spec {
+            NetworkSpec::Tap {
+                extra,
+                bridge,
+                netns,
+                ..
+            } => {
+                assert!(extra.is_empty());
+                assert_eq!(bridge.as_deref(), Some("br0"));
+                assert!(!netns);
+            }
+            other => panic!("expected tap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tap_extra_nics_round_trip_bridge_and_mac() {
+        let raw = r#"{"mode":"tap","bridge":"fvbhprimary","mac":"02:00:00:00:00:01","extra":[{"bridge":"fvbhnet1","mac":"02:11:22:33:44:55"}]}"#;
+        let spec: NetworkSpec = serde_json::from_str(raw).unwrap();
+        let NetworkSpec::Tap { extra, .. } = &spec else {
+            panic!("expected tap");
+        };
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0].bridge, "fvbhnet1");
+        assert_eq!(extra[0].mac.as_deref(), Some("02:11:22:33:44:55"));
+        assert!(extra[0].tap_name.is_none());
+        let again: NetworkSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap(),
+            serde_json::to_value(&again).unwrap()
+        );
     }
 }

@@ -29,7 +29,7 @@ new wire formats.
 | Priority | Feature | Why | Source |
 |---|---|---|---|
 | **H1** | Virtio **device live-state** in `FLUXKVM1` | **Done (v3)** — pack/restore queue rings + status/features; backends still re-attach paths from boot config; Firecracker remains production snap for FC guests | hypervisor README, agent-sandbox-gaps |
-| **H2** | Full virtio-pci BAR / Windows path | **Done (Linux BAR path)** — ECAM populates virtio-net @ `00:01.0` with BAR0→mmio alias + ACPI MCFG; Windows/virtio-win MSI-X still CH SoT | DESIGN / README |
+| **H2** | Full virtio-pci BAR / Windows path | **Done (tables)** — ECAM virtio-net @ `00:01.0`, BAR0, MSI-X table at BAR0+`0x800`, DSDT `PCI0`, firmware entry at `0x01000000`, ACPI reset I/O `0xCF9`. virtio-win boot is unproven; Cloud Hypervisor stays the production Windows VMM | DESIGN / README |
 | **H3** | vhost-net multi-queue bind | **Done** — mem-table + VRING NUM/ADDR/BASE/KICK/CALL + TAP backend; kernel datapath kicks when rings programmed (userspace pump remains fallback) | hypervisor boot smoke / DESIGN |
 | **H4** | P3 on demand: virtio-fs, live migration, hotplug | **Deferred** — stubs return `Unsupported` until product asks (no invented surfaces) | DESIGN |
 | **H5** | Published kvm/FC density figures | **Done (archive)** — lab run on `80.79.5.173` archived in [benchmarks/evidence/density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt); cold flux-vm create is not a Track B density claim | ROADMAP-DENSITY, benchmarks |
@@ -59,10 +59,10 @@ Custom CPUID templates and Track B density publication remain out of scope here.
 **S1–S2 / S8–S11 / F1–F2 / H1–H3 / H5** closed on the code + gate path.
 Remaining honesty bounds:
 
-1. S2 production still prefers a real second k8s CNI kubeconfig (`FLUXVM_SECOND_CNI_KUBECONFIG`); nftables stand-in is the portable default.
-2. S9 RuntimeClass remains developer-preview (not a full Kata product claim); Multus secondary-NIC hotplug and SC warm-pool claim are still future depth.
+1. S2 production still prefers a real second k8s CNI kubeconfig (`FLUXVM_SECOND_CNI_KUBECONFIG`); nftables stand-in plus `scripts/evidence-cni-churn.sh` are the portable default.
+2. S9 RuntimeClass remains developer-preview (not a full Kata product claim). Warm-pool claim is `FLUXVM_CONTAINER_WARM_POOL=<name>` (template `network.mode=none`, then NIC hotplug).
 3. S10 needs `FLUXVM_FLEET_E2E=1` + ≥2 SSH hosts; S11 needs a runnable FluxVM guest on the lab host.
-4. H2 Windows/virtio-win MSI-X stays **cloud-hypervisor SoT**; H4 remains deferred.
+4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM. H4 remains deferred.
 
 Portable CI maps each code-side use case to a test target in
 [secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)

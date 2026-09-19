@@ -1,0 +1,33 @@
+policy-observer scrape evidence @ 20260918T035554Z
+url=http://127.0.0.1:9090
+--- /metrics (head) ---
+# HELP fluxvm_sentinel_observer_scrapes_total Completed policy-observer collection cycles.
+# TYPE fluxvm_sentinel_observer_scrapes_total counter
+fluxvm_sentinel_observer_scrapes_total 1
+# HELP fluxvm_sentinel_observer_scrape_errors_total Collection errors across bpftool/tc/filesystem sources.
+# TYPE fluxvm_sentinel_observer_scrape_errors_total counter
+fluxvm_sentinel_observer_scrape_errors_total 1
+# HELP fluxvm_sentinel_observer_vms FluxVM VM pin directories observed on this node.
+# TYPE fluxvm_sentinel_observer_vms gauge
+fluxvm_sentinel_observer_vms 0
+# HELP fluxvm_sentinel_observer_last_scrape_unixtime Unix timestamp of the most recent collection cycle.
+# TYPE fluxvm_sentinel_observer_last_scrape_unixtime gauge
+fluxvm_sentinel_observer_last_scrape_unixtime 1.789703753e+09
+--- series of interest ---
+metrics_bytes=785
+--- RSS ---
+2556819 /tmp/fluxvm-policy-observer -listen 127.0.0.1:9090
+--- sizing model ---
+{
+  "vms": 1000,
+  "rules_per_vm": 64,
+  "estimated_metric_series": 72000,
+  "estimated_exposition_bytes": 12960000,
+  "estimated_percpu_counter_bytes": 34816000,
+  "note": "capacity model; measure real RSS/scrape latency on target nodes before GA"
+}
+--- process RSS ---
+Name:	fluxvm-policy-o
+Pid:	2556819
+VmSize:	 1784052 kB
+VmRSS:	    8824 kB

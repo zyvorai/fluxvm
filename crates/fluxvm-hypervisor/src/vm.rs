@@ -19,7 +19,7 @@ use crate::jailer::{self, JailerConfig};
 use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
 use crate::memory::{self, GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
-use crate::pci::PciEcam;
+use crate::pci::{MsixBar, PciEcam};
 use crate::tap::Tap;
 use crate::vhost::VhostNet;
 use std::io;
@@ -55,6 +55,7 @@ pub struct VirtualMachine {
     pub boot_rip: u64,
     pub boot_params_gpa: Option<u64>,
     pub pvh_start_info_gpa: Option<u64>,
+    pub firmware_reset: bool,
     pub notes: Vec<String>,
 }
 
@@ -118,6 +119,7 @@ impl VirtualMachine {
             boot_rip: KERNEL_LOAD_ADDR,
             boot_params_gpa: None,
             pvh_start_info_gpa: None,
+            firmware_reset: false,
             notes,
         })
     }
@@ -167,10 +169,12 @@ impl VirtualMachine {
         bus.add_pio(Arc::new(CmosRtc::new()));
         if cfg.pci {
             bus.add_mmio(Arc::new(PciEcam::new()));
+            bus.add_mmio(Arc::new(MsixBar::new()));
             notes.push(format!(
-                "PCI ECAM at {:#x} + virtio-net @ 00:01.0 BAR0→{:#x} (H2)",
+                "PCI ECAM at {:#x} + virtio-net @ 00:01.0 BAR0→{:#x} MSI-X @ +{:#x}",
                 memory::PCI_MMCONFIG_START,
-                MMIO_WINDOW
+                MMIO_WINDOW,
+                crate::pci::MSIX_BAR_OFFSET
             ));
         }
 
@@ -310,6 +314,7 @@ impl VirtualMachine {
             boot_rip: boot_info.entry_rip,
             boot_params_gpa: boot_info.boot_params_gpa,
             pvh_start_info_gpa: boot_info.pvh_start_info_gpa,
+            firmware_reset: boot_info.firmware_reset,
             notes,
         })
     }
@@ -401,6 +406,12 @@ impl VirtualMachine {
                 cpu.virtio.len(),
                 cpu.regs.rip,
                 cpu.sregs.cr3
+            );
+        } else if self.firmware_reset {
+            kvm.setup_pvh_entry(&mut self.mem, self.boot_rip, 0)?;
+            eprintln!(
+                "[kvm] firmware reset entry rip={:#x} (32-bit; ACPI reset I/O 0xCF9)",
+                self.boot_rip
             );
         } else if let Some(start_info_gpa) = self.pvh_start_info_gpa {
             // PVH: hand the kernel a bare 32-bit entry point and let its
@@ -628,6 +639,10 @@ impl VirtualMachine {
                     if dir == ffi::KVM_EXIT_IO_OUT {
                         let data = kvm.io_data(0, off, n).to_vec();
                         this.bus.pio_write(port, &data)?;
+                        if crate::acpi::is_acpi_reset(port, &data) {
+                            stop.store(true, Ordering::Relaxed);
+                            return Ok("ACPI firmware reset (I/O 0xCF9)".into());
+                        }
                         for b in data {
                             if b.is_ascii() && (b >= 32 || b == b'\n' || b == b'\r') {
                                 serial_log.push(b as char);

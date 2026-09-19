@@ -7,7 +7,7 @@
 # migration-export → migration-restore through fluxvm-migrate / dataplane CLI.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${FLUXVM_ATTACHED_MIGRATION:-1}"
+FLUXVM_ATTACHED_MIGRATION="${FLUXVM_ATTACHED_MIGRATION:-1}"
 if [[ "${FLUXVM_ATTACHED_MIGRATION}" != 1 ]]; then
   echo "SKIP: set FLUXVM_ATTACHED_MIGRATION=1" >&2
   exit 0
@@ -35,6 +35,9 @@ fi
 echo "S11 using VM $VM_ID"
 
 cleanup() {
+  if [[ -n "${RESUME_CMD[*]:-}" ]]; then
+    "${RESUME_CMD[@]}" || true
+  fi
   if [[ "${CREATED:-0}" == 1 && "${FLUXVM_S11_KEEP:-0}" != 1 ]]; then
     fluxctl --config "$CFG" delete "$VM_ID" >/dev/null 2>&1 || true
   fi
@@ -47,11 +50,15 @@ sleep 2
 
 # Prefer the migration-state CLI surface on the dataplane.
 if fluxctl --config "$CFG" dataplane migration-export --help >/dev/null 2>&1; then
-  EXPORT_CMD=(fluxctl --config "$CFG" dataplane migration-export --vm "$VM_ID")
-  RESTORE_CMD=(fluxctl --config "$CFG" dataplane migration-restore --vm "$VM_ID")
+  QUIESCE_CMD=(fluxctl --config "$CFG" dataplane migration-quiesce "$VM_ID")
+  EXPORT_CMD=(fluxctl --config "$CFG" dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID")
+  RESTORE_CMD=(fluxctl --config "$CFG" dataplane migration-restore --input "$STATE_ROOT/export.json" "$VM_ID")
+  RESUME_CMD=(fluxctl --config "$CFG" dataplane migration-resume "$VM_ID")
 elif command -v fluxvm >/dev/null && fluxvm dataplane migration-export --help >/dev/null 2>&1; then
-  EXPORT_CMD=(fluxvm dataplane migration-export --vm "$VM_ID")
-  RESTORE_CMD=(fluxvm dataplane migration-restore --vm "$VM_ID")
+  QUIESCE_CMD=(fluxvm dataplane migration-quiesce "$VM_ID")
+  EXPORT_CMD=(fluxvm dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID")
+  RESTORE_CMD=(fluxvm dataplane migration-restore --input "$STATE_ROOT/export.json" "$VM_ID")
+  RESUME_CMD=(fluxvm dataplane migration-resume "$VM_ID")
 else
   # Fall back to the orchestrator against a generated plan that targets this VM.
   PLAN="$STATE_ROOT/attached-plan.json"
@@ -74,8 +81,9 @@ PY
     --state-root "$STATE_ROOT" run "$PLAN" --dry-run | tee "$STATE_ROOT/dry-run.json"
   # Live export/import via network migration_state module if exposed.
   if fluxctl --config "$CFG" dataplane --help 2>&1 | grep -q migration; then
-    fluxctl --config "$CFG" dataplane migration-export --vm "$VM_ID" > "$STATE_ROOT/export.json"
-    fluxctl --config "$CFG" dataplane migration-restore --vm "$VM_ID" --from "$STATE_ROOT/export.json"
+    fluxctl --config "$CFG" dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID"
+    fluxctl --config "$CFG" dataplane migration-restore --input "$STATE_ROOT/export.json" "$VM_ID"
+    fluxctl --config "$CFG" dataplane migration-resume "$VM_ID" || true
   else
     echo "WARN: orchestrator dry-run only; dataplane migration-* CLI unavailable" >&2
   fi
@@ -83,7 +91,18 @@ PY
   exit 0
 fi
 
-"${EXPORT_CMD[@]}" > "$STATE_ROOT/export.json"
+"${QUIESCE_CMD[@]}"
+"${EXPORT_CMD[@]}"
 python3 -m json.tool "$STATE_ROOT/export.json" >/dev/null
-"${RESTORE_CMD[@]}" --from "$STATE_ROOT/export.json"
+rc=0
+"${RESTORE_CMD[@]}" || rc=$?
+# Restore leaves the dataplane in restoring mode. Always resume so a
+# live guest is not stuck after the evidence run.
+if [[ -n "${RESUME_CMD[*]:-}" ]]; then
+  "${RESUME_CMD[@]}" || true
+fi
+if [[ "$rc" -ne 0 ]]; then
+  echo "S11 restore failed rc=$rc" >&2
+  exit "$rc"
+fi
 echo "S11 ATTACHED MIGRATION: PASS"

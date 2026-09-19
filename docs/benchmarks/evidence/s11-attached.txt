@@ -1,0 +1,34 @@
+S11 using VM 62b0a3ac-fb28-4ddc-b73f-b167d6e12559
+{
+  "vm_id": "62b0a3ac-fb28-4ddc-b73f-b167d6e12559",
+  "identity": 4165368398,
+  "phase": "quiescing",
+  "generation": 1,
+  "dataplane_schema_version": 10,
+  "schema_compatible": true
+}
+{
+  "vm_id": "62b0a3ac-fb28-4ddc-b73f-b167d6e12559",
+  "identity": 4165368398,
+  "phase": "restoring",
+  "generation": 2,
+  "dataplane_schema_version": 10,
+  "schema_compatible": true
+}
+{
+  "vm_id": "62b0a3ac-fb28-4ddc-b73f-b167d6e12559",
+  "identity": 4165368398,
+  "phase": "running",
+  "generation": 0,
+  "dataplane_schema_version": 10,
+  "schema_compatible": true
+}
+S11 ATTACHED MIGRATION: PASS
+{
+  "vm_id": "62b0a3ac-fb28-4ddc-b73f-b167d6e12559",
+  "identity": 4165368398,
+  "phase": "running",
+  "generation": 0,
+  "dataplane_schema_version": 10,
+  "schema_compatible": true
+}

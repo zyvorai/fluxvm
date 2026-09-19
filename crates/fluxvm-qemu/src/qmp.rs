@@ -373,6 +373,50 @@ pub async fn hotplug_memory(socket: &Path, add_memory_mib: u64, timeout: Duratio
     Ok(sum_memory_devices_mib(&after))
 }
 
+/// Attach an existing host TAP as a new virtio-net-pci device on
+/// `hotplug-pcie-{index}`. The TAP must already be up and enslaved to the
+/// guest's bridge; this function only talks QMP.
+pub async fn hotplug_nic(
+    socket: &Path,
+    tap: &str,
+    mac: Option<&str>,
+    index: u8,
+    timeout: Duration,
+) -> Result<()> {
+    let net_id = format!("net{index}");
+    let nic_id = format!("nic{index}");
+    execute(
+        socket,
+        "netdev_add",
+        Some(json!({
+            "type": "tap",
+            "id": net_id,
+            "ifname": tap,
+            "script": "no",
+            "downscript": "no"
+        })),
+        timeout,
+    )
+    .await
+    .context("netdev_add tap")?;
+    let mut args = json!({
+        "driver": "virtio-net-pci",
+        "id": nic_id,
+        "netdev": net_id,
+        "bus": format!("hotplug-pcie-{index}")
+    });
+    if let Some(mac) = mac {
+        args.as_object_mut()
+            .unwrap()
+            .insert("mac".into(), Value::from(mac));
+    }
+    if let Err(e) = execute(socket, "device_add", Some(args), timeout).await {
+        let _ = execute(socket, "netdev_del", Some(json!({"id": net_id})), timeout).await;
+        return Err(e).context("device_add virtio-net-pci");
+    }
+    Ok(())
+}
+
 async fn query_memory_devices(socket: &Path, timeout: Duration) -> Result<Vec<Value>> {
     let value = execute(socket, "query-memory-devices", None, timeout).await?;
     value

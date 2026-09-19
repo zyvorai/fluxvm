@@ -327,6 +327,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/resources", post(set_vm_resources))
         .route("/v1/vms/{id}/hotplug/cpu", post(hotplug_vm_cpu))
         .route("/v1/vms/{id}/hotplug/memory", post(hotplug_vm_memory))
+        .route("/v1/vms/{id}/hotplug/nic", post(hotplug_vm_nic))
         .route("/v1/vms/{id}/cpuset", get(vm_cpuset))
         .route("/v1/vms/{id}/freeze", post(freeze_vm))
         .route("/v1/vms/{id}/thaw", post(thaw_vm))
@@ -1509,6 +1510,17 @@ async fn hotplug_vm_memory(
     require_admin(role)?;
     let memory_mib = m.hotplug_memory(id, req.add_memory_mib).await?;
     Ok(Json(fluxvm_core::model::HotplugMemoryResult { memory_mib }))
+}
+
+async fn hotplug_vm_nic(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugNicRequest>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.hotplug_nic(id, req.bridge, req.mac).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn freeze_vm(

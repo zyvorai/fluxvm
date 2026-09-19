@@ -1,0 +1,179 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Detailed portable gates for the four remaining product surfaces:
+#   1. Multus netN guest NICs (create-time extra taps + QEMU hotplug slots)
+#   2. Secure Containers warm-pool claim (NIC index + recorded tap)
+#   3. Lab evidence scripts (S2 churn/nftables, S8 observer scrape, S10/S11 skips)
+#   4. In-tree Windows tables (MSI-X, DSDT, firmware entry, ACPI reset 0xCF9)
+#
+# Live S10 (two SSH hosts) and a virtio-win guest boot stay outside this
+# workflow. Those need the lab, not a GitHub-hosted runner.
+name: Multus, warm pool, Windows
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/multus-warm-windows.yml'
+      - 'scripts/test-multus-warm-windows.sh'
+      - 'scripts/evidence-*.sh'
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-firecracker/**'
+      - 'crates/fluxvm-cloud-hypervisor/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'crates/fluxvm-hypervisor/**'
+      - 'crates/fluxvm-network/**'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'docs/cilium-cni.md'
+      - 'docs/secure-containers.md'
+      - 'docs/secure-containers-set7r.md'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/multus-warm-windows.yml'
+      - 'scripts/test-multus-warm-windows.sh'
+      - 'scripts/evidence-*.sh'
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-qemu/**'
+      - 'crates/fluxvm-firecracker/**'
+      - 'crates/fluxvm-cloud-hypervisor/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-containerd-shim/**'
+      - 'crates/fluxvm-hypervisor/**'
+      - 'crates/fluxvm-network/**'
+      - 'tools/fluxvm-policy-observer/**'
+      - 'docs/cilium-cni.md'
+      - 'docs/secure-containers.md'
+      - 'docs/secure-containers-set7r.md'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: System dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev pkg-config
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: multus-warm-windows-unit
+      - name: rustfmt (touched crates)
+        working-directory: fluxvm
+        run: cargo fmt -p fluxvm-core -p fluxvm-qemu -p fluxvm-firecracker -p fluxvm-cloud-hypervisor -p fluxvm-scheduler -p fluxvm-containerd-shim -p fluxvm-hypervisor -- --check
+      - name: NetworkSpec extra NICs
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-core --lib -- --exact tap_without_extra_deserializes_empty_multus_list
+          cargo test -p fluxvm-core --lib -- --exact tap_extra_nics_round_trip_bridge_and_mac
+      - name: QEMU Multus hotplug ports
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-qemu --lib -- --exact primary_tap_without_extras_does_not_pin_a_hotplug_port
+          cargo test -p fluxvm-qemu --lib -- --exact multus_extra_nics_use_successive_hotplug_ports
+      - name: Firecracker extra ifaces
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-firecracker --lib -- --exact config_json_attaches_multus_extra_nics
+      - name: Cloud Hypervisor extra --net
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-cloud-hypervisor --lib -- --exact extra_nics_are_repeated_net_flags
+      - name: Warm-pool NIC claim
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-scheduler --lib -- --exact warm_pool_none_network_claims_the_first_hotplug_slot
+          cargo test -p fluxvm-scheduler --lib -- --exact second_hotplug_appends_a_multus_extra
+          cargo test -p fluxvm-scheduler --lib -- --exact user_and_macvtap_do_not_consume_a_recorded_slot
+      - name: Shim Multus guest script
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-containerd-shim --lib -- --exact cni_provider_labels_and_multus_names
+          cargo test -p fluxvm-containerd-shim --lib -- --exact multus_guest_script_configures_nics_in_probe_order
+      - name: Windows MSI-X, DSDT, firmware reset
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-hypervisor --lib -- --exact dsdt_checksums_and_names_pci0
+          cargo test -p fluxvm-hypervisor --lib -- --exact acpi_reset_recognizes_cf9
+          cargo test -p fluxvm-hypervisor --lib -- --exact msix_cap_is_chained_from_device_cfg
+          cargo test -p fluxvm-hypervisor --lib -- --exact msix_message_control_enable_bit_is_writable
+          cargo test -p fluxvm-hypervisor --lib -- --exact bar0_size_probe_reports_four_kib
+          cargo test -p fluxvm-hypervisor --lib -- --exact msix_table_window_accepts_a_vector
+          cargo test -p fluxvm-hypervisor --lib -- --exact windows_path_enters_firmware_and_publishes_reset_register
+
+  evidence:
+    name: S2 S8-script S10 S11 evidence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install iproute2, nftables, python3
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 nftables python3 curl
+      - name: Evidence script syntax
+        run: |
+          set -euo pipefail
+          for f in scripts/evidence-*.sh scripts/test-multus-warm-windows.sh; do
+            bash -n "$f"
+            echo "OK bash -n $f"
+          done
+      - name: S10 skips without a fleet lab
+        run: ./scripts/evidence-fleet-multihost.sh
+      - name: S11 skips when attached migration is off
+        run: FLUXVM_ATTACHED_MIGRATION=0 ./scripts/evidence-migration-attached-vm.sh
+      - name: Calico/flannel churn (3 rounds)
+        run: sudo -E env FLUXVM_CNI_CHURN_ROUNDS=3 bash scripts/evidence-cni-churn.sh
+      - name: S2 second policy-engine stand-in
+        run: sudo -E bash scripts/evidence-networkpolicy-second-cni.sh
+
+  policy-observer:
+    name: S8 policy observer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: tools/fluxvm-policy-observer/go.mod
+      - name: Observer unit tests
+        working-directory: tools/fluxvm-policy-observer
+        run: go test ./...
+      - name: Build observer and scrape /metrics
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq curl
+          (
+            cd tools/fluxvm-policy-observer
+            go build -o /tmp/fluxvm-policy-observer ./cmd/fluxvm-policy-observer
+          )
+          /tmp/fluxvm-policy-observer -listen 127.0.0.1:9090 >/tmp/observer.log 2>&1 &
+          echo $! >/tmp/observer.pid
+          trap 'kill "$(cat /tmp/observer.pid)" 2>/dev/null || true' EXIT
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -sf --max-time 1 http://127.0.0.1:9090/metrics | grep -q fluxvm_sentinel_observer_scrapes_total; then
+              break
+            fi
+            sleep 0.3
+          done
+          OBSERVER_URL=http://127.0.0.1:9090 ./scripts/evidence-policy-observer-scrape.sh
+          pid="$(cat /tmp/observer.pid)"
+          awk '/^VmRSS:/ { found=1; print } END { if (!found) exit 1 }' "/proc/${pid}/status"
+          grep -q fluxvm_sentinel_observer_scrapes_total docs/benchmarks/evidence/policy-observer-scrape-*.txt
