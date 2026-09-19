@@ -16,6 +16,7 @@ pub mod ipcache;
 pub mod ipv6_ext_walk;
 pub mod migration_state;
 pub mod netns;
+pub mod netns_scope;
 pub mod packetflow;
 pub mod pod_identity;
 pub mod qemu_cgroup;
@@ -93,12 +94,36 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             if tap.len() > 15 {
                 bail!("tap interface name must be <= 15 characters");
             }
+            // The redirect is the ONLY thing forwarding this VM's traffic (there is no bridge
+            // to fall back on), and it is installed by the eBPF dataplane. Refuse up front
+            // rather than create a tap that can never carry a packet.
+            if cfg.sandbox.dataplane.mode == fluxvm_core::config::DataplaneMode::Legacy {
+                bail!(
+                    "network.direct requires sandbox.dataplane.mode = ebpf or cilium \
+                     (the eBPF redirect is the only forwarding path for a bridge-less tap)"
+                );
+            }
             // No set_master and no default_bridge fallback: the whole point is
             // that nothing bridges this tap. A redirect program pairs it with
             // `direct.outer` instead (attached by the dataplane step).
             let made = direct::prepare_tap(&tap, direct)
                 .await
                 .context("preparing direct (bridge-less) tap")?;
+            // Recorded here, not at each call site: create, start, snapshot restore and the
+            // periodic reconcile all reach the loader through prepare(), and the loader needs
+            // this to re-enter the outer device's netns and re-apply the redirect config.
+            let attach = direct::DirectAttach {
+                spec: direct.clone(),
+                guest_mac: mac.clone(),
+            };
+            if let Err(e) = direct::record(id, &attach) {
+                if let Some(fd) = made.fd {
+                    // SAFETY: the fd is ours and has not been handed to a VMM yet.
+                    unsafe { libc::close(fd) };
+                }
+                let _ = cleanup_tap(&tap).await;
+                return Err(e).context("recording direct attach");
+            }
             Ok(PreparedNetwork {
                 spec: NetworkSpec::Tap {
                     tap_name: Some(tap.clone()),

@@ -26,6 +26,11 @@ use crate::tcx::{self, Preference as TcxPreference};
 
 const TC_PRIORITY: &str = "49152";
 const TC_HANDLE: &str = "1";
+/// Reserved pref/handle for the direct-attach inbound program on the OUTER device.
+/// Distinct from the egress program's (49152/1) and the Pod-ingress hook's (49153/2) so a
+/// single-namespace uplink can carry all of them without one displacing another.
+const TC_DIRECT_PRIORITY: &str = "49154";
+const TC_DIRECT_HANDLE: &str = "3";
 const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
@@ -47,7 +52,10 @@ const MAX_POD_RULES: usize = 64;
 /// Set 19: schema v10 adds the rich-rule candidate index and verifier-bounded
 /// IPv6 extension-header semantics. Reattach is required so both TC objects
 /// share the same map set and packet parser contract.
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 10;
+/// Schema v11 adds the bridge-less direct attach: the `fluxvm_direct` redirect map and
+/// tail in `fluxvm_tc.bpf.o`, and the separate `fluxvm_direct.bpf.o` inbound program.
+/// Source and destination of a live migration must agree, so the version moves.
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -130,6 +138,12 @@ pub struct NativeAttachmentStatus {
     pub pod_ingress_required: bool,
     #[serde(default)]
     pub pod_ingress_attached: bool,
+    /// Bridge-less direct VMs also need the inbound program on the outer device.
+    /// `attached` is healthy only when that hook is live too.
+    #[serde(default)]
+    pub direct_required: bool,
+    #[serde(default)]
+    pub direct_attached: bool,
     /// Fingerprint of the durable control-plane policy that was last fully
     /// committed to the kernel maps. `None` means an update may have been
     /// interrupted and reconcile must repair it.
@@ -159,6 +173,13 @@ pub fn apply(
     raise_memlock()?;
 
     validate_policy(policy)?;
+    // Bridge-less direct attach, recorded by the caller (or by the previous apply, so a
+    // repair/reconcile re-attach keeps the redirect wiring). Everything below that spawns
+    // `tc`/the TCX helper or reads an ifindex must run in the outer device's namespace.
+    let direct = crate::direct::recorded(id);
+    let _netns = crate::netns_scope::enter(
+        direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()),
+    );
     let _ = remove(cfg, id);
 
     let vm_dir = vm_pin_dir(&cfg.pin_root, id);
@@ -178,6 +199,10 @@ pub fn apply(
         .with_context(|| format!("recording eBPF interface {iface}"))?;
     fs::write(meta_dir.join("pod_id"), pod_id.to_string())
         .context("recording FluxVM eBPF Pod identity")?;
+    if let Some(d) = &direct {
+        // remove() above wiped the previous record along with the rest of the metadata.
+        crate::direct::record(id, d).context("recording FluxVM direct attach")?;
+    }
 
     let prog_pin = prog_dir.join("fluxvm_egress");
     // `fluxvm_tc.bpf.o` carries exactly one SEC("tc") program again under
@@ -229,6 +254,11 @@ pub fn apply(
         // reset it to unconfigured. `None` (no persisted policy yet) leaves
         // it as a safe/allow no-op, same as an unconfigured VM-level policy.
         configure_pod_maps(&map_dir, pod_id, pod_policy)?;
+        // Published before the program is attached, like every other map, so the redirect
+        // tail never runs against an empty config.
+        if let Some(d) = &direct {
+            configure_direct_out(&map_dir, ifindex, d)?;
+        }
         fs::write(
             meta_dir.join("schema_version"),
             DATAPLANE_SCHEMA_VERSION.to_string(),
@@ -333,6 +363,12 @@ pub fn apply(
         return attach;
     }
     attach?;
+    if let Some(d) = &direct {
+        if let Err(e) = attach_direct_in(cfg, id, &vm_dir, &meta_dir, iface, d) {
+            let _ = remove(cfg, id);
+            return Err(e).context("attaching the bridge-less direct redirect");
+        }
+    }
     if let Err(e) = sync_pod_ingress_attachment(cfg, id, iface, &map_dir, pod_policy) {
         let _ = remove(cfg, id);
         return Err(e).context("attaching Set 14 Pod ingress policy");
@@ -340,8 +376,189 @@ pub fn apply(
     Ok(())
 }
 
+/// Enters the network namespace a direct VM lives in (none for ordinary VMs, which
+/// also restores the daemon's own namespace if a caller had scoped elsewhere).
+fn vm_netns_scope(id: Uuid) -> crate::netns_scope::NetnsScope {
+    let direct = crate::direct::recorded(id);
+    crate::netns_scope::enter(direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()))
+}
+
+/// Writes the guest -> outer redirect config `fluxvm_egress` consults after it allows a packet.
+fn configure_direct_out(map_dir: &Path, tap_ifindex: u32, d: &crate::direct::DirectAttach) -> Result<()> {
+    use fluxvm_core::model::DirectMode;
+    let outer = read_ifindex(&d.spec.outer)
+        .with_context(|| format!("resolving direct outer device {}", d.spec.outer))?;
+    let mode = match d.spec.mode {
+        DirectMode::PeerVeth => crate::direct::OUT_PEER,
+        DirectMode::L2Uplink => crate::direct::OUT_REDIRECT,
+    };
+    bpftool_map_update(
+        &map_dir.join("fluxvm_direct"),
+        &tap_ifindex.to_ne_bytes(),
+        &crate::direct::out_value(outer, mode, 0),
+    )
+    .context("writing fluxvm_direct redirect config")
+}
+
+/// Loads `fluxvm_direct.bpf.o`, points it at the tap, and attaches it to the outer device's
+/// ingress (TCX when available, else legacy clsact at a reserved pref/handle).
+fn attach_direct_in(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+    vm_dir: &Path,
+    meta_dir: &Path,
+    tap: &str,
+    d: &crate::direct::DirectAttach,
+) -> Result<()> {
+    use fluxvm_core::model::DirectMode;
+    let obj = cfg.bpf_object.with_file_name("fluxvm_direct.bpf.o");
+    if !obj.exists() {
+        bail!("FluxVM direct-attach eBPF object does not exist at {}", obj.display());
+    }
+    let prog_pin = vm_dir.join("progs/fluxvm_direct_in");
+    let map_dir = vm_dir.join("direct_maps");
+    fs::create_dir_all(&map_dir)
+        .with_context(|| format!("creating direct map pin dir {}", map_dir.display()))?;
+    fs::create_dir_all(vm_dir.join("links")).context("creating TCX link pin dir")?;
+    run(
+        "bpftool",
+        &[
+            "prog".into(),
+            "load".into(),
+            obj.display().to_string(),
+            prog_pin.display().to_string(),
+            "type".into(),
+            "classifier".into(),
+            "pinmaps".into(),
+            map_dir.display().to_string(),
+        ],
+    )
+    .context("loading FluxVM direct inbound program")?;
+
+    let tap_idx = read_ifindex(tap).with_context(|| format!("resolving tap {tap}"))?;
+    let outer_idx = read_ifindex(&d.spec.outer)
+        .with_context(|| format!("resolving direct outer device {}", d.spec.outer))?;
+    let in_mode = match d.spec.mode {
+        DirectMode::PeerVeth => crate::direct::IN_PEER,
+        DirectMode::L2Uplink => crate::direct::IN_L2,
+    };
+    bpftool_map_update(
+        &map_dir.join("fluxvm_direct_in"),
+        &outer_idx.to_ne_bytes(),
+        &crate::direct::in_value(tap_idx, in_mode),
+    )
+    .context("writing fluxvm_direct_in config")?;
+    if d.spec.mode == DirectMode::L2Uplink {
+        let mac = d
+            .guest_mac
+            .as_deref()
+            .context("direct mode l2-uplink needs the guest MAC to steer inbound frames")?;
+        bpftool_map_update(
+            &map_dir.join("fluxvm_direct_mac"),
+            &crate::direct::mac_key(crate::direct::parse_mac(mac)?),
+            &tap_idx.to_ne_bytes(),
+        )
+        .context("writing fluxvm_direct_mac steering entry")?;
+    }
+
+    let outer = d.spec.outer.as_str();
+    let tcx_preference = TcxPreference::from_env()?;
+    if tcx_preference != TcxPreference::Off {
+        let link_pin = vm_dir.join("links/tcx_direct_in");
+        match tcx::attach(outer, &prog_pin, &link_pin) {
+            Ok(_) => {
+                fs::write(meta_dir.join("direct_attach_mode"), "tcx")
+                    .context("recording direct attach mode")?;
+                info!(%id, %outer, %tap, "attached FluxVM direct inbound redirect with TCX");
+                return Ok(());
+            }
+            Err(e) if tcx_preference == TcxPreference::Required => {
+                return Err(e).context("attaching required FluxVM direct TCX program");
+            }
+            Err(e) => warn!(%id, %outer, error = %e, "TCX unavailable for the direct inbound program; using clsact/tc"),
+        }
+    }
+    require_tc()?;
+    ensure_clsact(outer).context("installing clsact qdisc on the direct outer device")?;
+    run(
+        "tc",
+        &[
+            "filter".into(),
+            "add".into(),
+            "dev".into(),
+            outer.into(),
+            "ingress".into(),
+            "pref".into(),
+            TC_DIRECT_PRIORITY.into(),
+            "handle".into(),
+            TC_DIRECT_HANDLE.into(),
+            "bpf".into(),
+            "da".into(),
+            "pinned".into(),
+            prog_pin.display().to_string(),
+        ],
+    )
+    .context("attaching FluxVM direct inbound program")?;
+    fs::write(meta_dir.join("direct_attach_mode"), "tc").context("recording direct attach mode")?;
+    info!(%id, %outer, %tap, "attached FluxVM direct inbound redirect with clsact/tc");
+    Ok(())
+}
+
+/// Is the direct inbound program live on `outer`? Checks the exact owned program id, like the
+/// egress and Pod-ingress hooks, so a foreign program at the same spot is never mistaken for ours.
+fn direct_in_attached(vm_dir: &Path, outer: &str) -> bool {
+    let Ok(owned) = pinned_program_id(&vm_dir.join("progs/fluxvm_direct_in")) else {
+        return false;
+    };
+    let link = vm_dir.join("links/tcx_direct_in");
+    if link.exists() {
+        return tcx::status(&link).ok().and_then(|s| s.prog_id) == Some(owned);
+    }
+    crate::netns_scope::command("tc")
+        .args(["filter", "show", "dev", outer, "ingress", "pref", TC_DIRECT_PRIORITY])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            parse_tc_program_id_handle(&String::from_utf8_lossy(&o.stdout), TC_DIRECT_HANDLE.parse().unwrap_or(3))
+        })
+        == Some(owned)
+}
+
+/// Detaches the direct inbound program (if this VM has one). Best effort: the tap, and with it
+/// the outer device's peer, may already be gone.
+fn detach_direct_in_dir(id: Uuid, vm_dir: &Path) {
+    let Some(d) = crate::direct::recorded(id) else {
+        return;
+    };
+    let link = vm_dir.join("links/tcx_direct_in");
+    if link.exists() {
+        let _ = tcx::detach(&link);
+        return;
+    }
+    if direct_in_attached(vm_dir, &d.spec.outer) {
+        let _ = run(
+            "tc",
+            &[
+                "filter".into(),
+                "del".into(),
+                "dev".into(),
+                d.spec.outer.clone(),
+                "ingress".into(),
+                "pref".into(),
+                TC_DIRECT_PRIORITY.into(),
+                "handle".into(),
+                TC_DIRECT_HANDLE.into(),
+                "bpf".into(),
+            ],
+        );
+    }
+}
+
 pub fn remove(cfg: &DataplaneConfig, id: Uuid) -> Result<()> {
+    let _netns = vm_netns_scope(id);
     detach_pod_ingress_filter(cfg, id);
+    detach_direct_in_dir(id, &vm_pin_dir(&cfg.pin_root, id));
     let pin = vm_pin_dir(&cfg.pin_root, id);
     let owned_program_id = read_owned_program_id(id)
         .or_else(|| pinned_program_id(&pin.join("progs/fluxvm_egress")).ok());
@@ -363,6 +580,7 @@ pub fn remove(cfg: &DataplaneConfig, id: Uuid) -> Result<()> {
 /// creates at worst a short over-deny window, never an allow-all gap.
 pub fn reconfigure(cfg: &DataplaneConfig, policy: &VmNetworkPolicy, id: Uuid) -> Result<()> {
     require_bpftool()?;
+    let _netns = vm_netns_scope(id);
     // Reconfigure mutates pinned maps in place; it is independent of whether
     // the program is attached by TCX or the legacy clsact path.
     validate_policy(policy)?;
@@ -429,6 +647,7 @@ pub fn configure_pod_policy(
     policy: Option<&PodNetworkPolicy>,
 ) -> Result<()> {
     require_bpftool()?;
+    let _netns = vm_netns_scope(id);
     let pod_id = read_pod_id(id);
     if pod_id == 0 {
         bail!("VM {id} has no associated Pod identity; nothing to configure");
@@ -466,6 +685,8 @@ pub fn configure_pod_policy(
 }
 
 pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttachmentStatus> {
+    let direct = crate::direct::recorded(id);
+    let _netns = crate::netns_scope::enter(direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()));
     let vm_dir = vm_pin_dir(&cfg.pin_root, id);
     let iface = read_recorded_iface(id);
     let prog_pin = vm_dir.join("progs/fluxvm_egress");
@@ -513,7 +734,7 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
     let pod_ingress_attached =
         if let (Some(iface), Some(program_id)) = (iface.as_deref(), pod_ingress_owned_program_id) {
             schema_compatible
-                && Command::new("tc")
+                && crate::netns_scope::command("tc")
                     .args(["filter", "show", "dev", iface, "egress", "pref", "49153"])
                     .output()
                     .ok()
@@ -525,7 +746,13 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
         } else {
             false
         };
-    let attached = egress_attached && (!pod_ingress_required || pod_ingress_attached);
+    let direct_required = direct.is_some();
+    let direct_attached = direct.as_ref().is_some_and(|d| {
+        iface.is_some() && schema_compatible && direct_in_attached(&vm_dir, &d.spec.outer)
+    });
+    let attached = egress_attached
+        && (!pod_ingress_required || pod_ingress_attached)
+        && (!direct_required || direct_attached);
     Ok(NativeAttachmentStatus {
         attached,
         interface: iface,
@@ -535,6 +762,8 @@ pub fn attachment_status(cfg: &DataplaneConfig, id: Uuid) -> Result<NativeAttach
         schema_compatible,
         pod_ingress_required,
         pod_ingress_attached,
+        direct_required,
+        direct_attached,
         policy_fingerprint,
     })
 }
@@ -653,12 +882,14 @@ pub fn remove_best_effort(id: Uuid) -> Result<()> {
             dirs.push(p);
         }
     }
+    let _netns = vm_netns_scope(id);
     let owned_program_id = read_owned_program_id(id).or_else(|| {
         dirs.iter()
             .find_map(|d| pinned_program_id(&d.join("progs/fluxvm_egress")).ok())
     });
     for dir in &dirs {
         detach_pod_ingress_filter_in_vm_dir(id, dir);
+        detach_direct_in_dir(id, dir);
     }
     detach_tc_filter(id, owned_program_id);
     for dir in dirs {
@@ -770,7 +1001,7 @@ fn vm_meta_root() -> PathBuf {
     PathBuf::from("/run/fluxvm/ebpf/vms")
 }
 
-fn vm_meta_dir(id: Uuid) -> PathBuf {
+pub(crate) fn vm_meta_dir(id: Uuid) -> PathBuf {
     vm_meta_root().join(id.simple().to_string())
 }
 
@@ -881,11 +1112,32 @@ pub fn identity_for(id: Uuid) -> u32 {
 }
 
 fn read_ifindex(iface: &str) -> Result<u32> {
+    if crate::netns_scope::current().is_some() {
+        // /sys/class/net shows the namespace sysfs was mounted in, not this thread's, so
+        // ask `ip` from inside the scoped namespace instead.
+        let out = crate::netns_scope::command("ip")
+            .args(["-o", "link", "show", "dev", iface])
+            .output()
+            .with_context(|| format!("running ip link show dev {iface} in the scoped netns"))?;
+        if !out.status.success() {
+            bail!(
+                "ip link show dev {iface} failed in the scoped netns: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        return parse_ip_link_ifindex(&String::from_utf8_lossy(&out.stdout))
+            .with_context(|| format!("parsing ifindex for {iface} from ip link output"));
+    }
     let raw = fs::read_to_string(format!("/sys/class/net/{iface}/ifindex"))
         .with_context(|| format!("reading ifindex for {iface}"))?;
     raw.trim()
         .parse::<u32>()
         .with_context(|| format!("parsing ifindex for {iface}"))
+}
+
+/// `ip -o link show` lines start with `<ifindex>: <name>...`.
+fn parse_ip_link_ifindex(text: &str) -> Option<u32> {
+    text.lines().next()?.split(':').next()?.trim().parse().ok()
 }
 
 fn configure_maps(
@@ -1784,7 +2036,7 @@ pub(crate) fn raise_memlock() -> Result<()> {
 }
 
 fn ensure_clsact(iface: &str) -> Result<()> {
-    let out = Command::new("tc")
+    let out = crate::netns_scope::command("tc")
         .args(["qdisc", "show", "dev", iface])
         .output()
         .context("querying tc qdisc")?;
@@ -1917,7 +2169,7 @@ fn detach_pod_ingress_filter_in_vm_dir(id: Uuid, vm_dir: &Path) {
     let pin = vm_dir.join("progs/fluxvm_pod_ingress");
     if let Some(iface) = read_recorded_iface(id) {
         let owned = pinned_program_id(&pin).ok();
-        let out = Command::new("tc")
+        let out = crate::netns_scope::command("tc")
             .args(["filter", "show", "dev", &iface, "egress", "pref", "49153"])
             .output();
         if let (Some(owned), Ok(out)) = (owned, out) {
@@ -2005,7 +2257,7 @@ pub(crate) fn pinned_program_id(path: &Path) -> Result<u32> {
 /// handle. We deliberately require the handle match so another BPF filter at
 /// the same preference is never mistaken for ours.
 fn tc_filter_program_id(iface: &str) -> Result<Option<u32>> {
-    let out = Command::new("tc")
+    let out = crate::netns_scope::command("tc")
         .args([
             "filter",
             "show",
@@ -2053,7 +2305,13 @@ fn parse_tc_program_id(text: &str) -> Option<u32> {
 }
 
 pub(crate) fn run(program: &str, args: &[String]) -> Result<()> {
-    let out = Command::new(program)
+    // `tc` resolves interface names in a netns; bpftool's programs and maps are not namespaced.
+    let mut cmd = if program == "tc" {
+        crate::netns_scope::command(program)
+    } else {
+        Command::new(program)
+    };
+    let out = cmd
         .args(args)
         .output()
         .with_context(|| format!("running {program}"))?;
@@ -2072,6 +2330,14 @@ pub(crate) fn run(program: &str, args: &[String]) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ip_link_ifindex_is_the_leading_number() {
+        assert_eq!(parse_ip_link_ifindex("5: eth0@if7: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue\n"), Some(5));
+        assert_eq!(parse_ip_link_ifindex("12: tap0: <BROADCAST,MULTICAST> mtu 1500"), Some(12));
+        assert_eq!(parse_ip_link_ifindex(""), None);
+        assert_eq!(parse_ip_link_ifindex("Device \"x\" does not exist."), None);
+    }
 
     #[test]
     fn cidr_is_network_normalized() {

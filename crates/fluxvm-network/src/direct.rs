@@ -17,7 +17,14 @@
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::{model::DirectSpec, process::run_checked};
-use std::{ffi::CString, fs::File, os::fd::AsRawFd};
+use serde::{Deserialize, Serialize};
+use std::{
+    ffi::CString,
+    fs::File,
+    os::fd::AsRawFd,
+    path::Path,
+};
+use uuid::Uuid;
 
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
 const IFF_TAP: libc::c_short = 0x0002;
@@ -166,9 +173,144 @@ pub async fn cleanup(tap: &str, direct: &DirectSpec) {
     }
 }
 
+/// What the eBPF loader must know to (re)wire a direct VM, persisted next to the
+/// rest of the per-VM attach metadata so that *every* later operation -- repair,
+/// reconfigure, status, remove -- can re-enter the right namespace and re-apply
+/// the redirect config without being told again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectAttach {
+    pub spec: DirectSpec,
+    /// Guest MAC: the inbound steering key for `DirectMode::L2Uplink`.
+    #[serde(default)]
+    pub guest_mac: Option<String>,
+}
+
+const RECORD_FILE: &str = "direct.json";
+
+pub(crate) fn record_in(dir: &Path, a: &DirectAttach) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let json = serde_json::to_vec_pretty(a)?;
+    std::fs::write(dir.join(RECORD_FILE), json).context("recording direct attach")
+}
+
+pub(crate) fn recorded_in(dir: &Path) -> Option<DirectAttach> {
+    let raw = std::fs::read(dir.join(RECORD_FILE)).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+/// Records that VM `id` is a direct VM. Call before applying the dataplane.
+pub fn record(id: Uuid, a: &DirectAttach) -> Result<()> {
+    record_in(&crate::ebpf::vm_meta_dir(id), a)
+}
+
+/// The direct attach recorded for `id`, if it is a direct VM.
+pub fn recorded(id: Uuid) -> Option<DirectAttach> {
+    recorded_in(&crate::ebpf::vm_meta_dir(id))
+}
+
+/// Parses `aa:bb:cc:dd:ee:ff` into its six bytes.
+pub fn parse_mac(mac: &str) -> Result<[u8; 6]> {
+    let parts: Vec<&str> = mac.split(':').collect();
+    if parts.len() != 6 {
+        bail!("invalid MAC {mac:?}: expected 6 colon-separated octets");
+    }
+    let mut out = [0u8; 6];
+    for (o, p) in out.iter_mut().zip(parts) {
+        *o = u8::from_str_radix(p, 16).with_context(|| format!("invalid MAC {mac:?}"))?;
+    }
+    Ok(out)
+}
+
+// Wire encodings of the maps in bpf/fluxvm_direct.bpf.h and bpf/fluxvm_direct.bpf.c.
+// Native-endian u32 fields, no implicit padding: keep in lockstep with the C structs.
+pub(crate) const OUT_PEER: u32 = 1; // FLUXVM_DIRECT_PEER
+pub(crate) const OUT_REDIRECT: u32 = 2; // FLUXVM_DIRECT_REDIRECT
+pub(crate) const IN_PEER: u32 = 1; // FLUXVM_DIRECT_IN_PEER
+pub(crate) const IN_L2: u32 = 2; // FLUXVM_DIRECT_IN_L2
+
+/// `struct direct_out { peer_ifindex, mode, flags, pad }` (16 B).
+pub(crate) fn out_value(peer_ifindex: u32, mode: u32, flags: u32) -> [u8; 16] {
+    let mut v = [0u8; 16];
+    v[0..4].copy_from_slice(&peer_ifindex.to_ne_bytes());
+    v[4..8].copy_from_slice(&mode.to_ne_bytes());
+    v[8..12].copy_from_slice(&flags.to_ne_bytes());
+    v
+}
+
+/// `struct direct_in { tap_ifindex, mode }` (8 B).
+pub(crate) fn in_value(tap_ifindex: u32, mode: u32) -> [u8; 8] {
+    let mut v = [0u8; 8];
+    v[0..4].copy_from_slice(&tap_ifindex.to_ne_bytes());
+    v[4..8].copy_from_slice(&mode.to_ne_bytes());
+    v
+}
+
+/// `struct mac_key { u8 addr[6]; u8 pad[2]; }` (8 B).
+pub(crate) fn mac_key(mac: [u8; 6]) -> [u8; 8] {
+    let mut k = [0u8; 8];
+    k[..6].copy_from_slice(&mac);
+    k
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fluxvm_core::model::DirectMode;
+
+    fn attach() -> DirectAttach {
+        DirectAttach {
+            spec: DirectSpec {
+                outer: "eth0".into(),
+                netns_path: Some("/run/netns/fvcni-abc".into()),
+                mode: DirectMode::PeerVeth,
+            },
+            guest_mac: Some("02:00:00:00:00:02".into()),
+        }
+    }
+
+    #[test]
+    fn record_round_trips_and_missing_means_not_direct() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(recorded_in(d.path()), None, "no record => not a direct VM");
+        record_in(d.path(), &attach()).unwrap();
+        assert_eq!(recorded_in(d.path()), Some(attach()));
+        // Overwriting (a repair re-record) is idempotent.
+        record_in(d.path(), &attach()).unwrap();
+        assert_eq!(recorded_in(d.path()), Some(attach()));
+    }
+
+    #[test]
+    fn corrupt_record_is_treated_as_not_direct_not_a_panic() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(RECORD_FILE), b"{not json").unwrap();
+        assert_eq!(recorded_in(d.path()), None);
+    }
+
+    #[test]
+    fn map_values_match_the_c_struct_layouts() {
+        let v = out_value(0x0102_0304, OUT_PEER, 0);
+        assert_eq!(v.len(), 16);
+        assert_eq!(&v[0..4], &0x0102_0304u32.to_ne_bytes());
+        assert_eq!(&v[4..8], &1u32.to_ne_bytes());
+        assert_eq!(&v[8..16], &[0u8; 8]);
+        let w = in_value(7, IN_L2);
+        assert_eq!(w.len(), 8);
+        assert_eq!(&w[0..4], &7u32.to_ne_bytes());
+        assert_eq!(&w[4..8], &2u32.to_ne_bytes());
+        let k = mac_key([0x02, 0, 0, 0, 0, 0x2a]);
+        assert_eq!(k, [0x02, 0, 0, 0, 0, 0x2a, 0, 0]);
+    }
+
+    #[test]
+    fn parse_mac_accepts_valid_and_rejects_garbage() {
+        assert_eq!(
+            parse_mac("02:00:00:00:00:2A").unwrap(),
+            [0x02, 0, 0, 0, 0, 0x2a]
+        );
+        for bad in ["", "02:00:00:00:00", "02:00:00:00:00:00:00", "zz:00:00:00:00:00", "0200.0000.002a"] {
+            assert!(parse_mac(bad).is_err(), "{bad:?} must be rejected");
+        }
+    }
 
     #[test]
     fn ifreq_carries_name_and_tap_flags() {

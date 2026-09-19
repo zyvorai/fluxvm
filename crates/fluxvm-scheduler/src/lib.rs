@@ -22,6 +22,13 @@ use uuid::Uuid;
 mod sandbox;
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 
+/// A bridge-less direct tap is forwarded ONLY by the eBPF redirect. Unlike an ordinary VM, whose
+/// tap sits on a bridge and keeps working when the dataplane is missing, a failed attach must
+/// never be downgraded to a warning: the VM would boot with no connectivity at all.
+fn is_direct(spec: &NetworkSpec) -> bool {
+    matches!(spec, NetworkSpec::Tap { direct: Some(_), .. })
+}
+
 fn nic_hotplug_index(spec: &NetworkSpec) -> u8 {
     match spec {
         NetworkSpec::Tap {
@@ -1418,6 +1425,7 @@ impl VmManager {
             // (see fluxvm_network::netns::NetnsHandle).
             let network = fluxvm_network::prepare(&self.cfg, id, &req.network).await?;
             let dataplane_if = fluxvm_network::dataplane_interface(id, &network);
+            let network_spec_for_dataplane = network.spec.clone();
             record.tap_name = network.tap_name.clone();
             record.netns = network.netns.clone();
             record.dhcp_leasefile = network.dhcp_leasefile.clone();
@@ -1470,7 +1478,8 @@ impl VmManager {
                     &allow_cidrs,
                     req.pod_uid.as_deref(),
                 ) {
-                    if self.cfg.sandbox.dataplane.required
+                    if is_direct(&network_spec_for_dataplane)
+                        || self.cfg.sandbox.dataplane.required
                         || self.cfg.sandbox.dataplane.mode
                             != fluxvm_core::config::DataplaneMode::Legacy
                     {
@@ -1930,6 +1939,7 @@ impl VmManager {
         let result: Result<()> = async {
             let network = fluxvm_network::prepare(&self.cfg, id, &vm.request.network).await?;
             let dataplane_if = fluxvm_network::dataplane_interface(id, &network);
+            let network_spec_for_dataplane = network.spec.clone();
             vm.tap_name = network.tap_name.clone();
             vm.netns = network.netns.clone();
             vm.dhcp_leasefile = network.dhcp_leasefile.clone();
@@ -1969,7 +1979,8 @@ impl VmManager {
                     &allow_cidrs,
                     vm.request.pod_uid.as_deref(),
                 ) {
-                    if self.cfg.sandbox.dataplane.required
+                    if is_direct(&network_spec_for_dataplane)
+                        || self.cfg.sandbox.dataplane.required
                         || self.cfg.sandbox.dataplane.mode
                             != fluxvm_core::config::DataplaneMode::Legacy
                     {
@@ -3503,7 +3514,7 @@ mod tests {
 
 #[cfg(test)]
 mod nic_hotplug_tests {
-    use super::{nic_hotplug_index, record_hotplugged_nic};
+    use super::{is_direct, nic_hotplug_index, record_hotplugged_nic};
     use fluxvm_core::model::{ExtraNic, NetworkSpec, VmRecord};
 
     fn vm(network: serde_json::Value) -> VmRecord {
@@ -3562,6 +3573,22 @@ mod nic_hotplug_tests {
             other => panic!("expected tap after first hotplug, got {other:?}"),
         }
         assert_eq!(nic_hotplug_index(&record.request.network), 1);
+    }
+
+    #[test]
+    fn only_a_direct_tap_makes_a_dataplane_failure_fatal_regardless_of_mode() {
+        let direct: NetworkSpec = serde_json::from_value(serde_json::json!({
+            "mode": "tap", "direct": {"outer": "eth0"}
+        }))
+        .unwrap();
+        let bridged: NetworkSpec = serde_json::from_value(serde_json::json!({
+            "mode": "tap", "bridge": "vmbr0"
+        }))
+        .unwrap();
+        assert!(is_direct(&direct));
+        assert!(!is_direct(&bridged));
+        assert!(!is_direct(&NetworkSpec::None));
+        assert!(!is_direct(&NetworkSpec::User { forwards: vec![] }));
     }
 
     #[test]
