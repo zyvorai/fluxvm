@@ -20,6 +20,7 @@
 # FLUXVM_CONTAINER_CNI_PROVIDER=auto          # auto | cilium | generic
 # FLUXVM_CONTAINER_CNI_INTERFACE=eth0         # Cilium primary; Multus netN ignored
 # FLUXVM_CONTAINER_CNI_STRICT_MULTI_INTERFACE=1
+# FLUXVM_CONTAINER_CNI_DATAPATH=bridge      # bridge | direct | auto (docs/direct-datapath.md)
 #
 # Pair with Network Fabric coexistence (VM-edge policy, not Pod CNI):
 #   sudo ./scripts/enable-network-fabric-ga.sh --cilium --restart

@@ -109,6 +109,10 @@ struct RuntimeConfig {
     /// `auto` | `cilium` | `generic` — Cilium gets Multus-safe iface filtering
     /// and prefers eth0 (Cilium datapath). See docs/cilium-cni.md.
     cni_provider: String,
+    /// How the Pod's primary NIC reaches the guest: the bridge chain (default), a bridge-less
+    /// eBPF redirect straight between the pod veth and the guest's tap, or `auto` (direct when
+    /// possible, else the bridge chain). `FLUXVM_CONTAINER_CNI_DATAPATH`; see docs/direct-datapath.md.
+    cni_datapath: CniDatapath,
     /// When set, claim a paused member from this FluxVM pool instead of
     /// cold-creating, then hotplug the Pod's CNI bridges. The pool template
     /// must use `network.mode=none` so `hotplug-pcie-0` is free.
@@ -200,6 +204,7 @@ impl Default for RuntimeConfig {
             cni_provider: std::env::var("FLUXVM_CONTAINER_CNI_PROVIDER")
                 .unwrap_or_else(|_| "auto".into())
                 .to_ascii_lowercase(),
+            cni_datapath: CniDatapath::from_env(),
             warm_pool: std::env::var("FLUXVM_CONTAINER_WARM_POOL")
                 .ok()
                 .map(|v| v.trim().to_string())
@@ -442,6 +447,11 @@ struct CniBridge {
     cni_veth: String,
     interface: String,
     network: CniNetwork,
+    /// Bridge-less topology: the tap lives in the Pod netns and an eBPF redirect pairs it with
+    /// `interface`, so there is no host bridge, veth pair or in-pod bridge (those name fields
+    /// are empty). Absent in journals written before the direct datapath existed.
+    #[serde(default)]
+    direct: bool,
     /// Multus `netN` L2 paths. Each has its own host bridge; the guest sees
     /// them as extra virtio-net devices (boot-time `network.extra`, or NIC
     /// hotplug after a warm-pool claim).
@@ -746,6 +756,24 @@ impl Service {
     }
 
     async fn recovery_cni_ready(&self, cni: &CniBridge) -> bool {
+        if cni.direct {
+            // Nothing host-side to check beyond the netns alias and the Pod's own interface.
+            return cni.netns_mount.exists()
+                && tokio::process::Command::new("ip")
+                    .args([
+                        "netns",
+                        "exec",
+                        &cni.netns_alias,
+                        "ip",
+                        "link",
+                        "show",
+                        &cni.interface,
+                    ])
+                    .output()
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+        }
         if !cni.netns_mount.exists()
             || !Path::new("/sys/class/net").join(&cni.host_bridge).exists()
             || !Path::new("/sys/class/net").join(&cni.host_veth).exists()
@@ -1149,7 +1177,9 @@ impl Service {
         // IP + MAC to the VM guest. The host bridge must exist before FluxVM
         // creates its QEMU TAP, so this preparation intentionally happens
         // before POST /v1/vms.
-        let cni = if self.cfg.cni_enabled {
+        // How to redo the attachment on the bridge chain if the daemon rejects a direct one.
+        let mut bridge_retry: Option<(PathBuf, String, Vec<String>)> = None;
+        let mut cni = if self.cfg.cni_enabled {
             if let Some(path) = hints.netns_path.as_ref() {
                 let provider = resolve_cni_provider(&self.cfg.cni_provider, path).await;
                 let primary =
@@ -1171,37 +1201,34 @@ impl Service {
                         "Cilium CNI detected — L2 handoff keeps Pod IP/MAC on {primary} peer (Cilium TC stays on host lxc*)"
                     );
                 }
-                let mut bridge =
-                    prepare_cni_l2(&self.group, path, &primary)
-                        .await
-                        .map_err(|e| {
-                            let msg = format!("preparing CNI L2 attachment: {e:#}");
-                            warn!("{msg}");
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open("/tmp/fluxvm-shim-errors.log")
-                            {
-                                use std::io::Write;
-                                let _ = writeln!(f, "{msg}");
-                            }
-                            anyhow::anyhow!(msg)
-                        })?;
-                for (i, name) in multus.iter().enumerate() {
-                    match prepare_cni_l2(&format!("{}-n{i}", self.group), path, name).await {
-                        Ok(sec) => {
-                            info!(
-                                "Multus secondary {name} attached as guest NIC via bridge {}",
-                                sec.host_bridge
-                            );
-                            bridge.secondaries.push(sec);
-                        }
-                        Err(e) => {
-                            cleanup_cni_bridge(&bridge).await;
-                            bail!("preparing Multus secondary {name}: {e:#}");
-                        }
+                let facts = DirectFacts {
+                    kernel: kernel_version(),
+                    link_kind: cni_link_kind(path, &primary).await,
+                    secondaries: multus.len(),
+                    warm_pool: self.cfg.warm_pool.is_some(),
+                };
+                let (want_direct, why) = match resolve_datapath(self.cfg.cni_datapath, &facts) {
+                    Ok(decision) => decision,
+                    Err(reason) => bail!(
+                        "FLUXVM_CONTAINER_CNI_DATAPATH=direct but the direct datapath cannot be used: {reason}"
+                    ),
+                };
+                info!(
+                    "CNI datapath for {primary}: {} ({why})",
+                    if want_direct {
+                        "direct (bridge-less)"
+                    } else {
+                        "bridge chain"
                     }
-                }
+                );
+                bridge_retry = Some((path.clone(), primary.clone(), multus.clone()));
+                let bridge = if want_direct {
+                    prepare_cni_direct(&self.group, path, &primary)
+                        .await
+                        .context("preparing direct CNI attachment")?
+                } else {
+                    prepare_bridge_chain(&self.group, path, &primary, &multus).await?
+                };
                 Some(bridge)
             } else {
                 None
@@ -1211,24 +1238,7 @@ impl Service {
         };
 
         let network = if let Some(cni) = cni.as_ref() {
-            let extra: Vec<_> = cni
-                .secondaries
-                .iter()
-                .map(|sec| {
-                    json!({
-                        "bridge": sec.host_bridge,
-                        "mac": sec.network.mac
-                    })
-                })
-                .collect();
-            json!({
-                "mode": "tap",
-                "tap_name": null,
-                "bridge": cni.host_bridge,
-                "mac": cni.network.mac,
-                "netns": false,
-                "extra": extra
-            })
+            cni_network_json(cni)
         } else {
             json!({"mode": "user", "forwards": []})
         };
@@ -1281,7 +1291,7 @@ impl Service {
             "pod_uid": hints.pod_uid
         });
 
-        let (create_path, create_body) = if let Some(pool) = &self.cfg.warm_pool {
+        let (create_path, mut create_body) = if let Some(pool) = &self.cfg.warm_pool {
             info!("secure-container sandbox claiming warm pool {pool}");
             (
                 format!("/v1/pools/{pool}/claim"),
@@ -1291,25 +1301,59 @@ impl Service {
             ("/v1/vms".into(), create)
         };
 
-        let mut vm: VmRecord = match self
-            .api(Method::POST, &create_path, Some(create_body))
-            .await
-        {
-            Ok(resp) => match resp.json().await {
-                Ok(vm) => vm,
-                Err(e) => {
-                    if let Some(cni) = cni.as_ref() {
-                        cleanup_cni_bridge(cni).await;
+        let mut vm: VmRecord = loop {
+            let attempt: AnyResult<VmRecord> = match self
+                .api(Method::POST, &create_path, Some(create_body.clone()))
+                .await
+            {
+                Ok(resp) => resp
+                    .json()
+                    .await
+                    .context("decoding FluxVM VM create response"),
+                Err(e) => Err(e),
+            };
+            // `auto`: a direct attachment the daemon cannot honour (dataplane mode legacy, an eBPF
+            // attach failure, ...) is retried ONCE on the bridge chain instead of failing the Pod.
+            // Only in that case is a `Failed` VM response intercepted here; in every other mode it
+            // flows into the wait loop below exactly as before.
+            let retry_on_bridge = self.cfg.cni_datapath == CniDatapath::Auto
+                && cni.as_ref().is_some_and(|c| c.direct)
+                && bridge_retry.is_some();
+            let failure = match attempt {
+                Ok(vm) if vm.status != VmStatus::Failed || !retry_on_bridge => break vm,
+                Ok(vm) => {
+                    // Accepted but failed to come up (for a direct tap that includes a failed
+                    // dataplane attach). Remove the record before retrying.
+                    let why = vm.error.clone().unwrap_or_else(|| "unknown error".into());
+                    let _ = self
+                        .api(Method::DELETE, &format!("/v1/vms/{}", vm.id), None)
+                        .await;
+                    anyhow::anyhow!("FluxVM sandbox failed to start: {why}")
+                }
+                Err(e) => e,
+            };
+            if let (true, Some(direct_cni), Some((path, primary, multus))) =
+                (retry_on_bridge, cni.as_ref(), bridge_retry.as_ref())
+            {
+                warn!("direct datapath failed ({failure:#}); falling back to the bridge chain");
+                cleanup_cni_bridge(direct_cni).await;
+                match prepare_bridge_chain(&self.group, path, primary, multus).await {
+                    Ok(bridge) => {
+                        create_body["network"] = cni_network_json(&bridge);
+                        cni = Some(bridge);
+                        bridge_retry = None; // one retry only
+                        continue;
                     }
-                    return Err(e).context("decoding FluxVM VM create response");
+                    Err(e) => {
+                        return Err(e)
+                            .context("bridge-chain fallback after a failed direct attach");
+                    }
                 }
-            },
-            Err(e) => {
-                if let Some(cni) = cni.as_ref() {
-                    cleanup_cni_bridge(cni).await;
-                }
-                return Err(e);
             }
+            if let Some(cni) = cni.as_ref() {
+                cleanup_cni_bridge(cni).await;
+            }
+            return Err(failure);
         };
 
         if self.cfg.recovery_enabled {
@@ -4235,6 +4279,179 @@ enum CniProvider {
     Generic,
 }
 
+/// `FLUXVM_CONTAINER_CNI_DATAPATH`.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+enum CniDatapath {
+    /// Host bridge + veth chain (the original datapath).
+    #[default]
+    Bridge,
+    /// Bridge-less eBPF redirect; refuse to start the Pod when it cannot be used.
+    Direct,
+    /// Direct when every precondition holds, else the bridge chain (reason logged).
+    Auto,
+}
+
+impl CniDatapath {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "bridge" => Some(Self::Bridge),
+            "direct" => Some(Self::Direct),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    fn from_env() -> Self {
+        match std::env::var("FLUXVM_CONTAINER_CNI_DATAPATH") {
+            Err(_) => Self::default(),
+            // A typo must not silently pick a datapath; fall back to the safe original one.
+            Ok(raw) => Self::parse(&raw).unwrap_or_else(|| {
+                warn!("invalid FLUXVM_CONTAINER_CNI_DATAPATH={raw:?} (use bridge, direct or auto); using bridge");
+                Self::default()
+            }),
+        }
+    }
+}
+
+/// Everything the direct-datapath decision depends on, gathered up front so the decision itself
+/// is a pure function.
+#[derive(Debug, Default)]
+struct DirectFacts {
+    /// (major, minor) of the running kernel; `None` when it could not be read.
+    kernel: Option<(u32, u32)>,
+    /// rtnetlink kind of the Pod's primary interface (`veth`, `netkit`, `macvlan`, ...).
+    link_kind: Option<String>,
+    /// Multus `netN` secondaries that would need their own guest NIC.
+    secondaries: usize,
+    /// Warm-pool claims hotplug NICs over QMP by tap *name*.
+    warm_pool: bool,
+}
+
+/// `bpf_redirect_peer` (the guest -> pod-veth hop) needs Linux >= 5.10.
+const DIRECT_MIN_KERNEL: (u32, u32) = (5, 10);
+
+/// Why the direct datapath cannot be used for this Pod, or `None` when it can.
+fn direct_ineligibility(f: &DirectFacts) -> Option<String> {
+    match f.kernel {
+        None => return Some("cannot determine the kernel version".into()),
+        Some(k) if k < DIRECT_MIN_KERNEL => {
+            return Some(format!(
+                "kernel {}.{} is older than {}.{} (bpf_redirect_peer)",
+                k.0, k.1, DIRECT_MIN_KERNEL.0, DIRECT_MIN_KERNEL.1
+            ));
+        }
+        Some(_) => {}
+    }
+    match f.link_kind.as_deref() {
+        Some("veth") => {}
+        Some(other) => {
+            return Some(format!(
+                "the primary interface is a {other}, not a veth (netkit/macvlan/ipvlan Pods use the bridge path)"
+            ));
+        }
+        None => return Some("cannot determine the primary interface's link kind".into()),
+    }
+    if f.secondaries > 0 {
+        return Some(format!(
+            "{} Multus secondary NIC(s) are not supported with the direct datapath yet",
+            f.secondaries
+        ));
+    }
+    if f.warm_pool {
+        return Some(
+            "warm-pool claims hotplug NICs over QMP by name and cannot see a tap inside the Pod netns yet"
+                .into(),
+        );
+    }
+    None
+}
+
+/// Applies the configured mode to the facts. `Ok((use_direct, why))`; `Err` only for an explicit
+/// `direct` that cannot be honoured.
+fn resolve_datapath(mode: CniDatapath, f: &DirectFacts) -> Result<(bool, String), String> {
+    match (mode, direct_ineligibility(f)) {
+        (CniDatapath::Bridge, _) => Ok((false, "FLUXVM_CONTAINER_CNI_DATAPATH=bridge".into())),
+        (CniDatapath::Direct, None) => Ok((true, "FLUXVM_CONTAINER_CNI_DATAPATH=direct".into())),
+        (CniDatapath::Direct, Some(reason)) => Err(reason),
+        (CniDatapath::Auto, None) => Ok((true, "auto: every precondition holds".into())),
+        (CniDatapath::Auto, Some(reason)) => Ok((
+            false,
+            format!("auto: falling back to the bridge chain: {reason}"),
+        )),
+    }
+}
+
+/// `(major, minor)` from a kernel release string such as `7.0.0-31-generic` or `6.1.0-rc3+`.
+fn parse_kernel_version(release: &str) -> Option<(u32, u32)> {
+    let mut parts = release.trim().split(|c: char| !c.is_ascii_digit());
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+fn kernel_version() -> Option<(u32, u32)> {
+    parse_kernel_version(&std::fs::read_to_string("/proc/sys/kernel/osrelease").ok()?)
+}
+
+/// `info_kind` from `ip -d -j link show dev <iface>` output.
+fn parse_link_kind(json: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(json).ok()?;
+    v.as_array()?
+        .first()?
+        .get("linkinfo")?
+        .get("info_kind")?
+        .as_str()
+        .map(str::to_string)
+}
+
+async fn cni_link_kind(netns_path: &Path, interface: &str) -> Option<String> {
+    let args = vec![
+        format!("--net={}", netns_path.display()),
+        "--".into(),
+        "ip".into(),
+        "-d".into(),
+        "-j".into(),
+        "link".into(),
+        "show".into(),
+        "dev".into(),
+        interface.into(),
+    ];
+    parse_link_kind(&command_output("nsenter", &args).await.ok()?)
+}
+
+/// The `network` object of `POST /v1/vms` for a prepared CNI attachment.
+fn cni_network_json(cni: &CniBridge) -> Value {
+    if cni.direct {
+        return json!({
+            "mode": "tap",
+            "tap_name": null,
+            "bridge": null,
+            "mac": cni.network.mac,
+            "netns": false,
+            "extra": [],
+            "direct": {
+                "outer": cni.interface,
+                "netns_path": cni.netns_mount,
+                "mode": "peer-veth"
+            }
+        });
+    }
+    let extra: Vec<_> = cni
+        .secondaries
+        .iter()
+        .map(|sec| json!({"bridge": sec.host_bridge, "mac": sec.network.mac}))
+        .collect();
+    json!({
+        "mode": "tap",
+        "tap_name": null,
+        "bridge": cni.host_bridge,
+        "mac": cni.network.mac,
+        "netns": false,
+        "extra": extra
+    })
+}
+
 fn parse_cni_provider_label(raw: &str) -> Option<CniProvider> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "cilium" => Some(CniProvider::Cilium),
@@ -4658,6 +4875,7 @@ async fn prepare_cni_l2(group: &str, netns_path: &Path, interface: &str) -> AnyR
         cni_veth: cni_veth.clone(),
         interface: interface.to_string(),
         network: network.clone(),
+        direct: false,
         secondaries: Vec::new(),
     };
 
@@ -4873,6 +5091,107 @@ async fn prepare_cni_l2(group: &str, netns_path: &Path, interface: &str) -> AnyR
     Ok(bridge)
 }
 
+/// Bridge-less attach: leave `interface` (the Pod's veth) exactly where the CNI put it and only
+/// take the L3 config off it. The guest takes over the Pod IP/routes and the original MAC, so
+/// unlike `prepare_cni_l2` the veth is NOT re-MAC'd or enslaved to a bridge; the daemon creates the
+/// guest's tap inside this netns and an eBPF redirect pairs the two. Cilium's own hooks stay on
+/// the host-side `lxc*` peer and keep seeing every packet.
+async fn prepare_cni_direct(
+    group: &str,
+    netns_path: &Path,
+    interface: &str,
+) -> AnyResult<CniBridge> {
+    let network = capture_cni_network(netns_path, interface).await?;
+    let alias = format!("fvcni-{}", cni_suffix(group));
+    let netns_mount = bind_netns_alias(netns_path, &alias).await?;
+    let bridge = CniBridge {
+        netns_alias: alias.clone(),
+        netns_mount,
+        host_bridge: String::new(),
+        host_veth: String::new(),
+        cni_bridge: String::new(),
+        cni_veth: String::new(),
+        interface: interface.to_string(),
+        network,
+        direct: true,
+        secondaries: Vec::new(),
+    };
+    let result: AnyResult<()> = async {
+        // Same L3 removal as prepare_cni_l2 (the guest owns these addresses now); restore_cni_network
+        // puts them back verbatim on teardown.
+        run_netns(
+            &alias,
+            "ip",
+            &[
+                "-4".into(),
+                "addr".into(),
+                "flush".into(),
+                "dev".into(),
+                interface.into(),
+            ],
+        )
+        .await?;
+        for (family, kind) in [("-6", "addr"), ("-4", "route"), ("-6", "route")] {
+            let mut args = vec![
+                family.into(),
+                kind.into(),
+                "flush".into(),
+                "dev".into(),
+                interface.into(),
+            ];
+            if family == "-6" && kind == "addr" {
+                args.extend(["scope".into(), "global".into()]);
+            }
+            run_netns_best_effort(&alias, "ip", &args).await;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        cleanup_cni_bridge(&bridge).await;
+        return Err(e);
+    }
+    Ok(bridge)
+}
+
+/// The original bridge chain for the primary and every Multus secondary.
+async fn prepare_bridge_chain(
+    group: &str,
+    path: &Path,
+    primary: &str,
+    multus: &[String],
+) -> AnyResult<CniBridge> {
+    let mut bridge = prepare_cni_l2(group, path, primary).await.map_err(|e| {
+        let msg = format!("preparing CNI L2 attachment: {e:#}");
+        warn!("{msg}");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/tmp/fluxvm-shim-errors.log")
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{msg}");
+        }
+        anyhow::anyhow!(msg)
+    })?;
+    for (i, name) in multus.iter().enumerate() {
+        match prepare_cni_l2(&format!("{group}-n{i}"), path, name).await {
+            Ok(sec) => {
+                info!(
+                    "Multus secondary {name} attached as guest NIC via bridge {}",
+                    sec.host_bridge
+                );
+                bridge.secondaries.push(sec);
+            }
+            Err(e) => {
+                cleanup_cni_bridge(&bridge).await;
+                bail!("preparing Multus secondary {name}: {e:#}");
+            }
+        }
+    }
+    Ok(bridge)
+}
+
 async fn restore_cni_network(bridge: &CniBridge) {
     let alias = &bridge.netns_alias;
     let interface = &bridge.interface;
@@ -5006,6 +5325,38 @@ async fn cleanup_cni_bridge(bridge: &CniBridge) {
         Box::pin(cleanup_cni_bridge(secondary)).await;
     }
     restore_cni_network(bridge).await;
+    if bridge.direct {
+        // No bridge, veth pair or in-Pod bridge exist. The daemon detaches its inbound redirect
+        // when it deletes the VM; if that never ran (daemon gone), remove it here so a stale
+        // program cannot keep swallowing the veth's ingress after the addresses are restored.
+        run_netns_best_effort(
+            &bridge.netns_alias,
+            "tc",
+            &[
+                "filter".into(),
+                "del".into(),
+                "dev".into(),
+                bridge.interface.clone(),
+                "ingress".into(),
+                "pref".into(),
+                "49154".into(),
+                "handle".into(),
+                "3".into(),
+                "bpf".into(),
+            ],
+        )
+        .await;
+        run_command_best_effort(
+            "umount",
+            &[
+                "-l".into(),
+                bridge.netns_mount.to_string_lossy().into_owned(),
+            ],
+        )
+        .await;
+        let _ = tokio::fs::remove_file(&bridge.netns_mount).await;
+        return;
+    }
     run_netns_best_effort(
         &bridge.netns_alias,
         "ip",
@@ -5805,5 +6156,362 @@ mod set9_journal_compat_tests {
         let d = &state.sandbox.unwrap().devices[0];
         assert!(d.owners().is_none());
         assert!(!d.is_releasable());
+    }
+}
+
+#[cfg(test)]
+mod direct_datapath_tests {
+    use super::*;
+
+    fn ok_facts() -> DirectFacts {
+        DirectFacts {
+            kernel: Some((6, 1)),
+            link_kind: Some("veth".into()),
+            secondaries: 0,
+            warm_pool: false,
+        }
+    }
+
+    #[test]
+    fn datapath_env_values_parse_and_unknown_is_rejected() {
+        assert_eq!(CniDatapath::parse("bridge"), Some(CniDatapath::Bridge));
+        assert_eq!(CniDatapath::parse(""), Some(CniDatapath::Bridge));
+        assert_eq!(CniDatapath::parse(" Direct "), Some(CniDatapath::Direct));
+        assert_eq!(CniDatapath::parse("AUTO"), Some(CniDatapath::Auto));
+        assert_eq!(
+            CniDatapath::parse("dirct"),
+            None,
+            "a typo must not pick a datapath"
+        );
+        assert_eq!(
+            CniDatapath::default(),
+            CniDatapath::Bridge,
+            "the original datapath stays the default"
+        );
+    }
+
+    #[test]
+    fn kernel_release_strings_parse_to_major_minor() {
+        assert_eq!(parse_kernel_version("7.0.0-31-generic\n"), Some((7, 0)));
+        assert_eq!(parse_kernel_version("5.10.0"), Some((5, 10)));
+        assert_eq!(parse_kernel_version("6.1.0-rc3+"), Some((6, 1)));
+        assert_eq!(parse_kernel_version("5.15.0-1052-aws"), Some((5, 15)));
+        assert_eq!(parse_kernel_version("garbage"), None);
+        assert_eq!(parse_kernel_version(""), None);
+    }
+
+    #[test]
+    fn link_kind_comes_from_linkinfo() {
+        let veth = r#"[{"ifindex":5,"ifname":"eth0","linkinfo":{"info_kind":"veth"}}]"#;
+        let netkit = r#"[{"ifindex":5,"ifname":"eth0","linkinfo":{"info_kind":"netkit"}}]"#;
+        let plain = r#"[{"ifindex":1,"ifname":"lo"}]"#;
+        assert_eq!(parse_link_kind(veth).as_deref(), Some("veth"));
+        assert_eq!(parse_link_kind(netkit).as_deref(), Some("netkit"));
+        assert_eq!(parse_link_kind(plain), None);
+        assert_eq!(parse_link_kind("not json"), None);
+        assert_eq!(parse_link_kind("[]"), None);
+    }
+
+    #[test]
+    fn every_precondition_is_checked_with_a_distinct_reason() {
+        assert_eq!(direct_ineligibility(&ok_facts()), None);
+
+        let mut f = ok_facts();
+        f.kernel = Some((5, 9));
+        assert!(
+            direct_ineligibility(&f)
+                .unwrap()
+                .contains("older than 5.10")
+        );
+        f.kernel = Some((5, 10));
+        assert_eq!(
+            direct_ineligibility(&f),
+            None,
+            "5.10 is the boundary and is accepted"
+        );
+        f.kernel = Some((7, 0));
+        assert_eq!(direct_ineligibility(&f), None);
+        f.kernel = None;
+        assert!(direct_ineligibility(&f).unwrap().contains("kernel version"));
+
+        for kind in ["netkit", "macvlan", "ipvlan"] {
+            let mut f = ok_facts();
+            f.link_kind = Some(kind.into());
+            let why = direct_ineligibility(&f).unwrap();
+            assert!(why.contains(kind) && why.contains("not a veth"), "{why}");
+        }
+        let mut f = ok_facts();
+        f.link_kind = None;
+        assert!(direct_ineligibility(&f).unwrap().contains("link kind"));
+
+        let mut f = ok_facts();
+        f.secondaries = 2;
+        assert!(direct_ineligibility(&f).unwrap().contains("Multus"));
+
+        let mut f = ok_facts();
+        f.warm_pool = true;
+        assert!(direct_ineligibility(&f).unwrap().contains("warm-pool"));
+    }
+
+    #[test]
+    fn modes_resolve_as_documented() {
+        let bad = DirectFacts {
+            warm_pool: true,
+            ..ok_facts()
+        };
+        // bridge: never direct, even when everything would allow it
+        assert!(
+            !resolve_datapath(CniDatapath::Bridge, &ok_facts())
+                .unwrap()
+                .0
+        );
+        assert!(!resolve_datapath(CniDatapath::Bridge, &bad).unwrap().0);
+        // direct: honoured when possible, an error (not a silent fallback) when not
+        assert!(
+            resolve_datapath(CniDatapath::Direct, &ok_facts())
+                .unwrap()
+                .0
+        );
+        assert!(
+            resolve_datapath(CniDatapath::Direct, &bad)
+                .unwrap_err()
+                .contains("warm-pool")
+        );
+        // auto: direct when possible, otherwise the bridge chain with the reason in the message
+        assert!(resolve_datapath(CniDatapath::Auto, &ok_facts()).unwrap().0);
+        let (direct, why) = resolve_datapath(CniDatapath::Auto, &bad).unwrap();
+        assert!(
+            !direct && why.contains("falling back") && why.contains("warm-pool"),
+            "{why}"
+        );
+    }
+
+    fn net(mac: &str) -> CniNetwork {
+        CniNetwork {
+            addresses: vec![],
+            mac: mac.into(),
+            routes: vec![],
+        }
+    }
+
+    fn bridge_cni() -> CniBridge {
+        CniBridge {
+            netns_alias: "fvcni-abc".into(),
+            netns_mount: PathBuf::from("/run/netns/fvcni-abc"),
+            host_bridge: "fvbhabc".into(),
+            host_veth: "fvhabc".into(),
+            cni_bridge: "fvcbabc".into(),
+            cni_veth: "fvnabc".into(),
+            interface: "eth0".into(),
+            network: net("02:00:00:00:00:01"),
+            direct: false,
+            secondaries: vec![CniBridge {
+                host_bridge: "fvbhsec".into(),
+                network: net("02:00:00:00:00:09"),
+                ..CniBridge {
+                    netns_alias: "fvcni-sec".into(),
+                    netns_mount: PathBuf::from("/run/netns/fvcni-sec"),
+                    host_bridge: String::new(),
+                    host_veth: String::new(),
+                    cni_bridge: String::new(),
+                    cni_veth: String::new(),
+                    interface: "net1".into(),
+                    network: net("x"),
+                    direct: false,
+                    secondaries: vec![],
+                }
+            }],
+        }
+    }
+
+    #[test]
+    fn bridge_network_json_is_unchanged() {
+        // This is the exact object the shim sent before the direct datapath existed.
+        assert_eq!(
+            cni_network_json(&bridge_cni()),
+            json!({
+                "mode": "tap",
+                "tap_name": null,
+                "bridge": "fvbhabc",
+                "mac": "02:00:00:00:00:01",
+                "netns": false,
+                "extra": [{"bridge": "fvbhsec", "mac": "02:00:00:00:00:09"}]
+            })
+        );
+    }
+
+    #[test]
+    fn direct_network_json_carries_the_outer_device_and_no_bridge() {
+        let mut c = bridge_cni();
+        c.direct = true;
+        c.secondaries.clear();
+        let v = cni_network_json(&c);
+        assert_eq!(v["bridge"], Value::Null);
+        assert_eq!(v["extra"], json!([]));
+        assert_eq!(
+            v["mac"], "02:00:00:00:00:01",
+            "the guest keeps the Pod's MAC"
+        );
+        assert_eq!(v["direct"]["outer"], "eth0");
+        assert_eq!(v["direct"]["netns_path"], "/run/netns/fvcni-abc");
+        assert_eq!(v["direct"]["mode"], "peer-veth");
+        // and the daemon must accept exactly this shape
+        let spec: fluxvm_core::model::NetworkSpec = serde_json::from_value(v).unwrap();
+        spec.validate_direct()
+            .expect("the shim's direct body must pass the daemon's validation");
+    }
+
+    #[test]
+    fn journals_written_before_the_direct_datapath_still_load_as_bridge() {
+        let old = r#"{
+          "netns_alias":"fvcni-abc","netns_mount":"/run/netns/fvcni-abc",
+          "host_bridge":"fvbhabc","host_veth":"fvhabc","cni_bridge":"fvcbabc","cni_veth":"fvnabc",
+          "interface":"eth0",
+          "network":{"addresses":[],"mac":"02:00:00:00:00:01","routes":[]}
+        }"#;
+        let c: CniBridge = serde_json::from_str(old).unwrap();
+        assert!(
+            !c.direct,
+            "a pre-existing journal must keep meaning the bridge topology"
+        );
+        let mut d = c.clone();
+        d.direct = true;
+        let again: CniBridge = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert!(again.direct);
+    }
+
+    // ── real namespace: prepare_cni_direct / cleanup_cni_bridge (Linux root; skipped elsewhere) ──
+
+    fn sh(args: &[&str]) -> bool {
+        std::process::Command::new(args[0])
+            .args(&args[1..])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    fn out(args: &[&str]) -> String {
+        std::process::Command::new(args[0])
+            .args(&args[1..])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    }
+
+    struct Ns(String);
+    impl Drop for Ns {
+        fn drop(&mut self) {
+            let _ = sh(&["ip", "netns", "del", &self.0]);
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_attach_leaves_the_veth_alone_and_restores_it() {
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 || !sh(&["ip", "-V"]) || !sh(&["nsenter", "--version"]) {
+            eprintln!("SKIP: needs root, ip and nsenter");
+            return;
+        }
+        let pid = std::process::id();
+        let pod = format!("fvsh{pid}-pod");
+        let host = format!("fvsh{pid}-host");
+        assert!(sh(&["ip", "netns", "add", &pod]));
+        assert!(sh(&["ip", "netns", "add", &host]));
+        let _g = (Ns(pod.clone()), Ns(host.clone()));
+        assert!(sh(&[
+            "ip", "-n", &host, "link", "add", "lxc0", "type", "veth", "peer", "name", "eth0",
+            "netns", &pod
+        ]));
+        for (ns, dev) in [(&host, "lxc0"), (&pod, "eth0")] {
+            assert!(sh(&["ip", "-n", ns, "link", "set", dev, "up"]));
+        }
+        assert!(sh(&[
+            "ip",
+            "-n",
+            &pod,
+            "addr",
+            "add",
+            "10.96.0.5/24",
+            "dev",
+            "eth0"
+        ]));
+        assert!(sh(&[
+            "ip",
+            "-n",
+            &pod,
+            "route",
+            "add",
+            "default",
+            "via",
+            "10.96.0.1"
+        ]));
+        let mac_before = out(&["ip", "-n", &pod, "-o", "link", "show", "eth0"]);
+        let mac_before = mac_before
+            .split("link/ether ")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+
+        let netns_path = PathBuf::from(format!("/run/netns/{pod}"));
+        assert_eq!(
+            cni_link_kind(&netns_path, "eth0").await.as_deref(),
+            Some("veth"),
+            "the real link-kind probe must recognise a veth"
+        );
+        let group = format!("fvsh-test-{pid}");
+        let cni = prepare_cni_direct(&group, &netns_path, "eth0")
+            .await
+            .expect("prepare_cni_direct");
+        assert!(cni.direct && cni.host_bridge.is_empty() && cni.cni_bridge.is_empty());
+        assert!(
+            cni.netns_mount.exists(),
+            "the netns alias the daemon opens must exist"
+        );
+        assert_eq!(cni.network.mac, mac_before);
+
+        let addrs = out(&["ip", "-n", &pod, "-4", "-o", "addr", "show", "dev", "eth0"]);
+        assert!(
+            !addrs.contains("10.96.0.5"),
+            "the guest owns the address now: {addrs}"
+        );
+        assert!(
+            out(&["ip", "-n", &pod, "route", "show"]).trim().is_empty(),
+            "routes must be taken off eth0"
+        );
+        let mac_now = out(&["ip", "-n", &pod, "-o", "link", "show", "eth0"]);
+        assert!(
+            mac_now.contains(&mac_before),
+            "eth0 must NOT be re-MAC'd in the direct topology: {mac_now}"
+        );
+        for ns in [&pod, &host] {
+            assert!(
+                !out(&["ip", "-n", ns, "-d", "link"]).contains("bridge "),
+                "no bridge may be created"
+            );
+        }
+        assert!(
+            !out(&["ip", "-d", "link"]).contains(&format!("fvbh{}", cni_suffix(&group))),
+            "no host bridge"
+        );
+
+        cleanup_cni_bridge(&cni).await;
+        let addrs = out(&["ip", "-n", &pod, "-4", "-o", "addr", "show", "dev", "eth0"]);
+        assert!(
+            addrs.contains("10.96.0.5"),
+            "cleanup must give the Pod its address back: {addrs}"
+        );
+        assert!(
+            out(&["ip", "-n", &pod, "route", "show"]).contains("default via 10.96.0.1"),
+            "and its default route"
+        );
+        assert!(
+            !cni.netns_mount.exists(),
+            "cleanup must remove the netns alias"
+        );
     }
 }

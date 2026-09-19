@@ -58,14 +58,18 @@ sudo ./scripts/enable-network-fabric-ga.sh --cilium --restart
 ## 📡 Packet path (primary)
 
 ```text
-Pod netns eth0 (CNI-assigned IP/MAC)
-  → FluxVM L2 rebridge (host bridge + guest TAP)
-  → guest virtio-net with same IP/MAC/routes
+lxc* ⇄ Pod netns eth0 (CNI-assigned IP; the guest takes over IP/MAC/routes)
+  → in-Pod bridge → second veth pair → host bridge → guest TAP → guest virtio-net
 Host lxc* peer keeps Cilium TC/eBPF; FluxVM never writes Cilium maps.
 ```
+
+That bridge chain is the default. With `FLUXVM_CONTAINER_CNI_DATAPATH=direct|auto` (and a veth Pod, no
+Multus secondaries, no warm pool, kernel ≥ 5.10) a TC redirect replaces it — see
+[direct-datapath.md](direct-datapath.md).
 
 ## 📚 Related
 
 - [secure-containers-set6.md](secure-containers-set6.md) — dual-stack + Multus guard
+- [direct-datapath.md](direct-datapath.md) — bridge-less veth ⇄ guest redirect (opt-in)
 - [ebpf-cilium.md](ebpf-cilium.md) — `mode=cilium` Fabric coexistence
 - [network-policy.md](network-policy.md) — FluxVM policy vs Cilium CNP

@@ -56,6 +56,9 @@ if [[ ! -f "$BPF_TC" ]]; then
     install -D -m 0644 "$ROOT/dist/bpf/fluxvm_tc.bpf.o" "$BPF_TC"
     [[ -f "$ROOT/dist/bpf/fluxvm_xdp.bpf.o" ]] && \
       install -D -m 0644 "$ROOT/dist/bpf/fluxvm_xdp.bpf.o" "$BPF_XDP"
+    # Bridge-less direct taps (docs/direct-datapath.md) load this next to fluxvm_tc.bpf.o.
+    [[ -f "$ROOT/dist/bpf/fluxvm_direct.bpf.o" ]] && \
+      install -D -m 0644 "$ROOT/dist/bpf/fluxvm_direct.bpf.o" "$(dirname "$BPF_TC")/fluxvm_direct.bpf.o"
   fi
 fi
 [[ -f "$BPF_TC" || $DRY -eq 1 ]] || { echo "missing $BPF_TC" >&2; exit 1; }
