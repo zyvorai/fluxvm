@@ -276,10 +276,14 @@ pub fn build_args(
                 } else {
                     ",bus=hotplug-pcie-0".into()
                 };
-                a.extend([
-                    "-netdev".into(),
-                    format!("tap,id=net0,ifname={tap},script=no,downscript=no"),
-                ]);
+                // A tap in a foreign netns (bridge-less direct attach) cannot
+                // be opened by name from the VMM's namespace, so the daemon
+                // hands over an already-open fd instead.
+                let netdev = match ctx.network.tap_fd {
+                    Some(fd) => format!("tap,id=net0,fd={fd}"),
+                    None => format!("tap,id=net0,ifname={tap},script=no,downscript=no"),
+                };
+                a.extend(["-netdev".into(), netdev]);
                 let dev = match mac {
                     Some(m) => format!("virtio-net-pci,netdev=net0,mac={m}{bus}"),
                     None => format!("virtio-net-pci,netdev=net0{bus}"),
@@ -306,7 +310,7 @@ pub fn build_args(
         NetworkSpec::Macvtap { mac, .. } => {
             let fd = ctx
                 .network
-                .macvtap_fd
+                .tap_fd
                 .context("macvtap network was not prepared")?;
             a.extend(["-netdev".into(), format!("tap,id=net0,fd={fd}")]);
             let dev = mac
@@ -481,7 +485,7 @@ impl VmBackend for QemuBackend {
             match spawn_virtiofsd_instances(cfg, req, ctx).await {
                 Ok(v) => v,
                 Err(e) => {
-                    if let Some(fd) = ctx.network.macvtap_fd {
+                    if let Some(fd) = ctx.network.tap_fd {
                         fluxvm_core::process::close_fd(fd);
                     }
                     return Err(e);
@@ -492,7 +496,7 @@ impl VmBackend for QemuBackend {
         if req.secure_boot.unwrap_or(false) {
             if effective_firmware.is_none() {
                 kill_pids(&virtiofsd_pids);
-                if let Some(fd) = ctx.network.macvtap_fd {
+                if let Some(fd) = ctx.network.tap_fd {
                     fluxvm_core::process::close_fd(fd);
                 }
                 anyhow::bail!(
@@ -501,7 +505,7 @@ impl VmBackend for QemuBackend {
             }
             if cfg.qemu_ovmf_vars_template.is_none() {
                 kill_pids(&virtiofsd_pids);
-                if let Some(fd) = ctx.network.macvtap_fd {
+                if let Some(fd) = ctx.network.tap_fd {
                     fluxvm_core::process::close_fd(fd);
                 }
                 anyhow::bail!(
@@ -519,7 +523,7 @@ impl VmBackend for QemuBackend {
             if !vars_path.exists() {
                 let Some(template) = &cfg.qemu_ovmf_vars_template else {
                     kill_pids(&virtiofsd_pids);
-                    if let Some(fd) = ctx.network.macvtap_fd {
+                    if let Some(fd) = ctx.network.tap_fd {
                         fluxvm_core::process::close_fd(fd);
                     }
                     anyhow::bail!(
@@ -531,7 +535,7 @@ impl VmBackend for QemuBackend {
                     .context("copying OVMF vars template")
                 {
                     kill_pids(&virtiofsd_pids);
-                    if let Some(fd) = ctx.network.macvtap_fd {
+                    if let Some(fd) = ctx.network.tap_fd {
                         fluxvm_core::process::close_fd(fd);
                     }
                     return Err(e);
@@ -544,7 +548,7 @@ impl VmBackend for QemuBackend {
                 Ok(pid) => Some(pid),
                 Err(e) => {
                     kill_pids(&virtiofsd_pids);
-                    if let Some(fd) = ctx.network.macvtap_fd {
+                    if let Some(fd) = ctx.network.tap_fd {
                         fluxvm_core::process::close_fd(fd);
                     }
                     return Err(e);
@@ -561,7 +565,7 @@ impl VmBackend for QemuBackend {
         let spawned = spawn_logged(&program, &args, &ctx.log_path).await;
         // The child inherits the macvtap fd across exec (or spawn failed and
         // there's nothing to inherit); either way the parent's copy is done.
-        if let Some(fd) = ctx.network.macvtap_fd {
+        if let Some(fd) = ctx.network.tap_fd {
             fluxvm_core::process::close_fd(fd);
         }
         let child = match spawned {
@@ -743,7 +747,7 @@ mod tests {
             network: PreparedNetwork {
                 spec: NetworkSpec::None,
                 tap_name: None,
-                macvtap_fd: None,
+                tap_fd: None,
                 netns: None,
                 dhcp_leasefile: None,
                 guest_ip: None,
@@ -785,6 +789,7 @@ mod tests {
             bridge: Some("br0".into()),
             mac: Some("02:00:00:00:00:01".into()),
             netns: false,
+            direct: None,
             extra: vec![],
         };
         let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
@@ -804,6 +809,7 @@ mod tests {
             bridge: Some("br0".into()),
             mac: Some("02:00:00:00:00:01".into()),
             netns: false,
+            direct: None,
             extra: vec![
                 fluxvm_core::model::ExtraNic {
                     bridge: "br1".into(),
@@ -1018,6 +1024,48 @@ mod tests {
         let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
         assert!(!args.iter().any(|a| a.contains("if=pflash")));
         assert!(args.iter().any(|a| a.contains("chrtpm")));
+    }
+
+    #[test]
+    fn direct_tap_with_prepared_fd_is_attached_by_fd_not_ifname() {
+        // A tap in a foreign netns cannot be opened by name from QEMU's own
+        // namespace, so the daemon passes an inherited fd instead.
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: None,
+            mac: Some("02:00:00:00:00:01".into()),
+            netns: false,
+            direct: Some(fluxvm_core::model::DirectSpec {
+                outer: "eth0".into(),
+                netns_path: Some("/run/netns/fvcni-abc".into()),
+                mode: fluxvm_core::model::DirectMode::PeerVeth,
+            }),
+            extra: vec![],
+        };
+        c.network.tap_fd = Some(9);
+        let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
+        assert!(args.iter().any(|a| a == "tap,id=net0,fd=9"), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("ifname=")), "{args:?}");
+        assert!(args.iter().any(|a| {
+            a.starts_with("virtio-net-pci,netdev=net0") && a.contains("mac=02:00:00:00:00:01")
+        }));
+    }
+
+    #[test]
+    fn bridged_tap_without_fd_still_uses_ifname() {
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: Some("br0".into()),
+            mac: None,
+            netns: false,
+            direct: None,
+            extra: vec![],
+        };
+        c.network.tap_fd = None;
+        let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
+        assert!(args.iter().any(|a| a == "tap,id=net0,ifname=tap0,script=no,downscript=no"));
     }
 }
 

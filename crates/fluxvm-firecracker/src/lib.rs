@@ -102,6 +102,11 @@ fn config_json(
 
     match &ctx.network.spec {
         NetworkSpec::None => {}
+        NetworkSpec::Tap { .. } if ctx.network.tap_fd.is_some() => bail!(
+            "Firecracker backend cannot attach a tap by fd: its API only accepts a host_dev_name \
+             it opens itself inside its own network namespace. A bridge-less direct tap in a \
+             foreign netns needs the QEMU or Cloud Hypervisor backend."
+        ),
         NetworkSpec::Tap {
             tap_name: Some(tap),
             mac,
@@ -491,7 +496,7 @@ mod tests {
             network: PreparedNetwork {
                 spec: NetworkSpec::None,
                 tap_name: None,
-                macvtap_fd: None,
+                tap_fd: None,
                 netns: None,
                 dhcp_leasefile: None,
                 guest_ip: None,
@@ -540,6 +545,7 @@ mod tests {
             bridge: None,
             mac: Some("06:00:00:00:00:01".into()),
             netns: false,
+            direct: None,
             extra: vec![],
         };
         let paths = ResourcePaths {
@@ -565,6 +571,7 @@ mod tests {
             bridge: Some("br0".into()),
             mac: Some("02:00:00:00:00:01".into()),
             netns: false,
+            direct: None,
             extra: vec![fluxvm_core::model::ExtraNic {
                 bridge: "br1".into(),
                 mac: Some("02:00:00:00:00:02".into()),
@@ -616,5 +623,32 @@ mod tests {
         let args = cfg["boot-source"]["boot_args"].as_str().unwrap();
         assert!(args.contains("8250.nr_uarts=0"));
         assert!(!args.contains("console=ttyS0"));
+    }
+
+    #[test]
+    fn config_json_refuses_a_tap_that_can_only_be_attached_by_fd() {
+        let req = bare_req();
+        let mut ctx = bare_ctx();
+        ctx.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: None,
+            mac: Some("02:00:00:00:00:01".into()),
+            netns: false,
+            direct: Some(fluxvm_core::model::DirectSpec {
+                outer: "eth0".into(),
+                netns_path: Some("/run/netns/fvcni-abc".into()),
+                mode: fluxvm_core::model::DirectMode::PeerVeth,
+            }),
+            extra: vec![],
+        };
+        ctx.network.tap_fd = Some(9);
+        let paths = ResourcePaths {
+            kernel: PathBuf::from("/vmlinux"),
+            rootfs: PathBuf::from("/rootfs"),
+            seed: None,
+            vsock_uds: None,
+        };
+        let err = config_json(&req, &ctx, &paths, false).unwrap_err();
+        assert!(format!("{err:#}").contains("by fd"), "{err:#}");
     }
 }

@@ -49,6 +49,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             mac,
             netns,
             extra,
+            direct: None,
         },
         NetworkSpec::Tap {
             tap_name,
@@ -56,6 +57,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             mac: existing_mac,
             netns,
             mut extra,
+            direct,
         } => {
             extra.push(ExtraNic {
                 bridge,
@@ -68,6 +70,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
                 mac: existing_mac,
                 netns,
                 extra,
+                direct,
             }
         }
         _ => NetworkSpec::Tap {
@@ -76,6 +79,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             mac,
             netns: false,
             extra: vec![],
+            direct: None,
         },
     };
 }
@@ -3539,19 +3543,21 @@ mod nic_hotplug_tests {
             "fvbhpod".into(),
             Some("02:aa:bb:cc:dd:ee".into()),
         );
-        match record.request.network {
+        match &record.request.network {
             NetworkSpec::Tap {
                 tap_name,
                 bridge,
                 mac,
                 extra,
                 netns,
+                direct,
             } => {
                 assert_eq!(tap_name.as_deref(), Some("hn0abcdef"));
                 assert_eq!(bridge.as_deref(), Some("fvbhpod"));
                 assert_eq!(mac.as_deref(), Some("02:aa:bb:cc:dd:ee"));
                 assert!(extra.is_empty());
                 assert!(!netns);
+                assert!(direct.is_none(), "hotplugged NICs are bridged taps");
             }
             other => panic!("expected tap after first hotplug, got {other:?}"),
         }

@@ -64,6 +64,10 @@ impl VmBackend for FluxVmBackend {
                 )
             }),
             tap: match &ctx.network.spec {
+                NetworkSpec::Tap { .. } if ctx.network.tap_fd.is_some() => bail!(
+                    "FluxVm backend opens taps by name and cannot take a pre-opened fd; a \
+                     bridge-less direct tap in a foreign netns needs the QEMU or Cloud Hypervisor backend"
+                ),
                 NetworkSpec::Tap {
                     tap_name: Some(t), ..
                 } => Some(t.clone()),

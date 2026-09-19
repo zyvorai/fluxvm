@@ -53,6 +53,13 @@ pub enum NetworkSpec {
         /// `POST /v1/vms/{id}/hotplug/nic` after a warm-pool claim.
         #[serde(default)]
         extra: Vec<ExtraNic>,
+        /// Bridge-less attach: the tap is not enslaved to any bridge and a
+        /// TC/eBPF redirect moves frames straight between `direct.outer`
+        /// and the tap (see [`DirectSpec`]). Mutually exclusive with
+        /// `bridge` and `netns`. Absent on every record written before this
+        /// field existed, which keeps meaning "bridged tap".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        direct: Option<DirectSpec>,
     },
     /// A macvtap device on `parent`, giving the VM its own MAC directly on
     /// that link with no host bridge involved. Supported by the QEMU and
@@ -66,6 +73,86 @@ pub enum NetworkSpec {
         #[serde(default)]
         mac: Option<String>,
     },
+}
+
+/// How a bridge-less ("direct") tap is paired with its outer device.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DirectMode {
+    /// `outer` is a veth (a CNI pod's `eth0`). Frames arriving on `outer` are
+    /// redirected to the tap, and guest frames are `bpf_redirect_peer`d back
+    /// through `outer` to its peer -- the Cilium `lxc*` delivery hop.
+    #[default]
+    PeerVeth,
+    /// `outer` is a physical/bond uplink NIC with no bridge master. Frames
+    /// are steered to the tap by destination MAC; anything else is passed to
+    /// the host stack.
+    L2Uplink,
+}
+
+/// Bridge-less attach of a VM tap to an outer device. The tap and `outer`
+/// live in the same network namespace (`netns_path`, or the host's when
+/// `None`) because `bpf_redirect` only works within one namespace.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirectSpec {
+    /// Interface the redirect pairs with the tap (`eth0` for a CNI pod).
+    pub outer: String,
+    /// Path of the network namespace holding both devices (for a CNI pod, the
+    /// bind-mounted pod netns). `None` means the host namespace.
+    #[serde(default)]
+    pub netns_path: Option<String>,
+    #[serde(default)]
+    pub mode: DirectMode,
+}
+
+impl DirectSpec {
+    /// Structural checks that need no host access, so a bad request is
+    /// rejected at admission instead of half-way through `prepare`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.outer.is_empty() || self.outer.len() > 15 {
+            return Err("direct.outer must be 1..=15 characters".into());
+        }
+        if self.outer.contains(['/', ' ']) {
+            return Err("direct.outer is not a valid interface name".into());
+        }
+        if let Some(p) = &self.netns_path {
+            if !p.starts_with('/') {
+                return Err("direct.netns_path must be an absolute path".into());
+            }
+        }
+        if self.mode == DirectMode::L2Uplink && self.netns_path.is_some() {
+            return Err("direct.mode=l2-uplink attaches to a host uplink; netns_path must be unset".into());
+        }
+        Ok(())
+    }
+}
+
+impl NetworkSpec {
+    /// Validates the bridge-less options of a `Tap` spec. Other variants and
+    /// bridged taps always pass.
+    pub fn validate_direct(&self) -> Result<(), String> {
+        let NetworkSpec::Tap {
+            direct: Some(d),
+            bridge,
+            netns,
+            extra,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        d.validate()?;
+        if bridge.is_some() {
+            return Err("network.direct and network.bridge are mutually exclusive".into());
+        }
+        if *netns {
+            return Err("network.direct and network.netns=true are mutually exclusive".into());
+        }
+        if !extra.is_empty() {
+            return Err("network.extra NICs are not supported together with network.direct yet".into());
+        }
+        Ok(())
+    }
 }
 
 /// One extra guest NIC on a host bridge. `tap_name` is filled by
@@ -900,5 +987,76 @@ mod create_vm_request_tests {
             serde_json::to_value(&spec).unwrap(),
             serde_json::to_value(&again).unwrap()
         );
+    }
+
+    #[test]
+    fn bridged_tap_record_without_direct_stays_bridged_and_reserializes_unchanged() {
+        // Persisted VM requests are re-prepared on start/restore, so a record
+        // written before `direct` existed must keep meaning "bridged tap" and
+        // must not sprout a `direct` key when written back.
+        let raw = r#"{"mode":"tap","bridge":"vmbr0","mac":"02:00:00:00:00:01","netns":false}"#;
+        let spec: NetworkSpec = serde_json::from_str(raw).unwrap();
+        let NetworkSpec::Tap { direct, .. } = &spec else {
+            panic!("expected tap");
+        };
+        assert!(direct.is_none());
+        assert!(serde_json::to_value(&spec).unwrap().get("direct").is_none());
+        assert!(spec.validate_direct().is_ok());
+    }
+
+    #[test]
+    fn direct_tap_round_trips_with_defaults() {
+        let raw = r#"{"mode":"tap","mac":"02:00:00:00:00:01","direct":{"outer":"eth0","netns_path":"/run/netns/fvcni-abc123"}}"#;
+        let spec: NetworkSpec = serde_json::from_str(raw).unwrap();
+        let NetworkSpec::Tap { direct, bridge, .. } = &spec else {
+            panic!("expected tap");
+        };
+        let d = direct.as_ref().expect("direct present");
+        assert_eq!(d.outer, "eth0");
+        assert_eq!(d.netns_path.as_deref(), Some("/run/netns/fvcni-abc123"));
+        assert_eq!(d.mode, DirectMode::PeerVeth, "mode defaults to peer-veth");
+        assert!(bridge.is_none());
+        assert!(spec.validate_direct().is_ok());
+        let again: NetworkSpec =
+            serde_json::from_str(&serde_json::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap(),
+            serde_json::to_value(&again).unwrap()
+        );
+        let l2: NetworkSpec = serde_json::from_str(
+            r#"{"mode":"tap","direct":{"outer":"enp1s0","mode":"l2-uplink"}}"#,
+        )
+        .unwrap();
+        assert!(l2.validate_direct().is_ok());
+    }
+
+    #[test]
+    fn direct_validation_rejects_conflicting_or_malformed_specs() {
+        fn check(json: &str) -> Result<(), String> {
+            serde_json::from_str::<NetworkSpec>(json)
+                .unwrap()
+                .validate_direct()
+        }
+        let ok = r#""direct":{"outer":"eth0","netns_path":"/run/netns/x"}"#;
+        assert!(check(&format!(r#"{{"mode":"tap",{ok}}}"#)).is_ok());
+        let bridge = check(&format!(r#"{{"mode":"tap","bridge":"vmbr0",{ok}}}"#));
+        assert!(bridge.unwrap_err().contains("mutually exclusive"));
+        let netns = check(&format!(r#"{{"mode":"tap","netns":true,{ok}}}"#));
+        assert!(netns.unwrap_err().contains("netns=true"));
+        let extra = check(&format!(
+            r#"{{"mode":"tap","extra":[{{"bridge":"b"}}],{ok}}}"#
+        ));
+        assert!(extra.unwrap_err().contains("extra"));
+        assert!(check(r#"{"mode":"tap","direct":{"outer":""}}"#).is_err());
+        assert!(check(r#"{"mode":"tap","direct":{"outer":"averyveryverylongname"}}"#).is_err());
+        assert!(check(r#"{"mode":"tap","direct":{"outer":"a/b"}}"#).is_err());
+        let rel = check(r#"{"mode":"tap","direct":{"outer":"eth0","netns_path":"relative/ns"}}"#);
+        assert!(rel.unwrap_err().contains("absolute"));
+        let l2ns = check(
+            r#"{"mode":"tap","direct":{"outer":"eth0","mode":"l2-uplink","netns_path":"/run/netns/x"}}"#,
+        );
+        assert!(l2ns.unwrap_err().contains("l2-uplink"));
+        // Non-tap variants never trip direct validation.
+        assert!(check(r#"{"mode":"none"}"#).is_ok());
     }
 }

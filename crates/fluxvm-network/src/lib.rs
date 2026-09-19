@@ -4,6 +4,7 @@
 pub mod cilium;
 pub mod cnp;
 pub mod dataplane;
+pub mod direct;
 pub mod ebpf;
 pub mod egress;
 pub mod egress_proxy;
@@ -36,11 +37,12 @@ use std::ffi::CString;
 use uuid::Uuid;
 
 pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<PreparedNetwork> {
+    spec.validate_direct().map_err(|e| anyhow::anyhow!(e))?;
     match spec {
         NetworkSpec::None | NetworkSpec::User { .. } => Ok(PreparedNetwork {
             spec: spec.clone(),
             tap_name: None,
-            macvtap_fd: None,
+            tap_fd: None,
             netns: None,
             dhcp_leasefile: None,
             guest_ip: None,
@@ -53,6 +55,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             mac,
             extra,
             netns: use_netns,
+            ..
         } if *use_netns => {
             if !extra.is_empty() {
                 bail!("Multus extra NICs require network.netns=false (host-bridge taps)");
@@ -67,14 +70,53 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     mac: mac.clone(),
                     netns: true,
                     extra: vec![],
+                    direct: None,
                 },
                 tap_name: Some(handle.tap_name),
-                macvtap_fd: None,
+                tap_fd: None,
                 netns: Some(handle.netns),
                 dhcp_leasefile: Some(handle.dhcp_leasefile),
                 guest_ip: Some(handle.guest_ip),
                 guest_cidr: Some(handle.guest_cidr),
                 gateway: Some(handle.gateway),
+            })
+        }
+        NetworkSpec::Tap {
+            tap_name,
+            mac,
+            direct: Some(direct),
+            ..
+        } => {
+            let tap = tap_name
+                .clone()
+                .unwrap_or_else(|| format!("eph{}", &id.simple().to_string()[..8]));
+            if tap.len() > 15 {
+                bail!("tap interface name must be <= 15 characters");
+            }
+            // No set_master and no default_bridge fallback: the whole point is
+            // that nothing bridges this tap. A redirect program pairs it with
+            // `direct.outer` instead (attached by the dataplane step).
+            let made = direct::prepare_tap(&tap, direct)
+                .await
+                .context("preparing direct (bridge-less) tap")?;
+            Ok(PreparedNetwork {
+                spec: NetworkSpec::Tap {
+                    tap_name: Some(tap.clone()),
+                    bridge: None,
+                    mac: mac.clone(),
+                    netns: false,
+                    extra: vec![],
+                    direct: Some(direct.clone()),
+                },
+                tap_name: Some(tap),
+                tap_fd: made.fd,
+                // The VMM runs in the host namespace and takes the tap by fd;
+                // it is deliberately NOT launched inside the outer netns.
+                netns: None,
+                dhcp_leasefile: None,
+                guest_ip: None,
+                guest_cidr: None,
+                gateway: None,
             })
         }
         NetworkSpec::Tap {
@@ -142,9 +184,10 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     mac: mac.clone(),
                     netns: false,
                     extra: prepared_extra,
+                    direct: None,
                 },
                 tap_name: Some(tap),
-                macvtap_fd: None,
+                tap_fd: None,
                 netns: None,
                 dhcp_leasefile: None,
                 guest_ip: None,
@@ -205,7 +248,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     ],
                 )
                 .await?;
-                open_macvtap_fd(&name).await
+                open_tap_fd(&name).await
             }
             .await;
 
@@ -213,7 +256,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                 Ok(fd) => Ok(PreparedNetwork {
                     spec: spec.clone(),
                     tap_name: Some(name),
-                    macvtap_fd: Some(fd),
+                    tap_fd: Some(fd),
                     netns: None,
                     dhcp_leasefile: None,
                     guest_ip: None,
@@ -251,7 +294,7 @@ pub fn dataplane_interface(id: Uuid, network: &PreparedNetwork) -> Option<String
 /// Opens the macvtap character device (`/dev/tap<ifindex>`) for `name`
 /// without O_CLOEXEC, so the fd survives exec into the spawned VMM and can
 /// be passed on the command line (`-netdev tap,fd=N` / `--net fd=N`).
-async fn open_macvtap_fd(name: &str) -> Result<i32> {
+async fn open_tap_fd(name: &str) -> Result<i32> {
     let ifindex = std::fs::read_to_string(format!("/sys/class/net/{name}/ifindex"))
         .with_context(|| format!("reading ifindex for {name}"))?;
     let dev_path = format!("/dev/tap{}", ifindex.trim());
@@ -293,6 +336,17 @@ pub async fn cleanup(
     }
     match spec {
         NetworkSpec::Macvtap { .. } => cleanup_macvtap(tap_name).await,
+        NetworkSpec::Tap {
+            direct: Some(direct),
+            ..
+        } => {
+            direct::cleanup(tap_name, direct).await;
+            // Host-namespace direct taps are persistent like bridged ones.
+            if direct.netns_path.is_none() {
+                cleanup_tap(tap_name).await?;
+            }
+            Ok(())
+        }
         NetworkSpec::Tap { extra, .. } => {
             cleanup_tap(tap_name).await?;
             for nic in extra {
@@ -323,7 +377,7 @@ pub async fn add_bridge_tap(tap: &str, bridge: &str) -> Result<()> {
     Ok(())
 }
 
-async fn create_tap(tap: &str) -> Result<()> {
+pub(crate) async fn create_tap(tap: &str) -> Result<()> {
     run_checked(
         "ip",
         &[
