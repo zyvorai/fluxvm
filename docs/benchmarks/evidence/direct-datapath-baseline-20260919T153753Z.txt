@@ -1,0 +1,52 @@
+== FluxVM direct-datapath baseline ==
+date: 2026-09-19T15:33:35Z
+host: Linux 7.0.0-31-generic x86_64 cpus=12
+loadavg(1/5/15m at start): 1.28 2.63 3.24  (other workloads inflate variance)
+iproute2: ip utility, iproute2-6.19.0, libbpf 1.6.3
+iperf3: iperf 3.20 (cJSON 1.7.15)
+br_netfilter: loaded (bridge-nf-call-iptables=1)
+runs=5 duration=5s ping_count=500 udp_len=64 mtu=1500
+scope: host forwarding cost only; veth stands in for the tap (no virtio/QEMU)
+bench-direct-datapath: == floor (hops=2, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0360ms p99=0.0700ms loss=0.0%
+bench-direct-datapath:   run 2: ping p50=0.0340ms p99=0.0650ms loss=0.0%
+bench-direct-datapath:   run 3: ping p50=0.0360ms p99=0.0660ms loss=0.0%
+bench-direct-datapath:   run 4: ping p50=0.0370ms p99=0.0690ms loss=0.0%
+bench-direct-datapath:   run 5: ping p50=0.0350ms p99=0.0630ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=45.822 Gbit/s udp64=0.4215 Mpps loss=0.04%
+bench-direct-datapath:   run 2: tcp=45.255 Gbit/s udp64=0.4317 Mpps loss=0.11%
+bench-direct-datapath:   run 3: tcp=44.298 Gbit/s udp64=0.4172 Mpps loss=0.02%
+bench-direct-datapath:   run 4: tcp=46.040 Gbit/s udp64=0.4333 Mpps loss=0.00%
+bench-direct-datapath:   run 5: tcp=45.667 Gbit/s udp64=0.4315 Mpps loss=0.01%
+bench-direct-datapath: == cni-bridge (hops=8, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0550ms p99=0.0950ms loss=0.0%
+bench-direct-datapath:   run 2: ping p50=0.0570ms p99=0.1040ms loss=0.0%
+bench-direct-datapath:   run 3: ping p50=0.0520ms p99=0.0980ms loss=0.0%
+bench-direct-datapath:   run 4: ping p50=0.0540ms p99=0.0980ms loss=0.0%
+bench-direct-datapath:   run 5: ping p50=0.0540ms p99=0.0970ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=37.936 Gbit/s udp64=0.2308 Mpps loss=0.04%
+bench-direct-datapath:   run 2: tcp=36.305 Gbit/s udp64=0.2232 Mpps loss=0.12%
+bench-direct-datapath:   run 3: tcp=33.524 Gbit/s udp64=0.1677 Mpps loss=0.23%
+bench-direct-datapath:   run 4: tcp=23.878 Gbit/s udp64=0.1494 Mpps loss=0.08%
+bench-direct-datapath:   run 5: tcp=24.800 Gbit/s udp64=0.1976 Mpps loss=0.12%
+bench-direct-datapath: == standalone-bridge (hops=5, target=10.99.0.2) ==
+bench-direct-datapath:   run 1: ping p50=0.0570ms p99=0.0750ms loss=0.0%
+bench-direct-datapath:   run 2: ping p50=0.0480ms p99=0.0850ms loss=0.0%
+bench-direct-datapath:   run 3: ping p50=0.0480ms p99=0.0880ms loss=0.0%
+bench-direct-datapath:   run 4: ping p50=0.0540ms p99=0.0880ms loss=0.0%
+bench-direct-datapath:   run 5: ping p50=0.0470ms p99=0.0960ms loss=0.0%
+bench-direct-datapath:   run 1: tcp=40.650 Gbit/s udp64=0.2982 Mpps loss=0.00%
+bench-direct-datapath:   run 2: tcp=40.320 Gbit/s udp64=0.2938 Mpps loss=0.04%
+bench-direct-datapath:   run 3: tcp=41.141 Gbit/s udp64=0.2855 Mpps loss=0.01%
+bench-direct-datapath:   run 4: tcp=39.815 Gbit/s udp64=0.3003 Mpps loss=0.04%
+bench-direct-datapath:   run 5: tcp=39.734 Gbit/s udp64=0.2982 Mpps loss=0.04%
+
+== summary (median of 5 runs; lower is better for ping, higher for tcp/udp) ==
+metric                      floor               cni-bridge          standalone-bridge   
+ping_loss_pct               0                   0                   0                   
+ping_p50_ms                 0.036               0.054               0.048               
+ping_p99_ms                 0.066               0.098               0.088               
+tcp_gbps                    45.67               33.52               40.32               
+udp64_loss_pct              0.02                0.12                0.04                
+udp64_mpps                  0.4315              0.1976              0.2982              
+json: /tmp/direct-datapath-baseline.json
