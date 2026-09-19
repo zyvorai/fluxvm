@@ -49,7 +49,7 @@ else
   echo "note: clang lacks -bpf-stack-size; building service objects with default stack view" >&2
 fi
 
-for src in fluxvm_tc fluxvm_pod_ingress fluxvm_xdp fluxvm_intelligence fluxvm_qemu_device fluxvm_qemu_egress; do
+for src in fluxvm_tc fluxvm_direct fluxvm_pod_ingress fluxvm_xdp fluxvm_intelligence fluxvm_qemu_device fluxvm_qemu_egress; do
   "$CLANG" "${CFLAGS[@]}" -c "$ROOT/bpf/${src}.bpf.c" -o "$OUT_DIR/${src}.bpf.o"
 done
 
@@ -74,6 +74,7 @@ done
 
 echo "built:"
 echo "  $OUT_DIR/fluxvm_tc.bpf.o"
+echo "  $OUT_DIR/fluxvm_direct.bpf.o"
 echo "  $OUT_DIR/fluxvm_pod_ingress.bpf.o"
 echo "  $OUT_DIR/fluxvm_xdp.bpf.o"
 echo "  $OUT_DIR/fluxvm_intelligence.bpf.o"

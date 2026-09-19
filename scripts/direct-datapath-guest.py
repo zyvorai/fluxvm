@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Minimal "guest" for scripts/test-direct-datapath.sh: attaches to an existing
+# tap and answers ARP requests and ICMP echo for one IPv4 address, standing in
+# for a VM's virtio-net so the redirect path can be exercised with no KVM.
+#
+#   direct-datapath-guest.py <tap> <guest-ip> <guest-mac> <stats-file>
+#
+# The stats file is rewritten after every handled frame as key=value lines
+# (rx_frames, arp_replies, icmp_replies) so the test can assert on them.
+import fcntl
+import os
+import socket
+import struct
+import sys
+
+TUNSETIFF = 0x400454CA
+IFF_TAP, IFF_NO_PI = 0x0002, 0x1000
+
+
+def checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\0"
+    s = sum(struct.unpack("!%dH" % (len(data) // 2), data))
+    while s >> 16:
+        s = (s & 0xFFFF) + (s >> 16)
+    return ~s & 0xFFFF
+
+
+def open_tap(name: str) -> int:
+    fd = os.open("/dev/net/tun", os.O_RDWR)
+    fcntl.ioctl(fd, TUNSETIFF, struct.pack("16sH22x", name.encode(), IFF_TAP | IFF_NO_PI))
+    return fd
+
+
+def main() -> None:
+    tap, ip_s, mac_s, stats_path = sys.argv[1:5]
+    gip = socket.inet_aton(ip_s)
+    gmac = bytes.fromhex(mac_s.replace(":", ""))
+    stats = {"rx_frames": 0, "arp_replies": 0, "icmp_replies": 0}
+    fd = open_tap(tap)
+
+    def flush() -> None:
+        tmp = stats_path + ".tmp"
+        with open(tmp, "w") as f:
+            f.writelines("%s=%d\n" % kv for kv in stats.items())
+        os.replace(tmp, stats_path)
+
+    flush()
+    while True:
+        frame = os.read(fd, 65535)
+        stats["rx_frames"] += 1
+        if len(frame) >= 14:
+            src, etype = frame[6:12], struct.unpack("!H", frame[12:14])[0]
+            if etype == 0x0806 and len(frame) >= 42:  # ARP
+                op = struct.unpack("!H", frame[20:22])[0]
+                sha, spa, tpa = frame[22:28], frame[28:32], frame[38:42]
+                if op == 1 and tpa == gip:
+                    reply = (
+                        src + gmac + b"\x08\x06"
+                        + struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2)
+                        + gmac + gip + sha + spa
+                    )
+                    os.write(fd, reply)
+                    stats["arp_replies"] += 1
+            elif etype == 0x0800 and len(frame) >= 34:  # IPv4
+                ihl = (frame[14] & 0x0F) * 4
+                if frame[23] == 1 and frame[30:34] == gip and frame[14 + ihl] == 8:
+                    ip_src = frame[26:30]
+                    icmp = bytearray(frame[14 + ihl:])
+                    icmp[0], icmp[2], icmp[3] = 0, 0, 0
+                    struct.pack_into("!H", icmp, 2, checksum(bytes(icmp)))
+                    iph = bytearray(20)
+                    iph[0] = 0x45
+                    struct.pack_into("!H", iph, 2, 20 + len(icmp))
+                    iph[8], iph[9] = 64, 1
+                    iph[12:16], iph[16:20] = gip, ip_src
+                    struct.pack_into("!H", iph, 10, checksum(bytes(iph)))
+                    os.write(fd, src + gmac + b"\x08\x00" + bytes(iph) + bytes(icmp))
+                    stats["icmp_replies"] += 1
+        flush()
+
+
+if __name__ == "__main__":
+    main()

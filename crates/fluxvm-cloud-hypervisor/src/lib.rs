@@ -145,7 +145,10 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
             extra,
             ..
         } => {
-            let mut n = format!("tap={tap}");
+            let mut n = match ctx.network.tap_fd {
+                Some(fd) => format!("fd={fd}"),
+                None => format!("tap={tap}"),
+            };
             if let Some(mac) = mac {
                 n.push_str(&format!(",mac={mac}"));
             }
@@ -165,7 +168,7 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
         NetworkSpec::Macvtap { mac, .. } => {
             let fd = ctx
                 .network
-                .macvtap_fd
+                .tap_fd
                 .context("macvtap network was not prepared")?;
             let mut n = format!("fd={fd}");
             if let Some(mac) = mac {
@@ -245,7 +248,7 @@ impl VmBackend for CloudHypervisorBackend {
             match spawn_swtpm(cfg, ctx).await {
                 Ok(pid) => Some(pid),
                 Err(e) => {
-                    if let Some(fd) = ctx.network.macvtap_fd {
+                    if let Some(fd) = ctx.network.tap_fd {
                         fluxvm_core::process::close_fd(fd);
                     }
                     return Err(e);
@@ -262,7 +265,7 @@ impl VmBackend for CloudHypervisorBackend {
             &args,
         );
         let spawned = spawn_logged(&program, &args, &ctx.log_path).await;
-        if let Some(fd) = ctx.network.macvtap_fd {
+        if let Some(fd) = ctx.network.tap_fd {
             fluxvm_core::process::close_fd(fd);
         }
         let child = match spawned {
@@ -628,6 +631,7 @@ mod tests {
             bridge: Some("br0".into()),
             mac: Some("02:00:00:00:00:01".into()),
             netns: false,
+            direct: None,
             extra: vec![fluxvm_core::model::ExtraNic {
                 bridge: "br1".into(),
                 mac: Some("02:00:00:00:00:02".into()),
@@ -704,7 +708,7 @@ mod tests {
             network: PreparedNetwork {
                 spec: NetworkSpec::None,
                 tap_name: None,
-                macvtap_fd: None,
+                tap_fd: None,
                 netns: None,
                 dhcp_leasefile: None,
                 guest_ip: None,
@@ -1195,5 +1199,30 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("send-migration request"));
+    }
+
+    #[test]
+    fn direct_tap_with_prepared_fd_is_attached_by_fd() {
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: None,
+            mac: Some("02:00:00:00:00:01".into()),
+            netns: false,
+            direct: Some(fluxvm_core::model::DirectSpec {
+                outer: "eth0".into(),
+                netns_path: Some("/run/netns/fvcni-abc".into()),
+                mode: fluxvm_core::model::DirectMode::PeerVeth,
+            }),
+            extra: vec![],
+        };
+        c.network.tap_fd = Some(9);
+        let args = build_args(&cfg(), &req(), &c).unwrap();
+        let nets: Vec<_> = args
+            .windows(2)
+            .filter(|w| w[0] == "--net")
+            .map(|w| w[1].as_str())
+            .collect();
+        assert_eq!(nets, vec!["fd=9,mac=02:00:00:00:00:01"]);
     }
 }

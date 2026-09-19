@@ -15,9 +15,12 @@ pub struct PreparedNetwork {
     /// Name of the ephemeral network device to remove on stop (a TAP or a
     /// macvtap link, depending on `spec`).
     pub tap_name: Option<String>,
-    /// For `NetworkSpec::Macvtap`: a pre-opened, exec-inheritable fd for the
-    /// device's `/dev/tapN` character device, passed to the VMM as `fd=`.
-    pub macvtap_fd: Option<i32>,
+    /// A pre-opened, exec-inheritable tap fd passed to the VMM as `fd=`
+    /// instead of `ifname=`: for `NetworkSpec::Macvtap` the device's
+    /// `/dev/tapN`, and for a `NetworkSpec::Tap { direct: Some(..) }` whose
+    /// tap lives in a foreign netns, a `/dev/net/tun` fd bound to that netns
+    /// (the VMM cannot open the tap by name from its own namespace).
+    pub tap_fd: Option<i32>,
     /// Set for `NetworkSpec::Tap { netns: true, .. }`: the private network
     /// namespace `tap_name` was created inside. Every backend's `launch`
     /// must run the VMM process itself inside this namespace (`ip netns

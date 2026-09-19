@@ -20,6 +20,7 @@
 #include <bpf/bpf_endian.h>
 #include <bpf/bpf_helpers.h>
 #include "fluxvm_pod_policy.bpf.h"
+#include "fluxvm_direct.bpf.h"
 
 #define FLUXVM_VERDICT_DROP  0
 #define FLUXVM_VERDICT_ALLOW 1
@@ -1083,8 +1084,7 @@ static __always_inline int handle_ipv6(
     return allowed?TC_ACT_OK:TC_ACT_SHOT;
 }
 
-SEC("tc")
-int fluxvm_egress(struct __sk_buff *skb)
+static __always_inline int fluxvm_egress_verdict(struct __sk_buff *skb)
 {
     __u32 ifindex = skb->ifindex;
     struct iface_config *cfg = bpf_map_lookup_elem(&fluxvm_id, &ifindex);
@@ -1119,6 +1119,20 @@ int fluxvm_egress(struct __sk_buff *skb)
                           FLUXVM_REASON_ACTION_DROP);
     }
     return verdict == FLUXVM_VERDICT_ALLOW ? TC_ACT_OK : TC_ACT_SHOT;
+}
+
+/* Policy first, redirect last. Everything above (allow-list, L4, rate limit,
+ * conntrack, stats, drop reasons) runs inside fluxvm_egress_verdict(); only a
+ * packet it allows is redirected. A second TCX program could not do this:
+ * TC_ACT_OK is TCX_PASS and ends a TCX chain, so it would never run. */
+SEC("tc")
+int fluxvm_egress(struct __sk_buff *skb)
+{
+    int verdict = fluxvm_egress_verdict(skb);
+    if (verdict != TC_ACT_OK)
+        return verdict;
+
+    return fluxvm_direct_redirect(skb);
 }
 
 char LICENSE[] SEC("license") = "GPL";
