@@ -6,7 +6,7 @@
 # tap and answers ARP requests and ICMP echo for one IPv4 address, standing in
 # for a VM's virtio-net so the redirect path can be exercised with no KVM.
 #
-#   direct-datapath-guest.py <tap> <guest-ip> <guest-mac> <stats-file>
+#   direct-datapath-guest.py <tap|fd:N> <guest-ip> <guest-mac> <stats-file>
 #
 # The stats file is rewritten after every handled frame as key=value lines
 # (rx_frames, arp_replies, icmp_replies) so the test can assert on them.
@@ -30,6 +30,11 @@ def checksum(data: bytes) -> int:
 
 
 def open_tap(name: str) -> int:
+    # "fd:N" adopts a tap fd inherited from the parent -- exactly how QEMU receives a direct
+    # tap that lives in a foreign netns. The fd is already bound to that namespace, so this
+    # process never has to enter it.
+    if name.startswith("fd:"):
+        return int(name[3:])
     fd = os.open("/dev/net/tun", os.O_RDWR)
     fcntl.ioctl(fd, TUNSETIFF, struct.pack("16sH22x", name.encode(), IFF_TAP | IFF_NO_PI))
     return fd
@@ -37,6 +42,10 @@ def open_tap(name: str) -> int:
 
 def main() -> None:
     tap, ip_s, mac_s, stats_path = sys.argv[1:5]
+    # A tap adopted by fd is the daemon's direct tap, opened with IFF_VNET_HDR (so a real VMM can
+    # negotiate checksum/TSO offloads): every frame read or written carries a 10-byte
+    # virtio_net_hdr. A tap opened by name here has no such header.
+    vnet = 10 if tap.startswith("fd:") else 0
     gip = socket.inet_aton(ip_s)
     gmac = bytes.fromhex(mac_s.replace(":", ""))
     stats = {"rx_frames": 0, "arp_replies": 0, "icmp_replies": 0}
@@ -50,7 +59,7 @@ def main() -> None:
 
     flush()
     while True:
-        frame = os.read(fd, 65535)
+        frame = os.read(fd, 65535)[vnet:]
         stats["rx_frames"] += 1
         if len(frame) >= 14:
             src, etype = frame[6:12], struct.unpack("!H", frame[12:14])[0]
@@ -63,7 +72,7 @@ def main() -> None:
                         + struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2)
                         + gmac + gip + sha + spa
                     )
-                    os.write(fd, reply)
+                    os.write(fd, b"\0" * vnet + reply)
                     stats["arp_replies"] += 1
             elif etype == 0x0800 and len(frame) >= 34:  # IPv4
                 ihl = (frame[14] & 0x0F) * 4
@@ -78,7 +87,7 @@ def main() -> None:
                     iph[8], iph[9] = 64, 1
                     iph[12:16], iph[16:20] = gip, ip_src
                     struct.pack_into("!H", iph, 10, checksum(bytes(iph)))
-                    os.write(fd, src + gmac + b"\x08\x00" + bytes(iph) + bytes(icmp))
+                    os.write(fd, b"\0" * vnet + src + gmac + b"\x08\x00" + bytes(iph) + bytes(icmp))
                     stats["icmp_replies"] += 1
         flush()
 

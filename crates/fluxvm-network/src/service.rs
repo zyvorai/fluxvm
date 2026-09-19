@@ -1925,6 +1925,13 @@ fn ensure_edt_qdiscs(cfg: &Config) -> Result<()> {
 
 /// Ensure the east-west service program/maps exist on one VM edge.
 pub fn ensure_for_vm(cfg: &Config, id: Uuid, iface: &str) -> Result<bool> {
+    // A bridge-less direct tap lives in another netns, where these tc/XDP attaches
+    // (which take a bare interface name) would hit the wrong device. Service Fabric on
+    // direct taps is a documented bound of the direct datapath, not silently half-applied.
+    if crate::direct::recorded(id).is_some() {
+        tracing::debug!(%id, %iface, "service fabric is not supported on bridge-less direct taps; skipping");
+        return Ok(false);
+    }
     let specs: Vec<ServiceSpec> = effective_catalog(cfg)?
         .into_iter()
         .filter(|s| s.exposure.east_west())

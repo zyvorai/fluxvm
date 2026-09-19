@@ -160,7 +160,8 @@ fn helper() -> String {
 
 fn run_json<T: for<'de> Deserialize<'de>>(args: &[&str]) -> Result<T> {
     let helper = helper();
-    let out = Command::new(&helper)
+    // The helper resolves the interface name inside whichever netns the caller scoped.
+    let out = crate::netns_scope::command(&helper)
         .args(args)
         .output()
         .with_context(|| format!("running TCX helper {helper}"))?;
