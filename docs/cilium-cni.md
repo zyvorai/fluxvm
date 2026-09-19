@@ -63,9 +63,9 @@ lxc* ⇄ Pod netns eth0 (CNI-assigned IP; the guest takes over IP/MAC/routes)
 Host lxc* peer keeps Cilium TC/eBPF; FluxVM never writes Cilium maps.
 ```
 
-That bridge chain is the default. With `FLUXVM_CONTAINER_CNI_DATAPATH=direct|auto` (and a veth Pod, no
-Multus secondaries, no warm pool, kernel ≥ 5.10) a TC redirect replaces it — see
-[direct-datapath.md](direct-datapath.md).
+That bridge chain is the fallback. By default (`FLUXVM_CONTAINER_CNI_DATAPATH=auto`, a veth Pod, no
+Multus secondaries, kernel ≥ 5.10, an `ebpf`/`cilium` daemon dataplane) a TC redirect replaces it;
+`FLUXVM_CONTAINER_CNI_DATAPATH=bridge` forces the chain — see [direct-datapath.md](direct-datapath.md).
 
 ## 📚 Related
 

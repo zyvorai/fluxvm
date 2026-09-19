@@ -17,7 +17,7 @@ Two attach modes share one mechanism:
 
 | Piece | Behavior |
 |-------|----------|
-| Shim knob | `FLUXVM_CONTAINER_CNI_DATAPATH=bridge\|direct\|auto` (default `bridge`) |
+| Shim knob | `FLUXVM_CONTAINER_CNI_DATAPATH=bridge\|direct\|auto` (default `auto`) |
 | `auto` | Direct when every precondition holds, else the bridge chain with the reason logged; a create or warm-pool hotplug the daemon rejects is retried **once** on the bridge chain |
 | `direct` | Direct or the Pod fails to start (no silent fallback) |
 | Preconditions | kernel ≥ 5.10 (`bpf_redirect_peer`), the primary interface is a `veth`, no Multus secondaries |
@@ -35,14 +35,15 @@ Two attach modes share one mechanism:
 
 ## ⚠️ What does not work (honesty bounds)
 
-- **Default is still `bridge`, and nothing here has run in a live Kubernetes pod with a real guest.**
-  Verified: the netns/veth/tap topology with a userspace guest on a real 7.0 kernel, the daemon's loader
-  end to end (TCX **and** legacy tc, in the Pod netns and on a host uplink), the shim's namespace
-  preparation and cleanup, the QMP fd-passing against a **mock** QEMU (the descriptor arrives, is the
-  daemon's tap, and the command order is right), and the decision logic. Not verified: a real QEMU accepting
-  the `getfd`/`netdev_add fd=` sequence, and the create-time `auto` fallback loop (no automated test).
-  Run `FLUXVM_DIRECT_LIVE=1 ./scripts/evidence-direct-datapath.sh` on a Cilium + KVM node, then flip
-  `CniDatapath`'s `#[default]` to `Auto`.
+- **The shim default is `auto`, on the strength of one live run.** On a single-node k3s + Cilium v1.20.2
+  (veth mode) node, kernel 7.0.0-31, KVM, QEMU 10.2.1, two `RuntimeClass fluxvm` Pods in `direct` mode became
+  Ready, reached each other, left no `fvbh*` bridge on the node, and a deny-all `NetworkPolicy` still blocked
+  the client ([evidence](benchmarks/evidence/direct-datapath-live-20260919T202359Z.txt)). A real QEMU also
+  accepted both the launch-time tap descriptor and the warm-pool `getfd`/`netdev_add fd=` sequence.
+  **Not measured or exercised live:** bridge-vs-direct latency/throughput with a real guest (the table below is a
+  veth stand-in), the create-time `auto` fallback loop (no automated test), a warm-pool claim from a Pod,
+  Multus secondaries, and standalone `l2-uplink` with a real guest (that mode is chosen per VM, never by default).
+  `FLUXVM_CONTAINER_CNI_DATAPATH=bridge` is the kill switch.
 - Multus secondary NICs use the bridge chain (`auto` falls back, `direct` fails).
 - **Service Fabric is not applied to direct taps** (its attaches take a bare interface name).
 - Cilium in **netkit** mode (or macvlan/ipvlan Pods) is not a veth → bridge chain.

@@ -4313,18 +4313,20 @@ enum CniProvider {
 #[serde(rename_all = "kebab-case")]
 enum CniDatapath {
     /// Host bridge + veth chain (the original datapath).
-    #[default]
     Bridge,
     /// Bridge-less eBPF redirect; refuse to start the Pod when it cannot be used.
     Direct,
     /// Direct when every precondition holds, else the bridge chain (reason logged).
+    #[default]
     Auto,
 }
 
 impl CniDatapath {
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "" | "bridge" => Some(Self::Bridge),
+            // An empty value (`FLUXVM_CONTAINER_CNI_DATAPATH=` in an env file) means "unset".
+            "" => Some(Self::default()),
+            "bridge" => Some(Self::Bridge),
             "direct" => Some(Self::Direct),
             "auto" => Some(Self::Auto),
             _ => None,
@@ -4337,7 +4339,7 @@ impl CniDatapath {
             // A typo must not silently pick a datapath; fall back to the safe original one.
             Ok(raw) => Self::parse(&raw).unwrap_or_else(|| {
                 warn!("invalid FLUXVM_CONTAINER_CNI_DATAPATH={raw:?} (use bridge, direct or auto); using bridge");
-                Self::default()
+                Self::Bridge
             }),
         }
     }
@@ -6207,7 +6209,11 @@ mod direct_datapath_tests {
     #[test]
     fn datapath_env_values_parse_and_unknown_is_rejected() {
         assert_eq!(CniDatapath::parse("bridge"), Some(CniDatapath::Bridge));
-        assert_eq!(CniDatapath::parse(""), Some(CniDatapath::Bridge));
+        assert_eq!(
+            CniDatapath::parse(""),
+            Some(CniDatapath::Auto),
+            "an empty value means unset, i.e. the default"
+        );
         assert_eq!(CniDatapath::parse(" Direct "), Some(CniDatapath::Direct));
         assert_eq!(CniDatapath::parse("AUTO"), Some(CniDatapath::Auto));
         assert_eq!(
@@ -6217,8 +6223,8 @@ mod direct_datapath_tests {
         );
         assert_eq!(
             CniDatapath::default(),
-            CniDatapath::Bridge,
-            "the original datapath stays the default"
+            CniDatapath::Auto,
+            "auto is the default: direct when every precondition holds, else the bridge chain"
         );
     }
 

@@ -173,10 +173,10 @@ Containers compatibility.
    and ignores Multus `netN` secondaries under the Cilium provider so primary
    handoff proceeds ([cilium-cni.md](cilium-cni.md)). Multus `netN` secondaries
    are attached as extra guest NICs over bridge chains (boot-time `network.extra`,
-   or hotplug after a warm-pool claim). An opt-in bridge-less datapath replaces the
-   primary NIC's bridge chain with an eBPF redirect
-   (`FLUXVM_CONTAINER_CNI_DATAPATH=direct|auto`; default `bridge`, live evidence
-   pending — [direct-datapath.md](direct-datapath.md)). Unusual non-Cilium layouts remain open.
+   or hotplug after a warm-pool claim). A bridge-less datapath replaces the
+   primary NIC's bridge chain with an eBPF redirect when its preconditions hold
+   (`FLUXVM_CONTAINER_CNI_DATAPATH=auto`, the default; `bridge` forces the chain;
+   [direct-datapath.md](direct-datapath.md)). Unusual non-Cilium layouts remain open.
 3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
    Pod volume roots are scoped by sandbox UID; other binds remain copied unless
    an explicit broker/hotplug model is added.

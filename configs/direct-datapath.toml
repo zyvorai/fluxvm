@@ -9,7 +9,7 @@
 #
 # Two ways to use it:
 #   * Secure Containers on Cilium/any veth CNI: keep configs/cilium-cni.toml (mode = "cilium") and set
-#       FLUXVM_CONTAINER_CNI_DATAPATH=auto     # bridge (default) | direct | auto   -- shim env, per node
+#       FLUXVM_CONTAINER_CNI_DATAPATH=auto     # auto (default) | direct | bridge   -- shim env, per node
 #   * Standalone VMs on a physical uplink: keep this fragment and create VMs with
 #       "network": {"mode": "tap", "mac": "...",
 #                   "direct": {"outer": "enp1s0", "mode": "l2-uplink", "guest_ips": ["192.168.1.50"]}}

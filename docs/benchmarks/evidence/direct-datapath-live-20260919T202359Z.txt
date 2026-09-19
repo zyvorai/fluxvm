@@ -1,0 +1,36 @@
+Direct datapath live evidence -- scripts/evidence-direct-datapath.sh with FLUXVM_DIRECT_LIVE=1
+run (UTC): 2026-09-19 ~20:22
+FluxVM: 6acfe4b (release build of fluxctl + containerd-shim-fluxvm-v2 + fluxvm-container-agent; musl guest agent)
+node: single-node k3s v1.35.5+k3s1, Cilium v1.20.2 (datapath-mode veth, tunnel routing), kernel 7.0.0-31-generic, KVM, QEMU 10.2.1
+daemon: [sandbox.dataplane] mode = "cilium", default_allow = true, TCX via /usr/libexec/fluxvm/fluxvm-tcx
+shim: FLUXVM_CONTAINER_CNI=1 PROVIDER=auto INTERFACE=eth0 STRICT_MULTI_INTERFACE=1 FLUXVM_CONTAINER_CNI_DATAPATH=direct
+guest image: Ubuntu 24.04 (noble) cloud image + musl fluxvm-guest-agent
+pods: runtimeClassName fluxvm, busybox:1.36
+
+This file is the script's own output, copied from the terminal (the script does not write a log).
+
+⚡ == Direct datapath static evidence ==
+✅ PASS: files present
+✅ PASS: shim / loader / QMP / scheduler / BPF symbols present
+✅ PASS: scripts parse
+✅ PASS: benchmark evidence archived: 2 file(s)
+⏭️  SKIP: cargo not available
+🧪 == Direct datapath live evidence ==
+namespace/fluxvm-direct-12879 created
+pod/server created
+pod/client created
+pod/server condition met
+pod/client condition met
+✅ PASS: pod -> pod reachable in direct mode (10.42.0.127)
+✅ PASS: no fvbh* host bridge on the node
+networkpolicy.networking.k8s.io/deny-all created
+✅ PASS: Cilium NetworkPolicy still enforced in direct mode
+🎉 Direct datapath live evidence: PASS
+
+Notes (not script output)
+- An earlier attempt of the same script FAILED ("RuntimeClass pods not Ready"): the daemon's
+  virtiofsd_binary was unset and `virtiofsd` is not on PATH (/usr/libexec/virtiofsd). The daemon log
+  showed the direct redirect attached before the 400 from POST /v1/vms; setting virtiofsd_binary fixed it.
+- Not measured here: bridge-vs-direct latency/throughput on the live node (see direct-datapath.md).
+- Not exercised here: the shim's create-time `auto` fallback loop, warm-pool claims from a Pod,
+  Multus secondaries, standalone `l2-uplink` with a real guest.

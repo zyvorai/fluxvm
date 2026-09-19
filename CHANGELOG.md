@@ -11,8 +11,8 @@
 - **Direct (bridge-less) datapath** — an eBPF redirect between the outer device and the
   VM's tap in place of a bridge, with Cilium's `lxc*` hooks untouched
   (`docs/direct-datapath.md`). Secure Containers: shim
-  `FLUXVM_CONTAINER_CNI_DATAPATH=bridge|direct|auto` (default `bridge`; live
-  Cilium + KVM evidence pending), tap created inside the Pod netns and handed to
+  `FLUXVM_CONTAINER_CNI_DATAPATH=bridge|direct|auto` (default `auto`; live
+  Cilium + KVM evidence passed, `docs/benchmarks/evidence/direct-datapath-live-20260919T202359Z.txt`), tap created inside the Pod netns and handed to
   QEMU as a descriptor, warm-pool NICs via QMP `getfd`. Standalone: `network.direct`
   with `l2-uplink` (shared per-uplink steering maps, ARP steering by `guest_ips`,
   several VMs on one unbridged NIC), `MicroVM.spec.networkMode: direct`,

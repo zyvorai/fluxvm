@@ -24,10 +24,11 @@ sudo systemctl restart containerd
 sudo pkill -f containerd-shim-fluxvm-v2 || true
 ```
 
-Optional bridge-less datapath (`FLUXVM_CONTAINER_CNI_DATAPATH=bridge|direct|auto`, default
-`bridge`; [docs/direct-datapath.md](../../../docs/direct-datapath.md)): the daemon's dataplane
+Bridge-less datapath (`FLUXVM_CONTAINER_CNI_DATAPATH=auto|direct|bridge`, default `auto`:
+direct when every precondition holds, else the bridge chain with the reason logged; `bridge` is the
+kill switch; [docs/direct-datapath.md](../../../docs/direct-datapath.md)): the daemon's dataplane
 mode must be `ebpf` or `cilium`, and `/usr/lib/fluxvm/bpf` needs `fluxvm_direct.bpf.o` next to
-`fluxvm_tc.bpf.o`. Prove it on a node with
+`fluxvm_tc.bpf.o`; with a `legacy` dataplane `auto` retries once on the bridge chain. Prove it on a node with
 `FLUXVM_DIRECT_LIVE=1 FLUXVM_CONTAINER_CNI_DATAPATH=direct ./scripts/evidence-direct-datapath.sh`.
 
 Optional Fabric coexistence profile:

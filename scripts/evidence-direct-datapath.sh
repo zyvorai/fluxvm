@@ -15,7 +15,7 @@
 #   3. live (FLUXVM_DIRECT_LIVE=1)
 #                               a RuntimeClass Pod on a Cilium + KVM node with the shim in direct mode:
 #                               Ready, reachable, no bridge on the node, and a NetworkPolicy still enforced.
-#                               THIS TIER IS WHAT THE DEFAULT FLIP TO `auto` WAITS FOR.
+#                               THIS TIER GATED THE FLIP OF THE SHIM DEFAULT TO `auto`; re-run it before changing it back.
 #
 #   ./scripts/evidence-direct-datapath.sh
 #   sudo FLUXVM_DIRECT_KERNEL=1 FLUXVM_BPF_DIR=dist/bpf ./scripts/evidence-direct-datapath.sh
@@ -58,11 +58,14 @@ has bpf/fluxvm_direct.bpf.h "fluxvm_direct_redirect"
 has tools/fluxvm-sentinel-certify.py "redirect_peer"
 pass "shim / loader / QMP / scheduler / BPF symbols present"
 
-# Default-datapath guard: the original bridge chain must remain the default until live evidence
-# exists. Flipping it is a deliberate one-line change in CniDatapath's #[default].
-if ! awk '/enum CniDatapath/,/^}/' crates/fluxvm-containerd-shim/src/main.rs | grep -B1 "Bridge," | grep -q "#\[default\]"; then
-  echo "note: CniDatapath's default is no longer Bridge -- make sure the live tier below has been run" >&2
-fi
+# Default-datapath guard: `auto` became the default after the live tier passed on a Cilium + KVM node
+# (docs/benchmarks/evidence/direct-datapath-live-*.txt). Changing it is a deliberate one-line change in
+# CniDatapath's #[default]; a stray edit must not silently move every Pod to another datapath.
+awk '/enum CniDatapath/,/^}/' crates/fluxvm-containerd-shim/src/main.rs | grep -B1 "Auto," | grep -q "#\[default\]" \
+  || fail "CniDatapath's #[default] is not Auto (re-run the live tier before changing the default)"
+compgen -G 'docs/benchmarks/evidence/direct-datapath-live-*.txt' >/dev/null \
+  || fail "no archived live evidence (docs/benchmarks/evidence/direct-datapath-live-*.txt) for the auto default"
+pass "default datapath is auto and live evidence is archived"
 
 for f in scripts/test-direct-datapath.sh scripts/test-direct-uplink.sh scripts/test-verifier-budget.sh scripts/bench-direct-datapath.sh; do
   bash -n "$f" || fail "syntax: $f"
