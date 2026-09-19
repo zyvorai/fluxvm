@@ -138,6 +138,14 @@ print(" ".join(f"{b:02x}" for b in raw))
 PY
 }
 
+# Schema v10 (Set 19): the rich-rule scan only visits rules whose slot bit is set in the
+# fluxvm_pridx bucket for (pod, direction, family, protocol). Every rule this script writes
+# goes into slot 0, so publish that candidate bit alongside the rule.
+pridx_set() { # dir family proto
+  # shellcheck disable=SC2046,SC2086
+  bpftool map update pinned "$PIN/tc/maps/fluxvm_pridx" key hex $(hex_u32 "$POD_ID") $(printf "%02x %02x %02x 00" "$1" "$2" "$3") value hex 01 00 00 00 00 00 00 00
+}
+
 pod_policy_value() {
   # Matches struct fluxvm_pod_policy in bpf/fluxvm_pod_policy.bpf.h: flags
   # (u32), reserved0 (u32, Set 14 rich-rule count), reserved1 (u32, Set 14
@@ -469,6 +477,7 @@ expect_no_ping4
 CIDR_RULE="$(pod_rule_value "$POD_ID" 1 4 0 24 0 0 "$A4")"
 # shellcheck disable=SC2086
 bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $CIDR_RULE
+pridx_set 1 4 0
 RICH_ONE="$(pod_policy_value "$RICH_EGRESS_FLAGS" 1 "$SCHEMA_V2")"
 # shellcheck disable=SC2086
 bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY value hex $RICH_ONE
@@ -501,6 +510,7 @@ sleep 0.4
 TCP_RULE="$(pod_rule_value "$POD_ID" 1 4 6 32 18080 18080 "$A4")"
 # shellcheck disable=SC2086
 bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $TCP_RULE
+pridx_set 1 4 6
 expect_no_ping4
 ip netns exec "$NSB" python3 - <<'PY'
 import socket
@@ -582,6 +592,7 @@ sctp_probe deny
 SCTP_RULE="$(pod_rule_value "$POD_ID" 1 4 "$SCTP_PROTO" 32 "$SCTP_PORT" "$SCTP_PORT" "$A4")"
 # shellcheck disable=SC2086
 bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $SCTP_RULE
+pridx_set 1 4 "$SCTP_PROTO"
 sctp_probe allow
 
 # shellcheck disable=SC2086
@@ -607,6 +618,8 @@ bpftool prog load "$POD_ING_OBJ" "$PIN/tc/progs/fluxvm_pod_ingress" type classif
   map name fluxvm_pid4_port pinned "$PIN/tc/maps/fluxvm_pid4_port" \
   map name fluxvm_pid6_port pinned "$PIN/tc/maps/fluxvm_pid6_port" \
   map name fluxvm_prules pinned "$PIN/tc/maps/fluxvm_prules" \
+  map name fluxvm_pridx pinned "$PIN/tc/maps/fluxvm_pridx" \
+  map name fluxvm_prhit pinned "$PIN/tc/maps/fluxvm_prhit" \
   map name fluxvm_ppstat pinned "$PIN/tc/maps/fluxvm_ppstat" \
   map name fluxvm_ct pinned "$PIN/tc/maps/fluxvm_ct"
 # Confirm real map sharing, not just a same-named coincidence: every map id
@@ -638,6 +651,7 @@ expect_no_ping4
 INGRESS_RULE="$(pod_rule_value "$POD_ID" 2 4 0 32 0 0 "$A4")"
 # shellcheck disable=SC2086
 bpftool map update pinned "$PIN/tc/maps/fluxvm_prules" key hex $RULE_SLOT value hex $INGRESS_RULE
+pridx_set 2 4 0
 RICH_ONE_IN="$(pod_policy_value "$RICH_INGRESS_FLAGS" 1 "$SCHEMA_V2")"
 # shellcheck disable=SC2086
 bpftool map update pinned "$PIN/tc/maps/fluxvm_pspol" key hex $POD_POLICY_KEY value hex $RICH_ONE_IN

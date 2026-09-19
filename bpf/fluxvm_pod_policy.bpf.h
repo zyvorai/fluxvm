@@ -252,7 +252,7 @@ fluxvm_prefix_match(
     if (bits > max_bits)
         return 0;
 
-    __u8 full = bits >> 3;
+    __u32 full = bits >> 3;
     __u8 rem = bits & 7;
 
     /* `packet` may be a raw packet pointer (e.g. ip6->daddr... for the v6
@@ -273,17 +273,24 @@ fluxvm_prefix_match(
     for (int i = 0; i < 16; i++)
         local[i] = packet[i];
 
-    /* Guarded per-iteration check instead of an early `break`: clang's
-     * unroll pass rejects a `#pragma unroll` loop that exits via `break`
-     * (confirmed on this toolchain; the fix pattern is already established
-     * elsewhere in this codebase for the identical class of bug -- see
-     * parse_quic() in bpf/fluxvm_quiclb.bpf.c). `i < full` bounds which
-     * bytes are compared without needing to leave the loop early. */
+    /* Compare the leading `full` bytes with pure ALU ops and ONE branch at the
+     * end. The previous form put a data-dependent early return inside each of
+     * the 16 unrolled iterations; this function is inlined at every rule-scan
+     * call site, and those per-byte exits multiplied the verifier's explored
+     * paths until the whole egress program exceeded the 1,000,000-insn
+     * complexity limit on Linux 7.x. `in_prefix` is all-ones for bytes inside
+     * the prefix, zero beyond it. The empty asm hides the value from LLVM so
+     * it cannot canonicalise the arithmetic back into a select, which the BPF
+     * backend lowers to exactly the branches we are removing. */
+    __u8 diff = 0;
 #pragma unroll
     for (int i = 0; i < 16; i++) {
-        if (i < full && local[i] != network[i])
-            return 0;
+        __u32 in_prefix = (__u32)((i - (int)full) >> 31);
+        __asm__ volatile("" : "+r"(in_prefix));
+        diff |= (__u8)((local[i] ^ network[i]) & in_prefix);
     }
+    if (diff)
+        return 0;
     if (!rem)
         return 1;
     /* `full` is mathematically <=15 here (rem != 0 implies bits isn't a
@@ -325,6 +332,40 @@ fluxvm_rule_matches(
     if (r->port_start == 0 && r->port_end == 0)
         return 1;
     return dport >= r->port_start && dport <= r->port_end;
+}
+
+/* A fixed-size peer address, so it can cross a BPF-to-BPF call as a typed
+ * memory argument (global functions accept ctx, scalars and sized structs,
+ * but not raw packet pointers). */
+struct fluxvm_peer16 {
+    __u8 b[16];
+};
+
+/* Match ONE rule by index. Deliberately a global (non-static, noinline) BPF
+ * function. The verifier verifies a global function once, independent of its
+ * callers, whereas the same body inlined into the 64-iteration rule scan below
+ * was re-walked for every iteration and at every inlined call site (v4 and
+ * v6). That alone pushed the egress program past the verifier's 1,000,000-insn
+ * complexity limit on Linux 7.x (the unmodified object was rejected). Global
+ * functions need Linux >= 5.5. Packed into <= 5 arguments (r1-r5):
+ *   meta = direction | family << 8 | protocol << 16 */
+__attribute__((noinline)) int
+fluxvm_rule_match_idx(
+    __u32 idx,
+    __u32 pod_id,
+    __u32 meta,
+    __u32 dport,
+    const struct fluxvm_peer16 *peer)
+{
+    /* Newer verifiers treat a pointer argument of a global function as
+     * possibly NULL (older ones assume non-NULL, so the check is then a no-op).
+     * Callers always pass a valid stack copy; a NULL peer simply never matches. */
+    if (!peer)
+        return 0;
+    __u32 key = idx;
+    struct fluxvm_pod_rule *r = bpf_map_lookup_elem(&fluxvm_prules, &key);
+    return fluxvm_rule_matches(r, pod_id, (__u8)meta, (__u8)(meta >> 8),
+                               peer->b, (__u8)(meta >> 16), (__u16)dport);
 }
 
 static __always_inline int
@@ -369,10 +410,10 @@ fluxvm_pod_policy_rich_verdict(
             break;
         if (!(candidates & (1ULL << i)))
             continue;
-        __u32 key = i;
-        struct fluxvm_pod_rule *r = bpf_map_lookup_elem(&fluxvm_prules, &key);
-        if (fluxvm_rule_matches(r, pod_id, direction, family, peer,
-                                protocol, dport)) {
+        if (fluxvm_rule_match_idx(
+                i, pod_id,
+                (__u32)direction | ((__u32)family << 8) | ((__u32)protocol << 16),
+                dport, (const struct fluxvm_peer16 *)peer)) {
             fluxvm_count_pod_policy(pod_id, 0);
             fluxvm_count_pod_rule_hit(
                 pod_id, i, direction, FLUXVM_POD_VERDICT_ALLOW);
@@ -448,8 +489,12 @@ fluxvm_pod_policy_verdict6_tuple(
     __u8 protocol,
     __u16 dport)
 {
+    /* Global functions cannot take a raw packet pointer, so hand the rule
+     * scan a stack copy (constant-index copy, same as fluxvm_prefix_match). */
+    __u8 peer[16];
+    __builtin_memcpy(peer, peer_addr, 16);
     int rich = fluxvm_pod_policy_rich_verdict(
-        pod_id, direction, FLUXVM_POD_AF_INET6, peer_addr, protocol, dport);
+        pod_id, direction, FLUXVM_POD_AF_INET6, peer, protocol, dport);
     if (rich >= 0)
         return rich;
 
