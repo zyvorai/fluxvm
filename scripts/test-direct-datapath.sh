@@ -125,11 +125,17 @@ else
   pass "real fluxvm_egress (with redirect tail) passes the kernel verifier"
 fi
 
+# Empty a pinned map. The real loader (ebpf.rs) does this to fluxvm_ct on every policy
+# change, because conntrack deliberately keeps already-learned flows flowing: without it a
+# deny would not affect the ICMP flow the earlier steps established.
+clear_map() { python3 "$ROOT/scripts/bpf-map-clear.py" "$1" 2>/dev/null; }
+
 # policy allow|deny for the tap, whichever program is loaded
 policy() {
   local on=0; [[ "$1" == allow ]] && on=1
   if [[ "$MODE" == real ]]; then
     mapupd "$PIN/maps/fluxvm_id" "$(le32 "$TAP_IDX")" "$(iface_cfg "$on" "$on")"
+    clear_map "$PIN/maps/fluxvm_ct"
   else
     mapupd "$PIN/maps/stub_allow" "$(le32 "$TAP_IDX")" "$(le32 "$on")"
   fi
