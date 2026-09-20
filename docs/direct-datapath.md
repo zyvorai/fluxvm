@@ -35,14 +35,19 @@ Two attach modes share one mechanism:
 
 ## ⚠️ What does not work (honesty bounds)
 
-- **The shim default is `auto`, on the strength of one live run.** On a single-node k3s + Cilium v1.20.2
+- **The shim default is `auto`, on the strength of two live runs.** On a single-node k3s + Cilium v1.20.2
   (veth mode) node, kernel 7.0.0-31, KVM, QEMU 10.2.1, two `RuntimeClass fluxvm` Pods in `direct` mode became
   Ready, reached each other, left no `fvbh*` bridge on the node, and a deny-all `NetworkPolicy` still blocked
   the client ([evidence](benchmarks/evidence/direct-datapath-live-20260919T202359Z.txt)). A real QEMU also
   accepted both the launch-time tap descriptor and the warm-pool `getfd`/`netdev_add fd=` sequence.
-  **Not measured or exercised live:** bridge-vs-direct latency/throughput with a real guest (the table below is a
-  veth stand-in), the create-time `auto` fallback loop (no automated test), a warm-pool claim from a Pod,
-  Multus secondaries, and standalone `l2-uplink` with a real guest (that mode is chosen per VM, never by default).
+  A second live run with real guests ([evidence](benchmarks/evidence/direct-datapath-live-realguest-20260920.txt))
+  exercised: the default with the env unset (8/8 concurrent Pods direct), the `auto` fallback (Pods came up on the
+  bridge chain), standalone `l2-uplink` with two real guests, and warm-pool claim plus direct NIC hotplug. It also
+  measured bridge vs direct with real guests: **no detectable difference** (p50 0.526 vs 0.462 ms and TCP 0.34 vs
+  0.37 Gbit/s medians, both inside the run-to-run spread on a shared node), so the datapath's value is fewer
+  devices and less host state, not guest-visible speed. **Still not exercised:** Multus secondaries (Multus is
+  installed on the lab node but not in the CNI chain) and a warm-pool Pod running containers (a pool member keeps
+  its template's virtiofs shares, so the Pod's rootfs cannot be delivered).
   **Pod teardown:** deleting a Secure Container Pod originally hung (Terminating indefinitely) in both `direct`
   and `bridge` mode. That was three agent/shim bugs, not the datapath (see the CHANGELOG "Fixed" entry); with them
   fixed a direct-mode Pod is fully deleted in ~13 s and leaves no tap/veth links, netns aliases, QEMU or VM

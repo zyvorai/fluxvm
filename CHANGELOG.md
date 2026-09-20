@@ -29,9 +29,13 @@
   6. `VmStore::update` was an upsert, so a late writer could resurrect a VM that `delete` had just removed; it now
      only replaces an existing record.
   7. A rejected direct create left a `failed` VM record behind on every `auto` fallback; the shim now removes it.
-  8. With workloads truly inside their cgroup, the OCI device policy is enforced, and containerd's default
-     "deny all" left containers unable to use `/dev/null` or `/dev/urandom`; the agent now adds runc's default
-     allowed-device list.
+  8. With workloads truly inside their cgroup the OCI device policy is enforced, and containerd's default
+     "deny all" would leave containers unable to open the standard devices; the agent now adds runc's default
+     allowed-device list (unit-tested). Separately, and not caused by that change (an A/B against the pre-fix agent
+     behaves the same): the container's `/dev` is the image's empty directory, with no device nodes, so
+     `/dev/null`, `/dev/urandom` and `/dev/zero` do not exist inside Secure Containers; still open.
+  9. A NIC hotplugged into a warm-pool VM is enumerated by the guest a moment after `device_add` returns; the shim's
+     guest network script now waits for it instead of failing with an empty "exit=1".
   Live result: a Pod is fully deleted in ~13 s with nothing left behind (no tap/veth links, netns aliases,
   QEMU, VM records, shim processes).
 

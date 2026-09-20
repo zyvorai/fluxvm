@@ -1,0 +1,68 @@
+Direct datapath with REAL guests -- second live run (2026-09-20), same node as direct-datapath-live-20260919T202359Z.txt
+node: single-node k3s v1.35.5+k3s1, Cilium v1.20.2 (veth, tunnel), kernel 7.0.0-31, KVM, QEMU 10.2.1, 12 cores, shared with ~54 other pods
+build: origin/main at 130b7ac plus the fixes in this change (pod-id/ipcache race, VM-store update, failed-record cleanup,
+       default devices, guest-NIC wait). Guests: Ubuntu 24.04, 2 vCPU, 1 GiB, virtio-net (no vhost).
+Every number below was typed from the run's own output; nothing is extrapolated.
+
+1. Default (env UNSET) is auto -> direct
+   - Two rounds of four Pods created at the same instant, FLUXVM_CONTAINER_CNI_DATAPATH unset: 8/8 took the direct
+     datapath (VM records: 4 direct, 0 bridge, 0 failed per round), no fvbh* bridge, pod->pod ping OK.
+   - The first attempt of this same test (two Pods at once) sent ONE of them down the bridge chain: the daemon
+     rejected its create with a bare "No such file or directory". Cause: two creates raced on one fixed temp file
+     (pod-ids.json.tmp). Fixed (lock + unique temp file; regression test failed 5/5 before, 15/15 pass after).
+   - deny-all NetworkPolicy enforced (Cilium still sees the lxc* side).
+   - Teardown: shims=0 qemu=0 VM records=0 after each round.
+
+2. auto fallback loop (create rejected by the daemon -> retry once on the bridge chain)
+   - Forced by removing /usr/lib/fluxvm/bpf/fluxvm_direct.bpf.o for the run: both Pods logged
+     "direct datapath failed (... 400 ...); falling back to the bridge chain", came up on the bridge chain (2 fvbh
+     bridges), pod->pod ping over it OK.
+   - Each rejected attempt used to leave a `failed` VM record behind; the shim now removes it: the VM list held only
+     the two running VMs, then nothing after teardown (shims=0 qemu=0 VM records=0).
+
+3. Bridge vs direct, real guests, pod->pod on the same node (3 interleaved rounds, order alternating; one bridge
+   pair and one direct pair booted together each round)
+   ping, 200 echoes 20 ms apart, RTT ms        round1   round2   round3
+     bridge  p50 / p99                          0.553/2.000  0.274/0.403  0.526/0.777
+     direct  p50 / p99                          0.462/0.947  0.477/2.390  0.432/0.918
+   TCP, single stream, 1 GiB through nc (Gbit/s)
+     bridge                                     0.34     0.48     0.34
+     direct                                     0.37     0.33     0.41
+   Medians: p50 bridge 0.526 ms vs direct 0.462 ms; TCP 0.34 vs 0.37 Gbit/s. Both differences are inside the
+   run-to-run spread (bridge p50 alone ranged 0.274-0.553), so this run does NOT show a measurable gain: with
+   a real guest the virtio-net/QEMU path and the guest's own userspace dominate. The veth stand-in table in
+   docs/direct-datapath.md is the datapath-only cost; the guest-visible effect here is "none detectable".
+   Caveats: shared, loaded node; TCP is a guest-CPU-bound nc pipe, not iperf3 (an iperf3 attempt was invalid: see 7);
+   3 rounds; no UDP/pps figure.
+
+4. Standalone l2-uplink with two real guests (private veth pair as the "uplink", no bridge master, node NIC untouched)
+   - LAN peer (netns) -> guest 1 and -> guest 2 by ARP steered from the declared guest_ips: 3/3 each.
+   - guest 1 -> LAN peer: 3/3. guest 1 <-> guest 2 (local switching on the uplink, no bridge): 3/3 both ways.
+   - fvbh bridges: 0; uplink has no master.
+
+5. Warm pool
+   - API level (real QEMU, private netns): pool member booted and paused; claim took 24 ms and the VM was running;
+     POST /v1/vms/{id}/hotplug/nic with a direct spec -> 204; guest saw the NIC; host <-> guest ping 3/3 both ways;
+     no bridge.
+   - From a Pod (FLUXVM_CONTAINER_WARM_POOL=<pool>): claim works and the direct NIC is hotplugged, but the Pod never
+     became Ready. First blocker (fixed here): the shim ran the guest network script immediately, before the guest
+     enumerated the hotplugged NIC, and failed with an empty "exit=1"; it now waits for the NIC. Second blocker
+     (by design, documented in secure-containers-set7r.md): "mount: /run/fluxvm/pod: wrong fs type" -- a pool member
+     keeps the virtiofs shares of its template, so a Pod's container rootfs cannot be delivered to it. So a
+     warm-pool Pod cannot run containers today; the datapath half of it (claim + direct hotplug) does work.
+
+6. Multus secondaries: NOT exercised. Multus is installed on the node (cluster-network-addons) but Cilium's
+   cni-exclusive=true had renamed its config to 00-multus.conf.cilium_bak, so it is not in the CNI chain and a Pod
+   annotated with a NetworkAttachmentDefinition got no net1 (and, correctly for that reason, went direct). Testing it
+   needs the node's CNI chain reconfigured, which was not done on a shared node.
+
+7. Other things found on the way (fixed unless noted)
+   - Concurrent creates race (1). VM store update() resurrected deleted VMs (unit-tested; not reproduced live).
+   - Failed VM records left by fallback (2). Guest NIC not yet enumerated after hotplug (5).
+   - /dev inside Secure Containers is the image's empty directory: /dev/null, /dev/zero and /dev/urandom do not exist,
+     so `iperf3` ("failed to open /dev/urandom") and `dd if=/dev/zero` fail. An A/B against the pre-cgroup-fix agent
+     behaves the same, so it is pre-existing. NOT fixed.
+   - The OCI device policy now being enforced (workloads really run in their cgroup) needs runc's default allowed
+     devices; added (unit-tested; moot until the nodes exist).
+   - Bridge-chain leftovers (an fvbh*/fvh* pair plus an fvcni-* netns alias) were seen after some bridge Pods in the
+     first, interrupted benchmark attempts; not reproduced in the final three rounds. Not investigated further.
