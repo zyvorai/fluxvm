@@ -39,6 +39,9 @@
   `fluxctl serve` is the control-plane daemon. Deploy/Makefile also install a
   `fluxvm` → `fluxctl` symlink for one release of command compatibility;
   prefer `fluxctl` in new scripts and docs.
+- **README and social preview rewritten** — benefit-led hero, a "Proof & status" section
+  tying each claim to its evidence, and a refreshed 1280×640 social image
+  (`docs/assets/social-preview.svg` → `.png`). Every existing README anchor is preserved.
 
 ### Fixed
 - **VM-edge eBPF program rejected on Linux 7.x** — `fluxvm_tc.bpf.o` exceeded the
