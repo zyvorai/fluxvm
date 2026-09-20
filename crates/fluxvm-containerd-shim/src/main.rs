@@ -576,6 +576,9 @@ struct Service {
     exit: Arc<ExitSignal>,
     namespace: String,
     group: String,
+    /// The task id containerd invoked this shim process for (`-id`); for the `delete` subcommand
+    /// it is the task being cleaned up, which may be one container of a Pod rather than the Pod.
+    own_id: String,
     cfg: RuntimeConfig,
     http: Client,
     sandbox: Arc<Mutex<Option<Sandbox>>>,
@@ -627,6 +630,7 @@ impl Shim for Service {
             exit: Arc::new(ExitSignal::default()),
             namespace: args.namespace.clone(),
             group,
+            own_id: args.id.clone(),
             cfg,
             http: Client::new(),
             sandbox: Arc::new(Mutex::new(None)),
@@ -655,6 +659,19 @@ impl Shim for Service {
     }
 
     async fn delete_shim(&mut self) -> Result<DeleteResponse, Error> {
+        // containerd runs this for every task whose shim connection it sees close, including a
+        // single container of a running Pod. The Pod's VM is shared by its sandbox and every other
+        // container, so only tear it down when no other task is registered: destroying it after
+        // one container's delete powered the guest off under the still-running sandbox, and the
+        // Pod then never finished terminating (StopPodSandbox failed against a vanished VM).
+        let remaining = other_tasks(&self.own_id, self.tasks.read().await.keys());
+        if remaining > 0 {
+            warn!(
+                "not destroying the Pod VM while cleaning up {}: {remaining} other task(s) remain",
+                self.own_id
+            );
+            return Ok(DeleteResponse::new());
+        }
         self.destroy_sandbox()
             .await
             .map_err(|e| Error::Other(format!("destroying secure-container sandbox: {e:#}")))?;
@@ -3933,6 +3950,11 @@ fn forward_events(publisher: RemotePublisher, namespace: String, mut rx: EventRe
     });
 }
 
+/// How many tasks other than `own_id` are still registered for the Pod.
+fn other_tasks<'a>(own_id: &str, ids: impl IntoIterator<Item = &'a String>) -> usize {
+    ids.into_iter().filter(|id| id.as_str() != own_id).count()
+}
+
 fn process_key(id: &str, exec_id: Option<&str>) -> String {
     match exec_id {
         Some(exec_id) => format!("{id}\0{exec_id}"),
@@ -6570,5 +6592,27 @@ mod direct_datapath_tests {
             !cni.netns_mount.exists(),
             "cleanup must remove the netns alias"
         );
+    }
+}
+
+#[cfg(test)]
+mod pod_teardown_tests {
+    use super::other_tasks;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn cleaning_up_one_container_of_a_live_pod_keeps_the_vm() {
+        // containerd runs the shim's `delete` for a container while the sandbox task is still there.
+        assert_eq!(other_tasks("ctr", &ids(&["sandbox"])), 1);
+        assert_eq!(other_tasks("ctr", &ids(&["sandbox", "other-ctr"])), 2);
+    }
+
+    #[test]
+    fn cleaning_up_the_last_task_may_destroy_the_vm() {
+        assert_eq!(other_tasks("sandbox", &ids(&["sandbox"])), 0);
+        assert_eq!(other_tasks("sandbox", &ids(&[])), 0);
     }
 }

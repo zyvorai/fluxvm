@@ -2,6 +2,25 @@
 
 ## 0.4.0 (unreleased)
 
+### Fixed
+- **Secure Containers: a Pod could not be deleted.** On a live k3s + Cilium node `kubectl delete pod`
+  left Pods `Terminating` indefinitely (in `direct` and `bridge` mode alike). Three causes, all found on a
+  clean, freshly restarted containerd:
+  1. `fluxvm-container-agent` moved only the outer (reaper) process into the container cgroup, after it had
+     already forked the workload, so the workload stayed in the agent's own cgroup. `Kill(all)` by cgroup missed
+     it, the wrapper died on SIGTERM and orphaned it, and it kept the stdio pipes open, so containerd's
+     `task.Delete` waited for EOF forever. The outer process now joins the cgroup before forking, and forwards
+     SIGTERM/SIGINT/SIGHUP/SIGQUIT/SIGUSR1/SIGUSR2 to the workload (as runc's init does). This also means cgroup
+     limits, the device policy and the in-guest network policy now actually apply to the workload.
+  2. That in-guest policy (`bpf/fluxvm_guest_cgroup.bpf.c`) keyed inbound packets by
+     `bpf_get_current_cgroup_id()`, the interrupted task's cgroup, so once workloads really were in their cgroup all
+     inbound traffic was dropped (fail-closed). It now uses `bpf_skb_cgroup_id()`.
+  3. containerd runs the shim's `delete` subcommand whenever one container's connection closes; it destroyed the
+     whole Pod VM, powering the guest off under the still-running sandbox (StopPodSandbox then failed forever
+     against a vanished VM). It now only destroys the VM when no other task remains.
+  Live result: a Pod is fully deleted in ~13 s with nothing left behind (no tap/veth links, netns aliases,
+  QEMU, VM records).
+
 ### Added
 - **Cilium CNI (Secure Containers)** — shim `FLUXVM_CONTAINER_CNI_PROVIDER`
   (`auto`/`cilium`/`generic`) with Multus-safe `netN` filtering, eth0-preferring

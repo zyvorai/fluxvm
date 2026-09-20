@@ -43,9 +43,10 @@ Two attach modes share one mechanism:
   **Not measured or exercised live:** bridge-vs-direct latency/throughput with a real guest (the table below is a
   veth stand-in), the create-time `auto` fallback loop (no automated test), a warm-pool claim from a Pod,
   Multus secondaries, and standalone `l2-uplink` with a real guest (that mode is chosen per VM, never by default).
-  **Pod teardown was not observed:** on that node `kubectl delete` of a Secure Container Pod hung (Terminating
-  for 20+ minutes) in both `direct` and `bridge` mode, so it is not the datapath, but the direct-mode CNI DEL /
-  `eth0` restore path has not been seen to run live. Investigate the shim's Kill/Wait after guest exit first.
+  **Pod teardown:** deleting a Secure Container Pod originally hung (Terminating indefinitely) in both `direct`
+  and `bridge` mode. That was three agent/shim bugs, not the datapath (see the CHANGELOG "Fixed" entry); with them
+  fixed a direct-mode Pod is fully deleted in ~13 s and leaves no tap/veth links, netns aliases, QEMU or VM
+  records behind. A leaked idle shim process per Pod was seen in some runs and is not yet explained.
   `FLUXVM_CONTAINER_CNI_DATAPATH=bridge` is the kill switch.
 - Multus secondary NICs use the bridge chain (`auto` falls back, `direct` fails).
 - **Service Fabric is not applied to direct taps** (its attaches take a bare interface name).

@@ -17,8 +17,12 @@
 // One loaded instance of these two programs is shared across every
 // container in the Pod VM (loaded once, attached again per container's own
 // cgroup), so both programs key their maps by cgroup id
-// (bpf_get_current_cgroup_id(), == that cgroup's inode number on cgroupfs)
-// rather than needing a fresh map instance per container.
+// (bpf_skb_cgroup_id(), == that cgroup's inode number on cgroupfs)
+// rather than needing a fresh map instance per container. It is the id of the
+// SOCKET the packet belongs to, not of the running task: bpf_get_current_cgroup_id()
+// is right for egress (the sender's own context) but wrong for ingress, which runs
+// in softirq context under whichever task was interrupted, so inbound packets were
+// judged against an unrelated cgroup's (usually absent, i.e. deny-all) policy.
 //
 // Fail-closed-by-default, unlike the host-side Set 6S Pod policy: once
 // fluxvm-container-agent attaches these programs to a container's cgroup at
@@ -184,7 +188,7 @@ static __always_inline int verdict6(__u64 cg,__u8 direction,const __u8 *addr)
 SEC("cgroup_skb/egress")
 int fluxvm_guest_egress(struct __sk_buff *skb)
 {
-    __u64 cg = bpf_get_current_cgroup_id();
+    __u64 cg = bpf_skb_cgroup_id(skb);
     if (skb->family == LINUX_AF_INET) {
         __u32 daddr;
         if (bpf_skb_load_bytes(skb, IPV4_DADDR_OFFSET, &daddr, sizeof(daddr)) < 0)
@@ -203,7 +207,7 @@ int fluxvm_guest_egress(struct __sk_buff *skb)
 SEC("cgroup_skb/ingress")
 int fluxvm_guest_ingress(struct __sk_buff *skb)
 {
-    __u64 cg = bpf_get_current_cgroup_id();
+    __u64 cg = bpf_skb_cgroup_id(skb);
     if (skb->family == LINUX_AF_INET) {
         __u32 saddr;
         if (bpf_skb_load_bytes(skb, IPV4_SADDR_OFFSET, &saddr, sizeof(saddr)) < 0)

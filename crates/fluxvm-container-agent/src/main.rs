@@ -1014,7 +1014,7 @@ fn create_container(
         is_sandbox,
         share_process_namespace,
     };
-    let (init, namespaces) = match spawn_gated(&id, None, &spec, &io, ns_request) {
+    let (init, namespaces) = match spawn_gated(&id, None, &spec, &io, ns_request, &cgroup_path) {
         Ok(handle) => handle,
         Err(e) => {
             cleanup_mounts(&mounts);
@@ -1081,7 +1081,14 @@ fn create_exec(
     let ns_request = NsRequest::Exec {
         target: container.namespaces,
     };
-    let (handle, _) = spawn_gated(id, Some(&exec_id), &spec, &io, ns_request)?;
+    let (handle, _) = spawn_gated(
+        id,
+        Some(&exec_id),
+        &spec,
+        &io,
+        ns_request,
+        &container.cgroup_path,
+    )?;
     let pid = handle.snapshot().pid;
     if let Err(e) = add_pid_to_cgroup(&container.cgroup_path, pid) {
         let _ = handle.signal(libc::SIGKILL, true);
@@ -4558,13 +4565,42 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
     }
 }
 
+/// Signals the per-container outer (reaper) process relays to its workload child.
+const FORWARDED_SIGNALS: [libc::c_int; 6] = [
+    libc::SIGTERM,
+    libc::SIGINT,
+    libc::SIGHUP,
+    libc::SIGQUIT,
+    libc::SIGUSR1,
+    libc::SIGUSR2,
+];
+
+/// Host-namespace pid of the workload, set by the outer process after it forks. Only ever read
+/// from the signal handler in that same (single-threaded, post-fork) process.
+static INNER_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn forward_signal_to_inner(sig: libc::c_int) {
+    let pid = INNER_PID.load(std::sync::atomic::Ordering::SeqCst);
+    if pid > 0 {
+        unsafe { libc::kill(pid, sig) };
+    }
+}
+
 fn spawn_gated(
     container_id: &str,
     exec_id: Option<&str>,
     spec: &ProcessSpec,
     io: &ContainerIo,
     ns_request: NsRequest,
+    cgroup: &std::path::Path,
 ) -> Result<(Arc<ProcHandle>, ContainerNamespaces)> {
+    // The outer process joins the container cgroup itself, BEFORE it forks the inner (workload)
+    // process, so the workload inherits membership. Moving only the outer pid from the parent
+    // after the fork (the previous behaviour) left the workload in the agent's own cgroup: cgroup
+    // kills, limits and the cgroup-keyed network policy then never applied to it, and a stopped
+    // container's real process outlived its wrapper and kept the stdio pipes open forever.
+    let cgroup_procs =
+        CString::new(cgroup.join("cgroup.procs").as_os_str().as_bytes()).context("cgroup path")?;
     let rootfs = CString::new(spec.rootfs.as_os_str().as_bytes()).context("rootfs contains NUL")?;
     let cwd = CString::new(spec.cwd.as_bytes()).context("cwd contains NUL")?;
     let executable = resolve_executable(spec)?;
@@ -4766,6 +4802,13 @@ fn spawn_gated(
                 libc::close(*fd);
             }
 
+            // Writing "0" to cgroup.procs moves the writing process.
+            let cg = libc::open(cgroup_procs.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+            if cg < 0 || libc::write(cg, b"0".as_ptr().cast(), 1) != 1 {
+                libc::_exit(124);
+            }
+            libc::close(cg);
+
             if create_flags != 0 && libc::unshare(create_flags) != 0 {
                 libc::_exit(126);
             }
@@ -4788,11 +4831,18 @@ fn spawn_gated(
                 }
             }
 
+            // The outer process is only a reaper; the workload is its child. Forward the
+            // termination-style signals to it (as runc's init does) instead of dying and
+            // orphaning the workload.
+            for sig in FORWARDED_SIGNALS {
+                libc::signal(sig, forward_signal_to_inner as libc::sighandler_t);
+            }
             let inner_pid = libc::fork();
             if inner_pid < 0 {
                 libc::_exit(125);
             }
             if inner_pid != 0 {
+                INNER_PID.store(inner_pid, std::sync::atomic::Ordering::SeqCst);
                 // Still outer: hand off readiness, drop our own copies of
                 // the stdio fds (so EOF on the agent side depends only on
                 // the inner process's lifetime, exactly as pre-Set-6), then

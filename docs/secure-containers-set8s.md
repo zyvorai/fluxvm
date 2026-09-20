@@ -34,8 +34,13 @@ built and tested the same way, not assumed to work by analogy.
 ## What was built
 
 - **`bpf/fluxvm_guest_cgroup.bpf.c`**: two programs, `cgroup_skb/egress` and
-  `cgroup_skb/ingress`, both keyed by `bpf_get_current_cgroup_id()` (the
-  attached cgroup's inode number). Maps: `fluxvm_cpol` (per-container policy
+  `cgroup_skb/ingress`, both keyed by `bpf_skb_cgroup_id()` (the inode number of
+  the cgroup that owns the packet's socket). `bpf_get_current_cgroup_id()` was used
+  originally, which is wrong for ingress: that hook runs in softirq context under
+  whichever task was interrupted, so inbound packets were judged against an
+  unrelated cgroup's (usually absent, i.e. deny-all) policy. It went unnoticed
+  because container workloads were never actually inside their container cgroup
+  (see the CHANGELOG "Fixed" entry) and so were never subject to this policy. Maps: `fluxvm_cpol` (per-container policy
   flags), `fluxvm_cid4`/`fluxvm_cid6` (peer allow/deny, mirroring Set 6S's
   `fluxvm_pid4`/`fluxvm_pid6` shape), `fluxvm_cdrops` (per-container drop
   counters).
