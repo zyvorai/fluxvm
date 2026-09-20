@@ -781,6 +781,32 @@ impl VmManager {
         Ok(())
     }
 
+    /// Drops the persisted `pod_uid` -> eBPF `pod_id` mapping of a deleted VM so the store does not grow
+    /// for the node's lifetime (it was minted for every Secure Containers Pod and never released). Skipped
+    /// while another VM still carries the same Pod UID -- a Pod's failed sandbox create is retried on a new
+    /// VM, which may already be running when the old one's delete finishes -- because releasing the id would
+    /// let a different Pod be minted the same one.
+    async fn release_pod_identity(&self, deleted: &VmRecord) {
+        let Some(uid) = deleted.request.pod_uid.as_deref() else {
+            return;
+        };
+        if self
+            .list()
+            .await
+            .iter()
+            .any(|v| v.id != deleted.id && v.request.pod_uid.as_deref() == Some(uid))
+        {
+            return;
+        }
+        let (cfg, uid) = (self.cfg.clone(), uid.to_string());
+        let released =
+            tokio::task::spawn_blocking(move || fluxvm_network::pod_identity::forget(&cfg, &uid))
+                .await;
+        if !matches!(released, Ok(Ok(()))) {
+            tracing::warn!(vm = %deleted.id, "releasing the Pod identity failed: {released:?}");
+        }
+    }
+
     /// Hot-adds a virtiofs share serving `host_path` to a running QEMU VM and returns its tag (`fs{N}`, the
     /// share's index in `shared_folders`). The share is recorded on the VM's request so stop/delete reaps the
     /// `virtiofsd`, and a later restart re-creates it as an ordinary boot-time share. Warm-pool templates
@@ -2542,6 +2568,7 @@ impl VmManager {
         let vm = self.store.remove(id).await?.context("VM vanished")?;
         let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
         let _ = fluxvm_network::dataplane::delete_policy(&self.cfg, id);
+        self.release_pod_identity(&vm).await;
         self.activity.lock().await.remove(&id);
         // These three point at live state outside `workspace` (a
         // still-active LV, a still-running qemu-nbd process, a Ceph clone)

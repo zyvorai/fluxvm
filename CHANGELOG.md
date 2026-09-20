@@ -3,6 +3,11 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **Pod identities were never released.** `pod_identity::forget` had no caller, so every Secure Containers
+  Pod left its `pod_uid` -> `pod_id` entry in `pod-ids.json` for the node's lifetime (110 entries had built up
+  on the lab node). VM delete now releases it, unless another VM still carries the same Pod UID (a failed
+  sandbox create is retried on a new VM that may already be running). Verified live, warm-pool and cold: the
+  entry appears while the Pod runs and is gone after it is deleted.
 - **A bridge-hotplugged NIC leaked its tap.** `hotplug_nic` (the warm-pool bridge-chain path) never set the
   VM's `tap_name`, and stop/delete clean the network only for a record that names its primary tap, so the
   `hn0…` tap outlived every claimed VM (found live: one stray tap after a warm-pool bridge Pod). It is now

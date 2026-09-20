@@ -39,6 +39,17 @@ a VM-UUID hash.
   `POST /v1/vms`. `CreateVmRequest::pod_uid` flows through
   `VmManager::create()`/`apply_sandbox_policy()`, which mints the Pod
   identity and threads it into `ebpf::apply()`.
+- **Warm-pool Pods**: a pool member is booted before any Pod exists, so the
+  identity is supplied at claim time instead: `POST /v1/pools/{name}/claim`
+  takes `pod_uid` (see [api.md](api.md)), which is recorded as the VM's
+  `request.pod_uid`, and the identity is minted when the NIC is hot-added
+  (direct or bridge-chain). Checked live: a warm-pool Pod's policy is enforced
+  in both directions (`docs/benchmarks/evidence/direct-datapath-live-realguest-20260920.txt`, F).
+- **Release**: deleting the VM drops the `pod_uid` -> `pod_id` entry so the
+  store does not grow for the node's lifetime. The entry is kept while another
+  VM still carries the same Pod UID (a failed sandbox create is retried on a
+  new VM that may already be running). Entries that predate this were never
+  released and are not pruned.
 - **Independent policy-content API**: `dataplane::set_pod_network_policy`
   (HTTP: `GET`/`POST`/`DELETE /v1/vms/{id}/network/pod-policy`, admin-only for
   writes) sets or clears a Pod's peer allow/deny list without requiring a

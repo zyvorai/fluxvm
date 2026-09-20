@@ -49,7 +49,11 @@ Two attach modes share one mechanism:
   in the CNI chain for the test: a Secure Container Pod got `net1`, `auto` fell back to the bridge chain with the
   reason logged, `direct` refused as documented) and a **warm-pool Pod running containers** (Ready in 7 s from a
   claim; the Pod's shares are hot-added over virtiofs, see `POST /v1/vms/{id}/hotplug/share` in
-  [api.md](api.md)). It also fixed `/dev` inside Secure Containers, which was empty.
+  [api.md](api.md)). A claimed member also carries the Pod's eBPF identity (`pod_uid` on the claim), and Pod-scoped
+  policy was enforced against real peer traffic in both directions (evidence, section F). It also fixed `/dev`
+  inside Secure Containers, which was empty. Deleting a Pod takes ~20 s in `direct` and `bridge` mode alike, warm-pool
+  or cold: the grace period, then containerd's 5 s `shim delete` limit against the daemon's graceful guest power-off,
+  then kubelet's retry.
   **Pod teardown:** deleting a Secure Container Pod originally hung (Terminating indefinitely) in both `direct`
   and `bridge` mode. That was three agent/shim bugs, not the datapath (see the CHANGELOG "Fixed" entry); with them
   fixed a direct-mode Pod is fully deleted in ~13 s and leaves no tap/veth links, netns aliases, QEMU or VM

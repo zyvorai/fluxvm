@@ -128,3 +128,25 @@ E. Warm-pool Pods get their eBPF Pod identity (pod_uid on claim) -- verified liv
    Found on the way: the bridge hotplug never recorded the VM's primary tap, so delete leaked the hn0... tap (one
    stray link after the first bridge run). Fixed; after the rerun no fvbh/fvh/hn links remained.
    Lab node afterwards: clean (no fx* ns, QEMU, shims, VM records or links; CNI dir as before).
+
+F. Follow-ups checked after E (same day)
+   - Pod-scoped policy ENFORCEMENT on a warm-pool Pod (direct datapath; secure Pod a, runc peers b and c on the
+     same node, 2 pings each way):
+       no policy .............................. a->b, a->c, b->a, c->a: all 0% loss
+       default_deny + allow only c ............ a->b blocked, b->a 100% loss; a->c and c->a 0% loss
+       policy cleared ......................... all four 0% loss again
+       deny b only (no default_deny) .......... a->b blocked, b->a 100% loss; a->c and c->a 0% loss
+     drop-reasons for the VM show pod-policy-deny for a->b (2 packets after the first policy, 4 after the second).
+     The b->a drops do not appear there; the block is observed (0% -> 100% -> 0% with the policy), but I did not
+     attribute it to a counter. In the a->b case ping exits at once with status 1 (no summary line) rather than
+     timing out, so the guest reports an error for the blocked send; the host edge still counted the packets.
+   - Pod delete timing, re-measured in ONE run with the same Pod spec (terminationGracePeriodSeconds 5):
+     cold Pod 20.5 s, warm-pool Pod 20.3 s. The earlier "54 s warm vs 13 s cold" compared different things (a
+     namespace delete against a Pod delete) and is retracted: warm-pool Pods are not slower to delete.
+     Where the ~20 s goes (both): 5 s grace period; ~2 s container kill; then containerd runs `shim delete` for
+     the dead sandbox shim, which waits for the daemon's VM delete (a graceful guest power-off, 7 s for an idle
+     guest, ~11.5 s here) and is killed at containerd's 5 s limit ("failed to delete dead shim ... signal:
+     killed"); kubelet's next StopPodSandbox retry follows ~6 s later. Not changed.
+   - pod-ids.json: 110 stale entries had accumulated; fixed in this commit (see CHANGELOG). Existing stale
+     entries are not pruned.
+   Lab node afterwards: clean.
