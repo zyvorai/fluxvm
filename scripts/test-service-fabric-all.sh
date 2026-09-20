@@ -38,4 +38,9 @@ if [[ "${SKIP_RSS:-}" != "1" ]]; then
   ./scripts/test-service-fabric-rss-affinity.sh
 fi
 
+if [[ "${SKIP_STREAM:-}" != "1" ]]; then
+  echo "########## Service Fabric: HTTP streaming + drain ##########"
+  ./scripts/test-service-fabric-stream.sh
+fi
+
 echo "########## ALL PASS: Service Fabric test battery ##########"

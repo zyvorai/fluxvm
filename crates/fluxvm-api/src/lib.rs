@@ -310,6 +310,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
+        .route("/v1/host/gpus", get(list_host_gpus))
+        .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
+        .route("/v1/host/gpus/bind", post(bind_host_gpu))
+        .route("/v1/host/gpus/release", post(release_host_gpu))
         .route("/v1/vms", post(create_vm).get(list_vms))
         .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
         .route("/v1/vms/{id}/start", post(start_vm))
@@ -1332,6 +1336,55 @@ async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities>
             },
         ],
     })
+}
+
+fn allocated_vfio_bdfs(vms: &[VmRecord]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for vm in vms {
+        for bdf in &vm.request.vfio_devices {
+            out.insert(bdf.trim().to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+async fn list_host_gpus(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let gpus = fluxvm_core::gpu::list_host_gpus(&m.cfg.state_dir, &allocated)?;
+    Ok(Json(json!({ "items": gpus })))
+}
+
+async fn host_gpu_preflight(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<fluxvm_core::gpu::GpuPreflight>> {
+    Ok(Json(fluxvm_core::gpu::gpu_preflight(&m.cfg.state_dir)?))
+}
+
+async fn bind_host_gpu(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuBindRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    let result = fluxvm_core::gpu::bind_gpu_group(&m.cfg.state_dir, &req, &allocated)?;
+    Ok((StatusCode::OK, Json(result)))
+}
+
+async fn release_host_gpu(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::gpu::GpuReleaseRequest>,
+) -> ApiResult<Json<fluxvm_core::gpu::HostGpu>> {
+    require_admin(role)?;
+    let allocated = allocated_vfio_bdfs(&m.list().await);
+    Ok(Json(fluxvm_core::gpu::release_gpu_group(
+        &m.cfg.state_dir,
+        &req,
+        &allocated,
+    )?))
 }
 
 async fn start_migration(

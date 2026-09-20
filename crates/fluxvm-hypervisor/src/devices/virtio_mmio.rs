@@ -242,7 +242,25 @@ impl MmioDevice for VirtioMmio {
             0x064 => {
                 st.interrupt_status &= !val;
             }
-            0x070 => st.status = val,
+            0x070 => {
+                // Virtio 1.0 §2.1.2: writing 0 to status resets the device.
+                // Distro kernels (Ubuntu) probe, reset, and re-init; leaving
+                // stale queue/feature state after a reset hangs the probe.
+                if val == 0 {
+                    st.driver_features = 0;
+                    st.status = 0;
+                    st.sel = 0;
+                    st.notify = None;
+                    st.interrupt_status = 0;
+                    for q in &mut st.queues {
+                        *q = QueueState::default();
+                    }
+                    self.dev_feat_sel.store(0, Ordering::SeqCst);
+                    self.drv_feat_sel.store(0, Ordering::SeqCst);
+                } else {
+                    st.status = val;
+                }
+            }
             0x080 => {
                 let q = Self::q(&mut st);
                 q.desc = (q.desc & !0xffff_ffff) | val as u64;

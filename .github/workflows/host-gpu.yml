@@ -1,0 +1,26 @@
+name: Host GPU inventory
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/fluxvm-core/src/gpu.rs"
+      - "crates/fluxvm-api/src/lib.rs"
+      - "scripts/test-gpu-passthrough-lifecycle.sh"
+      - ".github/workflows/host-gpu.yml"
+  pull_request:
+    paths:
+      - "crates/fluxvm-core/src/gpu.rs"
+      - "crates/fluxvm-api/src/lib.rs"
+      - "scripts/test-gpu-passthrough-lifecycle.sh"
+      - ".github/workflows/host-gpu.yml"
+
+jobs:
+  gpu-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: fluxvm-core GPU unit tests
+        run: cargo test -p fluxvm-core gpu -- --nocapture

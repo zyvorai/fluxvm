@@ -54,12 +54,16 @@ Useful flags: `--vsock-cid` / `--vsock-uds`, `--no-balloon`, `--no-rng`, `--no-a
 
 One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for guest INIT-SIPI via in-kernel LAPIC. Virtio queue-notify stays BSP-only.
 
-**Known gap:** with a full distro kernel (5.10, ACPI MADT SMP), a real
-guest reports `smpboot: do_boot_cpu failed(-1) to wakeup CPU#1` and
-falls back to 1 CPU after a ~10s stall — the AP never responds to the
-guest's INIT-SIPI-SIPI. Boot still completes correctly on the
-(single, surviving) BSP; this only costs 10s and one CPU under
-`--cpus 2+`, it does not block boot. Not yet root-caused.
+CPUID topology is patched per vCPU (leaf-1 APIC ID + logical processor
+count; host `0xB`/`0x1F` topology leaves cleared; x2APIC cleared until
+MADT type-9 exists) so Linux AP bring-up matches MADT. Re-run the smoke:
+
+```bash
+sudo ./scripts/test-kvm-smp-boot.sh   # --cpus 2, asserts userspace + no do_boot_cpu failed
+```
+
+If that script soft-skips (no KERNEL/KVM), treat multi-vCPU as
+**experimental** until it has been green on a lab host.
 
 ## Debugging: gdbstub
 
@@ -76,8 +80,9 @@ guest's INIT-SIPI-SIPI. Boot still completes correctly on the
   a guest-kernel config requirement, not a virtio-blk bug (verified: the
   same image/hypervisor boots cleanly to `/sbin/init` on a plain,
   non-GPT ext4 disk). Check with `nm vmlinux | grep efi_partition`.
-- See SMP above: 2+ vCPU boots with a full distro kernel cost a ~10s
-  AP-wakeup stall before falling back to 1 CPU (not yet root-caused).
+- Multi-vCPU: see SMP section. Lab gate is `scripts/test-kvm-smp-boot.sh`.
+- Virtio-mmio devices reset cleanly on status=0 (required by Ubuntu probe).
+  MicroVM cmdline defaults to `pci=off` when `--pci` is not set.
 
 **Resolved:** every control-plane-launched VM (`guest.rs`, the real path
 `fluxvm.service` uses for `fluxvm_engine = "kvm"`) used to have its vCPU

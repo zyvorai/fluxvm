@@ -3435,6 +3435,38 @@ mod tests {
     }
 
     #[test]
+    fn equal_weights_cover_both_backends() {
+        let mut s = v4_spec();
+        s.backends.truncate(2);
+        let table = maglev_table(&s).unwrap();
+        assert!(table.contains(&0));
+        assert!(table.contains(&1));
+        assert!(!table.iter().any(|id| *id > 1));
+    }
+
+    #[test]
+    fn draining_backend_excluded_from_maglev() {
+        let mut s = v4_spec();
+        s.backends.truncate(2);
+        s.backends[1].state = BackendState::Draining;
+        s.backends[1].drain_until_unix_ms = Some(9_999_999_999_999);
+        let table = maglev_table(&s).unwrap();
+        assert!(table.iter().all(|id| *id == 0));
+        assert!(!table.contains(&1));
+    }
+
+    #[test]
+    fn all_draining_fails_closed() {
+        let mut s = v4_spec();
+        for b in &mut s.backends {
+            b.state = BackendState::Draining;
+            b.drain_until_unix_ms = Some(9_999_999_999_999);
+        }
+        let table = maglev_table(&s).unwrap();
+        assert!(table.is_empty());
+    }
+
+    #[test]
     fn ipv6_nat_is_valid() {
         let mut s = v4_spec();
         s.vip = "fd00:40::100".parse().unwrap();

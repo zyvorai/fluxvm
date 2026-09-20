@@ -3,6 +3,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod gpu;
 pub mod metrics;
 pub mod model;
 pub mod process;

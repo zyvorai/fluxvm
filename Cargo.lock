@@ -2080,6 +2080,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "uuid",
@@ -2572,7 +2573,7 @@ checksum = "b40ca9252762c466af32d0b1002e91e4e1bc5398f77455e55474deb466355ff5"
 
 [[package]]
 name = "guestkit"
-version = "1.2.2"
+version = "1.2.4"
 dependencies = [
  "aes 0.8.4",
  "anyhow",

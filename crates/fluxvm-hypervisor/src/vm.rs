@@ -148,6 +148,14 @@ impl VirtualMachine {
         }
         let _ = (next_base, next_irq);
         cfg.cmdline = boot::append_virtio_mmio_cmdline(&cfg.cmdline, &mmio_devs);
+        // Distro kernels (Ubuntu) spend a long time probing PCI when the
+        // microVM has no real PCI devices. Match Firecracker's default.
+        if !cfg.pci && !cfg.cmdline.split_whitespace().any(|t| t.starts_with("pci=")) {
+            if !cfg.cmdline.is_empty() && !cfg.cmdline.ends_with(' ') {
+                cfg.cmdline.push(' ');
+            }
+            cfg.cmdline.push_str("pci=off");
+        }
 
         let mut mem = GuestMemory::allocate(cfg.memory_bytes())?;
         let _cr3 = boot::build_identity_page_tables(&mut mem)?;

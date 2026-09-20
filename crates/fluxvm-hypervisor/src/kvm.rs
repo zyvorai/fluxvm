@@ -291,6 +291,21 @@ impl KvmVm {
                 this.setup_fpu(id)?;
                 this.set_lint(id)?;
             }
+            // Re-park APs after lint/MSR setup. Some KVM versions leave APs
+            // RUNNABLE after LAPIC writes; INIT-SIPI must find them waiting.
+            for id in 1..num_cpus as usize {
+                let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
+                if ffi::flux_ioctl(
+                    this.vcpus[id].fd,
+                    ffi::KVM_SET_MP_STATE,
+                    &mut mp_state as *mut _ as *mut c_void,
+                ) < 0
+                {
+                    return Err(FluxError::Hypervisor(format!(
+                        "KVM_SET_MP_STATE re-park id={id}"
+                    )));
+                }
+            }
             Ok(this)
         }
     }
@@ -545,7 +560,12 @@ impl KvmVm {
                     e.eax = e.eax.max(0x15);
                 }
                 if e.function == 1 {
-                    e.ebx = (e.ebx & 0x00ff_ffff) | (apic_id << 24);
+                    // EBX[31:24] = initial APIC ID; EBX[23:16] = logical
+                    // processors per package. Leaving the host's count
+                    // (often > guest vCPU count) makes Linux's AP bring-up
+                    // disagree with MADT and fail do_boot_cpu.
+                    let n = self.vcpus.len() as u32;
+                    e.ebx = (e.ebx & 0x0000_ffff) | ((n & 0xff) << 16) | (apic_id << 24);
                     // "Hypervisor present" -- always true here, and some
                     // guest-kernel paravirt/topology decisions gate on it
                     // (matches crosvm, which sets this unconditionally).
@@ -553,6 +573,18 @@ impl KvmVm {
                     if self.tsc_deadline_supported {
                         e.ecx |= 1 << 24;
                     }
+                    // Clear x2APIC until MADT grows type-9 entries; leaf-1
+                    // APIC ID + MADT local-APIC records are the topology.
+                    e.ecx &= !(1 << 21);
+                }
+                // Host extended topology leaves (0xB / 0x1F) describe the
+                // physical package. Zero them so the guest falls back to
+                // the patched leaf-1 APIC ID and MADT.
+                if e.function == 0xb || e.function == 0x1f {
+                    e.eax = 0;
+                    e.ebx = 0;
+                    e.ecx = 0;
+                    e.edx = 0;
                 }
                 // KVM_GET_SUPPORTED_CPUID always zeroes leaf 0x15 (TSC /
                 // "core crystal clock" ratio) even when the host CPU
