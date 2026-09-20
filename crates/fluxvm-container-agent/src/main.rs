@@ -3023,6 +3023,8 @@ fn create_minimal_devices(dev: &PathBuf) {
                     libc::S_IFCHR | mode,
                     libc::makedev(major, minor),
                 );
+                // mknod honours the umask (0644 under 022); the standard devices must be world-usable.
+                libc::chmod(c.as_ptr(), mode);
             }
         }
     }
@@ -4529,12 +4531,15 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
             return fail("ms_private");
         }
         // pivot_root(2) requires new_root to be a mount point; bind-mounting
-        // it onto itself makes an ordinary directory qualify.
+        // it onto itself makes an ordinary directory qualify. The bind must be recursive (as in
+        // runc): everything the OCI `mounts` put under the rootfs -- the /dev tmpfs with its device
+        // nodes, /dev/shm, /sys, bind-mounted files and volumes -- is a submount, and a plain
+        // MS_BIND leaves all of it behind, so the container saw the image's bare, empty /dev.
         if libc::mount(
             rootfs.as_ptr(),
             rootfs.as_ptr(),
             std::ptr::null(),
-            libc::MS_BIND,
+            libc::MS_BIND | libc::MS_REC,
             std::ptr::null(),
         ) != 0
         {
