@@ -1,14 +1,5 @@
 <div align="center">
 
-```text
-███████╗██╗     ██╗   ██╗██╗  ██╗██╗   ██╗███╗   ███╗
-██╔════╝██║     ██║   ██║╚██╗██╔╝██║   ██║████╗ ████║
-█████╗  ██║     ██║   ██║ ╚███╔╝ ██║   ██║██╔████╔██║
-██╔══╝  ██║     ██║   ██║ ██╔██╗ ╚██╗ ██╔╝██║╚██╔╝██║
-██║     ███████╗╚██████╔╝██╔╝ ██╗ ╚████╔╝ ██║ ╚═╝ ██║
-╚═╝     ╚══════╝ ╚═════╝ ╚═╝  ╚═╝  ╚═══╝  ╚═╝     ╚═╝
-```
-
 ### Secure, isolated VMs via Firecracker, Cloud Hypervisor, QEMU/KVM, and the FluxVM hypervisor
 
 <img src="docs/assets/social-preview.png" alt="FluxVM — Rust-native VM control plane" width="720">
