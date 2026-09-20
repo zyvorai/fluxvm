@@ -41,4 +41,6 @@ Notes (not script output)
   in-guest ingress policy keyed by the wrong cgroup id). Fixed in the change that adds this note;
   re-run afterwards (same node, same script): PASS (pod->pod reachable, no fvbh*, deny-all still enforced),
   a Pod deleted in ~13 s (two-Pod namespace in ~55 s), and no tap/veth links, netns aliases, QEMU or VM
-  records left behind. Not explained: an idle shim process lingered after some Pod deletions.
+  records left behind. A shim process per Pod also lingered until a further fix (the `Shutdown` handler was
+  cancelled mid-teardown when containerd closed the connection); after it, three rounds of two-Pod namespaces
+  (one with `kubectl exec`) left no shim, QEMU, VM record, tap/veth link or netns alias.

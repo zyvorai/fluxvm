@@ -18,8 +18,13 @@
   3. containerd runs the shim's `delete` subcommand whenever one container's connection closes; it destroyed the
      whole Pod VM, powering the guest off under the still-running sandbox (StopPodSandbox then failed forever
      against a vanished VM). It now only destroys the VM when no other task remains.
+  4. The shim process itself stayed behind after every Pod (one idle process per Pod). containerd closes the
+     connection ~3 s after `Shutdown`, and ttrpc then drops the in-flight handler; the handler awaited the
+     daemon's VM delete (a graceful guest power-off takes far longer), so it was cancelled before it signalled the
+     shim to exit, and the VM record, CNI netns alias and shim were all left. The teardown now runs on a detached
+     task, so it completes and the shim exits.
   Live result: a Pod is fully deleted in ~13 s with nothing left behind (no tap/veth links, netns aliases,
-  QEMU, VM records).
+  QEMU, VM records, shim processes).
 
 ### Added
 - **Cilium CNI (Secure Containers)** — shim `FLUXVM_CONTAINER_CNI_PROVIDER`

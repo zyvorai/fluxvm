@@ -3809,8 +3809,18 @@ impl Task for Service {
 
     async fn shutdown(&self, _ctx: &TtrpcContext, _req: ShutdownRequest) -> TtrpcResult<Empty> {
         if self.tasks.read().await.is_empty() && self.execs.read().await.is_empty() {
-            let _ = self.destroy_sandbox().await;
-            self.exit.signal();
+            // Tear the Pod down on a detached task, not inside this RPC. containerd closes the
+            // connection a few seconds after Shutdown and ttrpc then drops the in-flight handler;
+            // destroy_sandbox awaits the daemon's VM delete (a graceful guest power-off takes far
+            // longer), so it used to be cancelled before `exit` was signalled and the shim process
+            // stayed behind forever, one per Pod.
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = this.destroy_sandbox().await {
+                    warn!("destroying the Pod VM at shutdown failed: {e:#}");
+                }
+                this.exit.signal();
+            });
         }
         Ok(Empty::new())
     }

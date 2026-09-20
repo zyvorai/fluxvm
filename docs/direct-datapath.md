@@ -46,7 +46,8 @@ Two attach modes share one mechanism:
   **Pod teardown:** deleting a Secure Container Pod originally hung (Terminating indefinitely) in both `direct`
   and `bridge` mode. That was three agent/shim bugs, not the datapath (see the CHANGELOG "Fixed" entry); with them
   fixed a direct-mode Pod is fully deleted in ~13 s and leaves no tap/veth links, netns aliases, QEMU or VM
-  records behind. A leaked idle shim process per Pod was seen in some runs and is not yet explained.
+  records or shim processes behind (a per-Pod shim leak, caused by the `Shutdown` handler being cancelled
+  mid-teardown when containerd closed the connection, is fixed too).
   `FLUXVM_CONTAINER_CNI_DATAPATH=bridge` is the kill switch.
 - Multus secondary NICs use the bridge chain (`auto` falls back, `direct` fails).
 - **Service Fabric is not applied to direct taps** (its attaches take a bare interface name).
