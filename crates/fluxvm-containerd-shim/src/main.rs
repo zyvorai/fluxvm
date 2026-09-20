@@ -4881,8 +4881,11 @@ fn guest_network_command_all(networks: &[&CniNetwork]) -> AnyResult<String> {
             bail!("CNI network contains no guest addresses");
         }
         let nth = index + 1;
+        // A NIC hotplugged into a warm-pool VM is not enumerated by the guest kernel until a moment
+        // after `device_add` returns, so wait for it instead of failing with an empty error.
+        lines.push("IFACE=\"\"".into());
         lines.push(format!(
-            "IFACE=\"$(ls -1 /sys/class/net | grep -v '^lo$' | sort | sed -n '{nth}p')\""
+            "for _ in $(seq 1 100); do IFACE=\"$(ls -1 /sys/class/net | grep -v '^lo$' | sort | sed -n '{nth}p')\"; [ -n \"$IFACE\" ] && break; sleep 0.2; done"
         ));
         lines.push("[ -n \"$IFACE\" ]".into());
         lines.push("ip link set dev \"$IFACE\" up".into());
@@ -5997,6 +6000,8 @@ mod tests {
         let command = guest_network_command_all(&[&primary, &secondary]).unwrap();
         assert!(command.contains("sed -n '1p'"));
         assert!(command.contains("sed -n '2p'"));
+        // The interface lookup retries: a hotplugged NIC shows up in the guest a moment late.
+        assert!(command.contains("for _ in $(seq 1 100)"));
         assert!(command.contains("ip -4 addr add 10.0.0.2/24"));
         assert!(command.contains("ip -4 addr add 10.1.0.2/24"));
         assert!(command.contains("ip -4 route replace default via 10.0.0.1"));
