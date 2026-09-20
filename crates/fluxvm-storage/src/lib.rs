@@ -137,8 +137,19 @@ impl Store {
         .await
     }
 
+    /// Replaces an existing record; does nothing if it is gone. Creation goes through
+    /// [`insert`](Self::insert) / [`insert_with_cid`](Self::insert_with_cid).
+    ///
+    /// This used to be an upsert, so a slow writer holding a stale copy (a `stop()` still finishing,
+    /// the reconcile loop) re-created a record that `delete` had just removed: the API answered 204
+    /// and the VM stayed listed as `stopped` forever.
     pub async fn update(&self, vm: VmRecord) -> Result<()> {
-        self.insert(vm).await
+        self.with_exclusive(move |m| {
+            if let Some(slot) = m.get_mut(&vm.id) {
+                *slot = vm;
+            }
+        })
+        .await
     }
 
     pub async fn get(&self, id: Uuid) -> Option<VmRecord> {
@@ -427,6 +438,39 @@ mod tests {
         assert_eq!(removed.unwrap().id, id);
         assert!(store.get(id).await.is_none());
         assert_eq!(store.list().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_late_update_does_not_resurrect_a_deleted_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let vm = fixture_record("doomed");
+        let id = vm.id;
+        store.insert(vm.clone()).await.unwrap();
+
+        // `delete` removes the record while another task still holds its own copy...
+        store.remove(id).await.unwrap();
+        // ...and then writes it back (stop() finishing, the reconcile loop, an exit monitor).
+        let mut stale = vm;
+        stale.status = VmStatus::Stopped;
+        store.update(stale).await.unwrap();
+
+        assert!(
+            store.get(id).await.is_none(),
+            "the deleted VM must stay deleted"
+        );
+        assert!(store.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_replaces_an_existing_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let mut vm = fixture_record("live");
+        store.insert(vm.clone()).await.unwrap();
+        vm.status = VmStatus::Running;
+        store.update(vm.clone()).await.unwrap();
+        assert_eq!(store.get(vm.id).await.unwrap().status, VmStatus::Running);
     }
 
     #[tokio::test]
