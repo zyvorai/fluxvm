@@ -24,6 +24,7 @@ pub mod service;
 pub mod service_ha;
 pub mod service_policy;
 pub mod service_pressure;
+mod store;
 pub mod tcx;
 pub mod xdp;
 

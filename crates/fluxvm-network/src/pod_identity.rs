@@ -15,7 +15,7 @@
 use anyhow::Result;
 use fluxvm_core::config::Config;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io::Write, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct Store {
@@ -36,15 +36,7 @@ fn load(cfg: &Config) -> Result<Store> {
 }
 
 fn save(cfg: &Config, store: &Store) -> Result<()> {
-    let p = path(cfg);
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = p.with_extension("json.tmp");
-    let mut f = fs::File::create(&tmp)?;
-    f.write_all(serde_json::to_vec_pretty(store)?.as_slice())?;
-    f.sync_all()?;
-    fs::rename(tmp, p)?;
+    crate::store::write_atomic(&path(cfg), serde_json::to_vec_pretty(store)?.as_slice())?;
     Ok(())
 }
 
@@ -61,6 +53,7 @@ fn fnv1a(bytes: &[u8]) -> u32 {
 /// one on first use. `0` is reserved (means "no Pod-scoped policy" to the
 /// BPF side), so a hash that lands on it is bumped forward.
 pub fn pod_id_for(cfg: &Config, pod_uid: &str) -> Result<u32> {
+    let _guard = crate::store::lock();
     let mut store = load(cfg)?;
     if let Some(&id) = store.ids.get(pod_uid) {
         return Ok(id);
@@ -92,6 +85,7 @@ pub fn pod_id_for(cfg: &Config, pod_uid: &str) -> Result<u32> {
 /// reusing that exact UID -- impossible in practice, Kubernetes Pod UIDs are
 /// never reused -- would keep the old id; safe to skip on error.
 pub fn forget(cfg: &Config, pod_uid: &str) -> Result<()> {
+    let _guard = crate::store::lock();
     let mut store = load(cfg)?;
     if store.ids.remove(pod_uid).is_some() {
         save(cfg, &store)?;
@@ -108,6 +102,36 @@ mod tests {
         let mut cfg = Config::default();
         cfg.state_dir = dir.path().to_path_buf();
         (cfg, dir)
+    }
+
+    #[test]
+    fn concurrent_pod_creates_all_get_a_persisted_id() {
+        // Two Pods created at the same instant used to race on one fixed temp file: the loser's
+        // rename failed with a bare ENOENT ("No such file or directory") and its VM create was
+        // rejected; a lost read-modify-write could also drop a mapping.
+        let (cfg, _dir) = test_cfg();
+        let cfg = std::sync::Arc::new(cfg);
+        let threads: Vec<_> = (0..24)
+            .map(|i| {
+                let cfg = cfg.clone();
+                std::thread::spawn(move || pod_id_for(&cfg, &format!("pod-uid-{i}")))
+            })
+            .collect();
+        let ids: Vec<u32> = threads
+            .into_iter()
+            .map(|t| {
+                t.join()
+                    .unwrap()
+                    .expect("concurrent pod_id_for must not fail")
+            })
+            .collect();
+        let stored = load(&cfg).unwrap();
+        assert_eq!(stored.ids.len(), 24, "no mapping may be lost");
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(stored.ids[&format!("pod-uid-{i}")], *id);
+        }
+        let unique: std::collections::BTreeSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), 24, "ids must stay unique");
     }
 
     #[test]

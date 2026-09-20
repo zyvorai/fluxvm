@@ -10,7 +10,7 @@
 use anyhow::{Result, bail};
 use fluxvm_core::config::Config;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, io::Write, net::IpAddr, path::PathBuf};
+use std::{collections::BTreeMap, fs, net::IpAddr, path::PathBuf};
 use uuid::Uuid;
 
 /// Sentinel `vm_id` for Fabric-reconciled remote identity rows.
@@ -49,15 +49,7 @@ fn load(cfg: &Config) -> Result<Store> {
 }
 
 fn save(cfg: &Config, store: &Store) -> Result<()> {
-    let p = path(cfg);
-    if let Some(parent) = p.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = p.with_extension("json.tmp");
-    let mut f = fs::File::create(&tmp)?;
-    f.write_all(serde_json::to_vec_pretty(store)?.as_slice())?;
-    f.sync_all()?;
-    fs::rename(tmp, p)?;
+    crate::store::write_atomic(&path(cfg), serde_json::to_vec_pretty(store)?.as_slice())?;
     Ok(())
 }
 
@@ -78,6 +70,7 @@ fn normalize_host(ip_or_cidr: &str) -> Result<String> {
 }
 
 pub fn upsert(cfg: &Config, ip: &str, identity: u32, vm_id: Uuid) -> Result<()> {
+    let _guard = crate::store::lock();
     let ip = ip.split('/').next().unwrap_or(ip).trim().to_string();
     if ip.is_empty() {
         return Ok(());
@@ -98,6 +91,7 @@ pub fn upsert(cfg: &Config, ip: &str, identity: u32, vm_id: Uuid) -> Result<()> 
 /// Each CIDR contributes its address part (prefix length is not stored; service
 /// policy sid maps are exact-IP). Prefer `/32` / `/128` peer publishes.
 pub fn upsert_remote(cfg: &Config, identity: u32, cidrs: &[String]) -> Result<usize> {
+    let _guard = crate::store::lock();
     if identity == 0 {
         bail!("identity 0 is reserved/unresolved");
     }
@@ -129,6 +123,7 @@ pub fn upsert_remote(cfg: &Config, identity: u32, cidrs: &[String]) -> Result<us
 
 /// Remove remote (nil-`vm_id`) rows for `identity`. Local VM rows are kept.
 pub fn remove_remote_identity(cfg: &Config, identity: u32) -> Result<usize> {
+    let _guard = crate::store::lock();
     let mut store = load(cfg)?;
     let before = store.entries.len();
     store
@@ -142,6 +137,7 @@ pub fn remove_remote_identity(cfg: &Config, identity: u32) -> Result<usize> {
 }
 
 pub fn remove_vm(cfg: &Config, vm_id: Uuid) -> Result<()> {
+    let _guard = crate::store::lock();
     if vm_id.is_nil() {
         bail!("refusing to remove_vm for nil remote sentinel; use remove_remote_identity");
     }
