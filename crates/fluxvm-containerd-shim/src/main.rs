@@ -1346,7 +1346,14 @@ impl Service {
                         .await;
                     anyhow::anyhow!("FluxVM sandbox failed to start: {why}")
                 }
-                Err(e) => e,
+                Err(e) => {
+                    // A create the daemon rejected still leaves a `failed` record behind that
+                    // nothing references (the error body carries no id); remove it by our unique
+                    // name, or every rejected attempt stays in the VM list forever.
+                    self.discard_failed_vm_records(&format!("ctr-{}", safe_name(&self.group)))
+                        .await;
+                    e
+                }
             };
             if let (true, Some(direct_cni), Some((path, primary, multus))) =
                 (retry_on_bridge, cni.as_ref(), bridge_retry.as_ref())
@@ -3121,6 +3128,21 @@ impl Service {
         });
     }
 
+    /// Deletes the `failed` VM records named `name` (best effort).
+    async fn discard_failed_vm_records(&self, name: &str) {
+        let Ok(resp) = self.api(Method::GET, "/v1/vms", None).await else {
+            return;
+        };
+        let Ok(list) = resp.json::<Value>().await else {
+            return;
+        };
+        for id in failed_vm_ids_named(&list, name) {
+            let _ = self
+                .api(Method::DELETE, &format!("/v1/vms/{id}"), None)
+                .await;
+        }
+    }
+
     async fn delete_fluxvm_vm_idempotent(&self, vm_id: &str) -> AnyResult<()> {
         let url = format!("{}/v1/vms/{vm_id}", self.cfg.api_url.trim_end_matches('/'));
         let mut req = self.http.request(Method::DELETE, &url);
@@ -3958,6 +3980,23 @@ fn forward_events(publisher: RemotePublisher, namespace: String, mut rx: EventRe
             }
         }
     });
+}
+
+/// Ids of `failed` records called exactly `name` in a `GET /v1/vms` response (`{"items": [...]}`).
+fn failed_vm_ids_named(list: &Value, name: &str) -> Vec<String> {
+    list.get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter(|v| {
+                    v.get("name").and_then(Value::as_str) == Some(name)
+                        && v.get("status").and_then(Value::as_str) == Some("failed")
+                })
+                .filter_map(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// How many tasks other than `own_id` are still registered for the Pod.
@@ -6607,7 +6646,7 @@ mod direct_datapath_tests {
 
 #[cfg(test)]
 mod pod_teardown_tests {
-    use super::other_tasks;
+    use super::{failed_vm_ids_named, other_tasks};
 
     fn ids(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -6618,6 +6657,19 @@ mod pod_teardown_tests {
         // containerd runs the shim's `delete` for a container while the sandbox task is still there.
         assert_eq!(other_tasks("ctr", &ids(&["sandbox"])), 1);
         assert_eq!(other_tasks("ctr", &ids(&["sandbox", "other-ctr"])), 2);
+    }
+
+    #[test]
+    fn only_our_own_failed_records_are_discarded() {
+        let list = serde_json::json!({"items": [
+            {"id": "1", "name": "ctr-pod-a", "status": "failed"},
+            {"id": "2", "name": "ctr-pod-a", "status": "running"},
+            {"id": "3", "name": "ctr-pod-b", "status": "failed"},
+            {"id": "4", "name": "ctr-pod-a", "status": "failed"},
+        ]});
+        assert_eq!(failed_vm_ids_named(&list, "ctr-pod-a"), vec!["1", "4"]);
+        assert!(failed_vm_ids_named(&list, "ctr-none").is_empty());
+        assert!(failed_vm_ids_named(&serde_json::json!({}), "ctr-pod-a").is_empty());
     }
 
     #[test]
