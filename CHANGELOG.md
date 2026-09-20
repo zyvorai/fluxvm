@@ -23,6 +23,15 @@
      daemon's VM delete (a graceful guest power-off takes far longer), so it was cancelled before it signalled the
      shim to exit, and the VM record, CNI netns alias and shim were all left. The teardown now runs on a detached
      task, so it completes and the shim exits.
+  5. Found while exercising the direct datapath live: two Pods created at the same instant raced on one fixed
+     `pod-ids.json.tmp` (bare ENOENT, so the VM create was rejected and `auto` silently fell back to the bridge
+     chain); the pod-id and ipcache stores now use a lock and unique temp files.
+  6. `VmStore::update` was an upsert, so a late writer could resurrect a VM that `delete` had just removed; it now
+     only replaces an existing record.
+  7. A rejected direct create left a `failed` VM record behind on every `auto` fallback; the shim now removes it.
+  8. With workloads truly inside their cgroup, the OCI device policy is enforced, and containerd's default
+     "deny all" left containers unable to use `/dev/null` or `/dev/urandom`; the agent now adds runc's default
+     allowed-device list.
   Live result: a Pod is fully deleted in ~13 s with nothing left behind (no tap/veth links, netns aliases,
   QEMU, VM records, shim processes).
 
