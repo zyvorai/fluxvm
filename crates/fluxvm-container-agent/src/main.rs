@@ -2667,10 +2667,49 @@ fn parse_device_cgroup_policy(config: &Value) -> Result<Option<DeviceCgroupPolic
         }
         rules.retain(|r| r.access != 0);
     }
+    if !default_allow {
+        append_default_allowed_devices(&mut rules);
+    }
     Ok(Some(DeviceCgroupPolicy {
         default_allow,
         rules,
     }))
+}
+
+/// Devices every container may use no matter what the OCI rules say: `mknod` of any device, the six
+/// standard character devices, the console, the pty multiplexer and the pts slaves. runc appends the
+/// same list after the spec's rules (containerd's default spec is just "deny all"), and without it a
+/// container inside its device cgroup cannot even open /dev/null or /dev/urandom, or create them.
+fn append_default_allowed_devices(rules: &mut Vec<DeviceCgroupRule>) {
+    let rwm = BPF_DEVCG_ACC_READ | BPF_DEVCG_ACC_WRITE | BPF_DEVCG_ACC_MKNOD;
+    let defaults: [(u32, Option<u32>, Option<u32>, u32); 11] = [
+        (BPF_DEVCG_DEV_CHAR, None, None, BPF_DEVCG_ACC_MKNOD),
+        (BPF_DEVCG_DEV_BLOCK, None, None, BPF_DEVCG_ACC_MKNOD),
+        (BPF_DEVCG_DEV_CHAR, Some(1), Some(3), rwm), // null
+        (BPF_DEVCG_DEV_CHAR, Some(1), Some(5), rwm), // zero
+        (BPF_DEVCG_DEV_CHAR, Some(1), Some(7), rwm), // full
+        (BPF_DEVCG_DEV_CHAR, Some(1), Some(8), rwm), // random
+        (BPF_DEVCG_DEV_CHAR, Some(1), Some(9), rwm), // urandom
+        (BPF_DEVCG_DEV_CHAR, Some(5), Some(0), rwm), // tty
+        (BPF_DEVCG_DEV_CHAR, Some(5), Some(1), rwm), // console
+        (BPF_DEVCG_DEV_CHAR, Some(5), Some(2), rwm), // ptmx
+        (BPF_DEVCG_DEV_CHAR, Some(136), None, rwm),  // pts/*
+    ];
+    for (dev_type, major, minor, access) in defaults {
+        match rules
+            .iter_mut()
+            .find(|r| r.dev_type == Some(dev_type) && r.major == major && r.minor == minor)
+        {
+            Some(existing) => existing.access |= access,
+            None => rules.push(DeviceCgroupRule {
+                allow: true,
+                dev_type: Some(dev_type),
+                major,
+                minor,
+                access,
+            }),
+        }
+    }
 }
 
 #[repr(C)]
@@ -5619,12 +5658,68 @@ mod tests {
         });
         let policy = parse_device_cgroup_policy(&config).unwrap().unwrap();
         assert!(!policy.default_allow);
-        assert_eq!(policy.rules.len(), 1);
-        assert!(policy.rules[0].allow);
+        // The spec's own 1:3 rule folds into the default list (which also grants it rwm).
+        assert!(policy.rules.iter().all(|r| r.allow));
+        assert_eq!(
+            policy
+                .rules
+                .iter()
+                .filter(|r| r.major == Some(1) && r.minor == Some(3))
+                .count(),
+            1
+        );
         let program = build_device_bpf(&policy).unwrap();
         assert_eq!(program.first().unwrap().code, 0x61);
         assert_eq!(program.last().unwrap().code, 0x95);
         assert!(program.len() > 8);
+    }
+
+    #[test]
+    fn deny_all_device_policy_still_allows_the_standard_devices() {
+        // containerd's default OCI spec only says "deny all"; the standard devices must survive.
+        let config = serde_json::json!({
+            "linux": {"resources": {"devices": [{"allow": false, "access": "rwm"}]}}
+        });
+        let policy = parse_device_cgroup_policy(&config).unwrap().unwrap();
+        assert!(!policy.default_allow);
+        let allows = |major: u32, minor: u32| {
+            policy.rules.iter().any(|r| {
+                r.allow
+                    && r.dev_type == Some(BPF_DEVCG_DEV_CHAR)
+                    && r.major == Some(major)
+                    && r.minor == Some(minor)
+                    && r.access == 0x7
+            })
+        };
+        for (major, minor) in [
+            (1, 3),
+            (1, 5),
+            (1, 7),
+            (1, 8),
+            (1, 9),
+            (5, 0),
+            (5, 1),
+            (5, 2),
+        ] {
+            assert!(allows(major, minor), "{major}:{minor} must stay usable");
+        }
+        assert!(
+            policy
+                .rules
+                .iter()
+                .any(|r| r.dev_type == Some(BPF_DEVCG_DEV_CHAR) && r.major == Some(136))
+        );
+        assert!(build_device_bpf(&policy).is_ok());
+    }
+
+    #[test]
+    fn a_widely_allowing_policy_is_left_alone() {
+        let config = serde_json::json!({
+            "linux": {"resources": {"devices": [{"allow": true, "access": "rwm"}]}}
+        });
+        let policy = parse_device_cgroup_policy(&config).unwrap().unwrap();
+        assert!(policy.default_allow);
+        assert!(policy.rules.is_empty());
     }
 
     #[test]
