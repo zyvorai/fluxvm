@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Fixed
+- **A bridge-hotplugged NIC leaked its tap.** `hotplug_nic` (the warm-pool bridge-chain path) never set the
+  VM's `tap_name`, and stop/delete clean the network only for a record that names its primary tap, so the
+  `hn0…` tap outlived every claimed VM (found live: one stray tap after a warm-pool bridge Pod). It is now
+  recorded with the first hotplugged NIC; verified live (no links left after delete).
 - **Secure Containers: a Pod could not be deleted.** On a live k3s + Cilium node `kubectl delete pod`
   left Pods `Terminating` indefinitely (in `direct` and `bridge` mode alike). Three causes, all found on a
   clean, freshly restarted containerd:
@@ -31,15 +35,46 @@
   7. A rejected direct create left a `failed` VM record behind on every `auto` fallback; the shim now removes it.
   8. With workloads truly inside their cgroup the OCI device policy is enforced, and containerd's default
      "deny all" would leave containers unable to open the standard devices; the agent now adds runc's default
-     allowed-device list (unit-tested). Separately, and not caused by that change (an A/B against the pre-fix agent
-     behaves the same): the container's `/dev` is the image's empty directory, with no device nodes, so
-     `/dev/null`, `/dev/urandom` and `/dev/zero` do not exist inside Secure Containers; still open.
+     allowed-device list (unit-tested).
+  8b. `/dev` inside a Secure Container was the image's empty directory, so `/dev/null`, `/dev/zero` and
+     `/dev/urandom` did not exist (`iperf3`: "failed to open /dev/urandom"; `dd if=/dev/zero` failed). This
+     predates the cgroup change (an A/B against the pre-fix agent behaves the same). The agent bind-mounted the
+     container rootfs onto itself *non-recursively* before `pivot_root`, which dropped the `/dev` tmpfs the OCI
+     mounts had just placed under it; the self-bind is now recursive. The nodes are also `chmod`ed after `mknod`,
+     since `mknod` applies the umask. Verified live: `/dev/null` (writable by a non-root user), `/dev/zero` and
+     `/dev/urandom` work, and `/dev`, `/dev/shm`, `/proc`, `/sys`, ConfigMap volumes and `resolv.conf` all survive
+     the pivot.
   9. A NIC hotplugged into a warm-pool VM is enumerated by the guest a moment after `device_add` returns; the shim's
      guest network script now waits for it instead of failing with an empty "exit=1".
   Live result: a Pod is fully deleted in ~13 s with nothing left behind (no tap/veth links, netns aliases,
   QEMU, VM records, shim processes).
 
 ### Added
+- **Warm-pool Pods can run containers.** A pool member keeps the virtiofs shares its template was created with,
+  so a Pod's container rootfs (staging directory, kubelet volumes) could not be delivered and a warm-pool Pod
+  never became Ready. New:
+  `CreateVmRequest.shared_memory` (boot with shareable memory so shares can be hot-added; set it on pool
+  templates), and `POST /v1/vms/{id}/hotplug/share` (admin, QEMU): starts a `virtiofsd` for a host directory and
+  hot-plugs a `vhost-user-fs-pci` device onto one of the reserved top PCIe root ports (`fs{N}`, N = share
+  index; the `virtiofsd` is respawned per port attempt because it serves one connection). With
+  `FLUXVM_CONTAINER_WARM_POOL` the shim hot-adds the Pod's shares right after the NIC. Live: a Pod claimed from a
+  warm pool was Ready in **7 s** (a cold Pod takes ~140 s), with the container started, `logs`, `exec`, a
+  ConfigMap volume and `/dev` working; two shares hot-added, mounted, read and written from the guest.
+  Pool templates must have no `shared_folders` of their own: the shim expects the Pod's shares to be `fs0…`.
+- **Warm-pool Pods get their eBPF Pod identity.** A pool member is booted before any Pod exists, so a
+  claimed VM never carried `pod_uid` and Pod-scoped network policy (`/v1/vms/{id}/network/pod-policy`,
+  "VM has no associated Pod identity") could not apply to it. `POST /v1/pools/{name}/claim` now takes a
+  `pod_uid` (validated: 1–128 of `[A-Za-z0-9._-]`, checked before a member is taken), the shim sends the Pod's
+  UID with `FLUXVM_CONTAINER_WARM_POOL`, and the identity is minted when the NIC is hot-added. A bridge-chain
+  hotplug (`hotplug_nic`) now also attaches the dataplane when the VM has a Pod identity (the direct hotplug
+  already did). Live, direct and bridge: the record carries the Pod's UID, the eBPF meta `pod_id` equals the
+  `pod-ids.json` entry, and setting a Pod-scoped policy on the claimed VM returns 200. Enforcement against
+  peer traffic was not exercised.
+- **Multus secondaries exercised live.** With Multus in the CNI chain (a reversible rename; Cilium's
+  `cni-exclusive` had to be relaxed while testing and was restored), a Secure Container Pod annotated with a
+  NetworkAttachmentDefinition got `net1`, with `auto` using the bridge chain and reporting why, `direct` refusing
+  as documented, and host ⇄ guest `net1` reachable (3/3 both ways). Ordinary Pods keep working through
+  Multus → Cilium.
 - **Cilium CNI (Secure Containers)** — shim `FLUXVM_CONTAINER_CNI_PROVIDER`
   (`auto`/`cilium`/`generic`) with Multus-safe `netN` filtering, eth0-preferring
   L2 handoff, `configs/cilium-cni.toml`, `docs/cilium-cni.md`,

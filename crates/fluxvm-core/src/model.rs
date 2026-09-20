@@ -418,6 +418,11 @@ pub struct CreateVmRequest {
     pub loadvm_tag: Option<String>,
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Boot with shareable (memfd) guest memory even without a boot-time virtiofs share, so shares can be
+    /// hot-added later (`POST /v1/vms/{id}/hotplug/share`). Warm-pool templates set this: a pool member
+    /// is booted before any Pod exists, so its per-Pod shares can only arrive after it is claimed.
+    #[serde(default)]
+    pub shared_memory: bool,
     #[serde(default)]
     pub agent: Option<AgentSpec>,
     /// Enable QEMU guest-agent virtio-serial channel (QEMU backend only).
@@ -717,6 +722,32 @@ pub struct PoolSpec {
     pub template: CreateVmRequest,
 }
 
+/// `POST /v1/vms/{id}/hotplug/share`: hot-add a virtiofs share (QEMU only, the VM must have booted with
+/// `shared_memory` or a boot-time share). The tag is the next `fs{N}`, i.e. the share's index in the VM's
+/// `shared_folders` after the call, and is returned to the caller.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HotplugShareRequest {
+    pub host_path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl HotplugShareRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.host_path.is_absolute() {
+            return Err("host_path must be absolute".into());
+        }
+        if self
+            .host_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err("host_path must not contain '..'".into());
+        }
+        Ok(())
+    }
+}
+
 /// Persisted state of a warm pool: which VM ids are currently reserved
 /// members (booted, paused, unclaimed). A member id present here always
 /// corresponds to a real `Paused` `VmRecord` in the main VM store — the two
@@ -782,7 +813,7 @@ impl From<PoolRecord> for PoolView {
 }
 
 /// Applied to the VM handed back by a pool claim, replacing whatever the
-/// template said for these two fields (a pool member is paused with no name
+/// template said for these fields (a pool member is paused with no name
 /// worth keeping and no TTL, precisely so it never expires while idle in
 /// the pool).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -791,6 +822,32 @@ pub struct ClaimOverrides {
     pub name: Option<String>,
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
+    /// Kubernetes Pod UID the claimed VM now belongs to (Secure Containers). Recorded as the VM's
+    /// `request.pod_uid` so the dataplane attached at NIC hotplug carries the Pod's eBPF identity, exactly as
+    /// for a VM created for the Pod (`CreateVmRequest::pod_uid`). A pool member is booted before any Pod
+    /// exists, so this is the only point the identity can be supplied.
+    #[serde(default)]
+    pub pod_uid: Option<String>,
+}
+
+impl ClaimOverrides {
+    /// Rejects a `pod_uid` that could not be a Kubernetes UID: it becomes a key of the persisted
+    /// pod-identity store and part of file names, so keep it to a short run of `[A-Za-z0-9._-]`.
+    pub fn validate(&self) -> Result<(), String> {
+        let Some(uid) = self.pod_uid.as_deref() else {
+            return Ok(());
+        };
+        if uid.is_empty() || uid.len() > 128 {
+            return Err("pod_uid must be 1-128 characters".into());
+        }
+        if !uid
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        {
+            return Err("pod_uid may only contain letters, digits, '.', '_' and '-'".into());
+        }
+        Ok(())
+    }
 }
 
 /// Body of `POST /v1/pools/{name}/resize` / `fluxctl pool resize` — the new
@@ -956,6 +1013,32 @@ mod pool_view_tests {
         let view = PoolView::from(pool(2, 5, 0));
         assert_eq!(view.ready, 5);
         assert_eq!(view.pending, 0);
+    }
+
+    #[test]
+    fn claim_overrides_without_a_pod_uid_still_deserialize() {
+        let o: ClaimOverrides =
+            serde_json::from_str(r#"{"name":"ctr-a","ttl_seconds":60}"#).unwrap();
+        assert_eq!(o.pod_uid, None);
+        assert!(o.validate().is_ok());
+        let o: ClaimOverrides =
+            serde_json::from_str(r#"{"pod_uid":"3f1c2a4e-9d7b-4c11-8a0e-5b6d7e8f9a01"}"#).unwrap();
+        assert_eq!(
+            o.pod_uid.as_deref(),
+            Some("3f1c2a4e-9d7b-4c11-8a0e-5b6d7e8f9a01")
+        );
+        assert!(o.validate().is_ok());
+    }
+
+    #[test]
+    fn claim_overrides_reject_a_pod_uid_that_cannot_be_a_kubernetes_uid() {
+        for bad in ["", "a/b", "../x", "uid with space", "x\n", &"a".repeat(129)] {
+            let o = ClaimOverrides {
+                pod_uid: Some(bad.to_string()),
+                ..Default::default()
+            };
+            assert!(o.validate().is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]

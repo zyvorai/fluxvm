@@ -66,3 +66,65 @@ Every number below was typed from the run's own output; nothing is extrapolated.
      devices; added (unit-tested; moot until the nodes exist).
    - Bridge-chain leftovers (an fvbh*/fvh* pair plus an fvcni-* netns alias) were seen after some bridge Pods in the
      first, interrupted benchmark attempts; not reproduced in the final three rounds. Not investigated further.
+
+
+================================================================================
+ADDENDUM (same day, later): items 5-7 above were re-run after fixes. This supersedes the "NOT exercised" /
+"NOT fixed" statements above.
+================================================================================
+
+A. /dev inside Secure Containers -- FIXED and verified live
+   Cause: pivot_root_into bind-mounted the container rootfs onto itself non-recursively, which dropped the /dev
+   tmpfs the OCI mounts had placed under it, so /dev was the image's empty directory. The self-bind is now
+   MS_BIND|MS_REC, and the minimal device nodes are chmod'ed after mknod (umask). Live: /dev/null, /dev/zero and
+   /dev/urandom present and usable (also by a non-root user); /dev, /dev/shm, /proc, /sys, a ConfigMap volume and
+   resolv.conf survive the pivot; iperf3 loopback works.
+
+B. Multus secondaries -- EXERCISED (temporary, reverted)
+   Multus was put into the CNI chain by renaming 00-multus.conf.cilium_bak back (Cilium's cni-exclusive=true
+   renames it again within seconds, so it was set false for the test and restored afterwards, with a Cilium agent
+   restart). Bridge/host-local plugins were copied into /opt/cni/bin for the NAD and removed afterwards.
+   - ordinary runc Pods: primary networking works through Multus -> Cilium; a Pod annotated with the NAD got
+     net1 (10.97.0.2); sec -> plain ping 0.14 ms avg.
+   - Secure Container Pod with the NAD, default (auto): Ready; network-status shows eth0 (cilium) and net1
+     (10.97.0.3); shim logged "CNI datapath for eth0: bridge chain (auto: falling back to the bridge chain: 1
+     Multus secondary NIC(s) are not supported with the direct datapath yet)" and "Multus secondary net1 attached
+     as guest NIC via bridge fvbh...". VM record: direct=0, extra NICs=1.
+   - host -> guest net1: 3/3, 0.40 ms avg; guest -> host bridge 10.97.0.1: 3/3, 0.29 ms avg.
+   - the same Pod with DATAPATH=direct: stays ContainerCreating, FailedCreatePodSandBox "FLUXVM_CONTAINER_CNI_
+     DATAPATH=direct but the direct datapath cannot be used: 1 Multus secondary NIC(s) are not supported" -- refuses
+     instead of falling back, as documented.
+   - after teardown: no shims, VMs, fvbh bridges or fvcni aliases; CNI dir back to 00-multus.conf.cilium_bak +
+     05-cilium.conflist, cni-exclusive=true.
+
+C. Warm-pool Pods running containers -- FIXED and verified live
+   Root cause was a pool member keeping its template's virtiofs shares. Now the shim hot-adds the Pod's shares
+   after the NIC (POST /v1/vms/{id}/hotplug/share; the pool template needs shared_memory=true).
+   - API level (real QEMU): claim a paused member, hot-add two directories -> {"tag":"fs0"}, {"tag":"fs1"}; the
+     guest mounted both (virtiofs) and read their files, a guest write to fs0 appeared on the host; two virtiofsd
+     processes while running, zero after delete (and no QEMU left).
+     Bug found by this test: the second share failed because the first port attempt (already taken by fs0) consumed
+     virtiofsd's single vhost-user connection and the retry found no socket; virtiofsd is now respawned per attempt.
+   - From a Pod (FLUXVM_CONTAINER_WARM_POOL=<pool>, pool of 2): Pod Ready after 7 s (a cold Pod takes ~140 s),
+     `logs` printed "started", `exec` ran, the ConfigMap volume was readable (/cfg/greeting), /dev populated; the
+     pool refilled to 2 members after the claim.
+   - Namespace deletion took 54 s (a cold Pod's takes ~13 s): the extra time was not investigated; teardown
+     completed with no shims left and no leaked VMs beyond the pool's own members.
+
+D. Lab node afterwards: RuntimeClass fluxvm, shim wrapper and pools removed; no fx* namespaces, QEMU, shims, VM
+   records or fvbh/fvh/fvcb/fvn links; k3s and fluxvm active. The fixed agent and daemon stay installed. Unrelated
+   and pre-existing: zynera/zynera-chat ImagePullBackOff and market-llama... Pending.
+
+E. Warm-pool Pods get their eBPF Pod identity (pod_uid on claim) -- verified live, direct and bridge
+   Before: a claimed pool member had request.pod_uid = None, so /v1/vms/{id}/network/pod-policy failed with "VM has
+   no associated Pod identity". Now POST /v1/pools/{name}/claim takes pod_uid (the shim sends the Pod UID).
+   - direct Pod (Ready 12 s then 7 s on the rerun): VM record request.pod_uid == the Pod's UID; the eBPF meta pod_id
+     (2757653943) equals the pod-ids.json entry; POST .../network/pod-policy -> HTTP 200.
+   - bridge Pod (Ready 7 s / 6 s): same three checks pass (pod_id 3129108792), so the bridge-chain hotplug now
+     attaches the dataplane with the Pod identity too.
+   - a claim with pod_uid "../x" -> HTTP 400 and no pool member consumed.
+   Not exercised: enforcement of a Pod-scoped policy against peer traffic; only that the identity exists and the
+   policy maps accept a policy.
+   Found on the way: the bridge hotplug never recorded the VM's primary tap, so delete leaked the hn0... tap (one
+   stray link after the first bridge run). Fixed; after the rerun no fvbh/fvh/hn links remained.
+   Lab node afterwards: clean (no fx* ns, QEMU, shims, VM records or links; CNI dir as before).

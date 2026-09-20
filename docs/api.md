@@ -33,6 +33,7 @@ POST   /v1/vms/{uuid}/resources
 POST   /v1/vms/{uuid}/hotplug/cpu
 POST   /v1/vms/{uuid}/hotplug/memory
 POST   /v1/vms/{uuid}/hotplug/nic
+POST   /v1/vms/{uuid}/hotplug/share
 GET    /v1/vms/{uuid}/cpuset
 POST   /v1/vms/{uuid}/freeze
 POST   /v1/vms/{uuid}/thaw
@@ -163,6 +164,12 @@ of members ready right now) it adds `ready` (`members.len()`, named explicitly s
 know that's what `members` counts), `pending` (`size` minus `ready`, floored at 0), and
 `claimed_total` (a lifetime count of members this pool has actually handed out via
 `POST .../claim`). All three are additive — nothing existing was renamed or removed.
+
+`POST /v1/pools/{name}/claim` accepts `name`, `ttl_seconds` and `pod_uid` (all optional). `pod_uid` is
+the Kubernetes Pod UID a Secure Containers claim is for: it is recorded as the VM's `request.pod_uid`,
+so the dataplane attached when the NIC is hot-added mints the Pod's eBPF identity (Pod-scoped network
+policy, `POST /v1/vms/{id}/network/pod-policy`) exactly as for a VM created for the Pod. It must be 1–128
+characters of `[A-Za-z0-9._-]` (400 otherwise, checked before a member is taken from the pool).
 
 ```bash
 curl -sS http://127.0.0.1:7788/v1/vms -H 'Authorization: Bearer <token>'
@@ -334,3 +341,18 @@ over QMP with `getfd` + `netdev_add fd=` on one session):
 
 `bridge` and `direct` are mutually exclusive (400 otherwise). A direct hotplug needs a VM booted with
 `network.mode=none`; on any failure the daemon removes the tap and dataplane it created.
+
+### Share hotplug (QEMU)
+
+`POST /v1/vms/{uuid}/hotplug/share` (admin) hot-adds a virtiofs share to a running VM, so a warm-pool
+member (which keeps its template's shares) can receive a Pod's rootfs and volumes after a claim:
+
+```json
+{"host_path": "/var/lib/fluxvm/some/dir", "read_only": false}
+```
+
+The reply is `{"tag": "fs<N>"}`, N being the share's index in the VM's `shared_folders`; mount it in the
+guest with `mount -t virtiofs fs<N> <dir>`. The path must be absolute, without `..`, and a directory the
+**daemon** can see (a sandboxed daemon with `PrivateTmp` does not see `/tmp`). The VM must have been created with
+`"shared_memory": true` (vhost-user-fs needs shareable guest memory); up to four shares can be hot-added
+(reserved root ports). On failure the `virtiofsd` is killed and nothing is recorded.

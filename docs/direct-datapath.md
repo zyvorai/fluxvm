@@ -45,9 +45,11 @@ Two attach modes share one mechanism:
   bridge chain), standalone `l2-uplink` with two real guests, and warm-pool claim plus direct NIC hotplug. It also
   measured bridge vs direct with real guests: **no detectable difference** (p50 0.526 vs 0.462 ms and TCP 0.34 vs
   0.37 Gbit/s medians, both inside the run-to-run spread on a shared node), so the datapath's value is fewer
-  devices and less host state, not guest-visible speed. **Still not exercised:** Multus secondaries (Multus is
-  installed on the lab node but not in the CNI chain) and a warm-pool Pod running containers (a pool member keeps
-  its template's virtiofs shares, so the Pod's rootfs cannot be delivered).
+  devices and less host state, not guest-visible speed. A third pass exercised **Multus secondaries** (Multus put
+  in the CNI chain for the test: a Secure Container Pod got `net1`, `auto` fell back to the bridge chain with the
+  reason logged, `direct` refused as documented) and a **warm-pool Pod running containers** (Ready in 7 s from a
+  claim; the Pod's shares are hot-added over virtiofs, see `POST /v1/vms/{id}/hotplug/share` in
+  [api.md](api.md)). It also fixed `/dev` inside Secure Containers, which was empty.
   **Pod teardown:** deleting a Secure Container Pod originally hung (Terminating indefinitely) in both `direct`
   and `bridge` mode. That was three agent/shim bugs, not the datapath (see the CHANGELOG "Fixed" entry); with them
   fixed a direct-mode Pod is fully deleted in ~13 s and leaves no tap/veth links, netns aliases, QEMU or VM

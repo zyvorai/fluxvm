@@ -633,6 +633,55 @@ pub async fn hotplug_nic_fd(
     Ok(())
 }
 
+/// Hot-add a `vhost-user-fs-pci` device on `hotplug-pcie-{port}` for a `virtiofsd` that is already
+/// listening on `virtiofs_socket`. The VM must have shareable guest memory (see `shared_memory`).
+/// Two commands (`chardev-add`, `device_add`); a failed `device_add` removes the chardev again.
+pub async fn hotplug_virtiofs(
+    socket: &Path,
+    index: usize,
+    virtiofs_socket: &Path,
+    tag: &str,
+    port: u8,
+    timeout: Duration,
+) -> Result<()> {
+    let chardev = format!("vfsock{index}");
+    let steps = vec![
+        Step::new(
+            "chardev-add",
+            Some(json!({
+                "id": chardev,
+                "backend": {"type": "socket", "data": {
+                    "addr": {"type": "unix", "data": {"path": virtiofs_socket.to_string_lossy()}},
+                    "server": false
+                }}
+            })),
+        ),
+        Step::new(
+            "device_add",
+            Some(json!({
+                "driver": "vhost-user-fs-pci",
+                "id": format!("fsdev{index}"),
+                "chardev": chardev,
+                "tag": tag,
+                "queue-size": 1024,
+                "bus": format!("hotplug-pcie-{port}")
+            })),
+        ),
+    ];
+    if let Err(e) = execute_session(socket, steps, timeout).await {
+        // Harmless when the chardev never existed.
+        let _ = execute(
+            socket,
+            "chardev-remove",
+            Some(json!({"id": chardev})),
+            timeout,
+        )
+        .await;
+        return Err(e).context("hot-adding a virtiofs share");
+    }
+    Ok(())
+}
+
 async fn query_memory_devices(socket: &Path, timeout: Duration) -> Result<Vec<Value>> {
     let value = execute(socket, "query-memory-devices", None, timeout).await?;
     value
@@ -1284,6 +1333,38 @@ mod fd_session_tests {
         assert_eq!(seen[2].1["netdev"], "net0");
         assert_eq!(seen[2].1["bus"], "hotplug-pcie-0");
         assert_eq!(seen[2].1["mac"], "02:00:00:00:00:02");
+    }
+
+    #[tokio::test]
+    async fn virtiofs_hotplug_adds_the_chardev_then_the_device_in_one_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("qmp.sock");
+        let server = serve(StdListener::bind(&sock).unwrap(), false);
+
+        hotplug_virtiofs(
+            &sock,
+            2,
+            Path::new("/run/fluxvm/vfs.sock"),
+            "fs2",
+            7,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+
+        let seen = server.join().unwrap();
+        let cmds: Vec<&str> = seen.iter().map(|s| s.0.as_str()).collect();
+        assert_eq!(cmds, ["chardev-add", "device_add"]);
+        assert_eq!(seen[0].1["id"], "vfsock2");
+        assert_eq!(
+            seen[0].1["backend"]["data"]["addr"]["data"]["path"],
+            "/run/fluxvm/vfs.sock"
+        );
+        assert_eq!(seen[0].1["backend"]["data"]["server"], false);
+        assert_eq!(seen[1].1["driver"], "vhost-user-fs-pci");
+        assert_eq!(seen[1].1["chardev"], "vfsock2");
+        assert_eq!(seen[1].1["tag"], "fs2");
+        assert_eq!(seen[1].1["bus"], "hotplug-pcie-7");
     }
 
     #[tokio::test]

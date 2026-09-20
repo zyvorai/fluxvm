@@ -11,7 +11,7 @@ use fluxvm_core::{
     model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
     process::{spawn_logged, spawn_swtpm, wait_for_socket_ready},
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const QMP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,7 +43,10 @@ const MAX_VCPUS_CEILING: u8 = 254;
 /// `device_add`'s `bus` field, trying each until one's free -- the same
 /// out-of-process REST relationship as the `vnc.sock` path convention
 /// above, not a Rust dependency, so the convention can't be shared as code).
-const HOTPLUG_PCIE_PORTS: u8 = 4;
+const HOTPLUG_PCIE_PORTS: u8 = 8;
+/// First of the root ports reserved for hot-added virtiofs shares; the ports below it (0..4) are the NICs'
+/// (the scheduler caps NIC hotplug at 4). Shares are tried from the top down.
+const SHARE_PORTS_START: u8 = 4;
 
 pub struct QemuBackend;
 
@@ -199,7 +202,7 @@ pub fn build_args(
     // QEMU's default anonymous allocation — `vhost-user-fs-pci` otherwise
     // fails to attach. `-m` above still sets the *size*; this object is
     // what makes the *backing* shareable with the virtiofsd process(es).
-    if !virtiofs_sockets.is_empty() {
+    if !virtiofs_sockets.is_empty() || req.shared_memory {
         a.extend([
             "-object".into(),
             format!(
@@ -383,6 +386,68 @@ pub fn build_args(
     Ok(a)
 }
 
+/// Starts one `virtiofsd` serving `host_path` on `workspace/virtiofs-{index}.sock` and waits until its socket
+/// is ready. Returns the pid and the socket path; the caller owns the process.
+async fn spawn_virtiofsd_one(
+    cfg: &Config,
+    workspace: &Path,
+    index: usize,
+    host_path: &Path,
+) -> Result<(u32, PathBuf)> {
+    let socket = workspace.join(format!("virtiofs-{index}.sock"));
+    // Stale sockets from a previous failed launch make exists()/connect
+    // race: the path is present but nothing accepts → Connection refused.
+    let _ = tokio::fs::remove_file(&socket).await;
+    let args = vec![
+        // Ubuntu/systemd hosts often fail virtiofsd's default namespace
+        // sandbox ("Error creating sandbox" / capability sync) when
+        // spawned under ProtectSystem/NoNewPrivileges. Fail-open to an
+        // explicit none sandbox so Secure Containers shared folders work.
+        "--sandbox".to_string(),
+        "none".to_string(),
+        "--seccomp".to_string(),
+        "none".to_string(),
+        "--socket-path".to_string(),
+        path_arg(&socket),
+        "--shared-dir".to_string(),
+        path_arg(host_path),
+    ];
+    // rust-vmm virtiofsd (common on Ubuntu/k3s hosts) has no --readonly /
+    // -o ro. Enforce read-only via guest fstab in the scheduler when
+    // share.read_only is set; do not pass a flag that aborts virtiofsd
+    // before it binds the vhost-user socket.
+    let log = workspace.join(format!("virtiofsd-{index}.log"));
+    let child = spawn_logged(&cfg.virtiofsd_binary, &args, &log)
+        .await
+        .with_context(|| {
+            format!(
+                "spawning virtiofsd for shared_folders[{index}] ({})",
+                host_path.display()
+            )
+        })?;
+    let Some(pid) = child.id() else {
+        anyhow::bail!("virtiofsd for shared_folders[{index}] exited before PID was available");
+    };
+    // QEMU connects as the vhost-user *client*. Do not probe with
+    // UnixStream::connect — that can consume virtiofsd's single accept.
+    // Stale sockets (path present, nothing listening) caused Connection
+    // refused; we unlink before spawn and wait for a *new* path while
+    // the child is still alive.
+    if let Err(e) = wait_for_socket_ready(
+        pid,
+        &socket,
+        VIRTIOFSD_SOCKET_TIMEOUT,
+        &format!("virtiofsd for shared_folders[{index}]"),
+        &log,
+    )
+    .await
+    {
+        kill_pids(&[pid]);
+        return Err(e);
+    }
+    Ok((pid, socket))
+}
+
 /// Spawns one `virtiofsd` per `req.shared_folders` entry, in order, each
 /// listening on its own socket under `ctx.workspace`. On any failure,
 /// already-spawned instances from this call are killed before returning —
@@ -395,70 +460,50 @@ async fn spawn_virtiofsd_instances(
     let mut pids = Vec::new();
     let mut sockets = Vec::new();
     for (i, share) in req.shared_folders.iter().enumerate() {
-        let socket = ctx.workspace.join(format!("virtiofs-{i}.sock"));
-        // Stale sockets from a previous failed launch make exists()/connect
-        // race: the path is present but nothing accepts → Connection refused.
-        let _ = tokio::fs::remove_file(&socket).await;
-        let tag = format!("fs{i}");
-        let args = vec![
-            // Ubuntu/systemd hosts often fail virtiofsd's default namespace
-            // sandbox ("Error creating sandbox" / capability sync) when
-            // spawned under ProtectSystem/NoNewPrivileges. Fail-open to an
-            // explicit none sandbox so Secure Containers shared folders work.
-            "--sandbox".to_string(),
-            "none".to_string(),
-            "--seccomp".to_string(),
-            "none".to_string(),
-            "--socket-path".to_string(),
-            path_arg(&socket),
-            "--shared-dir".to_string(),
-            path_arg(&share.host_path),
-        ];
-        // rust-vmm virtiofsd (common on Ubuntu/k3s hosts) has no --readonly /
-        // -o ro. Enforce read-only via guest fstab in the scheduler when
-        // share.read_only is set; do not pass a flag that aborts virtiofsd
-        // before it binds the vhost-user socket.
-        let log = ctx.workspace.join(format!("virtiofsd-{i}.log"));
-        let spawn_result = spawn_logged(&cfg.virtiofsd_binary, &args, &log)
-            .await
-            .with_context(|| {
-                format!(
-                    "spawning virtiofsd for shared_folders[{i}] ({})",
-                    share.host_path.display()
-                )
-            });
-        let child = match spawn_result {
-            Ok(c) => c,
+        match spawn_virtiofsd_one(cfg, &ctx.workspace, i, &share.host_path).await {
+            Ok((pid, socket)) => {
+                pids.push(pid);
+                sockets.push((format!("fs{i}"), socket));
+            }
             Err(e) => {
                 kill_pids(&pids);
                 return Err(e);
             }
-        };
-        let Some(pid) = child.id() else {
-            kill_pids(&pids);
-            anyhow::bail!("virtiofsd for shared_folders[{i}] exited before PID was available");
-        };
-        // QEMU connects as the vhost-user *client*. Do not probe with
-        // UnixStream::connect — that can consume virtiofsd's single accept.
-        // Stale sockets (path present, nothing listening) caused Connection
-        // refused; we unlink before spawn and wait for a *new* path while
-        // the child is still alive.
-        if let Err(e) = wait_for_socket_ready(
-            pid,
-            &socket,
-            VIRTIOFSD_SOCKET_TIMEOUT,
-            &format!("virtiofsd for shared_folders[{i}]"),
-            &log,
-        )
-        .await
-        {
-            kill_pids(&pids);
-            return Err(e);
         }
-        pids.push(pid);
-        sockets.push((tag, socket));
     }
     Ok((pids, sockets))
+}
+
+/// Hot-adds a virtiofs share to a running QEMU VM: starts a `virtiofsd` for `host_path` and plugs a
+/// `vhost-user-fs-pci` device on the first free of the top root ports. `index` is the share's index in the
+/// VM's `shared_folders` (its tag is `fs{index}`). Returns the `virtiofsd` pid, which the caller records
+/// so stop/delete reaps it. On failure the `virtiofsd` is killed.
+pub async fn hotplug_virtiofs(
+    cfg: &Config,
+    vm: &VmRecord,
+    host_path: &Path,
+    index: usize,
+) -> Result<u32> {
+    let tag = format!("fs{index}");
+    let qmp_socket = vm.workspace.join("qmp.sock");
+    let mut last_err = None;
+    for port in (SHARE_PORTS_START..HOTPLUG_PCIE_PORTS).rev() {
+        // A `virtiofsd` serves exactly one vhost-user connection and exits when it drops, so a failed
+        // attempt (port already taken) must not reuse it: start a fresh one per port.
+        let (pid, socket) = spawn_virtiofsd_one(cfg, &vm.workspace, index, host_path).await?;
+        match qmp::hotplug_virtiofs(&qmp_socket, index, &socket, &tag, port, QMP_TIMEOUT).await {
+            Ok(()) => return Ok(pid),
+            Err(e) => {
+                kill_pids(&[pid]);
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("no PCIe root port reserved for virtiofs shares")))
+    .context(format!(
+        "hot-adding virtiofs share {tag} (no free root port, or the VM has no shareable memory)"
+    ))
 }
 
 fn kill_pids(pids: &[u32]) {
@@ -732,6 +777,7 @@ mod tests {
             cloud_init: None,
             ttl_seconds: None,
             extra_args: vec![],
+            shared_memory: false,
             agent: None,
             qga: None,
             hyperv: false,
@@ -1136,6 +1182,7 @@ mod snapshot_save_tests {
                 cloud_init: None,
                 ttl_seconds: None,
                 extra_args: vec![],
+                shared_memory: false,
                 agent: None,
                 qga: None,
                 hyperv: false,

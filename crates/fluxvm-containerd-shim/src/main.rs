@@ -1311,7 +1311,12 @@ impl Service {
             info!("secure-container sandbox claiming warm pool {pool}");
             (
                 format!("/v1/pools/{pool}/claim"),
-                json!({"name": format!("ctr-{}", safe_name(&self.group))}),
+                json!({
+                    "name": format!("ctr-{}", safe_name(&self.group)),
+                    // The member was booted before this Pod existed; without its UID the claimed VM
+                    // would never get the Pod's eBPF identity (Pod-scoped network policy).
+                    "pod_uid": hints.pod_uid
+                }),
             )
         } else {
             ("/v1/vms".into(), create)
@@ -1453,6 +1458,13 @@ impl Service {
                 }
             }
 
+            // A claimed pool member was booted before this Pod existed, so it has none of the Pod's
+            // virtiofs shares: hot-add them now, in order, so they get the tags fs0, fs1, ... the
+            // guest mounts below.
+            if self.cfg.warm_pool.is_some() {
+                self.hotplug_shared_folders(&vm, &shared_folders).await?;
+            }
+
             if let Some(cni) = cni.as_ref() {
                 self.configure_guest_cni(&vm, cni).await?;
             }
@@ -1536,6 +1548,36 @@ impl Service {
             )
             .await
             .with_context(|| format!("hotplugging CNI bridge {bridge} onto {}", vm.id))?;
+        }
+        Ok(())
+    }
+
+    /// Hot-adds each of `shares` (`{"host_path", "read_only"}`) to a claimed warm-pool VM. The daemon
+    /// numbers them fs0, fs1, ... in call order, which is what `ensure_guest_shares_mounted` expects.
+    async fn hotplug_shared_folders(&self, vm: &VmRecord, shares: &[Value]) -> AnyResult<()> {
+        for (i, share) in shares.iter().enumerate() {
+            let body = json!({
+                "host_path": share["host_path"],
+                "read_only": share["read_only"],
+            });
+            let resp = self
+                .api(
+                    Method::POST,
+                    &format!("/v1/vms/{}/hotplug/share", vm.id),
+                    Some(body),
+                )
+                .await
+                .with_context(|| format!("hot-adding virtiofs share #{i} to {}", vm.id))?;
+            let reply: Value = resp.json().await.context("decoding hotplug/share reply")?;
+            let expected = format!("fs{i}");
+            if reply["tag"].as_str() != Some(expected.as_str()) {
+                bail!(
+                    "warm-pool VM {} numbered share #{i} {:?}, expected {expected}: the pool template \
+                     must not declare shared_folders",
+                    vm.id,
+                    reply["tag"]
+                );
+            }
         }
         Ok(())
     }

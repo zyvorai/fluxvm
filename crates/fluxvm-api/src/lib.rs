@@ -328,6 +328,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/hotplug/cpu", post(hotplug_vm_cpu))
         .route("/v1/vms/{id}/hotplug/memory", post(hotplug_vm_memory))
         .route("/v1/vms/{id}/hotplug/nic", post(hotplug_vm_nic))
+        .route("/v1/vms/{id}/hotplug/share", post(hotplug_vm_share))
         .route("/v1/vms/{id}/cpuset", get(vm_cpuset))
         .route("/v1/vms/{id}/freeze", post(freeze_vm))
         .route("/v1/vms/{id}/thaw", post(thaw_vm))
@@ -1525,6 +1526,18 @@ async fn hotplug_vm_nic(
         None => m.hotplug_nic(id, req.bridge, req.mac).await?,
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn hotplug_vm_share(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::HotplugShareRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    req.validate().map_err(|e| anyhow::anyhow!(e))?;
+    let tag = m.hotplug_share(id, req.host_path, req.read_only).await?;
+    Ok(Json(json!({"tag": tag})))
 }
 
 async fn freeze_vm(
@@ -2876,6 +2889,7 @@ mod tests {
                 cloud_init: None,
                 ttl_seconds: None,
                 extra_args: vec![],
+                shared_memory: false,
                 agent: agent_enabled.then(|| AgentSpec {
                     enabled: true,
                     port: 17777,

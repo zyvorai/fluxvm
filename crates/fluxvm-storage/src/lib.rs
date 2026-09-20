@@ -390,6 +390,7 @@ mod tests {
                 cloud_init: None,
                 ttl_seconds: None,
                 extra_args: vec![],
+                shared_memory: false,
                 agent: None,
                 qga: None,
                 hyperv: false,

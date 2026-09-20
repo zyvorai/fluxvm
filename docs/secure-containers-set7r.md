@@ -48,8 +48,9 @@ Pod correctly), and no change to what gets copied or where.
 - **Warm-pool claim** is `FLUXVM_CONTAINER_WARM_POOL=<pool>` on the shim.
   The pool template must boot with `network.mode=none`. After claim the
   shim hotplugs the Pod CNI bridge (and Multus `netN` bridges) via
-  `POST /v1/vms/{id}/hotplug/nic`. virtiofs shares are still the ones the
-  template was created with — a pool member is not a per-Pod rootfs. With the
+  `POST /v1/vms/{id}/hotplug/nic`. A pool member keeps the shares its template
+  was created with, so the shim also hot-adds the Pod's shares
+  (`POST /v1/vms/{id}/hotplug/share`; the pool template needs `shared_memory: true`). With the
   opt-in direct datapath the hotplug request carries a `direct` spec instead of
   a bridge: the daemon creates the tap inside the Pod netns and passes it to QEMU
   over QMP `getfd` ([direct-datapath.md](direct-datapath.md)).

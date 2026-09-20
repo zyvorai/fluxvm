@@ -1196,6 +1196,7 @@ async fn main() -> Result<()> {
                 let overrides = ClaimOverrides {
                     name: vm_name,
                     ttl_seconds,
+                    pod_uid: None,
                 };
                 println!(
                     "{}",

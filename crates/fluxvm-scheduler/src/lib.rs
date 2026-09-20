@@ -161,6 +161,18 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             direct: None,
         },
     };
+    // stop/delete tear the network down only for a VM whose record names its primary tap
+    // (`vm.tap_name`); a warm-pool member is created with no NIC, so without this the first hotplugged tap
+    // was never removed and leaked on every claimed VM.
+    if vm.tap_name.is_none() {
+        if let NetworkSpec::Tap {
+            tap_name: Some(primary),
+            ..
+        } = &vm.request.network
+        {
+            vm.tap_name = Some(primary.clone());
+        }
+    }
 }
 
 /// Linux reserves vsock CIDs 0–2 (hypervisor/local/host); guest CIDs start
@@ -720,6 +732,27 @@ impl VmManager {
         fluxvm_network::add_bridge_tap(&tap, &bridge)
             .await
             .context("creating hotplug TAP")?;
+        // A claimed Secure Containers VM carries its Pod's UID; attach the dataplane with that identity, as
+        // the cold create path does, so Pod-scoped network policy applies to it.
+        if let Some(uid) = vm.request.pod_uid.as_deref() {
+            let (cfg, tap_name, uid) = (self.cfg.clone(), tap.clone(), uid.to_string());
+            let applied = tokio::task::spawn_blocking(move || {
+                fluxvm_network::dataplane::apply_sandbox_policy(
+                    &cfg,
+                    id,
+                    Some(&tap_name),
+                    None,
+                    &[],
+                    Some(&uid),
+                )
+            })
+            .await
+            .context("dataplane apply panicked")?;
+            if let Err(e) = applied {
+                let _ = fluxvm_network::cleanup_tap(&tap).await;
+                return Err(e).context("applying the VM dataplane for the hotplugged NIC");
+            }
+        }
         if let Err(e) = fluxvm_qemu::hotplug_nic(&vm, &tap, mac.as_deref(), index).await {
             let _ = fluxvm_network::cleanup_tap(&tap).await;
             return Err(e);
@@ -746,6 +779,44 @@ impl VmManager {
         vm.tap_name = prepared.tap_name.clone();
         self.store.update(vm).await?;
         Ok(())
+    }
+
+    /// Hot-adds a virtiofs share serving `host_path` to a running QEMU VM and returns its tag (`fs{N}`, the
+    /// share's index in `shared_folders`). The share is recorded on the VM's request so stop/delete reaps the
+    /// `virtiofsd`, and a later restart re-creates it as an ordinary boot-time share. Warm-pool templates
+    /// (`network.mode=none`, `shared_memory`) use this to hand a claimed VM its per-Pod shares.
+    pub async fn hotplug_share(
+        &self,
+        id: Uuid,
+        host_path: std::path::PathBuf,
+        read_only: bool,
+    ) -> Result<String> {
+        let mut vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu {
+            bail!("share hotplug is supported for the QEMU backend only");
+        }
+        if !matches!(vm.status, VmStatus::Running) {
+            bail!(
+                "share hotplug needs a running VM (status is {:?})",
+                vm.status
+            );
+        }
+        if !host_path.is_dir() {
+            bail!("share source {} is not a directory", host_path.display());
+        }
+        let index = vm.request.shared_folders.len();
+        let pid = fluxvm_qemu::hotplug_virtiofs(&self.cfg, &vm, &host_path, index).await?;
+        let tag = format!("fs{index}");
+        vm.virtiofsd_pids.push(pid);
+        vm.request
+            .shared_folders
+            .push(fluxvm_core::model::SharedFolder {
+                host_path,
+                guest_path: format!("/mnt/{tag}"),
+                read_only,
+            });
+        self.store.update(vm).await?;
+        Ok(tag)
     }
 
     /// The cpuset currently pinned via `set_resources`'s `cpuset_cpus`, or
@@ -2790,6 +2861,8 @@ impl VmManager {
         overrides: ClaimOverrides,
         token_tenant: Option<&str>,
     ) -> Result<VmRecord> {
+        // Before popping: a bad request must not consume a ready member.
+        overrides.validate().map_err(|e| anyhow::anyhow!(e))?;
         let Some(id) = self.pools.pop_member(name).await? else {
             bail!(
                 "pool '{name}' has no ready members right now — try again shortly, or increase its size"
@@ -2822,6 +2895,11 @@ impl VmManager {
         if let Some(new_name) = overrides.name {
             vm.request.name = new_name.clone();
             vm.name = new_name;
+        }
+        // The pool member was booted before any Pod existed; recording the Pod's UID here is what lets the
+        // dataplane attached at NIC hotplug mint the Pod's eBPF identity (Pod-scoped network policy).
+        if overrides.pod_uid.is_some() {
+            vm.request.pod_uid = overrides.pod_uid;
         }
         vm.request.ttl_seconds = overrides.ttl_seconds;
         vm.expires_at = overrides
@@ -2986,6 +3064,7 @@ mod tests {
             cloud_init: None,
             ttl_seconds: None,
             extra_args: vec![],
+            shared_memory: false,
             agent: None,
             qga: None,
             hyperv: false,
@@ -3667,6 +3746,11 @@ mod nic_hotplug_tests {
             other => panic!("expected tap after first hotplug, got {other:?}"),
         }
         assert_eq!(nic_hotplug_index(&record.request.network), 1);
+        assert_eq!(
+            record.tap_name.as_deref(),
+            Some("hn0abcdef"),
+            "delete cleans the network only when the record names its primary tap"
+        );
     }
 
     #[test]
@@ -3708,6 +3792,11 @@ mod nic_hotplug_tests {
             panic!("expected tap");
         };
         assert_eq!(tap_name.as_deref(), Some("hn0abcdef"));
+        assert_eq!(
+            record.tap_name.as_deref(),
+            Some("hn0abcdef"),
+            "a Multus extra must not replace the primary tap the record names"
+        );
         assert_eq!(
             extra,
             &vec![ExtraNic {
