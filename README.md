@@ -1,11 +1,4 @@
-<div align="center">
-
-<img src="docs/assets/social-preview.png" alt="FluxVM — Run real VMs with a real API. One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the FluxVM hypervisor." width="820">
-
-# Run real VMs with a real API.
-
-**One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor.**<br>
-No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend.
+# FluxVM
 
 [![CI](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml)
 [![DevOps gates](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml)
@@ -13,9 +6,23 @@ No libvirtd. No XML. A REST API and a CLI that do the same thing on every backen
 [![Release](https://img.shields.io/github/v/release/zyvorai/fluxvm?sort=semver)](https://github.com/zyvorai/fluxvm/releases)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 
-[**Quick start**](#quick-start) · [**Proof & status**](#maturity-whats-real-today) · [**Docs**](#documentation-map) · [**Talk to Zyvor**](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)
+![FluxVM — real VMs with a real API](docs/social/fluxvm-share-card.png)
 
-</div>
+**Run real VMs with a real API.**
+
+One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor. No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend.
+
+## Contents
+
+- [Why teams switch to FluxVM](#why-teams-switch-to-fluxvm)
+- [See it work](#see-it-work)
+- [Proof & status](#maturity-whats-real-today)
+- [vs. libvirt/virsh](#vs-libvirtvirsh)
+- [Backends](#backends)
+- [Use cases](#use-cases)
+- [Quick start](#quick-start)
+- [Documentation map](#documentation-map)
+- [License](#license)
 
 ---
 
@@ -418,3 +425,5 @@ component.
 
 Part of the Zyvor platform (see [Ecosystem](#ecosystem) above). More at
 **[zyvor.dev](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)**.
+
+Social assets: [docs/social/](docs/social/) (README hero uses `fluxvm-share-card.png`; legacy `docs/assets/social-preview.png` remains for other references).
