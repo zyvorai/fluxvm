@@ -118,7 +118,7 @@ jobs:
       # only the first run per distro per cache-eviction cycle pays for it.
       - name: Cache base image
         id: cache-image
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /tmp/base-image.qcow2
           key: image-customize-base-${{ matrix.distro }}-${{ matrix.image_url }}
