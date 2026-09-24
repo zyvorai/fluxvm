@@ -1010,6 +1010,13 @@ async fn proxy_over_tcp(
     uri: String,
     headers: axum::http::HeaderMap,
     body: bytes::Bytes,
+    // Authority the guest should see in `Host` (typically `guest_ip:port`).
+    // Must be set: Node and other HTTP/1.1 servers reject requests with no
+    // Host header (400 + Connection: close), which previously made the
+    // sandbox HTTP proxy look like a hard connection reset against any
+    // Node-based guest worker while Python's more lenient server still
+    // answered 200.
+    guest_host: &str,
 ) -> Response {
     let (mut sender, connection) =
         match hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await {
@@ -1026,18 +1033,20 @@ async fn proxy_over_tcp(
 
     let mut builder = hyper::Request::builder().method(method).uri(uri);
     for (k, v) in headers.iter() {
-        // host: about the wrong peer once forwarded. content-length: hyper
-        // computes and sets its own from the `Full` body below -- forwarding
-        // the original value duplicates the header, and on a non-empty body
-        // (anything but the plain GETs this path was first exercised with)
-        // that framing mismatch left the guest's HTTP server waiting on body
-        // bytes that were never coming, hanging the request indefinitely
-        // instead of erroring.
+        // host: about the FluxVM API peer, not the guest -- replaced with
+        // `guest_host` below. content-length: hyper computes and sets its
+        // own from the `Full` body below -- forwarding the original value
+        // duplicates the header, and on a non-empty body (anything but the
+        // plain GETs this path was first exercised with) that framing
+        // mismatch left the guest's HTTP server waiting on body bytes that
+        // were never coming, hanging the request indefinitely instead of
+        // erroring.
         if k == header::HOST || k == header::CONTENT_LENGTH || k == header::TRANSFER_ENCODING {
             continue;
         }
         builder = builder.header(k, v);
     }
+    builder = builder.header(header::HOST, guest_host);
     let outgoing = match builder.body(Full::new(body)) {
         Ok(r) => r,
         Err(e) => {
@@ -1175,7 +1184,15 @@ async fn sandbox_proxy_inner(
         Ok(b) => b,
         Err(e) => return (StatusCode::BAD_REQUEST, format!("body: {e}")).into_response(),
     };
-    proxy_over_tcp(tcp, method, uri, headers, body).await
+    proxy_over_tcp(
+        tcp,
+        method,
+        uri,
+        headers,
+        body,
+        &format!("{guest_ip}:{port}"),
+    )
+    .await
 }
 
 async fn list_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
@@ -4058,6 +4075,7 @@ mod tests {
                 "/".to_string(),
                 axum::http::HeaderMap::new(),
                 bytes::Bytes::new(),
+                "127.0.0.1",
             )
             .await;
 
