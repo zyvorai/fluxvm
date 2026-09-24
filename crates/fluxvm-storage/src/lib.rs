@@ -421,6 +421,9 @@ mod tests {
             swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
+            requested_security_profile: Default::default(),
+            achieved_security_profile: Default::default(),
+            security_evidence: None,
         }
     }
 

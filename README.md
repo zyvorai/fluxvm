@@ -8,6 +8,7 @@
 No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend.
 
 [![CI](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml)
+[![Security profiles](https://github.com/zyvorai/fluxvm/actions/workflows/security-profiles.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/security-profiles.yml)
 [![DevOps gates](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml)
 [![License: Apache-2.0](https://img.shields.io/github/license/zyvorai/fluxvm)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/zyvorai/fluxvm?sort=semver)](https://github.com/zyvorai/fluxvm/releases)
@@ -218,6 +219,7 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 | **Operations** | cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC | [docs/operations.md](docs/operations.md) · [docs/api.md](docs/api.md#auth--rbac) |
 | **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native path (no KubeVirt); `fluxvm-agent` fleet registry with load-aware placement | [Kubernetes CRD/operator](#kubernetes-crdoperator) · [docs/microvm.md](docs/microvm.md) · [docs/operations.md](docs/operations.md#distributed-node-agent) |
 | **Secure Containers** *(developer preview)* | containerd runtime-v2 shim mapping a Pod onto one QEMU FluxVM: CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, device passthrough, guest AppArmor/SELinux/seccomp enforcement | [docs/secure-containers.md](docs/secure-containers.md) |
+| **Security profiles (Phase 6)** | `standard` / `measured` / `confidential-snp` / `confidential-tdx`: measured software-test evidence on ordinary QEMU hosts; confidential control plane tested without claiming host-memory encryption until a hardware run | [docs/security-profiles.md](docs/security-profiles.md) · [howto / CI](docs/guides/security-profiles-howto.md) |
 | **Sentinel observability** | eBPF host + guest runtime intelligence: per-VM syscall/page-fault telemetry, drop reasons, flight recorder, BPF-LSM VMM guard/QoS, XDP shield | [docs/runtime-intelligence.md](docs/runtime-intelligence.md) · [docs/flight-recorder.md](docs/flight-recorder.md) |
 
 ---
@@ -235,6 +237,8 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 **What storage backends are supported?** qcow2/raw, LVM thin, NBD and Ceph RBD — see [Bring-your-own storage backend](docs/use-cases.md#bring-your-own-storage-backend).
 
 **Are there published boot-latency or density numbers?** Not yet; it is tracked in [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md). Don't size capacity from unpublished figures.
+
+**How do I test security profiles without SNP/TDX hardware?** Run `./scripts/test-security-profiles.sh` (same suite as [CI](.github/workflows/security-profiles.yml)). Measured evidence is always `software-test` — see [docs/guides/security-profiles-howto.md](docs/guides/security-profiles-howto.md).
 
 **What license is this under?** Apache License 2.0 for the whole repository, no dual licensing — see [License](#license).
 
@@ -392,6 +396,7 @@ threat model, **[talk to Zyvor](https://zyvor.dev?utm_source=github&utm_medium=f
 | Day-2 operations (jailer, cgroups, pools, catalog, storage, fleet, state layout) | [docs/operations.md](docs/operations.md) |
 | Building custom images (per-distro + Windows) | [docs/build-image-tutorials.md](docs/build-image-tutorials.md) |
 | Secure Containers (containerd runtime-v2) | [docs/secure-containers.md](docs/secure-containers.md) |
+| Security profiles (Phase 6) — measured + confidential control plane | [docs/security-profiles.md](docs/security-profiles.md) · [howto + how to test](docs/guides/security-profiles-howto.md) · [CI](.github/workflows/security-profiles.yml) |
 | MicroVM (Kubernetes without KubeVirt) | [docs/microvm.md](docs/microvm.md) |
 | Whole-project production checklist | [docs/PRODUCTION.md](docs/PRODUCTION.md) |
 | DevOps / CI / readiness probes | [docs/DEVOPS.md](docs/DEVOPS.md) |

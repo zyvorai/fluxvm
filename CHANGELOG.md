@@ -3,6 +3,19 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Phase 6 security profiles.** `CreateVmRequest.security_profile` (`standard` /
+  `measured` / `confidential-snp` / `confidential-tdx`) with distinct requested vs
+  achieved evidence, host capability discovery, fleet admission that still gates
+  an explicit `node`, QEMU SNP/TDX providers, and measured software-test secret
+  release. Hardware-free CI: `./scripts/test-security-profiles.sh` /
+  [`.github/workflows/security-profiles.yml`](.github/workflows/security-profiles.yml).
+  Docs: [docs/security-profiles.md](docs/security-profiles.md),
+  [docs/guides/security-profiles-howto.md](docs/guides/security-profiles-howto.md).
+  Measured never claims host-memory protection; `*_launch_verified` stays false
+  until a real hardware run.
+- **Firecracker sandbox templates.** Operator-authored templates with
+  `"backend": "firecracker"` are no longer coerced to the in-tree FluxVm backend
+  (volumes remain QEMU-only; Firecracker cells cannot use virtiofs).
 - **Persistent sandbox volumes.** `POST /v1/sandboxes` accepts `volumes: [{name, guest_path, read_only?}]`.
   Each volume is a host directory under `sandbox.volumes_dir` (default `<state_dir>/volumes`), scoped per
   tenant, shared into the guest over virtiofs and mounted through an fstab line, so it survives sandbox

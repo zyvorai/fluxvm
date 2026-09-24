@@ -1,7 +1,13 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+mod confidential;
 mod qmp;
+
+pub use confidential::{
+    ControlPlaneSnpProvider, ControlPlaneTdxProvider, SnpLaunchProvider, TdxLaunchProvider,
+    apply_confidential_args, confidential_args_for,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -375,7 +381,19 @@ pub fn build_args(
         "-qmp".into(),
         format!("unix:{},server=on,wait=off", qmp.display()),
     ]);
-    a.extend(req.extra_args.clone());
+    if req.security_profile.is_confidential() {
+        if !req.extra_args.is_empty() {
+            anyhow::bail!(
+                "security_profile {} rejects extra_args; confidential launch args come only from the QEMU SNP/TDX provider",
+                req.security_profile.as_str()
+            );
+        }
+        if let Some(launch) = confidential_args_for(req.security_profile)? {
+            apply_confidential_args(&mut a, &launch)?;
+        }
+    } else {
+        a.extend(req.extra_args.clone());
+    }
     // Restores CPU/memory/device state from an existing internal snapshot
     // on this VM's own disk instead of a normal cold boot -- see
     // CreateVmRequest.loadvm_tag's doc comment for why this is a one-shot
@@ -790,6 +808,8 @@ mod tests {
             pod_uid: None,
             secure_boot: None,
             tpm: None,
+            security_profile: Default::default(),
+            measurement_policy: None,
             net_mbit_limit: None,
             net_pps_limit: None,
             blk_mbit_limit: None,
@@ -1195,6 +1215,8 @@ mod snapshot_save_tests {
                 pod_uid: None,
                 secure_boot: None,
                 tpm: None,
+                security_profile: Default::default(),
+                measurement_policy: None,
                 net_mbit_limit: None,
                 net_pps_limit: None,
                 blk_mbit_limit: None,
@@ -1213,6 +1235,9 @@ mod snapshot_save_tests {
             swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
+            requested_security_profile: Default::default(),
+            achieved_security_profile: Default::default(),
+            security_evidence: None,
         }
     }
 

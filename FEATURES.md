@@ -22,6 +22,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - qcow2 copy-on-write overlays for cheap disposable clones from a golden image
 - Direct-kernel or firmware boot (Cloud Hypervisor, QEMU)
 - UEFI Secure Boot (QEMU only) + emulated TPM 2.0 (QEMU and Cloud Hypervisor) — see [docs/secure-boot-tpm.md](docs/secure-boot-tpm.md)
+- Phase 6 **security profiles** (`standard` / `measured` / `confidential-snp` / `confidential-tdx`): admission, software-test evidence, fleet capability heartbeats, and policy-gated secret release — see [docs/security-profiles.md](docs/security-profiles.md)
 
 ## Backends
 

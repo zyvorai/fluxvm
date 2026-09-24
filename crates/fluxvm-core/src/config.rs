@@ -65,6 +65,9 @@ pub struct Config {
     /// in-tree pure KVM via `fluxvm-hypervisor`.
     #[serde(default)]
     pub fluxvm_engine: FluxVmEngine,
+    /// Measured / confidential-VM control-plane gates (Phase 6).
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 /// Which guest runner backs the FluxVM hypervisor control plane.
@@ -106,6 +109,30 @@ impl Default for Config {
             storage: StorageConfig::default(),
             sandbox: SandboxConfig::default(),
             fluxvm_engine: FluxVmEngine::default(),
+            security: SecurityConfig::default(),
+        }
+    }
+}
+
+/// Phase 6: measured / confidential launch gates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// Allow creating confidential-* VMs before a hardware integration run
+    /// (exercises arg generation / admission only; does not assert memory protection).
+    pub allow_unverified_confidential: bool,
+    /// Set true only after a verified SEV-SNP hardware launch + evidence path.
+    pub snp_launch_verified: bool,
+    /// Set true only after a verified TDX hardware launch + evidence path.
+    pub tdx_launch_verified: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            allow_unverified_confidential: false,
+            snp_launch_verified: false,
+            tdx_launch_verified: false,
         }
     }
 }

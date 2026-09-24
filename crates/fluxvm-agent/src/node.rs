@@ -7,6 +7,7 @@
 //! only reads `GET /v1/vms` off the local REST API to count them.
 
 use anyhow::{Context, Result};
+use fluxvm_core::security::{HostCapabilities, NodeSecurityCapabilities};
 use serde_json::json;
 use std::{collections::HashMap, time::Duration};
 
@@ -56,6 +57,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
         .map(|n| n.get() as u32)
         .unwrap_or(1);
     let memory_mib_total = total_memory_mib().unwrap_or(0);
+    let security = fetch_node_security(http, &cfg.fluxvm_url).await;
 
     let body = json!({
         "name": cfg.name,
@@ -64,6 +66,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
         "memory_mib_total": memory_mib_total,
         "vm_count": vm_count,
         "labels": cfg.labels,
+        "security": security,
     });
     let mut req = http.post(format!("{}/fleet/register", cfg.central_url));
     if let Some(t) = &cfg.token {
@@ -74,6 +77,23 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
         anyhow::bail!("central rejected heartbeat: {}", resp.status());
     }
     Ok(())
+}
+
+async fn fetch_node_security(
+    http: &reqwest::Client,
+    fluxvm_url: &str,
+) -> NodeSecurityCapabilities {
+    match http
+        .get(format!("{fluxvm_url}/v1/security/capabilities"))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json::<HostCapabilities>().await {
+            Ok(caps) => NodeSecurityCapabilities::from(caps),
+            Err(_) => NodeSecurityCapabilities::standard_only(),
+        },
+        _ => NodeSecurityCapabilities::standard_only(),
+    }
 }
 
 async fn local_vm_count(http: &reqwest::Client, fluxvm_url: &str) -> Result<usize> {
