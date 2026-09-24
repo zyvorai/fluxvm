@@ -201,10 +201,8 @@ impl VmManager {
         // operator-authored template may opt into QEMU (virtiofs volumes) or
         // Firecracker (stronger microVM cell; no virtiofs — volumes stay QEMU-only).
         create.backend = if from_template
-            && matches!(
-                create.backend,
-                BackendKind::Qemu | BackendKind::Firecracker
-            ) {
+            && matches!(create.backend, BackendKind::Qemu | BackendKind::Firecracker)
+        {
             create.backend
         } else {
             BackendKind::FluxVm
@@ -322,11 +320,13 @@ impl VmManager {
             }
         }
         for (v, host) in volumes.iter().zip(hosts) {
-            create.shared_folders.push(fluxvm_core::model::SharedFolder {
-                host_path: host,
-                guest_path: v.guest_path.clone(),
-                read_only: v.read_only,
-            });
+            create
+                .shared_folders
+                .push(fluxvm_core::model::SharedFolder {
+                    host_path: host,
+                    guest_path: v.guest_path.clone(),
+                    read_only: v.read_only,
+                });
         }
         Ok(())
     }
@@ -672,8 +672,21 @@ mod tests {
 
     #[test]
     fn rejects_bad_volume_names() {
-        for n in ["", "Home", "-x", ".x", "a/b", "a..b", "a b", "a;b", &"x".repeat(64)] {
-            assert!(validate_volume(&volume(n, "/home/a")).is_err(), "name {n:?}");
+        for n in [
+            "",
+            "Home",
+            "-x",
+            ".x",
+            "a/b",
+            "a..b",
+            "a b",
+            "a;b",
+            &"x".repeat(64),
+        ] {
+            assert!(
+                validate_volume(&volume(n, "/home/a")).is_err(),
+                "name {n:?}"
+            );
         }
     }
 

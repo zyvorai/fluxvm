@@ -1500,8 +1500,7 @@ impl VmManager {
         // assumes a concrete backend and must never see Auto.
         req.backend = resolve_backend(&req, &self.cfg);
         let requested_profile = req.security_profile;
-        let catalog_signed =
-            fluxvm_image::catalog::is_approved_signed_image(&self.cfg, &req.image);
+        let catalog_signed = fluxvm_image::catalog::is_approved_signed_image(&self.cfg, &req.image);
         let caps = fluxvm_core::security::HostCapabilities::discover(&self.cfg);
         fluxvm_core::security::validate_create_request(
             requested_profile,
