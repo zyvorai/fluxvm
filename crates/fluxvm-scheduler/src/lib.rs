@@ -1767,11 +1767,7 @@ impl VmManager {
             }
             if requested_profile.requires_measurement_chain() && req.backend == BackendKind::Qemu
             {
-                let firmware = self
-                    .cfg
-                    .qemu_ovmf_code
-                    .as_ref()
-                    .map(std::path::Path::as_path);
+                let firmware = self.cfg.qemu_ovmf_code.as_deref();
                 let evidence = fluxvm_core::security::collect_measured_evidence(
                     fluxvm_core::security::MeasuredLaunchInputs {
                         image: &record.disk,
