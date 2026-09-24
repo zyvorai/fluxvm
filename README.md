@@ -65,15 +65,12 @@ We only claim what has been run. Every row links to how it was verified.
 
 **Know before you commit.** These are the boundaries, stated up front so you can size the fit:
 
-- **Not yet a finished multi-tenant security boundary.** The jailer, cgroup v2 and per-VM netns are implemented;
-  add seccomp/AppArmor/SELinux policy, quotas, audit logging and stronger image provenance before exposing it to
-  untrusted tenants — [docs/PRODUCTION.md](docs/PRODUCTION.md).
-- **Secure Containers (containerd runtime-v2 shim) is a developer preview**, not a Kata-equivalence claim. Open gaps:
-  `hostPath` hotplug, broader CNI/OCI conformance, and a Pod-teardown hang seen on the lab node —
+- **Multi-tenant controls are opt-in, not a public-cloud boundary.** Create-path quotas use an O(1) ledger, `policy.require_catalog_names` rejects unsigned images, QEMU/Cloud Hypervisor children can take a log-mode seccomp filter (`FLUXVM_VMM_SECCOMP`), and AppArmor/SELinux profiles ship under `deploy/`. Per-tenant Firecracker uids need `[jailer] uid_range_start` / `uid_range_len`. Pause, resume, and delete do not hash images or scan the fleet. See [docs/PRODUCTION.md](docs/PRODUCTION.md).
+- **Secure Containers (containerd runtime-v2 shim) is a developer preview**, not a Kata-equivalence claim. Allowlisted hostPath is a virtiofs export when `FLUXVM_HOSTPATH_ALLOW` is set at sandbox create (symlink escape fails closed). Multus on the direct datapath fails closed. The Pod-teardown hang from earlier labs is covered by `journal_after_task_delete` (CHANGELOG 0.4.0). Broader CNI conformance stays opt-in —
   [docs/secure-containers.md](docs/secure-containers.md).
-- **Not KubeVirt-compatible, by design.** No `virtctl`, CDI or live-migration parity — see [FAQ](#faq).
-- **No published boot-latency or VM-density numbers yet**, so there is no sizing guide today
-  ([docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md)).
+- **Not KubeVirt-compatible, by design.** `kubectl-fluxvm` is the console/exec/pause/resume plugin and deletes the CR (the operator finalizes the VM). `GuestImage` HTTP sources are staged on the node and are not CDI DataVolumes; unsigned downloads are not promoted to a trusted catalog name. QEMU has a target receiver at `POST /v1/migration/receivers` (`-incoming defer`); Cloud Hypervisor stays fire-and-forget, and direct-datapath migration is refused. See [FAQ](#faq).
+- **Boot and density numbers are a method plus a per-host record, not a sizing SLA.** `scripts/record-baseline.sh` writes `docs/benchmarks/evidence/`. `avg_create_ms` is control-plane create time. `warm_claim_ms` is pool claim time. Repeat on a second host before capacity planning
+  ([docs/benchmarks/README.md](docs/benchmarks/README.md)).
 
 ---
 
@@ -224,17 +221,17 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 
 ## FAQ
 
-**Is FluxVM production-ready?** For the core VM-lifecycle primitives (auth/RBAC, jailer, cgroups, netns), yes — with the caveats in [Proof & status](#maturity-whats-real-today). Add seccomp/AppArmor/SELinux policy, quotas, audit logging and stronger image provenance before exposing it to untrusted tenants. Secure Containers is separately a developer preview.
+**Is FluxVM production-ready?** For the core VM-lifecycle primitives (auth/RBAC, jailer, cgroups, netns), yes — with the caveats in [Proof & status](#maturity-whats-real-today). Turn on `policy.require_catalog_names`, the quota ledger, `FLUXVM_VMM_SECCOMP`, and the AppArmor or SELinux profile before exposing it to untrusted tenants. Secure Containers is separately a developer preview.
 
 **How is this different from libvirt?** No libvirtd, no XML domain definitions — its own REST API, with netlink for networking. See [vs. libvirt/virsh](#vs-libvirtvirsh).
 
-**How is this different from KubeVirt?** A different model: FluxVM's `DisposableVm` and MicroVM paths run the VMM on the host under `fluxctl serve`, not inside a virt-launcher Pod, and don't implement `virtctl`, live migration or CDI. Full comparison: [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt).
+**How is this different from KubeVirt?** A different model: FluxVM's `DisposableVm` and MicroVM paths run the VMM on the host under `fluxctl serve`, not inside a virt-launcher Pod. `kubectl-fluxvm` covers console, exec, pause, resume, and CR delete. `GuestImage` HTTP staging is not CDI. QEMU live migration has a target receiver; it is not KubeVirt migration parity. Full comparison: [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt).
 
 **Do I need Fabric or Ragnarok?** No. Clone it, build it, run `fluxctl create`. Fabric and Ragnarok are separate products that use FluxVM as their VM engine — see [Ecosystem](#ecosystem).
 
 **What storage backends are supported?** qcow2/raw, LVM thin, NBD and Ceph RBD — see [Bring-your-own storage backend](docs/use-cases.md#bring-your-own-storage-backend).
 
-**Are there published boot-latency or density numbers?** Not yet; it is tracked in [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md). Don't size capacity from unpublished figures.
+**Are there published boot-latency or density numbers?** The measurement method is `scripts/record-baseline.sh`. Each evidence file is one host, and `avg_create_ms` is API create time, not guest init. It is not a sizing SLA until the same script has been repeated on a second host. Don't treat Firecracker's 125 ms target as a FluxVM number.
 
 **What license is this under?** Apache License 2.0 for the whole repository, no dual licensing — see [License](#license).
 

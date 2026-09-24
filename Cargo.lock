@@ -2293,6 +2293,7 @@ dependencies = [
  "chrono",
  "fluxvm-core",
  "libc",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

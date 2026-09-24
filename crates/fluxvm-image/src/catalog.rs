@@ -180,6 +180,11 @@ pub async fn add_entry(
     source: String,
     format: String,
 ) -> Result<CatalogEntry> {
+    if !fluxvm_core::policy::unsigned_catalog_insert_allowed(cfg.catalog.trusted_signers.len()) {
+        bail!(
+            "refusing unsigned catalog insert for '{name}': [[catalog.trusted_signers]] is configured; sign the entry offline with `fluxctl catalog sign --catalog-file` instead of catalog add"
+        );
+    }
     let path = catalog_path(cfg)?;
     let mut entries = if path.exists() {
         load_catalog(path)?
@@ -414,6 +419,16 @@ fn verify_signature<'a>(
         })
 }
 
+/// Result of [`resolve_with_provenance`]. `from_catalog` is false when the
+/// reference was returned unchanged (no catalog, or no matching name).
+#[derive(Debug, Clone)]
+pub struct ResolvedImage {
+    pub path: PathBuf,
+    pub from_catalog: bool,
+    pub signed_by: Option<String>,
+    pub sha256: Option<String>,
+}
+
 /// Resolves `image_ref` against the configured catalog:
 /// - No `catalog.path` configured, or `image_ref` doesn't match any entry's
 ///   `name` there → returned unchanged (a plain path/URL, the pre-catalog
@@ -427,26 +442,37 @@ fn verify_signature<'a>(
 ///   path is re-hashed here, so a file that changed after the catalog was
 ///   authored is caught rather than silently trusted.
 pub async fn resolve(cfg: &Config, image_ref: &Path) -> Result<PathBuf> {
+    Ok(resolve_with_provenance(cfg, image_ref).await?.path)
+}
+
+pub async fn resolve_with_provenance(cfg: &Config, image_ref: &Path) -> Result<ResolvedImage> {
+    let passthrough = || ResolvedImage {
+        path: image_ref.to_path_buf(),
+        from_catalog: false,
+        signed_by: None,
+        sha256: None,
+    };
     let Some(catalog_path) = &cfg.catalog.path else {
-        return Ok(image_ref.to_path_buf());
+        return Ok(passthrough());
     };
     let Some(ref_str) = image_ref.to_str() else {
-        return Ok(image_ref.to_path_buf());
+        return Ok(passthrough());
     };
     // A configured-but-not-yet-created catalog matches nothing — every
     // image_ref passes through unchanged, same as catalog.path being unset.
     if !catalog_path.exists() {
-        return Ok(image_ref.to_path_buf());
+        return Ok(passthrough());
     }
 
     let catalog = load_catalog(catalog_path)?;
     let Some(entry) = catalog.iter().find(|e| e.name == ref_str) else {
-        return Ok(image_ref.to_path_buf());
+        return Ok(passthrough());
     };
 
+    let mut signed_by = None;
     if !cfg.catalog.trusted_signers.is_empty() {
         let signers = parse_trusted_signers(&cfg.catalog.trusted_signers)?;
-        verify_signature(entry, &signers)?;
+        signed_by = Some(verify_signature(entry, &signers)?.to_string());
     }
 
     let local = fetch_if_needed(cfg, &entry.source)
@@ -462,7 +488,12 @@ pub async fn resolve(cfg: &Config, image_ref: &Path) -> Result<PathBuf> {
         verify_cosign(&local, &cfg.catalog.cosign_identities)
             .with_context(|| format!("cosign verify for catalog entry '{}'", entry.name))?;
     }
-    Ok(local)
+    Ok(ResolvedImage {
+        path: local,
+        from_catalog: true,
+        signed_by,
+        sha256: Some(entry.sha256.clone()),
+    })
 }
 
 /// Shell out to `cosign verify-blob` when `cosign_identities` is configured.
@@ -1013,6 +1044,25 @@ mod tests {
             .unwrap();
         assert_eq!(unsigned_entry.signature_valid, Some(false));
         assert_eq!(unsigned_entry.signed_by, None);
+    }
+
+    #[tokio::test]
+    async fn add_entry_refuses_unsigned_inserts_when_signers_are_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        fs::write(&path, b"[]").unwrap();
+        let (_private, public) = generate_keypair();
+        let cfg = cfg_with_catalog(&path, vec![public]);
+        let err = add_entry(
+            &cfg,
+            "base".into(),
+            "/does/not/need/to/exist".into(),
+            "qcow2".into(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unsigned catalog insert"));
     }
 
     #[test]

@@ -397,6 +397,14 @@ pub struct JailerConfig {
     /// beyond a single-tenant host.
     pub uid: u32,
     pub gid: u32,
+    /// When both are set, each non-empty tenant is assigned one unused uid
+    /// inside `[uid_range_start, uid_range_start + uid_range_len)` and that
+    /// assignment is stored under the state directory. The configured `gid`
+    /// is unchanged. Unset keeps the single host-wide `uid`/`gid`.
+    #[serde(default)]
+    pub uid_range_start: Option<u32>,
+    #[serde(default)]
+    pub uid_range_len: Option<u32>,
     /// Base directory jailer creates `<exec-file-name>/<vm-id>/root/` under.
     /// Must be on the same filesystem as `state_dir` for the hardlink-based
     /// resource placement in `fluxvm-firecracker` to avoid falling back
@@ -412,9 +420,79 @@ impl Default for JailerConfig {
             jailer_binary: "jailer".into(),
             uid: 123,
             gid: 100,
+            uid_range_start: None,
+            uid_range_len: None,
             chroot_base_dir: "/srv/jailer".into(),
         }
     }
+}
+
+impl JailerConfig {
+    /// Host-wide jail identity. Per-tenant ids are allocated by
+    /// [`assign_tenant_uid`], which persists them so two tenants cannot
+    /// hash onto the same uid.
+    pub fn identity_for_tenant(&self, _tenant: Option<&str>) -> (u32, u32) {
+        (self.uid, self.gid)
+    }
+}
+
+/// Allocate a stable jailer uid for `tenant`. The same tenant keeps its uid.
+/// The range is never aliased: a full range returns an error. `gid` stays
+/// the configured group.
+pub fn assign_tenant_uid(
+    state_dir: &Path,
+    jailer: &JailerConfig,
+    tenant: Option<&str>,
+) -> Result<(u32, u32)> {
+    let (Some(start), Some(len)) = (jailer.uid_range_start, jailer.uid_range_len) else {
+        return Ok((jailer.uid, jailer.gid));
+    };
+    if len == 0 {
+        return Ok((jailer.uid, jailer.gid));
+    }
+    let Some(tenant) = tenant.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((jailer.uid, jailer.gid));
+    };
+    fs::create_dir_all(state_dir).context("creating jailer uid state directory")?;
+    let lock_path = state_dir.join("jailer-uids.lock");
+    let path = state_dir.join("jailer-uids.json");
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .context("opening jailer uid lock")?;
+    // SAFETY: exclusive flock released when `lock_file` is dropped.
+    use std::os::unix::io::AsRawFd;
+    if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        anyhow::bail!(
+            "locking jailer uid assignments: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let mut map: std::collections::BTreeMap<String, u32> = if path.exists() {
+        let raw = fs::read_to_string(&path).context("reading jailer uid assignments")?;
+        if raw.trim().is_empty() {
+            std::collections::BTreeMap::new()
+        } else {
+            serde_json::from_str(&raw).context("parsing jailer uid assignments")?
+        }
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    if let Some(uid) = map.get(tenant) {
+        return Ok((*uid, jailer.gid));
+    }
+    let end = start.saturating_add(len);
+    let uid = (start..end)
+        .find(|candidate| !map.values().any(|used| used == candidate))
+        .with_context(|| {
+            format!("jailer uid range {start}..{end} is exhausted; refusing to alias tenants")
+        })?;
+    map.insert(tenant.to_string(), uid);
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(&map)?).context("writing jailer uid assignments")?;
+    fs::rename(&tmp, &path).context("renaming jailer uid assignments")?;
+    Ok((uid, jailer.gid))
 }
 
 /// TLS termination for `fluxctl serve`. When `cert` + `key` are set the API
@@ -579,10 +657,22 @@ pub struct Policy {
     /// resolved to, not as `"auto"` itself).
     pub allowed_backends: Option<Vec<BackendKind>>,
     /// If set, the request's `image` must be underneath one of these
-    /// directories (plain path-prefix check, not a symlink-resistant
-    /// containment guarantee — sufficient to stop tenants pointing at
-    /// arbitrary host paths, not a sandboxing boundary).
+    /// directories. The check canonicalizes existing path components, so a
+    /// symlink that escapes the directory is rejected. It runs on create
+    /// only.
     pub allowed_image_dirs: Option<Vec<PathBuf>>,
+    /// When true, create accepts only a catalog name whose signature
+    /// verifies against `[[catalog.trusted_signers]]`. Default false, so
+    /// existing literal image paths keep working.
+    #[serde(default)]
+    pub require_catalog_names: bool,
+    /// Optional host-wide vCPU cap, summed from the quota ledger. Unset
+    /// means unrestricted.
+    #[serde(default)]
+    pub max_vcpus_host: Option<u32>,
+    /// Optional host-wide memory cap in MiB. Unset means unrestricted.
+    #[serde(default)]
+    pub max_memory_mib_host: Option<u64>,
     /// If set, only these network modes are admitted (`none`, `user`,
     /// `tap`, `macvtap`).
     pub allowed_network_modes: Option<Vec<String>>,
@@ -690,5 +780,30 @@ mod jailer_required_tests {
         cfg.auth.require = true;
         cfg.listen = "127.0.0.1:7788".into();
         assert!(!cfg.jailer_required());
+    }
+
+    #[test]
+    fn tenant_jailer_uids_are_stable_and_distinct() {
+        let dir = std::env::temp_dir().join(format!("fluxvm-jailer-uids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut jailer = JailerConfig::default();
+        assert_eq!(
+            assign_tenant_uid(&dir, &jailer, Some("acme")).unwrap(),
+            (123, 100)
+        );
+        jailer.uid_range_start = Some(2000);
+        jailer.uid_range_len = Some(2);
+        let a = assign_tenant_uid(&dir, &jailer, Some("acme")).unwrap();
+        let b = assign_tenant_uid(&dir, &jailer, Some("other")).unwrap();
+        assert_eq!(a, assign_tenant_uid(&dir, &jailer, Some("acme")).unwrap());
+        assert_ne!(a.0, b.0);
+        assert_eq!(a.1, 100);
+        assert_eq!(b.1, 100);
+        assert!((2000..2002).contains(&a.0));
+        assert!((2000..2002).contains(&b.0));
+        assert!(assign_tenant_uid(&dir, &jailer, Some("third")).is_err());
+        assert_eq!(assign_tenant_uid(&dir, &jailer, None).unwrap(), (123, 100));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

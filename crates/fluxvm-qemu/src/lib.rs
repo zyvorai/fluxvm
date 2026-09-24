@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod qmp;
+pub mod receiver;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -605,9 +606,13 @@ impl VmBackend for QemuBackend {
         let sidecar_pids: Vec<u32> = virtiofsd_pids.iter().copied().chain(swtpm_pid).collect();
 
         let args = build_args(cfg, req, ctx, &virtiofs_sockets)?;
-        let (program, args) =
-            fluxvm_core::process::netns_wrap(ctx.network.netns.as_deref(), &cfg.qemu_binary, &args);
-        let spawned = spawn_logged(&program, &args, &ctx.log_path).await;
+        let spawned = fluxvm_core::process::spawn_vmm(
+            &cfg.qemu_binary,
+            &args,
+            &ctx.log_path,
+            ctx.network.netns.as_deref(),
+        )
+        .await;
         // The child inherits the macvtap fd across exec (or spawn failed and
         // there's nothing to inherit); either way the parent's copy is done.
         if let Some(fd) = ctx.network.tap_fd {

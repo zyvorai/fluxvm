@@ -45,6 +45,34 @@ class T(unittest.TestCase):
             try:
                 with self.assertRaises(BlockingIOError): m.Journal(Path(td),'x').lock()
             finally: j1.close()
+    def test_receiver_uri_overrides_plan_destination(self):
+        class O:
+            def __init__(self, uri):
+                self.vm='vm'; self.id='mid'; self.migration_uri=uri
+                self.plan={'vmm':{'destination_uri':'tcp:hyper-b.example.net:4444'}}
+        argv=m.expand_argv(['fluxctl','migrate','start','{vm_id}','--destination','{migration_uri}'],O('tcp:10.0.0.9:5555'))
+        self.assertEqual(argv[-1],'tcp:10.0.0.9:5555')
+        argv=m.expand_argv(['fluxctl','migrate','start','{vm_id}','--destination','{migration_uri}'],O(None))
+        self.assertEqual(argv[-1],'tcp:hyper-b.example.net:4444')
+    def test_prepare_receiver_activates_and_keeps_the_token_out_of_the_result(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); p,log=self.plan(root)
+            p['vmm']['migrate_argv']=['true','{vm_id}','--destination','{migration_uri}']
+            p['vmm']['destination_uri']='tcp:plan.example:1'
+            p['vmm']['receiver']={'api':'http://127.0.0.1:9','vcpus':1,'memory_mib':128,'disk':'/srv/disk.raw','advertise_host':'hyper-b.example.net','listen_host':'0.0.0.0'}
+            o=m.Orchestrator(p,root/'state',dry_run=True)
+            calls=[]
+            def fake_run(argv,check=True,timeout=None):
+                calls.append(list(argv))
+                if argv[-1].endswith('/activate'): return m.Result(0,'','',0)
+                return m.Result(0,'{"id":"abc","token":"sekret","uri":"tcp:hyper-b.example.net:5555"}','',0)
+            o.dst.run=fake_run
+            out=o.prepare_receiver()
+            self.assertEqual(out['uri'],'tcp:hyper-b.example.net:5555')
+            self.assertNotIn('token',out)
+            self.assertTrue(any(a[-1].endswith('/activate') for a in calls))
+            expanded=m.expand_argv(p['vmm']['migrate_argv'],o)
+            self.assertIn('tcp:hyper-b.example.net:5555',expanded)
     def test_remote_path_guard(self):
         with self.assertRaises(m.MigrationError): m.validate_remote_path('/tmp/../etc/passwd')
 if __name__=='__main__': unittest.main()

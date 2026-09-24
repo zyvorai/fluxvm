@@ -285,6 +285,11 @@ fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
 
 /// Admission check for `cfg.policy`, run once resolved (see `resolve_backend`)
 /// but before any disk/network work — a rejected request should be cheap.
+fn audit_event(event: &str, pairs: &[(&str, &str)]) {
+    let record = fluxvm_core::policy::format_audit_record(event, pairs);
+    tracing::info!(target: "fluxvm_audit", record = %record, "audit");
+}
+
 fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
     let p = &cfg.policy;
     if let Some(max) = p.max_vcpus {
@@ -331,7 +336,7 @@ fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
         }
     }
     if let Some(dirs) = &p.allowed_image_dirs {
-        if !dirs.iter().any(|d| req.image.starts_with(d)) {
+        if !fluxvm_core::policy::image_within_allowed(&req.image, dirs) {
             bail!(
                 "image {} is not under any policy allowed_image_dirs {:?}",
                 req.image.display(),
@@ -1478,23 +1483,43 @@ impl VmManager {
         // Resolved before policy so allowed_image_dirs governs the actual
         // downloaded/verified file a catalog alias points to, not the
         // alias string itself.
-        req.image = fluxvm_image::catalog::resolve(&self.cfg, &req.image)
+        let resolved = fluxvm_image::catalog::resolve_with_provenance(&self.cfg, &req.image)
             .await
             .context("resolving image from catalog")?;
+        fluxvm_core::policy::require_signed_catalog(
+            self.cfg.policy.require_catalog_names,
+            resolved.from_catalog,
+            resolved.signed_by.as_deref(),
+        )?;
+        let image_sha256 = resolved.sha256.clone().unwrap_or_default();
+        let signed_by = resolved.signed_by.clone().unwrap_or_default();
+        req.image = resolved.path;
         validate_policy(&req, &self.cfg)?;
-        if req.tenant.is_some() && !self.cfg.policy.tenants.is_empty() {
-            // Only paid for when a tenant is actually set on the request
-            // AND at least one [[policy.tenants]] entry exists -- avoids a
-            // full Store::list() scan on every create for hosts that don't
-            // use per-tenant quotas at all (the common case today).
-            let existing_for_tenant: Vec<VmRecord> = self
-                .store
-                .list()
-                .await
-                .into_iter()
-                .filter(|v| v.request.tenant == req.tenant)
-                .collect();
-            validate_tenant_policy(&req, &self.cfg, &existing_for_tenant)?;
+        let ledger = self.store.quota_ledger().await?;
+        if let Some(tenant) = req.tenant.as_deref()
+            && !self.cfg.policy.tenants.is_empty()
+        {
+            if let Err(e) = fluxvm_core::policy::enforce_tenant_totals(
+                tenant,
+                req.vcpus,
+                req.memory_mib,
+                &self.cfg.policy,
+                &ledger,
+            ) {
+                let reason = e.to_string();
+                audit_event("quota.deny", &[("tenant", tenant), ("reason", &reason)]);
+                return Err(e);
+            }
+        }
+        if let Err(e) = fluxvm_core::policy::enforce_host_totals(
+            req.vcpus,
+            req.memory_mib,
+            &self.cfg.policy,
+            &fluxvm_core::policy::ledger_for_host_admission(&ledger),
+        ) {
+            let reason = e.to_string();
+            audit_event("quota.deny", &[("scope", "host"), ("reason", &reason)]);
+            return Err(e);
         }
         // Every storage backend except CephRbd points `image` at a real
         // filesystem entry (a file for Default/Nbd, a block device for
@@ -1746,6 +1771,17 @@ impl VmManager {
         self.touch_activity(id).await;
         self.store.update(record.clone()).await?;
         metrics::record_vm_create(started.elapsed().as_millis() as u64);
+        let vm_id = record.id.to_string();
+        let tenant = record.request.tenant.clone().unwrap_or_default();
+        audit_event(
+            "vm.create",
+            &[
+                ("vm_id", &vm_id),
+                ("tenant", &tenant),
+                ("image_sha256", &image_sha256),
+                ("signed_by", &signed_by),
+            ],
+        );
         Ok(record)
     }
 
@@ -1786,22 +1822,18 @@ impl VmManager {
         if actor == "anonymous-admin" || actor == "none" {
             return Ok(());
         }
-        let vms: Vec<VmRecord> = self
-            .list()
-            .await
-            .into_iter()
-            .filter(|v| v.request.created_by_token.as_deref() == Some(actor))
-            .collect();
-        if let Some(max) = self.cfg.auth.max_vms_per_token {
-            if vms.len() >= max {
-                bail!("token '{actor}' at max_vms_per_token ({max})");
-            }
-        }
-        if let Some(max_mem) = self.cfg.auth.max_memory_mib_per_token {
-            let used: u64 = vms.iter().map(|v| v.request.memory_mib).sum();
-            if used.saturating_add(req.memory_mib) > max_mem {
-                bail!("token '{actor}' would exceed max_memory_mib_per_token ({max_mem})");
-            }
+        let ledger = self.store.quota_ledger().await?;
+        if let Err(e) = fluxvm_core::policy::enforce_token_totals(
+            actor,
+            req.vcpus,
+            req.memory_mib,
+            self.cfg.auth.max_vms_per_token,
+            self.cfg.auth.max_memory_mib_per_token,
+            &ledger,
+        ) {
+            let reason = e.to_string();
+            audit_event("quota.deny", &[("token", actor), ("reason", &reason)]);
+            return Err(e);
         }
         Ok(())
     }
@@ -2029,13 +2061,40 @@ impl VmManager {
                 vm.status
             );
         }
-        match vm.backend {
+        if vm.request.network.is_direct() {
+            bail!("live migration of a direct-datapath VM is refused until a two-host test exists");
+        }
+        let vm_id = id.to_string();
+        audit_event(
+            "migration.start",
+            &[("vm_id", &vm_id), ("destination", &request.destination)],
+        );
+        let quiesced = fluxvm_network::ebpf::attachment_status(&self.cfg.sandbox.dataplane, id)
+            .map(|status| status.attached)
+            .unwrap_or(false);
+        if quiesced {
+            if let Err(e) = fluxvm_network::migration_state::quiesce(&self.cfg, id) {
+                if let Err(resume) = fluxvm_network::migration_state::resume(&self.cfg, id) {
+                    tracing::warn!(vm = %id, error = %resume, "resuming dataplane after quiesce failed");
+                }
+                return Err(e);
+            }
+        }
+        let started = match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::migration_start(&self.cfg, &vm, request).await,
             BackendKind::CloudHypervisor => {
                 fluxvm_cloud_hypervisor::migration_start(&self.cfg, &vm, request).await
             }
-            other => bail!("live migration contract v1 supports qemu only (backend={other:?})"),
+            other => Err(anyhow::anyhow!(
+                "live migration contract v1 supports qemu only (backend={other:?})"
+            )),
+        };
+        if quiesced && started.is_err() {
+            if let Err(e) = fluxvm_network::migration_state::resume(&self.cfg, id) {
+                tracing::warn!(vm = %id, error = %e, "resuming dataplane after migration start failed");
+            }
         }
+        started
     }
 
     pub async fn migration_status(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationStatus> {
@@ -2052,14 +2111,249 @@ impl VmManager {
 
     pub async fn cancel_migration(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationStatus> {
         let vm = self.get(id).await?;
-        match vm.backend {
-            BackendKind::Qemu => fluxvm_qemu::migration_cancel(&self.cfg, &vm).await,
+        let status = match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::migration_cancel(&self.cfg, &vm).await?,
             BackendKind::CloudHypervisor => bail!(
                 "Cloud Hypervisor's migration API has no cancellation primitive once a migration \
                  has been requested"
             ),
             other => bail!("migration cancel contract v1 supports qemu only (backend={other:?})"),
+        };
+        let vm_id = id.to_string();
+        audit_event("migration.cancel", &[("vm_id", &vm_id)]);
+        Ok(status)
+    }
+
+    fn receiver_dir(&self) -> std::path::PathBuf {
+        self.cfg.state_dir.join("migration-receivers")
+    }
+
+    fn read_receiver(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationReceiver> {
+        let path = self.receiver_dir().join(format!("{id}.json"));
+        let raw = fs::read_to_string(&path)
+            .with_context(|| format!("migration receiver {id} not found"))?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    fn write_receiver(&self, rec: &fluxvm_core::model::MigrationReceiver) -> Result<()> {
+        let dir = self.receiver_dir();
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}.json", rec.id));
+        fs::write(&path, serde_json::to_vec_pretty(rec)?)?;
+        Ok(())
+    }
+
+    /// Incoming QEMU only. Cloud Hypervisor, Firecracker, and the in-tree
+    /// hypervisor stay unsupported. The receiver does not choose a node.
+    pub async fn create_migration_receiver(
+        &self,
+        req: fluxvm_core::model::MigrationReceiverRequest,
+    ) -> Result<fluxvm_core::model::MigrationReceiver> {
+        let cpu = if req.cpu_model.is_empty() {
+            "host"
+        } else {
+            req.cpu_model.as_str()
+        };
+        let machine = if req.machine.is_empty() {
+            "q35"
+        } else {
+            req.machine.as_str()
+        };
+        fluxvm_qemu::receiver::validate_receiver(cpu, machine, &req.disk)?;
+        let vcpus = req.vcpus;
+        let memory_mib = req.memory_mib;
+        if let Err(e) = self
+            .store
+            .reserve_untracked_host(vcpus, memory_mib, &self.cfg.policy)
+            .await
+        {
+            let reason = e.to_string();
+            audit_event("quota.deny", &[("scope", "host"), ("reason", &reason)]);
+            return Err(e);
         }
+        match self.launch_reserved_receiver(req).await {
+            Ok(rec) => Ok(rec),
+            Err(e) => {
+                if let Err(release) = self.store.release_untracked_host(vcpus, memory_mib).await {
+                    tracing::warn!(
+                        error = %release,
+                        "releasing migration receiver host reservation"
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn launch_reserved_receiver(
+        &self,
+        req: fluxvm_core::model::MigrationReceiverRequest,
+    ) -> Result<fluxvm_core::model::MigrationReceiver> {
+        let id = Uuid::new_v4();
+        let workspace = self.receiver_dir().join(id.to_string());
+        let launched = fluxvm_qemu::receiver::launch(
+            &self.cfg,
+            &workspace,
+            &req.disk,
+            &req.disk_format,
+            req.vcpus,
+            req.memory_mib,
+            &req.listen_host,
+            &req.advertise_host,
+            req.listen_port,
+        )
+        .await?;
+        let cgroup_path =
+            match fluxvm_cgroup::CgroupManager::create_and_migrate(&id.to_string(), launched.pid) {
+                Ok(mgr) => Some(mgr.path().to_path_buf()),
+                Err(e) => {
+                    if let Err(stop) = process::terminate_pid(launched.pid).await {
+                        tracing::warn!(
+                            receiver = %id,
+                            error = %stop,
+                            "stopping receiver after cgroup reservation failed"
+                        );
+                    }
+                    let _ = fs::remove_dir_all(&workspace);
+                    bail!("migration receiver cgroup reservation failed: {e}");
+                }
+            };
+        let ttl = req.expires_in_seconds.unwrap_or(600);
+        let rec = fluxvm_core::model::MigrationReceiver {
+            id,
+            uri: launched.uri,
+            listen_uri: launched.listen_uri,
+            token: Uuid::new_v4().to_string(),
+            expires_at_unix: (Utc::now() + Duration::seconds(ttl as i64)).timestamp() as u64,
+            pid: launched.pid,
+            qmp_socket: launched.qmp_socket,
+            workspace,
+            disk: req.disk,
+            cgroup_path,
+            vcpus: req.vcpus,
+            memory_mib: req.memory_mib,
+        };
+        if let Err(e) = self.write_receiver(&rec) {
+            if let Err(stop) = process::terminate_pid(launched.pid).await {
+                tracing::warn!(receiver = %id, error = %stop, "stopping receiver after persisting it failed");
+            }
+            if let Some(path) = &rec.cgroup_path
+                && let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(path.clone())
+                && let Err(remove) = mgr.remove()
+            {
+                tracing::warn!(receiver = %id, error = %remove, "removing receiver cgroup after persist failed");
+            }
+            let _ = fs::remove_dir_all(&rec.workspace);
+            return Err(e);
+        }
+        let vm_id = rec.id.to_string();
+        audit_event(
+            "migration.receiver",
+            &[("receiver_id", &vm_id), ("uri", &rec.uri)],
+        );
+        Ok(rec)
+    }
+
+    pub async fn activate_migration_receiver(
+        &self,
+        id: Uuid,
+        token: &str,
+    ) -> Result<fluxvm_core::model::MigrationReceiver> {
+        let rec = self.read_receiver(id)?;
+        if rec.token != token {
+            bail!("migration receiver token does not match");
+        }
+        if rec.expires_at_unix < Utc::now().timestamp() as u64 {
+            bail!("migration receiver {id} has expired");
+        }
+        let incoming = if rec.listen_uri.is_empty() {
+            rec.uri.as_str()
+        } else {
+            rec.listen_uri.as_str()
+        };
+        fluxvm_qemu::receiver::activate(&rec.qmp_socket, incoming).await?;
+        Ok(rec)
+    }
+
+    pub async fn delete_migration_receiver(&self, id: Uuid) -> Result<()> {
+        let path = self.receiver_dir().join(format!("{id}.json"));
+        if let Ok(rec) = self.read_receiver(id) {
+            if let Err(e) = process::terminate_pid(rec.pid).await {
+                tracing::warn!(receiver = %id, error = %e, "stopping migration receiver");
+            }
+            if let Some(path) = rec.cgroup_path {
+                if let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(path) {
+                    if let Err(e) = mgr.remove() {
+                        tracing::warn!(receiver = %id, error = %e, "removing migration receiver cgroup");
+                    }
+                }
+            }
+            if let Err(e) = self
+                .store
+                .release_untracked_host(rec.vcpus, rec.memory_mib)
+                .await
+            {
+                tracing::warn!(receiver = %id, error = %e, "releasing migration receiver host reservation");
+            }
+        }
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+        let workspace = self.receiver_dir().join(id.to_string());
+        if workspace.exists() {
+            let _ = fs::remove_dir_all(&workspace);
+        }
+        Ok(())
+    }
+
+    pub async fn reap_migration_receivers(&self) {
+        let dir = self.receiver_dir();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        let now = Utc::now().timestamp() as u64;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(raw) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(rec) = serde_json::from_str::<fluxvm_core::model::MigrationReceiver>(&raw)
+            else {
+                continue;
+            };
+            if rec.expires_at_unix < now {
+                let _ = self.delete_migration_receiver(rec.id).await;
+            }
+        }
+    }
+
+    /// Set host reservations from the receiver files still on disk. Called
+    /// after the startup reap, before the API accepts requests.
+    pub async fn sync_receiver_host_quota(&self) -> Result<()> {
+        let dir = self.receiver_dir();
+        let mut vcpus = 0u64;
+        let mut memory_mib = 0u64;
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(raw) = fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(rec) = serde_json::from_str::<fluxvm_core::model::MigrationReceiver>(&raw)
+                else {
+                    continue;
+                };
+                vcpus = vcpus.saturating_add(u64::from(rec.vcpus));
+                memory_mib = memory_mib.saturating_add(rec.memory_mib);
+            }
+        }
+        self.store.set_untracked_host(vcpus, memory_mib).await
     }
 
     /// Save full VM state so a later [`Self::start_from_snapshot`] can restore it.
@@ -2605,6 +2899,9 @@ impl VmManager {
                 fs::remove_dir_all(jail_path)?;
             }
         }
+        let vm_id = id.to_string();
+        let tenant = vm.request.tenant.clone().unwrap_or_default();
+        audit_event("vm.delete", &[("vm_id", &vm_id), ("tenant", &tenant)]);
         Ok(())
     }
 
@@ -2749,6 +3046,7 @@ impl VmManager {
                         me.spawn_backfill(pool.name);
                     }
                 }
+                me.reap_migration_receivers().await;
             }
         });
     }
@@ -3390,6 +3688,14 @@ mod tests {
         assert!(validate_policy(&too_long, &cfg).is_err());
         let ok = req_with(1, 512, None, Some(1800), BackendKind::Qemu, "/x.qcow2");
         assert!(validate_policy(&ok, &cfg).is_ok());
+    }
+
+    #[test]
+    fn require_catalog_names_rejects_an_unsigned_resolution() {
+        let err = fluxvm_core::policy::require_signed_catalog(true, true, None).unwrap_err();
+        assert!(err.to_string().contains("require_catalog_names"));
+        assert!(fluxvm_core::policy::require_signed_catalog(false, false, None).is_ok());
+        assert!(fluxvm_core::policy::require_signed_catalog(true, true, Some("build")).is_ok());
     }
 
     #[test]

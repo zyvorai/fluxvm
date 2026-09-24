@@ -10,7 +10,7 @@ use fluxvm_core::{
         BackendKind, CreateVmRequest, MigrationMode, MigrationPhase, MigrationStartRequest,
         MigrationStatus, NetworkSpec, VmRecord,
     },
-    process::{output_checked_timeout, run_checked_timeout, spawn_logged, spawn_swtpm},
+    process::{output_checked_timeout, run_checked_timeout, spawn_swtpm},
 };
 use serde_json::Value;
 use std::time::Duration;
@@ -259,12 +259,13 @@ impl VmBackend for CloudHypervisorBackend {
         };
 
         let args = build_args(cfg, req, ctx)?;
-        let (program, args) = fluxvm_core::process::netns_wrap(
-            ctx.network.netns.as_deref(),
+        let spawned = fluxvm_core::process::spawn_vmm(
             &cfg.cloud_hypervisor_binary,
             &args,
-        );
-        let spawned = spawn_logged(&program, &args, &ctx.log_path).await;
+            &ctx.log_path,
+            ctx.network.netns.as_deref(),
+        )
+        .await;
         if let Some(fd) = ctx.network.tap_fd {
             fluxvm_core::process::close_fd(fd);
         }
