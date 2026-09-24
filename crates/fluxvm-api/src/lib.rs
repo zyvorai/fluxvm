@@ -809,7 +809,11 @@ async fn list_sandboxes(
         .list()
         .await
         .into_iter()
-        .filter(|v| v.backend == BackendKind::FluxVm)
+        // QEMU-backed sandboxes (volume templates) are sandboxes too; they are
+        // recognised by the marker `create_sandbox` writes into their workspace.
+        .filter(|v| {
+            v.backend == BackendKind::FluxVm || v.workspace.join("sandbox-proxy.json").exists()
+        })
         .filter(|v| match &token_tenant {
             Some(Extension(TokenTenant(t))) => v.request.tenant.as_deref() == Some(t.as_str()),
             None => true,
