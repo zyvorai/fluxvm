@@ -47,21 +47,33 @@ impl VmBackend for FluxVmBackend {
             memory_mib: req.memory_mib,
             vcpus: req.vcpus,
             kernel_args: req.kernel_args.clone().or_else(|| {
-                Some(
-                    // random.trust_cpu=on: this kernel has no virtio-rng driver, and
-                    // without it the guest's CRNG gets stuck at "fast init" forever
-                    // (real entropy sources -- disk/keyboard/network jitter -- barely
-                    // exist in a headless microVM). Anything that calls the blocking
-                    // getrandom() before the CRNG is *fully* seeded hangs indefinitely
-                    // in wait_for_random_bytes(), which is indistinguishable from a
-                    // hung process from the outside -- alive, no output, nothing
-                    // listening. Trusting RDRAND lets it seed fully at boot instead.
-                    "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
+                Some(match cfg.fluxvm_engine {
+                    // Firecracker attaches virtio devices via its API and appends
+                    // its own `root=/dev/vda` + virtio_mmiocmdline — do not inject
+                    // in-tree KVM `virtio_mmio.device=0x200@0xfeb…` hints (Wrong
+                    // magic value) or a competing `root=` that loses to FC's
+                    // append. Use a flat ext4 rootfs (see fabric
+                    // `scripts/keep-bake-fc-rootfs.sh`); GPT cloud images panic.
+                    FluxVmEngine::Firecracker => {
+                        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off rw random.trust_cpu=on rdrand=force"
+                            .into()
+                    }
+                    FluxVmEngine::Kvm => {
+                        // random.trust_cpu=on: this kernel has no virtio-rng driver, and
+                        // without it the guest's CRNG gets stuck at "fast init" forever
+                        // (real entropy sources -- disk/keyboard/network jitter -- barely
+                        // exist in a headless microVM). Anything that calls the blocking
+                        // getrandom() before the CRNG is *fully* seeded hangs indefinitely
+                        // in wait_for_random_bytes(), which is indistinguishable from a
+                        // hung process from the outside -- alive, no output, nothing
+                        // listening. Trusting RDRAND lets it seed fully at boot instead.
+                        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw \
                      random.trust_cpu=on rdrand=force \
                      virtio_mmio.device=0x200@0xfeb00000:5 \
                      virtio_mmio.device=0x200@0xfeb00200:6"
-                        .into(),
-                )
+                            .into()
+                    }
+                })
             }),
             tap: match &ctx.network.spec {
                 NetworkSpec::Tap { .. } if ctx.network.tap_fd.is_some() => bail!(
