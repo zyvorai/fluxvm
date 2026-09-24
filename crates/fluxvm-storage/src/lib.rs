@@ -675,6 +675,8 @@ mod tests {
                 blk_mbit_limit: None,
                 blk_ops_limit: None,
                 cpu_template: None,
+                security_profile: Default::default(),
+                measurement_policy: None,
             },
             guest_cid: None,
             jail_path: None,
