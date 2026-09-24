@@ -314,6 +314,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/metrics", get(metrics))
         .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
         .route("/v1/security/capabilities", get(security_capabilities))
+        .route("/v1/host/confidential", get(host_confidential))
         .route("/v1/host/gpus", get(list_host_gpus))
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
@@ -931,13 +932,21 @@ async fn create_sandbox(
     require_admin(role)?;
     let token_tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
     let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            m.create_sandbox(req, token_tenant.as_deref(), actor_name)
-                .await?,
-        ),
-    ))
+    let record = m
+        .create_sandbox(req, token_tenant.as_deref(), actor_name)
+        .await?;
+    // Report the confidential outcome next to the VM record, when one was asked for.
+    let status = fluxvm_scheduler::confidential::read_status(&record.workspace).await;
+    let mut body = serde_json::to_value(&record).map_err(anyhow::Error::from)?;
+    if let (Some(status), Some(object)) = (status, body.as_object_mut()) {
+        object.insert("confidential".into(), json!(status));
+    }
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// What this host offers for confidential guests, and whether FluxVM can use it.
+async fn host_confidential() -> Json<serde_json::Value> {
+    Json(json!(fluxvm_scheduler::confidential::detect()))
 }
 
 async fn list_sandboxes(

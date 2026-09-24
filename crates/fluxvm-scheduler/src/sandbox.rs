@@ -43,6 +43,10 @@ pub struct SandboxCreateRequest {
     /// `max_memory_mib` when it sets one.
     #[serde(default)]
     pub memory_mib: Option<u64>,
+    /// `auto` uses a hardware-encrypted VM when the host can and otherwise runs a
+    /// normal one; `required` refuses to run without one. See [`crate::confidential`].
+    #[serde(default)]
+    pub confidential: Option<crate::confidential::ConfidentialMode>,
 }
 
 pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
@@ -186,6 +190,10 @@ impl VmManager {
         token_tenant: Option<&str>,
         created_by_token: Option<&str>,
     ) -> Result<VmRecord> {
+        // Decide first, so a `required` request on a host that cannot honor it
+        // fails before anything is created.
+        let confidential =
+            crate::confidential::resolve(req.confidential, &crate::confidential::detect())?;
         let from_template = req.template.is_some();
         let mut create = if let Some(template) = &req.template {
             self.load_template_spec(template).await?
@@ -235,6 +243,9 @@ impl VmManager {
             Some(guard)
         };
         let record = self.create(create).await?;
+        if let Some(status) = &confidential {
+            crate::confidential::write_status(&record.workspace, status).await?;
+        }
         let proxy_ports: Vec<u16> = {
             let mut ports = Vec::new();
             if let Some(p) = req.http_proxy_port {
