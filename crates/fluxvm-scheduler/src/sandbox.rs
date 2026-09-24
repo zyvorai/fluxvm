@@ -198,9 +198,14 @@ impl VmManager {
         enforce_sandbox_tenant(&mut create, token_tenant)?;
         create.created_by_token = created_by_token.map(String::from);
         // A client-supplied `spec` is always the in-tree backend. Only an
-        // operator-authored template may opt into QEMU (needed for volumes).
-        create.backend = if from_template && create.backend == BackendKind::Qemu {
-            BackendKind::Qemu
+        // operator-authored template may opt into QEMU (virtiofs volumes) or
+        // Firecracker (stronger microVM cell; no virtiofs — volumes stay QEMU-only).
+        create.backend = if from_template
+            && matches!(
+                create.backend,
+                BackendKind::Qemu | BackendKind::Firecracker
+            ) {
+            create.backend
         } else {
             BackendKind::FluxVm
         };
