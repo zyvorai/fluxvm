@@ -516,6 +516,10 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             any(sandbox_http_proxy),
         )
         .route(
+            "/v1/sandboxes/{id}/ws/{port}/{*path}",
+            get(sandbox_ws_proxy),
+        )
+        .route(
             "/sandbox/{id}/{*path}",
             any(sandbox_http_proxy_default_port),
         )
@@ -1195,7 +1199,137 @@ async fn sandbox_proxy_inner(
     .await
 }
 
-async fn list_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+/// `GET /v1/sandboxes/{id}/ws/{port}/{*path}` — WebSocket upgrade bridged to a
+/// guest TCP WebSocket (Chrome DevTools CDP, etc.). Used by Keep screencast /
+/// screenshot so the operator never receives a raw guest debugger URL.
+async fn sandbox_ws_proxy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, port, path)): Path<(Uuid, u16, String)>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    if let Err(e) = require_admin(role) {
+        return e.into_response();
+    }
+    let vm = match m.ensure_running_for_request(id).await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("resume/get sandbox: {e:#}"),
+            )
+                .into_response();
+        }
+    };
+    let Some(guest_ip) = vm.guest_ip.clone() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "sandbox has no guest_ip (use network.mode=tap with netns for WS proxy)",
+        )
+            .into_response();
+    };
+    let Some(pid) = vm.pid else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "sandbox has no running process to reach its network namespace through",
+        )
+            .into_response();
+    };
+    let addr = match format!("{guest_ip}:{port}").parse::<std::net::SocketAddr>() {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::BAD_GATEWAY, format!("guest_ip: {e}")).into_response(),
+    };
+    let tcp = match tokio::time::timeout(Duration::from_secs(10), connect_in_netns(pid, addr)).await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr}: {e}"),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("guest upstream: connecting to {addr} timed out"),
+            )
+                .into_response();
+        }
+    };
+    let guest_host = format!("{guest_ip}:{port}");
+    let path = path.trim_start_matches('/').to_string();
+    ws.on_upgrade(move |client| relay_sandbox_ws(client, tcp, guest_host, path))
+}
+
+async fn relay_sandbox_ws(
+    client: axum::extract::ws::WebSocket,
+    tcp: tokio::net::TcpStream,
+    guest_host: String,
+    path: String,
+) {
+    use axum::extract::ws::Message as AxumMessage;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::{
+        client_async,
+        tungstenite::{client::IntoClientRequest, Message as TungsteniteMessage},
+    };
+
+    let uri = format!("ws://{guest_host}/{path}");
+    let request = match uri.into_client_request() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(%e, "sandbox ws: bad guest uri");
+            return;
+        }
+    };
+    let (guest, _resp) = match client_async(request, tcp).await {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!(%e, %guest_host, %path, "sandbox ws: guest handshake failed");
+            return;
+        }
+    };
+
+    let (mut client_tx, mut client_rx) = client.split();
+    let (mut guest_tx, mut guest_rx) = guest.split();
+
+    let to_guest = async {
+        while let Some(Ok(msg)) = client_rx.next().await {
+            let out = match msg {
+                AxumMessage::Text(t) => TungsteniteMessage::Text(t.to_string().into()),
+                AxumMessage::Binary(b) => TungsteniteMessage::Binary(b.to_vec().into()),
+                AxumMessage::Ping(p) => TungsteniteMessage::Ping(p.to_vec().into()),
+                AxumMessage::Pong(p) => TungsteniteMessage::Pong(p.to_vec().into()),
+                AxumMessage::Close(_) => {
+                    let _ = guest_tx.close().await;
+                    break;
+                }
+            };
+            if guest_tx.send(out).await.is_err() {
+                break;
+            }
+        }
+    };
+    let to_client = async {
+        while let Some(Ok(msg)) = guest_rx.next().await {
+            let out = match msg {
+                TungsteniteMessage::Text(t) => AxumMessage::Text(t.to_string().into()),
+                TungsteniteMessage::Binary(b) => AxumMessage::Binary(b.to_vec().into()),
+                TungsteniteMessage::Ping(p) => AxumMessage::Ping(p.to_vec().into()),
+                TungsteniteMessage::Pong(p) => AxumMessage::Pong(p.to_vec().into()),
+                TungsteniteMessage::Close(_) | TungsteniteMessage::Frame(_) => break,
+            };
+            if client_tx.send(out).await.is_err() {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        _ = to_guest => {}
+        _ = to_client => {}
+    }
+}
     Ok(Json(json!({ "items": m.list_templates().await? })))
 }
 
