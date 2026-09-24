@@ -1330,6 +1330,8 @@ async fn relay_sandbox_ws(
         _ = to_client => {}
     }
 }
+
+async fn list_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({ "items": m.list_templates().await? })))
 }
 
