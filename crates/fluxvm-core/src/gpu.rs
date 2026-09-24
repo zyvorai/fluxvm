@@ -150,7 +150,10 @@ fn iommu_group_info(bdf: &str) -> Result<Option<(u32, Vec<String>)>> {
 }
 
 fn group_all_vfio(members: &[String]) -> bool {
-    !members.is_empty() && members.iter().all(|m| pci_driver_name(m).as_deref() == Some(VFIO_DRIVER))
+    !members.is_empty()
+        && members
+            .iter()
+            .all(|m| pci_driver_name(m).as_deref() == Some(VFIO_DRIVER))
 }
 
 /// True when any process has an open fd pointing at `/dev/vfio/<group>`.
@@ -191,11 +194,7 @@ fn vendor_label(vendor_id: u16) -> String {
 fn numa_node(bdf: &str) -> Option<u8> {
     let raw = fs::read_to_string(format!("{PCI_DEVICES}/{bdf}/numa_node")).ok()?;
     let n: i32 = raw.trim().parse().ok()?;
-    if n < 0 {
-        None
-    } else {
-        Some(n as u8)
-    }
+    if n < 0 { None } else { Some(n as u8) }
 }
 
 fn is_gpu_class(class_id: u32) -> bool {
@@ -251,9 +250,7 @@ pub fn list_host_gpus(state_dir: &Path, allocated_bdfs: &HashSet<String>) -> Res
             None => (None, vec![bdf.clone()]),
         };
         let group_bound_to_vfio = group_all_vfio(&iommu_members);
-        let group_held = iommu_group
-            .map(vfio_group_held)
-            .unwrap_or(false)
+        let group_held = iommu_group.map(vfio_group_held).unwrap_or(false)
             || iommu_members.iter().any(|m| allocated_bdfs.contains(m));
         out.push(HostGpu {
             bdf: bdf.clone(),
@@ -304,7 +301,10 @@ fn bind_vfio(bdf: &str) -> Result<()> {
             .with_context(|| format!("vfio-pci new_id for {bdf}"))?;
     }
     if pci_driver_name(bdf).as_deref() != Some(VFIO_DRIVER) {
-        bail!("failed to bind {bdf} to vfio-pci (driver={:?})", pci_driver_name(bdf));
+        bail!(
+            "failed to bind {bdf} to vfio-pci (driver={:?})",
+            pci_driver_name(bdf)
+        );
     }
     Ok(())
 }
@@ -365,9 +365,7 @@ pub fn bind_gpu_group(
     }
 
     if !group_all_vfio(&members) {
-        bail!(
-            "IOMMU group {group_id} is split after bind; not every member is on vfio-pci"
-        );
+        bail!("IOMMU group {group_id} is split after bind; not every member is on vfio-pci");
     }
 
     let mut state = load_bind_state(state_dir);
@@ -396,13 +394,11 @@ pub fn release_gpu_group(
     allocated_bdfs: &HashSet<String>,
 ) -> Result<HostGpu> {
     let bdf = normalize_bdf(&req.bdf)?;
-    let (group_id, members) = iommu_group_info(&bdf)?
-        .with_context(|| format!("PCI device {bdf} has no IOMMU group"))?;
+    let (group_id, members) =
+        iommu_group_info(&bdf)?.with_context(|| format!("PCI device {bdf} has no IOMMU group"))?;
 
     if vfio_group_held(group_id) {
-        bail!(
-            "IOMMU group {group_id} is still held; stop/delete the QEMU VM before release"
-        );
+        bail!("IOMMU group {group_id} is still held; stop/delete the QEMU VM before release");
     }
     for m in &members {
         if allocated_bdfs.contains(m) {
@@ -500,7 +496,10 @@ mod tests {
         save_bind_state(dir.path(), &state).unwrap();
         let loaded = load_bind_state(dir.path());
         assert_eq!(
-            loaded.previous_drivers.get("0000:01:00.0").map(String::as_str),
+            loaded
+                .previous_drivers
+                .get("0000:01:00.0")
+                .map(String::as_str),
             Some("nvidia")
         );
         assert_eq!(loaded.vram_gib.get("0000:01:00.0"), Some(&24));
