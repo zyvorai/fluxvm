@@ -35,6 +35,8 @@ images — not only the dataplane.
 - [ ] Snapshots tested for the backends you run (QEMU `savevm`, CH `ch-remote`, Firecracker `/snapshot/*`, FluxVm control SnapshotSave — restore via `start_from_snapshot`)
 - [ ] Optional `[policy] default_cpu_quota_percent` / `memory_max_equals_guest` when you want launch-time oversub caps ([oversubscription.md](oversubscription.md))
 - [ ] Optional Firecracker `cpu_template` on create (static names only; not for CH/QEMU/kvm)
+- [ ] Optional `FLUXVM_VMM_SECCOMP=1` for QEMU/Cloud Hypervisor children (log mode by default; set kill mode only after validating the allowlist) — Firecracker/jailer is not covered yet
+- [ ] AppArmor (`deploy/apparmor`) or SELinux reference module (`deploy/selinux`) loaded for the `fluxvm` unit when you want MAC confinement
 - [ ] Windows + QGA only on QEMU ([ch-windows-qga.md](ch-windows-qga.md)); `fluxvm_engine=kvm` lab-only
 - [ ] Capability figures: Track A isolation checklist done; Track B density numbers measured only if you quote microVM packing ([capability-figures.md](capability-figures.md))
 
@@ -42,7 +44,8 @@ images — not only the dataplane.
 
 - [ ] Catalog names instead of raw paths where possible
 - [ ] Ed25519 and/or `cosign verify-blob` on catalog entries
-- [ ] `allowed_image_dirs` set
+- [ ] `policy.require_catalog_names = true` when unsigned path creates must be rejected
+- [ ] `allowed_image_dirs` set (symlink-aware)
 - [ ] Storage backend chosen (local qcow2, LVM-thin, NBD, Ceph RBD) and backed up
 
 ## 4. Network

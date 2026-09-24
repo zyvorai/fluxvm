@@ -114,7 +114,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Scheduler-native alternative — kube-scheduler places a shadow Pod (capacity ticket only), VMM still runs on the host under `fluxctl serve`
 - `MicroVMJob`, `MicroVMPool` CRs for job/pool patterns
 - `MicroVMJob.spec.ttlSecondsAfterFinished` — Kubernetes-`Job`-style auto-cleanup: the Job controller deletes a finished `MicroVMJob` (and, via ownerReferences, its child `MicroVM`s) once it has sat in `Succeeded`/`Failed` for that long, instead of it (and every completed CI-style child VM) needing to be deleted by hand
-- Not KubeVirt — no live migration, CDI, or `virtctl`; see [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison table against `DisposableVm` and KubeVirt
+- Not KubeVirt — no CDI or `virtctl`; QEMU has `fluxctl migrate` + migration receivers (not KubeVirt migration parity). See [docs/microvm.md](docs/microvm.md#vs-disposablevm-and-kubevirt) for the full comparison table against `DisposableVm` and KubeVirt
 
 ### `fluxvm-agent` (multi-host fleet, no Kubernetes)
 

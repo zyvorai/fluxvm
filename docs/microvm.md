@@ -27,7 +27,7 @@ privileged surface stays the existing `fluxvm-kube` DaemonSet that already runs
 | Privileged surface | `fluxvm-kube` DaemonSet | Same DaemonSet + thin node-agent | virt-handler / launcher |
 | Capacity accounting | Operator / placer heuristics | Pod requests (CPU/memory) | Pod + CDI |
 | Jobs / pools | Warm pools via REST | `MicroVMJob`, `MicroVMPool` CRs | Jobs / DataVolumes (different model) |
-| Live migration / CDI / virtctl | No | No (v1) | Yes |
+| Live migration / CDI / virtctl | No CDI/`virtctl`; QEMU migrate via `fluxctl` / receivers | Same (v1) | Yes |
 
 Use **DisposableVm** when Ragnarok (or another controller) already pins `spec.node`.
 Use **MicroVM** when you want scheduler-driven placement and Job/Pool CRs on the
@@ -284,9 +284,10 @@ python3 scripts/test-microvm-policy.py
 
 ## Limitations (v1)
 
-- No virt-launcher, virtctl, CDI, or live migration.
+- No virt-launcher, CDI, or `virtctl`. QEMU live migration uses `fluxctl migrate` plus `POST /v1/migration/receivers` (not KubeVirt migration parity).
 - No second privileged VMM DaemonSet — reuse `fluxvm-kube` / host `fluxctl serve`.
-- No k8s-native image pull — host-staged paths only (`GuestImage` Ready when the file exists on the node).
+- No k8s-native image pull — host-staged paths only (`GuestImage` Ready when the file exists on the node; HTTP sources are staged on the node and are not CDI DataVolumes).
+- `kubectl-fluxvm` resolves `spec.node` / runtime node for console/exec/pause/resume; node names are validated as SSH hostnames (`ssh -- host -- …`) to block option injection.
 - Shadow Pod is capacity accounting, not the VMM process.
 - Images and TAP/bridges must exist on the scheduled node before Running.
 

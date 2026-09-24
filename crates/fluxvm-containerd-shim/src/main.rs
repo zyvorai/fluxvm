@@ -5870,7 +5870,9 @@ async fn stage_bind_mounts(
                 || fluxvm_core::policy::lexical_within(&source_path, allow)
         });
         if claims_allow {
-            let allow_root = allow_root.as_ref().expect("claims_allow implies allow_root");
+            let allow_root = allow_root
+                .as_ref()
+                .expect("claims_allow implies allow_root");
             let exported = hostpath_export_root();
             let same_export = exported.as_ref().is_some_and(|exp| {
                 fluxvm_core::policy::resolve_existing(exp)
@@ -5903,7 +5905,10 @@ async fn stage_bind_mounts(
             bail!(
                 "OCI bind source {} is outside hostPath allowlist {} and will not be copied into the Pod share",
                 source_path.display(),
-                allow_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+                allow_root
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
             );
         }
         let host = host_ctr.join("mounts").join(idx.to_string());

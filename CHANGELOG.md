@@ -3,6 +3,12 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Host admission, confinement, and QEMU migration receivers.** O(1) host quota ledger
+  (including untracked migration receivers), `policy.require_catalog_names`, symlink-aware
+  `allowed_image_dirs` / hostPath broker, optional `FLUXVM_VMM_SECCOMP` for QEMU/Cloud Hypervisor,
+  AppArmor/SELinux packaging under `deploy/`, and `POST /v1/migration/receivers` for QEMU
+  `-incoming defer`. `kubectl-fluxvm` covers console/exec/pause/resume/delete with SSH node
+  hostname validation. Evidence: `scripts/record-baseline.sh`, `scripts/test-migration-receiver.sh`.
 - **Phase 6 security profiles.** `CreateVmRequest.security_profile` (`standard` /
   `measured` / `confidential-snp` / `confidential-tdx`) with distinct requested vs
   achieved evidence, host capability discovery, fleet admission that still gates
@@ -28,6 +34,11 @@
   bounded as its host filesystem. Snapshot and AutoPause remain in-tree-backend features.
 
 ### Fixed
+- **Dataplane resume after failed/cancelled migration.** Quiesce from `migrate start` is cleared when
+  start returns an error, when QEMU reports `Failed`/`Cancelled`, on later terminal status polls, and on
+  `migrate cancel` — so abandoned migrations no longer leave the VM edge stuck rejecting new flows.
+- **`kubectl-fluxvm` SSH option injection.** `DisposableVm.spec.node` / MicroVM runtime node must be a
+  plain hostname and is passed as `ssh -- <node> -- …`.
 - **Pod identities were never released.** `pod_identity::forget` had no caller, so every Secure Containers
   Pod left its `pod_uid` -> `pod_id` entry in `pod-ids.json` for the node's lifetime (110 entries had built up
   on the lab node). VM delete now releases it, unless another VM still carries the same Pod UID (a failed

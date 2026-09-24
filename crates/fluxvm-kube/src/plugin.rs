@@ -36,9 +36,10 @@ pub fn validate_ssh_node(node: &str) -> Result<&str> {
     if node.is_empty() || node.starts_with('-') {
         bail!("invalid node hostname for ssh: {node:?}");
     }
-    if !node.chars().all(|c| {
-        c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')
-    }) {
+    if !node
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']'))
+    {
         bail!("invalid node hostname for ssh: {node:?}");
     }
     Ok(node)

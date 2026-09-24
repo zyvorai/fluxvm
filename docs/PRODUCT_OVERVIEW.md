@@ -81,13 +81,13 @@ Full diagrams (image pipeline, Secure Containers request flow, Network Fabric pa
 | Backends | QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree hypervisor | QEMU/KVM (broad hypervisor support via drivers) | KVM via virt-launcher |
 | Where the VMM runs | Host, under `fluxctl serve` | Host, under `libvirtd` | Inside a virt-launcher Pod |
 | Kubernetes-native | Yes (`DisposableVm` CRD, MicroVM) | No | Yes (native) |
-| Live migration / CDI / `virtctl` | No | No (needs orchestration layer) | Yes |
+| Live migration / CDI / `virtctl` | QEMU source + receiver (not KubeVirt parity); no CDI/`virtctl` | No (needs orchestration layer) | Yes |
 | eBPF/TC dataplane | Yes — Network Fabric, GA schema v4 | No | Depends on CNI |
 | Multi-host fleet management | Yes — `fluxvm-agent`, verified across 2 real hosts | No (needs external orchestration) | Via Kubernetes scheduler |
 | OCI/containerd workload support | Developer preview (Secure Containers) | No | No (different workload model) |
 | License | Apache-2.0 | LGPL | Apache-2.0 |
 
-This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt has live migration/CDI/`virtctl` and FluxVM doesn't; libvirt has broader hypervisor driver support).
+This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt still owns CDI/`virtctl` and full cluster migration orchestration; FluxVM's QEMU migration path is host-API + Fabric, not KubeVirt parity; libvirt has broader hypervisor driver support).
 
 ---
 

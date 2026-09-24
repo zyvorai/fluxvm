@@ -20,7 +20,18 @@ jobs:
   gpu-unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling dependency
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev
       - name: fluxvm-core GPU unit tests
+        working-directory: fluxvm
         run: cargo test -p fluxvm-core gpu -- --nocapture

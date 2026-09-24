@@ -79,10 +79,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_node_security(
-    http: &reqwest::Client,
-    fluxvm_url: &str,
-) -> NodeSecurityCapabilities {
+async fn fetch_node_security(http: &reqwest::Client, fluxvm_url: &str) -> NodeSecurityCapabilities {
     match http
         .get(format!("{fluxvm_url}/v1/security/capabilities"))
         .send()

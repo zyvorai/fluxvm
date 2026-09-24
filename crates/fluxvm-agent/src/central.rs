@@ -643,7 +643,10 @@ fn resolve_target(
             node.security.supports(profile).map_err(|e| {
                 AppError(
                     StatusCode::BAD_REQUEST,
-                    format!("node '{name}' cannot satisfy security_profile {}: {e}", profile.as_str()),
+                    format!(
+                        "node '{name}' cannot satisfy security_profile {}: {e}",
+                        profile.as_str()
+                    ),
                 )
             })?;
             Ok(node)
@@ -668,8 +671,9 @@ fn resolve_target(
 fn extract_security_profile(body: &serde_json::Value) -> Result<SecurityProfile, AppError> {
     match body.get("security_profile").and_then(|v| v.as_str()) {
         None | Some("") | Some("standard") => Ok(SecurityProfile::Standard),
-        Some(raw) => SecurityProfile::parse_fleet(raw)
-            .map_err(|e| AppError(StatusCode::BAD_REQUEST, e)),
+        Some(raw) => {
+            SecurityProfile::parse_fleet(raw).map_err(|e| AppError(StatusCode::BAD_REQUEST, e))
+        }
     }
 }
 
@@ -773,14 +777,7 @@ async fn create_vm(
     loop {
         let target = {
             let nodes = fleet.nodes.lock().await;
-            pick_best_capacity_excluding(
-                &nodes,
-                req_vcpus,
-                req_mem,
-                &tried,
-                &selector,
-                profile,
-            )
+            pick_best_capacity_excluding(&nodes, req_vcpus, req_mem, &tried, &selector, profile)
         };
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
@@ -1256,8 +1253,7 @@ mod tests {
         assert!(pick_best_capacity(&nodes, 2, 2048).is_none());
         // ...but an explicit "node":"a" still resolves, same as a
         // Kubernetes Pod with spec.nodeName bypassing the scheduler.
-        let target =
-            resolve_target(
+        let target = resolve_target(
             &nodes,
             Some("a".to_string()),
             2,
@@ -1318,15 +1314,8 @@ mod tests {
         let selector: HashMap<String, String> = [("zone".to_string(), "us-east".to_string())]
             .into_iter()
             .collect();
-        let target = resolve_target(
-            &nodes,
-            None,
-            2,
-            2048,
-            &selector,
-            SecurityProfile::Standard,
-        )
-        .unwrap();
+        let target =
+            resolve_target(&nodes, None, 2, 2048, &selector, SecurityProfile::Standard).unwrap();
         assert_eq!(target.name, "tight");
     }
 
@@ -1340,15 +1329,8 @@ mod tests {
         let selector: HashMap<String, String> = [("gpu".to_string(), "true".to_string())]
             .into_iter()
             .collect();
-        let err = resolve_target(
-            &nodes,
-            None,
-            2,
-            2048,
-            &selector,
-            SecurityProfile::Standard,
-        )
-        .unwrap_err();
+        let err = resolve_target(&nodes, None, 2, 2048, &selector, SecurityProfile::Standard)
+            .unwrap_err();
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(err.1.contains("nodeSelector"), "message was: {}", err.1);
         assert!(err.1.contains("gpu=true"), "message was: {}", err.1);
