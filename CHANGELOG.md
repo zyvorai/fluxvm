@@ -3,6 +3,9 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **`deny_udp` Keep kill switch.** `VmNetworkPolicy.deny_udp` sets iface
+  `reserved0` bit0; TC drops UDP/SCTP after DHCP (reason `udp-deny` / 12).
+  Host-side only — no PacketWolf. Pairs with gateway-only broker/proxy ports.
 - **Host admission, confinement, and QEMU migration receivers.** O(1) host quota ledger
   (including untracked migration receivers), `policy.require_catalog_names`, symlink-aware
   `allowed_image_dirs` / hostPath broker, optional `FLUXVM_VMM_SECCOMP` for QEMU/Cloud Hypervisor,

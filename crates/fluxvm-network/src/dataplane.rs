@@ -58,6 +58,9 @@ pub struct VmNetworkPolicy {
     /// Log-and-allow instead of drop (CNP audit mode).
     #[serde(default)]
     pub audit_mode: bool,
+    /// Keep / strict: drop all UDP and SCTP (except DHCP). WebRTC/QUIC kill switch.
+    #[serde(default)]
+    pub deny_udp: bool,
     /// Filled by group merge; not persisted as operator input.
     #[serde(default, skip_serializing)]
     pub compiled_group_ids: Vec<u32>,
@@ -79,6 +82,7 @@ impl Default for VmNetworkPolicy {
             allow_fqdns: Vec::new(),
             entities: Vec::new(),
             audit_mode: false,
+            deny_udp: false,
             compiled_group_ids: Vec::new(),
         }
     }
@@ -193,6 +197,7 @@ pub fn default_policy(cfg: &Config) -> VmNetworkPolicy {
         allow_fqdns: Vec::new(),
         entities: Vec::new(),
         audit_mode: false,
+        deny_udp: false,
         compiled_group_ids: Vec::new(),
     }
 }
