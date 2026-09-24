@@ -30,6 +30,20 @@ pub fn vm_id_from_status(kind: &str, status: &Value) -> Result<String> {
         .ok_or_else(|| anyhow::anyhow!("status has no VM id yet"))
 }
 
+/// Node names become `ssh` destinations. Reject OpenSSH option tokens
+/// (`-oProxyCommand=…`) and anything that is not a plain host identifier.
+pub fn validate_ssh_node(node: &str) -> Result<&str> {
+    if node.is_empty() || node.starts_with('-') {
+        bail!("invalid node hostname for ssh: {node:?}");
+    }
+    if !node.chars().all(|c| {
+        c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '[' | ']')
+    }) {
+        bail!("invalid node hostname for ssh: {node:?}");
+    }
+    Ok(node)
+}
+
 pub fn command_for(
     verb: &str,
     kind: &str,
@@ -75,7 +89,10 @@ pub fn command_for(
         other => bail!("unsupported verb {other} (console, exec, pause, resume, delete)"),
     };
     if let Some(node) = node {
-        let mut remote = vec!["ssh".into(), node.to_string(), "--".into()];
+        let node = validate_ssh_node(node)?;
+        // `ssh -- host -- …` so a leading `-` cannot be parsed as an option
+        // even if validation is later loosened.
+        let mut remote = vec!["ssh".into(), "--".into(), node.to_string(), "--".into()];
         remote.extend(argv);
         argv = remote;
     }
@@ -127,12 +144,31 @@ mod tests {
             cmd,
             PluginCommand::Fluxctl(vec![
                 "ssh".into(),
+                "--".into(),
                 "worker-a".into(),
                 "--".into(),
                 "fluxctl".into(),
                 "pause".into(),
                 "11111111-2222-4333-8444-555555555555".into()
             ])
+        );
+    }
+
+    #[test]
+    fn ssh_node_rejects_openssh_option_injection() {
+        let dvm = json!({
+            "spec": {"node": "-oProxyCommand=touch /tmp/pwned"},
+            "status": {
+                "vmId": "11111111-2222-4333-8444-555555555555",
+                "phase": "Running"
+            }
+        });
+        let err = command_for("pause", "disposablevm", "job", "default", &dvm, &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("invalid node hostname"),
+            "expected hostname rejection, got {err}"
         );
     }
 

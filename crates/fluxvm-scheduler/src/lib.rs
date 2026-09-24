@@ -8,8 +8,8 @@ use fluxvm_core::{
     config::Config,
     metrics,
     model::{
-        BackendKind, ClaimOverrides, CloudInitSpec, CreateVmRequest, ExtraNic, NetworkSpec,
-        PoolRecord, PoolSpec, StorageBackend, VmRecord, VmStatus,
+        BackendKind, ClaimOverrides, CloudInitSpec, CreateVmRequest, ExtraNic, MigrationPhase,
+        NetworkSpec, PoolRecord, PoolSpec, StorageBackend, VmRecord, VmStatus,
     },
     process,
 };
@@ -2185,7 +2185,16 @@ impl VmManager {
                 "live migration contract v1 supports qemu only (backend={other:?})"
             )),
         };
-        if quiesced && started.is_err() {
+        // QEMU can return Ok(Failed); keep the dataplane quiesced only while
+        // migration is still in flight (Active/Setup/…).
+        let should_resume = match &started {
+            Err(_) => true,
+            Ok(status) => matches!(
+                status.phase,
+                MigrationPhase::Failed | MigrationPhase::Cancelled
+            ),
+        };
+        if quiesced && should_resume {
             if let Err(e) = fluxvm_network::migration_state::resume(&self.cfg, id) {
                 tracing::warn!(vm = %id, error = %e, "resuming dataplane after migration start failed");
             }
@@ -2195,14 +2204,23 @@ impl VmManager {
 
     pub async fn migration_status(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationStatus> {
         let vm = self.get(id).await?;
-        match vm.backend {
-            BackendKind::Qemu => fluxvm_qemu::migration_status(&self.cfg, &vm).await,
+        let status = match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::migration_status(&self.cfg, &vm).await?,
             BackendKind::CloudHypervisor => bail!(
                 "Cloud Hypervisor's migration API has no status-polling primitive (send-migration \
                  is fire-and-forget) -- check whether this VM is still Running on this node instead"
             ),
             other => bail!("migration status contract v1 supports qemu only (backend={other:?})"),
+        };
+        if matches!(
+            status.phase,
+            MigrationPhase::Failed | MigrationPhase::Cancelled
+        ) {
+            if let Err(e) = fluxvm_network::migration_state::resume(&self.cfg, id) {
+                tracing::warn!(vm = %id, error = %e, "resuming dataplane after terminal migration status");
+            }
         }
+        Ok(status)
     }
 
     pub async fn cancel_migration(&self, id: Uuid) -> Result<fluxvm_core::model::MigrationStatus> {
@@ -2215,6 +2233,9 @@ impl VmManager {
             ),
             other => bail!("migration cancel contract v1 supports qemu only (backend={other:?})"),
         };
+        if let Err(e) = fluxvm_network::migration_state::resume(&self.cfg, id) {
+            tracing::warn!(vm = %id, error = %e, "resuming dataplane after migration cancel");
+        }
         let vm_id = id.to_string();
         audit_event("migration.cancel", &[("vm_id", &vm_id)]);
         Ok(status)
