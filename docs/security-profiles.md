@@ -4,6 +4,11 @@
 The VM record stores **requested** and **achieved** profiles separately so
 a control-plane accept cannot be read as a hardware attestation claim.
 
+**How to test (same as CI):** [`./scripts/test-security-profiles.sh`](../scripts/test-security-profiles.sh) ·
+[guide](guides/security-profiles-howto.md) ·
+[GitHub Actions](../.github/workflows/security-profiles.yml).
+Example create body: [`examples/qemu-measured.json`](../examples/qemu-measured.json).
+
 | Profile | What it requires | Evidence class | Hardware attestation? |
 |---|---|---|---|
 | `standard` (default) | Nothing new | none | no |
@@ -14,8 +19,7 @@ a control-plane accept cannot be read as a hardware attestation claim.
 ## Why measured is not hardware attestation
 
 FluxVM already attaches a real UEFI Secure Boot chain and an `swtpm`-backed
-vTPM (see [secure-boot-tpm.md](../../docs/secure-boot-tpm.md) in the
-upstream tree). That document is explicit: FluxVM does not consume PCR
+vTPM (see [secure-boot-tpm.md](./secure-boot-tpm.md)). That document is explicit: FluxVM does not consume PCR
 quotes or perform remote attestation, and an `swtpm` process is controlled
 by the host. A host-controlled TPM **cannot** prove that the host cannot
 inspect the guest.

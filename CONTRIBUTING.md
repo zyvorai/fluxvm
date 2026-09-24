@@ -9,6 +9,7 @@ make test-policy    # python control-plane tests (no rustc required)
 make check          # test-policy + preflight
 make bpf            # scripts/build-ebpf.sh
 make preflight
+./scripts/test-security-profiles.sh   # Phase 6 measured + confidential control plane (no TEE hardware)
 ./scripts/release-checklist.sh   # docs + production python suites
 ```
 

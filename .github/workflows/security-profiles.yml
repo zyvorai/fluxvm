@@ -1,0 +1,88 @@
+name: Security profiles (Phase 6)
+
+# Hardware-free CI for measured + confidential-VM control plane.
+# Does not claim SEV-SNP/TDX host-memory protection.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "crates/fluxvm-core/src/security.rs"
+      - "crates/fluxvm-core/src/model.rs"
+      - "crates/fluxvm-core/src/config.rs"
+      - "crates/fluxvm-qemu/src/confidential.rs"
+      - "crates/fluxvm-qemu/src/lib.rs"
+      - "crates/fluxvm-scheduler/src/lib.rs"
+      - "crates/fluxvm-image/src/catalog.rs"
+      - "crates/fluxvm-agent/src/**"
+      - "crates/fluxvm-api/src/lib.rs"
+      - "docs/security-profiles.md"
+      - "docs/guides/security-profiles-howto.md"
+      - "scripts/test-security-profiles.sh"
+      - "examples/qemu-measured.json"
+      - ".github/workflows/security-profiles.yml"
+  pull_request:
+    paths:
+      - "crates/fluxvm-core/src/security.rs"
+      - "crates/fluxvm-core/src/model.rs"
+      - "crates/fluxvm-core/src/config.rs"
+      - "crates/fluxvm-qemu/src/confidential.rs"
+      - "crates/fluxvm-qemu/src/lib.rs"
+      - "crates/fluxvm-scheduler/src/lib.rs"
+      - "crates/fluxvm-image/src/catalog.rs"
+      - "crates/fluxvm-agent/src/**"
+      - "crates/fluxvm-api/src/lib.rs"
+      - "docs/security-profiles.md"
+      - "docs/guides/security-profiles-howto.md"
+      - "scripts/test-security-profiles.sh"
+      - "examples/qemu-measured.json"
+      - ".github/workflows/security-profiles.yml"
+
+jobs:
+  security-profiles:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+
+      - name: Phase 6 unit tests (no hardware)
+        working-directory: fluxvm
+        run: |
+          chmod +x scripts/test-security-profiles.sh
+          ./scripts/test-security-profiles.sh
+
+      - name: How to re-run locally (CI log hint)
+        if: always()
+        run: |
+          cat <<'EOF'
+          Locally (no SNP/TDX hardware needed):
+            cd fluxvm && ./scripts/test-security-profiles.sh
+
+          Docs:
+            docs/security-profiles.md
+            docs/guides/security-profiles-howto.md
+            examples/qemu-measured.json
+
+          Honesty: measured evidence is class software-test — never claim
+          the host cannot inspect the guest until Keep/FluxVM 0.2 + hardware.
+          EOF
