@@ -48,12 +48,14 @@ impl VmBackend for FluxVmBackend {
             vcpus: req.vcpus,
             kernel_args: req.kernel_args.clone().or_else(|| {
                 Some(match cfg.fluxvm_engine {
-                    // Firecracker attaches virtio devices via its API; cmdline
-                    // virtio_mmio.device=… hints are for the in-tree KVM engine
-                    // only and confuse FC (Wrong magic value). Cloud-image
-                    // rootfs disks are GPT-partitioned — root lives on vda1.
+                    // Firecracker attaches virtio devices via its API and appends
+                    // its own `root=/dev/vda` + virtio_mmiocmdline — do not inject
+                    // in-tree KVM `virtio_mmio.device=0x200@0xfeb…` hints (Wrong
+                    // magic value) or a competing `root=` that loses to FC's
+                    // append. Use a flat ext4 rootfs (see fabric
+                    // `scripts/keep-bake-fc-rootfs.sh`); GPT cloud images panic.
                     FluxVmEngine::Firecracker => {
-                        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda1 rw random.trust_cpu=on rdrand=force"
+                        "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off rw random.trust_cpu=on rdrand=force"
                             .into()
                     }
                     FluxVmEngine::Kvm => {
