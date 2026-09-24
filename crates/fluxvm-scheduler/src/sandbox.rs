@@ -35,6 +35,48 @@ pub struct SandboxCreateRequest {
     /// belongs to the caller's tenant and can be attached to one VM at a time.
     #[serde(default)]
     pub volumes: Vec<SandboxVolume>,
+    /// Override the template's vCPU count. Must not exceed the template's own
+    /// `max_vcpus` when it sets one.
+    #[serde(default)]
+    pub vcpus: Option<u8>,
+    /// Override the template's memory. Must not exceed the template's own
+    /// `max_memory_mib` when it sets one.
+    #[serde(default)]
+    pub memory_mib: Option<u64>,
+}
+
+pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
+
+/// Apply a per-sandbox size override. A template's `max_*` fields are the
+/// operator's ceiling, so a caller can shrink or grow within them but never past.
+fn apply_resources(
+    create: &mut CreateVmRequest,
+    vcpus: Option<u8>,
+    memory_mib: Option<u64>,
+) -> Result<()> {
+    if let Some(vcpus) = vcpus {
+        if vcpus == 0 {
+            bail!("vcpus must be at least 1");
+        }
+        if let Some(max) = create.max_vcpus {
+            if vcpus > max {
+                bail!("vcpus {vcpus} exceeds the template's max_vcpus {max}");
+            }
+        }
+        create.vcpus = vcpus;
+    }
+    if let Some(memory) = memory_mib {
+        if memory < MIN_SANDBOX_MEMORY_MIB {
+            bail!("memory_mib must be at least {MIN_SANDBOX_MEMORY_MIB}");
+        }
+        if let Some(max) = create.max_memory_mib {
+            if memory > max {
+                bail!("memory_mib {memory} exceeds the template's max_memory_mib {max}");
+            }
+        }
+        create.memory_mib = memory;
+    }
+    Ok(())
 }
 
 /// A persistent host directory shared into a sandbox over virtiofs.
@@ -152,6 +194,7 @@ impl VmManager {
         } else {
             bail!("sandbox create requires `template` or `spec`");
         };
+        apply_resources(&mut create, req.vcpus, req.memory_mib)?;
         enforce_sandbox_tenant(&mut create, token_tenant)?;
         create.created_by_token = created_by_token.map(String::from);
         // A client-supplied `spec` is always the in-tree backend. Only an
@@ -568,6 +611,34 @@ mod tests {
         create.tenant = Some("other-tenant".into());
         let err = enforce_sandbox_tenant(&mut create, Some("acme")).unwrap_err();
         assert!(err.to_string().contains("cannot create a sandbox"));
+    }
+
+    #[test]
+    fn resources_override_the_template_within_its_ceiling() {
+        let mut create = req();
+        create.max_vcpus = Some(4);
+        create.max_memory_mib = Some(8192);
+        apply_resources(&mut create, Some(2), Some(7900)).unwrap();
+        assert_eq!((create.vcpus, create.memory_mib), (2, 7900));
+    }
+
+    #[test]
+    fn no_resources_leaves_the_template_alone() {
+        let mut create = req();
+        let (v, m) = (create.vcpus, create.memory_mib);
+        apply_resources(&mut create, None, None).unwrap();
+        assert_eq!((create.vcpus, create.memory_mib), (v, m));
+    }
+
+    #[test]
+    fn resources_past_the_ceiling_or_below_the_floor_are_rejected() {
+        let mut create = req();
+        create.max_vcpus = Some(2);
+        create.max_memory_mib = Some(1024);
+        assert!(apply_resources(&mut create, Some(3), None).is_err());
+        assert!(apply_resources(&mut create, None, Some(2048)).is_err());
+        assert!(apply_resources(&mut create, Some(0), None).is_err());
+        assert!(apply_resources(&mut create, None, Some(64)).is_err());
     }
 
     fn volume(name: &str, guest_path: &str) -> SandboxVolume {
