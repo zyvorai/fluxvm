@@ -75,6 +75,20 @@ pub enum NetworkSpec {
     },
 }
 
+impl NetworkSpec {
+    /// Bridge-less datapath. Live migration of these VMs is refused until a
+    /// two-host test exists.
+    pub fn is_direct(&self) -> bool {
+        matches!(
+            self,
+            NetworkSpec::Tap {
+                direct: Some(_),
+                ..
+            }
+        )
+    }
+}
+
 /// How a bridge-less ("direct") tap is paired with its outer device.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -565,6 +579,69 @@ pub struct MigrationStatus {
     pub downtime_ms: Option<u64>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// Target-side QEMU incoming receiver. The caller picks the node; this
+/// record is only the runtime reservation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationReceiverRequest {
+    pub vcpus: u8,
+    pub memory_mib: u64,
+    /// Empty or `host`. Other CPU models are rejected.
+    #[serde(default)]
+    pub cpu_model: String,
+    /// Empty or a `q35...` machine type.
+    #[serde(default)]
+    pub machine: String,
+    /// Shared disk both hosts already open. The receiver does not copy it.
+    pub disk: PathBuf,
+    #[serde(default = "default_disk_format")]
+    pub disk_format: String,
+    #[serde(default = "default_listen_host")]
+    pub listen_host: String,
+    /// Address the source dials. Required when `listen_host` is a wildcard.
+    #[serde(default)]
+    pub advertise_host: String,
+    /// `0` binds an ephemeral port.
+    #[serde(default)]
+    pub listen_port: u16,
+    #[serde(default)]
+    pub expires_in_seconds: Option<u64>,
+}
+
+fn default_disk_format() -> String {
+    "raw".into()
+}
+fn default_listen_host() -> String {
+    "0.0.0.0".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationReceiver {
+    pub id: Uuid,
+    /// Address the source VMM dials.
+    pub uri: String,
+    /// Address passed to QMP `migrate-incoming`. May be a wildcard.
+    #[serde(default)]
+    pub listen_uri: String,
+    pub token: String,
+    pub expires_at_unix: u64,
+    pub pid: u32,
+    pub qmp_socket: PathBuf,
+    pub workspace: PathBuf,
+    pub disk: PathBuf,
+    #[serde(default)]
+    pub cgroup_path: Option<PathBuf>,
+    /// Charged against the host quota while this receiver is reserved.
+    #[serde(default)]
+    pub vcpus: u8,
+    #[serde(default)]
+    pub memory_mib: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationReceiverActivate {
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

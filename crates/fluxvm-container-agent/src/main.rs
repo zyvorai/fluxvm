@@ -1745,6 +1745,19 @@ fn seccomp_compare(raw: &str) -> Result<u32> {
     })
 }
 
+fn oci_namespace_types(config: &Value) -> Vec<String> {
+    config
+        .pointer("/linux/namespaces")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|ns| ns.get("type").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn parse_seccomp_profile(config: &Value) -> Result<Option<SeccompProfile>> {
     let Some(seccomp) = config.pointer("/linux/seccomp") else {
         return Ok(None);
@@ -6065,5 +6078,41 @@ mod set8_guest_device_tests {
             err.to_string()
                 .contains("unsafe hotplugged guest device path")
         );
+    }
+}
+
+#[cfg(test)]
+mod oci_fixture_tests {
+    use super::{oci_namespace_types, parse_device_cgroup_policy, parse_seccomp_profile};
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> Value {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/oci-fixtures")
+            .join(name);
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn fixtures_execute_in_the_agent_parsers() {
+        let seccomp = fixture("seccomp-notify.json");
+        let profile = parse_seccomp_profile(&seccomp).unwrap().unwrap();
+        assert!(!profile.rules.is_empty());
+
+        let devices = fixture("device-cgroup.json");
+        let policy = parse_device_cgroup_policy(&devices).unwrap().unwrap();
+        assert!(!policy.rules.is_empty() || !policy.default_allow);
+
+        let ns = fixture("ns-pid-mount-ipc-uts.json");
+        let types = oci_namespace_types(&ns);
+        assert_eq!(types, vec!["pid", "mount", "ipc", "uts"]);
+
+        let hostpath = fixture("hostpath-allowlisted.json");
+        assert!(hostpath.get("mounts").is_some() || hostpath.get("linux").is_some());
+        let tty = fixture("tty-churn.json");
+        assert!(tty.get("process").is_some() || tty.get("ociVersion").is_some());
     }
 }

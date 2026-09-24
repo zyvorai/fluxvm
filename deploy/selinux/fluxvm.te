@@ -1,0 +1,27 @@
+policy_module(fluxvm, 1.0.0)
+
+# Reference domain for fluxctl serve. The module is permissive: denials are
+# logged and allowed. Remove the permissive line and rebuild to enforce.
+type fluxvm_t;
+type fluxvm_exec_t;
+domain_type(fluxvm_t)
+permissive fluxvm_t;
+
+require {
+    type unconfined_t;
+    class process transition;
+    class file { read write open getattr execute execute_no_trans map };
+    class dir { read write open search add_name remove_name };
+    class chr_file { read write open ioctl getattr };
+    class netlink_route_socket { create bind getattr read write nlmsg_read nlmsg_write };
+}
+
+# /dev/kvm, /dev/net/tun, /var/lib/fluxvm, cgroup and netlink are the minimum
+# a confined fluxctl serve needs. Site policy should narrow this further
+# before dropping the permissive line.
+allow fluxvm_t self:process transition;
+allow fluxvm_t fluxvm_exec_t:file { read open getattr execute execute_no_trans map };
+allow fluxvm_t self:file { read write open getattr };
+allow fluxvm_t self:dir { read write open search add_name remove_name };
+allow fluxvm_t self:chr_file { read write open ioctl getattr };
+allow fluxvm_t self:netlink_route_socket { create bind getattr read write nlmsg_read nlmsg_write };

@@ -38,12 +38,22 @@
   },
   "vm_id": "11111111-2222-4333-8444-555555555555",
   "vmm": {
+    "destination_uri": "tcp:hyper-b.example.net:4444",
+    "receiver": {
+      "advertise_host": "hyper-b.example.net",
+      "api": "http://127.0.0.1:7788",
+      "disk": "/srv/fluxvm/payments/root.raw",
+      "listen_host": "0.0.0.0",
+      "memory_mib": 2048,
+      "vcpus": 2
+    },
     "migrate_argv": [
-      "/usr/local/libexec/fluxvm/fluxvm-migration-driver",
+      "fluxctl",
       "migrate",
+      "start",
       "{vm_id}",
       "--destination",
-      "tcp:hyper-b.example.net:4444"
+      "{migration_uri}"
     ],
     "rollback_argv": [
       "/usr/local/libexec/fluxvm/fluxvm-migration-driver",

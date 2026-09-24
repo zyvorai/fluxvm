@@ -1,0 +1,18 @@
+schema=fluxvm-baseline-1
+recorded_at=20260924T114122Z
+commit=c93456c9977972054a40302a4022f8266093323b
+uname=Darwin 25.2.0 arm64
+os=Darwin
+cpu=Apple M4
+nproc=10
+config_note=production-hardening.toml is the profile these numbers are compared against; this run does not require that file to be loaded
+metric_note=avg_create_ms and boot_to_ready_ms are control-plane create latency, not guest-ready
+metric_note=warm_claim_ms is POST /v1/pools/{}/claim and is not comparable to cold create
+sla_note=not a sizing SLA; Firecracker 125ms and 5/core/sec targets are not FluxVM SLAs
+
+kvm=skipped
+bench-sandbox=skipped
+bench-density=skipped
+bench-secure-containers=skipped
+bench-warm-claim=skipped
+reason=Linux and /dev/kvm are required; metadata above is the Phase 0 record for this host

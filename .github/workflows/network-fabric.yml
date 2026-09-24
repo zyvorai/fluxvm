@@ -155,6 +155,7 @@ jobs:
         run: |
           bash -n scripts/test-verifier-budget.sh
           bash -n scripts/test-direct-datapath.sh
+          bash -n scripts/evidence-cni-churn.sh
           bash -n scripts/test-direct-uplink.sh
           bash -n scripts/evidence-direct-datapath.sh
           bash -n scripts/bench-direct-datapath.sh

@@ -1,0 +1,14 @@
+[Unit]
+Description=FluxVM control plane (fluxctl serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/fluxctl serve --config /etc/fluxvm.toml
+Restart=on-failure
+# Installed profile: deploy/apparmor/fluxvm. No-op where AppArmor is absent.
+AppArmorProfile=fluxvm
+
+[Install]
+WantedBy=multi-user.target

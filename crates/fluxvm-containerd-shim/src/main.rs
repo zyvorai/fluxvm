@@ -544,6 +544,18 @@ fn runtime_state_path(cfg: &RuntimeConfig, namespace: &str, group: &str) -> Path
     runtime_state_root(cfg, namespace, group).join("runtime-state.json")
 }
 
+/// Drop the sandbox journal once the last task is gone. A remaining task
+/// keeps the VM, tap, and pod id. Returns true when the journal was cleared.
+fn journal_after_task_delete(state: &mut RuntimeStateJournal, task_id: &str) -> bool {
+    state.tasks.remove(task_id);
+    if !state.tasks.is_empty() {
+        return false;
+    }
+    state.sandbox = None;
+    state.execs.clear();
+    true
+}
+
 async fn load_runtime_state(
     cfg: &RuntimeConfig,
     namespace: &str,
@@ -1293,6 +1305,17 @@ impl Service {
                         .push((format!("fs{}", shared_folders.len() - 1), guest.to_string()));
                 }
             }
+        }
+        if let Some(allow) = hostpath_export_root() {
+            if !allow.is_dir() {
+                bail!(
+                    "FLUXVM_HOSTPATH_ALLOW {} is not a directory; refusing to export it",
+                    allow.display()
+                );
+            }
+            let tag = format!("fs{}", shared_folders.len());
+            shared_folders.push(hostpath_share_json(&allow));
+            kubelet_mounts.push((tag, "/run/fluxvm/hostpath-allow".into()));
         }
 
         let create = json!({
@@ -4496,7 +4519,7 @@ fn direct_ineligibility(f: &DirectFacts) -> Option<String> {
     }
     if f.secondaries > 0 {
         return Some(format!(
-            "{} Multus secondary NIC(s) are not supported with the direct datapath yet",
+            "fail closed: {} Multus secondary NIC(s) are not supported on the direct datapath (set FLUXVM_CONTAINER_CNI_DATAPATH=bridge)",
             f.secondaries
         ));
     }
@@ -5842,22 +5865,47 @@ async fn stage_bind_mounts(
         // S9 / P0 hostPath broker: only paths under an explicit allowlist root
         // (annotation `fluxvm.io/hostpath-allow` or env FLUXVM_HOSTPATH_ALLOW)
         // may pass through write-through. Everything else stays snapshotted.
-        if let Some(ref allow_root) = allow_root {
-            if let Ok(rel) = source_path.strip_prefix(allow_root) {
-                let guest = Path::new("/run/fluxvm/hostpath-allow").join(rel);
-                mount["source"] = Value::String(guest.to_string_lossy().into_owned());
-                mount["fluxvm.io/hostpath-broker"] = Value::String("allowlisted".into());
-                continue;
+        let claims_allow = allow_root.as_ref().is_some_and(|allow| {
+            fluxvm_core::policy::path_within(&source_path, allow)
+                || fluxvm_core::policy::lexical_within(&source_path, allow)
+        });
+        if claims_allow {
+            let allow_root = allow_root.as_ref().expect("claims_allow implies allow_root");
+            let exported = hostpath_export_root();
+            let same_export = exported.as_ref().is_some_and(|exp| {
+                fluxvm_core::policy::resolve_existing(exp)
+                    == fluxvm_core::policy::resolve_existing(allow_root)
+            });
+            if !same_export {
+                bail!(
+                    "hostPath allowlist {} is not a virtiofs export; set FLUXVM_HOSTPATH_ALLOW to that directory before the sandbox is created",
+                    allow_root.display()
+                );
             }
-            bail!(
-                "OCI bind source {} is outside hostPath allowlist {} (set annotation fluxvm.io/hostpath-allow or FLUXVM_HOSTPATH_ALLOW)",
-                source_path.display(),
-                allow_root.display()
-            );
+            match fluxvm_core::policy::hostpath_guest(&source_path, allow_root) {
+                Some(guest) => {
+                    mount["source"] = Value::String(guest.to_string_lossy().into_owned());
+                    mount["fluxvm.io/hostpath-broker"] = Value::String("allowlisted".into());
+                    continue;
+                }
+                None => bail!(
+                    "OCI bind source {} escapes hostPath allowlist {} (symlink or ..)",
+                    source_path.display(),
+                    allow_root.display()
+                ),
+            }
         }
 
-        // Non-Pod-scoped bind sources stay snapshot-based. This avoids
-        // exposing arbitrary hostPath content to the guest by accident.
+        // An allowlist is in force. A bind that does not fall under it must
+        // fail the task. Copying it into the Pod share would bypass the
+        // allowlist. Snapshot copy remains only when no allowlist is set.
+        if allow_root.is_some() {
+            bail!(
+                "OCI bind source {} is outside hostPath allowlist {} and will not be copied into the Pod share",
+                source_path.display(),
+                allow_root.as_ref().map(|p| p.display().to_string()).unwrap_or_default()
+            );
+        }
         let host = host_ctr.join("mounts").join(idx.to_string());
         if source_path.is_dir() {
             tokio::fs::create_dir_all(&host).await?;
@@ -5875,6 +5923,22 @@ async fn stage_bind_mounts(
 
 /// Explicit hostPath broker allowlist root (S9 P0). Empty / unset → no
 /// arbitrary hostPath passthrough (snapshot-only for non-kubelet binds).
+fn hostpath_share_json(host: &Path) -> Value {
+    json!({
+        "host_path": host,
+        "guest_path": "/run/fluxvm/hostpath-allow",
+        "read_only": false
+    })
+}
+
+/// Directory exported at sandbox create. Annotation-only allowlists fail
+/// closed unless this matches, because the guest mount is created here.
+fn hostpath_export_root() -> Option<PathBuf> {
+    std::env::var_os("FLUXVM_HOSTPATH_ALLOW")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
 fn hostpath_allow_root(spec: &Value) -> Option<PathBuf> {
     let from_ann = spec
         .get("annotations")
@@ -6723,5 +6787,45 @@ mod pod_teardown_tests {
     fn cleaning_up_the_last_task_may_destroy_the_vm() {
         assert_eq!(other_tasks("sandbox", &ids(&["sandbox"])), 0);
         assert_eq!(other_tasks("sandbox", &ids(&[])), 0);
+    }
+
+    #[test]
+    fn deleting_the_last_of_two_tasks_clears_vm_tap_and_pod_journal() {
+        use super::{RuntimeStateJournal, SandboxJournal, TaskMeta, journal_after_task_delete};
+        use std::path::PathBuf;
+        let task = || TaskMeta {
+            bundle: String::new(),
+            stdin: String::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            terminal: false,
+            pid: 0,
+            io_dir: None,
+            streaming: false,
+            oom_kill_seen: 0,
+            device_claims: vec![],
+            container_identity: 0,
+        };
+        let mut state = RuntimeStateJournal::default();
+        state.tasks.insert("a".into(), task());
+        state.tasks.insert("b".into(), task());
+        state.sandbox = Some(SandboxJournal {
+            vm_id: "vm-1".into(),
+            vm_name: "ctr-pod".into(),
+            ready: true,
+            share_dir: PathBuf::from("/var/lib/fluxvm/pods/pod-uid/share"),
+            cni: None,
+            kubelet_mounts: vec![],
+            devices: vec![],
+        });
+        assert!(!journal_after_task_delete(&mut state, "a"));
+        assert!(state.sandbox.is_some(), "one task still owns the VM");
+        assert!(journal_after_task_delete(&mut state, "b"));
+        assert!(state.sandbox.is_none());
+        assert!(state.tasks.is_empty());
+        assert!(state.execs.is_empty());
+        let rendered = serde_json::to_string(&state).unwrap();
+        assert!(!rendered.contains("vm-1"));
+        assert!(!rendered.contains("pod-uid"));
     }
 }

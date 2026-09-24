@@ -380,11 +380,13 @@ async fn launch_jailed(
 
     // Everything placed above is root-owned by default; Firecracker runs as
     // jailer.uid/gid after the chroot+setuid, so it needs access to all of it.
+    let (jail_uid, jail_gid) =
+        fluxvm_core::config::assign_tenant_uid(&cfg.state_dir, &cfg.jailer, req.tenant.as_deref())?;
     run_checked(
         "chown",
         &[
             "-R".into(),
-            format!("{}:{}", cfg.jailer.uid, cfg.jailer.gid),
+            format!("{jail_uid}:{jail_gid}"),
             chroot_root.display().to_string(),
         ],
     )
@@ -397,9 +399,9 @@ async fn launch_jailed(
         "--exec-file".into(),
         cfg.firecracker_binary.clone(),
         "--uid".into(),
-        cfg.jailer.uid.to_string(),
+        jail_uid.to_string(),
         "--gid".into(),
-        cfg.jailer.gid.to_string(),
+        jail_gid.to_string(),
         "--chroot-base-dir".into(),
         cfg.jailer.chroot_base_dir.display().to_string(),
         "--".into(),
