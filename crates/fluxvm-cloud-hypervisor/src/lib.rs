@@ -691,6 +691,8 @@ mod tests {
             pod_uid: None,
             secure_boot: None,
             tpm: None,
+            security_profile: Default::default(),
+            measurement_policy: None,
             net_mbit_limit: None,
             net_pps_limit: None,
             blk_mbit_limit: None,
@@ -752,6 +754,9 @@ mod tests {
             swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
+            requested_security_profile: Default::default(),
+            achieved_security_profile: Default::default(),
+            security_evidence: None,
         }
     }
 

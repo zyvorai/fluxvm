@@ -426,6 +426,31 @@ fn verify_signature<'a>(
 ///   and its content re-verified against `sha256` — even a local `source`
 ///   path is re-hashed here, so a file that changed after the catalog was
 ///   authored is caught rather than silently trusted.
+/// True when `image_ref` is a catalog alias whose Ed25519 signature verifies
+/// against `catalog.trusted_signers`. Call **before** [`resolve`] overwrites
+/// `image_ref` with a filesystem path.
+pub fn is_approved_signed_image(cfg: &Config, image_ref: &Path) -> bool {
+    let Some(catalog_path) = &cfg.catalog.path else {
+        return false;
+    };
+    let Some(ref_str) = image_ref.to_str() else {
+        return false;
+    };
+    if !catalog_path.exists() || cfg.catalog.trusted_signers.is_empty() {
+        return false;
+    }
+    let Ok(catalog) = load_catalog(catalog_path) else {
+        return false;
+    };
+    let Some(entry) = catalog.iter().find(|e| e.name == ref_str) else {
+        return false;
+    };
+    let Ok(signers) = parse_trusted_signers(&cfg.catalog.trusted_signers) else {
+        return false;
+    };
+    verify_signature(entry, &signers).is_ok()
+}
+
 pub async fn resolve(cfg: &Config, image_ref: &Path) -> Result<PathBuf> {
     let Some(catalog_path) = &cfg.catalog.path else {
         return Ok(image_ref.to_path_buf());

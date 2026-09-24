@@ -687,6 +687,10 @@ impl VmManager {
     /// headroom is exhausted rather than silently no-op'ing.
     pub async fn hotplug_cpu(&self, id: Uuid, add_vcpus: u8) -> Result<u8> {
         let vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::HotplugCpu,
+        )?;
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::hotplug_cpu(&self.cfg, &vm, add_vcpus).await,
             BackendKind::CloudHypervisor => {
@@ -701,6 +705,10 @@ impl VmManager {
     /// as `hotplug_cpu`. Returns the VM's new total live memory.
     pub async fn hotplug_memory(&self, id: Uuid, add_memory_mib: u64) -> Result<u64> {
         let vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::HotplugMemory,
+        )?;
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::hotplug_memory(&self.cfg, &vm, add_memory_mib).await,
             BackendKind::CloudHypervisor => {
@@ -716,6 +724,10 @@ impl VmManager {
     /// is free; later calls fill `extra`.
     pub async fn hotplug_nic(&self, id: Uuid, bridge: String, mac: Option<String>) -> Result<()> {
         let mut vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::HotplugNic,
+        )?;
         if vm.backend != BackendKind::Qemu {
             bail!("NIC hotplug is supported for the QEMU backend only");
         }
@@ -778,6 +790,10 @@ impl VmManager {
         mac: Option<String>,
     ) -> Result<()> {
         let mut vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::HotplugNic,
+        )?;
         let prepared = plug_direct_nic(&self.cfg, &vm, direct, mac).await?;
         vm.request.network = prepared.spec.clone();
         vm.tap_name = prepared.tap_name.clone();
@@ -822,6 +838,10 @@ impl VmManager {
         read_only: bool,
     ) -> Result<String> {
         let mut vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::HotplugShare,
+        )?;
         if vm.backend != BackendKind::Qemu {
             bail!("share hotplug is supported for the QEMU backend only");
         }
@@ -1479,6 +1499,30 @@ impl VmManager {
         // (the disk filename, the persisted record, the launch dispatch)
         // assumes a concrete backend and must never see Auto.
         req.backend = resolve_backend(&req, &self.cfg);
+        let requested_profile = req.security_profile;
+        let catalog_signed =
+            fluxvm_image::catalog::is_approved_signed_image(&self.cfg, &req.image);
+        let caps = fluxvm_core::security::HostCapabilities::discover(&self.cfg);
+        fluxvm_core::security::validate_create_request(
+            requested_profile,
+            req.backend == BackendKind::Qemu,
+            &req.extra_args,
+            req.shared_memory,
+            req.hugepages == Some(true),
+            req.loadvm_tag.is_some(),
+            &caps,
+            self.cfg.security.allow_unverified_confidential,
+        )?;
+        if requested_profile.requires_measurement_chain() {
+            if !catalog_signed {
+                bail!(
+                    "security_profile {} requires an approved signed catalog image",
+                    requested_profile.as_str()
+                );
+            }
+            req.secure_boot = Some(true);
+            req.tpm = Some(true);
+        }
         // Resolved before policy so allowed_image_dirs governs the actual
         // downloaded/verified file a catalog alias points to, not the
         // alias string itself.
@@ -1562,6 +1606,9 @@ impl VmManager {
             swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
+            requested_security_profile: requested_profile,
+            achieved_security_profile: fluxvm_core::security::SecurityProfile::default(),
+            security_evidence: None,
         };
         // Deciding the CID and reserving it happen as one atomic, locked
         // operation in the store — see fluxvm-storage::Store::insert_with_cid
@@ -1718,6 +1765,28 @@ impl VmManager {
                     }
                 }
             }
+            if requested_profile.requires_measurement_chain() && req.backend == BackendKind::Qemu
+            {
+                let firmware = self
+                    .cfg
+                    .qemu_ovmf_code
+                    .as_ref()
+                    .map(std::path::Path::as_path);
+                let evidence = fluxvm_core::security::collect_measured_evidence(
+                    fluxvm_core::security::MeasuredLaunchInputs {
+                        image: &record.disk,
+                        firmware,
+                        kernel: req.kernel.as_deref(),
+                        catalog_signed,
+                        secure_boot: req.secure_boot.unwrap_or(false),
+                        vtpm_attached: req.tpm.unwrap_or(false),
+                    },
+                )?;
+                fluxvm_core::security::write_evidence(&workspace, &evidence)?;
+                record.security_evidence = Some(evidence);
+            }
+            record.achieved_security_profile =
+                fluxvm_core::security::achieved_security_profile(requested_profile, &caps);
             Ok(())
         }
         .await;
@@ -1779,6 +1848,30 @@ impl VmManager {
     /// every other tenant. Now filtered to `created_by_token == actor` --
     /// stamped server-side in `create_vm`/`create_sandbox`, never settable
     /// from the request body, so this can't be spoofed by a client either.
+    pub fn host_security_capabilities(&self) -> fluxvm_core::security::HostCapabilities {
+        fluxvm_core::security::HostCapabilities::discover(&self.cfg)
+    }
+
+    pub async fn release_test_secret(
+        &self,
+        id: Uuid,
+    ) -> Result<fluxvm_core::security::SecretRelease> {
+        let vm = self.get(id).await?;
+        let policy = vm
+            .request
+            .measurement_policy
+            .as_ref()
+            .context("VM has no measurement_policy")?;
+        let evidence = match &vm.security_evidence {
+            Some(ev) => ev.clone(),
+            None => fluxvm_core::security::read_evidence(&vm.workspace)
+                .context("no security evidence on record or disk")?,
+        };
+        Ok(fluxvm_core::security::release_test_secret(
+            &evidence, policy,
+        ))
+    }
+
     pub async fn enforce_token_quotas(
         &self,
         actor: Option<&str>,
@@ -1863,6 +1956,10 @@ impl VmManager {
     /// dedicated snapshot-load paths (they ignore `loadvm_tag` on cold launch).
     pub async fn start_from_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
         let vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::SnapshotRestore,
+        )?;
         if let Some(e) = snapshot_backend_error(vm.backend) {
             bail!(e);
         }
@@ -2072,6 +2169,10 @@ impl VmManager {
     /// hypervisor control SnapshotSave path (same layout as sandbox snaps).
     pub async fn create_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
         let vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::SnapshotSave,
+        )?;
         if vm.status != VmStatus::Running && vm.status != VmStatus::Paused {
             bail!(
                 "snapshot requires a running or paused VM (status={:?})",
@@ -3108,6 +3209,8 @@ mod tests {
             pod_uid: None,
             secure_boot: None,
             tpm: None,
+            security_profile: Default::default(),
+            measurement_policy: None,
             net_mbit_limit: None,
             net_pps_limit: None,
             blk_mbit_limit: None,
@@ -3456,6 +3559,9 @@ mod tests {
             swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
+            requested_security_profile: Default::default(),
+            achieved_security_profile: Default::default(),
+            security_evidence: None,
         }
     }
 
@@ -3604,6 +3710,9 @@ mod tests {
                 swtpm_pid: None,
                 dhcp_leasefile: None,
                 guest_ip: None,
+                requested_security_profile: Default::default(),
+                achieved_security_profile: Default::default(),
+                security_evidence: None,
             }
         }
 

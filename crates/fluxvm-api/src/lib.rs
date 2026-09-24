@@ -310,12 +310,21 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
+        .route(
+            "/v1/security/capabilities",
+            get(security_capabilities),
+        )
         .route("/v1/host/gpus", get(list_host_gpus))
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
         .route("/v1/host/gpus/release", post(release_host_gpu))
         .route("/v1/vms", post(create_vm).get(list_vms))
         .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
+        .route("/v1/vms/{id}/attest", get(get_vm_evidence))
+        .route(
+            "/v1/vms/{id}/secrets/release",
+            post(release_vm_secret),
+        )
         .route("/v1/vms/{id}/start", post(start_vm))
         .route(
             "/v1/vms/{id}/start-from-snapshot",
@@ -1280,6 +1289,32 @@ load().catch(() => {});
 </html>"#;
 
 // ZYVOR_RUNTIME_BOUNDARY_V1: stable node-runtime feature discovery for Fabric.
+async fn security_capabilities(
+    State(m): State<Arc<VmManager>>,
+) -> Json<fluxvm_core::security::HostCapabilities> {
+    Json(m.host_security_capabilities())
+}
+
+async fn get_vm_evidence(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let vm = m.get(id).await?;
+    if let Some(ev) = &vm.security_evidence {
+        return Ok(Json(json!(ev)));
+    }
+    Ok(Json(json!(
+        fluxvm_core::security::read_evidence(&vm.workspace)?
+    )))
+}
+
+async fn release_vm_secret(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!(m.release_test_secret(id).await?)))
+}
+
 async fn runtime_capabilities() -> Json<fluxvm_core::model::RuntimeCapabilities> {
     use fluxvm_core::model::{
         BackendKind, RuntimeCapabilities, RuntimeMigrationCapability, RuntimeSnapshotCapability,
@@ -2981,6 +3016,9 @@ mod tests {
             swtpm_pid: None,
             dhcp_leasefile: None,
             guest_ip: None,
+            requested_security_profile: Default::default(),
+            achieved_security_profile: Default::default(),
+            security_evidence: None,
         }
     }
 

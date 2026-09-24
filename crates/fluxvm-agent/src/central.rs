@@ -18,6 +18,7 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
+use fluxvm_core::security::{NodeSecurityCapabilities, SecurityProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -69,6 +70,9 @@ pub struct NodeInfo {
     /// map).
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    /// Host security capabilities from the node's last heartbeat.
+    #[serde(default)]
+    pub security: NodeSecurityCapabilities,
 }
 
 impl NodeInfo {
@@ -147,6 +151,8 @@ pub struct RegisterRequest {
     /// that predates labels can still heartbeat successfully.
     #[serde(default)]
     pub labels: HashMap<String, String>,
+    #[serde(default)]
+    pub security: NodeSecurityCapabilities,
 }
 
 #[derive(Debug)]
@@ -321,6 +327,7 @@ fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
             last_seen: Utc::now(),
             cordoned,
             labels: req.labels,
+            security: req.security,
         },
     );
 }
@@ -347,6 +354,7 @@ fn node_json(n: &NodeInfo) -> Value {
         "labels": n.labels,
         "free_vcpus": n.free_vcpus(),
         "free_memory_mib": n.free_memory_mib(),
+        "security": n.security,
     })
 }
 
@@ -510,6 +518,7 @@ fn pick_best_capacity(
         request_mem,
         &HashSet::new(),
         &HashMap::new(),
+        SecurityProfile::Standard,
     )
 }
 
@@ -526,11 +535,13 @@ fn pick_best_capacity_excluding(
     request_mem: u64,
     exclude: &HashSet<String>,
     selector: &HashMap<String, String>,
+    profile: SecurityProfile,
 ) -> Option<NodeInfo> {
     nodes
         .values()
         .filter(|n| !exclude.contains(&n.name))
         .filter(|n| n.matches_selector(selector))
+        .filter(|n| n.security.supports(profile).is_ok())
         .filter_map(|n| {
             n.capacity_score(request_vcpus, request_mem)
                 .map(|score| (score, n))
@@ -619,21 +630,46 @@ fn resolve_target(
     req_vcpus: u32,
     req_mem: u64,
     selector: &HashMap<String, String>,
+    profile: SecurityProfile,
 ) -> Result<NodeInfo, AppError> {
     match requested_node {
-        Some(name) => nodes.get(&name).cloned().ok_or_else(|| {
+        Some(name) => {
+            let node = nodes.get(&name).cloned().ok_or_else(|| {
+                AppError(
+                    StatusCode::BAD_REQUEST,
+                    format!("no registered node named '{name}'"),
+                )
+            })?;
+            node.security.supports(profile).map_err(|e| {
+                AppError(
+                    StatusCode::BAD_REQUEST,
+                    format!("node '{name}' cannot satisfy security_profile {}: {e}", profile.as_str()),
+                )
+            })?;
+            Ok(node)
+        }
+        None => pick_best_capacity_excluding(
+            nodes,
+            req_vcpus,
+            req_mem,
+            &HashSet::new(),
+            selector,
+            profile,
+        )
+        .ok_or_else(|| {
             AppError(
-                StatusCode::BAD_REQUEST,
-                format!("no registered node named '{name}'"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                no_candidate_message(selector),
             )
         }),
-        None => pick_best_capacity_excluding(nodes, req_vcpus, req_mem, &HashSet::new(), selector)
-            .ok_or_else(|| {
-                AppError(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    no_candidate_message(selector),
-                )
-            }),
+    }
+}
+
+fn extract_security_profile(body: &serde_json::Value) -> Result<SecurityProfile, AppError> {
+    match body.get("security_profile").and_then(|v| v.as_str()) {
+        None | Some("") | Some("standard") => Ok(SecurityProfile::Standard),
+        Some(raw) => SecurityProfile::parse_fleet(raw)
+            .map_err(|e| AppError(StatusCode::BAD_REQUEST, e)),
     }
 }
 
@@ -715,11 +751,12 @@ async fn create_vm(
     let selector = extract_selector(&mut body);
 
     let (req_vcpus, req_mem) = request_sizes(&body);
+    let profile = extract_security_profile(&body)?;
 
     if let Some(name) = requested_node {
         let target = {
             let nodes = fleet.nodes.lock().await;
-            resolve_target(&nodes, Some(name), req_vcpus, req_mem, &selector)?
+            resolve_target(&nodes, Some(name), req_vcpus, req_mem, &selector, profile)?
         };
         return match dispatch_create(&fleet, &target, &body).await {
             Ok(record) => Ok(Json(json!({"node": target.name, "vm": record}))),
@@ -736,7 +773,14 @@ async fn create_vm(
     loop {
         let target = {
             let nodes = fleet.nodes.lock().await;
-            pick_best_capacity_excluding(&nodes, req_vcpus, req_mem, &tried, &selector)
+            pick_best_capacity_excluding(
+                &nodes,
+                req_vcpus,
+                req_mem,
+                &tried,
+                &selector,
+                profile,
+            )
         };
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
@@ -1024,6 +1068,7 @@ mod tests {
             last_seen: Utc::now() - chrono::Duration::seconds(age_secs),
             cordoned: false,
             labels: HashMap::new(),
+            security: NodeSecurityCapabilities::default(),
         }
     }
 
@@ -1047,6 +1092,14 @@ mod tests {
             last_seen: Utc::now(),
             cordoned: false,
             labels: HashMap::new(),
+            security: NodeSecurityCapabilities::default(),
+        }
+    }
+
+    fn node_with_security(name: &str, security: NodeSecurityCapabilities) -> NodeInfo {
+        NodeInfo {
+            security,
+            ..node(name, 0, 0)
         }
     }
 
@@ -1168,6 +1221,7 @@ mod tests {
                 memory_mib_total: 16384,
                 vm_count: 1,
                 labels: HashMap::new(),
+                security: NodeSecurityCapabilities::default(),
             },
         );
         assert!(nodes["a"].cordoned);
@@ -1186,6 +1240,7 @@ mod tests {
                 memory_mib_total: 8192,
                 vm_count: 0,
                 labels: HashMap::new(),
+                security: NodeSecurityCapabilities::default(),
             },
         );
         assert!(!nodes["new"].cordoned);
@@ -1202,15 +1257,30 @@ mod tests {
         // ...but an explicit "node":"a" still resolves, same as a
         // Kubernetes Pod with spec.nodeName bypassing the scheduler.
         let target =
-            resolve_target(&nodes, Some("a".to_string()), 2, 2048, &HashMap::new()).unwrap();
+            resolve_target(
+            &nodes,
+            Some("a".to_string()),
+            2,
+            2048,
+            &HashMap::new(),
+            SecurityProfile::Standard,
+        )
+        .unwrap();
         assert_eq!(target.name, "a");
     }
 
     #[test]
     fn explicit_node_targeting_unknown_name_still_errors() {
         let nodes: HashMap<String, NodeInfo> = HashMap::new();
-        let err = resolve_target(&nodes, Some("ghost".to_string()), 2, 2048, &HashMap::new())
-            .unwrap_err();
+        let err = resolve_target(
+            &nodes,
+            Some("ghost".to_string()),
+            2,
+            2048,
+            &HashMap::new(),
+            SecurityProfile::Standard,
+        )
+        .unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
@@ -1221,7 +1291,15 @@ mod tests {
         roomy.cordoned = true;
         nodes.insert("roomy".to_string(), roomy);
         nodes.insert("tight".to_string(), node_cap("tight", 1, 4, 8192));
-        let target = resolve_target(&nodes, None, 2, 2048, &HashMap::new()).unwrap();
+        let target = resolve_target(
+            &nodes,
+            None,
+            2,
+            2048,
+            &HashMap::new(),
+            SecurityProfile::Standard,
+        )
+        .unwrap();
         assert_eq!(target.name, "tight");
     }
 
@@ -1240,7 +1318,15 @@ mod tests {
         let selector: HashMap<String, String> = [("zone".to_string(), "us-east".to_string())]
             .into_iter()
             .collect();
-        let target = resolve_target(&nodes, None, 2, 2048, &selector).unwrap();
+        let target = resolve_target(
+            &nodes,
+            None,
+            2,
+            2048,
+            &selector,
+            SecurityProfile::Standard,
+        )
+        .unwrap();
         assert_eq!(target.name, "tight");
     }
 
@@ -1254,7 +1340,15 @@ mod tests {
         let selector: HashMap<String, String> = [("gpu".to_string(), "true".to_string())]
             .into_iter()
             .collect();
-        let err = resolve_target(&nodes, None, 2, 2048, &selector).unwrap_err();
+        let err = resolve_target(
+            &nodes,
+            None,
+            2,
+            2048,
+            &selector,
+            SecurityProfile::Standard,
+        )
+        .unwrap_err();
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
         assert!(err.1.contains("nodeSelector"), "message was: {}", err.1);
         assert!(err.1.contains("gpu=true"), "message was: {}", err.1);
@@ -1279,8 +1373,58 @@ mod tests {
             .collect();
         // "a" doesn't match the selector at all, but naming it explicitly
         // still resolves -- same bypass as an explicit node vs. cordoning.
-        let target = resolve_target(&nodes, Some("a".to_string()), 2, 2048, &selector).unwrap();
+        let target = resolve_target(
+            &nodes,
+            Some("a".to_string()),
+            2,
+            2048,
+            &selector,
+            SecurityProfile::Standard,
+        )
+        .unwrap();
         assert_eq!(target.name, "a");
+    }
+
+    #[test]
+    fn explicit_node_targeting_still_rejects_ineligible_confidential_profile() {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "a".to_string(),
+            node_with_security("a", NodeSecurityCapabilities::default()),
+        );
+        let err = resolve_target(
+            &nodes,
+            Some("a".to_string()),
+            2,
+            2048,
+            &HashMap::new(),
+            SecurityProfile::ConfidentialSnp,
+        )
+        .unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("confidential-snp"));
+    }
+
+    #[test]
+    fn automatic_placement_skips_nodes_that_cannot_satisfy_snp() {
+        let mut nodes = HashMap::new();
+        let mut snp_cap = NodeSecurityCapabilities::default();
+        snp_cap.snp = true;
+        nodes.insert("snp".to_string(), node_with_security("snp", snp_cap));
+        nodes.insert(
+            "plain".to_string(),
+            node_with_security("plain", NodeSecurityCapabilities::default()),
+        );
+        let target = resolve_target(
+            &nodes,
+            None,
+            2,
+            2048,
+            &HashMap::new(),
+            SecurityProfile::ConfidentialSnp,
+        )
+        .unwrap();
+        assert_eq!(target.name, "snp");
     }
 
     #[test]
@@ -1364,6 +1508,7 @@ mod tests {
                 memory_mib_total: 16384,
                 vm_count: 0,
                 labels: HashMap::new(),
+                security: NodeSecurityCapabilities::default(),
             },
         );
         assert!(!nodes["a"].cordoned);

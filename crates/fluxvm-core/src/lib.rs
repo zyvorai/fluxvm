@@ -7,3 +7,4 @@ pub mod gpu;
 pub mod metrics;
 pub mod model;
 pub mod process;
+pub mod security;

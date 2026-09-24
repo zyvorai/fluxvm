@@ -472,6 +472,13 @@ pub struct CreateVmRequest {
     /// (measured boot, disk encryption unseal), not only under UEFI.
     #[serde(default)]
     pub tpm: Option<bool>,
+    /// Phase 6 security profile (`standard` | `measured` | `confidential-snp` |
+    /// `confidential-tdx`). See `docs/security-profiles.md`.
+    #[serde(default)]
+    pub security_profile: crate::security::SecurityProfile,
+    /// Optional policy evaluated against collected evidence (measured secret-release).
+    #[serde(default)]
+    pub measurement_policy: Option<crate::security::MeasurementPolicy>,
     /// Firecracker virtio-net bandwidth cap (Mbit/s). `None` or `0` =
     /// unlimited. Mapped to Firecracker's iface `rate_limiter.bandwidth`
     /// (threat-containment barrier at the VMM, complementary to Fabric
@@ -706,6 +713,16 @@ pub struct VmRecord {
     /// above), not authoritative between reads.
     #[serde(default)]
     pub guest_ip: Option<String>,
+    /// Phase 6: profile the create request asked for.
+    #[serde(default)]
+    pub requested_security_profile: crate::security::SecurityProfile,
+    /// Phase 6: profile actually achieved after launch / evidence.
+    /// Confidential-* only when the matching `*_launch_verified` flag is true.
+    #[serde(default)]
+    pub achieved_security_profile: crate::security::SecurityProfile,
+    /// Phase 6: last collected evidence bundle (also on disk as security-evidence.json).
+    #[serde(default)]
+    pub security_evidence: Option<crate::security::SecurityEvidence>,
 }
 
 /// A named template for a warm pool: `size` VMs matching `template` are

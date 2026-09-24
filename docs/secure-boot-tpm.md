@@ -223,3 +223,8 @@ ephemeral per launch; its socket is torn down and respawned fresh on every
   a real TPM 2.0 device the guest OS can use (measured boot, BitLocker,
   `tpm2-tools`, etc.) — nothing in FluxVM itself reads PCR values or does
   remote attestation on the host side.
+
+For Phase 6 **security profiles** (`measured`, `confidential-snp`,
+`confidential-tdx`), software-test evidence collection, fleet placement,
+and secret release on policy match, see
+[security-profiles.md](security-profiles.md).

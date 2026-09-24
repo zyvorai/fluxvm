@@ -1,0 +1,11 @@
+{
+  "name": "measured-dev",
+  "backend": "qemu",
+  "image": "ubuntu-24.04",
+  "vcpus": 2,
+  "memory_mib": 4096,
+  "security_profile": "measured",
+  "measurement_policy": {
+    "test_secret": "dev-only-software-test-secret"
+  }
+}
