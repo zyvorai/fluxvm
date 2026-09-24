@@ -133,6 +133,15 @@ enum Command {
         cpuset_cpus: Option<String>,
     },
     #[command(next_help_heading = "Guest Access")]
+    /// Open the guest PTY over vsock (requires agent.enabled in the VM spec).
+    /// Stdin is framed as `PtyFrame` data. Output is the raw PTY byte stream.
+    Console {
+        id: Uuid,
+        #[arg(long, default_value_t = 80)]
+        cols: u16,
+        #[arg(long, default_value_t = 24)]
+        rows: u16,
+    },
     /// Run a command inside the guest over vsock (requires agent.enabled in the VM spec).
     Exec {
         id: Uuid,
@@ -862,6 +871,9 @@ async fn main() -> Result<()> {
                     "Firecracker jailer enabled"
                 );
             }
+            m.store.rebuild_quota_ledger().await?;
+            m.reap_migration_receivers().await;
+            m.sync_receiver_host_quota().await?;
             if !cfg.auth.has_credentials() {
                 tracing::warn!(
                     listen = %cfg.listen,
@@ -1033,6 +1045,34 @@ async fn main() -> Result<()> {
             )
             .await?;
             println!("{{\"ok\":true}}");
+        }
+        Command::Console { id, cols, rows } => {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let console = m.open_console(id, cols, rows).await?;
+            let (mut reader, mut writer) = tokio::io::split(console);
+            let to_guest = async move {
+                let mut stdin = tokio::io::stdin();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = stdin.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    let frame = fluxvm_guest_protocol::PtyFrame::Data(buf[..n].to_vec()).encode();
+                    writer.write_all(&frame).await?;
+                    writer.flush().await?;
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            let to_host = async move {
+                let mut stdout = tokio::io::stdout();
+                tokio::io::copy(&mut reader, &mut stdout).await?;
+                Ok::<(), anyhow::Error>(())
+            };
+            tokio::select! {
+                result = to_guest => result?,
+                result = to_host => result?,
+            }
         }
         Command::Exec {
             id,

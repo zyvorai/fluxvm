@@ -98,9 +98,10 @@ impl NodeSecurityCapabilities {
     pub fn supports(&self, profile: SecurityProfile) -> Result<(), String> {
         match profile {
             SecurityProfile::Standard => Ok(()),
-            SecurityProfile::Measured => {
-                require(self.measured, "node cannot satisfy measured security profile")
-            }
+            SecurityProfile::Measured => require(
+                self.measured,
+                "node cannot satisfy measured security profile",
+            ),
             SecurityProfile::ConfidentialSnp => require(
                 self.snp,
                 "node cannot satisfy confidential-snp security profile",
@@ -169,9 +170,7 @@ impl HostCapabilities {
                 || cpu_has(&cpu, "sev_snp")
                 || cpu_has(&cpu, "sev-snp")
                 || root.join("dev/sev").exists(),
-            tdx_present: tdx_sysfs
-                || cpu_has(&cpu, "tdx")
-                || root.join("dev/tdx-guest").exists(),
+            tdx_present: tdx_sysfs || cpu_has(&cpu, "tdx") || root.join("dev/tdx-guest").exists(),
             snp_launch_verified: cfg.security.snp_launch_verified,
             tdx_launch_verified: cfg.security.tdx_launch_verified,
         }
@@ -280,7 +279,11 @@ pub struct SecurityEvidence {
 
 impl SecurityEvidence {
     pub fn evaluate(&self, policy: &MeasurementPolicy) -> Result<()> {
-        check_opt("image_sha256", policy.image_sha256.as_deref(), self.image_sha256.as_deref())?;
+        check_opt(
+            "image_sha256",
+            policy.image_sha256.as_deref(),
+            self.image_sha256.as_deref(),
+        )?;
         check_opt(
             "firmware_sha256",
             policy.firmware_sha256.as_deref(),
@@ -331,7 +334,10 @@ pub fn sha256_file(path: &Path) -> Result<Option<String>> {
 }
 
 pub fn hex_sha256(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 pub fn software_pcrs(
@@ -614,11 +620,9 @@ mod tests {
 
     #[test]
     fn confidential_rejects_hotplug_and_snapshots() {
-        assert!(check_operation(
-            SecurityProfile::ConfidentialSnp,
-            VmOperation::HotplugCpu
-        )
-        .is_err());
+        assert!(
+            check_operation(SecurityProfile::ConfidentialSnp, VmOperation::HotplugCpu).is_err()
+        );
         assert!(check_operation(SecurityProfile::Measured, VmOperation::HotplugCpu).is_ok());
     }
 
@@ -640,27 +644,31 @@ mod tests {
 
     #[test]
     fn unverified_confidential_is_fail_closed_without_dev_flag() {
-        assert!(validate_create_request(
-            SecurityProfile::ConfidentialSnp,
-            true,
-            &[],
-            false,
-            false,
-            false,
-            &caps(true, false, false),
-            false,
-        )
-        .is_err());
-        assert!(validate_create_request(
-            SecurityProfile::ConfidentialSnp,
-            true,
-            &[],
-            false,
-            false,
-            false,
-            &caps(true, false, false),
-            true,
-        )
-        .is_ok());
+        assert!(
+            validate_create_request(
+                SecurityProfile::ConfidentialSnp,
+                true,
+                &[],
+                false,
+                false,
+                false,
+                &caps(true, false, false),
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_create_request(
+                SecurityProfile::ConfidentialSnp,
+                true,
+                &[],
+                false,
+                false,
+                false,
+                &caps(true, false, false),
+                true,
+            )
+            .is_ok()
+        );
     }
 }

@@ -87,6 +87,12 @@ running
 
 Bootstrap traffic remains available: ARP, DHCP, IPv6 NDP and DHCPv6 are not blocked by the migration gate.
 
+When `fluxctl migrate start` (or `POST /v1/vms/{id}/migration/start`) runs against a VM with an attached
+Network Fabric dataplane, FluxVM calls `quiesce` first. It calls `resume` again if start fails, if the
+VMM reports a terminal `Failed`/`Cancelled` phase, when status polling later sees those phases, or on
+`migrate cancel`. Fabric orchestrators that only call the lower-level
+`POST .../network/migration/quiesce` APIs must still resume explicitly after cutover or abort.
+
 The snapshot carries the stable VM UUID-derived FluxVM identity, dataplane schema, and the committed effective-policy fingerprint. Export refuses an uncommitted policy generation, and restore requires the destination fingerprint to exactly match the source before conntrack is imported. This prevents stale established-flow state from bypassing a changed destination policy. Restore also rejects a mismatched VM UUID, identity or schema rather than importing state into the wrong VM.
 
 ## REST API

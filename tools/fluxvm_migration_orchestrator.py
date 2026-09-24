@@ -141,6 +141,7 @@ class Orchestrator:
     def __init__(self,plan:dict[str,Any],state_root:Path,dry_run:bool=False):
         validate_plan(plan); self.plan=plan; self.id=plan['migration_id']; self.vm=plan['vm_id']; self.j=Journal(state_root,self.id)
         self.src=Runner(Node.from_obj('source',plan['source']),dry_run); self.dst=Runner(Node.from_obj('destination',plan['destination']),dry_run); self.dry_run=dry_run
+        self.migration_uri=None
     def _record_event(self,state:dict[str,Any],kind:str,**kw):
         state.setdefault('events',[]).append({"time_unix_ns":time.time_ns(),"kind":kind,**kw}); state['events']=state['events'][-512:]
     def _step(self,state:dict[str,Any],name:str,fn:Callable[[],Any]):
@@ -187,6 +188,23 @@ class Orchestrator:
         if t.get('enabled'): out['topology']=self._cmd(self.src,['fluxvm-topology','rollback',self.vm],check=not t.get('optional',False))
         if s.get('enabled'): out['scx']=self._cmd(self.src,['fluxvm-scx','rollback',self.vm],check=not s.get('optional',False))
         return out
+    def prepare_receiver(self):
+        vmm=self.plan.get('vmm') or {}
+        receiver=vmm.get('receiver')
+        if not isinstance(receiver, dict): return {"skipped":True}
+        body=dict(receiver)
+        api=body.pop('api','http://127.0.0.1:7788')
+        if not isinstance(api,str) or not api.startswith(('http://','https://')):
+            raise MigrationError('vmm.receiver.api must be an http(s) URL')
+        created=self.dst.run(['curl','-sf','-H','Content-Type: application/json','-d',json.dumps(body),f'{api}/v1/migration/receivers'])
+        try: doc=json.loads(created.stdout)
+        except json.JSONDecodeError as e: raise MigrationError('migration receiver response was not JSON') from e
+        rec_id=doc.get('id'); token=doc.get('token'); uri=doc.get('uri')
+        if not all(isinstance(v,str) and v for v in (rec_id,token,uri)):
+            raise MigrationError('migration receiver response is missing id, token, or uri')
+        self.migration_uri=uri
+        self.dst.run(['curl','-sf','-H','Content-Type: application/json','-d',json.dumps({'token':token}),f'{api}/v1/migration/receivers/{rec_id}/activate'])
+        return {"id":rec_id,"uri":uri,"api":api}
     def migrate_vmm(self): return self._cmd(self.src,expand_argv(self.plan['vmm']['migrate_argv'],self))
     def restore_destination(self):
         local=self.j.root/'network-state.json'; remote=f"/tmp/fluxvm-migrate-{self.id}-network.json"; self.dst.put(local,remote)
@@ -213,10 +231,13 @@ class Orchestrator:
                 return state
             if state.get('status')=='manual-intervention': raise ManualIntervention("journal requires manual intervention")
             state.update({"migration_id":self.id,"vm_id":self.vm,"status":"running","plan_sha256":expected}); self.j.save(state)
+            prepared=(state.get('results') or {}).get('receiver-prepared') or {}
+            if isinstance(prepared,dict) and isinstance(prepared.get('uri'),str): self.migration_uri=prepared['uri']
             self._step(state,'preflight',self.preflight)
             self._step(state,'source-quiesced',lambda:self._cmd(self.src,['fluxvm','dataplane','migration-quiesce',self.vm]))
             self._step(state,'state-exported',lambda:{"network":self.export_network(),"quic":self.export_quic()})
             self._step(state,'aux-quiesced',self.stop_aux)
+            self._step(state,'receiver-prepared',self.prepare_receiver)
             self._step(state,'vmm-migrated',self.migrate_vmm)
             self._step(state,'destination-restored',self.restore_destination)
             self._step(state,'aux-restored',self.start_aux_destination)
@@ -292,7 +313,11 @@ def sha256_file(p:Path)->str:
     return h.hexdigest()
 def expand_argv(argv:list[str],o:Orchestrator)->list[str]:
     if not isinstance(argv,list): raise MigrationError("argv must be an array")
-    mapping={'{vm_id}':o.vm,'{migration_id}':o.id}; result=[]
+    vmm=o.plan.get('vmm') if isinstance(o.plan.get('vmm'), dict) else {}
+    uri=getattr(o,'migration_uri',None)
+    if not isinstance(uri,str) or not uri:
+        uri=vmm.get('destination_uri') if isinstance(vmm.get('destination_uri'), str) else ''
+    mapping={'{vm_id}':o.vm,'{migration_id}':o.id,'{migration_uri}':uri}; result=[]
     for a in argv:
         if not isinstance(a,str): raise MigrationError("argv entries must be strings")
         for k,v in mapping.items(): a=a.replace(k,v)

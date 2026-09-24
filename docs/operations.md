@@ -340,14 +340,23 @@ sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate cancel <id>
 
 `start` requires the VM to already be `Running` and refuses anything but a `tcp:`/`unix:` destination —
 the same shared allowlist the REST route validates against, `exec:` included, so a migration can't be
-turned into an arbitrary shell invocation on the source host. `--mode` takes `pre-copy` (default) or
-`post-copy`, matching `MigrationMode`'s own wire spelling exactly rather than inventing a second CLI
-vocabulary for the same two values. `status` and `cancel` are QEMU-only — Cloud Hypervisor's
+turned into an arbitrary shell invocation on the source host. Direct-datapath VMs are refused until a
+two-host test exists. When the Network Fabric dataplane is attached, `start` quiesces the VM edge first;
+the gate is **resumed automatically** if start returns an error, if QEMU reports `Failed`/`Cancelled`,
+when `migrate status` later sees those terminal phases, or on `migrate cancel` — so a failed or abandoned
+migration does not leave new flows blocked by reason `migration-quiesce`. `--mode` takes `pre-copy`
+(default) or `post-copy`, matching `MigrationMode`'s own wire spelling exactly rather than inventing a
+second CLI vocabulary for the same two values. `status` and `cancel` are QEMU-only — Cloud Hypervisor's
 `send-migration` is fire-and-forget with no status-polling or cancellation primitive of its own (see
 runtime-boundary.md's `statusPollable` capability field) — calling either against a Cloud Hypervisor VM
 returns a clear error rather than hanging. None of this picks a destination host, confirms shared
 storage, or does anything Fabric-shaped; it is exactly the three existing REST primitives, reachable
 without Fabric or `curl`.
+
+**QEMU migration receivers.** The target node reserves host quota and launches QEMU with `-incoming defer`
+via `POST /v1/migration/receivers` (activate with the returned token). Receivers count against the O(1)
+host ledger as untracked capacity until reaped. Default listen is `0.0.0.0` — bind to a management
+address or firewall the port in multi-tenant networks. Cloud Hypervisor has no matching receiver API.
 
 **Firecracker-specific note:** pause/resume were verified correct and fast against Firecracker's own
 authoritative `GET /` state (not CPU-time heuristics — an idle guest and a paused one both show flat

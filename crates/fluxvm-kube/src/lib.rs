@@ -9,3 +9,4 @@ pub mod controller;
 pub mod crd;
 pub mod fluxvm_client;
 pub mod placement;
+pub mod plugin;

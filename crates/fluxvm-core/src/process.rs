@@ -118,6 +118,85 @@ pub async fn spawn_logged(program: &str, args: &[String], log: &Path) -> Result<
     spawn_logged_with_env(program, args, log, &[]).await
 }
 
+/// Spawn a QEMU or Cloud Hypervisor process.
+///
+/// `netns` joins that network namespace in the child, then installs the
+/// seccomp allowlist, so the filter covers the VMM and not an `ip` wrapper.
+/// The API process is never filtered. The mode is captured here because
+/// reading the environment is not safe inside `pre_exec`.
+pub async fn spawn_vmm(
+    program: &str,
+    args: &[String],
+    log: &Path,
+    netns: Option<&str>,
+) -> Result<Child> {
+    let stdout = OpenOptions::new().create(true).append(true).open(log)?;
+    let stderr = stdout.try_clone()?;
+    let mode = crate::vmm_seccomp::mode_from_env();
+    let netns_file = match netns {
+        Some(name) => Some(open_netns(name)?),
+        None => None,
+    };
+    let netns_fd = netns_file.as_ref().map(|file| {
+        use std::os::unix::io::AsRawFd;
+        file.as_raw_fd()
+    });
+    let install = mode != crate::policy::VmmSeccompMode::Off;
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .process_group(0);
+    if netns_fd.is_some() || install {
+        // SAFETY: pre_exec runs in the forked child. setns and the filter
+        // installer do not allocate. The netns file stays open until spawn
+        // returns, which is after the child has called setns.
+        unsafe {
+            cmd.pre_exec(move || {
+                if let Some(fd) = netns_fd {
+                    enter_netns(fd)?;
+                }
+                if install {
+                    crate::vmm_seccomp::install(mode)?;
+                }
+                Ok(())
+            });
+        }
+    }
+    let child = cmd.spawn().with_context(|| format!("spawning {program}"))?;
+    drop(netns_file);
+    Ok(child)
+}
+
+fn open_netns(name: &str) -> Result<std::fs::File> {
+    if name.is_empty() || name.contains('/') || name.contains('\0') {
+        bail!("invalid network namespace name");
+    }
+    std::fs::File::open(std::path::Path::new("/run/netns").join(name))
+        .or_else(|_| std::fs::File::open(std::path::Path::new("/var/run/netns").join(name)))
+        .with_context(|| format!("opening network namespace {name}"))
+}
+
+#[cfg(target_os = "linux")]
+fn enter_netns(fd: i32) -> std::io::Result<()> {
+    // SAFETY: setns(CLONE_NEWNET) on an already-opened netns descriptor,
+    // called only in the child before exec.
+    let rc = unsafe { libc::setns(fd, libc::CLONE_NEWNET) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enter_netns(_fd: i32) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "network namespaces are a Linux feature",
+    ))
+}
+
 pub async fn spawn_logged_with_env(
     program: &str,
     args: &[String],

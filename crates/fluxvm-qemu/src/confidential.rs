@@ -11,9 +11,7 @@
 //! hardware integration run.
 
 use anyhow::{Result, bail};
-use fluxvm_core::security::{
-    EvidenceClass, MeasurementPolicy, SecurityEvidence, SecurityProfile,
-};
+use fluxvm_core::security::{EvidenceClass, MeasurementPolicy, SecurityEvidence, SecurityProfile};
 use std::collections::BTreeMap;
 
 /// Launch arguments a confidential provider wants added to the QEMU
@@ -127,7 +125,10 @@ impl TdxLaunchProvider for ControlPlaneTdxProvider {
     }
 }
 
-pub fn apply_confidential_args(args: &mut Vec<String>, launch: &ConfidentialLaunchArgs) -> Result<()> {
+pub fn apply_confidential_args(
+    args: &mut Vec<String>,
+    launch: &ConfidentialLaunchArgs,
+) -> Result<()> {
     if let Some(idx) = args.iter().position(|a| a == "-machine") {
         let val_idx = idx + 1;
         if val_idx < args.len() {
@@ -252,7 +253,11 @@ mod tests {
             image_sha256: Some("deadbeef".into()),
             ..Default::default()
         };
-        assert!(ControlPlaneSnpProvider.verify_evidence(&ev, &policy).is_err());
+        assert!(
+            ControlPlaneSnpProvider
+                .verify_evidence(&ev, &policy)
+                .is_err()
+        );
     }
 
     #[test]

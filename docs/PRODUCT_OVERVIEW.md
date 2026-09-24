@@ -81,13 +81,13 @@ Full diagrams (image pipeline, Secure Containers request flow, Network Fabric pa
 | Backends | QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree hypervisor | QEMU/KVM (broad hypervisor support via drivers) | KVM via virt-launcher |
 | Where the VMM runs | Host, under `fluxctl serve` | Host, under `libvirtd` | Inside a virt-launcher Pod |
 | Kubernetes-native | Yes (`DisposableVm` CRD, MicroVM) | No | Yes (native) |
-| Live migration / CDI / `virtctl` | No | No (needs orchestration layer) | Yes |
+| Live migration / CDI / `virtctl` | QEMU source + receiver (not KubeVirt parity); no CDI/`virtctl` | No (needs orchestration layer) | Yes |
 | eBPF/TC dataplane | Yes — Network Fabric, GA schema v4 | No | Depends on CNI |
 | Multi-host fleet management | Yes — `fluxvm-agent`, verified across 2 real hosts | No (needs external orchestration) | Via Kubernetes scheduler |
 | OCI/containerd workload support | Developer preview (Secure Containers) | No | No (different workload model) |
 | License | Apache-2.0 | LGPL | Apache-2.0 |
 
-This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt has live migration/CDI/`virtctl` and FluxVM doesn't; libvirt has broader hypervisor driver support).
+This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt still owns CDI/`virtctl` and full cluster migration orchestration; FluxVM's QEMU migration path is host-API + Fabric, not KubeVirt parity; libvirt has broader hypervisor driver support).
 
 ---
 
@@ -138,7 +138,7 @@ Every figure below is counted directly from source, not estimated.
 | Multi-host fleet validation | Verified across 2 real, physically separate hosts | [docs/operations.md](operations.md#distributed-node-agent) |
 | Storage backends | 4 | qcow2/raw (default), LVM thin, NBD, Ceph RBD (RBD verified against a real Rook Ceph cluster) |
 | Network modes | 4 (+1 opt-in) | user-mode NAT, TAP+bridge, netns+DHCP, macvtap — all 4 SSH-verified end to end in regression tests; bridge-less `direct` is opt-in and netns/kernel-verified, not yet live ([direct-datapath.md](direct-datapath.md)) |
-| Boot latency / VM density / throughput | **Not yet published** | Tracked as open work in [docs/NEXT-FEATURES.md](NEXT-FEATURES.md) — we don't cite a number here because none has been benchmarked with a documented method |
+| Boot latency / VM density / migration downtime | **Method published, not a sizing SLA** | `scripts/record-baseline.sh` records cold create (`avg_create_ms`, control-plane time), warm pool claim (`warm_claim_ms`), Secure Containers boot, and delete on one host under `docs/benchmarks/evidence/`. `migration_downtime` comes from QMP `query-migrate` on the receiver path and is not boot latency. Repeat the same script on a second host before capacity planning. Firecracker’s 125 ms / 5-per-core figures in [capability-figures.md](capability-figures.md) are not FluxVM SLAs. |
 
 Unlike some of the figures in this table, we deliberately don't include a lines-of-code count or an aggregate REST-endpoint count — neither is currently asserted anywhere in this project's own docs, and inventing one here would just create the kind of stale, unverifiable claim this whole document is trying to avoid.
 

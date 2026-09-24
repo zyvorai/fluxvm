@@ -70,25 +70,141 @@ pub async fn run(client: Client) {
         .await;
 }
 
+fn is_http_source(source: &str) -> bool {
+    let source = source.trim();
+    source.starts_with("http://") || source.starts_with("https://")
+}
+
+pub fn guestimage_dir() -> std::path::PathBuf {
+    std::env::var_os("FLUXVM_GUESTIMAGE_DIR")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/fluxvm/images"))
+}
+
+/// A signer name is not a catalog signature. HTTP staging never promotes a
+/// download into the trusted catalog; sign the file with `fluxctl catalog sign`.
+pub fn promotion_allowed(_signer: Option<&str>, _sha_verified: bool) -> bool {
+    false
+}
+
+async fn fetch_url_to(url: &str, dest: &Path) -> Result<(), String> {
+    use futures::StreamExt;
+    use tokio::io::AsyncWriteExt;
+    let resp = reqwest::get(url)
+        .await
+        .map_err(|e| format!("downloading {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("downloading {url}: HTTP {}", resp.status()));
+    }
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| format!("creating {}: {e}", dest.display()))?;
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("reading {url}: {e}"))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("writing {}: {e}", dest.display()))?;
+    Ok(())
+}
+
+/// Download an HTTP(S) GuestImage into `dir` and verify `sha256` once.
+/// A cache hit (same size, mtime, and requested digest) does not re-hash
+/// and does not re-download. Returns the same tuple as [`verify_staged_file`].
+pub async fn stage_http_image(
+    dir: &Path,
+    name: &str,
+    url: &str,
+    sha256: Option<&str>,
+    cached_signature: Option<&str>,
+    signer: Option<&str>,
+) -> (bool, Option<String>, Option<String>, Option<String>) {
+    let Some(wanted) = sha256.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (
+            false,
+            None,
+            Some("HTTP GuestImage requires spec.sha256 before it can be staged".into()),
+            None,
+        );
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return (false, None, Some(format!("creating image dir: {e}")), None);
+    }
+    let dest = dir.join(format!("{name}.img"));
+    let dest_s = dest.display().to_string();
+    if dest.is_file() {
+        let cached = verify_staged_file(&dest_s, Some(wanted), cached_signature);
+        if cached.0 {
+            return note_promotion(dir, name, signer, cached);
+        }
+    }
+    if let Err(e) = fetch_url_to(url, &dest).await {
+        let _ = std::fs::remove_file(&dest);
+        return (false, None, Some(e), None);
+    }
+    let verified = verify_staged_file(&dest_s, Some(wanted), None);
+    note_promotion(dir, name, signer, verified)
+}
+
+fn note_promotion(
+    dir: &Path,
+    name: &str,
+    signer: Option<&str>,
+    verified: (bool, Option<String>, Option<String>, Option<String>),
+) -> (bool, Option<String>, Option<String>, Option<String>) {
+    let _ = signer;
+    let catalog = dir.join(format!("{name}.catalog-name"));
+    if catalog.exists() {
+        let _ = std::fs::remove_file(&catalog);
+    }
+    if verified.0 {
+        return (
+            verified.0,
+            verified.1,
+            Some(
+                "staged on the node; unsigned HTTP bytes were not promoted to a trusted catalog name"
+                    .into(),
+            ),
+            verified.3,
+        );
+    }
+    verified
+}
+
 async fn reconcile(obj: Arc<GuestImage>, client: Arc<Client>) -> Result<Action, Error> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let api: Api<GuestImage> = Api::namespaced(client.as_ref().clone(), &ns);
-    let (mut ready, path, mut message, verified_signature) =
+    let cached = obj
+        .status
+        .as_ref()
+        .and_then(|s| s.verified_signature.as_deref());
+    let (mut ready, path, mut message, verified_signature) = if is_http_source(&obj.spec.source) {
+        let signer = std::env::var("FLUXVM_CATALOG_TRUSTED_SIGNER").ok();
+        stage_http_image(
+            &guestimage_dir(),
+            &obj.name_any(),
+            obj.spec.source.trim(),
+            obj.spec.sha256.as_deref(),
+            cached,
+            signer.as_deref(),
+        )
+        .await
+    } else {
         match local_source_ready(&obj.spec.source) {
-            Some(p) => verify_staged_file(
-                &p,
-                obj.spec.sha256.as_deref(),
-                obj.status
-                    .as_ref()
-                    .and_then(|s| s.verified_signature.as_deref()),
-            ),
+            Some(p) => verify_staged_file(&p, obj.spec.sha256.as_deref(), cached),
             None => (
                 false,
                 None,
                 Some("stage this file on the node with GuestKit (no CDI pull)".into()),
                 None,
             ),
-        };
+        }
+    };
     let kernel_path = if ready {
         match resolve_kernel(obj.spec.kernel.as_deref()) {
             Ok(kp) => kp,
@@ -123,6 +239,11 @@ async fn reconcile(obj: Arc<GuestImage>, client: Arc<Client>) -> Result<Action, 
 /// cache entry computed against the old value.
 fn signature(len: u64, mtime_secs: i64, wanted_sha256: &str) -> String {
     format!("{len}:{mtime_secs}:{}", wanted_sha256.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+fn hash_file_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn hash_file(path: &Path) -> std::io::Result<String> {
@@ -362,5 +483,61 @@ mod tests {
         let (ready, ..) = verify_staged_file(f.path().to_str().unwrap(), None, None);
         assert!(ready, "sanity: the disk image alone verifies fine");
         assert!(resolve_kernel(Some("/no/such/kernel/anywhere")).is_err());
+    }
+
+    #[test]
+    fn unchanged_file_does_not_need_another_hash() {
+        let f = staged(b"same-bytes");
+        let path = f.path().to_str().unwrap();
+        let (ready, _, _, sig) = verify_staged_file(path, Some("abc"), None);
+        assert!(!ready);
+        let meta = std::fs::metadata(path).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let cached = signature(meta.len(), mtime, "deadbeef");
+        let (ready, _, message, got) = verify_staged_file(path, Some("deadbeef"), Some(&cached));
+        assert!(ready, "{message:?}");
+        assert_eq!(got.as_deref(), Some(cached.as_str()));
+        let _ = sig;
+    }
+
+    #[tokio::test]
+    async fn http_import_checks_sha_and_skips_unsigned_catalog_promotion() {
+        let body = b"http-image-bytes";
+        let sha = super::hash_file_bytes(body);
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let payload = body.to_vec();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                payload.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, &payload).await;
+        });
+        let url = format!("http://{addr}/image.img");
+        let (ready, path, message, _) =
+            super::stage_http_image(dir.path(), "demo", &url, Some(&sha), None, None).await;
+        assert!(ready, "{message:?}");
+        assert!(path.is_some());
+        assert!(message.unwrap().contains("not promoted"));
+        assert!(!dir.path().join("demo.catalog-name").exists());
+
+        let tampered = dir.path().join("demo.img");
+        std::fs::write(&tampered, b"nope").unwrap();
+        let (ready, _, message, _) =
+            verify_staged_file(tampered.to_str().unwrap(), Some(&sha), None);
+        assert!(!ready, "{message:?}");
+        assert!(!super::promotion_allowed(None, true));
+        assert!(!super::promotion_allowed(Some("build"), true));
     }
 }

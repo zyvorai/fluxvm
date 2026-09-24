@@ -12,6 +12,10 @@ description = "DisposableVM CRD + node-local operator for Zyvor FluxVM"
 name = "fluxvm-kube"
 path = "src/main.rs"
 
+[[bin]]
+name = "kubectl-fluxvm"
+path = "src/bin/kubectl-fluxvm.rs"
+
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }

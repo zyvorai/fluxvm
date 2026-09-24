@@ -13,7 +13,11 @@
 //! processes, not just within one.
 
 use anyhow::{Context, Result, bail};
+use fluxvm_core::config::Policy;
 use fluxvm_core::model::{PoolRecord, VmRecord};
+use fluxvm_core::policy::{
+    QuotaLedger, UsageTotals, enforce_host_totals, ledger_for_host_admission, ledger_is_warm,
+};
 use std::{
     collections::HashMap,
     fs,
@@ -50,7 +54,7 @@ impl Store {
     /// then persists whatever `f` left the map as.
     async fn with_exclusive<F, T>(&self, f: F) -> Result<T>
     where
-        F: FnOnce(&mut HashMap<Uuid, VmRecord>) -> T + Send + 'static,
+        F: FnOnce(&mut HashMap<Uuid, VmRecord>) -> (T, LedgerDelta) + Send + 'static,
         T: Send + 'static,
     {
         let path = self.path.clone();
@@ -65,10 +69,12 @@ impl Store {
                 bail!("locking store: {}", std::io::Error::last_os_error());
             }
             let mut map = Self::read_map(&path)?;
-            let result = f(&mut map);
+            let len_before = map.len() as u64;
+            let (result, delta) = f(&mut map);
             let tmp = path.with_extension("json.tmp");
             fs::write(&tmp, serde_json::to_vec_pretty(&map)?).context("writing VM state")?;
             fs::rename(&tmp, &path).context("renaming VM state")?;
+            apply_ledger_delta(&path, &map, len_before, delta)?;
             Ok(result)
         })
         .await
@@ -103,7 +109,9 @@ impl Store {
 
     pub async fn insert(&self, vm: VmRecord) -> Result<()> {
         self.with_exclusive(move |m| {
+            let sample = quota_sample(&vm);
             m.insert(vm.id, vm);
+            ((), LedgerDelta::Ingest(sample))
         })
         .await
     }
@@ -131,8 +139,9 @@ impl Store {
                 }
                 record.guest_cid = Some(candidate);
             }
+            let sample = quota_sample(&record);
             m.insert(record.id, record.clone());
-            record
+            (record, LedgerDelta::Ingest(sample))
         })
         .await
     }
@@ -145,9 +154,18 @@ impl Store {
     /// and the VM stayed listed as `stopped` forever.
     pub async fn update(&self, vm: VmRecord) -> Result<()> {
         self.with_exclusive(move |m| {
-            if let Some(slot) = m.get_mut(&vm.id) {
-                *slot = vm;
-            }
+            let Some(slot) = m.get_mut(&vm.id) else {
+                return ((), LedgerDelta::Preserve);
+            };
+            let from = quota_sample(slot);
+            let to = quota_sample(&vm);
+            *slot = vm;
+            let delta = if from == to {
+                LedgerDelta::Preserve
+            } else {
+                LedgerDelta::Replace { from, to }
+            };
+            ((), delta)
         })
         .await
     }
@@ -170,8 +188,257 @@ impl Store {
     }
 
     pub async fn remove(&self, id: Uuid) -> Result<Option<VmRecord>> {
-        self.with_exclusive(move |m| m.remove(&id)).await
+        self.with_exclusive(move |m| {
+            let removed = m.remove(&id);
+            let delta = removed
+                .as_ref()
+                .map(|vm| LedgerDelta::Release(quota_sample(vm)))
+                .unwrap_or(LedgerDelta::Preserve);
+            (removed, delta)
+        })
+        .await
     }
+
+    /// O(1) when `quotas.json` matches the store length. Rebuilds from the
+    /// map only when the file is missing or the VM count disagrees.
+    pub async fn quota_ledger(&self) -> Result<QuotaLedger> {
+        let path = self.path.clone();
+        self.with_shared(move |m| load_quota_ledger(&path, m)).await
+    }
+
+    /// Rewrite the ledger from the current store. Called when `fluxctl serve`
+    /// starts so a crash between the VM file and the ledger cannot stick.
+    /// Receiver reservations in `untracked_host` are kept.
+    pub async fn rebuild_quota_ledger(&self) -> Result<QuotaLedger> {
+        self.with_exclusive(|_| ((), LedgerDelta::Rebuild)).await?;
+        self.quota_ledger().await
+    }
+
+    /// Charge `vcpus` and `memory_mib` against the host cap without adding a
+    /// VM record. The check and the write share the store lock.
+    pub async fn reserve_untracked_host(
+        &self,
+        vcpus: u8,
+        memory_mib: u64,
+        policy: &Policy,
+    ) -> Result<()> {
+        let policy = policy.clone();
+        self.mutate_quota(move |ledger| {
+            enforce_host_totals(
+                vcpus,
+                memory_mib,
+                &policy,
+                &ledger_for_host_admission(ledger),
+            )?;
+            ledger.untracked_host.vcpus =
+                ledger.untracked_host.vcpus.saturating_add(u64::from(vcpus));
+            ledger.untracked_host.memory_mib =
+                ledger.untracked_host.memory_mib.saturating_add(memory_mib);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Return a reservation taken by [`Self::reserve_untracked_host`].
+    pub async fn release_untracked_host(&self, vcpus: u8, memory_mib: u64) -> Result<()> {
+        self.mutate_quota(move |ledger| {
+            ledger.untracked_host.vcpus =
+                ledger.untracked_host.vcpus.saturating_sub(u64::from(vcpus));
+            ledger.untracked_host.memory_mib =
+                ledger.untracked_host.memory_mib.saturating_sub(memory_mib);
+            Ok(())
+        })
+        .await
+    }
+
+    /// Replace receiver reservations with the totals still on disk. Used once
+    /// at serve startup, after expired receivers have been removed.
+    pub async fn set_untracked_host(&self, vcpus: u64, memory_mib: u64) -> Result<()> {
+        self.mutate_quota(move |ledger| {
+            ledger.untracked_host.vms = 0;
+            ledger.untracked_host.vcpus = vcpus;
+            ledger.untracked_host.memory_mib = memory_mib;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn mutate_quota<F>(&self, f: F) -> Result<()>
+    where
+        F: FnOnce(&mut QuotaLedger) -> Result<()> + Send + 'static,
+    {
+        let path = self.path.clone();
+        let lock_path = self.lock_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let lock_file = fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&lock_path)
+                .context("opening store lock file")?;
+            if unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+                bail!("locking store: {}", std::io::Error::last_os_error());
+            }
+            let map = Self::read_map(&path)?;
+            let mut ledger = load_quota_ledger(&path, &map);
+            f(&mut ledger)?;
+            write_quota_ledger(&path, &ledger)?;
+            Ok(())
+        })
+        .await
+        .context("store worker thread panicked")?
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct QuotaSample {
+    tenant: Option<String>,
+    token: Option<String>,
+    vcpus: u8,
+    memory_mib: u64,
+}
+
+enum LedgerDelta {
+    /// Status-only write. The ledger totals do not change, so the VM map is
+    /// not walked again. The existing `quotas.json` bytes are copied forward
+    /// so a newer `vms.json` does not look like a crashed quota update.
+    Preserve,
+    Ingest(QuotaSample),
+    Release(QuotaSample),
+    Replace {
+        from: QuotaSample,
+        to: QuotaSample,
+    },
+    Rebuild,
+}
+
+fn quota_sample(vm: &VmRecord) -> QuotaSample {
+    QuotaSample {
+        tenant: vm
+            .request
+            .tenant
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        token: vm
+            .request
+            .created_by_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        vcpus: vm.request.vcpus,
+        memory_mib: vm.request.memory_mib,
+    }
+}
+
+fn apply_sample(ledger: &mut QuotaLedger, sample: &QuotaSample, release: bool) {
+    let tenant = sample.tenant.as_deref();
+    let token = sample.token.as_deref();
+    if release {
+        ledger.release(tenant, token, sample.vcpus, sample.memory_mib);
+    } else {
+        ledger.ingest(tenant, token, sample.vcpus, sample.memory_mib);
+    }
+}
+
+fn apply_ledger_delta(
+    vms_path: &Path,
+    map: &HashMap<Uuid, VmRecord>,
+    len_before: u64,
+    delta: LedgerDelta,
+) -> Result<()> {
+    match delta {
+        LedgerDelta::Preserve => {
+            let quota_path = vms_path.with_file_name("quotas.json");
+            if let Ok(bytes) = fs::read(&quota_path) {
+                write_quota_bytes(vms_path, &bytes)?;
+            }
+            Ok(())
+        }
+        LedgerDelta::Rebuild => {
+            let mut ledger = quota_ledger_from(map);
+            ledger.untracked_host = read_untracked_host(vms_path);
+            write_quota_ledger(vms_path, &ledger)
+        }
+        other => {
+            if let Some(mut ledger) = read_warm_ledger(vms_path, len_before) {
+                match other {
+                    LedgerDelta::Ingest(sample) => apply_sample(&mut ledger, &sample, false),
+                    LedgerDelta::Release(sample) => apply_sample(&mut ledger, &sample, true),
+                    LedgerDelta::Replace { from, to } => {
+                        apply_sample(&mut ledger, &from, true);
+                        apply_sample(&mut ledger, &to, false);
+                    }
+                    LedgerDelta::Preserve | LedgerDelta::Rebuild => {}
+                }
+                write_quota_ledger(vms_path, &ledger)
+            } else {
+                let mut ledger = quota_ledger_from(map);
+                ledger.untracked_host = read_untracked_host(vms_path);
+                write_quota_ledger(vms_path, &ledger)
+            }
+        }
+    }
+}
+
+fn quota_ledger_from(map: &HashMap<Uuid, VmRecord>) -> QuotaLedger {
+    let mut ledger = QuotaLedger::default();
+    for vm in map.values() {
+        ledger.ingest(
+            vm.request.tenant.as_deref(),
+            vm.request.created_by_token.as_deref(),
+            vm.request.vcpus,
+            vm.request.memory_mib,
+        );
+    }
+    ledger
+}
+
+fn write_quota_bytes(vms_path: &Path, bytes: &[u8]) -> Result<()> {
+    let quota_path = vms_path.with_file_name("quotas.json");
+    let tmp = quota_path.with_extension("json.tmp");
+    fs::write(&tmp, bytes).context("writing quota ledger")?;
+    fs::rename(&tmp, &quota_path).context("renaming quota ledger")?;
+    Ok(())
+}
+
+fn write_quota_ledger(vms_path: &Path, ledger: &QuotaLedger) -> Result<()> {
+    write_quota_bytes(vms_path, &serde_json::to_vec(ledger)?)
+}
+
+/// A ledger is warm only when its VM count matches the store *and* it was
+/// written at least as recently as `vms.json`. A crash between the two
+/// renames leaves the VM file newer, and the next admission rebuilds.
+fn read_warm_ledger(vms_path: &Path, vm_count: u64) -> Option<QuotaLedger> {
+    let quota_path = vms_path.with_file_name("quotas.json");
+    let vms_modified = vms_path.metadata().and_then(|m| m.modified()).ok()?;
+    let quota_modified = quota_path.metadata().and_then(|m| m.modified()).ok()?;
+    if quota_modified < vms_modified {
+        return None;
+    }
+    let raw = fs::read_to_string(&quota_path).ok()?;
+    let ledger = serde_json::from_str::<QuotaLedger>(&raw).ok()?;
+    ledger_is_warm(ledger.host.vms, vm_count).then_some(ledger)
+}
+
+fn read_untracked_host(vms_path: &Path) -> UsageTotals {
+    let quota_path = vms_path.with_file_name("quotas.json");
+    let Ok(raw) = fs::read_to_string(&quota_path) else {
+        return UsageTotals::default();
+    };
+    serde_json::from_str::<QuotaLedger>(&raw)
+        .map(|ledger| ledger.untracked_host)
+        .unwrap_or_default()
+}
+
+fn load_quota_ledger(vms_path: &Path, map: &HashMap<Uuid, VmRecord>) -> QuotaLedger {
+    if let Some(ledger) = read_warm_ledger(vms_path, map.len() as u64) {
+        return ledger;
+    }
+    let mut ledger = quota_ledger_from(map);
+    ledger.untracked_host = read_untracked_host(vms_path);
+    ledger
 }
 
 /// Same flock-per-operation, read-fresh-under-lock discipline as [`Store`]
@@ -696,5 +963,91 @@ mod tests {
         );
         assert_eq!(unique, all_ids);
         assert!(store.get("a").await.unwrap().members.is_empty());
+    }
+
+    #[tokio::test]
+    async fn warm_quota_ledger_is_not_rebuilt_from_vm_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let mut vm = fixture_record("a");
+        vm.request.tenant = Some("acme".into());
+        vm.request.created_by_token = Some("tok".into());
+        vm.request.vcpus = 2;
+        vm.request.memory_mib = 512;
+        store.insert(vm).await.unwrap();
+        let ledger = store.quota_ledger().await.unwrap();
+        assert_eq!(ledger.host.vms, 1);
+        assert_eq!(ledger.tenants["acme"].vcpus, 2);
+        assert_eq!(ledger.tokens["tok"].memory_mib, 512);
+
+        let path = dir.path().join("quotas.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw["host"]["memory_mib"] = serde_json::json!(999);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        let warm = store.quota_ledger().await.unwrap();
+        assert_eq!(
+            warm.host.memory_mib, 999,
+            "a warm ledger is read as-is; create does not rescan VM records"
+        );
+        let rebuilt = store.rebuild_quota_ledger().await.unwrap();
+        assert_eq!(rebuilt.host.memory_mib, 512);
+    }
+
+    #[tokio::test]
+    async fn status_update_keeps_the_warm_ledger_without_rescanning() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let mut vm = fixture_record("a");
+        vm.request.vcpus = 2;
+        vm.request.memory_mib = 512;
+        store.insert(vm.clone()).await.unwrap();
+        let path = dir.path().join("quotas.json");
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw["host"]["memory_mib"] = serde_json::json!(999);
+        std::fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        vm.status = VmStatus::Paused;
+        store.update(vm).await.unwrap();
+        let warm = store.quota_ledger().await.unwrap();
+        assert_eq!(warm.host.memory_mib, 999);
+        assert_eq!(warm.host.vcpus, 2);
+    }
+
+    #[tokio::test]
+    async fn receiver_reservation_counts_against_the_host_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::load(dir.path()).unwrap();
+        let mut vm = fixture_record("a");
+        vm.request.vcpus = 2;
+        vm.request.memory_mib = 512;
+        store.insert(vm.clone()).await.unwrap();
+        let mut policy = fluxvm_core::config::Policy::default();
+        policy.max_vcpus_host = Some(4);
+        policy.max_memory_mib_host = Some(1024);
+        store.reserve_untracked_host(2, 512, &policy).await.unwrap();
+        let ledger = store.quota_ledger().await.unwrap();
+        assert_eq!(ledger.host.vms, 1);
+        assert_eq!(ledger.host.vcpus, 2);
+        assert_eq!(ledger.untracked_host.vcpus, 2);
+        assert_eq!(ledger.untracked_host.memory_mib, 512);
+        let err = store
+            .reserve_untracked_host(1, 64, &policy)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("max_vcpus_host"));
+        let rebuilt = store.rebuild_quota_ledger().await.unwrap();
+        assert_eq!(rebuilt.untracked_host.vcpus, 2);
+        assert_eq!(rebuilt.host.vcpus, 2);
+        vm.status = VmStatus::Paused;
+        store.update(vm).await.unwrap();
+        let warm = store.quota_ledger().await.unwrap();
+        assert_eq!(warm.untracked_host.vcpus, 2);
+        assert_eq!(warm.host.vms, 1);
+        store.release_untracked_host(2, 512).await.unwrap();
+        let released = store.quota_ledger().await.unwrap();
+        assert_eq!(released.untracked_host.vcpus, 0);
+        assert_eq!(released.untracked_host.memory_mib, 0);
+        assert_eq!(released.host.vcpus, 2);
     }
 }

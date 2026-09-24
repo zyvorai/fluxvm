@@ -3,6 +3,14 @@
 Reproduce cold-start numbers for FluxVM sandboxes and MicroVM create→Running
 on a KVM lab host.
 
+`scripts/record-baseline.sh` writes one evidence file per host under
+`docs/benchmarks/evidence/`. `avg_create_ms` and `boot_to_ready_ms` from
+`bench-sandbox.sh` are control-plane create time, not guest init.
+`scripts/bench-warm-claim.sh` reports `warm_claim_ms` for
+`POST /v1/pools/{name}/claim`, which is not comparable to a cold create.
+These records are not a sizing SLA until the same script has been run on a
+second host. Migration downtime is a separate QMP `query-migrate` figure.
+
 ## Prerequisites
 
 - Linux x86_64 host with `/dev/kvm`

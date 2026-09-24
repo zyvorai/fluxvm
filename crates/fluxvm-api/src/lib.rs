@@ -310,10 +310,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
-        .route(
-            "/v1/security/capabilities",
-            get(security_capabilities),
-        )
+        .route("/v1/security/capabilities", get(security_capabilities))
         .route("/v1/host/gpus", get(list_host_gpus))
         .route("/v1/host/gpus/preflight", get(host_gpu_preflight))
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
@@ -321,10 +318,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms", post(create_vm).get(list_vms))
         .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
         .route("/v1/vms/{id}/attest", get(get_vm_evidence))
-        .route(
-            "/v1/vms/{id}/secrets/release",
-            post(release_vm_secret),
-        )
+        .route("/v1/vms/{id}/secrets/release", post(release_vm_secret))
         .route("/v1/vms/{id}/start", post(start_vm))
         .route(
             "/v1/vms/{id}/start-from-snapshot",
@@ -334,6 +328,15 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/migration/start", post(start_migration))
         .route("/v1/vms/{id}/migration/status", get(migration_status))
         .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
+        .route("/v1/migration/receivers", post(create_migration_receiver))
+        .route(
+            "/v1/migration/receivers/{id}/activate",
+            post(activate_migration_receiver),
+        )
+        .route(
+            "/v1/migration/receivers/{id}",
+            axum::routing::delete(delete_migration_receiver),
+        )
         .route("/v1/vms/{id}/stop", post(stop_vm))
         .route("/v1/vms/{id}/pause", post(pause_vm))
         .route("/v1/vms/{id}/resume", post(resume_vm))
@@ -1303,9 +1306,9 @@ async fn get_vm_evidence(
     if let Some(ev) = &vm.security_evidence {
         return Ok(Json(json!(ev)));
     }
-    Ok(Json(json!(
-        fluxvm_core::security::read_evidence(&vm.workspace)?
-    )))
+    Ok(Json(json!(fluxvm_core::security::read_evidence(
+        &vm.workspace
+    )?)))
 }
 
 async fn release_vm_secret(
@@ -1387,9 +1390,7 @@ fn allocated_vfio_bdfs(vms: &[VmRecord]) -> std::collections::HashSet<String> {
     out
 }
 
-async fn list_host_gpus(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
+async fn list_host_gpus(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     let allocated = allocated_vfio_bdfs(&m.list().await);
     let gpus = fluxvm_core::gpu::list_host_gpus(&m.cfg.state_dir, &allocated)?;
     Ok(Json(json!({ "items": gpus })))
@@ -1450,6 +1451,36 @@ async fn cancel_migration(
 ) -> ApiResult<Json<fluxvm_core::model::MigrationStatus>> {
     require_admin(role)?;
     Ok(Json(m.cancel_migration(id).await?))
+}
+
+async fn create_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<fluxvm_core::model::MigrationReceiverRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let rec = m.create_migration_receiver(req).await?;
+    Ok((StatusCode::CREATED, Json(rec)))
+}
+
+async fn activate_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationReceiverActivate>,
+) -> ApiResult<Json<fluxvm_core::model::MigrationReceiver>> {
+    require_admin(role)?;
+    Ok(Json(m.activate_migration_receiver(id, &req.token).await?))
+}
+
+async fn delete_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_migration_receiver(id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
