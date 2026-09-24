@@ -30,6 +30,87 @@ pub struct SandboxCreateRequest {
     /// Extra guest ports exposed via `/v1/sandboxes/{id}/http/{port}/…`.
     #[serde(default)]
     pub http_proxy_ports: Vec<u16>,
+    /// Named persistent volumes to attach. Needs a QEMU-backed `template`
+    /// (virtiofs is not supported by the in-tree FluxVm backend). A volume
+    /// belongs to the caller's tenant and can be attached to one VM at a time.
+    #[serde(default)]
+    pub volumes: Vec<SandboxVolume>,
+}
+
+/// A persistent host directory shared into a sandbox over virtiofs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxVolume {
+    /// Lowercase `[a-z0-9._-]`, at most 63 characters, starting with a letter or digit.
+    pub name: String,
+    /// Absolute mount point inside the guest.
+    pub guest_path: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+pub const MAX_SANDBOX_VOLUMES: usize = 4;
+
+/// Top-level guest directories a volume may be mounted under. The mount point
+/// is interpolated into generated cloud-init commands, so it is both
+/// character-restricted and kept away from system directories.
+const VOLUME_GUEST_ROOTS: &[&str] = &["home", "mnt", "data", "srv", "opt", "workspace", "root"];
+
+fn valid_volume_component(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+        && s.len() <= 63
+        && !s.contains("..")
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
+fn validate_volume(v: &SandboxVolume) -> Result<()> {
+    if !valid_volume_component(&v.name) {
+        bail!(
+            "invalid volume name {:?}: use 1-63 characters from [a-z0-9._-], starting with a letter or digit",
+            v.name
+        );
+    }
+    let path = &v.guest_path;
+    if path.len() > 128
+        || !path.starts_with('/')
+        || !path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '.' | '-'))
+    {
+        bail!(
+            "invalid guest_path {path:?}: must be absolute, at most 128 characters from [A-Za-z0-9/_.-]"
+        );
+    }
+    let components: Vec<&str> = path[1..].split('/').collect();
+    if components
+        .iter()
+        .any(|c| c.is_empty() || *c == "." || *c == "..")
+    {
+        bail!("invalid guest_path {path:?}: empty, '.' and '..' components are not allowed");
+    }
+    if !VOLUME_GUEST_ROOTS.contains(&components[0]) {
+        bail!(
+            "guest_path {path:?} must be under one of: {}",
+            VOLUME_GUEST_ROOTS
+                .iter()
+                .map(|r| format!("/{r}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Directory that backs `name` for `tenant`. Tenants get separate subtrees;
+/// untenanted callers use `_shared`, which no valid tenant name can equal.
+fn volume_host_path(root: &Path, tenant: Option<&str>, name: &str) -> Result<PathBuf> {
+    let tenant_dir = match tenant {
+        Some(t) if valid_volume_component(t) => t,
+        Some(t) => bail!("tenant {t:?} cannot own volumes: it is not a valid path component"),
+        None => "_shared",
+    };
+    Ok(root.join(tenant_dir).join(name))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +144,7 @@ impl VmManager {
         token_tenant: Option<&str>,
         created_by_token: Option<&str>,
     ) -> Result<VmRecord> {
+        let from_template = req.template.is_some();
         let mut create = if let Some(template) = &req.template {
             self.load_template_spec(template).await?
         } else if let Some(spec) = req.spec {
@@ -72,7 +154,13 @@ impl VmManager {
         };
         enforce_sandbox_tenant(&mut create, token_tenant)?;
         create.created_by_token = created_by_token.map(String::from);
-        create.backend = BackendKind::FluxVm;
+        // A client-supplied `spec` is always the in-tree backend. Only an
+        // operator-authored template may opt into QEMU (needed for volumes).
+        create.backend = if from_template && create.backend == BackendKind::Qemu {
+            BackendKind::Qemu
+        } else {
+            BackendKind::FluxVm
+        };
         if let Some(name) = req.name {
             create.name = name;
         } else if create.name.is_empty() {
@@ -92,6 +180,14 @@ impl VmManager {
             a.enabled = true;
         }
         self.enforce_token_quotas(created_by_token, &create).await?;
+        // Held from the "already attached?" check until the VM record exists.
+        let _volume_guard = if req.volumes.is_empty() {
+            None
+        } else {
+            let guard = self.sandbox_volume_lock.lock().await;
+            self.attach_volumes(&mut create, &req.volumes).await?;
+            Some(guard)
+        };
         let record = self.create(create).await?;
         let proxy_ports: Vec<u16> = {
             let mut ports = Vec::new();
@@ -117,6 +213,74 @@ impl VmManager {
         )
         .await?;
         Ok(record)
+    }
+
+    /// Resolve `volumes` to host directories and append them to
+    /// `create.shared_folders`. Fails if a volume is invalid, the sandbox is
+    /// not QEMU-backed, or another VM already has the volume attached.
+    async fn attach_volumes(
+        &self,
+        create: &mut CreateVmRequest,
+        volumes: &[SandboxVolume],
+    ) -> Result<()> {
+        if create.backend != BackendKind::Qemu {
+            bail!(
+                "volumes need a QEMU-backed template: the in-tree FluxVm backend has no virtiofs support"
+            );
+        }
+        if volumes.len() > MAX_SANDBOX_VOLUMES {
+            bail!("at most {MAX_SANDBOX_VOLUMES} volumes per sandbox");
+        }
+        for (i, v) in volumes.iter().enumerate() {
+            validate_volume(v)?;
+            if volumes[..i]
+                .iter()
+                .any(|o| o.name == v.name || o.guest_path == v.guest_path)
+            {
+                bail!("duplicate volume name or guest_path: {}", v.name);
+            }
+        }
+        let root = self
+            .cfg
+            .sandbox
+            .volumes_dir
+            .clone()
+            .unwrap_or_else(|| self.cfg.state_dir.join("volumes"));
+        tokio::fs::create_dir_all(&root).await?;
+        let root = tokio::fs::canonicalize(&root).await?;
+
+        let mut hosts = Vec::with_capacity(volumes.len());
+        for v in volumes {
+            let path = volume_host_path(&root, create.tenant.as_deref(), &v.name)?;
+            tokio::fs::create_dir_all(&path).await?;
+            // Refuse a volume directory that was replaced by a symlink out of the root.
+            let resolved = tokio::fs::canonicalize(&path).await?;
+            if !resolved.starts_with(&root) {
+                bail!("volume {:?} resolves outside the volumes directory", v.name);
+            }
+            hosts.push(resolved);
+        }
+
+        let attached: Vec<PathBuf> = self
+            .list()
+            .await
+            .into_iter()
+            .filter(|vm| vm.status != VmStatus::Failed)
+            .flat_map(|vm| vm.request.shared_folders.into_iter().map(|s| s.host_path))
+            .collect();
+        for (v, host) in volumes.iter().zip(&hosts) {
+            if attached.iter().any(|a| a == host) {
+                bail!("volume {:?} is already attached to another VM", v.name);
+            }
+        }
+        for (v, host) in volumes.iter().zip(hosts) {
+            create.shared_folders.push(fluxvm_core::model::SharedFolder {
+                host_path: host,
+                guest_path: v.guest_path.clone(),
+                read_only: v.read_only,
+            });
+        }
+        Ok(())
     }
 
     async fn load_template_spec(&self, name: &str) -> Result<CreateVmRequest> {
@@ -404,5 +568,78 @@ mod tests {
         create.tenant = Some("other-tenant".into());
         let err = enforce_sandbox_tenant(&mut create, Some("acme")).unwrap_err();
         assert!(err.to_string().contains("cannot create a sandbox"));
+    }
+
+    fn volume(name: &str, guest_path: &str) -> SandboxVolume {
+        SandboxVolume {
+            name: name.into(),
+            guest_path: guest_path.into(),
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_volumes() {
+        for (n, p) in [
+            ("home", "/home/agent"),
+            ("agent-1.data_x", "/data"),
+            ("a", "/mnt/deep/er-path_1.2"),
+            ("w", "/workspace"),
+        ] {
+            validate_volume(&volume(n, p)).unwrap_or_else(|e| panic!("{n} {p}: {e}"));
+        }
+    }
+
+    #[test]
+    fn rejects_bad_volume_names() {
+        for n in ["", "Home", "-x", ".x", "a/b", "a..b", "a b", "a;b", &"x".repeat(64)] {
+            assert!(validate_volume(&volume(n, "/home/a")).is_err(), "name {n:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_guest_paths() {
+        // Anything that could alter the generated cloud-init runcmd / fstab line,
+        // escape a directory, or shadow a system directory must be refused.
+        for p in [
+            "",
+            "home/agent",
+            "/",
+            "/etc",
+            "/etc/passwd",
+            "/usr/bin",
+            "/home/../etc",
+            "/home/./a",
+            "/home//a",
+            "/home/a/",
+            "/home/a b",
+            "/home/a;reboot",
+            "/home/a'b",
+            "/home/a\nb",
+            "/home/$(id)",
+            "/proc/x",
+        ] {
+            assert!(validate_volume(&volume("v", p)).is_err(), "path {p:?}");
+        }
+    }
+
+    #[test]
+    fn volume_paths_are_scoped_per_tenant() {
+        let root = Path::new("/var/lib/fluxvm/volumes");
+        assert_eq!(
+            volume_host_path(root, Some("acme"), "home").unwrap(),
+            root.join("acme/home")
+        );
+        assert_eq!(
+            volume_host_path(root, None, "home").unwrap(),
+            root.join("_shared/home")
+        );
+        assert_ne!(
+            volume_host_path(root, Some("acme"), "home").unwrap(),
+            volume_host_path(root, Some("other"), "home").unwrap()
+        );
+        // "_shared" is not a valid tenant name, so a tenant cannot alias the untenanted tree.
+        assert!(volume_host_path(root, Some("_shared"), "home").is_err());
+        assert!(volume_host_path(root, Some("../x"), "home").is_err());
     }
 }

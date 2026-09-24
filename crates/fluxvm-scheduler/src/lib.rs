@@ -449,6 +449,9 @@ pub struct VmManager {
     /// rename/clone all load the whole file, mutate, and write it back, so
     /// two concurrent calls need to not interleave.
     catalog_lock: AsyncMutex<()>,
+    /// Serializes the "is this volume already attached?" check with the VM
+    /// record write in `create_sandbox`, so two creates cannot both claim one volume.
+    sandbox_volume_lock: AsyncMutex<()>,
     /// Last activity timestamps for AutoPause / wake-on-request (sandbox id → UTC).
     activity: AsyncMutex<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>,
 }
@@ -478,6 +481,7 @@ impl VmManager {
             pools,
             backfill_locks: AsyncMutex::new(HashMap::new()),
             catalog_lock: AsyncMutex::new(()),
+            sandbox_volume_lock: AsyncMutex::new(()),
             activity: AsyncMutex::new(HashMap::new()),
         }))
     }

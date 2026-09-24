@@ -2,6 +2,18 @@
 
 ## 0.4.0 (unreleased)
 
+### Added
+- **Persistent sandbox volumes.** `POST /v1/sandboxes` accepts `volumes: [{name, guest_path, read_only?}]`.
+  Each volume is a host directory under `sandbox.volumes_dir` (default `<state_dir>/volumes`), scoped per
+  tenant, shared into the guest over virtiofs and mounted through an fstab line, so it survives sandbox
+  replacement. A volume can be attached to one VM at a time. Volumes need a QEMU-backed sandbox: an
+  operator-authored template whose `spec.json` says `"backend": "qemu"` is now honoured instead of being
+  coerced to the in-tree backend (a client-supplied `spec` is still always the in-tree backend, so a client
+  cannot pick QEMU or its `extra_args`). Guest paths are limited to `/home`, `/mnt`, `/data`, `/srv`, `/opt`,
+  `/workspace`, `/root` and to `[A-Za-z0-9/_.-]` because they reach generated cloud-init commands.
+  `GET /v1/sandboxes` now also lists QEMU-backed sandboxes. There is no size quota: the directory is only as
+  bounded as its host filesystem. Snapshot and AutoPause remain in-tree-backend features.
+
 ### Fixed
 - **Pod identities were never released.** `pod_identity::forget` had no caller, so every Secure Containers
   Pod left its `pod_uid` -> `pod_id` entry in `pod-ids.json` for the node's lifetime (110 entries had built up

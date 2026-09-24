@@ -63,7 +63,7 @@ GET    /v1/pools/{name}
 DELETE /v1/pools/{name}
 POST   /v1/pools/{name}/claim
 POST   /v1/pools/{name}/resize
-POST   /v1/sandboxes
+POST   /v1/sandboxes                     # optional volumes: [{name, guest_path, read_only}] (QEMU template)
 GET    /v1/sandboxes
 POST   /v1/sandboxes/{id}/snapshot
 POST   /v1/sandboxes/{id}/fs/read

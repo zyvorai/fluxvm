@@ -124,6 +124,10 @@ pub struct SandboxConfig {
     pub credential_vault: Vec<CredentialInject>,
     /// Directory for OCI→template builds and snapshot templates.
     pub templates_dir: Option<PathBuf>,
+    /// Root for named sandbox volumes (`SandboxCreateRequest.volumes`): a
+    /// persistent host directory per `<tenant>/<name>`, shared into a QEMU
+    /// sandbox over virtiofs. Defaults to `<state_dir>/volumes`.
+    pub volumes_dir: Option<PathBuf>,
     /// Bind address for the live L7 egress proxy (empty = disabled).
     pub egress_proxy_listen: String,
     /// Default guest port for `/sandbox/{id}/…` when no port is in the path.
@@ -146,6 +150,7 @@ impl Default for SandboxConfig {
             egress_allow_domains: Vec::new(),
             credential_vault: Vec::new(),
             templates_dir: None,
+            volumes_dir: None,
             egress_proxy_listen: String::new(),
             http_proxy_default_port: default_http_proxy_port(),
             dataplane: DataplaneConfig::default(),
