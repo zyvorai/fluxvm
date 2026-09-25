@@ -71,11 +71,9 @@ images — not only the dataplane.
       (`fluxvm-microvm` controller + node-agent; API
       `microvm.fluxvm.zyvor.io`) — [microvm.md](microvm.md),
       [tutorials/microvm/](tutorials/microvm/README.md)
-- [ ] Secure Containers RuntimeClass on lab nodes after guest-image + CNI L2
-      + Set 3–5 lifecycle/OCI/volume/stdio-TTY smoke, Set 6/6R recovery +
-      namespace isolation, Set 7–9 OOM/metrics + device lifecycle, and
-      Set 10/11 guest AppArmor/SELinux/seccomp-argument/seccomp-notify
-      enforcement —
+- [ ] Secure Containers RuntimeClass **live lab** on nodes after guest-image +
+      CNI L2 + Set 3–11 smoke (code-side P0/P1 multi-VMM is **Done** on main;
+      this checkbox is evidence under load, not missing features) —
       [secure-containers.md](secure-containers.md) (rollup + per-Set links),
       `deploy/containerd/` (`FLUXVM_CONTAINER_CNI=0` for user-mode only)
 

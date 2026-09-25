@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Changed
+- **Docs: Secure Containers P0 status sync.** Set 4/5 handoff “remaining”
+  lists, `deploy/containerd/README` hostPath note, `PRODUCT_OVERVIEW` direct
+  datapath row, and `NEXT-FEATURES` intro now match GA multi-VMM / broker /
+  CNI code closed in #87 (live e2e under load still open).
 - **Secure Containers P0 code:** Cloud Hypervisor virtiofs shared-rootfs
   (`FLUXVM_CONTAINER_BACKEND=cloud-hypervisor`), Multus hybrid/direct secondaries
   (`FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`), Calico/Flannel CNI providers,

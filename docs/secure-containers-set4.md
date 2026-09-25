@@ -16,9 +16,11 @@ Bind sources below those roots are rewritten to the corresponding guest path
 instead of copied. Reads and writes therefore hit the kubelet-mounted PVC,
 CSI, emptyDir, projected, Secret or ConfigMap volume directly.
 
-Other bind mounts remain snapshot-based. Set 4 intentionally does not expose
-arbitrary hostPath mounts. A future hotplug/broker path can add explicitly
-allowlisted hostPath exports without broadening the default trust boundary.
+Other bind mounts remain snapshot-based. Set 4 intentionally did not expose
+arbitrary hostPath mounts at ship time. Allowlisted hostPath create-time
+passthrough and QEMU/CH broker hotplug later landed as P0 — see
+[secure-containers.md](secure-containers.md) (`FLUXVM_HOSTPATH_ALLOW`,
+`FLUXVM_HOSTPATH_BROKER`).
 
 ## 2. Guest OCI hardening
 
@@ -41,13 +43,19 @@ noNewPrivileges and Linux capability sets.
 
 ## Remaining gates
 
+Historical Set 4 backlog (status today):
+
 - VSOCK-native stdio + TTY/PTY/resize — delivered in
   [Set 5](secure-containers-set5.md)
-- seccomp argument comparators / notify
-- Linux namespace creation parity and device-cgroup rules
-- explicitly allowlisted hostPath hotplug/broker
-- Cloud Hypervisor / Firecracker shared-rootfs: CH uses virtiofs; Firecracker packs shares to ext4 at launch (no virtio-fs upstream)
-- real Kubernetes/KVM conformance and churn tests
+- seccomp argument comparators / notify — delivered in Sets 10–11
+- Linux namespace creation parity and device-cgroup rules — delivered in
+  Sets 6R / 10
+- explicitly allowlisted hostPath hotplug/broker — **Done** (P0; see
+  [secure-containers.md](secure-containers.md))
+- Cloud Hypervisor / Firecracker shared-rootfs — **Done** (CH virtiofs; FC
+  ext4 pack at launch; no virtio-fs upstream)
+- real Kubernetes/KVM conformance and churn tests — **Open (lab)** under
+  `FLUXVM_SECURE_CONTAINERS_E2E=1`
 
 ## Required guest packages
 
