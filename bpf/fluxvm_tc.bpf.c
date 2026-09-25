@@ -50,11 +50,15 @@
 #define FLUXVM_REASON_MIGRATION_QUIESCE    9
 #define FLUXVM_REASON_MIGRATION_RESTORING 10
 #define FLUXVM_REASON_UNSUPPORTED_ETHERTYPE 11
+#define FLUXVM_REASON_UDP_DENY             12
 #define FLUXVM_REASON_ACTION_DROP          0
 #define FLUXVM_REASON_ACTION_AUDIT         1
 #define FLUXVM_MIGRATION_RUNNING           0
 #define FLUXVM_MIGRATION_QUIESCING         1
 #define FLUXVM_MIGRATION_RESTORING         2
+
+/* reserved0 flag bits (Keep / strict cells). */
+#define FLUXVM_IFACE_DENY_UDP              1u
 
 struct iface_config {
     __u32 identity;
@@ -67,13 +71,8 @@ struct iface_config {
     __u32 allow_icmp;
     __u64 rate_bytes_per_sec;
     __u64 rate_packets_per_sec;
-    // Set 6S: Kubernetes Pod identity for fluxvm_pspol/fluxvm_pid4/6 lookups.
-    // 0 means "no Pod-scoped policy" (Secure Containers not in use for this
-    // VM, or Set 6S not configured) -- handle_ipv4/6 skip the pod-policy
-    // check entirely in that case, so every non-Secure-Containers sandbox
-    // keeps today's behavior unchanged. `reserved0` is explicit trailing
-    // padding so the struct's size (48 bytes) has no implicit compiler-
-    // inserted padding for the userspace loader to get wrong.
+    // Set 6S: Kubernetes Pod identity. reserved0: bit0 = deny_udp (Keep
+    // WebRTC/QUIC kill switch; DHCP still allowed above the check).
     __u32 pod_id;
     __u32 reserved0;
 };
@@ -907,6 +906,24 @@ static __always_inline int handle_ipv4(
         return TC_ACT_OK;
     }
 
+    /* Keep: UDP/QUIC/WebRTC kill switch — DHCP already returned above. */
+    if ((cfg->reserved0 & FLUXVM_IFACE_DENY_UDP) &&
+        (iph->protocol == IPPROTO_UDP || iph->protocol == IPPROTO_SCTP)) {
+        record_reason4(skb, cfg->identity, iph, sport, dport,
+                       FLUXVM_REASON_UDP_DENY,
+                       audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+        if (audit) {
+            count(cfg->identity, FLUXVM_VERDICT_ALLOW, skb->len);
+            record_flow4(skb, cfg->identity, iph, sport, dport,
+                         FLUXVM_VERDICT_DROP, sample);
+            return TC_ACT_OK;
+        }
+        count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+        record_flow4(skb, cfg->identity, iph, sport, dport,
+                     FLUXVM_VERDICT_DROP, sample);
+        return TC_ACT_SHOT;
+    }
+
     __u8 src[16] = {};
     __u8 dst[16] = {};
     __builtin_memcpy(src, &iph->saddr, 4);
@@ -1041,6 +1058,18 @@ static __always_inline int handle_ipv6(
         count(cfg->identity,FLUXVM_VERDICT_ALLOW,skb->len);
         record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,FLUXVM_VERDICT_ALLOW,sample);
         return TC_ACT_OK;
+    }
+    if ((cfg->reserved0 & FLUXVM_IFACE_DENY_UDP) &&
+        (proto == IPPROTO_UDP || proto == IPPROTO_SCTP)) {
+        record_reason_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,FLUXVM_REASON_UDP_DENY,audit?FLUXVM_REASON_ACTION_AUDIT:FLUXVM_REASON_ACTION_DROP);
+        if (audit) {
+            count(cfg->identity,FLUXVM_VERDICT_ALLOW,skb->len);
+            record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,FLUXVM_VERDICT_DROP,sample);
+            return TC_ACT_OK;
+        }
+        count(cfg->identity,FLUXVM_VERDICT_DROP,skb->len);
+        record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,FLUXVM_VERDICT_DROP,sample);
+        return TC_ACT_SHOT;
     }
     struct flow_key ctkey={.identity=cfg->identity,.sport=sport,.dport=dport,.protocol=proto,.family=FLUXVM_AF_INET6};
     __builtin_memcpy(ctkey.src,ip6->saddr.in6_u.u6_addr8,16); __builtin_memcpy(ctkey.dst,ip6->daddr.in6_u.u6_addr8,16);

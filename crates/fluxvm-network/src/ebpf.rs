@@ -1340,7 +1340,7 @@ fn configure_maps(
     if fail_closed_first {
         // Publish deny-all first, before deleting any old allowlist keys.
         update_iface_config(
-            &id_map, ifindex, identity, false, false, false, 0, false, 0, 0, pod_id,
+            &id_map, ifindex, identity, false, false, false, 0, false, 0, 0, pod_id, 0,
         )?;
     }
 
@@ -1382,6 +1382,7 @@ fn configure_maps(
         .unwrap_or(0);
     let rate_packets = policy.max_egress_pps.map(u64::from).unwrap_or(0);
     let packed_sample = policy.sample_rate | if policy.audit_mode { 1u32 << 31 } else { 0 };
+    let iface_flags = if policy.deny_udp { 1u32 } else { 0 }; // FLUXVM_IFACE_DENY_UDP
 
     let gid_map = map_dir.join("fluxvm_gid");
     if gid_map.exists() {
@@ -1400,6 +1401,7 @@ fn configure_maps(
         rate_bytes,
         rate_packets,
         pod_id,
+        iface_flags,
     )
 }
 
@@ -1785,13 +1787,13 @@ fn update_iface_config(
     rate_bytes_per_sec: u64,
     rate_packets_per_sec: u64,
     pod_id: u32,
+    iface_flags: u32,
 ) -> Result<()> {
     let mut key = Vec::with_capacity(4);
     key.extend_from_slice(&ifindex.to_ne_bytes());
 
     // Must match struct iface_config in bpf/fluxvm_tc.bpf.c exactly:
-    // 6 x u32, 2 x u64, then pod_id + explicit reserved padding (Set 6S) --
-    // 48 bytes total, confirmed against the compiled object's BTF.
+    // 6 x u32, 2 x u64, then pod_id + reserved0/flags (48 bytes).
     let mut value = Vec::with_capacity(48);
     value.extend_from_slice(&identity.to_ne_bytes());
     value.extend_from_slice(&(default_allow as u32).to_ne_bytes());
@@ -1802,7 +1804,7 @@ fn update_iface_config(
     value.extend_from_slice(&rate_bytes_per_sec.to_ne_bytes());
     value.extend_from_slice(&rate_packets_per_sec.to_ne_bytes());
     value.extend_from_slice(&pod_id.to_ne_bytes());
-    value.extend_from_slice(&0u32.to_ne_bytes());
+    value.extend_from_slice(&iface_flags.to_ne_bytes());
     bpftool_map_update(map, &key, &value)
 }
 
@@ -2039,6 +2041,7 @@ fn drop_reason_label(reason: u32) -> &'static str {
         9 => "migration-quiesce",
         10 => "migration-restoring",
         11 => "unsupported-ethertype",
+        12 => "udp-deny",
         _ => "unknown",
     }
 }

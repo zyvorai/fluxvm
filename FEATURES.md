@@ -54,6 +54,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - nftables is the default fallback when eBPF mode isn't enabled
 - Per-VM eBPF rule cap: 64 (kernel BPF verifier limit)
 - Opt-in enable: `sudo ./scripts/enable-network-fabric-ga.sh --restart` (fail-closed GA) or `--lab` (soft default-allow); host readiness via `./scripts/network-fabric-preflight.sh` — see [docs/network-fabric.md](docs/network-fabric.md)
+- **`deny_udp`** on `VmNetworkPolicy` — Keep / strict cells: TC drops UDP+SCTP (DHCP still allowed); drop reason `udp-deny` (code 12). Used with gateway-only `allow_ports` for proxy-or-die.
 
 ### Service Fabric
 
