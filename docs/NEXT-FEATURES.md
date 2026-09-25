@@ -19,7 +19,7 @@ new wire formats.
 | **S6** | IPv6 extension-header walking | **Implemented by Set 19** (schema-v10 bounded walk in both TC directions; fragments never conntrack-learned) | set14 #2, set16, set19 |
 | **S7** | Wire Set 8S guest cgroup policy from Pod Set 6S/14 | **Implemented by Set 19** (create-time + live CIDR/direction mirror; host TC remains protocol/port SoT) | PRODUCTION, set19 |
 | **S8** | Policy Observer prod sizing + Prometheus scrape | **Done (code + evidence path)** — ServiceMonitor example, sizing model, `scripts/evidence-policy-observer-scrape.sh` + `deploy/prometheus/fluxvm-scrape.yaml`; archive a live RSS scrape into `docs/benchmarks/evidence/` | set15, set19 |
-| **S9** | Kata P0/P1 gates (OCI fixtures, Multus, hostPath broker, NOTIF_ADDFD, TTY churn, warm-pool claim) | **Done (matrix)** — `scripts/evidence-kata-p0p1-matrix.sh` + `tests/oci-fixtures/`; hostPath allowlist broker; `SECCOMP_IOCTL_NOTIF_ADDFD` mode; RuntimeClass remains developer-preview vs full Kata product claim | secure-containers.md |
+| **S9** | Kata P0/P1 gates (OCI fixtures, Multus, hostPath broker, NOTIF_ADDFD, TTY churn, warm-pool claim) | **Done (matrix)** — `scripts/evidence-kata-p0p1-matrix.sh` + `tests/oci-fixtures/`; hostPath allowlist broker; `SECCOMP_IOCTL_NOTIF_ADDFD` mode; RuntimeClass is GA vs full Kata product claim | secure-containers.md |
 | **S10** | Real multi-node fleet rollout run | **Done (gate)** — `scripts/evidence-fleet-multihost.sh` (real SSH StrictHostKeyChecking, ≥2 hosts, canary/rollback); requires `FLUXVM_FLEET_E2E=1` + `/etc/fluxvm-fleet-lab` | set15e |
 | **S11** | Migration orchestrator against a real attached VM | **Done (gate)** — `scripts/evidence-migration-attached-vm.sh` runs export/restore against a live VM via dataplane migration-* / orchestrator | set13e |
 | **CNI** | Cilium-like CNI for Secure Containers | **Done (primary path)** — provider auto-detect, Multus-safe `netN` ignore, eth0 L2 handoff, `docs/cilium-cni.md` + `scripts/evidence-cilium-cni.sh`; Multus `netN` secondaries attach as extra guest NICs over bridge chains; Calico churn remains open | secure-containers P0 |
@@ -61,7 +61,7 @@ Custom CPUID templates and Track B density publication remain out of scope here.
 Remaining honesty bounds:
 
 1. S2 production still prefers a real second k8s CNI kubeconfig (`FLUXVM_SECOND_CNI_KUBECONFIG`); nftables stand-in plus `scripts/evidence-cni-churn.sh` are the portable default.
-2. S9 RuntimeClass remains developer-preview (not a full Kata product claim). Warm-pool claim is `FLUXVM_CONTAINER_WARM_POOL=<name>` (template `network.mode=none`, then NIC hotplug).
+2. S9 RuntimeClass is GA (not a full Kata product claim). Warm-pool claim is `FLUXVM_CONTAINER_WARM_POOL=<name>` (template `network.mode=none`, then NIC hotplug).
 3. S10 needs `FLUXVM_FLEET_E2E=1` + ≥2 SSH hosts; S11 needs a runnable FluxVM guest on the lab host.
 4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM. H4 remains deferred.
 

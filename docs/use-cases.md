@@ -118,8 +118,9 @@ Set 2 adds optional CNI L2 (guest gets the real Pod IP when a CRI netns exists)
 and guest cgroup-v2 stats/resource updates. Set 3 adds containerd task events and
 guest OCI process hardening. Set 4 adds Pod-UID write-through volumes and guest
 RO/masked paths/devices/sysctls/libseccomp. Set 5 adds VSOCK stdio streaming and
-real guest PTY/`ResizePty`. This remains a **developer preview**: hostPath
-hotplug is not production-ready yet. Full design:
+real guest PTY/`ResizePty`. **Status: GA.** Scope boundaries remain (e.g. hostPath
+hotplug, QEMU-only VMM) — see Current limitations in
+[docs/secure-containers.md](secure-containers.md). Full design:
 [docs/secure-containers.md](secure-containers.md),
 [Set 3](secure-containers-set3.md),
 [Set 4](secure-containers-set4.md),

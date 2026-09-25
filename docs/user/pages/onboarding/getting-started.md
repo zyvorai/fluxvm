@@ -1,5 +1,7 @@
 # Getting Started
 
+**Boot a VM. Exec a command. Tear it down.**
+
 ## Purpose
 
 Install FluxVM and boot your first disposable VM — create, exec, and tear down.

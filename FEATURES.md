@@ -155,7 +155,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
   `delete`, `deregister`), previously reachable only via raw `curl`
 - Verified across two real, physically separate hosts
 
-## Secure Containers (developer preview — not production-ready)
+## Secure Containers (GA)
 
 - Containerd runtime-v2 shim `containerd-shim-fluxvm-v2`, RuntimeClass handler `fluxvm`
 - Maps a Pod/task group onto one QEMU FluxVM (`io.containerd.fluxvm.v2`)
@@ -165,7 +165,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Pod-UID write-through volumes, guest RO/masked paths/devices/sysctls/libseccomp
 - VSOCK stdio streaming, real guest PTY / `ResizePty`
 - Guest AppArmor/SELinux/seccomp enforcement
-- **Known gaps before "production-ready" or "Kata-equivalent"**: `hostPath` hotplug, broader CNI/OCI conformance — see [docs/secure-containers.md](docs/secure-containers.md) and [docs/PRODUCTION.md](docs/PRODUCTION.md)
+- **Known gaps vs Kata / full OCI**: `hostPath` hotplug, broader CNI/OCI conformance, QEMU-only VMM — see [docs/secure-containers.md](docs/secure-containers.md) and [docs/PRODUCTION.md](docs/PRODUCTION.md)
 
 ## Sentinel Observability
 

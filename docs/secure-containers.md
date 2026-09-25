@@ -1,6 +1,6 @@
 # FluxVM Secure Containers — containerd runtime v2
 
-**A Pod. Its own guest kernel.** *(Developer preview)*
+**A Pod. Its own guest kernel.** *(GA)*
 
 FluxVM Secure Containers is the first container-runtime layer on top of the
 existing FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support.
@@ -165,8 +165,8 @@ Everything through Set 13 below, plus:
 
 ## Current limitations
 
-This remains a **developer-preview runtime**, not a claim of full Kata
-Containers compatibility.
+**Status: GA.** Scope boundaries below — not a claim of full Kata Containers
+compatibility.
 
 1. **QEMU is the supported Secure Containers VMM.** Cloud Hypervisor and
    Firecracker still need equivalent shared-rootfs/volume plumbing.
@@ -254,8 +254,7 @@ strictly sequential) — see
 claim is opt-in: set `FLUXVM_CONTAINER_WARM_POOL` to a pool whose template
 uses `network.mode=none`. The shim claims a paused member, then
 `POST /v1/vms/{id}/hotplug/nic` for the Pod CNI bridge (and each Multus
-`netN`). RuntimeClass is still a developer preview, not a Kata-equivalent
-product.
+`netN`). RuntimeClass is **GA**, not a Kata-equivalent product.
 
 ### P1 — additional VMMs
 

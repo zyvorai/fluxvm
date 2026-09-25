@@ -2,6 +2,12 @@
 
 ## 0.4.0 (unreleased)
 
+### Changed
+- **Secure Containers promoted to GA.** RuntimeClass `fluxvm` /
+  `containerd-shim-fluxvm-v2` is no longer labeled developer preview. Scope
+  boundaries (not Kata-equivalent, QEMU-only VMM, hostPath defaults, CNI edges)
+  remain in [docs/secure-containers.md](docs/secure-containers.md).
+
 ### Added
 - **`deny_udp` Keep kill switch.** `VmNetworkPolicy.deny_udp` sets iface
   `reserved0` bit0; TC drops UDP/SCTP after DHCP (reason `udp-deny` / 12).

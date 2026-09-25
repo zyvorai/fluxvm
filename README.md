@@ -22,7 +22,17 @@ No libvirtd. No XML. A REST API and a CLI that do the same thing on every backen
 
 ---
 
-## Why teams switch to FluxVM
+## Why FluxVM
+
+**One API.** JSON specs and REST where you’d hand-write XML for `virsh`.
+
+**Four backends.** QEMU, Cloud Hypervisor, Firecracker, and the FluxVM hypervisor — one contract.
+
+**Grow later.** One Linux host today. Kubernetes or a multi-host fleet when you need them.
+
+FluxVM is a complete control plane on its own — a host-local replacement for libvirt/virsh
+([command mapping below](#vs-libvirtvirsh)) — and also the VM engine under other Zyvor products.
+It is the same binary and the same REST API either way.
 
 | You have today | With FluxVM |
 |---|---|
@@ -32,10 +42,6 @@ No libvirtd. No XML. A REST API and a CLI that do the same thing on every backen
 | Orphaned VMs after a crashed job | Optional **`ttl_seconds`** cleanup and cheap qcow2 CoW clones |
 | Firewall rules bolted on with nftables | **Network Fabric (GA)**: a TC/eBPF VM-edge dataplane with L3/L4 policy, rate limits and live reconfigure |
 | A platform rewrite just to get a VM API | **One Linux host is enough.** Grow to multi-host fleets or Kubernetes when you need to |
-
-FluxVM is a complete control plane on its own — a host-local replacement for libvirt/virsh
-([command mapping below](#vs-libvirtvirsh)) — and also the VM engine under other Zyvor products.
-It is the same binary and the same REST API either way.
 
 ## See it work
 
@@ -69,7 +75,7 @@ We only claim what has been run. Every row links to how it was verified.
 **Know before you commit.** These are the boundaries, stated up front so you can size the fit:
 
 - **Multi-tenant controls are opt-in, not a public-cloud boundary.** Create-path quotas use an O(1) ledger, `policy.require_catalog_names` rejects unsigned images, QEMU/Cloud Hypervisor children can take a log-mode seccomp filter (`FLUXVM_VMM_SECCOMP`), and AppArmor/SELinux profiles ship under `deploy/`. Per-tenant Firecracker uids need `[jailer] uid_range_start` / `uid_range_len`. Pause, resume, and delete do not hash images or scan the fleet. See [docs/PRODUCTION.md](docs/PRODUCTION.md).
-- **Secure Containers (containerd runtime-v2 shim) is a developer preview**, not a Kata-equivalence claim. Allowlisted hostPath is a virtiofs export when `FLUXVM_HOSTPATH_ALLOW` is set at sandbox create (symlink escape fails closed). Multus on the direct datapath fails closed. The Pod-teardown hang from earlier labs is covered by `journal_after_task_delete` (CHANGELOG 0.4.0). Broader CNI conformance stays opt-in —
+- **Secure Containers (containerd runtime-v2 shim) is GA**, not a Kata-equivalence claim. Allowlisted hostPath is a virtiofs export when `FLUXVM_HOSTPATH_ALLOW` is set at sandbox create (symlink escape fails closed). Multus on the direct datapath fails closed. The Pod-teardown hang from earlier labs is covered by `journal_after_task_delete` (CHANGELOG 0.4.0). Broader CNI conformance stays opt-in —
   [docs/secure-containers.md](docs/secure-containers.md).
 - **Not KubeVirt-compatible, by design.** `kubectl-fluxvm` is the console/exec/pause/resume plugin and deletes the CR (the operator finalizes the VM). `GuestImage` HTTP sources are staged on the node and are not CDI DataVolumes; unsigned downloads are not promoted to a trusted catalog name. QEMU has a target receiver at `POST /v1/migration/receivers` (`-incoming defer`); Cloud Hypervisor stays fire-and-forget, and direct-datapath migration is refused. See [FAQ](#faq).
 - **Boot and density numbers are a method plus a per-host record, not a sizing SLA.** `scripts/record-baseline.sh` writes `docs/benchmarks/evidence/`. `avg_create_ms` is control-plane create time. `warm_claim_ms` is pool claim time. Repeat on a second host before capacity planning
@@ -118,7 +124,7 @@ Nine use cases map onto what is implemented today — nothing below is aspiratio
 | **CI/CD runners that isolate every job** | VM-per-job over vsock `exec` (no SSH, no network path needed); `ttl_seconds` guarantees cleanup even if the job crashes |
 | **A golden-image pipeline** | Build once (`fluxctl build-image`), reuse via qcow2 CoW overlays; SHA-256 plus an optional Ed25519-signed image catalog |
 | **Kubernetes-native VM workloads without KubeVirt** | `DisposableVm` CRD + node-local `fluxvm-kube` operator, verified against a real k3s cluster |
-| **OCI workloads with a per-Pod guest kernel** | `containerd-shim-fluxvm-v2` — **developer preview**, not production-ready yet |
+| **OCI workloads with a per-Pod guest kernel** | `containerd-shim-fluxvm-v2` — **GA** (not Kata-equivalent; see GA boundaries in [docs/secure-containers.md](docs/secure-containers.md)) |
 | **A multi-host fleet without Kubernetes** | `fluxvm-agent` central registry + load-aware placement, verified across two physically separate hosts |
 | **Sandboxed / untrusted code execution** | Firecracker jailer + cgroup v2 + netns + vsock `exec` + TTL reaper — the same isolation *shape* as gVisor/Firecracker-based CI sandboxes |
 | **Per-branch dev and test environments** | Cheap qcow2 CoW cloning, optional `ttl_seconds`, `pause`/`resume` to park instead of rebuild |
@@ -139,7 +145,7 @@ Nine use cases map onto what is implemented today — nothing below is aspiratio
 **Look elsewhere (for now) when you…**
 
 - need a finished multi-tenant security boundary today ([details](#maturity-whats-real-today));
-- need Kata-equivalent OCI isolation today (Secure Containers is a developer preview);
+- need full Kata / CDI / non-QEMU Secure Containers VMM parity (Secure Containers is GA with documented scope boundaries);
 - need KubeVirt/OpenShift compatibility (`virtctl`, CDI, live-migration parity);
 - need published performance numbers for capacity planning.
 
@@ -217,7 +223,7 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 | **Images** | virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, Ed25519-signed catalog with REST CRUD, Windows golden-image customization | [docs/build-image-tutorials.md](docs/build-image-tutorials.md) · [docs/operations.md](docs/operations.md#image-catalog--signing) · [docs/windows-golden.md](docs/windows-golden.md) |
 | **Operations** | cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC | [docs/operations.md](docs/operations.md) · [docs/api.md](docs/api.md#auth--rbac) |
 | **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native path (no KubeVirt); `fluxvm-agent` fleet registry with load-aware placement | [Kubernetes CRD/operator](#kubernetes-crdoperator) · [docs/microvm.md](docs/microvm.md) · [docs/operations.md](docs/operations.md#distributed-node-agent) |
-| **Secure Containers** *(developer preview)* | containerd runtime-v2 shim mapping a Pod onto one QEMU FluxVM: CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, device passthrough, guest AppArmor/SELinux/seccomp enforcement | [docs/secure-containers.md](docs/secure-containers.md) |
+| **Secure Containers** *(GA)* | containerd runtime-v2 shim mapping a Pod onto one QEMU FluxVM: CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, device passthrough, guest AppArmor/SELinux/seccomp enforcement | [docs/secure-containers.md](docs/secure-containers.md) |
 | **Security profiles (Phase 6)** | `standard` / `measured` / `confidential-snp` / `confidential-tdx`: measured software-test evidence on ordinary QEMU hosts; confidential control plane tested without claiming host-memory encryption until a hardware run | [docs/security-profiles.md](docs/security-profiles.md) · [howto / CI](docs/guides/security-profiles-howto.md) |
 | **Sentinel observability** | eBPF host + guest runtime intelligence: per-VM syscall/page-fault telemetry, drop reasons, flight recorder, BPF-LSM VMM guard/QoS, XDP shield | [docs/runtime-intelligence.md](docs/runtime-intelligence.md) · [docs/flight-recorder.md](docs/flight-recorder.md) |
 
@@ -225,7 +231,7 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 
 ## FAQ
 
-**Is FluxVM production-ready?** For the core VM-lifecycle primitives (auth/RBAC, jailer, cgroups, netns), yes — with the caveats in [Proof & status](#maturity-whats-real-today). Turn on `policy.require_catalog_names`, the quota ledger, `FLUXVM_VMM_SECCOMP`, and the AppArmor or SELinux profile before exposing it to untrusted tenants. Secure Containers is separately a developer preview.
+**Is FluxVM production-ready?** For the core VM-lifecycle primitives (auth/RBAC, jailer, cgroups, netns), yes — with the caveats in [Proof & status](#maturity-whats-real-today). Turn on `policy.require_catalog_names`, the quota ledger, `FLUXVM_VMM_SECCOMP`, and the AppArmor or SELinux profile before exposing it to untrusted tenants. Secure Containers is GA with documented scope boundaries (not Kata-equivalent).
 
 **How is this different from libvirt?** No libvirtd, no XML domain definitions — its own REST API, with netlink for networking. See [vs. libvirt/virsh](#vs-libvirtvirsh).
 
@@ -267,7 +273,7 @@ base image -> SHA256 -> qemu-img -> customize -> reusable template
                                       |
 VM launch: template -> CoW clone -> cloud-init -> VMM -> optional TTL delete
 
-Secure Containers (developer preview):
+Secure Containers (GA):
 Kubernetes/ctr -> containerd -> containerd-shim-fluxvm-v2
   -> FluxVM REST -> QEMU + virtiofs Pod share (+ Pod-UID write-through volumes)
   -> fluxvm-guest-agent :17777 -> fluxvm-container-agent :17778 / stdio :17779

@@ -130,7 +130,7 @@ v2.5-era `libseccomp.so.2`).
 
 Detail: [docs/secure-containers-set11.md](../../docs/secure-containers-set11.md).
 
-> Developer-preview. Validate VSOCK stdio/TTY, CNI, and PVC behavior on your
+> **GA.** Validate VSOCK stdio/TTY, CNI, and PVC behavior on your
 > KVM/containerd/Kubernetes node image before production. See
 > [docs/secure-containers.md](../../docs/secure-containers.md). Do not advertise
-> this RuntimeClass as full Kata-compatible production yet.
+> this RuntimeClass as full Kata-compatible.
