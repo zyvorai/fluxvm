@@ -16,10 +16,8 @@ use fluxvm_core::{
     backend::{LaunchContext, LaunchResult, VmBackend, path_arg},
     config::Config,
     model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
-    process::{spawn_swtpm},
-    virtiofs::{
-        spawn_virtiofsd_instances, spawn_virtiofsd_one, terminate_virtiofsd_pids,
-    },
+    process::spawn_swtpm,
+    virtiofs::{spawn_virtiofsd_instances, spawn_virtiofsd_one, terminate_virtiofsd_pids},
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;

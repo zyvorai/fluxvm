@@ -194,7 +194,8 @@ impl NetworkSpec {
             for (i, nic) in extra.iter().enumerate() {
                 match &nic.direct {
                     Some(ed) => {
-                        ed.validate().map_err(|e| format!("network.extra[{i}].direct: {e}"))?;
+                        ed.validate()
+                            .map_err(|e| format!("network.extra[{i}].direct: {e}"))?;
                         if !nic.bridge.is_empty() {
                             return Err(format!(
                                 "network.extra[{i}]: bridge and direct are mutually exclusive"
@@ -203,9 +204,7 @@ impl NetworkSpec {
                     }
                     None => {
                         if nic.bridge.is_empty() {
-                            return Err(format!(
-                                "network.extra[{i}]: need bridge or direct"
-                            ));
+                            return Err(format!("network.extra[{i}]: need bridge or direct"));
                         }
                     }
                 }

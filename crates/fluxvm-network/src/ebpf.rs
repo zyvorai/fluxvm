@@ -266,13 +266,16 @@ pub fn apply(
         if let Some(d) = &direct {
             configure_direct_out(&map_dir, ifindex, d)?;
         }
-        for (i, d) in crate::direct::recorded_all(id).into_iter().enumerate().skip(1) {
+        for (i, d) in crate::direct::recorded_all(id)
+            .into_iter()
+            .enumerate()
+            .skip(1)
+        {
             let Some(tap) = d.tap_name.as_deref() else {
                 continue;
             };
-            let extra_idx = read_ifindex(tap).with_context(|| {
-                format!("resolving Multus/extra direct tap {tap} (index {i})")
-            })?;
+            let extra_idx = read_ifindex(tap)
+                .with_context(|| format!("resolving Multus/extra direct tap {tap} (index {i})"))?;
             configure_direct_out(&map_dir, extra_idx, &d)?;
         }
         fs::write(
@@ -385,9 +388,9 @@ pub fn apply(
             let tap = if i == 0 {
                 iface
             } else {
-                d.tap_name.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("direct-extra-{i} record is missing tap_name")
-                })?
+                d.tap_name
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("direct-extra-{i} record is missing tap_name"))?
             };
             attach_direct_in(cfg, id, &vm_dir, &meta_dir, tap, d).with_context(|| {
                 if i == 0 {

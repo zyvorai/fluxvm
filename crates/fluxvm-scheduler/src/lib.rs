@@ -693,7 +693,8 @@ impl VmManager {
                 ci.runcmd.push(format!(
                     "grep -qF ' {path} ' /etc/fstab || echo '{dev} {path} ext4 {opts} 0 0' >> /etc/fstab"
                 ));
-                ci.runcmd.push(format!("mount {path} || mount {dev} {path}"));
+                ci.runcmd
+                    .push(format!("mount {path} || mount {dev} {path}"));
                 vd_idx = vd_idx.saturating_add(1);
             }
             return Some(ci);
@@ -930,8 +931,7 @@ impl VmManager {
                 fluxvm_qemu::hotplug_virtiofs(&self.cfg, &vm, &host_path, index).await?
             }
             BackendKind::CloudHypervisor => {
-                fluxvm_cloud_hypervisor::hotplug_virtiofs(&self.cfg, &vm, &host_path, index)
-                    .await?
+                fluxvm_cloud_hypervisor::hotplug_virtiofs(&self.cfg, &vm, &host_path, index).await?
             }
             _ => unreachable!(),
         };

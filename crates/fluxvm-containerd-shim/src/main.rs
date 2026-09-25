@@ -5540,9 +5540,7 @@ async fn prepare_hybrid_direct(
                     bridge.secondaries.push(sec);
                 }
                 Err(e) if matches!(multus_mode, CniDatapath::Auto) => {
-                    warn!(
-                        "Multus secondary {name} direct failed ({e:#}); falling back to bridge"
-                    );
+                    warn!("Multus secondary {name} direct failed ({e:#}); falling back to bridge");
                     match prepare_cni_l2(&sec_group, path, name).await {
                         Ok(sec) => bridge.secondaries.push(sec),
                         Err(e2) => {
@@ -6128,14 +6126,10 @@ async fn stage_bind_mounts(
                 fluxvm_core::policy::resolve_existing(exp)
                     == fluxvm_core::policy::resolve_existing(allow_root)
             });
-            let guest_root = if let Some((hi, _)) = exports
-                .iter()
-                .enumerate()
-                .find(|(_, exp)| {
-                    fluxvm_core::policy::resolve_existing(exp)
-                        == fluxvm_core::policy::resolve_existing(allow_root)
-                })
-            {
+            let guest_root = if let Some((hi, _)) = exports.iter().enumerate().find(|(_, exp)| {
+                fluxvm_core::policy::resolve_existing(exp)
+                    == fluxvm_core::policy::resolve_existing(allow_root)
+            }) {
                 if hi == 0 {
                     PathBuf::from("/run/fluxvm/hostpath-allow")
                 } else {
@@ -6163,12 +6157,14 @@ async fn stage_bind_mounts(
                     "host_path": allow_root,
                     "read_only": false
                 });
-                svc.hotplug_shared_folders(vm, &[share]).await.with_context(|| {
-                    format!(
-                        "hostPath broker hotplugging allowlist {}",
-                        allow_root.display()
-                    )
-                })?;
+                svc.hotplug_shared_folders(vm, &[share])
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "hostPath broker hotplugging allowlist {}",
+                            allow_root.display()
+                        )
+                    })?;
                 // Guest path for hotplugged shares is /mnt/fsN from the daemon;
                 // map under /run/fluxvm/hostpath-allow via a guest bind after mount.
                 PathBuf::from("/run/fluxvm/hostpath-allow")
