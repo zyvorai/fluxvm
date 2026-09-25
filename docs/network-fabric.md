@@ -30,6 +30,11 @@ fails; `network.mode=none` / user NAT still soft-skip (no edge). Service load
 balancing, BGP, WireGuard, and first-class Cilium endpoint identity belong in
 separate projects rather than expanding this blast radius.
 
+**Keep / strict sandboxes:** set `deny_udp: true` on `VmNetworkPolicy` so TC
+drops UDP and SCTP after DHCP (WebRTC/QUIC kill switch; drop reason `udp-deny`).
+Pair with gateway-only `allow_ports` for proxy-or-die. See Fabric
+[`docs/keep/confine.md`](https://github.com/zyvorai/fabric/blob/main/docs/keep/confine.md).
+
 For the control-plane/packet-decision diagrams, see
 [Packet-decision and control-plane diagrams](#packet-decision-and-control-plane-diagrams) below.
 For a **user-facing speed comparison** vs traditional VM firewalls / bridges /
