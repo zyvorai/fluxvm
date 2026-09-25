@@ -138,10 +138,10 @@ impl DirectSpec {
         if self.outer.contains(['/', ' ']) {
             return Err("direct.outer is not a valid interface name".into());
         }
-        if let Some(p) = &self.netns_path {
-            if !p.starts_with('/') {
-                return Err("direct.netns_path must be an absolute path".into());
-            }
+        if let Some(p) = &self.netns_path
+            && !p.starts_with('/')
+        {
+            return Err("direct.netns_path must be an absolute path".into());
         }
         if !self.guest_ips.is_empty() {
             if self.mode != DirectMode::L2Uplink {

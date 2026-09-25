@@ -4631,7 +4631,8 @@ fn direct_ineligibility(f: &DirectFacts) -> Option<String> {
     if f.secondaries > 0 {
         // Multus secondaries ride the bridge chain (or optional per-secondary
         // direct) alongside a direct primary — they do not make the primary
-        // ineligible.
+        // ineligible. Count is retained on DirectFacts for telemetry/tests.
+        let _ = f.secondaries;
     }
     None
 }

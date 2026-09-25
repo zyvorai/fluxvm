@@ -115,7 +115,7 @@ impl Default for Config {
 }
 
 /// Phase 6: measured / confidential launch gates.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct SecurityConfig {
     /// Allow creating confidential-* VMs before a hardware integration run
@@ -125,16 +125,6 @@ pub struct SecurityConfig {
     pub snp_launch_verified: bool,
     /// Set true only after a verified TDX hardware launch + evidence path.
     pub tdx_launch_verified: bool,
-}
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            allow_unverified_confidential: false,
-            snp_launch_verified: false,
-            tdx_launch_verified: false,
-        }
-    }
 }
 
 /// Agent-sandbox controls used with `BackendKind::FluxVm`.
@@ -491,6 +481,7 @@ pub fn assign_tenant_uid(
     let lock_file = fs::OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(false)
         .open(&lock_path)
         .context("opening jailer uid lock")?;
     // SAFETY: exclusive flock released when `lock_file` is dropped.
