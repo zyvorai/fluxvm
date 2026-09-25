@@ -6,7 +6,17 @@ Kubernetes RuntimeClass handler: `fluxvm`
 
 `fluxvm-runtime.toml` is a merge fragment, not a complete containerd config.
 Use `scripts/install-secure-containers.sh` to install the host binaries, then
-merge the runtime fragment and restart containerd.
+merge the runtime fragment and restart containerd. Example shim environment
+variables live in [`env.example`](env.example) (backends, CNI, hostPath,
+Firecracker kernel).
+
+## VMM backends
+
+| `FLUXVM_CONTAINER_BACKEND` | Shares | Notes |
+|---|---|---|
+| `qemu` (default) | virtiofs | warm-pool + hostPath broker hotplug |
+| `cloud-hypervisor` / `ch` | virtiofs | needs CNI/tap (no user NAT) |
+| `firecracker` / `fc` | ext4 pack at launch | set `FLUXVM_CONTAINER_KERNEL` (or daemon `firecracker_kernel`); no warm-pool share hotplug |
 
 ## containerd ≥ 2.3 / k3s 1.36+
 

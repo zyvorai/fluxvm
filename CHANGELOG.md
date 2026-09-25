@@ -8,7 +8,10 @@
   (`FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`), Calico/Flannel CNI providers,
   allowlisted hostPath broker hotplug (`FLUXVM_HOSTPATH_BROKER`, colon-separated
   `FLUXVM_HOSTPATH_ALLOW`), and Firecracker block-staging shares (ext4 pack at
-  launch — no virtio-fs upstream).
+  launch — no virtio-fs upstream). Shim passes `FLUXVM_CONTAINER_KERNEL` on
+  Firecracker creates and skips `shared_memory` for that backend.
+  Operator env template: `deploy/containerd/env.example`.
+  Phase orchestrator: `scripts/complete-secure-containers-phases.sh`.
 - **Secure Containers promoted to GA.** RuntimeClass `fluxvm` /
   `containerd-shim-fluxvm-v2` is no longer labeled developer preview. Scope
   boundaries (not Kata-equivalent; Firecracker is block-staging not live

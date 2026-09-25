@@ -56,6 +56,23 @@ run_leg hostpath-broker bash -c '
     "'"$ROOT"'/docs/secure-containers.md" >/dev/null
 '
 
+# P0 — Firecracker ext4 share packing + kernel env wiring
+run_leg firecracker-shares bash -c '
+  test -f "'"$ROOT"'/tests/oci-fixtures/firecracker-shares.json" && \
+  grep -n "FLUXVM_CONTAINER_KERNEL\|prepare_share_images\|pack_directory_ext4" \
+    "'"$ROOT"'/crates/fluxvm-containerd-shim/src/main.rs" \
+    "'"$ROOT"'/crates/fluxvm-firecracker/src/lib.rs" \
+    "'"$ROOT"'/crates/fluxvm-core/src/fs_image.rs" >/dev/null
+'
+
+# P0 — Calico/Flannel churn harness present (needs root for live churn)
+run_leg cni-churn bash -c '
+  test -x "'"$ROOT"'/scripts/evidence-cni-churn.sh" && \
+  grep -n "calico\|flannel\|CniProvider::Calico\|CniProvider::Flannel" \
+    "'"$ROOT"'/crates/fluxvm-containerd-shim/src/main.rs" \
+    "'"$ROOT"'/scripts/evidence-cni-churn.sh" >/dev/null
+'
+
 # P1 — seccomp NOTIF_ADDFD surface (ioctl path or documented gate)
 run_leg notif-addfd bash -c '
   grep -n "NOTIF_ADDFD\|SECCOMP_IOCTL_NOTIF_ADDFD\|addfd" \

@@ -6114,5 +6114,11 @@ mod oci_fixture_tests {
         assert!(hostpath.get("mounts").is_some() || hostpath.get("linux").is_some());
         let tty = fixture("tty-churn.json");
         assert!(tty.get("process").is_some() || tty.get("ociVersion").is_some());
+        let fc = fixture("firecracker-shares.json");
+        assert_eq!(
+            fc["annotations"]["io.zyvor.fluxvm.share-mode"],
+            "ext4-block"
+        );
+        assert!(fc.get("mounts").is_some());
     }
 }

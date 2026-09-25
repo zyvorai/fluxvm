@@ -813,11 +813,13 @@ mod tests {
                     bridge: "br1".into(),
                     mac: Some("02:00:00:00:00:02".into()),
                     tap_name: Some("tap1".into()),
+                    direct: None,
                 },
                 fluxvm_core::model::ExtraNic {
                     bridge: "br2".into(),
                     mac: None,
                     tap_name: Some("tap2".into()),
+                    direct: None,
                 },
             ],
         };

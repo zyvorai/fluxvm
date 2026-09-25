@@ -57,13 +57,17 @@ Custom CPUID templates and Track B density publication remain out of scope here.
 
 ## Suggested next implementation set
 
-**S1–S2 / S8–S11 / F1–F2 / H1–H3 / H5** closed on the code + gate path.
-Remaining honesty bounds:
+**S1–S11 / CNI / DP / F1–F2 / H1–H3 / H5 / FC1–FC3** closed on the code +
+gate path. Secure Containers P0/P1 multi-VMM (incl. Firecracker block shares)
+is shipped; RuntimeClass is GA.
+
+Remaining honesty bounds (live lab only):
 
 1. S2 production still prefers a real second k8s CNI kubeconfig (`FLUXVM_SECOND_CNI_KUBECONFIG`); nftables stand-in plus `scripts/evidence-cni-churn.sh` are the portable default.
-2. S9 RuntimeClass is GA (not a full Kata product claim). Warm-pool claim is `FLUXVM_CONTAINER_WARM_POOL=<name>` (template `network.mode=none`, then NIC hotplug).
+2. Live SC matrix: TTY churn, enforcing-SELinux mount label, multi-CNI under load (`FLUXVM_SECURE_CONTAINERS_E2E=1`).
 3. S10 needs `FLUXVM_FLEET_E2E=1` + ≥2 SSH hosts; S11 needs a runnable FluxVM guest on the lab host.
 4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM. H4 remains deferred.
+5. Remote seccomp policy RPC remains explicitly out of scope (Set 11).
 
 Portable CI maps each code-side use case to a test target in
 [secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)

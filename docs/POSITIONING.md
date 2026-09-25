@@ -73,7 +73,7 @@ Explicitly **not** a replacement — `virtctl`, live migration, and CDI stay Kub
 
 ### vs. gVisor / Kata Containers (isolation-shape analogies only)
 
-FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vsock + TTL reaper) produces **the same isolation shape** as gVisor- or Firecracker-based CI sandboxes — this is an analogy about the security properties, not a feature-parity claim. Similarly, Secure Containers aims for "the same security shape users expect from Kata Containers," but PRODUCTION.md is explicit that it isn't Kata-equivalent yet (hostPath hotplug and broader CNI/OCI conformance are open gaps). Don't market either as matching gVisor or Kata feature-for-feature — the honest claim is isolation-shape similarity built on FluxVM's own primitives, not a compatibility layer.
+FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vsock + TTL reaper) produces **the same isolation shape** as gVisor- or Firecracker-based CI sandboxes — this is an analogy about the security properties, not a feature-parity claim. Similarly, Secure Containers aims for "the same security shape users expect from Kata Containers," but PRODUCTION.md is explicit that it isn't Kata-equivalent yet (live e2e under load, Firecracker block-staging vs live virtiofs, remote policy RPC out of scope). Don't market either as matching gVisor or Kata feature-for-feature — the honest claim is isolation-shape similarity built on FluxVM's own primitives, not a compatibility layer.
 
 ### When to look elsewhere
 

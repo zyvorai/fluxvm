@@ -172,6 +172,8 @@ compatibility.
    VMMs.** Set `FLUXVM_CONTAINER_BACKEND=qemu|cloud-hypervisor|firecracker`.
    Firecracker has **no virtio-fs** upstream: Pod shares are packed to ext4
    block images at launch (write-through hostPath/live sync is QEMU/CH only).
+   Firecracker also needs a Linux kernel via `FLUXVM_CONTAINER_KERNEL` or the
+   daemon's `firecracker_kernel` config.
 2. **CNI coverage is Cilium-, Calico-, and Flannel-aware on the primary
    interface.** The L2 handoff auto-detects the provider
    (`FLUXVM_CONTAINER_CNI_PROVIDER=auto|cilium|calico|flannel|generic`),
@@ -214,6 +216,22 @@ compatibility.
 
 ## Next gates to production Kata-style Kubernetes support
 
+Code-side P0/P1 phases below are **closed**. Remaining work is live-node
+evidence under `FLUXVM_SECURE_CONTAINERS_E2E=1` / lab scripts — not new VMM
+surface.
+
+| Phase | Status | Notes |
+|---|---|---|
+| P0 OCI fixtures + parsers | **Done** | `tests/oci-fixtures/` + agent parser tests |
+| P0 CNI (Cilium/Calico/Flannel/Multus) | **Done** | providers + Multus hybrid/direct; live multi-CNI under load open |
+| P0 hostPath broker | **Done** | create-time allowlist + QEMU/CH hotplug broker |
+| P0/P1 multi-VMM (QEMU/CH/FC) | **Done** | FC = ext4 block shares + `FLUXVM_CONTAINER_KERNEL` |
+| P1 seccomp NOTIFY + ADDFD | **Done** | remote policy RPC out of scope |
+| P1 warm-pool claim | **Done** | QEMU/CH; FC cold-create only |
+| Live e2e matrix (TTY, SELinux, CNI load) | **Open (lab)** | `FLUXVM_SECURE_CONTAINERS_E2E=1` + `scripts/complete-secure-containers-phases.sh` |
+| Remote policy RPC | **Out of scope** | Set 11 docs |
+| Phase orchestrator | **Done** | `scripts/complete-secure-containers-phases.sh` |
+
 ### P0 — OCI conformance fixtures
 
 PID/mount/IPC/UTS namespace isolation (opt-in `CLONE_NEWUSER`) and
@@ -227,8 +245,9 @@ controls on real KVM/containerd), not more fragment files.
 Cilium / Calico / Flannel providers auto-detect
 (`FLUXVM_CONTAINER_CNI_PROVIDER`); Multus `netN` secondaries attach as extra
 guest NICs (hybrid bridge default, optional per-secondary direct via
-`FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`). Remaining: multi-CNI conformance under
-load on live nodes.
+`FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`). Portable churn:
+`scripts/evidence-cni-churn.sh`. Remaining: multi-CNI conformance under load on
+live nodes.
 
 ### P0 — volume broker / explicit hostPath
 
@@ -249,7 +268,8 @@ containerd/Kubernetes Pod runs, not just the guest-agent binary in isolation.
 ### P1 — streaming/TTY conformance
 
 Run repeated init + exec terminal resize, stdin close, high-volume stdout/stderr
-and abrupt-exit tests on self-hosted KVM/containerd nodes.
+and abrupt-exit tests on self-hosted KVM/containerd nodes
+(`scripts/e2e-secure-containers-tty.sh`).
 
 ### P1 — performance
 
@@ -267,8 +287,9 @@ not a Kata-equivalent product.
 
 QEMU, Cloud Hypervisor, and Firecracker are all selectable via
 `FLUXVM_CONTAINER_BACKEND`. Firecracker packs Pod shares to ext4 at launch
-(no live virtio-fs). Remaining honesty bounds are live e2e gates and remote
-policy RPC (explicitly out of scope) — not a fourth VMM.
+(no live virtio-fs) and needs `FLUXVM_CONTAINER_KERNEL` (or daemon
+`firecracker_kernel`). See `deploy/containerd/env.example`. Remaining honesty
+bounds are live e2e gates — not a fourth VMM.
 
 ## Installation
 
@@ -282,6 +303,9 @@ Set the guest image explicitly when needed:
 export FLUXVM_CONTAINER_GUEST_IMAGE=/var/lib/fluxvm/images/secure-container.qcow2
 export FLUXVM_API_URL=http://127.0.0.1:7788
 # export FLUXVM_API_TOKEN=...   # if FluxVM API auth is enabled
+# Firecracker: also set a Linux kernel (or configure firecracker_kernel on the daemon)
+# export FLUXVM_CONTAINER_BACKEND=firecracker
+# export FLUXVM_CONTAINER_KERNEL=/var/lib/fluxvm/images/vmlinux
 ```
 
 Merge `deploy/containerd/fluxvm-runtime.toml` into containerd configuration,

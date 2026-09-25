@@ -97,6 +97,10 @@ struct RuntimeConfig {
     api_url: String,
     api_token: Option<String>,
     guest_image: PathBuf,
+    /// Optional Linux kernel for Firecracker Secure Containers
+    /// (`FLUXVM_CONTAINER_KERNEL`). Falls back to daemon `firecracker_kernel`
+    /// when unset; required for a cold Firecracker create to succeed.
+    kernel: Option<PathBuf>,
     container_agent_binary: PathBuf,
     state_dir: PathBuf,
     vcpus: u8,
@@ -125,9 +129,11 @@ struct RuntimeConfig {
     vfio_allow: Vec<String>,
     vfio_require_iommu_group: bool,
     guest_device_allow: Vec<String>,
-    /// `qemu` (default) or `cloud-hypervisor` — Secure Containers VMM backend.
-    /// `FLUXVM_CONTAINER_BACKEND`. Cloud Hypervisor requires CNI/tap (no user NAT)
-    /// and a CH-bootable guest image (kernel or firmware).
+    /// `qemu` (default), `cloud-hypervisor`, or `firecracker` — Secure
+    /// Containers VMM (`FLUXVM_CONTAINER_BACKEND`). Cloud Hypervisor requires
+    /// CNI/tap (no user NAT). Firecracker needs a kernel via
+    /// `FLUXVM_CONTAINER_KERNEL` or daemon `firecracker_kernel`, and packs
+    /// Pod shares to ext4 (no virtio-fs / warm-pool share hotplug).
     backend: String,
     device_unplug_timeout_secs: u64,
 }
@@ -166,6 +172,7 @@ impl Default for RuntimeConfig {
             guest_image: std::env::var_os("FLUXVM_CONTAINER_GUEST_IMAGE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/var/lib/fluxvm/images/secure-container.qcow2")),
+            kernel: std::env::var_os("FLUXVM_CONTAINER_KERNEL").map(PathBuf::from),
             container_agent_binary: std::env::var_os("FLUXVM_CONTAINER_AGENT_BINARY")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/usr/local/libexec/fluxvm-container-agent")),
@@ -1200,6 +1207,22 @@ impl Service {
                 self.cfg.guest_image.display()
             );
         }
+        if self.cfg.backend == "firecracker" {
+            if let Some(kernel) = &self.cfg.kernel {
+                if !kernel.exists() {
+                    bail!(
+                        "FLUXVM_CONTAINER_KERNEL does not exist: {} \
+                         (Firecracker Secure Containers need a Linux kernel)",
+                        kernel.display()
+                    );
+                }
+            } else {
+                warn!(
+                    "FLUXVM_CONTAINER_BACKEND=firecracker without FLUXVM_CONTAINER_KERNEL; \
+                     relying on daemon firecracker_kernel"
+                );
+            }
+        }
         if !self.cfg.container_agent_binary.exists() {
             bail!(
                 "fluxvm-container-agent binary does not exist: {}",
@@ -1355,7 +1378,7 @@ impl Service {
             kubelet_mounts.push((tag, guest));
         }
 
-        let create = json!({
+        let mut create = json!({
             "name": format!("ctr-{}", safe_name(&self.group)),
             "backend": self.cfg.backend,
             "image": self.cfg.guest_image,
@@ -1364,9 +1387,17 @@ impl Service {
             "network": network,
             "agent": {"enabled": true},
             "shared_folders": shared_folders,
-            "shared_memory": !shared_folders.is_empty(),
+            // virtiofs / vhost-user-fs needs shareable guest memory. Firecracker
+            // packs shares to ext4 instead — leave shared_memory off.
+            "shared_memory": self.cfg.backend != "firecracker" && !shared_folders.is_empty(),
             "pod_uid": hints.pod_uid
         });
+        if let Some(kernel) = &self.cfg.kernel {
+            create
+                .as_object_mut()
+                .expect("create is an object")
+                .insert("kernel".into(), json!(kernel));
+        }
 
         let (create_path, mut create_body) = if let Some(pool) = &self.cfg.warm_pool {
             info!("secure-container sandbox claiming warm pool {pool}");
@@ -6355,10 +6386,20 @@ mod tests {
             Some(CniProvider::Cilium)
         );
         assert_eq!(
+            parse_cni_provider_label("calico"),
+            Some(CniProvider::Calico)
+        );
+        assert_eq!(
+            parse_cni_provider_label("flannel"),
+            Some(CniProvider::Flannel)
+        );
+        assert_eq!(
             parse_cni_provider_label("GENERIC"),
             Some(CniProvider::Generic)
         );
         assert_eq!(parse_cni_provider_label("auto"), None);
+        assert_eq!(CniProvider::Calico.as_str(), "calico");
+        assert_eq!(CniProvider::Flannel.as_str(), "flannel");
         assert!(is_multus_secondary_iface("net1"));
         assert!(is_multus_secondary_iface("net12"));
         assert!(!is_multus_secondary_iface("eth0"));
@@ -6367,6 +6408,18 @@ mod tests {
         assert!(is_multus_secondary_iface("net0"));
         assert!(!is_multus_secondary_iface("lxc123"));
         assert!(!is_multus_secondary_iface("cilium_host"));
+    }
+
+    #[test]
+    fn cni_datapath_and_multus_mode_parse() {
+        assert_eq!(CniDatapath::parse("bridge"), Some(CniDatapath::Bridge));
+        assert_eq!(CniDatapath::parse("direct"), Some(CniDatapath::Direct));
+        assert_eq!(CniDatapath::parse("auto"), Some(CniDatapath::Auto));
+        // Empty env value means "unset" → default Auto.
+        assert_eq!(CniDatapath::parse(""), Some(CniDatapath::Auto));
+        assert_eq!(CniDatapath::parse("nope"), None);
+        // Multus secondaries reuse the same parser (env MULTUS_DATAPATH).
+        assert_eq!(CniDatapath::parse("DIRECT"), Some(CniDatapath::Direct));
     }
 
     #[test]

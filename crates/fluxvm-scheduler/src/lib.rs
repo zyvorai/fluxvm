@@ -142,6 +142,7 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
                 bridge,
                 mac,
                 tap_name: Some(tap),
+                direct: None,
             });
             NetworkSpec::Tap {
                 tap_name,
@@ -4365,6 +4366,7 @@ mod nic_hotplug_tests {
                 bridge: "fvbhnet1".into(),
                 mac: Some("02:11:22:33:44:55".into()),
                 tap_name: Some("hn1abcdef".into()),
+                direct: None,
             }]
         );
         assert_eq!(nic_hotplug_index(&record.request.network), 2);
