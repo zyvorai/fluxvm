@@ -447,6 +447,10 @@ fn validate_cpu_template(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
 /// A no-op (`Ok(())`) when `req.tenant` is unset or has no matching
 /// `[[policy.tenants]]` entry -- unrestricted by this mechanism, same
 /// "absent means unrestricted" convention every other `Policy` field has.
+///
+/// Production create path uses `fluxvm_core::policy::enforce_tenant_totals`;
+/// this helper remains for unit coverage of the same rules.
+#[cfg(test)]
 fn validate_tenant_policy(
     req: &CreateVmRequest,
     cfg: &Config,
