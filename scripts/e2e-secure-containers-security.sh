@@ -32,7 +32,7 @@ spec:
 YAML
 
 kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$POD" --timeout=180s
-mode=$(kubectl -n "$NAMESPACE" exec "$POD" -- awk '/^Seccomp:/ {print $2}' /proc/self/status | tr -d '\r')
+mode=$(kubectl -n "$NAMESPACE" exec "$POD" -- sh -c "grep '^Seccomp:' /proc/self/status | sed 's/^Seccomp:[[:space:]]*//' | tr -d '\r'")
 if [[ "$mode" != "2" ]]; then
   echo "expected seccomp filter mode 2, got: ${mode:-<empty>}" >&2
   exit 1

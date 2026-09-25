@@ -65,7 +65,7 @@ is shipped; RuntimeClass is GA.
 Remaining honesty bounds (live lab only):
 
 1. S2 production still prefers a real second k8s CNI kubeconfig (`FLUXVM_SECOND_CNI_KUBECONFIG`); nftables stand-in plus `scripts/evidence-cni-churn.sh` are the portable default.
-2. Live SC matrix: TTY churn, enforcing-SELinux mount label, multi-CNI under load (`FLUXVM_SECURE_CONTAINERS_E2E=1`).
+2. Live SC matrix: lab evidence archived (`docs/benchmarks/evidence/sc-live-matrix-*.txt`) — TTY/ctr/namespaces/userns-load/CNI-churn PASS; enforcing-SELinux mountLabel still needs an SELinux guest; seccomp NOTIFY live path still open.
 3. S10 needs `FLUXVM_FLEET_E2E=1` + ≥2 SSH hosts; S11 needs a runnable FluxVM guest on the lab host.
 4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM. H4 remains deferred.
 5. Remote seccomp policy RPC remains explicitly out of scope (Set 11).

@@ -3,6 +3,14 @@
 ## 0.4.0 (unreleased)
 
 ### Changed
+- **Secure Containers live lab gates.** Provision helper
+  (`scripts/provision-secure-containers-lab.sh`), evidence runner
+  (`scripts/evidence-sc-live-matrix.sh`), and e2e legs for userns-load /
+  seccomp-NOTIFY / SELinux-mountLabel. Lab evidence on 175.110.122.71:
+  ctr + TTY + namespaces + userns-load + CNI churn PASS; SELinux skipped
+  (no enforcing host); seccomp NOTIFY still timing out. Non-goals
+  (remote policy RPC, FC live virtiofs, Kata-equivalence) recorded in
+  evidence.
 - **Docs: Secure Containers P0 status sync.** Set 4/5 handoff “remaining”
   lists, `deploy/containerd/README` hostPath note, `PRODUCT_OVERVIEW` direct
   datapath row, and `NEXT-FEATURES` intro now match GA multi-VMM / broker /
