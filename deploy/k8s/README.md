@@ -13,7 +13,7 @@ per-node operator instance talking to a *local* `fluxctl serve` REST API.
 This DaemonSet is a straight containerization of that model — one pod per
 `fluxvm-capable` node, two containers sharing the pod's network namespace.
 
-A separate, developer-preview path — **Secure Containers** — does use containerd
+A separate GA path — **Secure Containers** — does use containerd
 RuntimeClass `fluxvm` / `io.containerd.fluxvm.v2` for OCI workloads inside a
 FluxVM (Sets 2–5: CNI L2 + cgroups; task events + OCI hardening; Pod-UID
 write-through volumes + guest seccomp/paths; VSOCK stdio + TTY/PTY). That

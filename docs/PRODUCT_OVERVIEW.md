@@ -43,7 +43,7 @@ The exhaustive, line-by-line checklist lives in **[FEATURES.md](../FEATURES.md)*
 
 **Kubernetes & fleet** — `DisposableVm` CRD + node-local operator (verified end to end against a real k3s cluster, 9/9 checks passing); `fluxvm-microvm` scheduler-native path as a KubeVirt alternative; `fluxvm-agent` distributed node-agent with a central fleet registry and load-aware placement, verified across two real, physically separate hosts.
 
-**Secure Containers** *(developer preview)* — containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one QEMU FluxVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, guest AppArmor/SELinux/seccomp enforcement. Not yet Kata-equivalent — see [docs/secure-containers.md](secure-containers.md) for the itemized gaps.
+**Secure Containers** *(GA)* — containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one QEMU FluxVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, guest AppArmor/SELinux/seccomp enforcement. Not Kata-equivalent — see [docs/secure-containers.md](secure-containers.md) for the itemized GA boundaries.
 
 **Sentinel observability** — eBPF-based host + guest runtime intelligence: per-VM syscall/page-fault telemetry, drop-reason tracking, flight recorder, BPF-LSM VMM guard/QoS, XDP shield, topology steering.
 
@@ -86,7 +86,7 @@ Full diagrams (image pipeline, Secure Containers request flow, Network Fabric pa
 | Live migration / CDI / `virtctl` | QEMU source + receiver (not KubeVirt parity); no CDI/`virtctl` | No (needs orchestration layer) | Yes |
 | eBPF/TC dataplane | Yes — Network Fabric, GA schema v4 | No | Depends on CNI |
 | Multi-host fleet management | Yes — `fluxvm-agent`, verified across 2 real hosts | No (needs external orchestration) | Via Kubernetes scheduler |
-| OCI/containerd workload support | Developer preview (Secure Containers) | No | No (different workload model) |
+| OCI/containerd workload support | GA (Secure Containers; not Kata-equivalent) | No | No (different workload model) |
 | License | Apache-2.0 | LGPL | Apache-2.0 |
 
 This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt still owns CDI/`virtctl` and full cluster migration orchestration; FluxVM's QEMU migration path is host-API + Fabric, not KubeVirt parity; libvirt has broader hypervisor driver support).

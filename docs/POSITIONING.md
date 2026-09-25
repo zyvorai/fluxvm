@@ -78,7 +78,7 @@ FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vs
 ### When to look elsewhere
 
 - **You need a finished multi-tenant security boundary today** — see the [maturity caveat](../README.md#maturity-whats-real-today).
-- **You need production-grade OCI/containerd workloads today** — Secure Containers is developer preview.
+- **You need full Kata / CDI / non-QEMU Secure Containers VMM parity** — Secure Containers is GA with documented scope boundaries; see [secure-containers.md](secure-containers.md).
 - **You need KubeVirt/OpenShift API compatibility** — not a goal here; see the vs. KubeVirt section above.
 - **You need published boot-latency/density/throughput numbers for capacity planning** — measure with [capability-figures.md](capability-figures.md) / benches; don't cite unpublished SPECs as product claims.
 
@@ -101,7 +101,7 @@ FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vs
 - Claiming feature parity with Kata Containers or gVisor — the honest claim is isolation-shape similarity, not compatibility
 - Citing unpublished boot-latency, density, or throughput numbers — measure first; see [capability-figures.md](capability-figures.md)
 - Softening the MVP/multi-tenant-security-boundary caveat to sound more finished than it is
-- Presenting Secure Containers as production-ready — it's explicitly developer preview
+- Presenting Secure Containers as Kata-equivalent or claiming unrestricted hostPath — GA with documented scope boundaries
 
 ---
 

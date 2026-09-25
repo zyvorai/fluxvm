@@ -28,7 +28,7 @@ events/OCI hardening, Pod-UID volumes + guest seccomp/paths, VSOCK stdio/TTY), s
 [Set 4](../../../secure-containers-set4.md),
 [Set 5](../../../secure-containers-set5.md), and
 [`deploy/containerd/`](../../../../deploy/containerd/).
-That path is developer-preview and is not what this DaemonSet deploys.
+That path is GA (with documented scope boundaries) and is not what this DaemonSet deploys.
 
 ## What gets deployed
 

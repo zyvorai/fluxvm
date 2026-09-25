@@ -29,8 +29,8 @@ timestamps).
 
 ## Still explicit follow-ups
 
-This remains a developer-preview runtime until the real-node conformance gate
-is complete. The following are not claimed as finished by Set 3 alone:
+**Status: GA** for the Secure Containers RuntimeClass overall; Set 3 alone does
+not claim the items below as finished:
 
 1. TTY/PTY and resize semantics.
 2. CSI/PVC write-through and dynamic volume hotplug — **partially addressed in

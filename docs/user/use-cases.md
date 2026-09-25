@@ -88,7 +88,7 @@ one QEMU FluxVM (runtime `io.containerd.fluxvm.v2`, RuntimeClass `fluxvm`).
 Set 2 adds optional CNI L2 Pod IP + guest cgroup stats; Set 3 adds task events +
 OCI process hardening; Set 4 adds Pod-UID write-through volumes + guest
 RO/masked paths/devices/sysctls/libseccomp; Set 5 adds VSOCK stdio + guest PTY.
-Developer preview — see
+GA — see
 [secure-containers.md](../secure-containers.md),
 [Set 5](../secure-containers-set5.md).
 
