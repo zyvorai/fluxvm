@@ -1,5 +1,7 @@
 # Network policy tutorials (FluxVM Fabric)
 
+**One identity. One policy. At the VM edge.**
+
 Short, copy-paste guides for label identities, CNP documents, deny lists,
 audit mode, and observe — aimed at operators of the VM-edge dataplane.
 

@@ -1,5 +1,7 @@
 # Use cases
 
+**Outcomes that map to shipping features — nothing aspirational.**
+
 FluxVM is a Rust-native VM control plane: create and manage isolated
 virtual machines backed by QEMU/KVM, Cloud Hypervisor, Firecracker, or the
 in-tree FluxVM hypervisor. Short-lived / disposable patterns (optional

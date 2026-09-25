@@ -1,5 +1,7 @@
 # FluxVM Secure Containers — containerd runtime v2
 
+**A Pod. Its own guest kernel.** *(Developer preview)*
+
 FluxVM Secure Containers is the first container-runtime layer on top of the
 existing FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support.
 The goal is the same security shape users expect from Kata Containers: a Pod

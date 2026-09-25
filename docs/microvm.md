@@ -1,5 +1,7 @@
 # FluxVM MicroVM
 
+**Schedule a VM like a Pod. Without KubeVirt.**
+
 Kubernetes-native MicroVM compute for FluxVM — **without KubeVirt**.
 Supports short-lived / disposable jobs when you set TTLs; not limited to them.
 

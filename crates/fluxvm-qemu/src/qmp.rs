@@ -10,9 +10,15 @@
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::backend::validate_migration_transport;
-use fluxvm_core::model::{MigrationMode, MigrationPhase, MigrationStartRequest, MigrationStatus};
+use fluxvm_core::model::{
+    MigrationMode, MigrationPhase, MigrationStartRequest, MigrationStatus, MigrationTlsSpec,
+};
 use serde_json::{Value, json};
-use std::{io::ErrorKind, path::Path, time::Duration};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 
@@ -166,6 +172,75 @@ pub async fn migration_status(socket: &Path, timeout: Duration) -> Result<Migrat
     Ok(parse_migration_status(&value))
 }
 
+/// Copies `spec`'s ca/cert/key into the filenames QEMU's `tls-creds-x509`
+/// object expects under `workspace/migtls`.
+pub(crate) fn materialize_tls_dir(
+    workspace: &Path,
+    spec: &MigrationTlsSpec,
+    endpoint: &str,
+) -> Result<PathBuf> {
+    let dir = workspace.join("migtls");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating migration TLS directory {}", dir.display()))?;
+    std::fs::copy(&spec.ca_path, dir.join("ca-cert.pem"))
+        .with_context(|| format!("copying migration TLS CA from {}", spec.ca_path.display()))?;
+    let (cert_name, key_name) = match endpoint {
+        "server" => ("server-cert.pem", "server-key.pem"),
+        "client" => ("client-cert.pem", "client-key.pem"),
+        other => bail!("unknown migration TLS endpoint {other:?} (expected server or client)"),
+    };
+    std::fs::copy(&spec.cert_path, dir.join(cert_name)).with_context(|| {
+        format!(
+            "copying migration TLS cert from {}",
+            spec.cert_path.display()
+        )
+    })?;
+    std::fs::copy(&spec.key_path, dir.join(key_name))
+        .with_context(|| format!("copying migration TLS key from {}", spec.key_path.display()))?;
+    Ok(dir)
+}
+
+/// `object-add` tls-creds-x509, then `migrate-set-parameters` with tls-creds.
+pub(crate) async fn set_migration_tls(
+    socket: &Path,
+    creds_id: &str,
+    dir: &Path,
+    endpoint: &str,
+    tls_hostname: Option<&str>,
+    timeout: Duration,
+) -> Result<()> {
+    execute(
+        socket,
+        "object-add",
+        Some(json!({
+            "qom-type": "tls-creds-x509",
+            "id": creds_id,
+            "dir": dir,
+            "endpoint": endpoint,
+            "verify-peer": true,
+        })),
+        timeout,
+    )
+    .await
+    .context(
+        "object-add tls-creds-x509 failed -- QEMU may have been built without TLS support (--enable-gnutls)",
+    )?;
+
+    let mut params = serde_json::Map::new();
+    params.insert("tls-creds".into(), Value::from(creds_id));
+    if let Some(host) = tls_hostname {
+        params.insert("tls-hostname".into(), Value::from(host));
+    }
+    execute(
+        socket,
+        "migrate-set-parameters",
+        Some(Value::Object(params)),
+        timeout,
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn migration_start(
     socket: &Path,
     request: &MigrationStartRequest,
@@ -213,6 +288,23 @@ pub async fn migration_start(
             socket,
             "migrate-set-parameters",
             Some(Value::Object(params)),
+            timeout,
+        )
+        .await?;
+    }
+
+    if let Some(tls) = &request.tls {
+        let workspace = socket
+            .parent()
+            .context("qmp socket path has no parent workspace directory")?;
+        let dir = materialize_tls_dir(workspace, tls, "client")
+            .context("materializing migration TLS client credentials")?;
+        set_migration_tls(
+            socket,
+            "migtls",
+            &dir,
+            "client",
+            tls.tls_hostname.as_deref(),
             timeout,
         )
         .await?;
@@ -909,6 +1001,32 @@ mod migration_contract_tests {
         for state in ["postcopy-active", "postcopy-paused", "postcopy-recover"] {
             assert_eq!(migration_phase(state), MigrationPhase::PostcopyActive);
         }
+    }
+
+    #[test]
+    fn materialize_tls_dir_writes_qemu_expected_filenames() {
+        let root = tempfile::tempdir().unwrap();
+        let ca = root.path().join("ca.pem");
+        let cert = root.path().join("cert.pem");
+        let key = root.path().join("key.pem");
+        std::fs::write(&ca, b"ca").unwrap();
+        std::fs::write(&cert, b"cert").unwrap();
+        std::fs::write(&key, b"key").unwrap();
+        let tls = MigrationTlsSpec {
+            ca_path: ca,
+            cert_path: cert,
+            key_path: key,
+            tls_hostname: None,
+        };
+        let ws = root.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let dir = materialize_tls_dir(&ws, &tls, "server").unwrap();
+        assert!(dir.join("ca-cert.pem").is_file());
+        assert!(dir.join("server-cert.pem").is_file());
+        assert!(dir.join("server-key.pem").is_file());
+        let client = materialize_tls_dir(&ws, &tls, "client").unwrap();
+        assert!(client.join("client-cert.pem").is_file());
+        assert!(client.join("client-key.pem").is_file());
     }
 }
 

@@ -547,6 +547,25 @@ pub struct MigrationStartRequest {
     pub max_downtime_ms: Option<u64>,
     #[serde(default)]
     pub multifd_channels: Option<u8>,
+    /// When set, the migration stream is authenticated/encrypted via QEMU's
+    /// `tls-creds-x509` object (client/source endpoint). `None` keeps today's
+    /// plain `tcp:`/`unix:` behavior.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
+}
+
+/// Cert/key material for QEMU's `tls-creds-x509` migration transport.
+/// Paths are absolute on the FluxVM host; FluxVM copies them into the
+/// filenames QEMU expects (`ca-cert.pem`, `server-*.pem` / `client-*.pem`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MigrationTlsSpec {
+    pub ca_path: PathBuf,
+    pub cert_path: PathBuf,
+    pub key_path: PathBuf,
+    /// Hostname/IP the source verifies the receiver cert against. Ignored on
+    /// the receiver (server) endpoint.
+    #[serde(default)]
+    pub tls_hostname: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -607,6 +626,10 @@ pub struct MigrationReceiverRequest {
     pub listen_port: u16,
     #[serde(default)]
     pub expires_in_seconds: Option<u64>,
+    /// When set, activate arms `migrate-incoming` with `tls-creds-x509`
+    /// (server endpoint) instead of a plain socket.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
 }
 
 fn default_disk_format() -> String {
@@ -637,6 +660,9 @@ pub struct MigrationReceiver {
     pub vcpus: u8,
     #[serde(default)]
     pub memory_mib: u64,
+    /// TLS material supplied at create time; applied on activate.
+    #[serde(default)]
+    pub tls: Option<MigrationTlsSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1316,10 +1342,15 @@ mod create_vm_request_tests {
                 .unwrap_err()
                 .contains("l2-uplink")
         );
-        assert!(check(r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["fd00::5"]}}"#)
-            .unwrap_err()
-            .contains("IPv4"));
-        assert!(check(r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["not-an-ip"]}}"#).is_err());
+        assert!(check(
+            r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["fd00::5"]}}"#
+        )
+        .unwrap_err()
+        .contains("IPv4"));
+        assert!(check(
+            r#"{"mode":"tap","direct":{"outer":"e","mode":"l2-uplink","guest_ips":["not-an-ip"]}}"#
+        )
+        .is_err());
         let many = (1..=9)
             .map(|i| format!("\"10.0.0.{i}\""))
             .collect::<Vec<_>>()
@@ -1358,5 +1389,94 @@ mod create_vm_request_tests {
         assert!(l2ns.unwrap_err().contains("l2-uplink"));
         // Non-tap variants never trip direct validation.
         assert!(check(r#"{"mode":"none"}"#).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod migration_tls_model_tests {
+    use super::*;
+
+    #[test]
+    fn migration_tls_spec_field_names_match_documented_contract() {
+        let spec = MigrationTlsSpec {
+            ca_path: "a".into(),
+            cert_path: "b".into(),
+            key_path: "c".into(),
+            tls_hostname: Some("d".into()),
+        };
+        let value = serde_json::to_value(&spec).unwrap();
+        let obj = value.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["ca_path", "cert_path", "key_path", "tls_hostname"]
+        );
+    }
+
+    #[test]
+    fn migration_start_request_tls_defaults_none_when_absent() {
+        let value = serde_json::json!({"destination": "tcp:10.0.0.5:4444"});
+        let req: MigrationStartRequest = serde_json::from_value(value).unwrap();
+        assert!(req.tls.is_none());
+        assert_eq!(req.mode, MigrationMode::PreCopy);
+    }
+
+    #[test]
+    fn migration_start_request_tls_round_trips() {
+        let req = MigrationStartRequest {
+            destination: "tcp:10.0.0.5:4444".into(),
+            mode: MigrationMode::PostCopy,
+            bandwidth_mbps: Some(800),
+            max_downtime_ms: Some(300),
+            multifd_channels: Some(4),
+            tls: Some(MigrationTlsSpec {
+                ca_path: "/etc/ca.pem".into(),
+                cert_path: "/etc/cert.pem".into(),
+                key_path: "/etc/key.pem".into(),
+                tls_hostname: Some("dest.example.com".into()),
+            }),
+        };
+        let round_tripped: MigrationStartRequest =
+            serde_json::from_value(serde_json::to_value(&req).unwrap()).unwrap();
+        assert_eq!(round_tripped, req);
+    }
+
+    #[test]
+    fn migration_receiver_request_tls_defaults_none_when_absent() {
+        let value = serde_json::json!({
+            "vcpus": 2,
+            "memory_mib": 1024,
+            "disk": "/srv/shared/disk.raw",
+        });
+        let req: MigrationReceiverRequest = serde_json::from_value(value).unwrap();
+        assert!(req.tls.is_none());
+        assert_eq!(req.listen_host, "0.0.0.0");
+    }
+
+    #[test]
+    fn migration_receiver_persists_tls_field_name() {
+        let value = serde_json::to_value(MigrationReceiver {
+            id: Uuid::nil(),
+            uri: "tcp:10.0.0.1:1".into(),
+            listen_uri: "tcp:0.0.0.0:1".into(),
+            token: "t".into(),
+            expires_at_unix: 0,
+            pid: 1,
+            qmp_socket: "/tmp/qmp.sock".into(),
+            workspace: "/tmp/ws".into(),
+            disk: "/tmp/disk.raw".into(),
+            cgroup_path: None,
+            vcpus: 1,
+            memory_mib: 512,
+            tls: Some(MigrationTlsSpec {
+                ca_path: "a".into(),
+                cert_path: "b".into(),
+                key_path: "c".into(),
+                tls_hostname: None,
+            }),
+        })
+        .unwrap();
+        assert!(value.get("tls").is_some());
     }
 }

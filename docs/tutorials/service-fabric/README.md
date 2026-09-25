@@ -1,5 +1,7 @@
 # Service Fabric tutorial (FluxVM)
 
+**A Maglev VIP on one FluxVM host.**
+
 Stand up a Maglev VIP on a single FluxVM host — schema **4** ABI / program
 generation **6** (Service Fabric **v6**).
 

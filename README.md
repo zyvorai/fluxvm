@@ -2,7 +2,9 @@
 
 <img src="docs/assets/social-preview.png" alt="FluxVM — Run real VMs with a real API. One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the FluxVM hypervisor." width="820">
 
-# Run real VMs with a real API.
+# FluxVM
+
+**Run real VMs with a real API.**
 
 **One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor.**<br>
 No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend.

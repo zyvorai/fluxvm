@@ -1,5 +1,7 @@
 # MicroVM tutorials (FluxVM)
 
+**Schedule a VM like a Pod. Run it on the host VMM.**
+
 Short, copy-paste guides for scheduled MicroVMs on Kubernetes — shadow Pods,
 node agent, Jobs, warm pools, GuestImage catalog, and the DisposableVm bridge.
 

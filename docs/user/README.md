@@ -1,5 +1,7 @@
 # FluxVM — User Documentation
 
+**Run real VMs with a real API. Start here.**
+
 A standalone, minimal-dependency VM control plane — QEMU/KVM, Cloud Hypervisor, and Firecracker behind one API. Optional TTL/CoW for disposable workloads.
 
 | You want to… | Open |

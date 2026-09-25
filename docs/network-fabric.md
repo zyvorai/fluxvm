@@ -1,4 +1,9 @@
-# FluxVM Network Fabric (GA; dataplane schema v4)
+# FluxVM Network Fabric
+
+**Policy at the VM edge. GA.** · dataplane schema **v4**
+
+One TC/eBPF dataplane for identities, groups, deny lists, and CNP-shaped
+policy — pinned under `/sys/fs/bpf/fluxvm`. Not a foreign CNI rewrite.
 
 **Status: GA.** The Network Fabric **v3 GA path** freezes the core VM-edge
 dataplane ABI (TC/eBPF policy, status/stats/flows, schema fingerprints,

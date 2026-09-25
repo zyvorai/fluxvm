@@ -1,5 +1,7 @@
 # FluxVM — Product Positioning
 
+**One control plane. Four backends. A real API.**
+
 **FluxVM** is a Rust-native control plane for creating and managing secure, isolated
 virtual machines on Linux via Firecracker, Cloud Hypervisor, QEMU/KVM, or the in-tree
 FluxVM hypervisor. Short-lived and disposable workloads (TTL cleanup, cheap CoW clones)

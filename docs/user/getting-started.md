@@ -1,5 +1,7 @@
 # Getting started with FluxVM
 
+**Boot a VM. Exec a command. Tear it down.**
+
 Boot a disposable VM on a Linux KVM host — create, exec, and tear down —
 using the FluxVM CLI and REST API.
 

@@ -1,5 +1,7 @@
 # FluxVM — Product Overview
 
+**A host-local VM API — without the platform rewrite.**
+
 This doc is the capability tour and the one authoritative metrics table for FluxVM. For the pitch and quick start, see the [README](../README.md); for who this is (and isn't) for, see [POSITIONING.md](POSITIONING.md); for the exhaustive feature checklist, see [FEATURES.md](../FEATURES.md).
 
 ## The Problem

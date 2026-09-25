@@ -1,5 +1,7 @@
 # Production readiness tutorials (FluxVM)
 
+**Auth. Readyz. Tenant IDs.**
+
 Short guides for the **host-local production bar** — auth, `/readyz`, tenant
 IDs — alongside the dataplane runbook.
 
