@@ -287,16 +287,18 @@ unsafe fn install_filter(kill: bool) -> std::io::Result<()> {
         len: n as u16,
         filter: filter.as_mut_ptr(),
     };
-    if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+    if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    let rc = libc::prctl(
-        libc::PR_SET_SECCOMP,
-        libc::SECCOMP_MODE_FILTER,
-        &prog as *const libc::sock_fprog as libc::c_ulong,
-        0,
-        0,
-    );
+    let rc = unsafe {
+        libc::prctl(
+            libc::PR_SET_SECCOMP,
+            libc::SECCOMP_MODE_FILTER,
+            &prog as *const libc::sock_fprog as libc::c_ulong,
+            0,
+            0,
+        )
+    };
     if rc != 0 {
         let err = std::io::Error::last_os_error();
         if !kill && err.raw_os_error() == Some(libc::EINVAL) {

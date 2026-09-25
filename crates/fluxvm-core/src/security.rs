@@ -469,6 +469,7 @@ pub fn check_operation(profile: SecurityProfile, op: VmOperation) -> Result<()> 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn validate_create_request(
     profile: SecurityProfile,
     backend_is_qemu: bool,

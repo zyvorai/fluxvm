@@ -136,14 +136,14 @@ components, unrelated to `fluxvm-agent`'s VM-placement fleet.
 
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.
-Secure Containers RuntimeClass as full Kata-equivalent (hostPath hotplug,
-broad CNI/OCI conformance fixtures, `CLONE_NEWUSER` unvalidated under load,
-seccomp `SECCOMP_IOCTL_NOTIF_ADDFD`/remote policy RPC) —
+Secure Containers RuntimeClass as full Kata-equivalent (Firecracker has no
+live virtiofs write-through, `CLONE_NEWUSER` unvalidated under load, remote
+policy RPC out of scope) —
 [secure-containers.md](secure-containers.md). Device-cgroup enforcement
-(`BPF_PROG_TYPE_CGROUP_DEVICE`, Set 10) and the seccomp user-notification
-broker (Set 11) are both implemented; live-node validation of the seccomp
-notify path against a real containerd/Kubernetes Pod and a real
-enforcing-SELinux mount label are still open.
+(`BPF_PROG_TYPE_CGROUP_DEVICE`, Set 10), the seccomp user-notification
+broker (Set 11), and `SECCOMP_IOCTL_NOTIF_ADDFD` are implemented; live-node
+validation of the seccomp notify path against a real containerd/Kubernetes
+Pod and a real enforcing-SELinux mount label are still open.
 Sentinel Pod-scoped network policy (Set 6S) automatically enforcing
 Kubernetes `NetworkPolicy` objects — a standalone `fluxvm-networkpolicy-
 controller` DaemonSet compiles both egress and ingress `NetworkPolicy`

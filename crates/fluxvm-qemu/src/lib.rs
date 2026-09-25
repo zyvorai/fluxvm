@@ -16,7 +16,8 @@ use fluxvm_core::{
     backend::{LaunchContext, LaunchResult, VmBackend, path_arg},
     config::Config,
     model::{BackendKind, CreateVmRequest, NetworkSpec, VmRecord},
-    process::{spawn_logged, spawn_swtpm, wait_for_socket_ready},
+    process::spawn_swtpm,
+    virtiofs::{spawn_virtiofsd_instances, spawn_virtiofsd_one, terminate_virtiofsd_pids},
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -25,9 +26,6 @@ const QMP_TIMEOUT: Duration = Duration::from_secs(10);
 /// `savevm` writes guest RAM+device state into the qcow2 — can take well over
 /// 10s on multi-GB cloud images, so use a longer budget than other QMP ops.
 const QMP_SAVEVM_TIMEOUT: Duration = Duration::from_secs(120);
-/// How long to wait for each `virtiofsd` listening socket to accept
-/// connections before failing the launch (QEMU is a vhost-user client).
-const VIRTIOFSD_SOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 /// DIMM slots reserved for memory hotplug when `req.max_memory_mib` isn't
 /// set. Each `device_add pc-dimm` (one per hotplug-memory call) consumes
 /// one slot regardless of its size, so this caps hotplug *calls*, not
@@ -331,10 +329,10 @@ pub fn build_args(
         }
     }
 
-    if req.agent.as_ref().is_some_and(|a| a.enabled) {
-        if let Some(cid) = ctx.guest_cid {
-            a.extend(["-device".into(), format!("vhost-vsock-pci,guest-cid={cid}")]);
-        }
+    if req.agent.as_ref().is_some_and(|a| a.enabled)
+        && let Some(cid) = ctx.guest_cid
+    {
+        a.extend(["-device".into(), format!("vhost-vsock-pci,guest-cid={cid}")]);
     }
 
     if req.qga.as_ref().is_some_and(|q| q.enabled) {
@@ -405,94 +403,6 @@ pub fn build_args(
     Ok(a)
 }
 
-/// Starts one `virtiofsd` serving `host_path` on `workspace/virtiofs-{index}.sock` and waits until its socket
-/// is ready. Returns the pid and the socket path; the caller owns the process.
-async fn spawn_virtiofsd_one(
-    cfg: &Config,
-    workspace: &Path,
-    index: usize,
-    host_path: &Path,
-) -> Result<(u32, PathBuf)> {
-    let socket = workspace.join(format!("virtiofs-{index}.sock"));
-    // Stale sockets from a previous failed launch make exists()/connect
-    // race: the path is present but nothing accepts → Connection refused.
-    let _ = tokio::fs::remove_file(&socket).await;
-    let args = vec![
-        // Ubuntu/systemd hosts often fail virtiofsd's default namespace
-        // sandbox ("Error creating sandbox" / capability sync) when
-        // spawned under ProtectSystem/NoNewPrivileges. Fail-open to an
-        // explicit none sandbox so Secure Containers shared folders work.
-        "--sandbox".to_string(),
-        "none".to_string(),
-        "--seccomp".to_string(),
-        "none".to_string(),
-        "--socket-path".to_string(),
-        path_arg(&socket),
-        "--shared-dir".to_string(),
-        path_arg(host_path),
-    ];
-    // rust-vmm virtiofsd (common on Ubuntu/k3s hosts) has no --readonly /
-    // -o ro. Enforce read-only via guest fstab in the scheduler when
-    // share.read_only is set; do not pass a flag that aborts virtiofsd
-    // before it binds the vhost-user socket.
-    let log = workspace.join(format!("virtiofsd-{index}.log"));
-    let child = spawn_logged(&cfg.virtiofsd_binary, &args, &log)
-        .await
-        .with_context(|| {
-            format!(
-                "spawning virtiofsd for shared_folders[{index}] ({})",
-                host_path.display()
-            )
-        })?;
-    let Some(pid) = child.id() else {
-        anyhow::bail!("virtiofsd for shared_folders[{index}] exited before PID was available");
-    };
-    // QEMU connects as the vhost-user *client*. Do not probe with
-    // UnixStream::connect — that can consume virtiofsd's single accept.
-    // Stale sockets (path present, nothing listening) caused Connection
-    // refused; we unlink before spawn and wait for a *new* path while
-    // the child is still alive.
-    if let Err(e) = wait_for_socket_ready(
-        pid,
-        &socket,
-        VIRTIOFSD_SOCKET_TIMEOUT,
-        &format!("virtiofsd for shared_folders[{index}]"),
-        &log,
-    )
-    .await
-    {
-        kill_pids(&[pid]);
-        return Err(e);
-    }
-    Ok((pid, socket))
-}
-
-/// Spawns one `virtiofsd` per `req.shared_folders` entry, in order, each
-/// listening on its own socket under `ctx.workspace`. On any failure,
-/// already-spawned instances from this call are killed before returning —
-/// callers never have to reconcile a partial set themselves.
-async fn spawn_virtiofsd_instances(
-    cfg: &Config,
-    req: &CreateVmRequest,
-    ctx: &LaunchContext,
-) -> Result<(Vec<u32>, Vec<VirtiofsSocket>)> {
-    let mut pids = Vec::new();
-    let mut sockets = Vec::new();
-    for (i, share) in req.shared_folders.iter().enumerate() {
-        match spawn_virtiofsd_one(cfg, &ctx.workspace, i, &share.host_path).await {
-            Ok((pid, socket)) => {
-                pids.push(pid);
-                sockets.push((format!("fs{i}"), socket));
-            }
-            Err(e) => {
-                kill_pids(&pids);
-                return Err(e);
-            }
-        }
-    }
-    Ok((pids, sockets))
-}
-
 /// Hot-adds a virtiofs share to a running QEMU VM: starts a `virtiofsd` for `host_path` and plugs a
 /// `vhost-user-fs-pci` device on the first free of the top root ports. `index` is the share's index in the
 /// VM's `shared_folders` (its tag is `fs{index}`). Returns the `virtiofsd` pid, which the caller records
@@ -513,7 +423,7 @@ pub async fn hotplug_virtiofs(
         match qmp::hotplug_virtiofs(&qmp_socket, index, &socket, &tag, port, QMP_TIMEOUT).await {
             Ok(()) => return Ok(pid),
             Err(e) => {
-                kill_pids(&[pid]);
+                terminate_virtiofsd_pids(&[pid]);
                 last_err = Some(e);
             }
         }
@@ -526,11 +436,7 @@ pub async fn hotplug_virtiofs(
 }
 
 fn kill_pids(pids: &[u32]) {
-    for pid in pids {
-        unsafe {
-            libc::kill(*pid as libc::pid_t, libc::SIGKILL);
-        }
-    }
+    terminate_virtiofsd_pids(pids);
 }
 
 #[async_trait]
@@ -905,11 +811,13 @@ mod tests {
                     bridge: "br1".into(),
                     mac: Some("02:00:00:00:00:02".into()),
                     tap_name: Some("tap1".into()),
+                    direct: None,
                 },
                 fluxvm_core::model::ExtraNic {
                     bridge: "br2".into(),
                     mac: None,
                     tap_name: Some("tap2".into()),
+                    direct: None,
                 },
             ],
         };

@@ -173,10 +173,10 @@ pub fn vfio_group_held(group_id: u32) -> bool {
             continue;
         };
         for fd in fds.flatten() {
-            if let Ok(link) = fs::read_link(fd.path()) {
-                if link.to_string_lossy() == target {
-                    return true;
-                }
+            if let Ok(link) = fs::read_link(fd.path())
+                && link.to_string_lossy() == target
+            {
+                return true;
             }
         }
     }
@@ -317,12 +317,13 @@ fn restore_driver(bdf: &str, previous: Option<&str>) -> Result<()> {
     if Path::new(&override_path).exists() {
         // Empty string clears the override on modern kernels.
         let _ = fs::write(&override_path, "");
-        if let Some(driver) = previous {
-            if !driver.is_empty() && driver != VFIO_DRIVER {
-                let _ = fs::write(&override_path, driver);
-                let bind_path = format!("/sys/bus/pci/drivers/{driver}/bind");
-                let _ = fs::write(&bind_path, bdf);
-            }
+        if let Some(driver) = previous
+            && !driver.is_empty()
+            && driver != VFIO_DRIVER
+        {
+            let _ = fs::write(&override_path, driver);
+            let bind_path = format!("/sys/bus/pci/drivers/{driver}/bind");
+            let _ = fs::write(&bind_path, bdf);
         }
         // Trigger a reprobe.
         let _ = fs::write(format!("{PCI_DEVICES}/{bdf}/driver_override"), "");

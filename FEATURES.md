@@ -158,14 +158,16 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 ## Secure Containers (GA)
 
 - Containerd runtime-v2 shim `containerd-shim-fluxvm-v2`, RuntimeClass handler `fluxvm`
-- Maps a Pod/task group onto one QEMU FluxVM (`io.containerd.fluxvm.v2`)
-- CNI L2 — guest gets the real Pod IP when a CRI netns exists
+- Maps a Pod/task group onto one QEMU, Cloud Hypervisor, or Firecracker FluxVM (`FLUXVM_CONTAINER_BACKEND`; Firecracker uses ext4 block staging for Pod shares — no virtio-fs)
+- CNI L2 — guest gets the real Pod IP when a CRI netns exists (Cilium / Calico / Flannel / generic)
+- Multus `netN` hybrid: direct primary + bridge or per-secondary direct (`FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`)
+- Allowlisted hostPath broker (create-time colon list + optional hotplug via `FLUXVM_HOSTPATH_BROKER`)
 - Guest cgroup-v2 stats and resource updates
 - Containerd task events, guest OCI process hardening
 - Pod-UID write-through volumes, guest RO/masked paths/devices/sysctls/libseccomp
 - VSOCK stdio streaming, real guest PTY / `ResizePty`
 - Guest AppArmor/SELinux/seccomp enforcement
-- **Known gaps vs Kata / full OCI**: `hostPath` hotplug, broader CNI/OCI conformance, QEMU-only VMM — see [docs/secure-containers.md](docs/secure-containers.md) and [docs/PRODUCTION.md](docs/PRODUCTION.md)
+- **Known gaps vs full Kata**: live e2e matrix under load; seccomp remote policy RPC (out of scope); Firecracker has no live virtiofs write-through — see [docs/secure-containers.md](docs/secure-containers.md) and [docs/PRODUCTION.md](docs/PRODUCTION.md)
 
 ## Sentinel Observability
 

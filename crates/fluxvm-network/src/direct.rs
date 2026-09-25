@@ -175,9 +175,17 @@ pub struct DirectAttach {
     /// Guest MAC: the inbound steering key for `DirectMode::L2Uplink`.
     #[serde(default)]
     pub guest_mac: Option<String>,
+    /// Host tap name when this is a Multus/extra direct NIC (primary uses the
+    /// VM's main tap from the dataplane iface marker).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_name: Option<String>,
 }
 
 const RECORD_FILE: &str = "direct.json";
+
+fn extra_record_file(index: usize) -> String {
+    format!("direct-extra-{index}.json")
+}
 
 pub(crate) fn record_in(dir: &Path, a: &DirectAttach) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -198,6 +206,35 @@ pub fn record(id: Uuid, a: &DirectAttach) -> Result<()> {
 /// The direct attach recorded for `id`, if it is a direct VM.
 pub fn recorded(id: Uuid) -> Option<DirectAttach> {
     recorded_in(&crate::ebpf::vm_meta_dir(id))
+}
+
+/// Records a Multus/extra direct attach alongside the primary `direct.json`.
+pub fn record_extra(id: Uuid, index: usize, a: &DirectAttach) -> Result<()> {
+    let dir = crate::ebpf::vm_meta_dir(id);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let json = serde_json::to_vec_pretty(a)?;
+    std::fs::write(dir.join(extra_record_file(index)), json)
+        .context("recording direct extra attach")
+}
+
+/// Primary + every `direct-extra-N.json` recorded for `id`.
+pub fn recorded_all(id: Uuid) -> Vec<DirectAttach> {
+    let dir = crate::ebpf::vm_meta_dir(id);
+    let mut out = Vec::new();
+    if let Some(primary) = recorded_in(&dir) {
+        out.push(primary);
+    }
+    // Bound the scan; Multus rarely exceeds a handful of secondaries.
+    for i in 0..32 {
+        let path = dir.join(extra_record_file(i));
+        let Ok(raw) = std::fs::read(&path) else {
+            continue;
+        };
+        if let Ok(a) = serde_json::from_slice::<DirectAttach>(&raw) {
+            out.push(a);
+        }
+    }
+    out
 }
 
 /// Parses `aa:bb:cc:dd:ee:ff` into its six bytes.
@@ -298,6 +335,7 @@ mod tests {
                 guest_ips: vec![],
             },
             guest_mac: Some("02:00:00:00:00:02".into()),
+            tap_name: None,
         }
     }
 

@@ -1,0 +1,15 @@
+{
+  "_comment": "Firecracker Secure Containers: Pod shares are packed to ext4 at launch (no virtio-fs). Requires FLUXVM_CONTAINER_BACKEND=firecracker and FLUXVM_CONTAINER_KERNEL (or daemon firecracker_kernel). Guest mounts /dev/vdc+ after root+seed.",
+  "annotations": {
+    "io.zyvor.fluxvm.backend": "firecracker",
+    "io.zyvor.fluxvm.share-mode": "ext4-block"
+  },
+  "mounts": [
+    {
+      "destination": "/run/fluxvm/share",
+      "type": "bind",
+      "source": "/var/lib/fluxvm/containerd/share",
+      "options": ["rbind", "rprivate", "rw"]
+    }
+  ]
+}

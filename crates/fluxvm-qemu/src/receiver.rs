@@ -122,6 +122,7 @@ pub struct LaunchedReceiver {
     pub listen_uri: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn launch(
     cfg: &Config,
     workspace: &Path,

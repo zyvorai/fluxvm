@@ -11,5 +11,7 @@ is a minimal `config.json` fragment exercised by
 | `seccomp-notify.json` | Set 11 SCMP_ACT_NOTIFY broker |
 | `hostpath-allowlisted.json` | P0 hostPath broker allowlist |
 | `tty-churn.json` | P1 repeated resize / stdin-close |
+| `firecracker-shares.json` | Firecracker ext4 block-staging shares (no virtio-fs) |
 
 Live execution still requires `FLUXVM_SECURE_CONTAINERS_E2E=1` on a KVM host.
+Firecracker legs also need `FLUXVM_CONTAINER_KERNEL` (or daemon `firecracker_kernel`).

@@ -19,11 +19,11 @@ new wire formats.
 | **S6** | IPv6 extension-header walking | **Implemented by Set 19** (schema-v10 bounded walk in both TC directions; fragments never conntrack-learned) | set14 #2, set16, set19 |
 | **S7** | Wire Set 8S guest cgroup policy from Pod Set 6S/14 | **Implemented by Set 19** (create-time + live CIDR/direction mirror; host TC remains protocol/port SoT) | PRODUCTION, set19 |
 | **S8** | Policy Observer prod sizing + Prometheus scrape | **Done (code + evidence path)** — ServiceMonitor example, sizing model, `scripts/evidence-policy-observer-scrape.sh` + `deploy/prometheus/fluxvm-scrape.yaml`; archive a live RSS scrape into `docs/benchmarks/evidence/` | set15, set19 |
-| **S9** | Kata P0/P1 gates (OCI fixtures, Multus, hostPath broker, NOTIF_ADDFD, TTY churn, warm-pool claim) | **Done (matrix)** — `scripts/evidence-kata-p0p1-matrix.sh` + `tests/oci-fixtures/`; hostPath allowlist broker; `SECCOMP_IOCTL_NOTIF_ADDFD` mode; RuntimeClass is GA vs full Kata product claim | secure-containers.md |
+| **S9** | Kata P0/P1 gates (OCI fixtures, Multus, hostPath broker, NOTIF_ADDFD, TTY churn, warm-pool claim, FC block shares) | **Done (matrix)** — `scripts/evidence-kata-p0p1-matrix.sh` + `tests/oci-fixtures/`; hostPath allowlist broker; `SECCOMP_IOCTL_NOTIF_ADDFD`; Firecracker ext4 share packing (`FLUXVM_CONTAINER_BACKEND=firecracker`); RuntimeClass is GA vs full Kata product claim | secure-containers.md |
 | **S10** | Real multi-node fleet rollout run | **Done (gate)** — `scripts/evidence-fleet-multihost.sh` (real SSH StrictHostKeyChecking, ≥2 hosts, canary/rollback); requires `FLUXVM_FLEET_E2E=1` + `/etc/fluxvm-fleet-lab` | set15e |
 | **S11** | Migration orchestrator against a real attached VM | **Done (gate)** — `scripts/evidence-migration-attached-vm.sh` runs export/restore against a live VM via dataplane migration-* / orchestrator | set13e |
-| **CNI** | Cilium-like CNI for Secure Containers | **Done (primary path)** — provider auto-detect, Multus-safe `netN` ignore, eth0 L2 handoff, `docs/cilium-cni.md` + `scripts/evidence-cilium-cni.sh`; Multus `netN` secondaries attach as extra guest NICs over bridge chains; Calico churn remains open | secure-containers P0 |
-| **DP** | Direct (bridge-less) datapath: Cilium-style redirect between the Pod veth / host uplink and the guest tap | **Done, default `auto` for Secure Containers** — shim `FLUXVM_CONTAINER_CNI_DATAPATH=auto\|direct\|bridge` (default `auto`), daemon loader in the Pod netns (TCX + legacy tc), `l2-uplink` standalone mode (shared per-uplink maps, ARP steering, MicroVM CRD `networkMode: direct`), warm-pool hotplug via QMP fd-passing, Linux 7.x verifier fix, hop view, capability probe, bench + evidence scripts. Live Cilium + KVM evidence passed (`FLUXVM_DIRECT_LIVE=1`, [direct-datapath-live-20260919T202359Z.txt](benchmarks/evidence/direct-datapath-live-20260919T202359Z.txt)); real-guest run ([direct-datapath-live-realguest-20260920.txt](benchmarks/evidence/direct-datapath-live-realguest-20260920.txt)): default/auto fallback/`l2-uplink`/warm-pool hotplug verified, bridge-vs-direct shows no detectable guest-visible difference; Multus secondaries stay on the bridge chain and were not exercised live | [direct-datapath.md](direct-datapath.md) |
+| **CNI** | Cilium-like CNI for Secure Containers | **Done (primary + Calico/Flannel/Multus)** — provider auto-detect, Multus `netN` hybrid/direct secondaries (`FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`), Calico/Flannel providers; live multi-CNI under load remains a gate | secure-containers P0 |
+| **DP** | Direct (bridge-less) datapath: Cilium-style redirect between the Pod veth / host uplink and the guest tap | **Done, default `auto` for Secure Containers** — shim `FLUXVM_CONTAINER_CNI_DATAPATH=auto\|direct\|bridge` (default `auto`), daemon loader in the Pod netns (TCX + legacy tc), `l2-uplink` standalone mode (shared per-uplink maps, ARP steering, MicroVM CRD `networkMode: direct`), warm-pool hotplug via QMP fd-passing, Linux 7.x verifier fix, hop view, capability probe, bench + evidence scripts. Live Cilium + KVM evidence passed (`FLUXVM_DIRECT_LIVE=1`, [direct-datapath-live-20260919T202359Z.txt](benchmarks/evidence/direct-datapath-live-20260919T202359Z.txt)); real-guest run ([direct-datapath-live-realguest-20260920.txt](benchmarks/evidence/direct-datapath-live-realguest-20260920.txt)): default/auto fallback/`l2-uplink`/warm-pool hotplug verified, bridge-vs-direct shows no detectable guest-visible difference; Multus secondaries support hybrid/direct opt-in | [direct-datapath.md](direct-datapath.md) |
 
 ## In-tree hypervisor / agent sandboxes
 
@@ -57,13 +57,17 @@ Custom CPUID templates and Track B density publication remain out of scope here.
 
 ## Suggested next implementation set
 
-**S1–S2 / S8–S11 / F1–F2 / H1–H3 / H5** closed on the code + gate path.
-Remaining honesty bounds:
+**S1–S11 / CNI / DP / F1–F2 / H1–H3 / H5 / FC1–FC3** closed on the code +
+gate path. Secure Containers P0/P1 multi-VMM (incl. Firecracker block shares)
+is shipped; RuntimeClass is GA.
+
+Remaining honesty bounds (live lab only):
 
 1. S2 production still prefers a real second k8s CNI kubeconfig (`FLUXVM_SECOND_CNI_KUBECONFIG`); nftables stand-in plus `scripts/evidence-cni-churn.sh` are the portable default.
-2. S9 RuntimeClass is GA (not a full Kata product claim). Warm-pool claim is `FLUXVM_CONTAINER_WARM_POOL=<name>` (template `network.mode=none`, then NIC hotplug).
+2. Live SC matrix: TTY churn, enforcing-SELinux mount label, multi-CNI under load (`FLUXVM_SECURE_CONTAINERS_E2E=1`).
 3. S10 needs `FLUXVM_FLEET_E2E=1` + ≥2 SSH hosts; S11 needs a runnable FluxVM guest on the lab host.
 4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM. H4 remains deferred.
+5. Remote seccomp policy RPC remains explicitly out of scope (Set 11).
 
 Portable CI maps each code-side use case to a test target in
 [secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)

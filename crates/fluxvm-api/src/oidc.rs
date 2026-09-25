@@ -65,8 +65,8 @@ impl OidcValidator {
 
         let (alg, key) = self.decoding_key(&kid).await?;
         let mut validation = Validation::new(alg);
-        validation.set_issuer(&[self.issuer.clone()]);
-        validation.set_audience(&[self.audience.clone()]);
+        validation.set_issuer(std::slice::from_ref(&self.issuer));
+        validation.set_audience(std::slice::from_ref(&self.audience));
 
         let data = decode::<OidcClaims>(token, &key, &validation).context("OIDC JWT validate")?;
         let claims = data.claims;
@@ -91,13 +91,12 @@ impl OidcValidator {
     async fn decoding_key(&self, kid: &str) -> Result<(Algorithm, DecodingKey)> {
         {
             let cache = self.cache.read().await;
-            if let Some(entry) = cache.keys.get(kid) {
-                if cache
+            if let Some(entry) = cache.keys.get(kid)
+                && cache
                     .fetched_at
                     .is_some_and(|t| t.elapsed() < Duration::from_secs(3600))
-                {
-                    return Ok(entry.clone());
-                }
+            {
+                return Ok(entry.clone());
             }
         }
         self.refresh_jwks().await?;

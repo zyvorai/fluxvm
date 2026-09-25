@@ -66,5 +66,11 @@ unless noted. Live rows use `secure-containers-live.yml` (opt-in via
 | UC-DP-05 | Warm-pool direct hotplug: tap passed to QEMU as a descriptor (QMP getfd) after the dataplane is wired | DP | `crates/fluxvm-qemu/src/qmp.rs` | network-fabric | no |
 | UC-DP-06 | Pod-policy rule matching unchanged by the verifier fix; VM-edge program stays inside the verifier budget | DP | `scripts/test-pod-policy-verdict.py` | network-fabric (privileged) | no |
 | UC-DP-L1 | Live Cilium + KVM Pod in direct mode: reachable, no host bridge, NetworkPolicy still enforced | DP | `scripts/evidence-direct-datapath.sh` | live-ga | yes |
+| UC-SC-01 | Multi-VMM backend selection (qemu/CH/FC) | S9 | `crates/fluxvm-containerd-shim/src/main.rs` | network-fabric | no |
+| UC-SC-02 | Firecracker ext4 share packing | S9 | `crates/fluxvm-firecracker/src/lib.rs` | rust-crates | no |
+| UC-SC-03 | Firecracker share OCI fixture | S9 | `tests/oci-fixtures/firecracker-shares.json` | matrix-lint | no |
+| UC-SC-04 | hostPath allowlist + broker surface | S9 | `scripts/evidence-kata-p0p1-matrix.sh` | live-ga | no |
+| UC-SC-05 | Calico/Flannel CNI churn harness | S9 | `scripts/evidence-cni-churn.sh` | live-ga | no |
+| UC-SC-06 | Phase completion orchestrator | S9 | `scripts/complete-secure-containers-phases.sh` | shell-contracts | no |
 
 See also [NEXT-FEATURES.md](NEXT-FEATURES.md) and [secure-containers-set19.md](secure-containers-set19.md).

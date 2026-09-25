@@ -87,6 +87,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             tap_name,
             mac,
             direct: Some(direct),
+            extra,
             ..
         } => {
             let tap = tap_name
@@ -127,6 +128,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             let attach = direct::DirectAttach {
                 spec: direct.clone(),
                 guest_mac: mac.clone(),
+                tap_name: None,
             };
             if let Err(e) = direct::record(id, &attach) {
                 if let Some(fd) = made.fd {
@@ -136,13 +138,95 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                 let _ = cleanup_tap(&tap).await;
                 return Err(e).context("recording direct attach");
             }
+            // Hybrid / Multus: prepare extra NICs (bridge or per-NIC direct).
+            let mut prepared_extra: Vec<ExtraNic> = Vec::with_capacity(extra.len());
+            for (i, nic) in extra.iter().enumerate() {
+                let etap = nic
+                    .tap_name
+                    .clone()
+                    .unwrap_or_else(|| format!("x{i}{}", &id.simple().to_string()[..7]));
+                if etap.len() > 15 {
+                    let _ = cleanup_tap(&tap).await;
+                    for prev in &prepared_extra {
+                        if let Some(name) = &prev.tap_name {
+                            let _ = cleanup_tap(name).await;
+                        }
+                    }
+                    bail!("extra tap interface name must be <= 15 characters");
+                }
+                if let Some(ed) = &nic.direct {
+                    let made_extra = match direct::prepare_tap(&etap, ed).await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            let _ = cleanup_tap(&tap).await;
+                            for prev in &prepared_extra {
+                                if let Some(name) = &prev.tap_name {
+                                    let _ = cleanup_tap(name).await;
+                                }
+                            }
+                            return Err(e).context(format!("preparing direct extra NIC {i}"));
+                        }
+                    };
+                    if let Some(fd) = made_extra.fd {
+                        // Extra taps are name-based for the VMM (like Multus bridge);
+                        // close the spare fd so we do not leak it.
+                        unsafe { libc::close(fd) };
+                    }
+                    let extra_attach = direct::DirectAttach {
+                        spec: ed.clone(),
+                        guest_mac: nic.mac.clone(),
+                        tap_name: Some(etap.clone()),
+                    };
+                    if let Err(e) = direct::record_extra(id, i, &extra_attach) {
+                        let _ = cleanup_tap(&tap).await;
+                        let _ = cleanup_tap(&etap).await;
+                        for prev in &prepared_extra {
+                            if let Some(name) = &prev.tap_name {
+                                let _ = cleanup_tap(name).await;
+                            }
+                        }
+                        return Err(e).context("recording direct extra attach");
+                    }
+                    prepared_extra.push(ExtraNic {
+                        bridge: String::new(),
+                        mac: nic.mac.clone(),
+                        tap_name: Some(etap),
+                        direct: Some(ed.clone()),
+                    });
+                } else {
+                    if nic.bridge.is_empty() {
+                        let _ = cleanup_tap(&tap).await;
+                        for prev in &prepared_extra {
+                            if let Some(name) = &prev.tap_name {
+                                let _ = cleanup_tap(name).await;
+                            }
+                        }
+                        bail!("extra NIC {i} is missing a bridge");
+                    }
+                    if let Err(e) = add_bridge_tap(&etap, &nic.bridge).await {
+                        let _ = cleanup_tap(&tap).await;
+                        for prev in &prepared_extra {
+                            if let Some(name) = &prev.tap_name {
+                                let _ = cleanup_tap(name).await;
+                            }
+                        }
+                        return Err(e).context("preparing Multus extra NIC on direct primary");
+                    }
+                    prepared_extra.push(ExtraNic {
+                        bridge: nic.bridge.clone(),
+                        mac: nic.mac.clone(),
+                        tap_name: Some(etap),
+                        direct: None,
+                    });
+                }
+            }
             Ok(PreparedNetwork {
                 spec: NetworkSpec::Tap {
                     tap_name: Some(tap.clone()),
                     bridge: None,
                     mac: mac.clone(),
                     netns: false,
-                    extra: vec![],
+                    extra: prepared_extra,
                     direct: Some(direct.clone()),
                 },
                 tap_name: Some(tap),
@@ -212,6 +296,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     bridge: nic.bridge.clone(),
                     mac: nic.mac.clone(),
                     tap_name: Some(etap),
+                    direct: None,
                 });
             }
             Ok(PreparedNetwork {
