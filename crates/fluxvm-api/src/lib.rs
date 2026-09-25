@@ -1272,7 +1272,7 @@ async fn relay_sandbox_ws(
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::{
         client_async,
-        tungstenite::{client::IntoClientRequest, Message as TungsteniteMessage},
+        tungstenite::{Message as TungsteniteMessage, client::IntoClientRequest},
     };
 
     let uri = format!("ws://{guest_host}/{path}");

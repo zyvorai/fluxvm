@@ -4629,9 +4629,9 @@ fn direct_ineligibility(f: &DirectFacts) -> Option<String> {
         None => return Some("cannot determine the primary interface's link kind".into()),
     }
     if f.secondaries > 0 {
-        // Multus secondaries ride the bridge chain alongside a direct primary
-        // (hybrid). Per-secondary direct needs each Multus iface to be a veth;
-        // that is handled after primary eligibility succeeds.
+        // Multus secondaries ride the bridge chain (or optional per-secondary
+        // direct) alongside a direct primary — they do not make the primary
+        // ineligible.
     }
     None
 }
@@ -6805,9 +6805,10 @@ mod direct_datapath_tests {
         f.link_kind = None;
         assert!(direct_ineligibility(&f).unwrap().contains("link kind"));
 
+        // Multus secondaries no longer block a direct primary (hybrid path).
         let mut f = ok_facts();
         f.secondaries = 2;
-        assert!(direct_ineligibility(&f).unwrap().contains("Multus"));
+        assert_eq!(direct_ineligibility(&f), None);
 
         // A warm pool is supported now: the daemon passes the tap to QEMU as a descriptor.
         assert_eq!(direct_ineligibility(&ok_facts()), None);
@@ -6816,7 +6817,7 @@ mod direct_datapath_tests {
     #[test]
     fn modes_resolve_as_documented() {
         let bad = DirectFacts {
-            secondaries: 1,
+            link_kind: Some("macvlan".into()),
             ..ok_facts()
         };
         // bridge: never direct, even when everything would allow it
@@ -6832,16 +6833,26 @@ mod direct_datapath_tests {
                 .unwrap()
                 .0
         );
+        // Multus secondaries are hybrid — direct primary still succeeds.
+        let with_multus = DirectFacts {
+            secondaries: 1,
+            ..ok_facts()
+        };
+        assert!(
+            resolve_datapath(CniDatapath::Direct, &with_multus)
+                .unwrap()
+                .0
+        );
         assert!(
             resolve_datapath(CniDatapath::Direct, &bad)
                 .unwrap_err()
-                .contains("Multus")
+                .contains("macvlan")
         );
         // auto: direct when possible, otherwise the bridge chain with the reason in the message
         assert!(resolve_datapath(CniDatapath::Auto, &ok_facts()).unwrap().0);
         let (direct, why) = resolve_datapath(CniDatapath::Auto, &bad).unwrap();
         assert!(
-            !direct && why.contains("falling back") && why.contains("Multus"),
+            !direct && why.contains("falling back") && why.contains("macvlan"),
             "{why}"
         );
     }
