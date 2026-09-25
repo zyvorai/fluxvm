@@ -52,13 +52,20 @@ size-stabilization drain remains available only for legacy stdio mode.
 
 ## Remaining gates
 
-- namespace creation parity (PID/mount/IPC/UTS/user) inside the Pod VM
-- device-cgroup enforcement and broader OCI conformance
-- seccomp argument comparators / notify
-- allowlisted arbitrary hostPath broker/hotplug
-- IPv6 + multi-interface CNI conformance
-- Cloud Hypervisor / Firecracker shared-rootfs: CH uses virtiofs; Firecracker packs shares to ext4 at launch (no virtio-fs upstream)
-- real KVM/containerd/Kubernetes churn and terminal-resize CI on self-hosted nodes
+Historical Set 5 backlog (status today):
+
+- namespace creation parity (PID/mount/IPC/UTS/user) inside the Pod VM —
+  delivered in Set 6R (`CLONE_NEWUSER` still opt-in / unproven under load)
+- device-cgroup enforcement and broader OCI conformance — device-cgroup
+  in Set 10; live OCI matrix remains lab
+- seccomp argument comparators / notify — delivered in Sets 10–11
+- allowlisted arbitrary hostPath broker/hotplug — **Done** (P0)
+- IPv6 + multi-interface CNI conformance — dual-stack primary + Multus
+  `netN` code **Done**; multi-CNI under load remains lab
+- Cloud Hypervisor / Firecracker shared-rootfs — **Done** (CH virtiofs; FC
+  ext4 pack at launch)
+- real KVM/containerd/Kubernetes churn and terminal-resize CI on
+  self-hosted nodes — **Open (lab)**
 
 ## Test on a real KVM/containerd node
 

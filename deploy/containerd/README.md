@@ -52,9 +52,10 @@ RuntimeClass pods.
 ## Set 4 notes
 
 - Kubernetes Pod volumes under the current sandbox UID are exported write-through
-  into the guest (PVC/CSI/emptyDir/`volume-subpaths`). Keep arbitrary hostPath
-  passthrough disabled unless a later allowlisted broker/hotplug implementation
-  is installed.
+  into the guest (PVC/CSI/emptyDir/`volume-subpaths`). Arbitrary hostPath
+  passthrough is allowlisted: set `FLUXVM_HOSTPATH_ALLOW` (colon-separated
+  roots) and optionally `FLUXVM_HOSTPATH_BROKER=1` for QEMU/CH hotplug (see
+  [`env.example`](env.example)). Firecracker packs allowlisted roots at launch.
 - Guest OCI security: read-only rootfs, masked/read-only paths, device nodes,
   sysctls, and libseccomp by syscall name (fail closed). Guest images using OCI
   seccomp profiles must include `libseccomp.so.2`.

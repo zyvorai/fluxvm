@@ -1,11 +1,12 @@
 # Next features (ranked)
 
-Living backlog after Secure Containers Set 19 (GA completion candidate:
-schema-v10, `fluxvm_pridx`, IPv6 extension walk, guest policy mirror, Observer
-ops) plus Sets 16–18, and Sentinel's operational tooling — Set 12E (GA
-certification), Set 13E–17E (migrate/upgrade/fleet/drift/admission) — and
-in-tree KVM FC/CH parity (P0–P2). Prefer closing proven gates over inventing
-new wire formats.
+Living backlog after Secure Containers Set 19 and the P0 multi-VMM GA close
+(Cloud Hypervisor virtiofs, Multus hybrid/direct, Calico/Flannel, hostPath
+broker, Firecracker ext4 block shares — schema-v10, `fluxvm_pridx`, IPv6
+extension walk, guest policy mirror, Observer ops) plus Sets 16–18, and
+Sentinel's operational tooling — Set 12E (GA certification), Set 13E–17E
+(migrate/upgrade/fleet/drift/admission) — and in-tree KVM FC/CH parity
+(P0–P2). Prefer closing proven live gates over inventing new wire formats.
 
 ## Sentinel / Secure Containers (highest leverage)
 
