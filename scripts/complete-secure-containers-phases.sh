@@ -59,6 +59,12 @@ if [[ "${FLUXVM_SECURE_CONTAINERS_E2E:-0}" == 1 ]]; then
     run e2e-ns env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-namespaces.sh"
   [[ -x "$ROOT/scripts/e2e-secure-containers-security.sh" ]] && \
     run e2e-sec env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-security.sh"
+  [[ -x "$ROOT/scripts/e2e-secure-containers-userns-load.sh" ]] && \
+    run e2e-userns-load env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-userns-load.sh"
+  [[ -x "$ROOT/scripts/e2e-secure-containers-seccomp-notify.sh" ]] && \
+    run e2e-seccomp-notify env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-seccomp-notify.sh"
+  [[ -x "$ROOT/scripts/e2e-secure-containers-selinux-mountlabel.sh" ]] && \
+    run e2e-selinux-mountlabel env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-selinux-mountlabel.sh"
 else
   echo "== phase:live-e2e == SKIP (set FLUXVM_SECURE_CONTAINERS_E2E=1 on a KVM/containerd host)"
   SKIP=$((SKIP + 1))
