@@ -1,10 +1,10 @@
-# FluxVM Network Fabric (GA; dataplane schema v4)
+# FluxVM Network Fabric
 
-**Status: GA.** The Network Fabric **v3 GA path** freezes the core VM-edge
-dataplane ABI (TC/eBPF policy, status/stats/flows, schema fingerprints,
-ownership, reconcile). The live BPF schema is **v4** (groups, deny CIDRs,
-conntrack, CNP-shaped policy). Upgrade-safe installs keep `mode = "legacy"`
-until you opt into the GA profile:
+**Policy at the VM edge. GA.**
+
+One TC/eBPF dataplane for identities, groups, deny lists, and CNP-shaped policy — pinned under `/sys/fs/bpf/fluxvm`, schema **v4**. Not a foreign CNI rewrite.
+
+**Status: GA.** The Network Fabric **v3 GA path** freezes the core VM-edge dataplane ABI (TC/eBPF policy, status/stats/flows, schema fingerprints, ownership, reconcile). The live BPF schema is **v4**. Upgrade-safe installs keep `mode = "legacy"` until you opt in:
 
 ```bash
 # Host readiness (bpffs, bpftool/tc, BPF object, systemd MEMLOCK/paths):

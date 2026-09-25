@@ -1,7 +1,8 @@
-# Production readiness tutorials (FluxVM)
+# Production readiness tutorials
 
-Short guides for the **host-local production bar** — auth, `/readyz`, tenant
-IDs — alongside the dataplane runbook.
+**Auth. Readyz. Tenant IDs.**
+
+The host-local production bar — short labs next to the dataplane runbook.
 
 | Tutorial | Focus | Time |
 |----------|-------|------|

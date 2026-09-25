@@ -1,153 +1,52 @@
 # FluxVM — Product Overview
 
-This doc is the capability tour and the one authoritative metrics table for FluxVM. For the pitch and quick start, see the [README](../README.md); for who this is (and isn't) for, see [POSITIONING.md](POSITIONING.md); for the exhaustive feature checklist, see [FEATURES.md](../FEATURES.md).
+Capability tour for FluxVM. Pitch: [README](../README.md). Who it’s for: [POSITIONING.md](POSITIONING.md). Checklist: [FEATURES.md](../FEATURES.md).
 
-## The Problem
+## The problem
 
-Teams that need a host-local VM control plane — CI runners, sandboxed code execution, per-branch environments, Kubernetes VM workloads, or longer-lived guests — are usually stuck choosing between:
+Teams that need a host-local VM API usually choose between hand-rolled `virsh` XML, a full private-cloud stack, or containers that share the host kernel.
 
-- **Manual libvirt/virsh scripting** — XML domain definitions, no REST API, no optional TTL cleanup, easy for orphaned VMs to accumulate
-- **A full private-cloud platform** — adopting VMware/OpenStack/a KubeVirt cluster just to get a solid VM API is disproportionate overhead for many teams
-- **Container-only isolation** — good enough until the workload needs a real kernel boundary (untrusted code, a kernel-dependent test, a legacy binary that needs its own kernel)
+FluxVM fills the gap: a real control plane without the platform rewrite.
 
-FluxVM fills that gap: a control plane with a real API, without requiring a whole private-cloud stack. Disposable / short-lived patterns (TTL, CoW) are available when you want them.
+## What is FluxVM?
 
----
+- **One binary, one REST API** — no libvirtd, no XML
+- **Four backends** — QEMU/KVM, Cloud Hypervisor, Firecracker, FluxVM hypervisor
+- **Optional TTL** — cleanup after crash or forget
+- **Vsock guest agent** — exec, console, copy with no SSH
 
-## What Is FluxVM?
+## Capability tour
 
-FluxVM is a Rust-native VM control plane. It provides:
+Skim version. Full checklist: [FEATURES.md](../FEATURES.md).
 
-- **One binary, one REST API** — `fluxvm` CLI talks to `fluxctl serve`, no libvirtd, no XML
-- **4 backends behind one trait** — QEMU/KVM, Cloud Hypervisor, Firecracker, and the in-tree FluxVM hypervisor, selectable per-VM or via `"backend":"auto"`
-- **Optional TTL cleanup** — `ttl_seconds` on a VM spec means a forgotten or crashed job still gets torn down when you opt in
-- **A vsock guest agent** — `exec`, PTY console, file transfer, with no SSH or network path required
+**Lifecycle** — create, list, pause, resume, delete; `"backend":"auto"`; vsock exec.
 
----
+**Networking** — user NAT, TAP, netns, macvtap; **Network Fabric (GA)** — [network-fabric.md](network-fabric.md).
 
-## Capability Tour
+**Service Fabric** — node-local Maglev VIP load balancing.
 
-The exhaustive, line-by-line checklist lives in **[FEATURES.md](../FEATURES.md)**. This section is the skim version.
+**Images** — `build-image`, signed catalog, Windows goldens via GuestKit.
 
-**VM lifecycle** — create, list, get, pause, resume, delete across all 4 backends; `"backend":"auto"` resolution; vsock-based `exec`/console/file-transfer with no SSH required.
+**Operations** — cgroups, warm pools, jailer, LVM/NBD/Ceph, admission policy, token auth.
 
-**Networking** — QEMU user-mode NAT, TAP+bridge, per-VM network namespaces, macvtap; **Network Fabric is GA (schema v4)** — a TC/eBPF or Cilium-coexistence dataplane with IPv4/IPv6 L3+L4 policy, rate limits, security groups, CNP, live reconfigure, and REST observability (nftables is the default fallback).
+**Kubernetes & fleet** — DisposableVm · MicroVM · fluxvm-agent — [microvm.md](microvm.md).
 
-**Service Fabric** — node-local Maglev VIP load balancing: dual-stack NAT/DSR/SNAT, health-aware routing, incremental reconcile, per-service EDT, flow export.
+**Secure Containers** *(preview)* — containerd shim → one QEMU per Pod — [secure-containers.md](secure-containers.md).
 
-**Images** — virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, an Ed25519-signed image catalog with REST CRUD, Windows/Kryton golden-image customization with live QGA.
-
-**Operations** — cgroup v2 resource control (limits, freeze/thaw, PSI), warm VM pools, the Firecracker jailer (chroot + uid/gid drop), alternative storage backends (LVM thin, NBD, Ceph RBD — RBD verified against a real Rook Ceph cluster), admission policy limits, bearer-token auth/RBAC.
-
-**Kubernetes & fleet** — `DisposableVm` CRD + node-local operator (verified end to end against a real k3s cluster, 9/9 checks passing); `fluxvm-microvm` scheduler-native path as a KubeVirt alternative; `fluxvm-agent` distributed node-agent with a central fleet registry and load-aware placement, verified across two real, physically separate hosts.
-
-**Secure Containers** *(developer preview)* — containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one QEMU FluxVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, guest AppArmor/SELinux/seccomp enforcement. Not yet Kata-equivalent — see [docs/secure-containers.md](secure-containers.md) for the itemized gaps.
-
-**Sentinel observability** — eBPF-based host + guest runtime intelligence: per-VM syscall/page-fault telemetry, drop-reason tracking, flight recorder, BPF-LSM VMM guard/QoS, XDP shield, topology steering.
-
----
+**Sentinel** — eBPF runtime intelligence (syscall, drop reasons, flight recorder, topology).
 
 ## Architecture
 
 ```text
-                     +-------------------------+
- CLI / REST -------->| Rust VmManager          |
-                     | state + TTL + sandboxes |
-                     +------------+------------+
-                                  |
-     +-------------+--------------+--------------+--------------+
-     |             |              |              |              |
- +---v---+   +-----v-----+  +-----v------+  +----v-------------+
- | QEMU  |   | Cloud     |  |Firecracker |  | FluxVM hypervisor|
- | qcow2 |   | Hypervisor|  | raw rootfs |  | (agent sandboxes)|
- +---+---+   +-----+-----+  +-----+------+  +----+-------------+
-     |             |              |              |
-     +------+------+--------------+--------------+
-            |
-     KVM + TAP/bridge + Linux host
+CLI / REST ──► VmManager ──► QEMU | Cloud Hypervisor | Firecracker | FluxVM HV
+                                    └────────── KVM + TAP / bridge / netns ──┘
 ```
 
-Full diagrams (image pipeline, Secure Containers request flow, Network Fabric packet-decision and control-plane sequence): [README — Architecture at a glance](../README.md#architecture-at-a-glance) and [docs/network-fabric.md](network-fabric.md#packet-decision-and-control-plane-diagrams).
+One `VmBackend` trait. Schedulers and APIs never branch on the VMM.
 
----
+## Next
 
-## Comparison
-
-| Feature | FluxVM | libvirt/virsh | KubeVirt |
-|---------|:--------:|:----------:|:---------:|
-| REST API | Yes | No (XML-RPC-ish via libvirtd) | Yes (Kubernetes API) |
-| VM spec format | JSON | XML domain definitions | Kubernetes CRD YAML |
-| TTL-guaranteed cleanup | Yes (`ttl_seconds`) | No | No (Pod lifecycle only) |
-| Backends | QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree hypervisor | QEMU/KVM (broad hypervisor support via drivers) | KVM via virt-launcher |
-| Where the VMM runs | Host, under `fluxctl serve` | Host, under `libvirtd` | Inside a virt-launcher Pod |
-| Kubernetes-native | Yes (`DisposableVm` CRD, MicroVM) | No | Yes (native) |
-| Live migration / CDI / `virtctl` | QEMU source + receiver (not KubeVirt parity); no CDI/`virtctl` | No (needs orchestration layer) | Yes |
-| eBPF/TC dataplane | Yes — Network Fabric, GA schema v4 | No | Depends on CNI |
-| Multi-host fleet management | Yes — `fluxvm-agent`, verified across 2 real hosts | No (needs external orchestration) | Via Kubernetes scheduler |
-| OCI/containerd workload support | Developer preview (Secure Containers) | No | No (different workload model) |
-| License | Apache-2.0 | LGPL | Apache-2.0 |
-
-This table intentionally covers only what's verifiable today — no unpublished performance numbers, no forward-looking claims. See [POSITIONING.md](POSITIONING.md#competitive-frame) for the fuller competitive narrative, including the honest caveats (KubeVirt still owns CDI/`virtctl` and full cluster migration orchestration; FluxVM's QEMU migration path is host-API + Fabric, not KubeVirt parity; libvirt has broader hypervisor driver support).
-
----
-
-## Deployment Models
-
-### Single host, standalone
-
-`fluxctl serve` on one Linux box with KVM. Suitable for CI runners, dev/test environments, and sandboxed execution on a single machine.
-
-**Requirements:** Linux, KVM, current stable Rust toolchain to build.
-
-### Multi-host fleet (no Kubernetes)
-
-`fluxvm-agent` provides a central fleet registry plus per-host heartbeat clients, with load-aware placement — verified across two real, physically separate hosts.
-
-**Requirements:** 2+ hosts, network connectivity between them for the fleet registry.
-
-### Kubernetes-native
-
-`fluxvm-kube` operator reconciling `DisposableVm` CRs against a local `fluxctl serve` instance per node, or `fluxvm-microvm` for scheduler-driven placement via shadow Pods.
-
-**Requirements:** A Kubernetes cluster (verified against k3s), nodes with `/dev/kvm`.
-
----
-
-## Technology Stack
-
-| Layer | Technology |
-|-------|------------|
-| Language | Rust |
-| VMM backends | QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree `fluxvm-hypervisor` |
-| Networking | netlink (direct), TC/eBPF (Network Fabric), nftables (fallback) |
-| Guest agent transport | AF_VSOCK |
-| Kubernetes integration | Custom Resource Definitions (`DisposableVm`, MicroVM), controller-runtime-style operators |
-| Image tooling | guestkit-based (no libguestfs dependency) |
-
----
-
-## Project Statistics
-
-Every figure below is counted directly from source, not estimated.
-
-| Metric | Value | Method |
-|--------|-------|--------|
-| Crates | 23 | `ls crates/` |
-| Backends | 4 | QEMU/KVM, Cloud Hypervisor, Firecracker, in-tree FluxVM hypervisor |
-| Kubernetes CRD operator validation | 9/9 checks passing | Real k3s cluster; see [`scripts/test-kube-operator.sh`](../scripts/test-kube-operator.sh) — covers CRD acceptance, live reconciliation to a real running VM, out-of-band-delete self-healing, and finalizer-blocked cleanup with no leaked QEMU process |
-| Multi-host fleet validation | Verified across 2 real, physically separate hosts | [docs/operations.md](operations.md#distributed-node-agent) |
-| Storage backends | 4 | qcow2/raw (default), LVM thin, NBD, Ceph RBD (RBD verified against a real Rook Ceph cluster) |
-| Network modes | 4 (+1 opt-in) | user-mode NAT, TAP+bridge, netns+DHCP, macvtap — all 4 SSH-verified end to end in regression tests; bridge-less `direct` is opt-in and netns/kernel-verified, not yet live ([direct-datapath.md](direct-datapath.md)) |
-| Boot latency / VM density / migration downtime | **Method published, not a sizing SLA** | `scripts/record-baseline.sh` records cold create (`avg_create_ms`, control-plane time), warm pool claim (`warm_claim_ms`), Secure Containers boot, and delete on one host under `docs/benchmarks/evidence/`. `migration_downtime` comes from QMP `query-migrate` on the receiver path and is not boot latency. Repeat the same script on a second host before capacity planning. Firecracker’s 125 ms / 5-per-core figures in [capability-figures.md](capability-figures.md) are not FluxVM SLAs. |
-
-Unlike some of the figures in this table, we deliberately don't include a lines-of-code count or an aggregate REST-endpoint count — neither is currently asserted anywhere in this project's own docs, and inventing one here would just create the kind of stale, unverifiable claim this whole document is trying to avoid.
-
----
-
-## License
-
-Apache License 2.0 — free for commercial use, modification, and distribution, for the entire repository. See [README.md — License](../README.md#license) and [NOTICE](../NOTICE).
-
----
-
-*For technical details, see [docs/api.md](api.md), [docs/operations.md](operations.md), and [docs/PRODUCTION.md](PRODUCTION.md).*
+- [Quick start](../README.md#quick-start)
+- [Use cases](use-cases.md)
+- [Getting started](user/getting-started.md)
+- [PRODUCTION.md](PRODUCTION.md)

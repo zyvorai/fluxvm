@@ -1,10 +1,10 @@
-# MicroVM tutorials (FluxVM)
+# MicroVM tutorials
 
-Short, copy-paste guides for scheduled MicroVMs on Kubernetes — shadow Pods,
-node agent, Jobs, warm pools, GuestImage catalog, and the DisposableVm bridge.
+**Schedule a VM like a Pod. Run it on the host VMM.**
 
-API group: `microvm.fluxvm.zyvor.io`. Controllers: `fluxvm-system`. Design:
-[microvm.md](../../microvm.md).
+Shadow Pods, node agent, Jobs, warm pools, GuestImage, and the DisposableVm bridge — without KubeVirt.
+
+API group: `microvm.fluxvm.zyvor.io`. Controllers: `fluxvm-system`. Design: [microvm.md](../../microvm.md).
 
 | Tutorial | Focus | Time |
 |----------|-------|------|

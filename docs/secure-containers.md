@@ -1,13 +1,8 @@
-# FluxVM Secure Containers — containerd runtime v2
+# FluxVM Secure Containers
 
-FluxVM Secure Containers is the first container-runtime layer on top of the
-existing FluxVM VM lifecycle, VSOCK guest agent and QEMU virtiofs support.
-The goal is the same security shape users expect from Kata Containers: a Pod
-or container group gets its own guest kernel instead of sharing the node's
-host kernel — plus, starting with Set 6, **FluxVM Sentinel**: an eBPF-based
-policy substrate spanning the host VMM edge and (in later Sets) the guest
-kernel with one shared schema and identity model, which Kata's namespace +
-seccomp + static-policy-file model does not attempt.
+**A Pod. Its own guest kernel.** *(Developer preview)*
+
+containerd runtime-v2 on the FluxVM VM lifecycle, VSOCK guest agent, and QEMU virtiofs. Same isolation *shape* as Kata — a Pod or container group gets its own kernel, not the node’s — plus **FluxVM Sentinel**: eBPF policy spanning the host VMM edge (and later the guest) with one shared schema. Not a Kata-equivalence claim.
 
 ## Architecture
 

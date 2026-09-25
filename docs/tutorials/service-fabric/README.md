@@ -1,14 +1,13 @@
-# Service Fabric tutorial (FluxVM)
+# Service Fabric tutorial
 
-Stand up a Maglev VIP on a single FluxVM host — schema **4** ABI / program
-generation **6** (Service Fabric **v6**).
+**A Maglev VIP on one FluxVM host.**
+
+Schema **4** ABI · program generation **6** (Service Fabric **v6**).
 
 **Level:** Intermediate · **Time:** ~30 minutes  
-**Prerequisites:** [Getting started](../../user/getting-started.md), eBPF
-dataplane enabled, bridged/tap VM or north-south uplink configured.
+**Prerequisites:** [Getting started](../../user/getting-started.md), eBPF dataplane, bridged/tap VM or north-south uplink.
 
-Operator reference: [service-fabric.md](../service-fabric.md) ·
-Fabric fan-out: [ebpf-service-fabric.md](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md).
+Operator reference: [service-fabric.md](../service-fabric.md) · Fabric fan-out: [ebpf-service-fabric.md](https://github.com/zyvorai/fabric/blob/main/docs/ebpf-service-fabric.md).
 
 ## What you will learn
 

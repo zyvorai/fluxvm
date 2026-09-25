@@ -1,39 +1,31 @@
 <div align="center">
 
-<img src="docs/assets/social-preview.png" alt="FluxVM — Run real VMs with a real API. One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the FluxVM hypervisor." width="820">
+<img src="docs/assets/social-preview.png" alt="FluxVM — Run real VMs with a real API." width="820">
 
-# Run real VMs with a real API.
+# FluxVM
 
-**One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor.**<br>
-No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend.
+**Run real VMs with a real API.**
+
+One control plane for Firecracker, Cloud Hypervisor, QEMU/KVM, and the FluxVM hypervisor.<br>
+No libvirtd. No XML. REST and CLI — same verbs on every backend.
 
 [![CI](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml)
-[![Security profiles](https://github.com/zyvorai/fluxvm/actions/workflows/security-profiles.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/security-profiles.yml)
-[![DevOps gates](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml/badge.svg)](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml)
 [![License: Apache-2.0](https://img.shields.io/github/license/zyvorai/fluxvm)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/zyvorai/fluxvm?sort=semver)](https://github.com/zyvorai/fluxvm/releases)
-[![Rust: stable](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 
-[**Quick start**](#quick-start) · [**Proof & status**](#maturity-whats-real-today) · [**Docs**](#documentation-map) · [**Talk to Zyvor**](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)
+[**Quick start**](#quick-start) · [**Proof**](#maturity-whats-real-today) · [**Docs**](#documentation-map) · [**zyvor.dev**](https://zyvor.dev/fluxvm?utm_source=github&utm_medium=fluxvm)
 
 </div>
 
 ---
 
-## Why teams switch to FluxVM
+## Why FluxVM
 
-| You have today | With FluxVM |
-|---|---|
-| Hand-written XML and `virsh` scripts | A JSON VM spec and a **real REST API** (`fluxctl serve`), plus a CLI with the same verbs |
-| A different toolchain per hypervisor | **Four backends behind one trait** — pick per VM, or let `"backend":"auto"` choose |
-| SSH keys, bastions and open ports just to run a command | A **vsock guest agent**: `exec`, PTY console and file copy with no SSH and no network path |
-| Orphaned VMs after a crashed job | Optional **`ttl_seconds`** cleanup and cheap qcow2 CoW clones |
-| Firewall rules bolted on with nftables | **Network Fabric (GA)**: a TC/eBPF VM-edge dataplane with L3/L4 policy, rate limits and live reconfigure |
-| A platform rewrite just to get a VM API | **One Linux host is enough.** Grow to multi-host fleets or Kubernetes when you need to |
+**One API.** JSON specs and REST where you’d hand-write XML for `virsh`.
 
-FluxVM is a complete control plane on its own — a host-local replacement for libvirt/virsh
-([command mapping below](#vs-libvirtvirsh)) — and also the VM engine under other Zyvor products.
-It is the same binary and the same REST API either way.
+**Four backends.** QEMU, Cloud Hypervisor, Firecracker, and the FluxVM hypervisor — one contract.
+
+**Grow later.** One Linux host today. Kubernetes or a multi-host fleet when you need them.
 
 ## See it work
 
@@ -45,7 +37,7 @@ fluxctl pause <id> && fluxctl resume <id>         # park it instead of rebuildin
 fluxctl delete <id>                               # or set ttl_seconds and walk away
 ```
 
-Ready to run it yourself? [Full Quick start](#quick-start).
+[Full Quick start →](#quick-start)
 
 ---
 
