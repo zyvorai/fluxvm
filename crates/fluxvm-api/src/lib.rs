@@ -769,12 +769,12 @@ async fn create_vm(
     require_admin(role)?;
     // Token tenant is authoritative: inherit when omitted; reject mismatch.
     if let Some(Extension(TokenTenant(t))) = token_tenant {
-        if let Some(ref body) = req.tenant {
-            if body != &t {
-                return Err(ApiError::forbidden(format!(
-                    "token tenant '{t}' cannot create VM for tenant '{body}'"
-                )));
-            }
+        if let Some(ref body) = req.tenant
+            && body != &t
+        {
+            return Err(ApiError::forbidden(format!(
+                "token tenant '{t}' cannot create VM for tenant '{body}'"
+            )));
         }
         req.tenant = Some(t);
     }
@@ -1660,12 +1660,12 @@ async fn list_vms(
     }
     // Token tenant forces scope; query ?tenant= must match when both present.
     if let Some(Extension(TokenTenant(t))) = token_tenant {
-        if let Some(ref qt) = q.tenant {
-            if qt != &t {
-                return Err(ApiError::forbidden(format!(
-                    "token tenant '{t}' cannot list tenant '{qt}'"
-                )));
-            }
+        if let Some(ref qt) = q.tenant
+            && qt != &t
+        {
+            return Err(ApiError::forbidden(format!(
+                "token tenant '{t}' cannot list tenant '{qt}'"
+            )));
         }
         items.retain(|vm| vm.request.tenant.as_deref() == Some(t.as_str()));
     } else if let Some(tenant) = q.tenant {
@@ -2989,12 +2989,12 @@ async fn create_pool(
     // create_vm's own token-tenant forcing above, means it's correct for
     // every future member too, not just re-checked per member.
     if let Some(Extension(TokenTenant(t))) = token_tenant {
-        if let Some(ref body) = spec.template.tenant {
-            if body != &t {
-                return Err(ApiError::forbidden(format!(
-                    "token tenant '{t}' cannot create a pool for tenant '{body}'"
-                )));
-            }
+        if let Some(ref body) = spec.template.tenant
+            && body != &t
+        {
+            return Err(ApiError::forbidden(format!(
+                "token tenant '{t}' cannot create a pool for tenant '{body}'"
+            )));
         }
         spec.template.tenant = Some(t);
     }
@@ -3123,6 +3123,71 @@ async fn resize_pool(
     ))))
 }
 
+// ZYVOR_SERVICE_FABRIC_V6_API
+async fn list_network_service_policies(
+    State(m): State<Arc<VmManager>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        json!({"items": fluxvm_network::service_policy::list(&m.cfg)?}),
+    ))
+}
+
+async fn upsert_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(spec): Json<fluxvm_network::service_policy::ServicePolicySpec>,
+) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicyStatus>> {
+    require_admin(role)?;
+    Ok(Json(fluxvm_network::service_policy::upsert(&m.cfg, spec)?))
+}
+
+async fn reconcile_network_service_policies(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(
+        json!({"items": fluxvm_network::service_policy::reconcile(&m.cfg)?}),
+    ))
+}
+
+async fn get_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicySpec>> {
+    match fluxvm_network::service_policy::get(&m.cfg, &name)? {
+        Some(spec) => Ok(Json(spec)),
+        None => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service policy '{name}' not found"),
+        }),
+    }
+}
+
+async fn delete_network_service_policy(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    if !fluxvm_network::service_policy::delete(&m.cfg, &name)? {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("service policy '{name}' not found"),
+        });
+    }
+    Ok(Json(json!({"deleted": name})))
+}
+
+async fn network_service_envoy_contract(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_network::service_policy::EnvoyRedirectContract>> {
+    Ok(Json(fluxvm_network::service_policy::envoy_contract(
+        &m.cfg, &name,
+    )?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3166,7 +3231,7 @@ mod tests {
                 ttl_seconds: None,
                 extra_args: vec![],
                 shared_memory: false,
-                agent: agent_enabled.then(|| AgentSpec {
+                agent: agent_enabled.then_some(AgentSpec {
                     enabled: true,
                     port: 17777,
                     token: None,
@@ -4227,69 +4292,4 @@ mod tests {
             guest.await.unwrap();
         }
     }
-}
-
-// ZYVOR_SERVICE_FABRIC_V6_API
-async fn list_network_service_policies(
-    State(m): State<Arc<VmManager>>,
-) -> ApiResult<Json<serde_json::Value>> {
-    Ok(Json(
-        json!({"items": fluxvm_network::service_policy::list(&m.cfg)?}),
-    ))
-}
-
-async fn upsert_network_service_policy(
-    State(m): State<Arc<VmManager>>,
-    Extension(role): Extension<Role>,
-    Json(spec): Json<fluxvm_network::service_policy::ServicePolicySpec>,
-) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicyStatus>> {
-    require_admin(role)?;
-    Ok(Json(fluxvm_network::service_policy::upsert(&m.cfg, spec)?))
-}
-
-async fn reconcile_network_service_policies(
-    State(m): State<Arc<VmManager>>,
-    Extension(role): Extension<Role>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(role)?;
-    Ok(Json(
-        json!({"items": fluxvm_network::service_policy::reconcile(&m.cfg)?}),
-    ))
-}
-
-async fn get_network_service_policy(
-    State(m): State<Arc<VmManager>>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<fluxvm_network::service_policy::ServicePolicySpec>> {
-    match fluxvm_network::service_policy::get(&m.cfg, &name)? {
-        Some(spec) => Ok(Json(spec)),
-        None => Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("service policy '{name}' not found"),
-        }),
-    }
-}
-
-async fn delete_network_service_policy(
-    State(m): State<Arc<VmManager>>,
-    Extension(role): Extension<Role>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    require_admin(role)?;
-    if !fluxvm_network::service_policy::delete(&m.cfg, &name)? {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: format!("service policy '{name}' not found"),
-        });
-    }
-    Ok(Json(json!({"deleted": name})))
-}
-
-async fn network_service_envoy_contract(
-    State(m): State<Arc<VmManager>>,
-    Path(name): Path<String>,
-) -> ApiResult<Json<fluxvm_network::service_policy::EnvoyRedirectContract>> {
-    Ok(Json(fluxvm_network::service_policy::envoy_contract(
-        &m.cfg, &name,
-    )?))
 }
