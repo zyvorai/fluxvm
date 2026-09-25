@@ -803,6 +803,7 @@ pub async fn savevm(socket: &Path, name: &str, timeout: Duration) -> Result<Valu
 }
 
 /// Alias for callers that prefer snapshot-oriented naming.
+#[allow(dead_code)]
 pub async fn snapshot_create(socket: &Path, name: &str, timeout: Duration) -> Result<Value> {
     savevm(socket, name, timeout).await
 }
