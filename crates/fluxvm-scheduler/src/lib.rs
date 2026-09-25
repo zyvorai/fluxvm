@@ -1,6 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::collapsible_if)]
 #![cfg_attr(test, allow(clippy::field_reassign_with_default))]
 
 use anyhow::{Context, Result, bail};
