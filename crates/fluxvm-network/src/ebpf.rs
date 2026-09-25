@@ -1340,8 +1340,8 @@ fn configure_maps(
     if fail_closed_first {
         // Publish deny-all first, before deleting any old allowlist keys.
         update_iface_config(
-        &id_map, ifindex, identity, false, false, false, 0, false, 0, 0, pod_id, 0,
-    )?;
+            &id_map, ifindex, identity, false, false, false, 0, false, 0, 0, pod_id, 0,
+        )?;
     }
 
     clear_map(&cidr4_map)?;
