@@ -1393,10 +1393,16 @@ mod create_vm_request_tests {
         assert!(bridge.unwrap_err().contains("mutually exclusive"));
         let netns = check(&format!(r#"{{"mode":"tap","netns":true,{ok}}}"#));
         assert!(netns.unwrap_err().contains("netns=true"));
-        let extra = check(&format!(
-            r#"{{"mode":"tap","extra":[{{"bridge":"b"}}],{ok}}}"#
-        ));
-        assert!(extra.unwrap_err().contains("extra"));
+        // Hybrid Multus: direct primary + bridged extras is allowed.
+        assert!(
+            check(&format!(
+                r#"{{"mode":"tap","extra":[{{"bridge":"b"}}],{ok}}}"#
+            ))
+            .is_ok()
+        );
+        // Extra still needs bridge or direct.
+        let bare_extra = check(&format!(r#"{{"mode":"tap","extra":[{{}}],{ok}}}"#));
+        assert!(bare_extra.unwrap_err().contains("need bridge or direct"));
         assert!(check(r#"{"mode":"tap","direct":{"outer":""}}"#).is_err());
         assert!(check(r#"{"mode":"tap","direct":{"outer":"averyveryverylongname"}}"#).is_err());
         assert!(check(r#"{"mode":"tap","direct":{"outer":"a/b"}}"#).is_err());
