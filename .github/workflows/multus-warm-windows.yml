@@ -108,8 +108,8 @@ jobs:
       - name: Shim Multus guest script
         working-directory: fluxvm
         run: |
-          cargo test -p fluxvm-containerd-shim --lib -- --exact cni_provider_labels_and_multus_names
-          cargo test -p fluxvm-containerd-shim --lib -- --exact multus_guest_script_configures_nics_in_probe_order
+          cargo test -p fluxvm-containerd-shim --bin containerd-shim-fluxvm-v2 -- --exact cni_provider_labels_and_multus_names
+          cargo test -p fluxvm-containerd-shim --bin containerd-shim-fluxvm-v2 -- --exact multus_guest_script_configures_nics_in_probe_order
       - name: Windows MSI-X, DSDT, firmware reset
         working-directory: fluxvm
         run: |
