@@ -65,8 +65,8 @@ impl OidcValidator {
 
         let (alg, key) = self.decoding_key(&kid).await?;
         let mut validation = Validation::new(alg);
-        validation.set_issuer([&self.issuer]);
-        validation.set_audience([&self.audience]);
+        validation.set_issuer(std::slice::from_ref(&self.issuer));
+        validation.set_audience(std::slice::from_ref(&self.audience));
 
         let data = decode::<OidcClaims>(token, &key, &validation).context("OIDC JWT validate")?;
         let claims = data.claims;
