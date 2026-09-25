@@ -1,10 +1,13 @@
-# Network policy tutorials
+# Network policy tutorials (FluxVM Fabric)
 
 **One identity. One policy. At the VM edge.**
 
-Label identities, CNP documents, deny lists, audit, and observe — copy-paste labs for operators of the FluxVM Network Fabric.
+Short, copy-paste guides for label identities, CNP documents, deny lists,
+audit mode, and observe — aimed at operators of the VM-edge dataplane.
 
-FluxVM pins programs under `/sys/fs/bpf/fluxvm` (schema **v4**). It does not write foreign CNI private maps. Node CNI coexistence (`mode=cilium`): [ebpf-cilium.md](../ebpf-cilium.md).
+FluxVM pins programs under `/sys/fs/bpf/fluxvm` (schema **v4**). It does not
+write foreign CNI private maps. For node CNI coexistence (`mode=cilium`), see
+[ebpf-cilium.md](../ebpf-cilium.md).
 
 | Tutorial | Focus | Time |
 |----------|-------|------|

@@ -2,9 +2,13 @@
 
 **Schedule a VM like a Pod. Without KubeVirt.**
 
-Kubernetes-native MicroVM compute on the host VMM. Short-lived or long-lived — TTLs are optional.
+Kubernetes-native MicroVM compute for FluxVM — **without KubeVirt**.
+Supports short-lived / disposable jobs when you set TTLs; not limited to them.
 
-The VMM lives on the host under `fluxctl serve`. The Pod is only a **capacity ticket** (`registry.k8s.io/pause` plus CPU/memory requests). The privileged surface stays the existing `fluxvm-kube` DaemonSet.
+The VMM process lives on the host under `fluxctl serve`. The Pod is only a
+**capacity ticket** (`registry.k8s.io/pause` plus CPU/memory requests). The one
+privileged surface stays the existing `fluxvm-kube` DaemonSet that already runs
+`fluxctl serve` on capable nodes.
 
 | | |
 |---|---|
