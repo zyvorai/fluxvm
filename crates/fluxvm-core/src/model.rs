@@ -191,23 +191,44 @@ impl NetworkSpec {
             return Err("network.direct and network.netns=true are mutually exclusive".into());
         }
         if !extra.is_empty() {
-            return Err(
-                "network.extra NICs are not supported together with network.direct yet".into(),
-            );
+            for (i, nic) in extra.iter().enumerate() {
+                match &nic.direct {
+                    Some(ed) => {
+                        ed.validate().map_err(|e| format!("network.extra[{i}].direct: {e}"))?;
+                        if !nic.bridge.is_empty() {
+                            return Err(format!(
+                                "network.extra[{i}]: bridge and direct are mutually exclusive"
+                            ));
+                        }
+                    }
+                    None => {
+                        if nic.bridge.is_empty() {
+                            return Err(format!(
+                                "network.extra[{i}]: need bridge or direct"
+                            ));
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
 }
 
-/// One extra guest NIC on a host bridge. `tap_name` is filled by
-/// `fluxvm_network::prepare` (or NIC hotplug) and is what the VMM opens.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// One extra guest NIC — either on a host bridge or bridge-less direct.
+/// `tap_name` is filled by `fluxvm_network::prepare` (or NIC hotplug).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExtraNic {
+    /// Host bridge name when this NIC is bridged. Empty when `direct` is set.
+    #[serde(default)]
     pub bridge: String,
     #[serde(default)]
     pub mac: Option<String>,
     #[serde(default)]
     pub tap_name: Option<String>,
+    /// Bridge-less attach for this extra NIC (Secure Containers Multus `netN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<DirectSpec>,
 }
 
 impl Default for NetworkSpec {
@@ -344,19 +365,18 @@ pub struct CloudInitFile {
     pub permissions: Option<String>,
 }
 
-/// A host directory shared into the guest via virtiofs, declared at create
-/// time — there's no live "mount this now" equivalent for a real hardware
-/// VM the way `machinectl bind` had for nspawn's shared-kernel containers
-/// (see the systemd-removal migration plan's bind-mount notes). Requires
-/// `virtiofsd` on the host `$PATH`; only supported by the QEMU backend.
+/// A host directory shared into the guest via virtiofs (QEMU / Cloud
+/// Hypervisor) or packed into an ext4 block device (Firecracker — no
+/// virtio-fs upstream). Requires `virtiofsd` on `$PATH` for QEMU/CH, or
+/// `mkfs.ext4` privileges for Firecracker packing at launch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedFolder {
     pub host_path: PathBuf,
     /// Where to mount it inside the guest. Auto-mounted via a generated
     /// cloud-init `runcmd` entry when `cloud_init` is set on the request
-    /// (see `VmManager::create`); otherwise the guest must run
-    /// `mount -t virtiofs <tag> <guest_path>` itself, where `<tag>` is
-    /// this share's index in `shared_folders` (`"fs0"`, `"fs1"`, ...).
+    /// (see `VmManager::create`); otherwise the guest must mount itself —
+    /// `mount -t virtiofs <tag> <guest_path>` for QEMU/CH (`tag` = `fs0`…),
+    /// or `mount /dev/vdX <guest_path>` for Firecracker share drives.
     pub guest_path: String,
     #[serde(default)]
     pub read_only: bool,

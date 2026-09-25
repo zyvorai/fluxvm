@@ -678,6 +678,25 @@ impl VmManager {
             return req.cloud_init.clone();
         }
         let mut ci = req.cloud_init.clone().unwrap_or_default();
+        if req.backend == BackendKind::Firecracker {
+            // Firecracker has no virtio-fs: shares are packed to ext4 and
+            // attached as secondary virtio-block drives. Drive order is
+            // root (vda), cloud-init seed (vdb — always present when this
+            // function returns Some), then share0… as vdc+.
+            let mut vd_idx = 2u8;
+            for share in &req.shared_folders {
+                let path = &share.guest_path;
+                let dev = format!("/dev/vd{}", (b'a' + vd_idx) as char);
+                let opts = if share.read_only { "ro" } else { "defaults" };
+                ci.runcmd.push(format!("mkdir -p {path}"));
+                ci.runcmd.push(format!(
+                    "grep -qF ' {path} ' /etc/fstab || echo '{dev} {path} ext4 {opts} 0 0' >> /etc/fstab"
+                ));
+                ci.runcmd.push(format!("mount {path} || mount {dev} {path}"));
+                vd_idx = vd_idx.saturating_add(1);
+            }
+            return Some(ci);
+        }
         for (i, share) in req.shared_folders.iter().enumerate() {
             let tag = format!("fs{i}");
             let path = &share.guest_path;
@@ -892,8 +911,8 @@ impl VmManager {
             vm.requested_security_profile,
             fluxvm_core::security::VmOperation::HotplugShare,
         )?;
-        if vm.backend != BackendKind::Qemu {
-            bail!("share hotplug is supported for the QEMU backend only");
+        if vm.backend != BackendKind::Qemu && vm.backend != BackendKind::CloudHypervisor {
+            bail!("share hotplug is supported for the QEMU and Cloud Hypervisor backends only");
         }
         if !matches!(vm.status, VmStatus::Running) {
             bail!(
@@ -905,7 +924,16 @@ impl VmManager {
             bail!("share source {} is not a directory", host_path.display());
         }
         let index = vm.request.shared_folders.len();
-        let pid = fluxvm_qemu::hotplug_virtiofs(&self.cfg, &vm, &host_path, index).await?;
+        let pid = match vm.backend {
+            BackendKind::Qemu => {
+                fluxvm_qemu::hotplug_virtiofs(&self.cfg, &vm, &host_path, index).await?
+            }
+            BackendKind::CloudHypervisor => {
+                fluxvm_cloud_hypervisor::hotplug_virtiofs(&self.cfg, &vm, &host_path, index)
+                    .await?
+            }
+            _ => unreachable!(),
+        };
         let tag = format!("fs{index}");
         vm.virtiofsd_pids.push(pid);
         vm.request
@@ -3620,6 +3648,28 @@ mod tests {
         assert_eq!(ci.runcmd[0], "echo hi");
         assert!(ci.runcmd.iter().any(|c| c.contains("/mnt/data")));
         assert!(ci.runcmd.iter().any(|c| c.contains("virtiofs ro ")));
+    }
+
+    #[test]
+    fn effective_cloud_init_firecracker_uses_ext4_block_mounts() {
+        let mut r = req(BackendKind::Firecracker, Some("/boot/vmlinux"), None);
+        r.shared_folders = vec![
+            fluxvm_core::model::SharedFolder {
+                host_path: "/srv/a".into(),
+                guest_path: "/mnt/a".into(),
+                read_only: false,
+            },
+            fluxvm_core::model::SharedFolder {
+                host_path: "/srv/b".into(),
+                guest_path: "/mnt/b".into(),
+                read_only: true,
+            },
+        ];
+        let ci = VmManager::effective_cloud_init(&r).unwrap();
+        let joined = ci.runcmd.join("\n");
+        assert!(joined.contains("/dev/vdc /mnt/a ext4 defaults 0 0"));
+        assert!(joined.contains("/dev/vdd /mnt/b ext4 ro 0 0"));
+        assert!(!joined.contains("virtiofs"));
     }
 
     #[test]

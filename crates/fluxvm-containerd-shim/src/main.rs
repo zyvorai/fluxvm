@@ -125,6 +125,10 @@ struct RuntimeConfig {
     vfio_allow: Vec<String>,
     vfio_require_iommu_group: bool,
     guest_device_allow: Vec<String>,
+    /// `qemu` (default) or `cloud-hypervisor` — Secure Containers VMM backend.
+    /// `FLUXVM_CONTAINER_BACKEND`. Cloud Hypervisor requires CNI/tap (no user NAT)
+    /// and a CH-bootable guest image (kernel or firmware).
+    backend: String,
     device_unplug_timeout_secs: u64,
 }
 
@@ -259,6 +263,21 @@ impl Default for RuntimeConfig {
                         .collect()
                 })
                 .unwrap_or_default(),
+            backend: {
+                let raw = std::env::var("FLUXVM_CONTAINER_BACKEND")
+                    .unwrap_or_else(|_| "qemu".into())
+                    .trim()
+                    .to_ascii_lowercase();
+                match raw.as_str() {
+                    "cloud-hypervisor" | "ch" => "cloud-hypervisor".into(),
+                    "firecracker" | "fc" => "firecracker".into(),
+                    "qemu" => "qemu".into(),
+                    other => {
+                        warn!("invalid FLUXVM_CONTAINER_BACKEND={other:?}; using qemu");
+                        "qemu".into()
+                    }
+                }
+            },
             device_unplug_timeout_secs: std::env::var(
                 "FLUXVM_CONTAINER_DEVICE_UNPLUG_TIMEOUT_SECS",
             )
@@ -1251,9 +1270,9 @@ impl Service {
                 );
                 bridge_retry = Some((path.clone(), primary.clone(), multus.clone()));
                 let bridge = if want_direct {
-                    prepare_cni_direct(&self.group, path, &primary)
+                    prepare_hybrid_direct(&self.group, path, &primary, &multus)
                         .await
-                        .context("preparing direct CNI attachment")?
+                        .context("preparing direct CNI attachment (hybrid Multus)")?
                 } else {
                     prepare_bridge_chain(&self.group, path, &primary, &multus).await?
                 };
@@ -1306,27 +1325,46 @@ impl Service {
                 }
             }
         }
-        if let Some(allow) = hostpath_export_root() {
+        if let Some(allow) = hostpath_export_roots().into_iter().next() {
+            // Primary allow root (first FLUXVM_HOSTPATH_ALLOW entry).
             if !allow.is_dir() {
                 bail!(
                     "FLUXVM_HOSTPATH_ALLOW {} is not a directory; refusing to export it",
                     allow.display()
                 );
             }
+        }
+        for (hi, allow) in hostpath_export_roots().into_iter().enumerate() {
+            if !allow.is_dir() {
+                bail!(
+                    "FLUXVM_HOSTPATH_ALLOW entry {} is not a directory; refusing to export it",
+                    allow.display()
+                );
+            }
+            let guest = if hi == 0 {
+                "/run/fluxvm/hostpath-allow".to_string()
+            } else {
+                format!("/run/fluxvm/hostpath-allow-{hi}")
+            };
             let tag = format!("fs{}", shared_folders.len());
-            shared_folders.push(hostpath_share_json(&allow));
-            kubelet_mounts.push((tag, "/run/fluxvm/hostpath-allow".into()));
+            shared_folders.push(json!({
+                "host_path": allow,
+                "guest_path": guest,
+                "read_only": false
+            }));
+            kubelet_mounts.push((tag, guest));
         }
 
         let create = json!({
             "name": format!("ctr-{}", safe_name(&self.group)),
-            "backend": "qemu",
+            "backend": self.cfg.backend,
             "image": self.cfg.guest_image,
             "vcpus": vcpus,
             "memory_mib": memory_mib,
             "network": network,
             "agent": {"enabled": true},
             "shared_folders": shared_folders,
+            "shared_memory": !shared_folders.is_empty(),
             "pod_uid": hints.pod_uid
         });
 
@@ -1483,8 +1521,14 @@ impl Service {
 
             // A claimed pool member was booted before this Pod existed, so it has none of the Pod's
             // virtiofs shares: hot-add them now, in order, so they get the tags fs0, fs1, ... the
-            // guest mounts below.
+            // guest mounts below. Firecracker cannot hotplug shares (block-staged at create).
             if self.cfg.warm_pool.is_some() {
+                if self.cfg.backend == "firecracker" {
+                    bail!(
+                        "FLUXVM_CONTAINER_WARM_POOL is incompatible with \
+                         FLUXVM_CONTAINER_BACKEND=firecracker (no share hotplug; use a cold create)"
+                    );
+                }
                 self.hotplug_shared_folders(&vm, &shared_folders).await?;
             }
 
@@ -1636,22 +1680,43 @@ impl Service {
         }
     }
 
-    /// Ensure fs0 and the optional Pod-scoped kubelet volume exports are
+    /// Ensure fs0 / share0 and the optional Pod-scoped kubelet volume exports are
     /// mounted before container create. Cloud-init is intentionally not a
     /// correctness dependency for secure containers.
+    ///
+    /// QEMU/CH mount virtiofs tags (`fs0`…). Firecracker packs shares to
+    /// ext4 at launch (root=`vda`, seed=`vdb`, share0=`vdc`…); mount those.
     async fn ensure_guest_shares_mounted(
         &self,
         vm: &VmRecord,
         extras: &[(String, String)],
     ) -> AnyResult<()> {
-        let mut commands = vec![format!(
-            "mkdir -p {GUEST_SHARE}; if ! mountpoint -q {GUEST_SHARE}; then mount -t virtiofs fs0 {GUEST_SHARE}; fi; mountpoint -q {GUEST_SHARE}"
-        )];
-        for (tag, guest) in extras {
-            commands.push(format!(
-                "mkdir -p {guest}; if ! mountpoint -q {guest}; then mount -t virtiofs {tag} {guest}; fi; mountpoint -q {guest}"
-            ));
-        }
+        let commands = if self.cfg.backend == "firecracker" {
+            // Drive order matches fluxvm-firecracker::config_json + scheduler
+            // effective_cloud_init: vda root, vdb seed, shares from vdc.
+            let mut cmds = vec![format!(
+                "mkdir -p {GUEST_SHARE}; if ! mountpoint -q {GUEST_SHARE}; then mount -t ext4 /dev/vdc {GUEST_SHARE}; fi; mountpoint -q {GUEST_SHARE}"
+            )];
+            let mut vd_idx = 3u8; // vdd after share0 on vdc
+            for (_tag, guest) in extras {
+                let dev = format!("/dev/vd{}", (b'a' + vd_idx) as char);
+                cmds.push(format!(
+                    "mkdir -p {guest}; if ! mountpoint -q {guest}; then mount -t ext4 {dev} {guest}; fi; mountpoint -q {guest}"
+                ));
+                vd_idx = vd_idx.saturating_add(1);
+            }
+            cmds
+        } else {
+            let mut cmds = vec![format!(
+                "mkdir -p {GUEST_SHARE}; if ! mountpoint -q {GUEST_SHARE}; then mount -t virtiofs fs0 {GUEST_SHARE}; fi; mountpoint -q {GUEST_SHARE}"
+            )];
+            for (tag, guest) in extras {
+                cmds.push(format!(
+                    "mkdir -p {guest}; if ! mountpoint -q {guest}; then mount -t virtiofs {tag} {guest}; fi; mountpoint -q {guest}"
+                ));
+            }
+            cmds
+        };
         let probe = format!("bash -lc '{}'", commands.join("; "));
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         loop {
@@ -1673,14 +1738,14 @@ impl Service {
                 } => {
                     if tokio::time::Instant::now() >= deadline {
                         bail!(
-                            "guest virtiofs shares not mounted after retries \
+                            "guest shares not mounted after retries \
                              (exit={exit_code} stdout={stdout:?} stderr={stderr:?})"
                         );
                     }
                 }
                 AgentResponse::Error { message } => {
                     if tokio::time::Instant::now() >= deadline {
-                        bail!("guest virtiofs share mount: {message}");
+                        bail!("guest share mount: {message}");
                     }
                 }
                 other => bail!("unexpected guest share mount response: {other:?}"),
@@ -2621,8 +2686,14 @@ impl Service {
         let device_claims = self
             .prepare_hotplug_devices(&vm, &mut spec, hints.pod_uid.as_deref(), &req.id)
             .await?;
-        if let Err(e) =
-            stage_bind_mounts(&mut spec, &host_ctr, &guest_ctr, hints.pod_uid.as_deref()).await
+        if let Err(e) = stage_bind_mounts(
+            &mut spec,
+            &host_ctr,
+            &guest_ctr,
+            hints.pod_uid.as_deref(),
+            Some((self, &vm)),
+        )
+        .await
         {
             self.release_device_claims(&vm, &req.id, &device_claims)
                 .await;
@@ -4434,14 +4505,23 @@ fn address_is_routable(addr: IpAddr) -> bool {
 }
 
 /// How the shim interprets Pod-netns CNI topology.
-///
-/// `Cilium` prefers `eth0`, treats Multus `netN` secondaries as ignorable for
-/// the primary L2 handoff (still not full Multus NIC hotplug), and never
-/// writes Cilium-private BPF maps — see `docs/cilium-cni.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CniProvider {
     Cilium,
+    Calico,
+    Flannel,
     Generic,
+}
+
+impl CniProvider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Cilium => "cilium",
+            Self::Calico => "calico",
+            Self::Flannel => "flannel",
+            Self::Generic => "generic",
+        }
+    }
 }
 
 /// `FLUXVM_CONTAINER_CNI_DATAPATH`.
@@ -4518,10 +4598,9 @@ fn direct_ineligibility(f: &DirectFacts) -> Option<String> {
         None => return Some("cannot determine the primary interface's link kind".into()),
     }
     if f.secondaries > 0 {
-        return Some(format!(
-            "fail closed: {} Multus secondary NIC(s) are not supported on the direct datapath (set FLUXVM_CONTAINER_CNI_DATAPATH=bridge)",
-            f.secondaries
-        ));
+        // Multus secondaries ride the bridge chain alongside a direct primary
+        // (hybrid). Per-secondary direct needs each Multus iface to be a veth;
+        // that is handled after primary eligibility succeeds.
     }
     None
 }
@@ -4594,13 +4673,34 @@ fn direct_hotplug_body(cni: &CniBridge) -> Value {
 /// The `network` object of `POST /v1/vms` for a prepared CNI attachment.
 fn cni_network_json(cni: &CniBridge) -> Value {
     if cni.direct {
+        // Hybrid: primary is bridge-less direct; Multus secondaries stay on
+        // host bridges (or carry their own direct when set later).
+        let extra: Vec<_> = cni
+            .secondaries
+            .iter()
+            .map(|sec| {
+                if sec.direct {
+                    json!({
+                        "bridge": "",
+                        "mac": sec.network.mac,
+                        "direct": {
+                            "outer": sec.interface,
+                            "netns_path": sec.netns_mount,
+                            "mode": "peer-veth"
+                        }
+                    })
+                } else {
+                    json!({"bridge": sec.host_bridge, "mac": sec.network.mac})
+                }
+            })
+            .collect();
         return json!({
             "mode": "tap",
             "tap_name": null,
             "bridge": null,
             "mac": cni.network.mac,
             "netns": false,
-            "extra": [],
+            "extra": extra,
             "direct": {
                 "outer": cni.interface,
                 "netns_path": cni.netns_mount,
@@ -4626,7 +4726,9 @@ fn cni_network_json(cni: &CniBridge) -> Value {
 fn parse_cni_provider_label(raw: &str) -> Option<CniProvider> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "cilium" => Some(CniProvider::Cilium),
-        "generic" | "bridge" | "calico" | "flannel" | "cni" => Some(CniProvider::Generic),
+        "calico" => Some(CniProvider::Calico),
+        "flannel" => Some(CniProvider::Flannel),
+        "generic" | "bridge" | "cni" => Some(CniProvider::Generic),
         "auto" | "" => None,
         _ => None,
     }
@@ -4652,6 +4754,45 @@ fn host_looks_like_cilium() -> bool {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
             if name.contains("cilium") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn host_looks_like_calico() -> bool {
+    if Path::new("/opt/cni/bin/calico").is_file() || Path::new("/opt/cni/bin/calico-ipam").is_file()
+    {
+        return true;
+    }
+    if Path::new("/var/run/calico").is_dir() {
+        return true;
+    }
+    if let Ok(entries) = std::fs::read_dir("/etc/cni/net.d") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains("calico") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn host_looks_like_flannel() -> bool {
+    if Path::new("/opt/cni/bin/flannel").is_file()
+        || Path::new("/opt/cni/bin/flannel-cni").is_file()
+    {
+        return true;
+    }
+    if Path::new("/run/flannel").is_dir() {
+        return true;
+    }
+    if let Ok(entries) = std::fs::read_dir("/etc/cni/net.d") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.contains("flannel") {
                 return true;
             }
         }
@@ -4696,8 +4837,13 @@ async fn resolve_cni_provider(configured: &str, netns_path: &Path) -> CniProvide
     if host_looks_like_cilium() {
         return CniProvider::Cilium;
     }
-    // Pod-side hint: Cilium sometimes leaves cilium_net_* / cilium_vxlan peers
-    // visible briefly; prefer eth0 + Cilium profile when present.
+    if host_looks_like_calico() {
+        return CniProvider::Calico;
+    }
+    if host_looks_like_flannel() {
+        return CniProvider::Flannel;
+    }
+    // Pod-side hints when host markers are absent.
     if let Ok(links) = inventory_cni_links(netns_path).await {
         for link in &links {
             let Some(name) = link.get("ifname").and_then(Value::as_str) else {
@@ -4706,6 +4852,12 @@ async fn resolve_cni_provider(configured: &str, netns_path: &Path) -> CniProvide
             let lower = name.to_ascii_lowercase();
             if lower.starts_with("cilium") || lower == "lxc_health" {
                 return CniProvider::Cilium;
+            }
+            if lower.starts_with("cali") {
+                return CniProvider::Calico;
+            }
+            if lower.starts_with("flannel") || lower == "cni0" {
+                return CniProvider::Flannel;
             }
         }
     }
@@ -5328,6 +5480,72 @@ async fn prepare_cni_direct(
     Ok(bridge)
 }
 
+/// Direct primary + Multus secondaries on the bridge chain (or per-secondary
+/// direct when the Multus iface is a veth and
+/// `FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH=direct|auto`).
+async fn prepare_hybrid_direct(
+    group: &str,
+    path: &Path,
+    primary: &str,
+    multus: &[String],
+) -> AnyResult<CniBridge> {
+    let mut bridge = prepare_cni_direct(group, path, primary).await?;
+    let multus_mode = std::env::var("FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH")
+        .ok()
+        .and_then(|s| CniDatapath::parse(&s))
+        .unwrap_or(CniDatapath::Bridge);
+    for (i, name) in multus.iter().enumerate() {
+        let sec_group = format!("{group}-n{i}");
+        let want_sec_direct = match multus_mode {
+            CniDatapath::Bridge => false,
+            CniDatapath::Direct | CniDatapath::Auto => {
+                matches!(cni_link_kind(path, name).await.as_deref(), Some("veth"))
+            }
+        };
+        if want_sec_direct {
+            match prepare_cni_direct(&sec_group, path, name).await {
+                Ok(sec) => {
+                    info!("Multus secondary {name} attached as guest NIC via direct datapath");
+                    bridge.secondaries.push(sec);
+                }
+                Err(e) if matches!(multus_mode, CniDatapath::Auto) => {
+                    warn!(
+                        "Multus secondary {name} direct failed ({e:#}); falling back to bridge"
+                    );
+                    match prepare_cni_l2(&sec_group, path, name).await {
+                        Ok(sec) => bridge.secondaries.push(sec),
+                        Err(e2) => {
+                            cleanup_cni_bridge(&bridge).await;
+                            return Err(e2).context(format!(
+                                "Multus secondary {name} bridge fallback after direct failure"
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    cleanup_cni_bridge(&bridge).await;
+                    return Err(e).context(format!("Multus secondary {name} direct"));
+                }
+            }
+        } else {
+            match prepare_cni_l2(&sec_group, path, name).await {
+                Ok(sec) => {
+                    info!(
+                        "Multus secondary {name} attached as guest NIC via bridge {}",
+                        sec.host_bridge
+                    );
+                    bridge.secondaries.push(sec);
+                }
+                Err(e) => {
+                    cleanup_cni_bridge(&bridge).await;
+                    return Err(e).context(format!("Multus secondary {name}"));
+                }
+            }
+        }
+    }
+    Ok(bridge)
+}
+
 /// The original bridge chain for the primary and every Multus secondary.
 async fn prepare_bridge_chain(
     group: &str,
@@ -5808,6 +6026,7 @@ async fn stage_bind_mounts(
     host_ctr: &Path,
     guest_ctr: &str,
     pod_uid: Option<&str>,
+    broker: Option<(&Service, &VmRecord)>,
 ) -> AnyResult<()> {
     let allow_root = hostpath_allow_root(spec);
     let Some(mounts) = spec.get_mut("mounts").and_then(Value::as_array_mut) else {
@@ -5873,19 +6092,74 @@ async fn stage_bind_mounts(
             let allow_root = allow_root
                 .as_ref()
                 .expect("claims_allow implies allow_root");
-            let exported = hostpath_export_root();
-            let same_export = exported.as_ref().is_some_and(|exp| {
+            let exports = hostpath_export_roots();
+            let export_match = exports.iter().find(|exp| {
                 fluxvm_core::policy::resolve_existing(exp)
                     == fluxvm_core::policy::resolve_existing(allow_root)
             });
-            if !same_export {
+            let guest_root = if let Some((hi, _)) = exports
+                .iter()
+                .enumerate()
+                .find(|(_, exp)| {
+                    fluxvm_core::policy::resolve_existing(exp)
+                        == fluxvm_core::policy::resolve_existing(allow_root)
+                })
+            {
+                if hi == 0 {
+                    PathBuf::from("/run/fluxvm/hostpath-allow")
+                } else {
+                    PathBuf::from(format!("/run/fluxvm/hostpath-allow-{hi}"))
+                }
+            } else if let Some((svc, vm)) = broker {
+                // Dynamic broker: hotplug the allowlisted root now (QEMU/CH only).
+                if svc.cfg.backend == "firecracker" {
+                    bail!(
+                        "hostPath broker hotplug is unavailable on Firecracker; \
+                         set FLUXVM_HOSTPATH_ALLOW before sandbox create so the \
+                         allowlist is packed into an ext4 share at launch"
+                    );
+                }
+                let broker_on = std::env::var("FLUXVM_HOSTPATH_BROKER")
+                    .map(|v| !matches!(v.as_str(), "0" | "false" | "no" | "off" | "require-create"))
+                    .unwrap_or(true);
+                if !broker_on {
+                    bail!(
+                        "hostPath allowlist {} is not a virtiofs export; set FLUXVM_HOSTPATH_ALLOW before sandbox create, or FLUXVM_HOSTPATH_BROKER=1",
+                        allow_root.display()
+                    );
+                }
+                let share = json!({
+                    "host_path": allow_root,
+                    "read_only": false
+                });
+                svc.hotplug_shared_folders(vm, &[share]).await.with_context(|| {
+                    format!(
+                        "hostPath broker hotplugging allowlist {}",
+                        allow_root.display()
+                    )
+                })?;
+                // Guest path for hotplugged shares is /mnt/fsN from the daemon;
+                // map under /run/fluxvm/hostpath-allow via a guest bind after mount.
+                PathBuf::from("/run/fluxvm/hostpath-allow")
+            } else {
                 bail!(
                     "hostPath allowlist {} is not a virtiofs export; set FLUXVM_HOSTPATH_ALLOW to that directory before the sandbox is created",
                     allow_root.display()
                 );
-            }
+            };
+            let _ = export_match;
             match fluxvm_core::policy::hostpath_guest(&source_path, allow_root) {
                 Some(guest) => {
+                    // Remap guest root when using a numbered export (hi > 0).
+                    let guest = if guest_root != PathBuf::from("/run/fluxvm/hostpath-allow") {
+                        let rel = guest.strip_prefix("/run/fluxvm/hostpath-allow").ok();
+                        match rel {
+                            Some(rest) => guest_root.join(rest),
+                            None => guest,
+                        }
+                    } else {
+                        guest
+                    };
                     mount["source"] = Value::String(guest.to_string_lossy().into_owned());
                     mount["fluxvm.io/hostpath-broker"] = Value::String("allowlisted".into());
                     continue;
@@ -5936,12 +6210,23 @@ fn hostpath_share_json(host: &Path) -> Value {
     })
 }
 
-/// Directory exported at sandbox create. Annotation-only allowlists fail
-/// closed unless this matches, because the guest mount is created here.
-fn hostpath_export_root() -> Option<PathBuf> {
+/// Directories exported at sandbox create (`FLUXVM_HOSTPATH_ALLOW`, colon-separated).
+fn hostpath_export_roots() -> Vec<PathBuf> {
     std::env::var_os("FLUXVM_HOSTPATH_ALLOW")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        .map(|v| {
+            v.to_string_lossy()
+                .split(':')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// First export root (compat for single-path callers).
+fn hostpath_export_root() -> Option<PathBuf> {
+    hostpath_export_roots().into_iter().next()
 }
 
 fn hostpath_allow_root(spec: &Value) -> Option<PathBuf> {
@@ -6229,6 +6514,7 @@ mod tests {
             &td.join("ctr"),
             "/run/fluxvm/pod/containers/c",
             None,
+            None,
         )
         .await
         .unwrap_err()
@@ -6249,6 +6535,7 @@ mod tests {
             &mut spec,
             &td.join("ctr"),
             "/run/fluxvm/pod/containers/c",
+            None,
             None,
         )
         .await

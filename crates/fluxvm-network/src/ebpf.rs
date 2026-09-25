@@ -266,6 +266,15 @@ pub fn apply(
         if let Some(d) = &direct {
             configure_direct_out(&map_dir, ifindex, d)?;
         }
+        for (i, d) in crate::direct::recorded_all(id).into_iter().enumerate().skip(1) {
+            let Some(tap) = d.tap_name.as_deref() else {
+                continue;
+            };
+            let extra_idx = read_ifindex(tap).with_context(|| {
+                format!("resolving Multus/extra direct tap {tap} (index {i})")
+            })?;
+            configure_direct_out(&map_dir, extra_idx, &d)?;
+        }
         fs::write(
             meta_dir.join("schema_version"),
             DATAPLANE_SCHEMA_VERSION.to_string(),
@@ -370,11 +379,28 @@ pub fn apply(
         return attach;
     }
     attach?;
-    if let Some(d) = &direct {
-        if let Err(e) = attach_direct_in(cfg, id, &vm_dir, &meta_dir, iface, d) {
-            let _ = remove(cfg, id);
-            return Err(e).context("attaching the bridge-less direct redirect");
+    if let Err(e) = (|| -> Result<()> {
+        let all = crate::direct::recorded_all(id);
+        for (i, d) in all.iter().enumerate() {
+            let tap = if i == 0 {
+                iface
+            } else {
+                d.tap_name.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("direct-extra-{i} record is missing tap_name")
+                })?
+            };
+            attach_direct_in(cfg, id, &vm_dir, &meta_dir, tap, d).with_context(|| {
+                if i == 0 {
+                    "attaching primary bridge-less direct redirect".into()
+                } else {
+                    format!("attaching Multus/extra direct redirect {i}")
+                }
+            })?;
         }
+        Ok(())
+    })() {
+        let _ = remove(cfg, id);
+        return Err(e);
     }
     if let Err(e) = sync_pod_ingress_attachment(cfg, id, iface, &map_dir, pod_policy) {
         let _ = remove(cfg, id);
@@ -671,32 +697,31 @@ fn direct_in_attached(vm_dir: &Path, outer: &str, handle: u64) -> bool {
 /// Detaches the direct inbound program (if this VM has one). Best effort: the tap, and with it
 /// the outer device's peer, may already be gone.
 fn detach_direct_in_dir(id: Uuid, vm_dir: &Path) {
-    let Some(d) = crate::direct::recorded(id) else {
-        return;
-    };
-    remove_uplink_entries(vm_dir, &d);
-    let link = vm_dir.join("links/tcx_direct_in");
-    if link.exists() {
-        let _ = tcx::detach(&link);
-        return;
-    }
-    let handle = direct_tc_handle(id);
-    if direct_in_attached(vm_dir, &d.spec.outer, handle) {
-        let _ = run(
-            "tc",
-            &[
-                "filter".into(),
-                "del".into(),
-                "dev".into(),
-                d.spec.outer.clone(),
-                "ingress".into(),
-                "pref".into(),
-                TC_DIRECT_PRIORITY.into(),
-                "handle".into(),
-                handle.to_string(),
-                "bpf".into(),
-            ],
-        );
+    for d in crate::direct::recorded_all(id) {
+        remove_uplink_entries(vm_dir, &d);
+        let link = vm_dir.join("links/tcx_direct_in");
+        if link.exists() {
+            let _ = tcx::detach(&link);
+            continue;
+        }
+        let handle = direct_tc_handle(id);
+        if direct_in_attached(vm_dir, &d.spec.outer, handle) {
+            let _ = run(
+                "tc",
+                &[
+                    "filter".into(),
+                    "del".into(),
+                    "dev".into(),
+                    d.spec.outer.clone(),
+                    "ingress".into(),
+                    "pref".into(),
+                    TC_DIRECT_PRIORITY.into(),
+                    "handle".into(),
+                    handle.to_string(),
+                    "bpf".into(),
+                ],
+            );
+        }
     }
 }
 

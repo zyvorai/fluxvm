@@ -111,7 +111,8 @@ workload's own filter/chroot. Default policy is fail closed
 `io.zyvor.seccomp.notify.errno=<1..4095>` via OCI annotations). `NOTIFY` as
 `seccomp.defaultAction` and `NOTIFY` on `sendmsg` are both rejected at parse
 time — both would deadlock the listener bootstrap before the broker owns the
-fd. `SECCOMP_IOCTL_NOTIF_ADDFD` and remote policy RPC are not implemented.
+fd. `SECCOMP_IOCTL_NOTIF_ADDFD` is available via
+`io.zyvor.seccomp.notify.mode=addfd`; remote policy RPC remains out of scope.
 
 OCI `linux.mountLabel` is validated against an enabled SELinux guest with
 `libselinux.so.1` present, then appended as `context="<label>"` to

@@ -168,20 +168,24 @@ Everything through Set 13 below, plus:
 **Status: GA.** Scope boundaries below — not a claim of full Kata Containers
 compatibility.
 
-1. **QEMU is the supported Secure Containers VMM.** Cloud Hypervisor and
-   Firecracker still need equivalent shared-rootfs/volume plumbing.
-2. **CNI coverage is Cilium-aware on the primary interface.** The L2 handoff
-   auto-detects Cilium (`FLUXVM_CONTAINER_CNI_PROVIDER=auto`), prefers `eth0`,
-   and ignores Multus `netN` secondaries under the Cilium provider so primary
-   handoff proceeds ([cilium-cni.md](cilium-cni.md)). Multus `netN` secondaries
-   are attached as extra guest NICs over bridge chains (boot-time `network.extra`,
-   or hotplug after a warm-pool claim). A bridge-less datapath replaces the
-   primary NIC's bridge chain with an eBPF redirect when its preconditions hold
-   (`FLUXVM_CONTAINER_CNI_DATAPATH=auto`, the default; `bridge` forces the chain;
-   [direct-datapath.md](direct-datapath.md)). Unusual non-Cilium layouts remain open.
-3. **Arbitrary hostPath passthrough is not enabled by default.** Kubernetes
-   Pod volume roots are scoped by sandbox UID; other binds remain copied unless
-   an explicit broker/hotplug model is added.
+1. **QEMU, Cloud Hypervisor, and Firecracker are supported Secure Containers
+   VMMs.** Set `FLUXVM_CONTAINER_BACKEND=qemu|cloud-hypervisor|firecracker`.
+   Firecracker has **no virtio-fs** upstream: Pod shares are packed to ext4
+   block images at launch (write-through hostPath/live sync is QEMU/CH only).
+2. **CNI coverage is Cilium-, Calico-, and Flannel-aware on the primary
+   interface.** The L2 handoff auto-detects the provider
+   (`FLUXVM_CONTAINER_CNI_PROVIDER=auto|cilium|calico|flannel|generic`),
+   prefers `eth0`, and treats Multus `netN` secondaries as extra guest NICs.
+   Multus secondaries ride a **hybrid** path with a direct primary (bridge by
+   default; set `FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH=direct|auto` for
+   per-secondary direct when the iface is a veth). Unusual non-veth layouts
+   still fall back to the bridge chain. Firecracker cannot attach a
+   bridge-less direct tap by fd — use tap/bridge or QEMU/CH for direct.
+3. **Arbitrary hostPath passthrough is allowlisted.** Set
+   `FLUXVM_HOSTPATH_ALLOW` (colon-separated roots) at sandbox create, or use
+   the dynamic broker (`FLUXVM_HOSTPATH_BROKER=1`, default) to hotplug an
+   annotation allowlist root into a running sandbox (QEMU/CH). Outside the
+   allowlist, binds remain copied or fail closed when an allowlist is in force.
 4. **Device-cgroup enforcement landed in Set 10.** PID/mount/IPC/UTS
    namespace isolation landed in Set 6 (see
    [docs/secure-containers-set6r.md](secure-containers-set6r.md)), and user
@@ -194,8 +198,8 @@ compatibility.
    via `seccomp_rule_add_array`. `SCMP_ACT_NOTIFY` is served by a bounded
    in-guest broker (Set 11); `SCMP_ACT_NOTIFY` as `defaultAction` and NOTIFY
    on `sendmsg` are both rejected at OCI-parse time rather than risking a
-   listener-bootstrap deadlock. `SECCOMP_IOCTL_NOTIF_ADDFD` and remote
-   policy RPC are not implemented.
+   listener-bootstrap deadlock. `SECCOMP_IOCTL_NOTIF_ADDFD` is available via
+   `io.zyvor.seccomp.notify.mode=addfd`; remote policy RPC remains out of scope.
 6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
    resize testing on self-hosted nodes before production claims.**
 7. **`CLONE_NEWUSER` is opt-in and unproven under load.** Default identity
@@ -214,32 +218,33 @@ compatibility.
 
 PID/mount/IPC/UTS namespace isolation (opt-in `CLONE_NEWUSER`) and
 per-container device-cgroup enforcement (`BPF_PROG_TYPE_CGROUP_DEVICE`) have
-both landed. Remaining: broader OCI runtime-spec conformance test fixtures
-covering the full matrix of these controls together.
+both landed, with checked-in fragments under `tests/oci-fixtures/`. Remaining:
+live-node matrix coverage under `FLUXVM_SECURE_CONTAINERS_E2E=1` (combined
+controls on real KVM/containerd), not more fragment files.
 
 ### P0 — CNI conformance
 
-Cilium primary-path support is in-tree ([cilium-cni.md](cilium-cni.md),
-`scripts/evidence-cilium-cni.sh`); the opt-in direct datapath is documented in
-[direct-datapath.md](direct-datapath.md). Remaining: Calico/flannel bridge/veth churn,
-multi-CNI conformance under load, and Multus secondaries on the direct datapath.
+Cilium / Calico / Flannel providers auto-detect
+(`FLUXVM_CONTAINER_CNI_PROVIDER`); Multus `netN` secondaries attach as extra
+guest NICs (hybrid bridge default, optional per-secondary direct via
+`FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`). Remaining: multi-CNI conformance under
+load on live nodes.
 
 ### P0 — volume broker / explicit hostPath
 
-Keep Pod-scoped kubelet volume exports as the safe default. Add a narrowly
-allowlisted broker/hotplug path for operators that intentionally need arbitrary
-hostPath or non-kubelet mounts.
+Pod-scoped kubelet volume exports remain the safe default. Create-time
+`FLUXVM_HOSTPATH_ALLOW` (colon-separated) plus optional dynamic broker
+(`FLUXVM_HOSTPATH_BROKER=1`, QEMU/CH hotplug) are implemented. Firecracker packs
+allowlisted roots at launch (no hotplug).
 
 ### P1 — seccomp notification broker (landed, Set 11)
 
-Argument comparators (Set 10) and a bounded, fail-closed
-`SCMP_ACT_NOTIFY` listener/broker lifecycle (Set 11) are both implemented —
-see [docs/secure-containers-set11.md](secure-containers-set11.md). Remaining
-follow-up: `SECCOMP_IOCTL_NOTIF_ADDFD` and remote policy RPC are not
-implemented, and the full live-node gates (a real enforcing-SELinux guest
-mount label, killing a notified container mid-flight through the full
-create/delete lifecycle) still need to run against a live containerd/
-Kubernetes Pod, not just the guest-agent binary in isolation.
+Argument comparators (Set 10), bounded fail-closed `SCMP_ACT_NOTIFY` (Set 11),
+and `SECCOMP_IOCTL_NOTIF_ADDFD` (`io.zyvor.seccomp.notify.mode=addfd`) are
+implemented — see [docs/secure-containers-set11.md](secure-containers-set11.md).
+Remote policy RPC remains out of scope. Live-node gates (enforcing-SELinux
+guest mount label, mid-flight kill through full create/delete) still need
+containerd/Kubernetes Pod runs, not just the guest-agent binary in isolation.
 
 ### P1 — streaming/TTY conformance
 
@@ -254,12 +259,16 @@ strictly sequential) — see
 claim is opt-in: set `FLUXVM_CONTAINER_WARM_POOL` to a pool whose template
 uses `network.mode=none`. The shim claims a paused member, then
 `POST /v1/vms/{id}/hotplug/nic` for the Pod CNI bridge (and each Multus
-`netN`). RuntimeClass is **GA**, not a Kata-equivalent product.
+`netN`). Warm-pool claim requires QEMU or Cloud Hypervisor (share hotplug);
+Firecracker uses cold create with ext4-packed shares. RuntimeClass is **GA**,
+not a Kata-equivalent product.
 
 ### P1 — additional VMMs
 
-Enable Cloud Hypervisor first, then a restricted Firecracker profile once their
-shared-rootfs and device models are integrated.
+QEMU, Cloud Hypervisor, and Firecracker are all selectable via
+`FLUXVM_CONTAINER_BACKEND`. Firecracker packs Pod shares to ext4 at launch
+(no live virtio-fs). Remaining honesty bounds are live e2e gates and remote
+policy RPC (explicitly out of scope) — not a fourth VMM.
 
 ## Installation
 

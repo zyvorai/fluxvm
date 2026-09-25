@@ -57,7 +57,7 @@ size-stabilization drain remains available only for legacy stdio mode.
 - seccomp argument comparators / notify
 - allowlisted arbitrary hostPath broker/hotplug
 - IPv6 + multi-interface CNI conformance
-- Cloud Hypervisor / Firecracker shared-rootfs parity
+- Cloud Hypervisor / Firecracker shared-rootfs: CH uses virtiofs; Firecracker packs shares to ext4 at launch (no virtio-fs upstream)
 - real KVM/containerd/Kubernetes churn and terminal-resize CI on self-hosted nodes
 
 ## Test on a real KVM/containerd node

@@ -18,6 +18,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+use tokio::process::Command;
 
 const API_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -31,7 +32,55 @@ struct ResourcePaths {
     kernel: PathBuf,
     rootfs: PathBuf,
     seed: Option<PathBuf>,
+    /// Packed Secure Containers / shared_folders images: (drive_id, host or in-jail path).
+    shares: Vec<(String, PathBuf)>,
     vsock_uds: Option<PathBuf>,
+}
+
+/// Pack each `req.shared_folders` entry into `workspace/fc-share-{i}.ext4`.
+async fn prepare_share_images(
+    req: &CreateVmRequest,
+    workspace: &Path,
+) -> Result<Vec<(String, PathBuf)>> {
+    let mut out = Vec::new();
+    for (i, share) in req.shared_folders.iter().enumerate() {
+        let drive_id = format!("share{i}");
+        let image = workspace.join(format!("fc-share-{i}.ext4"));
+        // Size heuristic: at least 512M, grow with a rough du of the tree.
+        let size = share_image_size(&share.host_path).await;
+        fluxvm_core::fs_image::pack_directory_ext4(&share.host_path, &image, &size)
+            .await
+            .with_context(|| {
+                format!(
+                    "packing shared_folders[{i}] ({}) for Firecracker",
+                    share.host_path.display()
+                )
+            })?;
+        out.push((drive_id, image));
+    }
+    Ok(out)
+}
+
+async fn share_image_size(dir: &Path) -> String {
+    // Best-effort: `du -sm`; fall back to 2G.
+    let out = Command::new("du")
+        .args(["-sm"])
+        .arg(dir)
+        .output()
+        .await
+        .ok();
+    let mb = out
+        .and_then(|o| {
+            if !o.status.success() {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&o.stdout);
+            s.split_whitespace().next()?.parse::<u64>().ok()
+        })
+        .unwrap_or(512);
+    // Leave headroom for ext4 metadata; never below 512M.
+    let sized = mb.saturating_mul(2).max(512).min(32 * 1024);
+    format!("{sized}M")
 }
 
 fn config_json(
@@ -70,6 +119,19 @@ fn config_json(
             "path_on_host": seed.display().to_string(),
             "is_root_device": false,
             "is_read_only": true
+        }));
+    }
+    for (i, (drive_id, path)) in paths.shares.iter().enumerate() {
+        let read_only = req
+            .shared_folders
+            .get(i)
+            .map(|s| s.read_only)
+            .unwrap_or(false);
+        drives.push(json!({
+            "drive_id": drive_id,
+            "path_on_host": path.display().to_string(),
+            "is_root_device": false,
+            "is_read_only": read_only
         }));
     }
 
@@ -265,10 +327,12 @@ async fn launch_direct(
         .context(
             "Firecracker requires a Linux kernel via request.kernel or config.firecracker_kernel",
         )?;
+    let shares = prepare_share_images(req, &ctx.workspace).await?;
     let paths = ResourcePaths {
         kernel: kernel.clone(),
         rootfs: ctx.disk.clone(),
         seed: ctx.seed_disk.clone(),
+        shares,
         vsock_uds: ctx.vsock_socket.clone(),
     };
     let api = ctx.workspace.join("firecracker.sock");
@@ -358,6 +422,14 @@ async fn launch_jailed(
         }
         None => None,
     };
+    let host_shares = prepare_share_images(req, &ctx.workspace).await?;
+    let mut shares_in_jail = Vec::new();
+    for (drive_id, host_img) in &host_shares {
+        let jail_name = format!("{drive_id}.ext4");
+        link_or_copy(host_img, &chroot_root.join(&jail_name))
+            .with_context(|| format!("placing {drive_id} share image in jail"))?;
+        shares_in_jail.push((drive_id.clone(), PathBuf::from(format!("/{jail_name}"))));
+    }
     // Not pre-placed: Firecracker (running inside the jail) creates this
     // socket itself at startup, same as it would outside a jail — the
     // in-jail path here just tells it *where*, under its own chrooted `/`.
@@ -370,6 +442,7 @@ async fn launch_jailed(
         kernel: PathBuf::from("/vmlinux"),
         rootfs: PathBuf::from("/rootfs"),
         seed: seed_in_jail,
+        shares: shares_in_jail,
         vsock_uds: vsock_in_jail.clone(),
     };
     let cfg_json_path = chroot_root.join("config.json");
@@ -554,6 +627,7 @@ mod tests {
             kernel: PathBuf::from("/vmlinux"),
             rootfs: PathBuf::from("/rootfs"),
             seed: None,
+            shares: vec![],
             vsock_uds: None,
         };
         let cfg = config_json(&req, &ctx, &paths, false).unwrap();
@@ -578,12 +652,14 @@ mod tests {
                 bridge: "br1".into(),
                 mac: Some("02:00:00:00:00:02".into()),
                 tap_name: Some("tap1".into()),
+                direct: None,
             }],
         };
         let paths = ResourcePaths {
             kernel: PathBuf::from("/vmlinux"),
             rootfs: PathBuf::from("/rootfs"),
             seed: None,
+            shares: vec![],
             vsock_uds: None,
         };
         let cfg = config_json(&req, &ctx, &paths, false).unwrap();
@@ -605,6 +681,7 @@ mod tests {
             kernel: PathBuf::from("/vmlinux"),
             rootfs: PathBuf::from("/rootfs"),
             seed: None,
+            shares: vec![],
             vsock_uds: None,
         };
         let cfg = config_json(&req, &ctx, &paths, false).unwrap();
@@ -619,6 +696,7 @@ mod tests {
             kernel: PathBuf::from("/vmlinux"),
             rootfs: PathBuf::from("/rootfs"),
             seed: None,
+            shares: vec![],
             vsock_uds: None,
         };
         let cfg = config_json(&req, &ctx, &paths, true).unwrap();
@@ -649,9 +727,48 @@ mod tests {
             kernel: PathBuf::from("/vmlinux"),
             rootfs: PathBuf::from("/rootfs"),
             seed: None,
+            shares: vec![],
             vsock_uds: None,
         };
         let err = config_json(&req, &ctx, &paths, false).unwrap_err();
         assert!(format!("{err:#}").contains("by fd"), "{err:#}");
+    }
+
+    #[test]
+    fn config_json_attaches_share_drives_after_root_and_seed() {
+        let mut req = bare_req();
+        req.shared_folders = vec![
+            fluxvm_core::model::SharedFolder {
+                host_path: "/srv/a".into(),
+                guest_path: "/mnt/a".into(),
+                read_only: false,
+            },
+            fluxvm_core::model::SharedFolder {
+                host_path: "/srv/b".into(),
+                guest_path: "/mnt/b".into(),
+                read_only: true,
+            },
+        ];
+        let ctx = bare_ctx();
+        let paths = ResourcePaths {
+            kernel: PathBuf::from("/vmlinux"),
+            rootfs: PathBuf::from("/rootfs"),
+            seed: Some(PathBuf::from("/seed")),
+            shares: vec![
+                ("share0".into(), PathBuf::from("/share0.ext4")),
+                ("share1".into(), PathBuf::from("/share1.ext4")),
+            ],
+            vsock_uds: None,
+        };
+        let cfg = config_json(&req, &ctx, &paths, false).unwrap();
+        let drives = cfg["drives"].as_array().unwrap();
+        assert_eq!(drives.len(), 4);
+        assert_eq!(drives[0]["drive_id"], "rootfs");
+        assert_eq!(drives[1]["drive_id"], "seed");
+        assert_eq!(drives[2]["drive_id"], "share0");
+        assert_eq!(drives[2]["path_on_host"], "/share0.ext4");
+        assert_eq!(drives[2]["is_read_only"], false);
+        assert_eq!(drives[3]["drive_id"], "share1");
+        assert_eq!(drives[3]["is_read_only"], true);
     }
 }

@@ -46,7 +46,7 @@ noNewPrivileges and Linux capability sets.
 - seccomp argument comparators / notify
 - Linux namespace creation parity and device-cgroup rules
 - explicitly allowlisted hostPath hotplug/broker
-- Cloud Hypervisor / Firecracker shared-rootfs parity
+- Cloud Hypervisor / Firecracker shared-rootfs: CH uses virtiofs; Firecracker packs shares to ext4 at launch (no virtio-fs upstream)
 - real Kubernetes/KVM conformance and churn tests
 
 ## Required guest packages

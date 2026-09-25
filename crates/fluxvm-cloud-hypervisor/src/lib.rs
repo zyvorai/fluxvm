@@ -72,7 +72,12 @@ fn max_memory_mib(req: &CreateVmRequest) -> u64 {
     })
 }
 
-pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> Result<Vec<String>> {
+pub fn build_args(
+    cfg: &Config,
+    req: &CreateVmRequest,
+    ctx: &LaunchContext,
+    virtiofs_sockets: &[(String, std::path::PathBuf)],
+) -> Result<Vec<String>> {
     // Restore from a prior Cloud Hypervisor snapshot — config comes from the
     // snapshot bundle, not the create request.
     if let Some(tag) = &req.loadvm_tag {
@@ -98,6 +103,12 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
     let max_vcpus = max_vcpus(req);
     let hotplug_size_mib = max_memory_mib(req).saturating_sub(req.memory_mib);
     let api = ctx.workspace.join("ch-api.sock");
+    // virtiofs needs shared memory (`shared=on`); also honor req.shared_memory.
+    let need_shared_mem = req.shared_memory || !virtiofs_sockets.is_empty();
+    let mut memory = format!("size={}M,hotplug_size={hotplug_size_mib}M", req.memory_mib);
+    if need_shared_mem {
+        memory.push_str(",shared=on");
+    }
     let mut a = vec![
         "--api-socket".into(),
         api.display().to_string(),
@@ -108,7 +119,7 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
             format!("boot={},max={max_vcpus}", req.vcpus)
         },
         "--memory".into(),
-        format!("size={}M,hotplug_size={hotplug_size_mib}M", req.memory_mib),
+        memory,
         "--disk".into(),
         format!("path={}", path_arg(&ctx.disk)),
     ];
@@ -208,6 +219,13 @@ pub fn build_args(cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> R
         ]);
     }
 
+    for (tag, socket) in virtiofs_sockets {
+        a.extend([
+            "--fs".into(),
+            format!("tag={tag},socket={},dax=off", path_arg(socket)),
+        ]);
+    }
+
     if let Some(kernel) = &req.kernel {
         a.extend(["--kernel".into(), path_arg(kernel)]);
         if let Some(initrd) = &req.initrd {
@@ -244,10 +262,22 @@ impl VmBackend for CloudHypervisorBackend {
         req: &CreateVmRequest,
         ctx: &LaunchContext,
     ) -> Result<LaunchResult> {
+        let (virtiofsd_pids, virtiofs_sockets) =
+            match fluxvm_core::virtiofs::spawn_virtiofsd_instances(cfg, req, ctx).await {
+                Ok(v) => v,
+                Err(e) => {
+                    if let Some(fd) = ctx.network.tap_fd {
+                        fluxvm_core::process::close_fd(fd);
+                    }
+                    return Err(e);
+                }
+            };
+
         let swtpm_pid = if req.tpm.unwrap_or(false) {
             match spawn_swtpm(cfg, ctx).await {
                 Ok(pid) => Some(pid),
                 Err(e) => {
+                    fluxvm_core::virtiofs::terminate_virtiofsd_pids(&virtiofsd_pids);
                     if let Some(fd) = ctx.network.tap_fd {
                         fluxvm_core::process::close_fd(fd);
                     }
@@ -258,7 +288,19 @@ impl VmBackend for CloudHypervisorBackend {
             None
         };
 
-        let args = build_args(cfg, req, ctx)?;
+        let args = match build_args(cfg, req, ctx, &virtiofs_sockets) {
+            Ok(a) => a,
+            Err(e) => {
+                fluxvm_core::virtiofs::terminate_virtiofsd_pids(&virtiofsd_pids);
+                if let Some(pid) = swtpm_pid {
+                    let _ = fluxvm_core::process::terminate_pid(pid).await;
+                }
+                if let Some(fd) = ctx.network.tap_fd {
+                    fluxvm_core::process::close_fd(fd);
+                }
+                return Err(e);
+            }
+        };
         let spawned = fluxvm_core::process::spawn_vmm(
             &cfg.cloud_hypervisor_binary,
             &args,
@@ -272,6 +314,7 @@ impl VmBackend for CloudHypervisorBackend {
         let child = match spawned {
             Ok(c) => c,
             Err(e) => {
+                fluxvm_core::virtiofs::terminate_virtiofsd_pids(&virtiofsd_pids);
                 if let Some(pid) = swtpm_pid {
                     let _ = fluxvm_core::process::terminate_pid(pid).await;
                 }
@@ -279,6 +322,7 @@ impl VmBackend for CloudHypervisorBackend {
             }
         };
         let Some(pid) = child.id() else {
+            fluxvm_core::virtiofs::terminate_virtiofsd_pids(&virtiofsd_pids);
             if let Some(pid) = swtpm_pid {
                 let _ = fluxvm_core::process::terminate_pid(pid).await;
             }
@@ -289,7 +333,7 @@ impl VmBackend for CloudHypervisorBackend {
             control_socket: Some(ctx.workspace.join("ch-api.sock")),
             jail_path: None,
             vsock_socket: ctx.vsock_socket.clone(),
-            virtiofsd_pids: Vec::new(),
+            virtiofsd_pids,
             swtpm_pid,
         })
     }
@@ -305,6 +349,38 @@ impl VmBackend for CloudHypervisorBackend {
     async fn graceful_shutdown(&self, cfg: &Config, vm: &VmRecord) -> Result<()> {
         ch_remote(cfg, vm, "shutdown").await
     }
+}
+
+/// Hot-adds a virtiofs share to a running Cloud Hypervisor VM via
+/// `ch-remote fs add`. Spawns virtiofsd first; on failure the daemon is killed.
+pub async fn hotplug_virtiofs(
+    cfg: &Config,
+    vm: &VmRecord,
+    host_path: &std::path::Path,
+    index: usize,
+) -> Result<u32> {
+    let tag = format!("fs{index}");
+    let (pid, socket) =
+        fluxvm_core::virtiofs::spawn_virtiofsd_one(cfg, &vm.workspace, index, host_path).await?;
+    let api = vm.workspace.join("ch-api.sock");
+    let fs_arg = format!("tag={tag},socket={},dax=off", path_arg(&socket));
+    let result = run_checked_timeout(
+        &cfg.ch_remote_binary,
+        &[
+            "--api-socket".into(),
+            api.display().to_string(),
+            "fs".into(),
+            "add".into(),
+            fs_arg,
+        ],
+        CH_REMOTE_TIMEOUT,
+    )
+    .await;
+    if let Err(e) = result {
+        fluxvm_core::virtiofs::terminate_virtiofsd_pids(&[pid]);
+        return Err(e).context(format!("hot-adding Cloud Hypervisor virtiofs share {tag}"));
+    }
+    Ok(pid)
 }
 
 /// Pause, snapshot to `dest`, resume. `dest` is a directory URL path
@@ -639,7 +715,7 @@ mod tests {
                 tap_name: Some("tap1".into()),
             }],
         };
-        let args = build_args(&cfg(), &req(), &c).unwrap();
+        let args = build_args(&cfg(), &req(), &c, &[]).unwrap();
         let nets: Vec<_> = args
             .windows(2)
             .filter(|w| w[0] == "--net")
@@ -953,7 +1029,7 @@ mod tests {
 
     #[test]
     fn cpu_and_memory_hotplug_headroom_defaults_when_unset() {
-        let args = build_args(&cfg(), &req(), &ctx()).unwrap();
+        let args = build_args(&cfg(), &req(), &ctx(), &[]).unwrap();
         let cpus = args
             .iter()
             .position(|a| a == "--cpus")
@@ -981,7 +1057,7 @@ mod tests {
         r.max_vcpus = Some(8);
         r.memory_mib = 1024;
         r.max_memory_mib = Some(4096);
-        let args = build_args(&cfg(), &r, &ctx()).unwrap();
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
         let cpus = args
             .iter()
             .position(|a| a == "--cpus")
@@ -1052,7 +1128,7 @@ mod tests {
 
     #[test]
     fn tpm_disabled_omits_tpm_flag() {
-        let args = build_args(&cfg(), &req(), &ctx()).unwrap();
+        let args = build_args(&cfg(), &req(), &ctx(), &[]).unwrap();
         assert!(!args.iter().any(|a| a == "--tpm"));
     }
 
@@ -1060,7 +1136,7 @@ mod tests {
     fn tpm_enabled_adds_tpm_socket_flag() {
         let mut r = req();
         r.tpm = Some(true);
-        let args = build_args(&cfg(), &r, &ctx()).unwrap();
+        let args = build_args(&cfg(), &r, &ctx(), &[]).unwrap();
         let idx = args
             .iter()
             .position(|a| a == "--tpm")
@@ -1226,7 +1302,7 @@ mod tests {
             extra: vec![],
         };
         c.network.tap_fd = Some(9);
-        let args = build_args(&cfg(), &req(), &c).unwrap();
+        let args = build_args(&cfg(), &req(), &c, &[]).unwrap();
         let nets: Vec<_> = args
             .windows(2)
             .filter(|w| w[0] == "--net")
