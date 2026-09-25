@@ -1814,7 +1814,18 @@ impl Service {
         match fluxvm_vsock_client::call(
             vm,
             AgentRequest::Exec {
-                command: "nohup /usr/local/bin/fluxvm-container-agent >/var/log/fluxvm-container-agent.log 2>&1 </dev/null &".into(),
+                // Forward host-side agent policy env into the guest process.
+                // The agent reads FLUXVM_CONTAINER_USERNS from its own environ
+                // (not from the shim), so omitting it here left CLONE_NEWUSER
+                // permanently off even when the operator set it on the host.
+                command: format!(
+                    "env FLUXVM_CONTAINER_USERNS={} nohup /usr/local/bin/fluxvm-container-agent >/var/log/fluxvm-container-agent.log 2>&1 </dev/null &",
+                    if std::env::var("FLUXVM_CONTAINER_USERNS").ok().as_deref() == Some("1") {
+                        "1"
+                    } else {
+                        "0"
+                    }
+                ),
                 timeout_seconds: Some(5),
             },
             Duration::from_secs(10),
@@ -2714,6 +2725,25 @@ impl Service {
         let (vm, ()) = tokio::try_join!(self.ensure_sandbox(Some(&hints)), stage_rootfs)?;
 
         spec["root"]["path"] = Value::String(format!("{guest_ctr}/rootfs"));
+        // ctr has no --mount-label flag; containerd 2.x `--config` rejects an
+        // image ref. Allow e2e/operators to set OCI linux.mountLabel via
+        // annotation when the CRI path is not used.
+        let mount_label_ann = spec
+            .pointer("/annotations/io.zyvor.mountLabel")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if spec.pointer("/linux/mountLabel").and_then(|v| v.as_str()).is_none() {
+            if let Some(label) = mount_label_ann {
+                if let Some(linux) = spec.as_object_mut().and_then(|o| {
+                    o.entry("linux")
+                        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+                        .as_object_mut()
+                }) {
+                    linux.insert("mountLabel".into(), Value::String(label));
+                }
+            }
+        }
         let device_claims = self
             .prepare_hotplug_devices(&vm, &mut spec, hints.pod_uid.as_deref(), &req.id)
             .await?;

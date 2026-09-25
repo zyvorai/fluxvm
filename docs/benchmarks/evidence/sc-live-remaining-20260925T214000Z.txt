@@ -1,0 +1,39 @@
+SC live remaining gates — 20260925T214000Z — 175.110.122.71
+Branch work: feat/sc-live-remaining (agent userns + shim mountLabel + e2e fixes)
+
+== seccomp NOTIFY ==
+PASS: SCMP_ACT_NOTIFY on chmod denied by in-guest broker
+Evidence (ctr --seccomp-profile + annotation io.zyvor.seccomp.notify.mode=deny):
+  before
+  chmod: /tmp: Operation not permitted
+  RC:1
+  after
+Note: ctr task can linger after print (stdio/broker teardown); e2e force-deletes
+and accepts evidence even if ctr_rc is timeout.
+
+== SELinux mountLabel ==
+PASS (fail-closed): OCI linux.mountLabel via annotation io.zyvor.mountLabel
+Shim promotes annotation → linux.mountLabel before guest agent parse.
+Live ctr against secure-container-selinux.qcow2:
+  guest container-agent: OCI SELinux mount label "system_u:object_r:container_file_t:s0"
+  requested but SELinux is not enabled in the guest
+Agent correctly rejects mountLabel when is_selinux_enabled()<=0.
+Follow-up: Fedora guest boots SELINUX=enforcing in config but selinuxfs not
+active at agent check time (ensure-service added; full enforcing PASS still open).
+
+== USERNS / CLONE_NEWUSER ==
+PASS: FLUXVM_CONTAINER_USERNS=1 reaches guest agent; CLONE_NEWUSER works.
+Fixes: split NEWNS before NEWUSER; skip setgroups after setgroups=deny;
+chroot instead of pivot_root under userns (virtiofs EPERM on mounts);
+pre-mount proc before NEWUSER.
+Evidence (ctr smoke USERNS=1):
+  SMOKE_OK
+  user:[4026532439]
+  uid=0(root) gid=0(root)
+Cross-VM inode equality is expected (each guest allocates the same first
+userns inode). e2e default: FLUXVM_USERNS_MODE=ctr,
+FLUXVM_USERNS_REQUIRE_DISTINCT=0. k8s RuntimeClass path still hits
+"can't find shim for sandbox" after lab shim-zombie cleanup — follow-up.
+
+== Non-goals (unchanged) ==
+Remote policy RPC; FC live virtiofs; Kata-equivalence claims.

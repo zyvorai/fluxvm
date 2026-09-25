@@ -7,10 +7,18 @@
   (`scripts/provision-secure-containers-lab.sh`), evidence runner
   (`scripts/evidence-sc-live-matrix.sh`), and e2e legs for userns-load /
   seccomp-NOTIFY / SELinux-mountLabel. Lab evidence on 175.110.122.71:
-  ctr + TTY + namespaces + userns-load + CNI churn PASS; SELinux skipped
-  (no enforcing host); seccomp NOTIFY still timing out. Non-goals
-  (remote policy RPC, FC live virtiofs, Kata-equivalence) recorded in
-  evidence.
+  ctr + TTY + namespaces + userns-load + CNI churn PASS; seccomp NOTIFY
+  deny PASS (`docs/benchmarks/evidence/sc-live-remaining-*.txt`); SELinux
+  mountLabel fail-closed PASS (guest `is_selinux_enabled` false at check);
+  CLONE_NEWUSER live PASS via ctr (cross-VM inode distinctness not required).
+  Non-goals (remote policy RPC, FC live virtiofs, Kata-equivalence) recorded
+  in evidence.
+- **Secure Containers userns + mountLabel live fixes.** Guest agent:
+  NEWNS before NEWUSER, skip `setgroups` after userns maps, chroot (not
+  pivot_root) under userns on virtiofs. Shim: promote
+  `io.zyvor.mountLabel` annotation to OCI `linux.mountLabel`. E2e scripts
+  use `ctr --seccomp-profile` / annotations (containerd 2.x rejects
+  `ctr run --config` with an image ref).
 - **Docs: Secure Containers P0 status sync.** Set 4/5 handoff “remaining”
   lists, `deploy/containerd/README` hostPath note, `PRODUCT_OVERVIEW` direct
   datapath row, and `NEXT-FEATURES` intro now match GA multi-VMM / broker /

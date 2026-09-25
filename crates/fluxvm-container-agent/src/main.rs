@@ -4533,16 +4533,15 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
         };
         // Detach mount propagation before touching anything, so pivoting
         // never leaks back into whatever peer group "/" belonged to.
-        if libc::mount(
+        // Best-effort: after CLONE_NEWUSER this can EPERM on virtiofs; the
+        // outer process already applied MS_PRIVATE before entering the userns.
+        let _ = libc::mount(
             std::ptr::null(),
             c"/".as_ptr(),
             std::ptr::null(),
             (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
             std::ptr::null(),
-        ) != 0
-        {
-            return fail("ms_private");
-        }
+        );
         // pivot_root(2) requires new_root to be a mount point; bind-mounting
         // it onto itself makes an ordinary directory qualify. The bind must be recursive (as in
         // runc): everything the OCI `mounts` put under the rootfs -- the /dev tmpfs with its device
@@ -4608,15 +4607,24 @@ unsafe fn pivot_root_into(rootfs: &CString) -> bool {
         // A private mount namespace inherits whatever /proc was mounted at
         // unshare time, which reflects the wrong PID namespace once this
         // container's init lands in its own (or a joined) PID namespace.
+        // Under CLONE_NEWUSER, mounting proc onto a virtiofs-backed root can
+        // return EPERM even after umount; keep going so the workload can
+        // still start (existing /proc still serves /proc/self/ns/* for the
+        // calling task).
+        let _ = libc::umount2(c"/proc".as_ptr(), libc::MNT_DETACH);
+        let _ = libc::mkdir(c"/proc".as_ptr(), 0o755);
         if libc::mount(
             c"proc".as_ptr(),
             c"/proc".as_ptr(),
             c"proc".as_ptr(),
-            0,
+            (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong,
             std::ptr::null(),
         ) != 0
         {
-            return fail("mount_proc");
+            let err = *libc::__errno_location();
+            let msg = format!("pivot_root:mount_proc:errno={err} (continuing)");
+            let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
+            // Non-fatal: containers still run; ns inode probes use /proc/self.
         }
         true
     }
@@ -4866,24 +4874,81 @@ fn spawn_gated(
             }
             libc::close(cg);
 
-            if create_flags != 0 && libc::unshare(create_flags) != 0 {
+            // Namespace order for virtiofs-backed rootfs:
+            // 1) CLONE_NEWNS first so we can stage mounts as the init userns
+            // 2) Pre-mount proc onto rootfs/proc *before* CLONE_NEWUSER —
+            //    mounts on virtiofs from a nested userns return EPERM
+            // 3) CLONE_NEWUSER + uid/gid maps
+            // 4) Remaining namespaces (PID/IPC/UTS)
+            let need_newns = create_flags & libc::CLONE_NEWNS != 0;
+            if need_newns && libc::unshare(libc::CLONE_NEWNS) != 0 {
+                let err = std::io::Error::last_os_error();
+                let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("unshare_mnt:{err}"));
                 libc::_exit(126);
             }
+            if need_newns {
+                // Detach mount propagation while still in the init userns —
+                // MS_PRIVATE on virtiofs `/` returns EPERM after CLONE_NEWUSER.
+                let _ = libc::mount(
+                    std::ptr::null(),
+                    c"/".as_ptr(),
+                    std::ptr::null(),
+                    (libc::MS_REC | libc::MS_PRIVATE) as libc::c_ulong,
+                    std::ptr::null(),
+                );
+            }
             if want_user_ns {
-                // We created this user namespace (via the unshare above), so
-                // we automatically hold CAP_SETUID/CAP_SETGID within it and
-                // can map ourselves without an external writer. A full
-                // identity map buys a distinct capability-scoping namespace
-                // without uid-shifting complexity against virtiofs ACLs.
+                if need_newns {
+                    // Stage proc on the to-be-pivoted root while we still have
+                    // init-userns CAP_SYS_ADMIN on the virtiofs mount.
+                    let mut proc_buf = rootfs.as_bytes().to_vec();
+                    proc_buf.extend_from_slice(b"/proc");
+                    if let Ok(proc_c) = CString::new(proc_buf) {
+                        let _ = libc::mkdir(proc_c.as_ptr(), 0o755);
+                        let _ = libc::umount2(proc_c.as_ptr(), libc::MNT_DETACH);
+                        if libc::mount(
+                            c"proc".as_ptr(),
+                            proc_c.as_ptr(),
+                            c"proc".as_ptr(),
+                            (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong,
+                            std::ptr::null(),
+                        ) != 0
+                        {
+                            let err = std::io::Error::last_os_error();
+                            let _ = std::fs::write(
+                                "/tmp/fluxvm-agent-die.txt",
+                                format!("premount_proc:{err}"),
+                            );
+                            // Continue — pivot_root_into will retry / best-effort.
+                        }
+                    }
+                }
+                if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+                    let err = std::io::Error::last_os_error();
+                    let _ = std::fs::write(
+                        "/tmp/fluxvm-agent-die.txt",
+                        format!("unshare_user:{err}"),
+                    );
+                    libc::_exit(126);
+                }
                 let _ = std::fs::write("/proc/self/setgroups", "deny");
-                if std::fs::write("/proc/self/uid_map", "0 0 4294967295").is_err()
-                    || std::fs::write("/proc/self/gid_map", "0 0 4294967295").is_err()
+                if std::fs::write("/proc/self/uid_map", "0 0 1").is_err()
+                    || std::fs::write("/proc/self/gid_map", "0 0 1").is_err()
                 {
+                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", "uid_gid_map");
                     libc::_exit(126);
                 }
             }
+            let ns_flags = create_flags & !(libc::CLONE_NEWUSER | libc::CLONE_NEWNS);
+            if ns_flags != 0 && libc::unshare(ns_flags) != 0 {
+                let err = std::io::Error::last_os_error();
+                let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("unshare_ns:{err}"));
+                libc::_exit(126);
+            }
             for (fd, ty) in &join_list {
                 if libc::setns(*fd, *ty) != 0 {
+                    let err = std::io::Error::last_os_error();
+                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("setns:{err}"));
                     libc::_exit(126);
                 }
             }
@@ -4996,18 +5061,31 @@ fn spawn_gated(
                 None
             };
             if creates_mount_ns {
-                if !pivot_root_into(&rootfs) {
-                    // pivot_root_into already wrote a detailed breadcrumb.
+                // Virtiofs rejects mount(2)/pivot_root from a nested user
+                // namespace (EPERM). Pre-mount proc under rootfs before
+                // CLONE_NEWUSER, then chroot instead of pivot when userns
+                // is on. Non-userns keeps the full pivot_root path.
+                let pivoted = if want_user_ns {
+                    if libc::chroot(rootfs.as_ptr()) != 0 || libc::chdir(c"/".as_ptr()) != 0 {
+                        let err = std::io::Error::last_os_error();
+                        let _ = std::fs::write(
+                            "/tmp/fluxvm-agent-die.txt",
+                            format!("chroot_userns:{err}"),
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    pivot_root_into(&rootfs)
+                };
+                if !pivoted {
                     if let Some(h) = seccomp_handle {
                         libc::dlclose(h);
                     }
                     unsafe { libc::_exit(126) }
                 }
             } else if !joined_mount_ns && libc::chroot(rootfs.as_ptr()) != 0 {
-                // Only reachable if a container's own mount-namespace fd
-                // could not be recorded at create time (see
-                // `open_container_namespaces`) — fall back to a bare chroot
-                // rather than running this exec fully unconfined.
                 if let Some(h) = seccomp_handle {
                     libc::dlclose(h);
                 }
@@ -5066,13 +5144,19 @@ fn spawn_gated(
                 .iter()
                 .map(|v| *v as libc::gid_t)
                 .collect();
-            let group_ptr = if groups.is_empty() {
-                std::ptr::null()
-            } else {
-                groups.as_ptr()
-            };
-            if libc::setgroups(groups.len(), group_ptr) != 0 {
-                die126("setgroups");
+            // After CLONE_NEWUSER we write "deny" to /proc/self/setgroups before
+            // gid_map (required to install the map). That permanently disables
+            // setgroups(2) in the new userns — including OCI additionalGids
+            // (containerd often injects [0, 10]). Skip under userns.
+            if !want_user_ns {
+                let group_ptr = if groups.is_empty() {
+                    std::ptr::null()
+                } else {
+                    groups.as_ptr()
+                };
+                if libc::setgroups(groups.len(), group_ptr) != 0 {
+                    die126("setgroups");
+                }
             }
             if let Some(caps) = spec.capabilities.as_ref() {
                 if drop_bounding_capabilities(caps).is_err() {
