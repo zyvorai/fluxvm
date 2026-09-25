@@ -1122,6 +1122,7 @@ async fn main() -> Result<()> {
                     bandwidth_mbps,
                     max_downtime_ms,
                     multifd_channels,
+                    tls: None,
                 };
                 println!(
                     "{}",

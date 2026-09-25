@@ -9,7 +9,7 @@ use fluxvm_core::{
     metrics,
     model::{
         BackendKind, ClaimOverrides, CloudInitSpec, CreateVmRequest, ExtraNic, MigrationPhase,
-        NetworkSpec, PoolRecord, PoolSpec, StorageBackend, VmRecord, VmStatus,
+        MigrationTlsSpec, NetworkSpec, PoolRecord, PoolSpec, StorageBackend, VmRecord, VmStatus,
     },
     process,
 };
@@ -288,6 +288,51 @@ fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
 fn audit_event(event: &str, pairs: &[(&str, &str)]) {
     let record = fluxvm_core::policy::format_audit_record(event, pairs);
     tracing::info!(target: "fluxvm_audit", record = %record, "audit");
+}
+
+/// Cert/key files must exist; optionally under `policy.allowed_migration_tls_dirs`.
+fn validate_migration_tls_spec(tls: &MigrationTlsSpec, cfg: &Config) -> Result<()> {
+    for (label, path) in [
+        ("ca_path", &tls.ca_path),
+        ("cert_path", &tls.cert_path),
+        ("key_path", &tls.key_path),
+    ] {
+        if !path.exists() {
+            bail!("migration tls {label} does not exist: {}", path.display());
+        }
+        if let Some(dirs) = &cfg.policy.allowed_migration_tls_dirs {
+            if !fluxvm_core::policy::image_within_allowed(path, dirs) {
+                bail!(
+                    "migration tls {label} {} is not under any policy allowed_migration_tls_dirs {:?}",
+                    path.display(),
+                    dirs
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_migration_receiver_request(
+    req: &fluxvm_core::model::MigrationReceiverRequest,
+    cfg: &Config,
+) -> Result<()> {
+    let listen = if req.listen_host.is_empty() {
+        "0.0.0.0"
+    } else {
+        req.listen_host.as_str()
+    };
+    if let Some(allowed) = &cfg.policy.allowed_migration_bind_addresses {
+        if !allowed.iter().any(|a| a == listen) {
+            bail!(
+                "migration listen_host {listen:?} is not in policy allowed_migration_bind_addresses {allowed:?}"
+            );
+        }
+    }
+    if let Some(tls) = &req.tls {
+        validate_migration_tls_spec(tls, cfg)?;
+    }
+    Ok(())
 }
 
 fn validate_policy(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
@@ -2160,6 +2205,9 @@ impl VmManager {
         if vm.request.network.is_direct() {
             bail!("live migration of a direct-datapath VM is refused until a two-host test exists");
         }
+        if let Some(tls) = &request.tls {
+            validate_migration_tls_spec(tls, &self.cfg)?;
+        }
         let vm_id = id.to_string();
         audit_event(
             "migration.start",
@@ -2277,6 +2325,7 @@ impl VmManager {
             req.machine.as_str()
         };
         fluxvm_qemu::receiver::validate_receiver(cpu, machine, &req.disk)?;
+        validate_migration_receiver_request(&req, &self.cfg)?;
         let vcpus = req.vcpus;
         let memory_mib = req.memory_mib;
         if let Err(e) = self
@@ -2349,6 +2398,7 @@ impl VmManager {
             cgroup_path,
             vcpus: req.vcpus,
             memory_mib: req.memory_mib,
+            tls: req.tls,
         };
         if let Err(e) = self.write_receiver(&rec) {
             if let Err(stop) = process::terminate_pid(launched.pid).await {
@@ -2388,7 +2438,7 @@ impl VmManager {
         } else {
             rec.listen_uri.as_str()
         };
-        fluxvm_qemu::receiver::activate(&rec.qmp_socket, incoming).await?;
+        fluxvm_qemu::receiver::activate(&rec.qmp_socket, incoming, rec.tls.as_ref()).await?;
         Ok(rec)
     }
 
@@ -4560,5 +4610,80 @@ mod direct_hotplug_tests {
                 .contains("QEMU")
         );
         let _ = std::fs::remove_dir_all(&work);
+    }
+}
+
+#[cfg(test)]
+mod migration_tls_validation_tests {
+    use super::*;
+
+    fn tls_spec_with_temp_files() -> (MigrationTlsSpec, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fluxvm-tls-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ca = dir.join("ca.pem");
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        std::fs::write(&ca, b"ca").unwrap();
+        std::fs::write(&cert, b"cert").unwrap();
+        std::fs::write(&key, b"key").unwrap();
+        (
+            MigrationTlsSpec {
+                ca_path: ca,
+                cert_path: cert,
+                key_path: key,
+                tls_hostname: None,
+            },
+            dir,
+        )
+    }
+
+    #[test]
+    fn validate_migration_tls_spec_rejects_missing_file() {
+        let cfg = Config::default();
+        let (mut tls, _dir) = tls_spec_with_temp_files();
+        tls.ca_path = std::path::PathBuf::from("/nonexistent/ca.pem");
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_err());
+    }
+
+    #[test]
+    fn validate_migration_tls_spec_accepts_existing_files() {
+        let cfg = Config::default();
+        let (tls, _dir) = tls_spec_with_temp_files();
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_migration_tls_spec_enforce_allowlist() {
+        let mut cfg = Config::default();
+        let (tls, dir) = tls_spec_with_temp_files();
+        cfg.policy.allowed_migration_tls_dirs = Some(vec!["/nowhere".into()]);
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_err());
+        cfg.policy.allowed_migration_tls_dirs = Some(vec![dir]);
+        assert!(validate_migration_tls_spec(&tls, &cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_migration_receiver_listen_host_allowlist() {
+        let mut cfg = Config::default();
+        cfg.policy.allowed_migration_bind_addresses =
+            Some(vec!["10.0.0.5".into(), "0.0.0.0".into()]);
+        let mut req = fluxvm_core::model::MigrationReceiverRequest {
+            vcpus: 1,
+            memory_mib: 512,
+            cpu_model: String::new(),
+            machine: String::new(),
+            disk: "/tmp/disk.raw".into(),
+            disk_format: "raw".into(),
+            listen_host: "10.0.0.9".into(),
+            advertise_host: String::new(),
+            listen_port: 0,
+            expires_in_seconds: None,
+            tls: None,
+        };
+        assert!(validate_migration_receiver_request(&req, &cfg).is_err());
+        req.listen_host = "10.0.0.5".into();
+        assert!(validate_migration_receiver_request(&req, &cfg).is_ok());
+        req.listen_host.clear(); // defaults to 0.0.0.0
+        assert!(validate_migration_receiver_request(&req, &cfg).is_ok());
     }
 }

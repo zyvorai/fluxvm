@@ -1075,6 +1075,7 @@ mod tests {
             bandwidth_mbps: None,
             max_downtime_ms: None,
             multifd_channels: None,
+            tls: None,
         }
     }
 

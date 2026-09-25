@@ -734,6 +734,15 @@ pub struct Policy {
     /// unchanged).
     #[serde(default)]
     pub tenants: Vec<TenantPolicy>,
+    /// If set, `MigrationReceiverRequest.listen_host` must be one of these
+    /// literal addresses (after empty → `0.0.0.0` defaulting). Unset means
+    /// any listen host is allowed.
+    #[serde(default)]
+    pub allowed_migration_bind_addresses: Option<Vec<String>>,
+    /// If set, each path in a `MigrationTlsSpec` must sit under one of these
+    /// directories (same path-prefix semantics as `allowed_image_dirs`).
+    #[serde(default)]
+    pub allowed_migration_tls_dirs: Option<Vec<PathBuf>>,
 }
 
 /// One tenant's aggregate admission caps -- see `Policy::tenants`.
@@ -837,5 +846,44 @@ mod jailer_required_tests {
         assert!(assign_tenant_uid(&dir, &jailer, Some("third")).is_err());
         assert_eq!(assign_tenant_uid(&dir, &jailer, None).unwrap(), (123, 100));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod migration_policy_tests {
+    use super::*;
+
+    #[test]
+    fn policy_migration_tls_fields_default_none() {
+        let policy: Policy = toml::from_str("").unwrap();
+        assert!(policy.allowed_migration_bind_addresses.is_none());
+        assert!(policy.allowed_migration_tls_dirs.is_none());
+    }
+
+    #[test]
+    fn policy_migration_tls_fields_round_trip() {
+        let policy: Policy = toml::from_str(
+            r#"
+allowed_migration_bind_addresses = ["10.0.0.5", "0.0.0.0"]
+allowed_migration_tls_dirs = ["/etc/fluxvm/tls"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.allowed_migration_bind_addresses,
+            Some(vec!["10.0.0.5".into(), "0.0.0.0".into()])
+        );
+        assert_eq!(
+            policy.allowed_migration_tls_dirs,
+            Some(vec![PathBuf::from("/etc/fluxvm/tls")])
+        );
+    }
+
+    #[test]
+    fn config_without_policy_table_parses_migration_fields_none() {
+        let raw = "listen = \"127.0.0.1:7788\"\nstate_dir = \"/var/lib/fluxvm\"\n";
+        let config: Config = toml::from_str(raw).unwrap();
+        assert!(config.policy.allowed_migration_bind_addresses.is_none());
+        assert!(config.policy.allowed_migration_tls_dirs.is_none());
     }
 }
