@@ -8,13 +8,13 @@ import (
 	"testing"
 )
 
-func TestCoverageSchemaV10Compatible(t *testing.T) {
+func TestCoverageSchemaV11Compatible(t *testing.T) {
 	root := t.TempDir()
 	pinRoot := filepath.Join(root, "bpf")
 	metaRoot := filepath.Join(root, "meta")
 	vm := "aabbccddeeff00112233445566778899"
 	putFile(t, filepath.Join(metaRoot, vm, "pod_id"), "7\n")
-	putFile(t, filepath.Join(metaRoot, vm, "schema_version"), "10\n")
+	putFile(t, filepath.Join(metaRoot, vm, "schema_version"), "11\n")
 	putFile(t, filepath.Join(metaRoot, vm, "iface"), "tap7\n")
 	putFile(t, filepath.Join(metaRoot, vm, "attach_mode"), "tc\n")
 	for _, p := range []string{"progs/fluxvm_egress", "progs/fluxvm_pod_ingress", "maps/fluxvm_ppstat", "maps/fluxvm_pspol", "maps/fluxvm_prules"} {
@@ -26,8 +26,32 @@ func TestCoverageSchemaV10Compatible(t *testing.T) {
 		t.Fatalf("got %d VMs", len(snap.VMs))
 	}
 	st := snap.VMs[0]
-	if st.SchemaVersion != 10 || !st.SchemaCompatible {
-		t.Fatalf("schema10: version=%d compatible=%v (CurrentSchema=%d)", st.SchemaVersion, st.SchemaCompatible, CurrentSchema)
+	if st.SchemaVersion != 11 || !st.SchemaCompatible {
+		t.Fatalf("schema11: version=%d compatible=%v (CurrentSchema=%d)", st.SchemaVersion, st.SchemaCompatible, CurrentSchema)
+	}
+}
+
+func TestCoverageSchemaV10IncompatibleWithCurrent(t *testing.T) {
+	root := t.TempDir()
+	pinRoot := filepath.Join(root, "bpf")
+	metaRoot := filepath.Join(root, "meta")
+	vm := "ffeeddccbbaa99887766554433221100"
+	putFile(t, filepath.Join(metaRoot, vm, "pod_id"), "7\n")
+	putFile(t, filepath.Join(metaRoot, vm, "schema_version"), "10\n")
+	putFile(t, filepath.Join(metaRoot, vm, "iface"), "tap7\n")
+	putFile(t, filepath.Join(metaRoot, vm, "attach_mode"), "tc\n")
+	for _, p := range []string{"progs/fluxvm_egress", "maps/fluxvm_ppstat"} {
+		putFile(t, filepath.Join(pinRoot, "vms", vm, p), "")
+	}
+	r := fakeRunner{responses: map[string][]byte{}}
+	snap := Collector{PinRoot: pinRoot, MetaRoot: metaRoot, Runner: r}.Collect(context.Background())
+	if len(snap.VMs) != 1 {
+		t.Fatalf("got %d VMs", len(snap.VMs))
+	}
+	st := snap.VMs[0]
+	if st.SchemaVersion != 10 || st.SchemaCompatible {
+		t.Fatalf("schema10 should be incompatible with CurrentSchema=%d: version=%d compatible=%v",
+			CurrentSchema, st.SchemaVersion, st.SchemaCompatible)
 	}
 }
 
