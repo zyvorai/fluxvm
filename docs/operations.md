@@ -806,6 +806,9 @@ to one of three alternative provisioning backends instead —
   mount) after this VM's own `qemu-nbd --persistent` export was already
   running raced its write lock and failed with "Failed to get 'write' lock".
   Fixed by injecting the token before the export starts, not after.
+  Separately, concurrent creates that each inject a token used to race
+  guestkit's `/dev/nbdN` pick (same device handed to two mounts — see #104);
+  guestkit ≥1.2.5 serializes allocate+connect with `flock`.
 - **`ceph-rbd`** — `rbd clone <pool>/<image>@fluxvm-base ...` and QEMU's
   native `rbd:` block driver (QEMU only; Cloud Hypervisor/Firecracker have
   no built-in Ceph client). Verified end to end against a real, live Rook
