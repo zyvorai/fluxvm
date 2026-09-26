@@ -19,7 +19,7 @@
 
 use anyhow::{Context, Result as AnyResult, bail};
 use fluxvm_container_protocol::{
-    SeccompPolicyRpcRequest, SeccompPolicyRpcResponse, DEFAULT_SECCOMP_POLICY_PORT, decode_line,
+    DEFAULT_SECCOMP_POLICY_PORT, SeccompPolicyRpcRequest, SeccompPolicyRpcResponse, decode_line,
     encode_line,
 };
 use log::{info, warn};
@@ -230,11 +230,6 @@ mod tests {
             syscall_nr: 1,
             arch: 0,
         });
-        assert_eq!(
-            resp,
-            SeccompPolicyRpcResponse::Deny {
-                errno: libc::EPERM
-            }
-        );
+        assert_eq!(resp, SeccompPolicyRpcResponse::Deny { errno: libc::EPERM });
     }
 }
