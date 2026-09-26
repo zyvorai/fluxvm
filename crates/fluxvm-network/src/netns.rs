@@ -348,7 +348,7 @@ pub async fn prepare(state_dir: &Path, id: Uuid, mac: Option<&str>) -> Result<Ne
             &dnsmasq_log,
         )
         .await
-        .context("spawning dnsmasq DHCP server")?;
+        .context("spawning dnsmasq DHCP server (is dnsmasq installed? e.g. apt install dnsmasq-base)")?;
         let dnsmasq_pid = child.id().context("dnsmasq exited immediately")?;
         std::fs::write(dhcp_dir.join("dnsmasq.pid"), dnsmasq_pid.to_string())
             .context("recording dnsmasq pid")?;

@@ -21,6 +21,14 @@ for cmd in cloud-hypervisor firecracker fluxctl fluxvm-hypervisor bpftool tc; do
   fi
 done
 
+# tap+netns networking starts one dnsmasq (DHCP for the guest) per VM namespace.
+# Not fatal: VMs on other network modes do not need it.
+if command -v dnsmasq >/dev/null 2>&1; then
+  printf '%-24s %s\n' "dnsmasq" "OK ($(command -v dnsmasq))"
+else
+  printf '%-24s %s\n' "dnsmasq" "not installed (needed for tap+netns guest DHCP: apt install dnsmasq-base)"
+fi
+
 if [[ -e /dev/kvm ]]; then
   echo "/dev/kvm                 OK"
 else
