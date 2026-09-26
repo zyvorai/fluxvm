@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Live gate: init TTY + exec TTY + ResizePty via ctr + host `script` PTY.
+# Guest stdout markers are the success criteria; ctr teardown may hang.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,11 +17,15 @@ EXEC_ID="fluxvm-tty-exec-$$"
 LOG_INIT="$(mktemp)"
 LOG_EXEC="$(mktemp)"
 ADDR="${CONTAINERD_ADDRESS}"
+RUN_TIMEOUT="${FLUXVM_TTY_TIMEOUT:-120}"
 
 cleanup() {
   $CTR --address "$ADDR" tasks kill -s SIGKILL "$EXEC_ID" >/dev/null 2>&1 || true
-  $CTR --address "$ADDR" tasks delete "$EXEC_ID" >/dev/null 2>&1 || true
+  $CTR --address "$ADDR" tasks delete --force "$EXEC_ID" >/dev/null 2>&1 || true
   $CTR --address "$ADDR" containers delete "$EXEC_ID" >/dev/null 2>&1 || true
+  $CTR --address "$ADDR" tasks kill -s SIGKILL "$INIT_ID" >/dev/null 2>&1 || true
+  $CTR --address "$ADDR" tasks delete --force "$INIT_ID" >/dev/null 2>&1 || true
+  $CTR --address "$ADDR" containers delete "$INIT_ID" >/dev/null 2>&1 || true
   rm -f "$LOG_INIT" "$LOG_EXEC"
 }
 trap cleanup EXIT
@@ -26,22 +35,29 @@ command -v script >/dev/null
 command -v containerd-shim-fluxvm-v2 >/dev/null
 test -e /dev/kvm
 curl -fsS "${FLUXVM_API_URL:-http://127.0.0.1:7788}/healthz" >/dev/null
-timeout 120 $CTR --address "$ADDR" images pull "$IMAGE" >/dev/null
+
+if ! $CTR --address "$ADDR" images ls -q | grep -Fxq "$IMAGE"; then
+  timeout -k 5 90 $CTR --address "$ADDR" images pull "$IMAGE" >/dev/null
+fi
 
 # `script` gives ctr a real host PTY. ctr should pass the 33x101 window to the
 # shim, which forwards ResizePty to the guest PTY.
-script -q -e -c \
+set +e
+timeout -k 5 "$RUN_TIMEOUT" script -q -e -c \
   "stty rows 33 cols 101; $CTR --address '$ADDR' run --rm --runtime '$RUNTIME' --tty '$IMAGE' '$INIT_ID' /bin/sh -lc 'test -t 0 && test -t 1 && echo FLUXVM_TTY_INIT_OK && stty size'" \
   "$LOG_INIT" >/dev/null
+set -e
 
 grep -q 'FLUXVM_TTY_INIT_OK' "$LOG_INIT"
 grep -Eq '33[[:space:]]+101' "$LOG_INIT"
 
 # Keep a non-TTY init alive, then prove terminal exec uses its own PTY stream.
 $CTR --address "$ADDR" run --runtime "$RUNTIME" --detach "$IMAGE" "$EXEC_ID" /bin/sh -lc 'sleep 120'
-script -q -e -c \
+set +e
+timeout -k 5 "$RUN_TIMEOUT" script -q -e -c \
   "stty rows 41 cols 109; $CTR --address '$ADDR' task exec --exec-id shell --tty '$EXEC_ID' /bin/sh -lc 'test -t 0 && test -t 1 && echo FLUXVM_TTY_EXEC_OK && stty size'" \
   "$LOG_EXEC" >/dev/null
+set -e
 
 grep -q 'FLUXVM_TTY_EXEC_OK' "$LOG_EXEC"
 grep -Eq '41[[:space:]]+109' "$LOG_EXEC"

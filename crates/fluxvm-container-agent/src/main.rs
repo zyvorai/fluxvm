@@ -4841,12 +4841,18 @@ fn spawn_gated(
             (flags, joins)
         }
         NsRequest::Exec { target } => {
+            // Join order must match create-path ownership:
+            // mnt is unshared *before* CLONE_NEWUSER (init-userns owned);
+            // sandbox ipc/uts are setns'd before NEWUSER (also init-owned);
+            // pid is unshared *after* NEWUSER (container-userns owned).
+            // Joining user first drops init CAP_SYS_ADMIN and makes later
+            // setns(mnt/ipc/uts) fail with EPERM (wait status 32256 / exit 126).
             let mut joins = Vec::new();
             for (fd, ty) in [
-                (target.user, libc::CLONE_NEWUSER),
                 (target.mnt, libc::CLONE_NEWNS),
                 (target.ipc, libc::CLONE_NEWIPC),
                 (target.uts, libc::CLONE_NEWUTS),
+                (target.user, libc::CLONE_NEWUSER),
                 (target.pid, libc::CLONE_NEWPID),
             ] {
                 if fd >= 0 {
@@ -4980,11 +4986,73 @@ fn spawn_gated(
                 }
             }
             // Join shared sandbox namespaces while we still hold init-userns caps.
-            for (fd, ty) in &join_list {
-                if libc::setns(*fd, *ty) != 0 {
-                    let err = std::io::Error::last_os_error();
-                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("setns:{err}"));
-                    libc::_exit(126);
+            // Exec must open libseccomp.so.2 from the guest root *before*
+            // setns(mnt) into the pivoted container root (busybox has no
+            // libseccomp), and must setns(mnt) *before* setns(user) (mnt is
+            // init-userns owned — see Exec join_list order above).
+            let mut preopened_seccomp: *mut libc::c_void = std::ptr::null_mut();
+            if !is_create {
+                for (fd, ty) in &join_list {
+                    if *ty == libc::CLONE_NEWNS
+                        || *ty == libc::CLONE_NEWUSER
+                        || *ty == libc::CLONE_NEWPID
+                    {
+                        continue;
+                    }
+                    if libc::setns(*fd, *ty) != 0 {
+                        let err = std::io::Error::last_os_error();
+                        let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("setns:{err}"));
+                        libc::_exit(126);
+                    }
+                }
+                if spec.seccomp.is_some() {
+                    match open_libseccomp() {
+                        Ok(h) => preopened_seccomp = h,
+                        Err(e) => {
+                            let msg = format!("seccomp_lib:{e:#}");
+                            let _ = std::fs::write(AGENT_DIE_SHARE, &msg);
+                            let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", &msg);
+                            libc::_exit(126);
+                        }
+                    }
+                }
+                for (fd, ty) in &join_list {
+                    if *ty != libc::CLONE_NEWNS {
+                        continue;
+                    }
+                    if libc::setns(*fd, *ty) != 0 {
+                        let err = std::io::Error::last_os_error();
+                        let _ =
+                            std::fs::write("/tmp/fluxvm-agent-die.txt", format!("setns_mnt:{err}"));
+                        if !preopened_seccomp.is_null() {
+                            libc::dlclose(preopened_seccomp);
+                        }
+                        libc::_exit(126);
+                    }
+                }
+                for (fd, ty) in &join_list {
+                    if *ty != libc::CLONE_NEWUSER && *ty != libc::CLONE_NEWPID {
+                        continue;
+                    }
+                    if libc::setns(*fd, *ty) != 0 {
+                        let err = std::io::Error::last_os_error();
+                        let _ = std::fs::write(
+                            "/tmp/fluxvm-agent-die.txt",
+                            format!("setns_user_or_pid:{err}"),
+                        );
+                        if !preopened_seccomp.is_null() {
+                            libc::dlclose(preopened_seccomp);
+                        }
+                        libc::_exit(126);
+                    }
+                }
+            } else {
+                for (fd, ty) in &join_list {
+                    if libc::setns(*fd, *ty) != 0 {
+                        let err = std::io::Error::last_os_error();
+                        let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("setns:{err}"));
+                        libc::_exit(126);
+                    }
                 }
             }
             if want_user_ns {
@@ -5100,7 +5168,11 @@ fn spawn_gated(
             // but pause/busybox rootfs has no libseccomp.so.2 for a post-pivot
             // dlopen. Keeping the DSO mapped across the root switch matches
             // runc's order (setup mounts, then seccomp).
-            let seccomp_handle = if spec.seccomp.is_some() {
+            // Exec may already have opened the DSO in the outer reaper before
+            // setns(mnt) (preopened_seccomp).
+            let seccomp_handle = if !preopened_seccomp.is_null() {
+                Some(preopened_seccomp)
+            } else if spec.seccomp.is_some() {
                 match open_libseccomp() {
                     Ok(h) => Some(h),
                     Err(e) => {
@@ -5200,11 +5272,11 @@ fn spawn_gated(
                 .iter()
                 .map(|v| *v as libc::gid_t)
                 .collect();
-            // After CLONE_NEWUSER we write "deny" to /proc/self/setgroups before
-            // gid_map (required to install the map). That permanently disables
-            // setgroups(2) in the new userns — including OCI additionalGids
-            // (containerd often injects [0, 10]). Skip under userns.
-            if !want_user_ns {
+            let joined_user_ns = join_list.iter().any(|(_, ty)| *ty == libc::CLONE_NEWUSER);
+            // After CLONE_NEWUSER / setns(user) we write "deny" to setgroups
+            // (or inherit a userns that already did). setgroups(2) then fails —
+            // including OCI additionalGids (containerd often injects [0, 10]).
+            if !want_user_ns && !joined_user_ns {
                 let group_ptr = if groups.is_empty() {
                     std::ptr::null()
                 } else {
@@ -5262,7 +5334,11 @@ fn spawn_gated(
         }
         let mut status = 0i32;
         unsafe { libc::waitpid(pid, &mut status, 0) };
-        bail!("container process failed to establish namespaces (wait status {status})");
+        let die = std::fs::read_to_string("/tmp/fluxvm-agent-die.txt").unwrap_or_default();
+        if die.is_empty() {
+            bail!("container process failed to establish namespaces (wait status {status})");
+        }
+        bail!("container process failed to establish namespaces (wait status {status}; die={die})");
     }
     let namespaces = if is_create {
         open_container_namespaces(pid, want_user_ns)
