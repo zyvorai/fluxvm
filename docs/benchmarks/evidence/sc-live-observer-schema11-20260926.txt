@@ -1,0 +1,37 @@
+FluxVM policy-observer CurrentSchema=11 live recognition
+SCHEMA11_COMPATIBLE: PASS (schema_compatible=1 + directional_counters=1)
+---
+FluxVM S3 live prhit scrape @ 20260926T151954Z
+vm=cf635f7f-ff5e-49fd-aa64-a21004fdfd3f listen=127.0.0.1:9092
+=== network/status ===
+{"mode":"cilium","required":false,"attached":true,"interface":"vhcf635f7f","identity":2661566893,"pin_dir":"/sys/fs/bpf/fluxvm/vms/cf635f7fff5e49fdaa64a21004fdfd3f","schema_version":11,"schema_compatible":true,"policy_synced":true,"policy":{"default_allow":true,"allow_cidrs":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],"allow_ports":["tcp/443","tcp/80","udp/53"],"max_egress_mbps":250,"max_egress_pps":100000,"sample_rate":100,"deny_cidrs":[],"allow_icmp":false,"groups":[],"labels":[],"allow_fqdns":[],"entities":[],"audit_mode":false,"deny_udp":false}}
+=== observer series ===
+# HELP fluxvm_sentinel_dataplane_schema_version Recorded FluxVM eBPF dataplane schema version.
+# TYPE fluxvm_sentinel_dataplane_schema_version gauge
+fluxvm_sentinel_dataplane_schema_version{pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 11
+# HELP fluxvm_sentinel_dataplane_schema_compatible 1 when the observer recognizes this dataplane schema.
+# TYPE fluxvm_sentinel_dataplane_schema_compatible gauge
+fluxvm_sentinel_dataplane_schema_compatible{pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 1
+# HELP fluxvm_sentinel_policy_directional_counters 1 when Set 17 rule telemetry provides true per-direction Pod-policy counters; 0 means Set 15 shared-counter fallback.
+# TYPE fluxvm_sentinel_policy_directional_counters gauge
+fluxvm_sentinel_policy_directional_counters{pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 1
+# HELP fluxvm_sentinel_policy_hook_attached 1 when the directional program is attached to the expected TC/TCX hook.
+# TYPE fluxvm_sentinel_policy_hook_attached gauge
+fluxvm_sentinel_policy_hook_attached{direction="egress",mode="tc",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 1
+fluxvm_sentinel_policy_packets_total{direction="egress",pod_id="3871152336",verdict="allow",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_packets_total{direction="egress",pod_id="3871152336",verdict="drop",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_packets_total{direction="egress",pod_id="3871152336",verdict="audit",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_hook_attached{direction="ingress",mode="tc",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 1
+fluxvm_sentinel_policy_packets_total{direction="ingress",pod_id="3871152336",verdict="allow",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_packets_total{direction="ingress",pod_id="3871152336",verdict="drop",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_packets_total{direction="ingress",pod_id="3871152336",verdict="audit",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+# HELP fluxvm_sentinel_policy_rule_entries Number of compiled policy-map entries by direction and representation kind.
+# TYPE fluxvm_sentinel_policy_rule_entries gauge
+fluxvm_sentinel_policy_rule_entries{direction="egress",kind="rules",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 1
+fluxvm_sentinel_policy_rule_entries{direction="ingress",kind="rules",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 1
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="address_v4",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="address_v6",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="exact_port_v4",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="exact_port_v6",pod_id="3871152336",vm="cf635f7fff5e49fdaa64a21004fdfd3f"} 0
+
+S3 PRHIT DIRECTIONAL SCRAPE: PASS

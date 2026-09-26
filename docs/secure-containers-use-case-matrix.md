@@ -37,7 +37,7 @@ unless noted. Live rows use `secure-containers-live.yml` (opt-in via
 | UC-17-01 | Rule telemetry aggregates direction + identity | 17 | `tools/fluxvm-policy-observer/internal/observer/rule_telemetry_set17_test.go` | go-observer | no |
 | UC-17-02 | Rule telemetry ignores other Pod | 17 | `tools/fluxvm-policy-observer/internal/observer/rule_telemetry_set17_test.go` | go-observer | no |
 | UC-17-03 | Prefer prhit; fall back to shared counters | 17 | `tools/fluxvm-policy-observer/internal/observer/schema_coverage_test.go` | go-observer | no |
-| UC-17-04 | Schema-v10 / v9 recognition | 19 | `tools/fluxvm-policy-observer/internal/observer/schema_coverage_test.go` | go-observer | no |
+| UC-17-04 | Schema-v11 / v10 / v9 recognition | 19 | `tools/fluxvm-policy-observer/internal/observer/schema_coverage_test.go` | go-observer | no |
 | UC-17-05 | Observer sizing model JSON | 19 | `scripts/benchmark-policy-observer-set19.py` | observer-sizing | no |
 | UC-17-06 | Stateful CT TCP live proof (S1 starter) | 17 | `scripts/test-networkpolicy-stateful-set17.sh` | live-stateful | yes |
 | UC-19-01 | pridx key encoding + wildcard protocol OR | 19 | `crates/fluxvm-network/src/ebpf.rs` | rust-crates | no |
