@@ -51,11 +51,14 @@ enum Command {
     #[command(next_help_heading = "Basic Commands")]
     /// Start the FluxVM control-plane daemon (REST API).
     Serve,
-    /// Display status (Cilium-style panel).
+    /// Display status. With no id: Cilium-style host panel. With an id:
+    /// that VM's record (machinectl `status`/`show`).
     Status {
-        /// Print host binary / kernel paths.
+        /// Print host binary / kernel paths (host panel only).
         #[arg(long, short = 'v')]
         verbose: bool,
+        /// VM id — when set, print that VM instead of the host panel.
+        id: Option<Uuid>,
     },
     /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
     Healthz,
@@ -130,6 +133,8 @@ enum Command {
     /// that control untouched, it does not reset it. At least one flag is
     /// required; a bare `fluxctl resources <id>` with nothing to change is
     /// rejected rather than silently doing nothing.
+    /// Alias `set-limit` matches machinectl.
+    #[command(visible_alias = "set-limit")]
     Resources {
         id: Uuid,
         /// CPU quota as a percentage of one core (150 = 1.5 cores).
@@ -239,6 +244,15 @@ enum Command {
         #[arg(long, default_value_t = false)]
         read_only: bool,
     },
+    /// Start this VM automatically when `fluxctl serve` boots (machinectl
+    /// `enable`). Marker under `state_dir/autostart/{id}`.
+    Enable {
+        id: Uuid,
+    },
+    /// Clear the autostart mark (machinectl `disable`).
+    Disable {
+        id: Uuid,
+    },
     /// Tail the VM's captured console log file. REST equivalent:
     /// `GET /v1/vms/{id}/logs?lines=&follow=`.
     Logs {
@@ -308,6 +322,91 @@ enum Command {
     Catalog {
         #[command(subcommand)]
         command: CatalogCommand,
+    },
+    /// List image catalog entries (machinectl `list-images`).
+    ListImages,
+    /// Show one catalog entry (machinectl `image-status` / `show-image`).
+    #[command(visible_alias = "show-image")]
+    ImageStatus {
+        name: String,
+    },
+    /// Clone a catalog entry (machinectl `clone`).
+    Clone {
+        name: String,
+        new_name: String,
+    },
+    /// Rename a catalog entry (machinectl `rename`).
+    Rename {
+        name: String,
+        new_name: String,
+    },
+    /// Mark a catalog entry read-only (machinectl `read-only`). Use `--off`
+    /// to unlock.
+    ReadOnly {
+        name: String,
+        #[arg(long, default_value_t = false)]
+        off: bool,
+    },
+    /// Remove a catalog entry (machinectl `remove`). For VMs use `terminate`.
+    Remove {
+        name: String,
+    },
+    /// Remove orphaned catalog download cache (machinectl `clean`).
+    Clean,
+    /// Fetch a remote image into the catalog (machinectl `pull-raw`).
+    PullRaw {
+        name: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long, default_value = "qcow2")]
+        format: String,
+    },
+    /// Register a local image file in the catalog (machinectl `import-raw`).
+    ImportRaw {
+        name: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long, default_value = "qcow2")]
+        format: String,
+    },
+    /// Export a catalog entry's file (machinectl `export-raw`).
+    ExportRaw {
+        name: String,
+        dest: PathBuf,
+    },
+    /// Not supported — FluxVM images are raw/qcow2, not tar. Use `pull-raw`.
+    PullTar {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Not supported — use `import-raw` for a local disk image.
+    ImportTar {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Not supported — use `import-raw` for a local disk image.
+    ImportFs {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Not supported — use `export-raw`.
+    ExportTar {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Image transfers are synchronous in FluxVM; always empty (machinectl
+    /// `list-transfers`).
+    ListTransfers,
+    #[command(name = "cancel")]
+    CancelTransfer {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Edit is not applicable — change resources with `set-limit`/`resources`,
+    /// or recreate from an updated spec.
+    Edit {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
     },
     /// Manage warm VM pools — pre-booted, paused VMs handed out on claim in
     /// roughly resume time instead of full create time.
@@ -1273,9 +1372,9 @@ async fn main() -> Result<()> {
     };
     let cfg = Config::load(cli.config.as_deref())?;
 
-    // `status` is read-mostly and must work without write access to state_dir
-    // (Cilium-style partial panel). Other commands still require a manager.
-    if let Command::Status { verbose } = &cli.command {
+    // `status` without an id is the host panel (no write access required).
+    // With an id it is machinectl-style VM status and needs the manager.
+    if let Command::Status { verbose, id: None } = &cli.command {
         let m = manager(cfg.clone()).await.ok();
         status::print_status(m.as_deref(), &cfg, *verbose).await?;
         return Ok(());
@@ -1303,9 +1402,16 @@ async fn main() -> Result<()> {
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
-        Command::Status { .. } | Command::Healthz | Command::Readyz | Command::Metrics { .. } => {
-            unreachable!("handled above")
+        Command::Status {
+            verbose: _,
+            id: Some(id),
+        } => {
+            println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?);
         }
+        Command::Status { id: None, .. }
+        | Command::Healthz
+        | Command::Readyz
+        | Command::Metrics { .. } => unreachable!("handled above"),
         Command::Serve => {
             if cfg.auth.must_authenticate(&cfg.listen) && !cfg.auth.has_credentials() {
                 anyhow::bail!(
@@ -1358,6 +1464,7 @@ async fn main() -> Result<()> {
             }
             m.start_reaper();
             m.spawn_autopause_loop();
+            m.start_autostart_vms().await;
             if !cfg.sandbox.egress_proxy_listen.is_empty() {
                 let addr: std::net::SocketAddr = cfg.sandbox.egress_proxy_listen.parse()?;
                 if let Err(e) = fluxvm_network::egress::apply_egress_redirect(addr.port()) {
@@ -1669,6 +1776,14 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({"tag": tag}))?
             );
+        }
+        Command::Enable { id } => {
+            m.enable(id).await?;
+            println!("{{\"ok\":true,\"enabled\":true}}");
+        }
+        Command::Disable { id } => {
+            m.disable(id).await?;
+            println!("{{\"ok\":true,\"enabled\":false}}");
         }
         Command::Logs { id, lines, follow } => {
             let vm = m.get(id).await?;
@@ -2308,6 +2423,89 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Command::ListImages => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&image::catalog::list_with_verification(&cfg)?)?
+            );
+        }
+        Command::ImageStatus { name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.get_catalog_entry(&name).await?)?
+            );
+        }
+        Command::Clone { name, new_name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.clone_catalog_entry(&name, &new_name).await?)?
+            );
+        }
+        Command::Rename { name, new_name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.rename_catalog_entry(&name, &new_name).await?)?
+            );
+        }
+        Command::ReadOnly { name, off } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.set_catalog_read_only(&name, !off).await?)?
+            );
+        }
+        Command::Remove { name } => {
+            m.remove_catalog_entry(&name).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Clean => {
+            let removed = m.clean_catalog_downloads().await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"removed": removed}))?
+            );
+        }
+        Command::PullRaw {
+            name,
+            source,
+            format,
+        }
+        | Command::ImportRaw {
+            name,
+            source,
+            format,
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.add_catalog_entry(name, source, format).await?)?
+            );
+        }
+        Command::ExportRaw { name, dest } => {
+            m.export_catalog_entry(&name, &dest).await?;
+            println!("{}", serde_json::json!({"exported": dest}));
+        }
+        Command::PullTar { .. }
+        | Command::ImportTar { .. }
+        | Command::ImportFs { .. }
+        | Command::ExportTar { .. } => {
+            anyhow::bail!(
+                "tar/fs image transport is not supported; use pull-raw / import-raw / export-raw \
+                 (qcow2 or raw disk images)"
+            );
+        }
+        Command::ListTransfers => {
+            println!("{{\"items\":[]}}");
+        }
+        Command::CancelTransfer { .. } => {
+            anyhow::bail!(
+                "no async image transfers to cancel (catalog pulls/imports are synchronous)"
+            );
+        }
+        Command::Edit { .. } => {
+            anyhow::bail!(
+                "edit is not applicable; use `resources`/`set-limit` for cgroup limits, \
+                 or recreate from an updated JSON spec"
+            );
+        }
         Command::Fleet {
             central,
             token,
@@ -3801,5 +3999,51 @@ mod machinectl_parity_cli_tests {
             parse(&["terminate", &id.to_string()]),
             Command::Terminate { .. }
         ));
+    }
+
+    #[test]
+    fn enable_disable_and_image_verbs_parse() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["enable", &id.to_string()]),
+            Command::Enable { .. }
+        ));
+        assert!(matches!(
+            parse(&["disable", &id.to_string()]),
+            Command::Disable { .. }
+        ));
+        assert!(matches!(parse(&["list-images"]), Command::ListImages));
+        assert!(matches!(
+            parse(&["image-status", "ubuntu"]),
+            Command::ImageStatus { .. }
+        ));
+        assert!(matches!(
+            parse(&["show-image", "ubuntu"]),
+            Command::ImageStatus { .. }
+        ));
+        assert!(matches!(parse(&["clone", "a", "b"]), Command::Clone { .. }));
+        assert!(matches!(
+            parse(&["pull-raw", "img", "--source", "https://example/x.qcow2"]),
+            Command::PullRaw { .. }
+        ));
+        assert!(matches!(
+            parse(&["set-limit", &id.to_string(), "--pids-max", "64"]),
+            Command::Resources { .. }
+        ));
+        assert!(matches!(parse(&["list-transfers"]), Command::ListTransfers));
+        assert!(matches!(parse(&["clean"]), Command::Clean));
+    }
+
+    #[test]
+    fn status_with_id_is_vm_status() {
+        let id = Uuid::nil();
+        let Command::Status {
+            id: Some(parsed),
+            verbose: false,
+        } = parse(&["status", &id.to_string()])
+        else {
+            panic!("expected Status with id");
+        };
+        assert_eq!(parsed, id);
     }
 }

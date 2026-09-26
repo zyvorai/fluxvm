@@ -625,6 +625,78 @@ impl VmManager {
         fluxvm_image::catalog::clean_downloads(&self.cfg)
     }
 
+    /// One catalog entry with signature verification, or an error if missing.
+    pub async fn get_catalog_entry(
+        &self,
+        name: &str,
+    ) -> Result<fluxvm_image::catalog::CatalogListEntry> {
+        let entries = fluxvm_image::catalog::list_with_verification(&self.cfg)?;
+        entries
+            .into_iter()
+            .find(|e| e.entry.name == name)
+            .with_context(|| format!("catalog entry {name:?} not found"))
+    }
+
+    fn autostart_dir(&self) -> std::path::PathBuf {
+        self.cfg.state_dir.join("autostart")
+    }
+
+    /// Mark a VM to be started when `fluxctl serve` boots (machinectl `enable`).
+    pub async fn enable(&self, id: Uuid) -> Result<()> {
+        self.get(id).await?;
+        let dir = self.autostart_dir();
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join(id.to_string()), b"")?;
+        Ok(())
+    }
+
+    /// Clear the autostart mark (machinectl `disable`).
+    pub async fn disable(&self, id: Uuid) -> Result<()> {
+        self.get(id).await?;
+        let path = self.autostart_dir().join(id.to_string());
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+        }
+    }
+
+    /// Whether `enable` has marked this VM for autostart.
+    pub async fn is_enabled(&self, id: Uuid) -> bool {
+        self.autostart_dir().join(id.to_string()).exists()
+    }
+
+    /// Start every Stopped VM that was `enable`d. Called from `fluxctl serve`.
+    pub async fn start_autostart_vms(self: &Arc<Self>) {
+        let dir = self.autostart_dir();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
+        for ent in entries.flatten() {
+            let name = ent.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Ok(id) = Uuid::parse_str(name) else {
+                continue;
+            };
+            match self.get(id).await {
+                Ok(vm) if vm.status == VmStatus::Stopped => {
+                    if let Err(e) = self.start(id).await {
+                        tracing::warn!(%id, error = %e, "autostart failed");
+                    } else {
+                        tracing::info!(%id, "autostarted enabled VM");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(%id, error = %e, "autostart: VM missing; clearing enable mark");
+                    let _ = fs::remove_file(dir.join(id.to_string()));
+                }
+            }
+        }
+    }
+
     /// Create the VM's cgroup and migrate `pid` into it, storing the
     /// resulting path on `record`. Best-effort and non-fatal: a VM whose
     /// cgroup setup fails still runs — it just can't be resource-controlled

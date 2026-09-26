@@ -87,7 +87,7 @@ pub fn after_help() -> String {
             "✨ Basic Commands:",
             &[
                 ("serve", "Start the FluxVM control-plane daemon"),
-                ("status", "Display status (Cilium-style panel)"),
+                ("status", "Host panel, or VM status with an id"),
             ],
         ),
         (
@@ -100,7 +100,8 @@ pub fn after_help() -> String {
                 ("stop", "Stop a VM"),
                 ("pause", "Pause a VM"),
                 ("resume", "Resume a paused VM"),
-                ("delete", "Delete a VM"),
+                ("delete", "Delete a VM (alias: terminate)"),
+                ("set-limit", "Alias for resources (machinectl)"),
             ],
         ),
         (
@@ -115,6 +116,15 @@ pub fn after_help() -> String {
         (
             "🖥️  Guest Access:",
             &[
+                ("console", "Guest login (aliases: login, shell)"),
+                ("ssh", "SSH into the guest at guest_ip"),
+                ("show", "Show one VM's record"),
+                ("poweroff", "Guest power-off via vsock agent"),
+                ("reboot", "Guest reboot via vsock agent"),
+                ("kill", "Force-kill the VMM process"),
+                ("bind", "Bind a host dir into the guest (virtiofs)"),
+                ("enable", "Autostart VM on fluxctl serve"),
+                ("disable", "Clear autostart mark"),
                 ("exec", "Run a command inside the guest over vsock"),
                 ("ping", "Health-check the vsock guest agent"),
                 ("copy-to", "Copy a local file into the guest"),
@@ -127,6 +137,16 @@ pub fn after_help() -> String {
             &[
                 ("build-image", "Build a guest disk image"),
                 ("catalog", "Manage the named/signed image catalog"),
+                ("list-images", "List catalog entries (machinectl)"),
+                ("image-status", "Show one catalog entry"),
+                ("pull-raw", "Fetch a remote image into the catalog"),
+                ("import-raw", "Register a local image in the catalog"),
+                ("export-raw", "Export a catalog entry's file"),
+                ("clone", "Clone a catalog entry"),
+                ("rename", "Rename a catalog entry"),
+                ("remove", "Remove a catalog entry"),
+                ("read-only", "Lock/unlock a catalog entry"),
+                ("clean", "Remove orphaned catalog downloads"),
                 ("pool", "Manage warm VM pools"),
             ],
         ),

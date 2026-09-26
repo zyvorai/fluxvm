@@ -309,14 +309,25 @@ operators reach for from systemd-machined:
 
 | machinectl | fluxctl |
 |---|---|
+| `list` | `list` |
+| `status` / `show` | `status <id>` / `show <id>` (bare `status` = host panel) |
+| `start` / `stop` | `start` / `stop` |
 | `login` / `shell` | `console` (aliases `login`, `shell`; trailing args → vsock `exec`) |
-| *(ssh to guest IP)* | `ssh` (OpenSSH to `guest_ip`) |
-| `status` / `show` | `show` (same JSON as `get`) |
+| `enable` / `disable` | `enable` / `disable` (autostart on `fluxctl serve`) |
 | `poweroff` / `reboot` | `poweroff` / `reboot` (guest agent) |
 | `kill` | `kill` (force VMM; prefer `stop` for clean) |
 | `terminate` | `terminate` → `delete` |
 | `bind` | `bind` → virtiofs `hotplug share` |
 | `copy-to` / `copy-from` | `copy-to` / `copy-from` |
+| `set-limit` | `set-limit` / `resources` |
+| `list-images` / `image-status` | `list-images` / `image-status` (`show-image`) |
+| `clone` / `rename` / `remove` | `clone` / `rename` / `remove` (catalog images) |
+| `read-only` | `read-only` / `read-only --off` |
+| `clean` | `clean` |
+| `pull-raw` / `import-raw` / `export-raw` | same |
+| `pull-tar` / `import-tar` / `import-fs` / `export-tar` | rejected — use `*-raw` (qcow2/raw) |
+| `list-transfers` / `cancel` | empty / no-op (pulls are synchronous) |
+| `edit` | rejected — use `resources` or recreate from spec |
 
 `console`/`login` put the local TTY in raw mode so keystrokes reach the guest PTY intact.
 
