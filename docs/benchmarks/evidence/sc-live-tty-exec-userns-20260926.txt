@@ -1,0 +1,15 @@
+SC tty+exec evidence 20260926T124834Z
+== e2e-tty ==
+E2E PASS: VSOCK stdio + init TTY + exec TTY + ResizePty
+RESULT e2e-tty=PASS
+== e2e-sec ==
+pod/fluxvm-security-set10 created
+pod/fluxvm-security-set10 condition met
+Set 10 seccomp RuntimeDefault smoke passed
+RESULT e2e-sec=PASS
+== exec-userns ==
+pod/fluxvm-exec-ev-2250070 created
+pod/fluxvm-exec-ev-2250070 condition met
+EXEC_USERNS_OK
+RESULT exec-userns=PASS
+pod "fluxvm-exec-ev-2250070" force deleted from default namespace
