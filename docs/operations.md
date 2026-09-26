@@ -354,7 +354,9 @@ storage, or does anything Fabric-shaped; it is exactly the three existing REST p
 without Fabric or `curl`.
 
 **QEMU migration receivers.** The target node reserves host quota and launches QEMU with `-incoming defer`
-via `POST /v1/migration/receivers` (activate with the returned token). Receivers count against the O(1)
+via `POST /v1/migration/receivers` (activate with the returned token), or the matching CLI:
+`fluxctl migrate receiver create …`, `fluxctl migrate receiver activate --token …`, and
+`fluxctl migrate receiver delete`. Receivers count against the O(1)
 host ledger as untracked capacity until reaped. Default listen is `0.0.0.0` — bind to a management
 address or firewall the port in multi-tenant networks. Cloud Hypervisor has no matching receiver API.
 
@@ -436,13 +438,14 @@ curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/frozen            # {"frozen": true
 curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/stats              # CPU%, memory, disk I/O, read from the cgroup
 curl -sS http://127.0.0.1:7788/v1/vms/<uuid>/pressure           # PSI: cpu/memory/io some+full, avg10/60/300 + total
 
-# CLI equivalent of freeze/thaw/frozen/resources (no CLI form for stats/pressure yet — those
-# still require a raw HTTP call, same as before):
+# CLI equivalents (freeze/thaw/frozen/resources/stats/pressure):
 sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml freeze <uuid>
 sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml frozen <uuid>   # {"frozen": true|false}
 sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml thaw <uuid>
 sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml resources <uuid> \
     --cpu-quota-percent 150 --memory-max-bytes 536870912 --pids-max 64
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml stats <uuid>
+sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml pressure <uuid>
 ```
 
 `resources` (`ResourcePatch`) is a partial patch — only the fields you set are touched: `cpu_quota_percent`
@@ -472,9 +475,9 @@ VMM's own control socket is wedged or unresponsive, which is exactly the scenari
 `stop`/`ch-remote pause`) can't help with, since that goes through the same socket. `fluxctl thaw <id>`
 reverses it, and `fluxctl frozen <id>` reports the freezer's current state as `{"frozen": true|false}`
 without changing anything, matching the REST route exactly (both are plain GETs/POSTs with no request
-body — no new wire types were needed). `resources`/`stats`/`pressure` stayed REST-only at the time:
-`resources` takes a multi-field JSON patch that would need real flag design to do justice, and
-`stats`/`pressure` are read-only introspection with no urgency behind a CLI form yet. 7 new
+body — no new wire types were needed). `resources` later gained CLI flags; `stats`/`pressure` now
+have thin read-only CLI forms (`fluxctl stats <id>` / `fluxctl pressure <id>`) that print the same
+JSON as `GET /v1/vms/{id}/stats` and `GET /v1/vms/{id}/pressure`. 7 new
 CLI-argument-parsing tests covering all three commands plus a check that they aren't accidentally
 aliased to each other or to `pause`/`resume`.
 
