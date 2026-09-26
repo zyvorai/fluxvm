@@ -59,6 +59,10 @@ if [[ ! -f "$BPF_TC" ]]; then
     # Bridge-less direct taps (docs/direct-datapath.md) load this next to fluxvm_tc.bpf.o.
     [[ -f "$ROOT/dist/bpf/fluxvm_direct.bpf.o" ]] && \
       install -D -m 0644 "$ROOT/dist/bpf/fluxvm_direct.bpf.o" "$(dirname "$BPF_TC")/fluxvm_direct.bpf.o"
+    # Set 14/17 directional ingress object (required for schema_v2 pod-policy).
+    [[ -f "$ROOT/dist/bpf/fluxvm_pod_ingress.bpf.o" ]] && \
+      install -D -m 0644 "$ROOT/dist/bpf/fluxvm_pod_ingress.bpf.o" \
+        "$(dirname "$BPF_TC")/fluxvm_pod_ingress.bpf.o"
   fi
 fi
 [[ -f "$BPF_TC" || $DRY -eq 1 ]] || { echo "missing $BPF_TC" >&2; exit 1; }
