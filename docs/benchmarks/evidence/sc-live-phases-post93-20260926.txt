@@ -1,0 +1,78 @@
+FluxVM SC soft finish (post-#93) 20260926T125827Z
+host=NLDW4-4-04-32
+== e2e-ctr ==
+E2E PASS: io.containerd.fluxvm.v2 executed docker.io/library/busybox:1.36 inside a FluxVM sandbox (ctr_rc=137)
+RESULT e2e-ctr=PASS
+
+== e2e-tty ==
+E2E PASS: VSOCK stdio + init TTY + exec TTY + ResizePty
+RESULT e2e-tty=PASS
+
+== e2e-sec ==
+pod/fluxvm-security-set10 created
+pod/fluxvm-security-set10 condition met
+Set 10 seccomp RuntimeDefault smoke passed
+RESULT e2e-sec=PASS
+
+== e2e-userns-k8s ==
+== userns load (k8s): 1 concurrent RuntimeClass=fluxvm pods (require_distinct=0) ==
+pod/fluxvm-userns-load-2300618-1 created
+pod/fluxvm-userns-load-2300618-1 condition met
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+RESULT e2e-userns-k8s=PASS
+
+== e2e-userns-k8s-multi ==
+== userns load (k8s-multi): 1 pod / 2 containers RuntimeClass=fluxvm (require_distinct=1) ==
+pod/fluxvm-userns-load-2303274-multi created
+pod/fluxvm-userns-load-2303274-multi condition met
+  probe-1 -> user:[4026532502]
+  probe-2 -> user:[4026532505]
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)
+RESULT e2e-userns-k8s-multi=PASS
+
+== e2e-seccomp-notify ==
+E2E PASS: seccomp NOTIFY broker denied chmod (ctr_rc=137)
+RESULT e2e-seccomp-notify=PASS
+
+== e2e-selinux-mountlabel ==
+using SELinux guest image annotation: /var/lib/fluxvm/images/secure-container-selinux.qcow2
+E2E PASS: SELinux mountLabel green (context= / container_file_t)
+RESULT e2e-selinux-mountlabel=PASS
+
+== e2e-ns ==
+pod/fluxvm-namespaces-e2e created
+pod/fluxvm-namespaces-e2e condition met
+FluxVM Set 6 namespace isolation E2E: PASS (shared IPC/UTS, private PID/mount per container)
+RESULT e2e-ns=PASS
+
+== cni-churn ==
+✅ calico/flannel churn 20 rounds
+⚠️  no FLUXVM_SECOND_CNI_KUBECONFIG — live second-cluster S2 still uses the nftables stand-in
+RESULT cni-churn=PASS
+
+== s2 ==
+== S2.2 second CNI / policy engine ==
+RESULT s2=SKIP/soft-fail rc=1
+
+== wow ==
+== wow: RuntimeClass fluxvm must exist ==
+== wow: k8s userns (N=1) ==
+== userns load (k8s): 1 concurrent RuntimeClass=fluxvm pods (require_distinct=0) ==
+pod/fluxvm-userns-load-2326996-1 created
+pod/fluxvm-userns-load-2326996-1 condition met
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+== wow: k8s-multi distinct userns (N=2) ==
+== userns load (k8s-multi): 1 pod / 2 containers RuntimeClass=fluxvm (require_distinct=1) ==
+pod/fluxvm-userns-load-2329844-multi created
+pod/fluxvm-userns-load-2329844-multi condition met
+  probe-1 -> user:[4026532501]
+  probe-2 -> user:[4026532504]
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)
+WOW DEMO: OK
+  flip runbook: docs/secure-containers-flip-runtimeclass.md
+  supported profile: docs/secure-containers-supported-profile.md
+  evidence pack: docs/benchmarks/evidence/sc-hotcake-bundle-20260926.txt
+RESULT wow=PASS
+
+summary pass=10 skip=1 fail=0
+SC_LIVE_FINISH_POST93=COMPLETE
