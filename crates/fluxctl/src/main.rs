@@ -57,6 +57,16 @@ enum Command {
         #[arg(long, short = 'v')]
         verbose: bool,
     },
+    /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
+    Healthz,
+    /// Daemon readiness probe. Hits `GET /readyz` on `listen` (no auth).
+    Readyz,
+    /// Prometheus text metrics from the running daemon (`GET /metrics`).
+    Metrics {
+        /// Bearer token when `auth.require` is on (also `FLUXVM_TOKEN`).
+        #[arg(long, env = "FLUXVM_TOKEN")]
+        token: Option<String>,
+    },
     #[command(next_help_heading = "Lifecycle Commands")]
     /// Create a VM from a JSON spec file.
     Create {
@@ -135,6 +145,11 @@ enum Command {
         #[arg(long)]
         cpuset_cpus: Option<String>,
     },
+    /// Read back the VM's current cgroup cpuset pin. REST equivalent:
+    /// `GET /v1/vms/{id}/cpuset`. Write via `resources --cpuset-cpus`.
+    Cpuset {
+        id: Uuid,
+    },
     /// Cgroup-derived resource metrics for a VM (CPU%, memory bytes, disk
     /// read/write). REST equivalent: `GET /v1/vms/{id}/stats`.
     Stats {
@@ -175,6 +190,17 @@ enum Command {
         cols: u16,
         #[arg(long, default_value_t = 24)]
         rows: u16,
+    },
+    /// Tail the VM's captured console log file. REST equivalent:
+    /// `GET /v1/vms/{id}/logs?lines=&follow=`.
+    Logs {
+        id: Uuid,
+        /// How many trailing lines to print (default 100).
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+        /// Keep following new lines (like `tail -f`).
+        #[arg(long, default_value_t = false)]
+        follow: bool,
     },
     /// Run a command inside the guest over vsock (requires agent.enabled in the VM spec).
     Exec {
@@ -242,6 +268,13 @@ enum Command {
         command: PoolCommand,
     },
     #[command(next_help_heading = "Network Policy")]
+    /// Per-VM network policy and dataplane introspection
+    /// (`/v1/vms/{id}/network/*`). Distinct from `group`/`cnp`/`dataplane`,
+    /// which are host-wide.
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
     /// Security groups for the VM-edge dataplane.
     Group {
         #[command(subcommand)]
@@ -696,6 +729,33 @@ enum HubbleCommand {
 }
 
 #[derive(Subcommand)]
+enum NetworkCommand {
+    /// Declared VM network policy. REST: `GET /v1/vms/{id}/network/policy`.
+    Policy { id: Uuid },
+    /// Replace the VM network policy from a JSON file. REST:
+    /// `POST /v1/vms/{id}/network/policy`.
+    SetPolicy {
+        id: Uuid,
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    /// Declared + group-merged effective policy. REST:
+    /// `GET /v1/vms/{id}/network/effective`.
+    Effective { id: Uuid },
+    /// Dataplane attachment status for the VM. REST:
+    /// `GET /v1/vms/{id}/network/status`.
+    Status { id: Uuid },
+    /// Per-VM dataplane counters. REST: `GET /v1/vms/{id}/network/stats`.
+    Stats { id: Uuid },
+    /// Recent flows for the VM. REST: `GET /v1/vms/{id}/network/flows`.
+    Flows {
+        id: Uuid,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum GroupCommand {
     List,
     Get {
@@ -863,6 +923,77 @@ async fn manager(cfg: Config) -> Result<Arc<VmManager>> {
     VmManager::new(cfg)
 }
 
+/// GET a path on the running daemon at `cfg.listen`. Used by healthz/readyz/metrics.
+async fn daemon_get(cfg: &Config, path: &str, token: Option<&str>) -> Result<String> {
+    let base = if cfg.listen.starts_with("http://") || cfg.listen.starts_with("https://") {
+        cfg.listen.clone()
+    } else {
+        format!("http://{}", cfg.listen)
+    };
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let http = reqwest::Client::new();
+    let mut req = http.get(&url);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("GET {url} (is fluxctl serve running on listen?)"))?;
+    let status = resp.status();
+    let body = resp.text().await.context("reading daemon response body")?;
+    if !status.is_success() {
+        anyhow::bail!("GET {url} returned {status}: {body}");
+    }
+    Ok(body)
+}
+
+/// Tail `path` like the REST `/v1/vms/{id}/logs` handler: print the last
+/// `lines` lines, then optionally follow new ones.
+async fn tail_vm_log(path: &Path, lines: usize, follow: bool) -> Result<()> {
+    use std::collections::VecDeque;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("opening VM log {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(lines);
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                if tail.len() == lines {
+                    tail.pop_front();
+                }
+                tail.push_back(std::mem::take(&mut line));
+            }
+            Err(e) => return Err(e).context("reading VM log"),
+        }
+    }
+    let mut stdout = tokio::io::stdout();
+    for l in &tail {
+        stdout.write_all(l.as_bytes()).await?;
+    }
+    stdout.flush().await?;
+    if !follow {
+        return Ok(());
+    }
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+            Ok(_) => {
+                stdout.write_all(line.as_bytes()).await?;
+                stdout.flush().await?;
+            }
+            Err(e) => return Err(e).context("following VM log"),
+        }
+    }
+}
+
 /// Parses `migrate start --mode`, matching `MigrationMode`'s own
 /// `#[serde(rename_all = "kebab-case")]` spelling ("pre-copy"/"post-copy")
 /// exactly rather than inventing a separate CLI vocabulary for the same two
@@ -1027,11 +1158,32 @@ async fn main() -> Result<()> {
         status::print_status(m.as_deref(), &cfg, *verbose).await?;
         return Ok(());
     }
+    // Daemon probes talk HTTP to `listen` — no local VmManager / cgroup needed.
+    if matches!(
+        cli.command,
+        Command::Healthz | Command::Readyz | Command::Metrics { .. }
+    ) {
+        match cli.command {
+            Command::Healthz => {
+                println!("{}", daemon_get(&cfg, "/healthz", None).await?);
+            }
+            Command::Readyz => {
+                println!("{}", daemon_get(&cfg, "/readyz", None).await?);
+            }
+            Command::Metrics { token } => {
+                print!("{}", daemon_get(&cfg, "/metrics", token.as_deref()).await?);
+            }
+            _ => unreachable!(),
+        }
+        return Ok(());
+    }
 
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
-        Command::Status { .. } => unreachable!("handled above"),
+        Command::Status { .. } | Command::Healthz | Command::Readyz | Command::Metrics { .. } => {
+            unreachable!("handled above")
+        }
         Command::Serve => {
             if cfg.auth.must_authenticate(&cfg.listen) && !cfg.auth.has_credentials() {
                 anyhow::bail!(
@@ -1232,6 +1384,13 @@ async fn main() -> Result<()> {
             .await?;
             println!("{{\"ok\":true}}");
         }
+        Command::Cpuset { id } => {
+            let cpus = m.get_cpuset(id).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"cpus": cpus}))?
+            );
+        }
         Command::Stats { id } => {
             println!("{}", serde_json::to_string_pretty(&m.metrics(id).await?)?);
         }
@@ -1352,6 +1511,10 @@ async fn main() -> Result<()> {
                 result = to_guest => result?,
                 result = to_host => result?,
             }
+        }
+        Command::Logs { id, lines, follow } => {
+            let vm = m.get(id).await?;
+            tail_vm_log(&vm.log_path, lines.max(1), follow).await?;
         }
         Command::Exec {
             id,
@@ -1777,6 +1940,48 @@ async fn main() -> Result<()> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&m.list_identities().await?)?
+                );
+            }
+        },
+        Command::Network { command } => match command {
+            NetworkCommand::Policy { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_policy(id).await?)?
+                );
+            }
+            NetworkCommand::SetPolicy { id, spec } => {
+                let policy: fluxvm_network::dataplane::VmNetworkPolicy =
+                    serde_json::from_slice(&std::fs::read(spec)?)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.set_network_policy(id, policy).await?)?
+                );
+            }
+            NetworkCommand::Effective { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_effective(id).await?)?
+                );
+            }
+            NetworkCommand::Status { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_status(id).await?)?
+                );
+            }
+            NetworkCommand::Stats { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_stats(id).await?)?
+                );
+            }
+            NetworkCommand::Flows { id, limit } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "items": m.network_flows(id, limit).await?
+                    }))?
                 );
             }
         },
@@ -3256,5 +3461,96 @@ mod sandbox_cli_tests {
         assert_eq!(parsed, id);
         assert_eq!(timeout_seconds, Some(30));
         assert_eq!(command, vec!["echo".to_string(), "hi".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod cpuset_network_logs_health_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn cpuset_logs_and_probes_parse() {
+        let id = Uuid::nil();
+        let Command::Cpuset { id: parsed } = parse(&["cpuset", &id.to_string()]) else {
+            panic!("expected Command::Cpuset");
+        };
+        assert_eq!(parsed, id);
+
+        let Command::Logs {
+            id: parsed,
+            lines,
+            follow,
+        } = parse(&["logs", &id.to_string(), "--lines", "50", "--follow"])
+        else {
+            panic!("expected Command::Logs");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(lines, 50);
+        assert!(follow);
+
+        assert!(matches!(parse(&["healthz"]), Command::Healthz));
+        assert!(matches!(parse(&["readyz"]), Command::Readyz));
+        let Command::Metrics { token } = parse(&["metrics", "--token", "t"]) else {
+            panic!("expected Command::Metrics");
+        };
+        assert_eq!(token.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn network_subcommands_parse() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["network", "policy", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Policy { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["network", "effective", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Effective { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["network", "status", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Status { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["network", "stats", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Stats { .. }
+            }
+        ));
+        let Command::Network {
+            command: NetworkCommand::Flows { id: parsed, limit },
+        } = parse(&["network", "flows", &id.to_string(), "--limit", "20"])
+        else {
+            panic!("expected NetworkCommand::Flows");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(limit, 20);
+
+        let Command::Network {
+            command: NetworkCommand::SetPolicy { id: parsed, spec },
+        } = parse(&[
+            "network",
+            "set-policy",
+            &id.to_string(),
+            "--spec",
+            "/tmp/pol.json",
+        ])
+        else {
+            panic!("expected NetworkCommand::SetPolicy");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(spec, PathBuf::from("/tmp/pol.json"));
     }
 }
