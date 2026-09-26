@@ -16,7 +16,7 @@ use fluxvm_core::{
     },
     process,
 };
-use fluxvm_guest_protocol::AgentRequest;
+use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
 use fluxvm_storage::{PoolStore, Store};
 use std::{collections::HashMap, fs, sync::Arc};
 use tokio::sync::Mutex as AsyncMutex;
@@ -2868,6 +2868,88 @@ impl VmManager {
     pub async fn agent_ping(&self, id: Uuid) -> Result<()> {
         let vm = self.get(id).await?;
         fluxvm_vsock_client::ping(&vm, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT).await
+    }
+
+    /// Ask the guest agent to power the guest off (`shutdown -h now`).
+    /// Distinct from [`Self::stop`], which tears down the VMM from the host.
+    pub async fn agent_poweroff(&self, id: Uuid) -> Result<()> {
+        let vm = self.get(id).await?;
+        match fluxvm_vsock_client::call(
+            &vm,
+            AgentRequest::Shutdown,
+            fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT,
+        )
+        .await?
+        {
+            AgentResponse::ShuttingDown => Ok(()),
+            AgentResponse::Error { message } => bail!("guest agent error: {message}"),
+            other => bail!("unexpected response to shutdown: {other:?}"),
+        }
+    }
+
+    /// Ask the guest to reboot via the vsock agent (`reboot`). Connection
+    /// drops mid-reboot are treated as success — the guest is often already
+    /// tearing the agent down.
+    pub async fn agent_reboot(&self, id: Uuid) -> Result<()> {
+        match self.exec(id, "reboot".into(), Some(10)).await {
+            Ok(AgentResponse::Exec { .. }) | Ok(AgentResponse::ShuttingDown) => Ok(()),
+            Ok(AgentResponse::Error { message }) => {
+                // `reboot` may fail the JSON round-trip after the syscall started.
+                tracing::debug!(%message, "reboot agent error (guest may still be rebooting)");
+                Ok(())
+            }
+            Ok(other) => bail!("unexpected response to reboot: {other:?}"),
+            Err(e) => {
+                tracing::debug!(error = %e, "reboot: agent connection closed");
+                Ok(())
+            }
+        }
+    }
+
+    /// Immediately SIGTERM/SIGKILL the VMM process without a guest ACPI
+    /// powerdown (machinectl `kill` / hard stop). Prefer [`Self::stop`] for
+    /// a clean shutdown.
+    pub async fn kill(&self, id: Uuid) -> Result<VmRecord> {
+        let mut vm = self.get(id).await?;
+        if let Some(pid) = vm.pid {
+            if process::process_alive(pid).await {
+                process::terminate_pid(pid).await?;
+            }
+        }
+        let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
+        if let Some(tap) = &vm.tap_name {
+            let _ = fluxvm_network::cleanup(
+                &self.cfg.state_dir,
+                id,
+                &vm.request.network,
+                tap,
+                vm.netns.as_deref(),
+            )
+            .await;
+        }
+        vm.netns = None;
+        for pid in vm.virtiofsd_pids.drain(..) {
+            if process::process_alive(pid).await {
+                let _ = process::terminate_pid(pid).await;
+            }
+        }
+        if let Some(pid) = vm.swtpm_pid.take() {
+            if process::process_alive(pid).await {
+                let _ = process::terminate_pid(pid).await;
+            }
+        }
+        if let Some(cgroup_path) = vm.cgroup_path.take() {
+            let _ =
+                fluxvm_network::qemu_cgroup::detach(&self.cfg.sandbox.dataplane, id, &cgroup_path);
+            if let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(cgroup_path) {
+                let _ = mgr.remove();
+            }
+        }
+        vm.status = VmStatus::Stopped;
+        vm.pid = None;
+        vm.error = None;
+        self.store.update(vm.clone()).await?;
+        Ok(vm)
     }
 
     fn qga_socket_for(vm: &VmRecord) -> Result<std::path::PathBuf> {

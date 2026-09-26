@@ -96,6 +96,11 @@ enum Command {
     Delete {
         id: Uuid,
     },
+    /// Alias for `delete` (machinectl `terminate`).
+    #[command(hide = true)]
+    Terminate {
+        id: Uuid,
+    },
     #[command(next_help_heading = "Runtime Control")]
     /// Freeze every process in the VM's cgroup via the cgroup v2 freezer
     /// (`cgroup.freeze`) — a kernel-level stop that works even if the VMM's
@@ -182,14 +187,57 @@ enum Command {
         tag: String,
     },
     #[command(next_help_heading = "Guest Access")]
-    /// Open the guest PTY over vsock (requires agent.enabled in the VM spec).
-    /// Stdin is framed as `PtyFrame` data. Output is the raw PTY byte stream.
+    /// Interactive guest login over vsock PTY (machinectl `login`/`shell`).
+    /// Requires `agent.enabled`. With a trailing command, runs it via vsock
+    /// `exec` instead of opening a PTY (machinectl `shell NAME cmd…`).
+    #[command(visible_aliases = ["login", "shell"])]
     Console {
         id: Uuid,
         #[arg(long, default_value_t = 80)]
         cols: u16,
         #[arg(long, default_value_t = 24)]
         rows: u16,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// SSH into the guest at its `guest_ip` via the host OpenSSH client.
+    /// Needs a reachable address and `sshd` in the guest — distinct from
+    /// `console`/`login` (vsock agent PTY).
+    Ssh {
+        id: Uuid,
+        #[arg(long, short = 'l', default_value = "root")]
+        user: String,
+        #[arg(long, short = 'p', default_value_t = 22)]
+        port: u16,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        ssh_args: Vec<String>,
+    },
+    /// Show one VM's record (machinectl `status`/`show`). Same JSON as `get`.
+    Show {
+        id: Uuid,
+    },
+    /// Guest power-off via vsock agent (`shutdown -h now`). Distinct from
+    /// `stop`, which tears the VMM down from the host.
+    Poweroff {
+        id: Uuid,
+    },
+    /// Guest reboot via vsock agent.
+    Reboot {
+        id: Uuid,
+    },
+    /// Force-kill the VMM without guest ACPI powerdown (machinectl `kill`).
+    /// Prefer `stop` for a clean shutdown.
+    Kill {
+        id: Uuid,
+    },
+    /// Bind a host directory into the guest as virtiofs (machinectl `bind`).
+    /// Same as `hotplug share`.
+    Bind {
+        id: Uuid,
+        /// Absolute host directory to share.
+        host_path: PathBuf,
+        #[arg(long, default_value_t = false)]
+        read_only: bool,
     },
     /// Tail the VM's captured console log file. REST equivalent:
     /// `GET /v1/vms/{id}/logs?lines=&follow=`.
@@ -948,6 +996,80 @@ async fn daemon_get(cfg: &Config, path: &str, token: Option<&str>) -> Result<Str
     Ok(body)
 }
 
+/// Interactive vsock PTY session with the local TTY in raw mode so
+/// keystrokes (Ctrl-C, arrows, …) reach the guest instead of the host shell.
+async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _raw = RawTerminal::enter()?;
+    let console = m.open_console(id, cols, rows).await?;
+    let (mut reader, mut writer) = tokio::io::split(console);
+    let to_guest = async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stdin.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            let frame = fluxvm_guest_protocol::PtyFrame::Data(buf[..n].to_vec()).encode();
+            writer.write_all(&frame).await?;
+            writer.flush().await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let to_host = async move {
+        let mut stdout = tokio::io::stdout();
+        tokio::io::copy(&mut reader, &mut stdout).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::select! {
+        result = to_guest => result?,
+        result = to_host => result?,
+    }
+    Ok(())
+}
+
+/// Puts stdin into termios raw mode while held; restores on drop.
+struct RawTerminal {
+    fd: i32,
+    original: libc::termios,
+}
+
+impl RawTerminal {
+    fn enter() -> Result<Self> {
+        if !std::io::stdin().is_terminal() {
+            // Non-interactive pipe: leave cooked mode alone.
+            return Ok(Self {
+                fd: -1,
+                original: unsafe { std::mem::zeroed() },
+            });
+        }
+        let fd = libc::STDIN_FILENO;
+        let mut original = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::tcgetattr(fd, &mut original) };
+        if rc != 0 {
+            anyhow::bail!("tcgetattr failed: {}", std::io::Error::last_os_error());
+        }
+        let mut raw = original;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        let rc = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) };
+        if rc != 0 {
+            anyhow::bail!("tcsetattr failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(Self { fd, original })
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+            }
+        }
+    }
+}
+
 /// Tail `path` like the REST `/v1/vms/{id}/logs` handler: print the last
 /// `lines` lines, then optionally follow new ones.
 async fn tail_vm_log(path: &Path, lines: usize, follow: bool) -> Result<()> {
@@ -1484,33 +1606,69 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&m.start_from_snapshot(id, &tag).await?)?
             );
         }
-        Command::Console { id, cols, rows } => {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let console = m.open_console(id, cols, rows).await?;
-            let (mut reader, mut writer) = tokio::io::split(console);
-            let to_guest = async move {
-                let mut stdin = tokio::io::stdin();
-                let mut buf = [0u8; 1024];
-                loop {
-                    let n = stdin.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    let frame = fluxvm_guest_protocol::PtyFrame::Data(buf[..n].to_vec()).encode();
-                    writer.write_all(&frame).await?;
-                    writer.flush().await?;
-                }
-                Ok::<(), anyhow::Error>(())
-            };
-            let to_host = async move {
-                let mut stdout = tokio::io::stdout();
-                tokio::io::copy(&mut reader, &mut stdout).await?;
-                Ok::<(), anyhow::Error>(())
-            };
-            tokio::select! {
-                result = to_guest => result?,
-                result = to_host => result?,
+        Command::Console {
+            id,
+            cols,
+            rows,
+            command,
+        } => {
+            if !command.is_empty() {
+                let response = m.exec(id, command.join(" "), None).await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                run_console_session(&m, id, cols, rows).await?;
             }
+        }
+        Command::Ssh {
+            id,
+            user,
+            port,
+            ssh_args,
+        } => {
+            let vm = m.get(id).await?;
+            let ip = vm.guest_ip.as_deref().context(
+                "VM has no guest_ip yet — wait for DHCP/lease, or use `console`/`login` over vsock",
+            )?;
+            let status = tokio::process::Command::new("ssh")
+                .arg("-tt")
+                .arg("-p")
+                .arg(port.to_string())
+                .arg(format!("{user}@{ip}"))
+                .args(&ssh_args)
+                .status()
+                .await
+                .context("running ssh (is OpenSSH client installed?)")?;
+            if !status.success() {
+                anyhow::bail!("ssh exited with {status}");
+            }
+        }
+        Command::Show { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?);
+        }
+        Command::Poweroff { id } => {
+            m.agent_poweroff(id).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Reboot { id } => {
+            m.agent_reboot(id).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Kill { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.kill(id).await?)?);
+        }
+        Command::Bind {
+            id,
+            host_path,
+            read_only,
+        } => {
+            if !host_path.is_absolute() {
+                anyhow::bail!("host_path must be absolute");
+            }
+            let tag = m.hotplug_share(id, host_path, read_only).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"tag": tag}))?
+            );
         }
         Command::Logs { id, lines, follow } => {
             let vm = m.get(id).await?;
@@ -1732,7 +1890,7 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
         },
-        Command::Delete { id } => m.delete(id).await?,
+        Command::Delete { id } | Command::Terminate { id } => m.delete(id).await?,
         Command::BuildImage { spec } => {
             let req: BuildImageRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
             println!(
@@ -3552,5 +3710,96 @@ mod cpuset_network_logs_health_cli_tests {
         };
         assert_eq!(parsed, id);
         assert_eq!(spec, PathBuf::from("/tmp/pol.json"));
+    }
+}
+
+#[cfg(test)]
+mod machinectl_parity_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn login_and_shell_alias_console() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["login", &id.to_string()]),
+            Command::Console { command, .. } if command.is_empty()
+        ));
+        assert!(matches!(
+            parse(&["shell", &id.to_string()]),
+            Command::Console { command, .. } if command.is_empty()
+        ));
+        let Command::Console { command, .. } = parse(&["shell", &id.to_string(), "uname", "-a"])
+        else {
+            panic!("expected Console with command");
+        };
+        assert_eq!(command, vec!["uname".to_string(), "-a".to_string()]);
+    }
+
+    #[test]
+    fn ssh_poweroff_reboot_kill_show_bind_parse() {
+        let id = Uuid::nil();
+        let Command::Ssh {
+            id: parsed,
+            user,
+            port,
+            ssh_args,
+        } = parse(&[
+            "ssh",
+            &id.to_string(),
+            "-l",
+            "ubuntu",
+            "-p",
+            "2222",
+            "uptime",
+        ])
+        else {
+            panic!("expected Command::Ssh");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(user, "ubuntu");
+        assert_eq!(port, 2222);
+        assert_eq!(ssh_args, vec!["uptime".to_string()]);
+
+        assert!(matches!(
+            parse(&["show", &id.to_string()]),
+            Command::Show { .. }
+        ));
+        assert!(matches!(
+            parse(&["poweroff", &id.to_string()]),
+            Command::Poweroff { .. }
+        ));
+        assert!(matches!(
+            parse(&["reboot", &id.to_string()]),
+            Command::Reboot { .. }
+        ));
+        assert!(matches!(
+            parse(&["kill", &id.to_string()]),
+            Command::Kill { .. }
+        ));
+        let Command::Bind {
+            host_path,
+            read_only,
+            ..
+        } = parse(&["bind", &id.to_string(), "/var/data", "--read-only"])
+        else {
+            panic!("expected Command::Bind");
+        };
+        assert_eq!(host_path, PathBuf::from("/var/data"));
+        assert!(read_only);
+    }
+
+    #[test]
+    fn terminate_aliases_delete() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["terminate", &id.to_string()]),
+            Command::Terminate { .. }
+        ));
     }
 }

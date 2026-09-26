@@ -304,6 +304,22 @@ sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-to <id> ./local-file.
 sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-from <id> /etc/app/config.yaml ./local-file.txt
 ```
 
+**machinectl-shaped guest access.** Beside `console`/`exec`/`copy-*`, fluxctl also speaks the verbs
+operators reach for from systemd-machined:
+
+| machinectl | fluxctl |
+|---|---|
+| `login` / `shell` | `console` (aliases `login`, `shell`; trailing args → vsock `exec`) |
+| *(ssh to guest IP)* | `ssh` (OpenSSH to `guest_ip`) |
+| `status` / `show` | `show` (same JSON as `get`) |
+| `poweroff` / `reboot` | `poweroff` / `reboot` (guest agent) |
+| `kill` | `kill` (force VMM; prefer `stop` for clean) |
+| `terminate` | `terminate` → `delete` |
+| `bind` | `bind` → virtiofs `hotplug share` |
+| `copy-to` / `copy-from` | `copy-to` / `copy-from` |
+
+`console`/`login` put the local TTY in raw mode so keystrokes reach the guest PTY intact.
+
 `ping` sends a bare `AgentRequest::Ping` — the same health check `POST /v1/vms/{id}/agent/ping` performs
 over the REST API — so a caller can confirm the guest agent is up (and, if a token is configured, that
 this VM's own token still authenticates) without spending a real `exec` round trip and whatever

@@ -29,6 +29,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+libc = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
