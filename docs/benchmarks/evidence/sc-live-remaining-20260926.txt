@@ -39,3 +39,8 @@ Full log: docs/benchmarks/evidence/sc-live-phases-finish-20260926.txt
 
 == Non-goals (unchanged) ==
 Remote policy RPC; FC live virtiofs; Kata-equivalence claims.
+
+== Soft-skips closed (20260926 recheck2) ==
+e2e-ctr + e2e-seccomp-notify PASS after hardening (skip pull if present,
+timeout -k, accept guest marker when ctr teardown hangs).
+Evidence: docs/benchmarks/evidence/sc-live-soft-skips-fixed-20260926.txt
