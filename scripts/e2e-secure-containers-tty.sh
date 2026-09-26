@@ -26,7 +26,7 @@ command -v script >/dev/null
 command -v containerd-shim-fluxvm-v2 >/dev/null
 test -e /dev/kvm
 curl -fsS "${FLUXVM_API_URL:-http://127.0.0.1:7788}/healthz" >/dev/null
-$CTR --address "$ADDR" images pull "$IMAGE"
+timeout 120 $CTR --address "$ADDR" images pull "$IMAGE" >/dev/null
 
 # `script` gives ctr a real host PTY. ctr should pass the 33x101 window to the
 # shim, which forwards ResizePty to the guest PTY.

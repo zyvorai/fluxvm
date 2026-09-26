@@ -34,7 +34,9 @@ trap cleanup EXIT
 command -v containerd-shim-fluxvm-v2 >/dev/null
 test -e /dev/kvm
 curl -fsS "${FLUXVM_API_URL:-http://127.0.0.1:7788}/healthz" >/dev/null
-$CTR --address "$ADDR" images pull "$IMAGE" >/dev/null
+if ! $CTR --address "$ADDR" images ls -q | grep -Fxq "$IMAGE"; then
+  timeout -k 5 90 $CTR --address "$ADDR" images pull "$IMAGE" >/dev/null
+fi
 
 cat >"$PROFILE" <<'JSON'
 {
@@ -47,7 +49,9 @@ cat >"$PROFILE" <<'JSON'
 JSON
 
 set +e
-timeout "${FLUXVM_SECCOMP_NOTIFY_TIMEOUT:-240}" \
+# -k: ensure sudo/ctr die after SIGTERM so the outer matrix timeout is not
+# spent waiting on a RUNNING leftover task.
+timeout -k 5 "${FLUXVM_SECCOMP_NOTIFY_TIMEOUT:-180}" \
   $CTR --address "$ADDR" run --rm --runtime "$RUNTIME" \
   --seccomp --seccomp-profile "$PROFILE" \
   --annotation io.zyvor.seccomp.notify.mode=deny \

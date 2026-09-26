@@ -1,0 +1,8 @@
+SC soft-skip recheck2 20260926T110747Z
+== e2e-ctr ==
+E2E PASS: io.containerd.fluxvm.v2 executed docker.io/library/busybox:1.36 inside a FluxVM sandbox (ctr_rc=137)
+RESULT e2e-ctr=PASS
+== e2e-seccomp-notify ==
+E2E PASS: seccomp NOTIFY broker denied chmod (ctr_rc=137)
+RESULT e2e-seccomp-notify=PASS
+TASK    PID    STATUS    

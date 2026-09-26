@@ -1,8 +1,8 @@
 SC + FluxVM hot-cake evidence bundle — 20260926 (finish pass)
 Lab hosts: 175.110.122.71 (SC live / wow / CNI / full phase deploy+test)
 SHA-256 of member files (content-addressed pack; not a GPG signature):
-
-0c174c6613215fc81e8ccc5e63dd2a74be217c80667652790531733ba9f1f9fb  docs/benchmarks/evidence/sc-live-remaining-20260926.txt
+afbe19224df1688832574c8fa9c8d053a4bd3817e33b274bccee7fa68fa2bcac  docs/benchmarks/evidence/sc-live-remaining-20260926.txt
+9313b5dac3574e69504735345dbbb53c5a74be19b2fdce93b74eaac794de950e  docs/benchmarks/evidence/sc-live-soft-skips-fixed-20260926.txt
 9e8e2d5662140f2def5c31002c8829986cc7f03eac3bf9363a3b90e78d4dc760  docs/benchmarks/evidence/sc-live-guestkit-fedora-btrfs-20260926.txt
 910fd5dd7c954daa86481ffb2abbd3ed51e05c2b29885426a63175787464b6e2  docs/benchmarks/evidence/sc-live-userns-k8s-20260926.txt
 a267bf8fce0a0a7fe8ab36fe2e9ab5657ae6666ed7e4038a1526d09496c82731  docs/benchmarks/evidence/sc-live-userns-k8s-multi-20260926.txt
@@ -16,8 +16,8 @@ aeb7d92576feb227e1c8de6c49471433e617a87059068c37b91e540d12e5b966  docs/benchmark
 55ce0d9ace376d2f2f80f32a1fd8431be83011781c622c11028b007f3accb312  docs/benchmarks/evidence/policy-observer-scrape-20260918T035554Z.txt
 1c2abbddcab5c618a1239f2d35a9c331f654172c875d308976e0aa7bc10372a4  docs/benchmarks/evidence/direct-datapath-live-realguest-20260920.txt
 8b467a5ff7fcbede1e886abf8f840d7f59e5a894247fe410ccf4b389575722f1  docs/benchmarks/evidence/density-20260918-80.79.5.173.txt
-
 == Member summaries ==
+-- soft-skips closed 20260926: e2e-ctr + seccomp-notify PASS (teardown hang OK)
 -- finish pass 20260926: pass=7 skip=3 fail=0 (SC_LIVE_FINISH=COMPLETE)
    PASS: e2e-sec, userns-k8s, userns-k8s-multi, selinux-mountlabel, ns, cni-churn, wow
    soft-skip (timeout/rc): e2e-ctr, seccomp-notify, s2 (nft stand-in already archived)
@@ -25,5 +25,4 @@ aeb7d92576feb227e1c8de6c49471433e617a87059068c37b91e540d12e5b966  docs/benchmark
 -- cni-churn 20260926: 20 rounds PASS; no SECOND_CNI_KUBECONFIG
 -- s2 20260926: nftables second-policy-engine allow/deny PASS (archived)
 -- prior SC live + Observer + direct datapath + density unchanged
-
-bundle_sha256=b1a3850fc79f94c76707260ba41a5452df88e3941495dfdf2f4d0f95b8f3ae6e
+bundle_sha256=6be5767f6c382714372885bde46b0e54f8de6361f9cdac2edd98b26558e9d834
