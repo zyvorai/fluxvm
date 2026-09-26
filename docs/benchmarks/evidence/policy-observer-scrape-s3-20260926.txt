@@ -1,0 +1,77 @@
+policy-observer scrape evidence @ 20260926T145755Z
+url=http://127.0.0.1:9091
+--- /metrics (head) ---
+# HELP fluxvm_sentinel_observer_scrapes_total Completed policy-observer collection cycles.
+# TYPE fluxvm_sentinel_observer_scrapes_total counter
+fluxvm_sentinel_observer_scrapes_total 1
+# HELP fluxvm_sentinel_observer_scrape_errors_total Collection errors across bpftool/tc/filesystem sources.
+# TYPE fluxvm_sentinel_observer_scrape_errors_total counter
+fluxvm_sentinel_observer_scrape_errors_total 0
+# HELP fluxvm_sentinel_observer_vms FluxVM VM pin directories observed on this node.
+# TYPE fluxvm_sentinel_observer_vms gauge
+fluxvm_sentinel_observer_vms 1
+# HELP fluxvm_sentinel_observer_last_scrape_unixtime Unix timestamp of the most recent collection cycle.
+# TYPE fluxvm_sentinel_observer_last_scrape_unixtime gauge
+fluxvm_sentinel_observer_last_scrape_unixtime 1.790434674e+09
+# HELP fluxvm_sentinel_dataplane_schema_version Recorded FluxVM eBPF dataplane schema version.
+# TYPE fluxvm_sentinel_dataplane_schema_version gauge
+fluxvm_sentinel_dataplane_schema_version{pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 11
+# HELP fluxvm_sentinel_dataplane_schema_compatible 1 when the observer recognizes this dataplane schema.
+# TYPE fluxvm_sentinel_dataplane_schema_compatible gauge
+fluxvm_sentinel_dataplane_schema_compatible{pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 0
+# HELP fluxvm_sentinel_observer_vm_scrape_ok 1 when all sources for this VM were collected without error.
+# TYPE fluxvm_sentinel_observer_vm_scrape_ok gauge
+fluxvm_sentinel_observer_vm_scrape_ok{pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+# HELP fluxvm_sentinel_policy_directional_counters 1 when Set 17 rule telemetry provides true per-direction Pod-policy counters; 0 means Set 15 shared-counter fallback.
+# TYPE fluxvm_sentinel_policy_directional_counters gauge
+fluxvm_sentinel_policy_directional_counters{pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+# HELP fluxvm_sentinel_policy_hook_required 1 when the directional FluxVM policy hook exists in the loaded object.
+# TYPE fluxvm_sentinel_policy_hook_required gauge
+fluxvm_sentinel_policy_hook_required{direction="egress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+# HELP fluxvm_sentinel_policy_hook_attached 1 when the directional program is attached to the expected TC/TCX hook.
+# TYPE fluxvm_sentinel_policy_hook_attached gauge
+fluxvm_sentinel_policy_hook_attached{direction="egress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+# HELP fluxvm_sentinel_policy_enabled 1 when a Pod policy entry is enabled for this direction.
+# TYPE fluxvm_sentinel_policy_enabled gauge
+fluxvm_sentinel_policy_enabled{direction="egress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+# HELP fluxvm_sentinel_policy_default_deny 1 when unmatched traffic is denied for this direction.
+# TYPE fluxvm_sentinel_policy_default_deny gauge
+fluxvm_sentinel_policy_default_deny{direction="egress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+# HELP fluxvm_sentinel_policy_audit_mode 1 when denials are audit/log-and-allow for this direction.
+# TYPE fluxvm_sentinel_policy_audit_mode gauge
+fluxvm_sentinel_policy_audit_mode{direction="egress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 0
+# HELP fluxvm_sentinel_policy_packets_total Packets evaluated by the Pod policy dataplane, partitioned by direction and verdict.
+# TYPE fluxvm_sentinel_policy_packets_total counter
+fluxvm_sentinel_policy_packets_total{direction="egress",pod_id="1521024349",verdict="allow",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_packets_total{direction="egress",pod_id="1521024349",verdict="drop",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_packets_total{direction="egress",pod_id="1521024349",verdict="audit",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_hook_required{direction="ingress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+fluxvm_sentinel_policy_hook_attached{direction="ingress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+fluxvm_sentinel_policy_enabled{direction="ingress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+fluxvm_sentinel_policy_default_deny{direction="ingress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+fluxvm_sentinel_policy_audit_mode{direction="ingress",mode="tc",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_packets_total{direction="ingress",pod_id="1521024349",verdict="allow",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_packets_total{direction="ingress",pod_id="1521024349",verdict="drop",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_packets_total{direction="ingress",pod_id="1521024349",verdict="audit",vm="da32c7b75a6b41808149c80233f970fb"} 0
+# HELP fluxvm_sentinel_policy_rule_entries Number of compiled policy-map entries by direction and representation kind.
+# TYPE fluxvm_sentinel_policy_rule_entries gauge
+fluxvm_sentinel_policy_rule_entries{direction="egress",kind="rules",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+fluxvm_sentinel_policy_rule_entries{direction="ingress",kind="rules",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 1
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="address_v4",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="address_v6",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="exact_port_v4",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 0
+fluxvm_sentinel_policy_rule_entries{direction="shared",kind="exact_port_v6",pod_id="1521024349",vm="da32c7b75a6b41808149c80233f970fb"} 0
+--- series of interest ---
+metrics_bytes=5859
+--- RSS ---
+2748494 sudo -n /tmp/fluxvm-policy-observer --pin-root /sys/fs/bpf/fluxvm --meta-root /run/fluxvm/ebpf/vms --listen 127.0.0.1:9091
+2748497 /tmp/fluxvm-policy-observer --pin-root /sys/fs/bpf/fluxvm --meta-root /run/fluxvm/ebpf/vms --listen 127.0.0.1:9091
+--- sizing model ---
+{
+  "vms": 1000,
+  "rules_per_vm": 64,
+  "estimated_metric_series": 72000,
+  "estimated_exposition_bytes": 12960000,
+  "estimated_percpu_counter_bytes": 34816000,
+  "note": "capacity model; measure real RSS/scrape latency on target nodes before GA"
+}
