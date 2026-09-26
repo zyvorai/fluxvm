@@ -19,15 +19,21 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   /usr/local/bin/fluxctl mr,
   /usr/local/bin/fluxvm mr,
   /usr/local/bin/fluxvm-hypervisor Px,
-  /usr/bin/qemu-system-x86_64 Px,
-  /usr/local/bin/cloud-hypervisor Px,
-  /usr/local/bin/firecracker Px,
-  /usr/local/bin/jailer Px,
+  /usr/bin/qemu-system-x86_64 Pix,
+  /usr/local/bin/cloud-hypervisor Pix,
+  /usr/local/bin/firecracker Pix,
+  /usr/local/bin/jailer Pix,
   /usr/bin/qemu-img rix,
   /usr/bin/qemu-nbd rix,
   /usr/bin/cloud-localds rix,
   /usr/bin/ip rix,
   /usr/sbin/nft rix,
+  /usr/sbin/sysctl rix,
+  /usr/sbin/tc rix,
+  /usr/sbin/dnsmasq rix,
+  /usr/bin/kill rix,
+  /proc/sys/** r,
+  /proc/sys/net/** rw,
   /usr/sbin/iptables rix,
 
   # build-image / guestkit host helpers (inherit fluxctl)
@@ -128,6 +134,7 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   /sys/block/** r,
   /sys/dev/block/** r,
   /sys/module/nbd/** r,
+  /run/netns/ rk,
   /run/netns/** rwk,
 
   capability net_admin,
@@ -155,6 +162,7 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   network inet6,
   network netlink raw,
   network unix,
+  network vsock,
 }
 
 # Compat: old binary path if still present as a real file (prefer fluxctl).
@@ -165,15 +173,21 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   /usr/local/bin/fluxvm mr,
   /usr/local/bin/fluxctl mr,
   /usr/local/bin/fluxvm-hypervisor Px,
-  /usr/bin/qemu-system-x86_64 Px,
-  /usr/local/bin/cloud-hypervisor Px,
-  /usr/local/bin/firecracker Px,
-  /usr/local/bin/jailer Px,
+  /usr/bin/qemu-system-x86_64 Pix,
+  /usr/local/bin/cloud-hypervisor Pix,
+  /usr/local/bin/firecracker Pix,
+  /usr/local/bin/jailer Pix,
   /usr/bin/qemu-img rix,
   /usr/bin/qemu-nbd rix,
   /usr/bin/cloud-localds rix,
   /usr/bin/ip rix,
   /usr/sbin/nft rix,
+  /usr/sbin/sysctl rix,
+  /usr/sbin/tc rix,
+  /usr/sbin/dnsmasq rix,
+  /usr/bin/kill rix,
+  /proc/sys/** r,
+  /proc/sys/net/** rw,
   /usr/sbin/iptables rix,
 
   /usr/bin/kmod rix,
@@ -272,6 +286,7 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   /sys/block/** r,
   /sys/dev/block/** r,
   /sys/module/nbd/** r,
+  /run/netns/ rk,
   /run/netns/** rwk,
 
   capability net_admin,
@@ -299,12 +314,13 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   network inet6,
   network netlink raw,
   network unix,
+  network vsock,
 }
 
 profile fluxvm-hypervisor /usr/local/bin/fluxvm-hypervisor flags=(attach_disconnected) {
   #include <abstractions/base>
   /usr/local/bin/fluxvm-hypervisor mr,
-  /usr/local/bin/firecracker Px,
+  /usr/local/bin/firecracker Pix,
   /dev/kvm rw,
   /dev/net/tun rw,
   # lsof (guestkit cleanup) walks from /
