@@ -38,10 +38,12 @@ info "Installing system packages (qemu, cloud-localds)..."
 if [[ "${ID:-}" == "debian" || "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *"debian"* ]]; then
     $SUDO apt-get update -qq
     # libhivex-dev: guestkit registry-write for Windows offline customize / agent-inject
-    $SUDO apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils iproute2 curl libhivex-dev
+    # dnsmasq-base: the DHCP server FluxVM starts per VM network namespace (tap+netns mode);
+    # the -base package ships the binary without a system service, so port 53 stays free
+    $SUDO apt-get install -y -qq qemu-system-x86 qemu-utils cloud-image-utils iproute2 curl libhivex-dev dnsmasq-base
 elif command -v dnf >/dev/null || command -v yum >/dev/null; then
     PKG="$(command -v dnf >/dev/null && echo dnf || echo yum)"
-    $SUDO "$PKG" install -y qemu-kvm qemu-img cloud-utils iproute curl hivex-devel
+    $SUDO "$PKG" install -y qemu-kvm qemu-img cloud-utils iproute curl hivex-devel dnsmasq
 else
     warn "unrecognized package manager — install qemu-system-x86_64, qemu-img and cloud-localds manually"
 fi
