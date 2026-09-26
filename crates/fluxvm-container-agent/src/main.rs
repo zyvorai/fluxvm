@@ -35,8 +35,9 @@ use clap::Parser;
 use fluxvm_container_protocol::{
     CgroupEvents, ContainerEnvelope, ContainerIo, ContainerNetworkPolicy, ContainerNetworkRule,
     ContainerRequest, ContainerResponse, ContainerStats, ContainerStatus,
-    DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, IoStreamAck, IoStreamAttach,
-    IoStreamKind, MAX_MESSAGE_BYTES, ResourceLimits, SecurityStats, decode_line, encode_line,
+    DEFAULT_CONTAINER_AGENT_PORT, DEFAULT_CONTAINER_STREAM_PORT, DEFAULT_SECCOMP_POLICY_PORT,
+    IoStreamAck, IoStreamAttach, IoStreamKind, MAX_MESSAGE_BYTES, ResourceLimits,
+    SeccompPolicyRpcRequest, SeccompPolicyRpcResponse, SecurityStats, decode_line, encode_line,
 };
 use serde_json::Value;
 use std::{
@@ -201,6 +202,9 @@ enum SeccompNotifyMode {
     /// Inject a supervisor-owned fd into the notify target via
     /// `SECCOMP_IOCTL_NOTIF_ADDFD` (S9 / Set 11 follow-up), then continue.
     AddFd,
+    /// Ask the host policy RPC over AF_VSOCK (`VMADDR_CID_HOST`) before
+    /// answering; fail closed on timeout/error.
+    Remote,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -209,6 +213,8 @@ struct SeccompNotifyPolicy {
     errno: i32,
     /// Source fd in the supervisor process for AddFd mode (`-1` if unused).
     addfd_src: i32,
+    /// Host vsock port for Remote mode.
+    rpc_port: u32,
 }
 
 impl Default for SeccompNotifyPolicy {
@@ -217,6 +223,7 @@ impl Default for SeccompNotifyPolicy {
             mode: SeccompNotifyMode::Deny,
             errno: libc::EPERM,
             addfd_src: -1,
+            rpc_port: fluxvm_container_protocol::DEFAULT_SECCOMP_POLICY_PORT,
         }
     }
 }
@@ -227,6 +234,7 @@ struct SecurityCounters {
     seccomp_notify_denied: AtomicU64,
     seccomp_notify_continued: AtomicU64,
     seccomp_notify_errors: AtomicU64,
+    seccomp_notify_remote: AtomicU64,
     selinux_mounts_labeled: AtomicU64,
     lsm_apply_failures: AtomicU64,
 }
@@ -244,6 +252,7 @@ fn security_stats_snapshot() -> SecurityStats {
         seccomp_notify_denied: c.seccomp_notify_denied.load(Ordering::Relaxed),
         seccomp_notify_continued: c.seccomp_notify_continued.load(Ordering::Relaxed),
         seccomp_notify_errors: c.seccomp_notify_errors.load(Ordering::Relaxed),
+        seccomp_notify_remote: c.seccomp_notify_remote.load(Ordering::Relaxed),
         selinux_mounts_labeled: c.selinux_mounts_labeled.load(Ordering::Relaxed),
         lsm_apply_failures: c.lsm_apply_failures.load(Ordering::Relaxed),
     }
@@ -1690,8 +1699,9 @@ fn parse_seccomp_notify_policy(config: &Value) -> Result<SeccompNotifyPolicy> {
         "deny" => SeccompNotifyMode::Deny,
         "continue" => SeccompNotifyMode::Continue,
         "addfd" => SeccompNotifyMode::AddFd,
+        "remote" => SeccompNotifyMode::Remote,
         other => bail!(
-            "invalid io.zyvor.seccomp.notify.mode {other:?}; expected deny, continue, or addfd"
+            "invalid io.zyvor.seccomp.notify.mode {other:?}; expected deny, continue, addfd, or remote"
         ),
     };
     let errno = annotations
@@ -1718,10 +1728,23 @@ fn parse_seccomp_notify_policy(config: &Value) -> Result<SeccompNotifyPolicy> {
     if mode == SeccompNotifyMode::AddFd && addfd_src < 0 {
         bail!("io.zyvor.seccomp.notify.mode=addfd requires io.zyvor.seccomp.notify.addfd-src");
     }
+    let rpc_port = annotations
+        .and_then(|a| a.get("io.zyvor.seccomp.notify.rpc-port"))
+        .and_then(Value::as_str)
+        .map(|v| {
+            v.parse::<u32>()
+                .context("parsing io.zyvor.seccomp.notify.rpc-port")
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_SECCOMP_POLICY_PORT);
+    if mode == SeccompNotifyMode::Remote && rpc_port == 0 {
+        bail!("io.zyvor.seccomp.notify.rpc-port must be non-zero for mode=remote");
+    }
     Ok(SeccompNotifyPolicy {
         mode,
         errno,
         addfd_src,
+        rpc_port,
     })
 }
 
@@ -2055,11 +2078,117 @@ fn wait_for_seccomp_listener(socket: RawFd, target_pid: u32) -> Result<RawFd> {
     }
 }
 
+fn ask_host_seccomp_policy(
+    port: u32,
+    container_id: &str,
+    request: &ScmpNotif,
+    fallback_errno: i32,
+) -> SeccompPolicyRpcResponse {
+    let deny = || SeccompPolicyRpcResponse::Deny {
+        errno: fallback_errno,
+    };
+    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        security_counters()
+            .seccomp_notify_errors
+            .fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "security audit: seccomp-notify remote socket failed: {}",
+            std::io::Error::last_os_error()
+        );
+        return deny();
+    }
+    // Fail closed within 2s — seccomp NOTIFY must not hang the workload forever.
+    let tv = libc::timeval {
+        tv_sec: 2,
+        tv_usec: 0,
+    };
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&tv) as libc::socklen_t,
+        );
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_SNDTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of_val(&tv) as libc::socklen_t,
+        );
+    }
+    let mut addr: libc::sockaddr_vm = unsafe { std::mem::zeroed() };
+    addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+    addr.svm_cid = libc::VMADDR_CID_HOST;
+    addr.svm_port = port;
+    let rc = unsafe {
+        libc::connect(
+            fd,
+            &addr as *const _ as *const libc::sockaddr,
+            std::mem::size_of_val(&addr) as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(fd);
+        }
+        security_counters()
+            .seccomp_notify_errors
+            .fetch_add(1, Ordering::Relaxed);
+        eprintln!("security audit: seccomp-notify remote connect vsock:{port}: {err}");
+        return deny();
+    }
+
+    let req = SeccompPolicyRpcRequest {
+        container_id: container_id.to_string(),
+        notify_id: request.id,
+        pid: request.pid,
+        syscall_nr: request.data.nr,
+        arch: request.data.arch,
+    };
+    let Ok(line) = encode_line(&req) else {
+        unsafe {
+            libc::close(fd);
+        }
+        return deny();
+    };
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    if file.write_all(line.as_bytes()).is_err() {
+        // file drop closes fd
+        security_counters()
+            .seccomp_notify_errors
+            .fetch_add(1, Ordering::Relaxed);
+        return deny();
+    }
+    let mut reader = BufReader::new(file);
+    let mut resp_line = String::new();
+    if reader.read_line(&mut resp_line).is_err() || resp_line.is_empty() {
+        security_counters()
+            .seccomp_notify_errors
+            .fetch_add(1, Ordering::Relaxed);
+        return deny();
+    }
+    match decode_line::<SeccompPolicyRpcResponse>(resp_line.trim_end()) {
+        Ok(resp) => resp,
+        Err(e) => {
+            security_counters()
+                .seccomp_notify_errors
+                .fetch_add(1, Ordering::Relaxed);
+            eprintln!("security audit: seccomp-notify remote decode: {e:#}");
+            deny()
+        }
+    }
+}
+
 fn run_seccomp_notify_broker(
     socket: RawFd,
     policy: SeccompNotifyPolicy,
     target_pid: u32,
     label: String,
+    container_id: String,
 ) {
     let received = wait_for_seccomp_listener(socket, target_pid);
     unsafe {
@@ -2199,6 +2328,41 @@ fn run_seccomp_notify_broker(
                         "security audit: seccomp-notify {label} nr={} pid={} decision=continue",
                         request.data.nr, request.pid
                     );
+                }
+                SeccompNotifyMode::Remote => {
+                    match ask_host_seccomp_policy(
+                        policy.rpc_port,
+                        &container_id,
+                        &request,
+                        policy.errno,
+                    ) {
+                        SeccompPolicyRpcResponse::Deny { errno } => {
+                            response.error = -errno;
+                            security_counters()
+                                .seccomp_notify_denied
+                                .fetch_add(1, Ordering::Relaxed);
+                            security_counters()
+                                .seccomp_notify_remote
+                                .fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "security audit: seccomp-notify {label} nr={} pid={} decision=remote-deny errno={}",
+                                request.data.nr, request.pid, errno
+                            );
+                        }
+                        SeccompPolicyRpcResponse::Continue => {
+                            response.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+                            security_counters()
+                                .seccomp_notify_continued
+                                .fetch_add(1, Ordering::Relaxed);
+                            security_counters()
+                                .seccomp_notify_remote
+                                .fetch_add(1, Ordering::Relaxed);
+                            eprintln!(
+                                "security audit: seccomp-notify {label} nr={} pid={} decision=remote-continue",
+                                request.data.nr, request.pid
+                            );
+                        }
+                    }
                 }
                 SeccompNotifyMode::AddFd => {
                     #[cfg(target_os = "linux")]
@@ -5353,6 +5517,7 @@ fn spawn_gated(
         }
         let policy = spec.seccomp_notify;
         let broker_label = format!("{container_id}/{}", exec_id.unwrap_or("init"));
+        let broker_container_id = container_id.to_string();
         // `pid` here is the outer namespace-reaper process (see the
         // double-fork above), not the inner execve'd process directly — but
         // the reaper blocks in waitpid() for the inner process's entire
@@ -5361,7 +5526,13 @@ fn spawn_gated(
         // container process still around" without threading the inner pid
         // back out of the forked child.
         std::thread::spawn(move || {
-            run_seccomp_notify_broker(pair[0], policy, pid as u32, broker_label)
+            run_seccomp_notify_broker(
+                pair[0],
+                policy,
+                pid as u32,
+                broker_label,
+                broker_container_id,
+            )
         });
     }
     drop(stdin);
@@ -5727,6 +5898,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_seccomp_notify_policy_remote() {
+        let config = serde_json::json!({
+            "annotations": {
+                "io.zyvor.seccomp.notify.mode": "remote",
+                "io.zyvor.seccomp.notify.rpc-port": "17780",
+                "io.zyvor.seccomp.notify.errno": "1"
+            }
+        });
+        let policy = parse_seccomp_notify_policy(&config).unwrap();
+        assert_eq!(policy.mode, SeccompNotifyMode::Remote);
+        assert_eq!(policy.rpc_port, 17780);
+        assert_eq!(policy.errno, 1);
+    }
+
+    #[test]
     fn parses_explicit_seccomp_notify_rules() {
         let config = serde_json::json!({
             "linux": {"seccomp": {
@@ -5803,6 +5989,7 @@ mod tests {
             mode: SeccompNotifyMode::Deny,
             errno: libc::EACCES,
             addfd_src: -1,
+            rpc_port: DEFAULT_SECCOMP_POLICY_PORT,
         });
         assert_eq!(
             deny,
@@ -5814,6 +6001,7 @@ mod tests {
             mode: SeccompNotifyMode::Continue,
             errno: libc::EPERM,
             addfd_src: -1,
+            rpc_port: DEFAULT_SECCOMP_POLICY_PORT,
         });
         assert!(
             cont >= 0,
@@ -5865,7 +6053,13 @@ mod tests {
             libc::close(pair[1]);
             libc::close(result_pipe[1]);
         }
-        run_seccomp_notify_broker(pair[0], policy, pid as u32, "test/notify".to_string());
+        run_seccomp_notify_broker(
+            pair[0],
+            policy,
+            pid as u32,
+            "test/notify".to_string(),
+            "test".to_string(),
+        );
         let mut buf = [0u8; 8];
         let n = unsafe { libc::read(result_pipe[0], buf.as_mut_ptr().cast(), buf.len()) };
         unsafe {

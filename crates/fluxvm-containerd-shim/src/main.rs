@@ -18,6 +18,8 @@
 //! * Set 9 reference-counts device ownership, verifies IOMMU groups, and hot-unplugs unused devices;
 //! * Set 10 enforces seccomp argument filters, process LSM labels, and cgroup-device BPF;
 //! * Set 11 supervises explicit seccomp NOTIFY rules and reports guest security counters;
+//! * remote seccomp policy RPC (`io.zyvor.seccomp.notify.mode=remote`) asks the host
+//!   over AF_VSOCK before answering NOTIFY events (fail closed);
 //! * no host kernel is shared with the workload.
 //!
 //! The copy/snapshot approach is intentionally conservative. It gives a
@@ -83,6 +85,8 @@ use tokio::{
         mpsc::{Receiver, Sender, channel},
     },
 };
+
+mod seccomp_policy_rpc;
 
 const RUNTIME_ID: &str = "io.containerd.fluxvm.v2";
 const GUEST_SHARE: &str = "/run/fluxvm/pod";
@@ -3173,11 +3177,12 @@ impl Service {
             .await
         {
             Ok(ContainerResponse::SecurityStats { stats }) => info!(
-                "FluxVM guest security stats: notify_received={} notify_denied={} notify_continued={} notify_errors={} selinux_mounts_labeled={} lsm_preflight_failures={}",
+                "FluxVM guest security stats: notify_received={} notify_denied={} notify_continued={} notify_errors={} notify_remote={} selinux_mounts_labeled={} lsm_preflight_failures={}",
                 stats.seccomp_notify_received,
                 stats.seccomp_notify_denied,
                 stats.seccomp_notify_continued,
                 stats.seccomp_notify_errors,
+                stats.seccomp_notify_remote,
                 stats.selinux_mounts_labeled,
                 stats.lsm_apply_failures,
             ),
@@ -6692,6 +6697,8 @@ mod tests {
 
 #[tokio::main]
 async fn main() {
+    // Host AF_VSOCK listener for guest `mode=remote` seccomp NOTIFY decisions.
+    seccomp_policy_rpc::ensure_started();
     // Secure Containers run workloads inside a FluxVM guest, not as host
     // children of this shim. The default containerd-shim SIGCHLD reaper
     // waitpid(-1) races with tokio::process (and CNI helpers), surfacing as

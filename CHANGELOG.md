@@ -38,6 +38,13 @@
   virtiofs) remain in [docs/secure-containers.md](docs/secure-containers.md).
 
 ### Added
+- **Remote seccomp NOTIFY policy RPC.** Opt-in
+  `io.zyvor.seccomp.notify.mode=remote`: the guest broker asks the host over
+  AF_VSOCK (`DEFAULT_SECCOMP_POLICY_PORT` / `io.zyvor.seccomp.notify.rpc-port`)
+  before answering each notification. Shim listens on the host;
+  `FLUXVM_SECCOMP_POLICY_RPC=continue|deny` (default deny) or
+  `FLUXVM_SECCOMP_POLICY_RPC_URL` (HTTP POST). Timeouts/errors fail closed;
+  syscall args stay off the wire. `addfd` remains local-only.
 - **`deny_udp` Keep kill switch.** `VmNetworkPolicy.deny_udp` sets iface
   `reserved0` bit0; TC drops UDP/SCTP after DHCP (reason `udp-deny` / 12).
   Host-side only — no PacketWolf. Pairs with gateway-only broker/proxy ports.

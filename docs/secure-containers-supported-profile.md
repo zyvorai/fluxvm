@@ -16,7 +16,7 @@ matrix, stay on Kata/CoCo or treat the workload as lab-only.
 | Multus | Secondary NICs opt-in | Hybrid bridge default; `FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH=direct\|auto` when ready |
 | hostPath | Allowlist / broker only | `FLUXVM_HOSTPATH_ALLOW` and/or `FLUXVM_HOSTPATH_BROKER=1` (QEMU/CH hotplug) |
 | Guest image | guestkit-baked Fedora or Ubuntu SC guest | Prefer signed catalog entries; token inject via guestkit (no virt-customize in the FluxVM path) |
-| Policy | In-cluster `NetworkPolicy` → Sentinel | Host TC + optional guest `cgroup_skb` mirror; **no remote seccomp policy RPC** |
+| Policy | In-cluster `NetworkPolicy` → Sentinel | Host TC + optional guest `cgroup_skb` mirror; opt-in remote seccomp NOTIFY RPC (`mode=remote`) |
 | Isolation extras | Opt-in `CLONE_NEWUSER`, SELinux `linux.mountLabel`, seccomp NOTIFY | Live evidence under `docs/benchmarks/evidence/sc-live-*.txt` |
 | TEE / confidential | **Out of profile** | SC is **isolation without TEE**. SNP/TDX + attestation stays Ragnarok + Kata/KubeVirt |
 
@@ -28,7 +28,7 @@ matrix, stay on Kata/CoCo or treat the workload as lab-only.
 | OCI RuntimeClass drop-in | Yes (`runtimeClassName: fluxvm`) | You already standardized on `kata` RuntimeClasses cluster-wide |
 | Live virtio-fs write-through | QEMU/CH yes; Firecracker no | You require FC + live virtio-fs |
 | Unrestricted hostPath | No (allowlist / fail-closed) | You require arbitrary host binds |
-| Remote seccomp policy RPC | Out of scope | You need out-of-guest policy brokers over the network |
+| Remote seccomp policy RPC | Opt-in `mode=remote` | Guest→host AF_VSOCK; default deny; HTTP via `FLUXVM_SECCOMP_POLICY_RPC_URL` |
 | Host + guest eBPF NetworkPolicy (Sentinel) | Yes — [sentinel-wedge.md](sentinel-wedge.md) | You only need Kata’s static policy files |
 | SEV-SNP / TDX attestation | No | You need hardware TEE + attest-gated secrets |
 | CDI / `virtctl` / KubeVirt API | No | You need that control plane |
@@ -36,7 +36,7 @@ matrix, stay on Kata/CoCo or treat the workload as lab-only.
 ## Non-goals (keep)
 
 - Feature-for-feature Kata / CDI / `virtctl`
-- Remote seccomp policy RPC (Set 11)
+- Claiming remote seccomp RPC as a Kata-compatible policy file drop-in
 - Novel in-tree hypervisor devices (H4)
 - Claiming SC as confidential / TEE
 

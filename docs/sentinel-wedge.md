@@ -16,7 +16,7 @@ Kata’s namespace + seccomp + static policy-file model does not attempt.
 ## What it is not
 
 - Not a TEE / confidential computing product (see Ragnarok for SNP/TDX).
-- Not remote seccomp policy RPC (explicitly out of scope).
+- Remote seccomp NOTIFY RPC is opt-in (`mode=remote`); default remains in-guest deny/continue/addfd.
 - Not “Kata-equivalent packaging.”
 
 ## Where to go next

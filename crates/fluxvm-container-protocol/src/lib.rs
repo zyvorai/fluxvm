@@ -14,6 +14,8 @@ use std::net::IpAddr;
 
 pub const DEFAULT_CONTAINER_AGENT_PORT: u32 = 17778;
 pub const DEFAULT_CONTAINER_STREAM_PORT: u32 = 17779;
+/// Guest → host AF_VSOCK port for seccomp NOTIFY policy RPC (`mode=remote`).
+pub const DEFAULT_SECCOMP_POLICY_PORT: u32 = 17780;
 pub const DEFAULT_CALL_TIMEOUT_SECS: u64 = 30;
 pub const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -199,8 +201,37 @@ pub struct SecurityStats {
     pub seccomp_notify_denied: u64,
     pub seccomp_notify_continued: u64,
     pub seccomp_notify_errors: u64,
+    /// Decisions obtained from the host policy RPC (`mode=remote`).
+    #[serde(default)]
+    pub seccomp_notify_remote: u64,
     pub selinux_mounts_labeled: u64,
     pub lsm_apply_failures: u64,
+}
+
+/// Guest → host seccomp NOTIFY decision request. Deliberately omits syscall
+/// argument values (same posture as Set 11 in-guest audit lines).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SeccompPolicyRpcRequest {
+    pub container_id: String,
+    pub notify_id: u64,
+    pub pid: u32,
+    pub syscall_nr: i32,
+    pub arch: u32,
+}
+
+/// Host → guest decision for a seccomp NOTIFY event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "decision", rename_all = "kebab-case")]
+pub enum SeccompPolicyRpcResponse {
+    Deny {
+        #[serde(default = "default_seccomp_deny_errno")]
+        errno: i32,
+    },
+    Continue,
+}
+
+fn default_seccomp_deny_errno() -> i32 {
+    1 // EPERM
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -549,6 +580,30 @@ mod tests {
         assert!(
             matches!(back, ContainerResponse::SecurityStats { stats } if stats.seccomp_notify_denied == 2)
         );
+    }
+
+    #[test]
+    fn seccomp_policy_rpc_round_trip() {
+        let req = SeccompPolicyRpcRequest {
+            container_id: "c1".into(),
+            notify_id: 9,
+            pid: 42,
+            syscall_nr: 221,
+            arch: 0xc000_003e,
+        };
+        let line = encode_line(&req).unwrap();
+        let back: SeccompPolicyRpcRequest = decode_line(&line).unwrap();
+        assert_eq!(back, req);
+
+        let deny = SeccompPolicyRpcResponse::Deny { errno: 13 };
+        let line = encode_line(&deny).unwrap();
+        let back: SeccompPolicyRpcResponse = decode_line(&line).unwrap();
+        assert_eq!(back, deny);
+
+        let cont = SeccompPolicyRpcResponse::Continue;
+        let line = encode_line(&cont).unwrap();
+        let back: SeccompPolicyRpcResponse = decode_line(&line).unwrap();
+        assert_eq!(back, cont);
     }
 
     #[test]
