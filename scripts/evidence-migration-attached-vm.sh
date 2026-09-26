@@ -19,10 +19,20 @@ SPEC="${FLUXVM_S11_SPEC:-$ROOT/examples/qemu.json}"
 STATE_ROOT="${FLUXVM_MIGRATION_STATE:-/var/lib/fluxvm/migrations-s11}"
 mkdir -p "$STATE_ROOT"
 
+# migration-* mutates bpffs maps / TC state; prefer passwordless sudo when not root.
+FLUXCTL=(fluxctl --config "$CFG")
+if [[ "$(id -u)" -ne 0 ]]; then
+  if sudo -n true 2>/dev/null; then
+    FLUXCTL=(sudo -n fluxctl --config "$CFG")
+  else
+    echo "WARN: not root and sudo -n unavailable; migration map updates may fail" >&2
+  fi
+fi
+
 # Create a disposable VM if none supplied.
 VM_ID="${FLUXVM_S11_VM_ID:-}"
 if [[ -z "$VM_ID" ]]; then
-  OUT=$(fluxctl --config "$CFG" create --spec "$SPEC")
+  OUT=$("${FLUXCTL[@]}" create --spec "$SPEC")
   VM_ID=$(echo "$OUT" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   if [[ -z "$VM_ID" ]]; then
     VM_ID=$(echo "$OUT" | tr -d '{}' | tr ',' '\n' | awk -F: '/id/{gsub(/[ \"]/,"",$2); print $2; exit}')
@@ -39,21 +49,21 @@ cleanup() {
     "${RESUME_CMD[@]}" || true
   fi
   if [[ "${CREATED:-0}" == 1 && "${FLUXVM_S11_KEEP:-0}" != 1 ]]; then
-    fluxctl --config "$CFG" delete "$VM_ID" >/dev/null 2>&1 || true
+    "${FLUXCTL[@]}" delete "$VM_ID" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
 
 # Ensure the VM is running and dataplane is attached (ebpf or legacy).
-fluxctl --config "$CFG" start "$VM_ID" >/dev/null 2>&1 || true
+"${FLUXCTL[@]}" start "$VM_ID" >/dev/null 2>&1 || true
 sleep 2
 
 # Prefer the migration-state CLI surface on the dataplane.
-if fluxctl --config "$CFG" dataplane migration-export --help >/dev/null 2>&1; then
-  QUIESCE_CMD=(fluxctl --config "$CFG" dataplane migration-quiesce "$VM_ID")
-  EXPORT_CMD=(fluxctl --config "$CFG" dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID")
-  RESTORE_CMD=(fluxctl --config "$CFG" dataplane migration-restore --input "$STATE_ROOT/export.json" "$VM_ID")
-  RESUME_CMD=(fluxctl --config "$CFG" dataplane migration-resume "$VM_ID")
+if "${FLUXCTL[@]}" dataplane migration-export --help >/dev/null 2>&1; then
+  QUIESCE_CMD=("${FLUXCTL[@]}" dataplane migration-quiesce "$VM_ID")
+  EXPORT_CMD=("${FLUXCTL[@]}" dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID")
+  RESTORE_CMD=("${FLUXCTL[@]}" dataplane migration-restore --input "$STATE_ROOT/export.json" "$VM_ID")
+  RESUME_CMD=("${FLUXCTL[@]}" dataplane migration-resume "$VM_ID")
 elif command -v fluxvm >/dev/null && fluxvm dataplane migration-export --help >/dev/null 2>&1; then
   QUIESCE_CMD=(fluxvm dataplane migration-quiesce "$VM_ID")
   EXPORT_CMD=(fluxvm dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID")
@@ -80,10 +90,10 @@ PY
   python3 -B "$ROOT/tools/fluxvm_migration_orchestrator.py" \
     --state-root "$STATE_ROOT" run "$PLAN" --dry-run | tee "$STATE_ROOT/dry-run.json"
   # Live export/import via network migration_state module if exposed.
-  if fluxctl --config "$CFG" dataplane --help 2>&1 | grep -q migration; then
-    fluxctl --config "$CFG" dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID"
-    fluxctl --config "$CFG" dataplane migration-restore --input "$STATE_ROOT/export.json" "$VM_ID"
-    fluxctl --config "$CFG" dataplane migration-resume "$VM_ID" || true
+  if "${FLUXCTL[@]}" dataplane --help 2>&1 | grep -q migration; then
+    "${FLUXCTL[@]}" dataplane migration-export --output "$STATE_ROOT/export.json" "$VM_ID"
+    "${FLUXCTL[@]}" dataplane migration-restore --input "$STATE_ROOT/export.json" "$VM_ID"
+    "${FLUXCTL[@]}" dataplane migration-resume "$VM_ID" || true
   else
     echo "WARN: orchestrator dry-run only; dataplane migration-* CLI unavailable" >&2
   fi

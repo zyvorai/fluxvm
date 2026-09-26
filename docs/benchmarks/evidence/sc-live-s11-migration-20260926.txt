@@ -1,0 +1,62 @@
+S11 using VM e1331a56-30b9-4cf8-8a99-042bc0ad3ad4
+{
+  "vm_id": "e1331a56-30b9-4cf8-8a99-042bc0ad3ad4",
+  "identity": 2612947025,
+  "phase": "quiescing",
+  "generation": 1,
+  "dataplane_schema_version": 11,
+  "schema_compatible": true
+}
+{
+  "vm_id": "e1331a56-30b9-4cf8-8a99-042bc0ad3ad4",
+  "identity": 2612947025,
+  "phase": "restoring",
+  "generation": 2,
+  "dataplane_schema_version": 11,
+  "schema_compatible": true
+}
+{
+  "vm_id": "e1331a56-30b9-4cf8-8a99-042bc0ad3ad4",
+  "identity": 2612947025,
+  "phase": "running",
+  "generation": 0,
+  "dataplane_schema_version": 11,
+  "schema_compatible": true
+}
+S11 ATTACHED MIGRATION: PASS
+{
+  "vm_id": "e1331a56-30b9-4cf8-8a99-042bc0ad3ad4",
+  "identity": 2612947025,
+  "phase": "running",
+  "generation": 0,
+  "dataplane_schema_version": 11,
+  "schema_compatible": true
+}
+
+=== network/status ===
+{"mode":"cilium","required":false,"attached":true,"interface":"vhe1331a56","identity":2612947025,"pin_dir":"/sys/fs/bpf/fluxvm/vms/e1331a5630b94cf88a99042bc0ad3ad4","schema_version":11,"schema_compatible":true,"policy_synced":true,"policy":{"default_allow":true,"allow_cidrs":["10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"],"allow_ports":["tcp/443","tcp/80","udp/53"],"max_egress_mbps":250,"max_egress_pps":100000,"sample_rate":100,"deny_cidrs":[],"allow_icmp":false,"groups":[],"labels":[],"allow_fqdns":[],"entities":[],"audit_mode":false,"deny_udp":false}}
+=== export.json summary ===
+{
+  "path": "/var/lib/fluxvm/migrations-s11/export.json",
+  "sha256": "a64943136dec1379e3188d5f74845cae400fe0010ea83b6df005b3141f729e34",
+  "schema_version": 1,
+  "dataplane_schema_version": 11,
+  "vm_id": "e1331a56-30b9-4cf8-8a99-042bc0ad3ad4",
+  "conntrack_entries": 0,
+  "flows": 2,
+  "keys": [
+    "conntrack",
+    "dataplane_schema_version",
+    "drop_reasons",
+    "exported_at_unix_ms",
+    "flows",
+    "identity",
+    "policy_fingerprint",
+    "schema_version",
+    "vm_id"
+  ]
+}
+=== dataplane mode (toml) ===
+[sandbox.dataplane]
+mode = "cilium"
+bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"
