@@ -7,11 +7,14 @@ use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
 use fluxvm_api as api;
 use fluxvm_core::{
     config::Config,
-    model::{ClaimOverrides, CreateVmRequest, MigrationMode, MigrationStartRequest, ResourcePatch},
+    model::{
+        BackendKind, ClaimOverrides, CreateVmRequest, DirectMode, DirectSpec, MigrationMode,
+        MigrationReceiverRequest, MigrationStartRequest, ResourcePatch,
+    },
 };
 use fluxvm_guest_protocol::AgentResponse;
 use fluxvm_image::{self as image, BuildImageRequest};
-use fluxvm_scheduler::VmManager;
+use fluxvm_scheduler::{SandboxCreateRequest, VmManager};
 use std::{
     io::IsTerminal,
     path::{Path, PathBuf},
@@ -131,6 +134,37 @@ enum Command {
         /// `0-1,4-5`.
         #[arg(long)]
         cpuset_cpus: Option<String>,
+    },
+    /// Cgroup-derived resource metrics for a VM (CPU%, memory bytes, disk
+    /// read/write). REST equivalent: `GET /v1/vms/{id}/stats`.
+    Stats {
+        id: Uuid,
+    },
+    /// PSI (Pressure Stall Information) for the VM's cgroup — cpu/memory/io
+    /// some+full with avg10/60/300. REST equivalent:
+    /// `GET /v1/vms/{id}/pressure`.
+    Pressure {
+        id: Uuid,
+    },
+    /// Day-2 hotplug of CPU, memory, NIC, or a virtiofs share onto a running
+    /// VM. REST equivalents: `POST /v1/vms/{id}/hotplug/{cpu,memory,nic,share}`.
+    Hotplug {
+        #[command(subcommand)]
+        command: HotplugCommand,
+    },
+    /// Save full VM state under a tag so a later `start-from-snapshot` can
+    /// restore it. REST equivalent: `POST /v1/vms/{id}/snapshot`.
+    Snapshot {
+        id: Uuid,
+        #[arg(long)]
+        tag: String,
+    },
+    /// Relaunch a VM from a previously saved snapshot tag. REST equivalent:
+    /// `POST /v1/vms/{id}/start-from-snapshot`.
+    StartFromSnapshot {
+        id: Uuid,
+        #[arg(long)]
+        tag: String,
     },
     #[command(next_help_heading = "Guest Access")]
     /// Open the guest PTY over vsock (requires agent.enabled in the VM spec).
@@ -254,15 +288,21 @@ enum Command {
     },
     #[command(next_help_heading = "Cluster")]
     /// Live VM migration -- source-side VMM transport only (QEMU and Cloud
-    /// Hypervisor; see docs/runtime-boundary.md's runtime contract v1).
-    /// Fabric owns host selection, storage, and target-arming; this is the
-    /// standalone-mode escape hatch for triggering the same
-    /// `/v1/vms/{id}/migration/*` REST primitives without Fabric or a raw
-    /// HTTP call, the same reasoning `ping`/`copy-to`/`copy-from` closed for
-    /// the vsock agent.
+    /// Hypervisor; see docs/runtime-boundary.md's runtime contract v1), plus
+    /// the target-side `receiver` arm that prepares a QEMU migrate-incoming
+    /// listener. Fabric owns host selection, storage, and target-arming; this
+    /// is the standalone-mode escape hatch for triggering the same
+    /// `/v1/vms/{id}/migration/*` and `/v1/migration/receivers` REST
+    /// primitives without Fabric or a raw HTTP call.
     Migrate {
         #[command(subcommand)]
         command: MigrateCommand,
+    },
+    /// Agent-sandbox track: create/list/snapshot sandboxes and reach their
+    /// guest filesystem / process APIs. REST equivalents under `/v1/sandboxes*`.
+    Sandbox {
+        #[command(subcommand)]
+        command: SandboxCommand,
     },
     /// Manage a multi-host fleet through its central registry
     /// (`fluxvm-agent central`) — see docs/operations.md's "Distributed
@@ -420,6 +460,152 @@ enum MigrateCommand {
     Status { id: Uuid },
     /// Cancel an in-flight migration. QEMU only, same reason as `status`.
     Cancel { id: Uuid },
+    /// Target-side QEMU migrate-incoming receivers
+    /// (`POST/DELETE /v1/migration/receivers…`). Pair with `migrate start`
+    /// on the source after `activate`.
+    Receiver {
+        #[command(subcommand)]
+        command: MigrateReceiverCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateReceiverCommand {
+    /// Reserve a QEMU incoming receiver on this host. REST equivalent:
+    /// `POST /v1/migration/receivers`.
+    Create {
+        /// Shared disk path both hosts already open (receiver does not copy it).
+        #[arg(long)]
+        disk: PathBuf,
+        #[arg(long, default_value = "raw")]
+        disk_format: String,
+        #[arg(long)]
+        vcpus: u8,
+        #[arg(long)]
+        memory_mib: u64,
+        /// Empty or `host`. Other CPU models are rejected.
+        #[arg(long, default_value = "")]
+        cpu_model: String,
+        /// Empty or a `q35...` machine type.
+        #[arg(long, default_value = "")]
+        machine: String,
+        #[arg(long, default_value = "0.0.0.0")]
+        listen_host: String,
+        /// Address the source dials. Required when `listen_host` is a wildcard.
+        #[arg(long, default_value = "")]
+        advertise_host: String,
+        /// `0` binds an ephemeral port.
+        #[arg(long, default_value_t = 0)]
+        listen_port: u16,
+        #[arg(long)]
+        expires_in_seconds: Option<u64>,
+    },
+    /// Arm `migrate-incoming` with the receiver's token. REST equivalent:
+    /// `POST /v1/migration/receivers/{id}/activate`.
+    Activate {
+        id: Uuid,
+        #[arg(long)]
+        token: String,
+    },
+    /// Tear down a receiver reservation. REST equivalent:
+    /// `DELETE /v1/migration/receivers/{id}`.
+    Delete { id: Uuid },
+}
+
+#[derive(Subcommand)]
+enum HotplugCommand {
+    /// Add unrealized vCPUs reserved via `max_vcpus` at create time.
+    /// REST: `POST /v1/vms/{id}/hotplug/cpu`.
+    Cpu {
+        id: Uuid,
+        #[arg(long)]
+        add_vcpus: u8,
+    },
+    /// Add RAM as a new DIMM into slots reserved via `max_memory_mib`.
+    /// REST: `POST /v1/vms/{id}/hotplug/memory`.
+    Memory {
+        id: Uuid,
+        #[arg(long)]
+        add_memory_mib: u64,
+    },
+    /// Hot-add a virtio-net NIC (bridged or bridge-less direct). Exactly one
+    /// of `--bridge` or `--outer` is required. REST:
+    /// `POST /v1/vms/{id}/hotplug/nic`.
+    Nic {
+        id: Uuid,
+        #[arg(long)]
+        bridge: Option<String>,
+        #[arg(long)]
+        mac: Option<String>,
+        /// Outer device for bridge-less direct attach (mutually exclusive with `--bridge`).
+        #[arg(long)]
+        outer: Option<String>,
+        #[arg(long)]
+        netns_path: Option<String>,
+        /// Direct attach mode: `peer-veth` (default) or `l2-uplink`.
+        #[arg(long, default_value = "peer-veth")]
+        mode: String,
+        /// Guest IPv4 addresses for `l2-uplink` ARP steering (repeatable).
+        #[arg(long)]
+        guest_ip: Vec<String>,
+    },
+    /// Hot-add a virtiofs share. REST: `POST /v1/vms/{id}/hotplug/share`.
+    Share {
+        id: Uuid,
+        #[arg(long)]
+        host_path: PathBuf,
+        #[arg(long, default_value_t = false)]
+        read_only: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SandboxCommand {
+    /// Create a sandbox from a JSON `SandboxCreateRequest` file. REST:
+    /// `POST /v1/sandboxes`.
+    Create {
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    /// List sandboxes (FluxVm backend or workspace with `sandbox-proxy.json`).
+    /// REST: `GET /v1/sandboxes`.
+    List,
+    /// Snapshot sandbox disk/state to a host path. REST:
+    /// `POST /v1/sandboxes/{id}/snapshot`.
+    Snapshot {
+        id: Uuid,
+        #[arg(long)]
+        path: PathBuf,
+    },
+    /// Read a file from the sandbox guest over vsock. REST:
+    /// `POST /v1/sandboxes/{id}/fs/read`.
+    FsRead {
+        id: Uuid,
+        #[arg(long)]
+        path: String,
+    },
+    /// Write a local file into the sandbox guest over vsock. REST:
+    /// `POST /v1/sandboxes/{id}/fs/write`.
+    FsWrite {
+        id: Uuid,
+        /// Destination path inside the guest.
+        #[arg(long)]
+        path: String,
+        /// Local file to upload.
+        #[arg(long)]
+        local: PathBuf,
+        #[arg(long)]
+        mode: Option<u32>,
+    },
+    /// Run a command in the sandbox guest over vsock. REST:
+    /// `POST /v1/sandboxes/{id}/process`.
+    Process {
+        id: Uuid,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1046,6 +1232,99 @@ async fn main() -> Result<()> {
             .await?;
             println!("{{\"ok\":true}}");
         }
+        Command::Stats { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.metrics(id).await?)?);
+        }
+        Command::Pressure { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.pressure(id).await?)?);
+        }
+        Command::Hotplug { command } => match command {
+            HotplugCommand::Cpu { id, add_vcpus } => {
+                let vcpus = m.hotplug_cpu(id, add_vcpus).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"vcpus": vcpus}))?
+                );
+            }
+            HotplugCommand::Memory { id, add_memory_mib } => {
+                let memory_mib = m.hotplug_memory(id, add_memory_mib).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"memory_mib": memory_mib}))?
+                );
+            }
+            HotplugCommand::Nic {
+                id,
+                bridge,
+                mac,
+                outer,
+                netns_path,
+                mode,
+                guest_ip,
+            } => {
+                match (bridge.as_deref(), outer.as_deref()) {
+                    (None, None) => {
+                        anyhow::bail!("hotplug nic needs either --bridge or --outer")
+                    }
+                    (Some(_), Some(_)) => {
+                        anyhow::bail!("--bridge and --outer are mutually exclusive")
+                    }
+                    (Some(bridge), None) => {
+                        if netns_path.is_some() || !guest_ip.is_empty() || mode != "peer-veth" {
+                            anyhow::bail!("--netns-path/--guest-ip/--mode apply only with --outer");
+                        }
+                        m.hotplug_nic(id, bridge.to_string(), mac).await?;
+                    }
+                    (None, Some(outer)) => {
+                        let mode = match mode.as_str() {
+                            "peer-veth" => DirectMode::PeerVeth,
+                            "l2-uplink" => DirectMode::L2Uplink,
+                            other => anyhow::bail!(
+                                "unsupported direct mode {other:?}; use peer-veth or l2-uplink"
+                            ),
+                        };
+                        let direct = DirectSpec {
+                            outer: outer.to_string(),
+                            netns_path,
+                            mode,
+                            guest_ips: guest_ip,
+                        };
+                        direct
+                            .validate()
+                            .map_err(|e| anyhow::anyhow!("invalid direct nic: {e}"))?;
+                        m.hotplug_direct_nic(id, direct, mac).await?;
+                    }
+                }
+                println!("{{\"ok\":true}}");
+            }
+            HotplugCommand::Share {
+                id,
+                host_path,
+                read_only,
+            } => {
+                if !host_path.is_absolute() {
+                    anyhow::bail!("--host-path must be absolute");
+                }
+                let tag = m.hotplug_share(id, host_path, read_only).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"tag": tag}))?
+                );
+            }
+        },
+        Command::Snapshot { id, tag } => {
+            m.create_vm_snapshot(id, &tag).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"ok": true, "tag": tag}))?
+            );
+        }
+        Command::StartFromSnapshot { id, tag } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.start_from_snapshot(id, &tag).await?)?
+            );
+        }
         Command::Console { id, cols, rows } => {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let console = m.open_console(id, cols, rows).await?;
@@ -1139,6 +1418,109 @@ async fn main() -> Result<()> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&m.cancel_migration(id).await?)?
+                );
+            }
+            MigrateCommand::Receiver { command } => match command {
+                MigrateReceiverCommand::Create {
+                    disk,
+                    disk_format,
+                    vcpus,
+                    memory_mib,
+                    cpu_model,
+                    machine,
+                    listen_host,
+                    advertise_host,
+                    listen_port,
+                    expires_in_seconds,
+                } => {
+                    let request = MigrationReceiverRequest {
+                        vcpus,
+                        memory_mib,
+                        cpu_model,
+                        machine,
+                        disk,
+                        disk_format,
+                        listen_host,
+                        advertise_host,
+                        listen_port,
+                        expires_in_seconds,
+                        tls: None,
+                    };
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&m.create_migration_receiver(request).await?)?
+                    );
+                }
+                MigrateReceiverCommand::Activate { id, token } => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &m.activate_migration_receiver(id, &token).await?
+                        )?
+                    );
+                }
+                MigrateReceiverCommand::Delete { id } => {
+                    m.delete_migration_receiver(id).await?;
+                    println!("{{\"ok\":true}}");
+                }
+            },
+        },
+        Command::Sandbox { command } => match command {
+            SandboxCommand::Create { spec } => {
+                let req: SandboxCreateRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.create_sandbox(req, None, None).await?)?
+                );
+            }
+            SandboxCommand::List => {
+                let items: Vec<_> = m
+                    .list()
+                    .await
+                    .into_iter()
+                    .filter(|v| {
+                        v.backend == BackendKind::FluxVm
+                            || v.workspace.join("sandbox-proxy.json").exists()
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            }
+            SandboxCommand::Snapshot { id, path } => {
+                m.snapshot_sandbox(id, &path).await?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "path": path,
+                    }))?
+                );
+            }
+            SandboxCommand::FsRead { id, path } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.get_file(id, path).await?)?
+                );
+            }
+            SandboxCommand::FsWrite {
+                id,
+                path,
+                local,
+                mode,
+            } => {
+                let bytes = std::fs::read(&local)
+                    .with_context(|| format!("reading {}", local.display()))?;
+                let response = m.put_file(id, path, B64.encode(&bytes), mode).await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            }
+            SandboxCommand::Process {
+                id,
+                timeout_seconds,
+                command,
+            } => {
+                let cmd = command.join(" ");
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.exec(id, cmd, timeout_seconds).await?)?
                 );
             }
         },
@@ -2519,5 +2901,360 @@ mod migrate_cli_tests {
             err.to_string().contains("unknown migration mode"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn migrate_receiver_create_parses_required_flags() {
+        let Command::Migrate {
+            command:
+                MigrateCommand::Receiver {
+                    command:
+                        MigrateReceiverCommand::Create {
+                            disk,
+                            disk_format,
+                            vcpus,
+                            memory_mib,
+                            listen_port,
+                            ..
+                        },
+                },
+        } = parse(&[
+            "migrate",
+            "receiver",
+            "create",
+            "--disk",
+            "/var/lib/fluxvm/shared.raw",
+            "--vcpus",
+            "2",
+            "--memory-mib",
+            "2048",
+            "--listen-port",
+            "4444",
+        ])
+        else {
+            panic!("expected MigrateReceiverCommand::Create");
+        };
+        assert_eq!(disk, PathBuf::from("/var/lib/fluxvm/shared.raw"));
+        assert_eq!(disk_format, "raw");
+        assert_eq!(vcpus, 2);
+        assert_eq!(memory_mib, 2048);
+        assert_eq!(listen_port, 4444);
+    }
+
+    #[test]
+    fn migrate_receiver_activate_and_delete_parse() {
+        let id = Uuid::nil();
+        let Command::Migrate {
+            command:
+                MigrateCommand::Receiver {
+                    command: MigrateReceiverCommand::Activate { id: parsed, token },
+                },
+        } = parse(&[
+            "migrate",
+            "receiver",
+            "activate",
+            &id.to_string(),
+            "--token",
+            "secret",
+        ])
+        else {
+            panic!("expected MigrateReceiverCommand::Activate");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(token, "secret");
+
+        let Command::Migrate {
+            command:
+                MigrateCommand::Receiver {
+                    command: MigrateReceiverCommand::Delete { id: parsed },
+                },
+        } = parse(&["migrate", "receiver", "delete", &id.to_string()])
+        else {
+            panic!("expected MigrateReceiverCommand::Delete");
+        };
+        assert_eq!(parsed, id);
+    }
+}
+
+#[cfg(test)]
+mod stats_pressure_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn stats_and_pressure_take_only_the_vm_id() {
+        let id = Uuid::nil();
+        let Command::Stats { id: parsed } = parse(&["stats", &id.to_string()]) else {
+            panic!("expected Command::Stats");
+        };
+        assert_eq!(parsed, id);
+        let Command::Pressure { id: parsed } = parse(&["pressure", &id.to_string()]) else {
+            panic!("expected Command::Pressure");
+        };
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn stats_and_pressure_require_an_id() {
+        assert!(Cli::try_parse_from(["fluxvm", "stats"]).is_err());
+        assert!(Cli::try_parse_from(["fluxvm", "pressure"]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod hotplug_snapshot_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn hotplug_cpu_memory_share_parse() {
+        let id = Uuid::nil();
+        let Command::Hotplug {
+            command:
+                HotplugCommand::Cpu {
+                    id: parsed,
+                    add_vcpus,
+                },
+        } = parse(&["hotplug", "cpu", &id.to_string(), "--add-vcpus", "2"])
+        else {
+            panic!("expected HotplugCommand::Cpu");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(add_vcpus, 2);
+
+        let Command::Hotplug {
+            command:
+                HotplugCommand::Memory {
+                    id: parsed,
+                    add_memory_mib,
+                },
+        } = parse(&[
+            "hotplug",
+            "memory",
+            &id.to_string(),
+            "--add-memory-mib",
+            "512",
+        ])
+        else {
+            panic!("expected HotplugCommand::Memory");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(add_memory_mib, 512);
+
+        let Command::Hotplug {
+            command:
+                HotplugCommand::Share {
+                    id: parsed,
+                    host_path,
+                    read_only,
+                },
+        } = parse(&[
+            "hotplug",
+            "share",
+            &id.to_string(),
+            "--host-path",
+            "/mnt/data",
+            "--read-only",
+        ])
+        else {
+            panic!("expected HotplugCommand::Share");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(host_path, PathBuf::from("/mnt/data"));
+        assert!(read_only);
+    }
+
+    #[test]
+    fn hotplug_nic_bridge_and_direct_parse() {
+        let id = Uuid::nil();
+        let Command::Hotplug {
+            command: HotplugCommand::Nic {
+                bridge, outer, mac, ..
+            },
+        } = parse(&[
+            "hotplug",
+            "nic",
+            &id.to_string(),
+            "--bridge",
+            "br0",
+            "--mac",
+            "52:54:00:12:34:56",
+        ])
+        else {
+            panic!("expected HotplugCommand::Nic");
+        };
+        assert_eq!(bridge.as_deref(), Some("br0"));
+        assert!(outer.is_none());
+        assert_eq!(mac.as_deref(), Some("52:54:00:12:34:56"));
+
+        let Command::Hotplug {
+            command:
+                HotplugCommand::Nic {
+                    outer,
+                    mode,
+                    guest_ip,
+                    ..
+                },
+        } = parse(&[
+            "hotplug",
+            "nic",
+            &id.to_string(),
+            "--outer",
+            "eth0",
+            "--mode",
+            "l2-uplink",
+            "--guest-ip",
+            "10.0.0.5",
+        ])
+        else {
+            panic!("expected HotplugCommand::Nic direct");
+        };
+        assert_eq!(outer.as_deref(), Some("eth0"));
+        assert_eq!(mode, "l2-uplink");
+        assert_eq!(guest_ip, vec!["10.0.0.5".to_string()]);
+    }
+
+    #[test]
+    fn snapshot_and_start_from_snapshot_parse() {
+        let id = Uuid::nil();
+        let Command::Snapshot { id: parsed, tag } =
+            parse(&["snapshot", &id.to_string(), "--tag", "boot"])
+        else {
+            panic!("expected Command::Snapshot");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(tag, "boot");
+
+        let Command::StartFromSnapshot { id: parsed, tag } =
+            parse(&["start-from-snapshot", &id.to_string(), "--tag", "boot"])
+        else {
+            panic!("expected Command::StartFromSnapshot");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(tag, "boot");
+    }
+}
+
+#[cfg(test)]
+mod sandbox_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn sandbox_create_list_snapshot_parse() {
+        let Command::Sandbox {
+            command: SandboxCommand::Create { spec },
+        } = parse(&["sandbox", "create", "--spec", "/tmp/sandbox.json"])
+        else {
+            panic!("expected SandboxCommand::Create");
+        };
+        assert_eq!(spec, PathBuf::from("/tmp/sandbox.json"));
+
+        assert!(matches!(
+            parse(&["sandbox", "list"]),
+            Command::Sandbox {
+                command: SandboxCommand::List
+            }
+        ));
+
+        let id = Uuid::nil();
+        let Command::Sandbox {
+            command: SandboxCommand::Snapshot { id: parsed, path },
+        } = parse(&[
+            "sandbox",
+            "snapshot",
+            &id.to_string(),
+            "--path",
+            "/tmp/snap.qcow2",
+        ])
+        else {
+            panic!("expected SandboxCommand::Snapshot");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(path, PathBuf::from("/tmp/snap.qcow2"));
+    }
+
+    #[test]
+    fn sandbox_fs_and_process_parse() {
+        let id = Uuid::nil();
+        let Command::Sandbox {
+            command: SandboxCommand::FsRead { id: parsed, path },
+        } = parse(&[
+            "sandbox",
+            "fs-read",
+            &id.to_string(),
+            "--path",
+            "/etc/os-release",
+        ])
+        else {
+            panic!("expected SandboxCommand::FsRead");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(path, "/etc/os-release");
+
+        let Command::Sandbox {
+            command:
+                SandboxCommand::FsWrite {
+                    id: parsed,
+                    path,
+                    local,
+                    mode,
+                },
+        } = parse(&[
+            "sandbox",
+            "fs-write",
+            &id.to_string(),
+            "--path",
+            "/tmp/out",
+            "--local",
+            "/tmp/in",
+            "--mode",
+            "600",
+        ])
+        else {
+            panic!("expected SandboxCommand::FsWrite");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(path, "/tmp/out");
+        assert_eq!(local, PathBuf::from("/tmp/in"));
+        assert_eq!(mode, Some(600));
+
+        let Command::Sandbox {
+            command:
+                SandboxCommand::Process {
+                    id: parsed,
+                    timeout_seconds,
+                    command,
+                },
+        } = parse(&[
+            "sandbox",
+            "process",
+            &id.to_string(),
+            "--timeout-seconds",
+            "30",
+            "echo",
+            "hi",
+        ])
+        else {
+            panic!("expected SandboxCommand::Process");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(timeout_seconds, Some(30));
+        assert_eq!(command, vec!["echo".to_string(), "hi".to_string()]);
     }
 }
