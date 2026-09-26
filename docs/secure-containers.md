@@ -234,7 +234,7 @@ surface.
 | Phase | Status | Notes |
 |---|---|---|
 | P0 OCI fixtures + parsers | **Done** | `tests/oci-fixtures/` + agent parser tests |
-| P0 CNI (Cilium/Calico/Flannel/Multus) | **Done** | providers + Multus hybrid/direct; live multi-CNI under load open |
+| P0 CNI (Cilium/Calico/Flannel/Multus) | **Done** | providers + Multus hybrid/direct; live under load [sc-live-cni-under-load-20260926.txt](benchmarks/evidence/sc-live-cni-under-load-20260926.txt) |
 | P0 hostPath broker | **Done** | create-time allowlist + QEMU/CH hotplug broker |
 | P0/P1 multi-VMM (QEMU/CH/FC) | **Done** | FC = ext4 block shares + `FLUXVM_CONTAINER_KERNEL` |
 | P1 seccomp NOTIFY + ADDFD | **Done** | remote policy RPC out of scope |
@@ -257,8 +257,9 @@ Cilium / Calico / Flannel providers auto-detect
 (`FLUXVM_CONTAINER_CNI_PROVIDER`); Multus `netN` secondaries attach as extra
 guest NICs (hybrid bridge default, optional per-secondary direct via
 `FLUXVM_CONTAINER_CNI_MULTUS_DATAPATH`). Portable churn:
-`scripts/evidence-cni-churn.sh`. Remaining: multi-CNI conformance under load on
-live nodes.
+`scripts/evidence-cni-churn.sh`. Live under-load evidence:
+`scripts/evidence-cni-under-load.sh` /
+[sc-live-cni-under-load-20260926.txt](benchmarks/evidence/sc-live-cni-under-load-20260926.txt).
 
 ### P0 — volume broker / explicit hostPath
 
