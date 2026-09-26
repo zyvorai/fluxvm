@@ -37,7 +37,7 @@ matrix, stay on Kata/CoCo or treat the workload as lab-only.
 
 - Feature-for-feature Kata / CDI / `virtctl`
 - Claiming remote seccomp RPC as a Kata-compatible policy file drop-in
-- Novel in-tree hypervisor devices (H4)
+- Claiming in-tree virtio-fs is as deep as Cloud Hypervisor under load (prefer CH for production shared-FS)
 - Claiming SC as confidential / TEE
 
 ## Evidence

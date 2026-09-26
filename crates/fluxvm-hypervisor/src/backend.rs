@@ -111,6 +111,12 @@ impl VmBackend for FluxVmBackend {
             blk_mbit_limit: req.blk_mbit_limit,
             blk_ops_limit: req.blk_ops_limit,
             cpu_template: req.cpu_template.clone(),
+            max_vcpus: None,
+            shared_folders: req
+                .shared_folders
+                .iter()
+                .map(|s| s.host_path.clone())
+                .collect(),
         };
 
         let boot_path = ctx.workspace.join("fluxvm-boot.json");

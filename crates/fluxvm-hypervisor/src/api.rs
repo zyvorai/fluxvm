@@ -13,6 +13,14 @@ pub enum ApiRequest {
     Shutdown,
     SnapshotSave { path: PathBuf },
     SnapshotRestore { path: PathBuf },
+    /// H4: export FLUXKVM1 migration bundle directory (vmstate+mem).
+    MigrateExport { path: PathBuf },
+    /// H4: import FLUXKVM1 migration bundle directory.
+    MigrateImport { path: PathBuf },
+    /// H4: hot-add `add` vCPUs (requires max_vcpus headroom at boot).
+    HotplugCpu { add: u8 },
+    /// H4: validate + record a disk hotplug plan (path must exist).
+    HotplugDisk { path: PathBuf },
     Metrics,
     Ping,
 }
@@ -58,6 +66,12 @@ pub struct BootConfig {
     /// Firecracker static CPU template (e.g. T2). Only used when engine is Firecracker.
     #[serde(default)]
     pub cpu_template: Option<String>,
+    /// H4: max vCPUs reserved for hotplug (`>= vcpus`). Default = vcpus.
+    #[serde(default)]
+    pub max_vcpus: Option<u8>,
+    /// H4: host directories to expose via virtio-fs (tags fs0, fs1, …).
+    #[serde(default)]
+    pub shared_folders: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -43,6 +43,12 @@ pub struct VmConfig {
     /// Enable PCI ECAM window (CH / FC `--enable-pci` prep).
     pub pci: bool,
     pub jailer: bool,
+    /// H4: max vCPUs for hotplug headroom (`>= cpus`).
+    pub max_cpus: u8,
+    /// H4: host dirs for virtio-fs (spawn virtiofsd + advertise device).
+    pub shared_dirs: Vec<(String, PathBuf)>,
+    /// H4: additional virtio-blk images beyond `--disk`.
+    pub extra_disks: Vec<PathBuf>,
 }
 
 impl Default for VmConfig {
@@ -72,6 +78,9 @@ impl Default for VmConfig {
             acpi: true,
             pci: false,
             jailer: false,
+            max_cpus: 1,
+            shared_dirs: Vec::new(),
+            extra_disks: Vec::new(),
         }
     }
 }
@@ -87,7 +96,13 @@ impl VmConfig {
                     std::process::exit(0);
                 }
                 "--memory-mib" => c.memory_mib = parse_next(&mut args, "--memory-mib")?,
-                "--cpus" => c.cpus = parse_next(&mut args, "--cpus")?,
+                "--cpus" => {
+                    c.cpus = parse_next(&mut args, "--cpus")?;
+                    if c.max_cpus < c.cpus {
+                        c.max_cpus = c.cpus;
+                    }
+                }
+                "--max-cpus" => c.max_cpus = parse_next(&mut args, "--max-cpus")?,
                 "--guest" => {
                     let v: String = parse_next(&mut args, "--guest")?;
                     c.guest = match v.as_str() {
@@ -103,6 +118,22 @@ impl VmConfig {
                 "--kernel" => c.kernel = Some(PathBuf::from(req(&mut args, "--kernel")?)),
                 "--initrd" => c.initrd = Some(PathBuf::from(req(&mut args, "--initrd")?)),
                 "--disk" => c.disk = Some(PathBuf::from(req(&mut args, "--disk")?)),
+                "--extra-disk" => {
+                    c.extra_disks
+                        .push(PathBuf::from(req(&mut args, "--extra-disk")?))
+                }
+                "--shared-dir" => {
+                    // --shared-dir TAG=PATH  (tag defaults to fsN)
+                    let raw = req(&mut args, "--shared-dir")?;
+                    let (tag, path) = match raw.split_once('=') {
+                        Some((t, p)) => (t.to_string(), PathBuf::from(p)),
+                        None => (
+                            format!("fs{}", c.shared_dirs.len()),
+                            PathBuf::from(raw),
+                        ),
+                    };
+                    c.shared_dirs.push((tag, path));
+                }
                 "--tap" => c.tap = Some(req(&mut args, "--tap")?),
                 "--mac" => c.mac = req(&mut args, "--mac")?,
                 "--vhost-net" => c.vhost_net = true,
@@ -138,6 +169,11 @@ impl VmConfig {
     pub fn validate(&self) -> Result<()> {
         if self.cpus == 0 || self.cpus > 32 {
             return Err(FluxError::Unsupported("cpus must be 1..=32".into()));
+        }
+        if self.max_cpus < self.cpus || self.max_cpus > 32 {
+            return Err(FluxError::Unsupported(
+                "max_cpus must be cpus..=32".into(),
+            ));
         }
         if self.memory_mib < 64 {
             return Err(FluxError::Unsupported("memory-mib must be >= 64".into()));
@@ -175,9 +211,12 @@ OPTIONS:
   --guest linux|windows
   --memory-mib <N>          default 256
   --cpus <N>                default 1
+  --max-cpus <N>            hotplug headroom (default = cpus)
   --kernel <PATH>           Linux bzImage/vmlinux
   --initrd <PATH>
   --disk <PATH>             virtio-blk image
+  --extra-disk <PATH>       additional virtio-blk (repeatable)
+  --shared-dir [TAG=]PATH   virtio-fs share (spawns virtiofsd)
   --tap <NAME>              existing host TAP
   --mac <AA:BB:...>
   --vhost-net / --no-vhost-net

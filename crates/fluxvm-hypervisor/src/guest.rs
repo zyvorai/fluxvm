@@ -325,6 +325,14 @@ fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
         acpi: true,
         pci: false,
         jailer: cfg.seccomp, // pair seccomp boots with jailer when requested
+        max_cpus: cfg.max_vcpus.unwrap_or(cfg.vcpus).max(cfg.vcpus),
+        shared_dirs: cfg
+            .shared_folders
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (format!("fs{i}"), p.clone()))
+            .collect(),
+        extra_disks: Vec::new(),
     })
 }
 
@@ -666,6 +674,8 @@ mod tests {
             blk_mbit_limit: None,
             blk_ops_limit: None,
             cpu_template: None,
+            max_vcpus: None,
+            shared_folders: Vec::new(),
         }
     }
 

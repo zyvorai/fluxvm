@@ -33,7 +33,7 @@ Sentinel's operational tooling — Set 12E (GA certification), Set 13E–17E
 | **H1** | Virtio **device live-state** in `FLUXKVM1` | **Done (v3)** — pack/restore queue rings + status/features; backends still re-attach paths from boot config; Firecracker remains production snap for FC guests | hypervisor README, agent-sandbox-gaps |
 | **H2** | Full virtio-pci BAR / Windows path | **Done (tables)** — ECAM virtio-net @ `00:01.0`, BAR0, MSI-X table at BAR0+`0x800`, DSDT `PCI0`, firmware entry at `0x01000000`, ACPI reset I/O `0xCF9`. virtio-win boot is unproven; Cloud Hypervisor stays the production Windows VMM | DESIGN / README |
 | **H3** | vhost-net multi-queue bind | **Done** — mem-table + VRING NUM/ADDR/BASE/KICK/CALL + TAP backend; kernel datapath kicks when rings programmed (userspace pump remains fallback) | hypervisor boot smoke / DESIGN |
-| **H4** | P3 on demand: virtio-fs, live migration, hotplug | **Deferred** — stubs return `Unsupported` until product asks (no invented surfaces) | DESIGN |
+| **H4** | P3 on demand: virtio-fs, live migration, hotplug | **Done** — FLUXKVM1 migrate export/import bundles; CPU hotplug plan + `KVM_CREATE_VCPU`; disk hotplug validation; virtio-fs attach (virtiofsd spawn + MMIO device/tag). Control API: `MigrateExport`/`Import`, `HotplugCpu`/`Disk`. Production shared-FS still prefers CH when vhost-user queue bind depth matters | DESIGN |
 | **H5** | Published kvm/FC density figures | **Done (archive)** — lab run on `80.79.5.173` archived in [benchmarks/evidence/density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt); cold flux-vm create is not a Track B density claim | ROADMAP-DENSITY, benchmarks |
 
 ## Firecracker adoption (general CP — Track A follow-ups)
@@ -67,7 +67,7 @@ Remaining honesty bounds (live lab only):
 1. S2 second-cluster kubeconfig path live on 2026-09-26 — [benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt](benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt) (`S2 SECOND CNI (kubeconfig): PASS` against `80.79.5.173`, RuntimeClass `runc`). Portable nftables stand-in remains — [sc-live-s2-second-cni-20260926.txt](benchmarks/evidence/sc-live-s2-second-cni-20260926.txt). Lab drop-in `/etc/fluxvm-second-cni.env` auto-sourced by the evidence script.
 2. Live SC matrix + day-0 wow: [sc-live-matrix-20260926.txt](benchmarks/evidence/sc-live-matrix-20260926.txt) (`pass=10 skip=0 fail=0`, includes s2 + wow); earlier day-0 wow [sc-live-wow-demo-20260926.txt](benchmarks/evidence/sc-live-wow-demo-20260926.txt); post-#93 soft finish [sc-live-phases-post93-summary-20260926.txt](benchmarks/evidence/sc-live-phases-post93-summary-20260926.txt) (`pass=10 skip=1`, s2 soft-skip later cleared). Adoption packaging: [secure-containers-supported-profile.md](secure-containers-supported-profile.md), [secure-containers-15min-lab.md](secure-containers-15min-lab.md), [sentinel-wedge.md](sentinel-wedge.md).
 3. S10 live multi-host fleet cleared 2026-09-26 — [sc-live-s10-fleet-20260926.txt](benchmarks/evidence/sc-live-s10-fleet-20260926.txt) (lab `175.110.122.71` ↔ `80.79.5.173`, canary approve/resume, both nodes healthy). S11 live attached migration cleared same day — [sc-live-s11-migration-20260926.txt](benchmarks/evidence/sc-live-s11-migration-20260926.txt) (schema-11 cilium-mode fabric, quiesce/export/restore/resume). S3 live prhit directional scrape cleared same evening — [sc-live-s3-prhit-20260926.txt](benchmarks/evidence/sc-live-s3-prhit-20260926.txt) (`directional_counters=1`). Multi-CNI under load cleared same evening — [sc-live-cni-under-load-20260926.txt](benchmarks/evidence/sc-live-cni-under-load-20260926.txt). S4 EndpointSlice Service-VIP live gate cleared same evening — [sc-live-s4-endpointslice-20260926.txt](benchmarks/evidence/sc-live-s4-endpointslice-20260926.txt). Observer `CurrentSchema` bumped to 11 with live [sc-live-observer-schema11-20260926.txt](benchmarks/evidence/sc-live-observer-schema11-20260926.txt) (`schema_compatible=1`).
-4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM. H4 remains deferred.
+4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM.
 5. Remote seccomp policy RPC (`io.zyvor.seccomp.notify.mode=remote`) — guest→host AF_VSOCK; fail closed; optional HTTP forward via `FLUXVM_SECCOMP_POLICY_RPC_URL`.
 
 Portable CI maps each code-side use case to a test target in
@@ -76,5 +76,4 @@ Portable CI maps each code-side use case to a test target in
 `.github/workflows/secure-containers-coverage.yml`). Live rows stay opt-in via
 `FLUXVM_SECURE_CONTAINERS_LIVE_CI=1`.
 
-Hypervisor work should stay Firecracker/CH-matched (no novel device models);
-**H4** stays deferred.
+Hypervisor work should stay Firecracker/CH-matched (no novel device models).

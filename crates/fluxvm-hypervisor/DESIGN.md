@@ -92,10 +92,16 @@ Cmdline discovery: VMM appends `virtio_mmio.device=<size>@<base>:<irq>` like Fir
 | ACPI tables   | RSDP/XSDT/FADT/MADT/MCFG; DSDT/AML still follow-up for full Windows |
 | PCI ECAM      | `--pci` ECAM + virtio-net @ 00:01.0 BAR0 (H2); MSI-X/Windows → CH SoT |
 
-### Demand-driven (P3 stubs)
+### H4 (virtio-fs / migration / hotplug)
 
-virtio-fs, live migration, CPU/device hotplug — modules return `Unsupported`
-until product requires them (SoT = cloud-hypervisor).
+| Surface | Status |
+|---|---|
+| virtio-fs | `virtio_fs::attach` spawns/validates virtiofsd; MMIO device id 26 + tag config; CLI `--shared-dir` |
+| Live migration | `migration::export_state` / `import_state` FLUXKVM1 dir bundles; API `MigrateExport`/`MigrateImport` |
+| CPU hotplug | `hotplug::plan_add_vcpu` + `KvmVm::create_vcpu`; `--max-cpus`; API `HotplugCpu` |
+| Disk hotplug | `hotplug::hotplug_disk` validates host image; API `HotplugDisk`; CLI `--extra-disk` |
+
+Cloud Hypervisor remains the SoT for production shared-FS depth (full vhost-user queue bind under load).
 
 
 ## 6. Networking
@@ -205,7 +211,7 @@ for agent sandboxes and functions.
 
 Boot hang past `init_zbud` is **resolved** (Firecracker-matched TSS/MSRs/FPU/LAPIC/serial). Lab snapshots: `FLUXKVM1` v3. See [README.md](README.md), [docs/kvm-density.md](../../docs/kvm-density.md), [docs/NEXT-FEATURES.md](../../docs/NEXT-FEATURES.md).
 
-Windows tables (MSI-X, DSDT, firmware entry, ACPI reset) are in tree. Do not claim a virtio-win boot until a Windows guest is tested. Cloud Hypervisor stays the production Windows VMM. H4 (virtio-fs, in-tree live migration, CPU/disk hotplug) stays deferred.
+Windows tables (MSI-X, DSDT, firmware entry, ACPI reset) are in tree. Do not claim a virtio-win boot until a Windows guest is tested. Cloud Hypervisor stays the production Windows VMM. H4 (virtio-fs attach, FLUXKVM1 migration bundles, CPU/disk hotplug) is implemented in-tree.
 
 ## 12. What we will not implement
 

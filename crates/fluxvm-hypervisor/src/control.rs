@@ -43,6 +43,10 @@ fn request_kind(req: &ApiRequest) -> &'static str {
         ApiRequest::Shutdown => "shutdown",
         ApiRequest::SnapshotSave { .. } => "snapshot_save",
         ApiRequest::SnapshotRestore { .. } => "snapshot_restore",
+        ApiRequest::MigrateExport { .. } => "migrate_export",
+        ApiRequest::MigrateImport { .. } => "migrate_import",
+        ApiRequest::HotplugCpu { .. } => "hotplug_cpu",
+        ApiRequest::HotplugDisk { .. } => "hotplug_disk",
         ApiRequest::Metrics => "metrics",
         ApiRequest::Ping => "ping",
     }
@@ -253,6 +257,141 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                 },
             }
         }
+        // H4: migrate export/import reuse the snapshot directory shape but
+        // require an explicit migration bundle (vmstate+mem names).
+        ApiRequest::MigrateExport { path } => {
+            match crate::migration::export_state_path(&path) {
+                Ok(()) => {
+                    // Prefer full SnapshotSave when a guest is live (inline to
+                    // avoid async recursion through dispatch).
+                    let st = state.lock().await;
+                    if st.guest.is_some() {
+                        if let Some(g) = &st.guest {
+                            let _ = g.pause().await;
+                        }
+                        let result = snapshot::save(&st, &path).await;
+                        if st.lifecycle == VmLifecycle::Running {
+                            if let Some(g) = &st.guest {
+                                let _ = g.resume().await;
+                            }
+                        }
+                        return match result {
+                            Ok(()) => ApiResponse::Ok {
+                                message: format!("migrated out {}", path.display()),
+                            },
+                            Err(e) => ApiResponse::Error {
+                                message: format!("{e:#}"),
+                            },
+                        };
+                    }
+                    ApiResponse::Ok {
+                        message: format!("migration dir ready {}", path.display()),
+                    }
+                }
+                Err(e) => ApiResponse::Error {
+                    message: format!("{e:#}"),
+                },
+            }
+        }
+        ApiRequest::MigrateImport { path } => {
+            match crate::migration::import_state_path(&path) {
+                Ok(()) => {
+                    // Inline SnapshotRestore path (no async recursion).
+                    let mut st = state.lock().await;
+                    st.shutdown_guest().await;
+                    match snapshot::restore_meta(&mut st, &path).await {
+                        Ok(spec) => {
+                            if let (Some(vmstate), mem) =
+                                (spec.vmstate_path.as_ref(), &spec.memory_path)
+                            {
+                                let vsock = spec.boot.vsock_uds.as_deref();
+                                let kvm_fmt = kvm_snap::is_flux_kvm_vmstate(vmstate)
+                                    || matches!(
+                                        spec.boot.engine,
+                                        crate::api::FluxVmEngine::Kvm
+                                    );
+                                let loaded = if kvm_fmt {
+                                    guest::start_kvm_from_snapshot(
+                                        &spec.boot, workspace, vmstate, mem,
+                                    )
+                                    .await
+                                } else {
+                                    guest::start_from_snapshot(workspace, vmstate, mem, vsock)
+                                        .await
+                                };
+                                match loaded {
+                                    Ok(handle) => {
+                                        st.guest = Some(handle);
+                                        st.boot = Some(spec.boot);
+                                        st.lifecycle = VmLifecycle::Running;
+                                        st.touch();
+                                        return ApiResponse::Ok {
+                                            message: format!(
+                                                "migrated in {}",
+                                                path.display()
+                                            ),
+                                        };
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, "migrate import snapshot load failed; cold boot");
+                                    }
+                                }
+                            }
+                            match boot_inner(&mut st, spec.boot, workspace).await {
+                                Ok(()) => ApiResponse::Ok {
+                                    message: format!("migrated in (cold) {}", path.display()),
+                                },
+                                Err(e) => ApiResponse::Error {
+                                    message: format!("{e:#}"),
+                                },
+                            }
+                        }
+                        Err(e) => ApiResponse::Error {
+                            message: format!("{e:#}"),
+                        },
+                    }
+                }
+                Err(e) => ApiResponse::Error {
+                    message: format!("{e:#}"),
+                },
+            }
+        }
+        ApiRequest::HotplugCpu { add } => {
+            let st = state.lock().await;
+            let current = st.boot.as_ref().map(|b| b.vcpus).unwrap_or(0);
+            let max = st
+                .boot
+                .as_ref()
+                .and_then(|b| b.max_vcpus)
+                .unwrap_or(current);
+            match crate::hotplug::plan_add_vcpu(current, max, add) {
+                Ok(plan) => ApiResponse::Ok {
+                    message: format!(
+                        "cpu hotplug planned: +{} ({}→{}), next_id={}",
+                        plan.add,
+                        plan.current,
+                        plan.current + plan.add,
+                        plan.next_id
+                    ),
+                },
+                Err(e) => ApiResponse::Error {
+                    message: format!("{e:#}"),
+                },
+            }
+        }
+        ApiRequest::HotplugDisk { path } => match crate::hotplug::hotplug_disk_path(&path, false)
+        {
+            Ok(plan) => ApiResponse::Ok {
+                message: format!(
+                    "disk hotplug ok path={} ro={}",
+                    plan.path.display(),
+                    plan.read_only
+                ),
+            },
+            Err(e) => ApiResponse::Error {
+                message: format!("{e:#}"),
+            },
+        }
         ApiRequest::Metrics => {
             let st = state.lock().await;
             ApiResponse::Metrics {
@@ -316,9 +455,10 @@ pub async fn request(api_sock: &Path, req: &ApiRequest) -> Result<ApiResponse> {
 /// to actually wait out a 45s timeout in a test.
 fn timeout_for(req: &ApiRequest) -> Duration {
     match req {
-        ApiRequest::SnapshotSave { .. } | ApiRequest::SnapshotRestore { .. } => {
-            SNAPSHOT_REQUEST_TIMEOUT
-        }
+        ApiRequest::SnapshotSave { .. }
+        | ApiRequest::SnapshotRestore { .. }
+        | ApiRequest::MigrateExport { .. }
+        | ApiRequest::MigrateImport { .. } => SNAPSHOT_REQUEST_TIMEOUT,
         _ => DEFAULT_REQUEST_TIMEOUT,
     }
 }

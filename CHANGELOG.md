@@ -38,6 +38,11 @@
   virtiofs) remain in [docs/secure-containers.md](docs/secure-containers.md).
 
 ### Added
+- **H4 in-tree hypervisor:** virtio-fs attach (virtiofsd + MMIO tag),
+  FLUXKVM1 migrate export/import bundles, CPU hotplug (`max_cpus` /
+  `KVM_CREATE_VCPU`) and disk hotplug validation. Control API actions
+  `MigrateExport`/`MigrateImport`/`HotplugCpu`/`HotplugDisk`.
+
 - **AppArmor profile covers `fluxctl build-image`.** Enforce-mode
   `deploy/apparmor/fluxvm` allows guestkit helpers (kmod/sync/mount/chroot),
   `/run/guestkit*/**`, `/tmp` staging, `owner /**` for specs outside

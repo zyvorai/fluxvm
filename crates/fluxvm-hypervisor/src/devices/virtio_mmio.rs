@@ -14,6 +14,7 @@ pub const VIRTIO_ID_BLOCK: u32 = 2;
 pub const VIRTIO_ID_RNG: u32 = 4;
 pub const VIRTIO_ID_BALLOON: u32 = 5;
 pub const VIRTIO_ID_VSOCK: u32 = 19;
+pub const VIRTIO_ID_FS: u32 = 26;
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 pub const VIRTIO_BLK_F_RO: u64 = 1 << 5;
 
@@ -45,6 +46,8 @@ pub struct VirtioState {
     /// virtio-balloon target pages (4 KiB).
     pub balloon_num_pages: u32,
     pub balloon_actual: u32,
+    /// virtio-fs tag (NUL-padded, 36 bytes).
+    pub fs_tag: [u8; 36],
     pub queues: [QueueState; 4],
     pub num_queues: u32,
     pub sel: u32,
@@ -65,6 +68,7 @@ impl Default for VirtioState {
             guest_cid: 3,
             balloon_num_pages: 0,
             balloon_actual: 0,
+            fs_tag: [0; 36],
             queues: Default::default(),
             num_queues: 2,
             sel: 0,
@@ -153,6 +157,20 @@ impl VirtioMmio {
         Self::new(base, st)
     }
 
+    /// Virtio-fs (vhost-user-fs). Guest sees tag in config; FUSE queues are
+    /// serviced once DRIVER_OK and the host virtiofsd socket is attached.
+    pub fn fs(base: u64, irq: u32, tag: &str) -> Result<Self> {
+        let mut st = VirtioState::default();
+        st.device_id = VIRTIO_ID_FS;
+        st.features = VIRTIO_F_VERSION_1;
+        st.mac = [0; 6];
+        st.irq = irq;
+        // hiprio + request queues (virtio-fs minimum).
+        st.num_queues = 2;
+        st.fs_tag = crate::virtio_fs::tag_config_bytes(tag)?;
+        Ok(Self::new(base, st))
+    }
+
     pub fn irq(&self) -> u32 {
         self.state.lock().unwrap().irq
     }
@@ -204,6 +222,7 @@ impl MmioDevice for VirtioMmio {
             VIRTIO_ID_VSOCK => "virtio-mmio-vsock",
             VIRTIO_ID_BALLOON => "virtio-mmio-balloon",
             VIRTIO_ID_RNG => "virtio-mmio-rng",
+            VIRTIO_ID_FS => "virtio-mmio-fs",
             _ => "virtio-mmio-net",
         }
     }
@@ -334,6 +353,15 @@ impl MmioDevice for VirtioMmio {
                 }
             }
             VIRTIO_ID_RNG => {}
+            VIRTIO_ID_FS => {
+                // virtio_fs_config.tag[36] at 0x100.
+                if (0x100..0x100 + 36).contains(&off) && !data.is_empty() {
+                    let i = (off - 0x100) as usize;
+                    let n = data.len().min(36 - i);
+                    data[..n].copy_from_slice(&st.fs_tag[i..i + n]);
+                    return Ok(());
+                }
+            }
             _ => {
                 if (0x100..0x106).contains(&off) {
                     let i = (off - 0x100) as usize;
