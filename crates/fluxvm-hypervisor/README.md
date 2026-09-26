@@ -73,7 +73,7 @@ If that script soft-skips (no KERNEL/KVM), treat multi-vCPU as
 
 - Virtio **device live-state** in snapshots is a watermark only; backends re-attach from boot config (Firecracker remains production snap format).
 - Full virtio-pci BAR wiring / Windows production path → cloud-hypervisor SoT (P2 follow-up).
-- virtio-fs, live migration, CPU/device hotplug → demand-driven P3 stubs (`Unsupported` until product needs them).
+- virtio-fs / live migration / CPU+disk hotplug → **H4 Done** (see DESIGN.md); CH remains preferred for production shared-FS depth.
 - Guest kernels need `CONFIG_EFI_PARTITION` to boot from a GPT-partitioned
   image (standard cloud images). Without it, the guest falls back to
   legacy protective-MBR parsing and can't find the real root partition —

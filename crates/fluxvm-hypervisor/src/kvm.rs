@@ -314,6 +314,82 @@ impl KvmVm {
         self.vcpus.len()
     }
 
+    /// Hot-add a vCPU with the next contiguous id (H4). Parks it
+    /// `KVM_MP_STATE_UNINITIALIZED` so the guest INIT-SIPI path can bring it up.
+    pub fn create_vcpu(&mut self, id: i32) -> Result<()> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = id;
+            return Err(FluxError::Unsupported(
+                "KVM create_vcpu is Linux-only".into(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::raw::c_void;
+            if id < 0 || id as usize != self.vcpus.len() {
+                return Err(FluxError::Unsupported(format!(
+                    "create_vcpu id must be {} (contiguous)",
+                    self.vcpus.len()
+                )));
+            }
+            // SAFETY: KVM ioctls on fds owned by this KvmVm.
+            unsafe {
+                let vcpu_fd =
+                    ffi::flux_ioctl(self.vm_fd, ffi::KVM_CREATE_VCPU, id as *mut c_void);
+                if vcpu_fd < 0 {
+                    return Err(FluxError::Hypervisor(format!("KVM_CREATE_VCPU id={id}")));
+                }
+                let run = ffi::mmap(
+                    std::ptr::null_mut(),
+                    self.run_size,
+                    ffi::PROT_READ | ffi::PROT_WRITE,
+                    ffi::MAP_SHARED,
+                    vcpu_fd,
+                    0,
+                );
+                if run as usize == ffi::MAP_FAILED {
+                    return Err(FluxError::Hypervisor("mmap kvm_run (hotplug)".into()));
+                }
+                let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
+                if ffi::flux_ioctl(
+                    vcpu_fd,
+                    ffi::KVM_SET_MP_STATE,
+                    &mut mp_state as *mut _ as *mut c_void,
+                ) < 0
+                {
+                    return Err(FluxError::Hypervisor(format!(
+                        "KVM_SET_MP_STATE hotplug id={id}"
+                    )));
+                }
+                self.vcpus.push(VcpuHandle {
+                    fd: vcpu_fd,
+                    run: run as *mut u8,
+                });
+            }
+            let idx = self.vcpus.len() - 1;
+            self.setup_cpuid(idx)?;
+            self.setup_boot_msrs(idx)?;
+            self.setup_fpu(idx)?;
+            self.set_lint(idx)?;
+            // Re-park after LAPIC/MSR setup.
+            unsafe {
+                let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
+                if ffi::flux_ioctl(
+                    self.vcpus[idx].fd,
+                    ffi::KVM_SET_MP_STATE,
+                    &mut mp_state as *mut _ as *mut c_void,
+                ) < 0
+                {
+                    return Err(FluxError::Hypervisor(format!(
+                        "KVM_SET_MP_STATE re-park hotplug id={id}"
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+
     /// Firecracker `create_boot_msr_entries` / CH `boot_msr_entries` — exact
     /// 11-entry list, applied on every vCPU before first `KVM_RUN`.
     fn setup_boot_msrs(&self, idx: usize) -> Result<()> {
