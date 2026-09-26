@@ -38,6 +38,12 @@
   virtiofs) remain in [docs/secure-containers.md](docs/secure-containers.md).
 
 ### Added
+- **AppArmor profile covers `fluxctl build-image`.** Enforce-mode
+  `deploy/apparmor/fluxvm` allows guestkit helpers (kmod/sync/mount/chroot),
+  `/run/guestkit*/**`, `/tmp` staging, `owner /**` for specs outside
+  `/var/lib/fluxvm`, `ipc_lock`, and NUMA sysfs. Smoke:
+  `scripts/test-apparmor-build-image.sh` (CI on ubuntu image-customize).
+  Fixes #107.
 - **Remote seccomp NOTIFY policy RPC.** Opt-in
   `io.zyvor.seccomp.notify.mode=remote`: the guest broker asks the host over
   AF_VSOCK (`DEFAULT_SECCOMP_POLICY_PORT` / `io.zyvor.seccomp.notify.rpc-port`)

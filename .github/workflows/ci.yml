@@ -138,6 +138,17 @@ jobs:
           TEST_SERVICE: ${{ matrix.test_service }}
         run: sudo -E ./scripts/test-image-customize.sh --image /tmp/base-image.qcow2
 
+      # #107: same path under the enforced AppArmor profile (ubuntu only —
+      # one full guestkit pass is enough to catch profile regressions).
+      - name: AppArmor-enforced build-image smoke
+        if: matrix.distro == 'ubuntu'
+        working-directory: fluxvm
+        env:
+          FLUXVM_BIN: ${{ github.workspace }}/fluxvm/target/release/fluxctl
+          TEST_PACKAGE: tree
+          TEST_SERVICE: ${{ matrix.test_service }}
+        run: sudo -E ./scripts/test-apparmor-build-image.sh --image /tmp/base-image.qcow2
+
   container-image:
     runs-on: ubuntu-latest
     permissions:
