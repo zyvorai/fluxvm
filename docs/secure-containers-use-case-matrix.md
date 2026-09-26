@@ -71,6 +71,7 @@ unless noted. Live rows use `secure-containers-live.yml` (opt-in via
 | UC-SC-03 | Firecracker share OCI fixture | S9 | `tests/oci-fixtures/firecracker-shares.json` | matrix-lint | no |
 | UC-SC-04 | hostPath allowlist + broker surface | S9 | `scripts/evidence-kata-p0p1-matrix.sh` | live-ga | no |
 | UC-SC-05 | Calico/Flannel CNI churn harness | S9 | `scripts/evidence-cni-churn.sh` | live-ga | no |
+| UC-SC-05b | Multi-CNI under load (churn + Cilium + second cluster) | CNI | `scripts/evidence-cni-under-load.sh` | live-ga | yes |
 | UC-SC-06 | Phase completion orchestrator | S9 | `scripts/complete-secure-containers-phases.sh` | shell-contracts | no |
 
 See also [NEXT-FEATURES.md](NEXT-FEATURES.md) and [secure-containers-set19.md](secure-containers-set19.md).

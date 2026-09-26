@@ -1,0 +1,23 @@
+FluxVM multi-CNI under load @ 20260926T150300Z
+host=NLDW4-4-04-32 rounds=80 cycles=5
+primary_rc=fluxvm second_rc=runc
+second_kubeconfig=/home/sus/.kube/s2-second-cluster.yaml
+
+== leg1: calico/flannel-shaped churn (80 rounds) ==
+✅ calico/flannel churn 80 rounds
+✅ second CNI kubeconfig set: /home/sus/.kube/s2-second-cluster.yaml
+== leg2: Cilium primary Pod Ready churn ==
+  primary cycle 1 ok ip=10.0.0.254
+  primary cycle 2 ok ip=10.0.0.165
+  primary cycle 3 ok ip=10.0.0.12
+  primary cycle 4 ok ip=10.0.0.65
+  primary cycle 5 ok ip=10.0.0.55
+== leg3: second-cluster Pod churn ==
+  second cycle 1 ok ip=10.42.0.142 rc=runc
+  second cycle 2 ok ip=10.42.0.240 rc=runc
+  second cycle 3 ok ip=10.42.0.33 rc=runc
+  second cycle 4 ok ip=10.42.0.239 rc=runc
+  second cycle 5 ok ip=10.42.0.177 rc=runc
+
+CNI UNDER LOAD: PASS
+legs: calico/flannel-churn(80) + cilium-primary(5) + second-cluster(5)
