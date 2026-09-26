@@ -6,13 +6,16 @@
 
 [Unit]
 Description=Zyvor FluxVM in-guest agent (vsock ping/exec/shutdown)
-After=network.target
+After=network.target fluxvm-selinux-ensure.service
+Wants=fluxvm-selinux-ensure.service
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/fluxvm-guest-agent
 Restart=on-failure
 RestartSec=2
+StandardOutput=journal+console
+StandardError=journal+console
 
 [Install]
 WantedBy=multi-user.target

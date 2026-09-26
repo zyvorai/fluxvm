@@ -492,6 +492,11 @@ struct SandboxHints {
     /// Kubernetes Pod UID from CRI annotations. Used to scope write-through
     /// virtiofs exports to this Pod only.
     pod_uid: Option<String>,
+    /// Optional per-sandbox guest image override (`io.zyvor.fluxvm.guest-image`).
+    /// Must resolve under `FLUXVM_IMAGE_DIR` (default `/var/lib/fluxvm/images`).
+    /// Needed because ctr/`env` on the client does not reach the shim (shim
+    /// inherits containerd/k3s systemd environment).
+    guest_image: Option<PathBuf>,
 }
 
 const RUNTIME_STATE_VERSION: u32 = 1;
@@ -1201,12 +1206,8 @@ impl Service {
 
         let cold_started = tokio::time::Instant::now();
 
-        if !self.cfg.guest_image.exists() {
-            bail!(
-                "secure-container guest image does not exist: {}",
-                self.cfg.guest_image.display()
-            );
-        }
+        let hints = hints.cloned().unwrap_or_default();
+        let guest_image = resolve_guest_image(&self.cfg, hints.guest_image.as_deref())?;
         if self.cfg.backend == "firecracker" {
             if let Some(kernel) = &self.cfg.kernel {
                 if !kernel.exists() {
@@ -1230,7 +1231,6 @@ impl Service {
             );
         }
 
-        let hints = hints.cloned().unwrap_or_default();
         let share_dir = self.share_dir();
         tokio::fs::create_dir_all(&share_dir).await?;
 
@@ -1381,7 +1381,7 @@ impl Service {
         let mut create = json!({
             "name": format!("ctr-{}", safe_name(&self.group)),
             "backend": self.cfg.backend,
-            "image": self.cfg.guest_image,
+            "image": guest_image,
             "vcpus": vcpus,
             "memory_mib": memory_mib,
             "network": network,
@@ -4340,42 +4340,49 @@ fn sandbox_hints_from_spec(spec: &Value) -> SandboxHints {
     let mut resources = resource_limits_from_linux_resources(
         spec.pointer("/linux/resources").unwrap_or(&Value::Null),
     );
-    let pod_uid = spec
-        .get("annotations")
-        .and_then(Value::as_object)
-        .and_then(|annotations| {
-            let parse_i64 = |key: &str| {
-                annotations
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .and_then(|v| v.parse::<i64>().ok())
-            };
-            let parse_u64 = |key: &str| {
-                annotations
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .and_then(|v| v.parse::<u64>().ok())
-            };
-            if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-cpu-quota") {
-                resources.cpu_quota = Some(v);
-            }
-            if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-period") {
-                resources.cpu_period = Some(v);
-            }
-            if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-shares") {
-                resources.cpu_shares = Some(v);
-            }
-            if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-memory") {
-                resources.memory_limit_bytes = Some(v);
-            }
+    let annotations = spec.get("annotations").and_then(Value::as_object);
+    let pod_uid = annotations.and_then(|annotations| {
+        let parse_i64 = |key: &str| {
             annotations
-                .get("io.kubernetes.cri.sandbox-uid")
+                .get(key)
                 .and_then(Value::as_str)
-                .filter(|uid| {
-                    !uid.is_empty() && uid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                })
-                .map(str::to_string)
-        });
+                .and_then(|v| v.parse::<i64>().ok())
+        };
+        let parse_u64 = |key: &str| {
+            annotations
+                .get(key)
+                .and_then(Value::as_str)
+                .and_then(|v| v.parse::<u64>().ok())
+        };
+        if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-cpu-quota") {
+            resources.cpu_quota = Some(v);
+        }
+        if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-period") {
+            resources.cpu_period = Some(v);
+        }
+        if let Some(v) = parse_u64("io.kubernetes.cri.sandbox-cpu-shares") {
+            resources.cpu_shares = Some(v);
+        }
+        if let Some(v) = parse_i64("io.kubernetes.cri.sandbox-memory") {
+            resources.memory_limit_bytes = Some(v);
+        }
+        annotations
+            .get("io.kubernetes.cri.sandbox-uid")
+            .and_then(Value::as_str)
+            .filter(|uid| {
+                !uid.is_empty() && uid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            })
+            .map(str::to_string)
+    });
+    let guest_image = annotations.and_then(|annotations| {
+        annotations
+            .get("io.zyvor.fluxvm.guest-image")
+            .or_else(|| annotations.get("fluxvm.io/guest-image"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+    });
     let netns_path = spec
         .pointer("/linux/namespaces")
         .and_then(Value::as_array)
@@ -4395,7 +4402,50 @@ fn sandbox_hints_from_spec(spec: &Value) -> SandboxHints {
         resources,
         netns_path,
         pod_uid,
+        guest_image,
     }
+}
+
+/// Resolve the guest qcow2 for a sandbox. Annotation overrides must stay under
+/// `FLUXVM_IMAGE_DIR` so ctr cannot point the shim at an arbitrary host path.
+fn resolve_guest_image(cfg: &RuntimeConfig, override_path: Option<&Path>) -> AnyResult<PathBuf> {
+    let image_dir = std::env::var_os("FLUXVM_IMAGE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/fluxvm/images"));
+    let path = match override_path {
+        Some(p) => {
+            let candidate = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                image_dir.join(p)
+            };
+            let canon = candidate.canonicalize().with_context(|| {
+                format!(
+                    "secure-container guest-image annotation does not exist: {}",
+                    candidate.display()
+                )
+            })?;
+            let allow = image_dir.canonicalize().unwrap_or_else(|_| image_dir.clone());
+            if !canon.starts_with(&allow) {
+                bail!(
+                    "secure-container guest-image annotation must be under {}; got {}",
+                    allow.display(),
+                    canon.display()
+                );
+            }
+            canon
+        }
+        None => {
+            if !cfg.guest_image.exists() {
+                bail!(
+                    "secure-container guest image does not exist: {}",
+                    cfg.guest_image.display()
+                );
+            }
+            cfg.guest_image.clone()
+        }
+    };
+    Ok(path)
 }
 
 fn vm_shape(

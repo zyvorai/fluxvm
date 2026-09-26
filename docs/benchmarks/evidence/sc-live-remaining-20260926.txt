@@ -1,0 +1,41 @@
+SC live remaining gates — 20260926 — 175.110.122.71
+Branch work: feat/sc-live-gaps-remaining
+
+== SELinux mountLabel ==
+PASS (prior): scripts/e2e-secure-containers-selinux-mountlabel.sh green on
+secure-container-selinux.qcow2 (enforcing Fedora guest + restorecon path).
+
+== guestkit Fedora/btrfs token inject ==
+PASS: guestkit inspect_os → roots=["btrfsvol:/dev/sda4/root"]; RW remount +
+write /etc/fluxvm-guest-agent.token without virt-customize/libguestfs.
+Evidence: docs/benchmarks/evidence/sc-live-guestkit-fedora-btrfs-20260926.txt
+
+== USERNS k8s RuntimeClass ==
+PASS: FLUXVM_USERNS_MODE=k8s N=1
+  E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+Evidence: docs/benchmarks/evidence/sc-live-userns-k8s-20260926.txt
+Agent fix: setns(shared IPC/UTS) before CLONE_NEWUSER (CAP_SYS_ADMIN in
+owning userns); skip USERNS for kubernetes pause.
+
+== USERNS in-VM distinct ==
+PASS: FLUXVM_USERNS_MODE=k8s-multi N=2 require_distinct=1
+  probe-1 -> user:[4026532501]
+  probe-2 -> user:[4026532504]
+  E2E PASS: … distinct_user_ns=2; mode=k8s-multi
+Evidence: docs/benchmarks/evidence/sc-live-userns-k8s-multi-20260926.txt
+
+== Multi-CNI under load ==
+Still honesty-bound: prefers FLUXVM_SECOND_CNI_KUBECONFIG; portable default
+remains scripts/evidence-cni-churn.sh (nftables stand-in).
+
+== Full phase deploy + finish pass (20260926) ==
+Lab deploy of shim/agent + complete matrix on 175.110.122.71:
+  summary pass=7 skip=3 fail=0; SC_LIVE_FINISH=COMPLETE
+  PASS: e2e-sec, userns-k8s, userns-k8s-multi, selinux-mountlabel, ns,
+        cni-churn, wow
+  soft-skip (timeout/rc under FLUXVM_PHASES_SOFT): e2e-ctr, seccomp-notify, s2
+Evidence: docs/benchmarks/evidence/sc-live-phases-summary-20260926.txt
+Full log: docs/benchmarks/evidence/sc-live-phases-finish-20260926.txt
+
+== Non-goals (unchanged) ==
+Remote policy RPC; FC live virtiofs; Kata-equivalence claims.

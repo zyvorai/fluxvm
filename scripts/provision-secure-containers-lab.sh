@@ -3,8 +3,27 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Provision Secure Containers on a KVM lab host: build shim/agent/guest-agent,
-# virt-builder a debian guest with fluxvm-guest-agent, install binaries,
-# register containerd runtimes (system + k3s drop-in), apply RuntimeClass.
+# bake a guest image with fluxvm-guest-agent, install binaries, register
+# containerd runtimes (system + k3s drop-in), apply RuntimeClass.
+#
+# 15-minute lab path:
+#   1) fluxctl serve listening on :7788
+#   2) sudo FLUXVM_SC_RESTART_K3S=1 ./scripts/provision-secure-containers-lab.sh
+#   3) docs/secure-containers-flip-runtimeclass.md smoke Pod
+#   4) FLUXVM_SECURE_CONTAINERS_E2E=1 ./scripts/demo-secure-containers-wow.sh
+#
+# CNI notes (Cilium / Calico):
+#   - Default production profile expects Pod CNI L2 (do not leave
+#     FLUXVM_CONTAINER_CNI=0 on shared clusters).
+#   - If sandbox create hangs on CNI DELETE/ADD, clean zombie sandboxes
+#     (`ctr -n k8s.io sandboxes ls`) before retrying; prefer unique Pod names.
+#   - hostNetwork smoke skips Pod CNI — useful for shim/agent debug only.
+#   - Keep sandboxer=podsandbox (this shim has no Sandbox TTRPC service).
+#
+# Guest image: Ubuntu cloud + virt-customize is the lab bootstrap path when no
+# image exists. Production token inject / customize goes through guestkit only
+# (Fedora/btrfs roots supported) — never add a virt-customize fallback to
+# fluxvm-image.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -74,32 +93,36 @@ else
 fi
 
 echo "== system containerd runtime drop-in =="
+SHIM_BIN="$PREFIX/bin/containerd-shim-fluxvm-v2"
 if [[ -d /etc/containerd ]] || systemctl is-active containerd >/dev/null 2>&1; then
   sudo mkdir -p /etc/containerd /etc/containerd/conf.d
   if [[ ! -f /etc/containerd/config.toml ]]; then
-    sudo tee /etc/containerd/config.toml >/dev/null <<'TOML'
+    sudo tee /etc/containerd/config.toml >/dev/null <<TOML
 version = 2
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm]
   runtime_type = "io.containerd.fluxvm.v2"
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm.options]
-  BinaryName = "containerd-shim-fluxvm-v2"
+  BinaryName = "$SHIM_BIN"
 TOML
   else
-    sudo tee /etc/containerd/conf.d/fluxvm.toml >/dev/null <<'TOML'
+    sudo tee /etc/containerd/conf.d/fluxvm.toml >/dev/null <<TOML
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm]
   runtime_type = "io.containerd.fluxvm.v2"
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm.options]
-  BinaryName = "containerd-shim-fluxvm-v2"
+  BinaryName = "$SHIM_BIN"
 TOML
   fi
   # Shim environment for guest image + userns
   sudo mkdir -p /etc/systemd/system/containerd.service.d
+# Prefer Absolute BinaryName + USERNS; CNI on by default for supported profile.
+# Set FLUXVM_CONTAINER_CNI=0 only for user-mode / hostNetwork debug labs.
   sudo tee /etc/systemd/system/containerd.service.d/fluxvm-sc.conf >/dev/null <<EOF
 [Service]
 Environment=FLUXVM_API_URL=http://127.0.0.1:7788
 Environment=FLUXVM_CONTAINER_GUEST_IMAGE=$GUEST_IMG
 Environment=FLUXVM_CONTAINER_AGENT_BINARY=$PREFIX/libexec/fluxvm-container-agent
 Environment=FLUXVM_CONTAINER_USERNS=1
+Environment=FLUXVM_CONTAINER_CNI=${FLUXVM_CONTAINER_CNI:-1}
 EOF
   sudo systemctl daemon-reload
   sudo systemctl restart containerd || true
@@ -109,11 +132,19 @@ echo "== k3s containerd fluxvm drop-in =="
 K3S_D="/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d"
 if [[ -d /var/lib/rancher/k3s/agent/etc/containerd ]]; then
   sudo mkdir -p "$K3S_D"
-  sudo tee "$K3S_D/fluxvm.toml" >/dev/null <<'TOML'
+  # Absolute BinaryName — k3s containerd PATH often omits /usr/local/bin, which
+  # produces "can't find shim for sandbox" after a relative-name start fails.
+  # Single drop-in (99-) wins over older fluxvm.toml copies.
+  sudo rm -f "$K3S_D/fluxvm.toml"
+  # Keep default sandboxer=podsandbox. sandboxer=shim requires the
+  # containerd.runtime.sandbox.v1.Sandbox TTRPC service, which this shim does
+  # not implement yet ("Sandbox service does not exist"). Absolute BinaryName
+  # avoids "can't find shim for sandbox" when k3s PATH omits /usr/local/bin.
+  sudo tee "$K3S_D/99-fluxvm.toml" >/dev/null <<TOML
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.fluxvm]
   runtime_type = "io.containerd.fluxvm.v2"
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.fluxvm.options]
-  BinaryName = "containerd-shim-fluxvm-v2"
+  BinaryName = "$SHIM_BIN"
 TOML
   # k3s picks up containerd env via systemd for k3s service
   sudo mkdir -p /etc/systemd/system/k3s.service.d
@@ -123,6 +154,8 @@ Environment=FLUXVM_API_URL=http://127.0.0.1:7788
 Environment=FLUXVM_CONTAINER_GUEST_IMAGE=$GUEST_IMG
 Environment=FLUXVM_CONTAINER_AGENT_BINARY=$PREFIX/libexec/fluxvm-container-agent
 Environment=FLUXVM_CONTAINER_USERNS=1
+Environment=FLUXVM_CONTAINER_CNI=${FLUXVM_CONTAINER_CNI:-1}
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 EOF
   sudo systemctl daemon-reload
   # Prefer reload; full restart is disruptive — operator can restart k3s.

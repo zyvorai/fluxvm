@@ -4,6 +4,9 @@
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm]
   runtime_type = "io.containerd.fluxvm.v2"
   privileged_without_host_devices = false
+  # Leave sandboxer at containerd's default ("podsandbox"). sandboxer="shim"
+  # needs containerd.runtime.sandbox.v1.Sandbox on the shim, which FluxVM does
+  # not implement yet.
 
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.fluxvm.options]
   BinaryName = "containerd-shim-fluxvm-v2"

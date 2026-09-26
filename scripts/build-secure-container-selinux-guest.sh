@@ -11,8 +11,12 @@ OUT="${FLUXVM_SC_SELINUX_GUEST:-$IMG_DIR/secure-container-selinux.qcow2}"
 BASE="${FLUXVM_SC_FEDORA_BASE:-$IMG_DIR/fedora-cloud-base.qcow2}"
 SIZE="${FLUXVM_SC_SELINUX_GUEST_SIZE:-8G}"
 AGENT="${FLUXVM_GUEST_AGENT_BIN:-$ROOT/target/release/fluxvm-guest-agent}"
+ENSURE_SH="$ROOT/scripts/guest/fluxvm-selinux-ensure.sh"
+ENSURE_UNIT="$ROOT/systemd/fluxvm-selinux-ensure.service"
 
 [[ -x "$AGENT" ]] || { echo "build fluxvm-guest-agent first: $AGENT" >&2; exit 1; }
+[[ -f "$ENSURE_SH" ]] || { echo "missing $ENSURE_SH" >&2; exit 1; }
+[[ -f "$ENSURE_UNIT" ]] || { echo "missing $ENSURE_UNIT" >&2; exit 1; }
 command -v virt-customize >/dev/null
 command -v qemu-img >/dev/null
 sudo mkdir -p "$IMG_DIR"
@@ -29,17 +33,24 @@ fi
 TMP="$OUT.tmp"
 sudo qemu-img convert -O qcow2 "$BASE" "$TMP"
 sudo qemu-img resize "$TMP" "$SIZE"
-sudo env LIBGUESTFS_BACKEND=direct virt-customize --no-network -a "$TMP" \
+export LIBGUESTFS_BACKEND="${LIBGUESTFS_BACKEND:-direct}"
+sudo -E virt-customize --no-network -a "$TMP" \
   --hostname fluxvm-sc-selinux \
   --mkdir /usr/local/bin \
+  --mkdir /usr/local/libexec \
   --upload "$AGENT:/usr/local/bin/fluxvm-guest-agent" \
   --chmod 0755:/usr/local/bin/fluxvm-guest-agent \
+  --upload "$ENSURE_SH:/usr/local/libexec/fluxvm-selinux-ensure.sh" \
+  --chmod 0755:/usr/local/libexec/fluxvm-selinux-ensure.sh \
+  --upload "$ENSURE_UNIT:/etc/systemd/system/fluxvm-selinux-ensure.service" \
   --upload "$ROOT/systemd/fluxvm-guest-agent.service:/etc/systemd/system/fluxvm-guest-agent.service" \
-  --run-command 'mkdir -p /etc/systemd/system/multi-user.target.wants; ln -sf /etc/systemd/system/fluxvm-guest-agent.service /etc/systemd/system/multi-user.target.wants/fluxvm-guest-agent.service' \
+  --run-command 'mkdir -p /etc/systemd/system/multi-user.target.wants; ln -sf /etc/systemd/system/fluxvm-guest-agent.service /etc/systemd/system/multi-user.target.wants/fluxvm-guest-agent.service; ln -sf /etc/systemd/system/fluxvm-selinux-ensure.service /etc/systemd/system/multi-user.target.wants/fluxvm-selinux-ensure.service' \
   --run-command 'mkdir -p /etc/cloud; touch /etc/cloud/cloud-init.disabled' \
-  --run-command 'test -e /sys/fs/selinux || true' \
   --run-command 'if [ -f /etc/selinux/config ]; then sed -i "s/^SELINUX=.*/SELINUX=enforcing/" /etc/selinux/config; fi' \
-  --run-command 'test -x /usr/local/bin/fluxvm-guest-agent'
+  --run-command 'rm -f /.autorelabel' \
+  --run-command 'test -x /usr/local/bin/fluxvm-guest-agent && test -x /usr/local/libexec/fluxvm-selinux-ensure.sh' \
+  --run-command 'restorecon -F /usr/local/bin/fluxvm-guest-agent /usr/local/libexec/fluxvm-selinux-ensure.sh /etc/systemd/system/fluxvm-guest-agent.service /etc/systemd/system/fluxvm-selinux-ensure.service 2>/dev/null || (chcon -t bin_t /usr/local/bin/fluxvm-guest-agent; chcon -t bin_t /usr/local/libexec/fluxvm-selinux-ensure.sh) || true' \
+  --selinux-relabel
 
 sudo mv -f "$TMP" "$OUT"
 sudo chmod 644 "$OUT"

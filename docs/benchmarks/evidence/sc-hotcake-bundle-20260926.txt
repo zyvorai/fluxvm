@@ -1,0 +1,29 @@
+SC + FluxVM hot-cake evidence bundle — 20260926 (finish pass)
+Lab hosts: 175.110.122.71 (SC live / wow / CNI / full phase deploy+test)
+SHA-256 of member files (content-addressed pack; not a GPG signature):
+
+0c174c6613215fc81e8ccc5e63dd2a74be217c80667652790531733ba9f1f9fb  docs/benchmarks/evidence/sc-live-remaining-20260926.txt
+9e8e2d5662140f2def5c31002c8829986cc7f03eac3bf9363a3b90e78d4dc760  docs/benchmarks/evidence/sc-live-guestkit-fedora-btrfs-20260926.txt
+910fd5dd7c954daa86481ffb2abbd3ed51e05c2b29885426a63175787464b6e2  docs/benchmarks/evidence/sc-live-userns-k8s-20260926.txt
+a267bf8fce0a0a7fe8ab36fe2e9ab5657ae6666ed7e4038a1526d09496c82731  docs/benchmarks/evidence/sc-live-userns-k8s-multi-20260926.txt
+25ad66755a1cf55d6257298b67eb6bf06c82f75165ac7f966689f21129881d0b  docs/benchmarks/evidence/sc-live-wow-demo-20260926.txt
+8f964d7895cb76ac3062e5a1994bf11b230206bc069d26d5a03311ac64f5caf9  docs/benchmarks/evidence/sc-live-cni-churn-20260926.txt
+aeb7d92576feb227e1c8de6c49471433e617a87059068c37b91e540d12e5b966  docs/benchmarks/evidence/sc-live-s2-second-cni-20260926.txt
+abd3ee8a6bf20a9ad46e653e2fa6ca499062f73bbcfd1f3a7b24a54287211588  docs/benchmarks/evidence/sc-live-matrix-20260925T193043Z.txt
+57fab376fa5b2771e8484fe024431c466862b55eb039d695f9c746fba4053032  docs/benchmarks/evidence/sc-live-phases-summary-20260926.txt
+8f964d7895cb76ac3062e5a1994bf11b230206bc069d26d5a03311ac64f5caf9  docs/benchmarks/evidence/cni-churn-ok.txt
+aeb7d92576feb227e1c8de6c49471433e617a87059068c37b91e540d12e5b966  docs/benchmarks/evidence/s2-second-cni-20260918T035335Z.txt
+55ce0d9ace376d2f2f80f32a1fd8431be83011781c622c11028b007f3accb312  docs/benchmarks/evidence/policy-observer-scrape-20260918T035554Z.txt
+1c2abbddcab5c618a1239f2d35a9c331f654172c875d308976e0aa7bc10372a4  docs/benchmarks/evidence/direct-datapath-live-realguest-20260920.txt
+8b467a5ff7fcbede1e886abf8f840d7f59e5a894247fe410ccf4b389575722f1  docs/benchmarks/evidence/density-20260918-80.79.5.173.txt
+
+== Member summaries ==
+-- finish pass 20260926: pass=7 skip=3 fail=0 (SC_LIVE_FINISH=COMPLETE)
+   PASS: e2e-sec, userns-k8s, userns-k8s-multi, selinux-mountlabel, ns, cni-churn, wow
+   soft-skip (timeout/rc): e2e-ctr, seccomp-notify, s2 (nft stand-in already archived)
+-- wow demo 20260926: k8s + k8s-multi userns PASS (WOW DEMO: OK)
+-- cni-churn 20260926: 20 rounds PASS; no SECOND_CNI_KUBECONFIG
+-- s2 20260926: nftables second-policy-engine allow/deny PASS (archived)
+-- prior SC live + Observer + direct datapath + density unchanged
+
+bundle_sha256=b1a3850fc79f94c76707260ba41a5452df88e3941495dfdf2f4d0f95b8f3ae6e

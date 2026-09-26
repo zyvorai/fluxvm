@@ -28,6 +28,8 @@ No libvirtd. No XML. A REST API and a CLI that do the same thing on every backen
 
 **Four backends.** QEMU, Cloud Hypervisor, Firecracker, and the FluxVM hypervisor — one contract.
 
+**Secure Containers.** RuntimeClass `fluxvm` gives a Pod its own guest kernel, plus **Sentinel** host↔guest NetworkPolicy ([docs/sentinel-wedge.md](docs/sentinel-wedge.md)) — isolation **without** TEE. Not Kata-equivalent packaging; see the [supported profile](docs/secure-containers-supported-profile.md) and [15-minute lab](docs/secure-containers-15min-lab.md).
+
 **Grow later.** One Linux host today. Kubernetes or a multi-host fleet when you need them.
 
 FluxVM is a complete control plane on its own — a host-local replacement for libvirt/virsh
@@ -75,11 +77,10 @@ We only claim what has been run. Every row links to how it was verified.
 **Know before you commit.** These are the boundaries, stated up front so you can size the fit:
 
 - **Multi-tenant controls are opt-in, not a public-cloud boundary.** Create-path quotas use an O(1) ledger, `policy.require_catalog_names` rejects unsigned images, QEMU/Cloud Hypervisor children can take a log-mode seccomp filter (`FLUXVM_VMM_SECCOMP`), and AppArmor/SELinux profiles ship under `deploy/`. Per-tenant Firecracker uids need `[jailer] uid_range_start` / `uid_range_len`. Pause, resume, and delete do not hash images or scan the fleet. See [docs/PRODUCTION.md](docs/PRODUCTION.md).
-- **Secure Containers (containerd runtime-v2 shim) is GA**, not a Kata-equivalence claim. Allowlisted hostPath is a virtiofs export when `FLUXVM_HOSTPATH_ALLOW` is set at sandbox create (symlink escape fails closed). Multus on the direct datapath fails closed. The Pod-teardown hang from earlier labs is covered by `journal_after_task_delete` (CHANGELOG 0.4.0). Broader CNI conformance stays opt-in —
+- **Secure Containers (containerd runtime-v2 shim) is GA**, not a Kata-equivalence claim. Supported profile + flip runbook: [docs/secure-containers-supported-profile.md](docs/secure-containers-supported-profile.md), [docs/secure-containers-flip-runtimeclass.md](docs/secure-containers-flip-runtimeclass.md). Allowlisted hostPath is a virtiofs export when `FLUXVM_HOSTPATH_ALLOW` is set at sandbox create (symlink escape fails closed). Multus on the direct datapath fails closed. Live lab pack: [docs/benchmarks/evidence/sc-hotcake-bundle-20260926.txt](docs/benchmarks/evidence/sc-hotcake-bundle-20260926.txt). Broader second-CNI under load still prefers `FLUXVM_SECOND_CNI_KUBECONFIG` —
   [docs/secure-containers.md](docs/secure-containers.md).
 - **Not KubeVirt-compatible, by design.** `kubectl-fluxvm` is the console/exec/pause/resume plugin and deletes the CR (the operator finalizes the VM). `GuestImage` HTTP sources are staged on the node and are not CDI DataVolumes; unsigned downloads are not promoted to a trusted catalog name. QEMU has a target receiver at `POST /v1/migration/receivers` (`-incoming defer`); Cloud Hypervisor stays fire-and-forget, and direct-datapath migration is refused. See [FAQ](#faq).
-- **Boot and density numbers are a method plus a per-host record, not a sizing SLA.** `scripts/record-baseline.sh` writes `docs/benchmarks/evidence/`. `avg_create_ms` is control-plane create time. `warm_claim_ms` is pool claim time. Repeat on a second host before capacity planning
-  ([docs/benchmarks/README.md](docs/benchmarks/README.md)).
+- **Boot and density numbers are a method plus archived samples, not a sizing SLA.** See the capacity table in [docs/PRODUCT_OVERVIEW.md](docs/PRODUCT_OVERVIEW.md) and [docs/benchmarks/evidence/sc-hotcake-bundle-20260926.txt](docs/benchmarks/evidence/sc-hotcake-bundle-20260926.txt). `scripts/record-baseline.sh` writes per-host records under `docs/benchmarks/evidence/`.
 
 ---
 
@@ -223,7 +224,7 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 | **Images** | virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, Ed25519-signed catalog with REST CRUD, Windows golden-image customization | [docs/build-image-tutorials.md](docs/build-image-tutorials.md) · [docs/operations.md](docs/operations.md#image-catalog--signing) · [docs/windows-golden.md](docs/windows-golden.md) |
 | **Operations** | cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC | [docs/operations.md](docs/operations.md) · [docs/api.md](docs/api.md#auth--rbac) |
 | **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native path (no KubeVirt); `fluxvm-agent` fleet registry with load-aware placement | [Kubernetes CRD/operator](#kubernetes-crdoperator) · [docs/microvm.md](docs/microvm.md) · [docs/operations.md](docs/operations.md#distributed-node-agent) |
-| **Secure Containers** *(GA)* | containerd runtime-v2 shim mapping a Pod onto one QEMU FluxVM: CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, device passthrough, guest AppArmor/SELinux/seccomp enforcement | [docs/secure-containers.md](docs/secure-containers.md) |
+| **Secure Containers** *(GA)* | containerd runtime-v2 shim mapping a Pod onto one microVM: CNI L2, Sentinel policy, cgroup-v2 stats, VSOCK stdio/TTY, guest AppArmor/SELinux/seccomp | [docs/secure-containers.md](docs/secure-containers.md) · [supported profile](docs/secure-containers-supported-profile.md) · [15-min lab](docs/secure-containers-15min-lab.md) · [Sentinel wedge](docs/sentinel-wedge.md) |
 | **Security profiles (Phase 6)** | `standard` / `measured` / `confidential-snp` / `confidential-tdx`: measured software-test evidence on ordinary QEMU hosts; confidential control plane tested without claiming host-memory encryption until a hardware run | [docs/security-profiles.md](docs/security-profiles.md) · [howto / CI](docs/guides/security-profiles-howto.md) |
 | **Sentinel observability** | eBPF host + guest runtime intelligence: per-VM syscall/page-fault telemetry, drop reasons, flight recorder, BPF-LSM VMM guard/QoS, XDP shield | [docs/runtime-intelligence.md](docs/runtime-intelligence.md) · [docs/flight-recorder.md](docs/flight-recorder.md) |
 

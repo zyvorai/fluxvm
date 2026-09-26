@@ -1,0 +1,21 @@
+FluxVM Secure Containers live matrix (finish pass) 20260926T090345Z
+host=NLDW4-4-04-32
+RESULT e2e-ctr=SKIP/soft-fail rc=124
+RESULT e2e-sec=PASS
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+RESULT e2e-userns-k8s=PASS
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)
+RESULT e2e-userns-k8s-multi=PASS
+RESULT e2e-seccomp-notify=SKIP/soft-fail rc=124
+E2E PASS: SELinux mountLabel green (context= / container_file_t)
+RESULT e2e-selinux-mountlabel=PASS
+FluxVM Set 6 namespace isolation E2E: PASS (shared IPC/UTS, private PID/mount per container)
+RESULT e2e-ns=PASS
+RESULT cni-churn=PASS
+RESULT s2=SKIP/soft-fail rc=1
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)
+WOW DEMO: OK
+RESULT wow=PASS
+summary pass=7 skip=3 fail=0
+SC_LIVE_FINISH=COMPLETE
