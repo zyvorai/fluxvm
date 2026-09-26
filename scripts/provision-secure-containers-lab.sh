@@ -20,6 +20,12 @@
 #   - hostNetwork smoke skips Pod CNI — useful for shim/agent debug only.
 #   - Keep sandboxer=podsandbox (this shim has no Sandbox TTRPC service).
 #
+# Optional second-cluster S2 (real kubeconfig path):
+#   Write /etc/fluxvm-second-cni.env with:
+#     FLUXVM_SECOND_CNI_KUBECONFIG=/path/to/second-cluster.yaml
+#     FLUXVM_SECOND_CNI_RUNTIMECLASS=runc   # or fluxvm when SC is installed there
+#   scripts/evidence-networkpolicy-second-cni.sh auto-sources that drop-in.
+#
 # Guest image: Ubuntu cloud + virt-customize is the lab bootstrap path when no
 # image exists. Production token inject / customize goes through guestkit only
 # (Fedora/btrfs roots supported) — never add a virt-customize fallback to

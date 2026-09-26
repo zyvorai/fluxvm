@@ -13,6 +13,8 @@
 # separately). Pass FLUXVM_S2_INCLUDE_MULTINODE=1 to also run it here.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib/sc-second-cni-env.sh"
 
 if [[ "${FLUXVM_S2_INCLUDE_MULTINODE:-0}" == 1 ]]; then
   echo "== S2.1 same-CNI multi-node =="

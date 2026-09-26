@@ -52,3 +52,9 @@ PASS: ctr, tty, sec, userns-k8s, userns-k8s-multi, seccomp-notify,
 soft-skip: s2 (nft stand-in already archived; needs SECOND_CNI_KUBECONFIG
 for hard pass under this wrapper)
 Evidence: docs/benchmarks/evidence/sc-live-phases-post93-summary-20260926.txt
+
+== S2 real second-cluster kubeconfig (20260926) ==
+PASS: FLUXVM_SECOND_CNI_KUBECONFIG -> 80.79.5.173 (distinct k3s API)
+RuntimeClass=runc (SC not installed on second host; NetworkPolicy Set17 proof)
+Drop-in: /etc/fluxvm-second-cni.env (auto-sourced by evidence-networkpolicy-second-cni.sh)
+Evidence: docs/benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt
