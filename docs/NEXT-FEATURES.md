@@ -1,12 +1,15 @@
 # Next features (ranked)
 
-Living backlog after Secure Containers Set 19 and the P0 multi-VMM GA close
-(Cloud Hypervisor virtiofs, Multus hybrid/direct, Calico/Flannel, hostPath
-broker, Firecracker ext4 block shares — schema-v10, `fluxvm_pridx`, IPv6
-extension walk, guest policy mirror, Observer ops) plus Sets 16–18, and
-Sentinel's operational tooling — Set 12E (GA certification), Set 13E–17E
-(migrate/upgrade/fleet/drift/admission) — and in-tree KVM FC/CH parity
-(P0–P2). Prefer closing proven live gates over inventing new wire formats.
+**This ranked set is complete** on the code + gate path as of 2026-09-26.
+
+It covers Secure Containers Set 19 and the P0 multi-VMM GA close (Cloud
+Hypervisor virtiofs, Multus hybrid/direct, Calico/Flannel, hostPath broker,
+Firecracker ext4 block shares — schema-v10, `fluxvm_pridx`, IPv6 extension
+walk, guest policy mirror, Observer ops), Sets 16–18, Sentinel operational
+tooling (Set 12E GA certification, Set 13E–17E migrate/upgrade/fleet/drift/
+admission), in-tree KVM FC/CH parity (P0–P2 / **H1–H5**), and the post-GA
+closes below. Any future ranked set should still prefer proven live gates
+over inventing new wire formats — open a new section only when product asks.
 
 ## Sentinel / Secure Containers (highest leverage)
 
@@ -56,19 +59,36 @@ Custom CPUID templates and Track B density publication remain out of scope here.
 | **F1** | Hubble SID attribution for VM traffic | **Done** — `from_flow_record_attributed` overlays CEP / Cilium-agent SID on hubble observe flows (src + peer VM dst); never writes Cilium private maps |
 | **F2** | Scrape `MICROVM_METRICS_ADDR` (`:9108`) from Prometheus | **Done** — node-agent annotations + port, `deploy/k8s/microvm/servicemonitor.yaml`, `deploy/prometheus/fluxvm-scrape.yaml` |
 
-## Suggested next implementation set
+## Post-GA closes (2026-09-26)
 
-**S1–S11 / CNI / DP / F1–F2 / H1–H3 / H5 / FC1–FC3** closed on the code +
-gate path. Secure Containers P0/P1 multi-VMM (incl. Firecracker block shares)
-is shipped; RuntimeClass is GA.
+Work closed after the numbered S/H/FC/F rows, still part of this ranked set:
 
-Remaining honesty bounds (live lab only):
+| Close | Status |
+|---|---|
+| Concurrent NBD device alloc | **Done** — guestkit flock serialize (`#104`); lab evidence [nbd-concurrent-alloc-20260926.txt](benchmarks/evidence/nbd-concurrent-alloc-20260926.txt) |
+| Keep create concurrency | **Done** — `ZYVOR_AGENT_SANDBOX_CREATE_CONCURRENCY` default 4 + GitHub concurrency CI |
+| Remote seccomp NOTIFY RPC | **Done** — `io.zyvor.seccomp.notify.mode=remote` guest→host AF_VSOCK (`#106`); fail closed; optional `FLUXVM_SECCOMP_POLICY_RPC_URL` |
+| AppArmor `fluxctl build-image` | **Done** — enforce-mode profile covers guestkit path (`#108`); smoke `scripts/test-apparmor-build-image.sh` |
+| **H4** | **Done** — see H table above (`#111`); not duplicated here |
+
+## This ranked set — closed
+
+**S1–S11 / CNI / DP / F1–F2 / H1–H5 / FC1–FC3** plus the post-GA closes above
+are closed on the code + gate path. Secure Containers P0/P1 multi-VMM (incl.
+Firecracker block shares) is shipped; RuntimeClass is GA. There are **no
+further ranked items** in this document until product opens a new set.
+
+### Cleared live evidence (archive)
 
 1. S2 second-cluster kubeconfig path live on 2026-09-26 — [benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt](benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt) (`S2 SECOND CNI (kubeconfig): PASS` against `80.79.5.173`, RuntimeClass `runc`). Portable nftables stand-in remains — [sc-live-s2-second-cni-20260926.txt](benchmarks/evidence/sc-live-s2-second-cni-20260926.txt). Lab drop-in `/etc/fluxvm-second-cni.env` auto-sourced by the evidence script.
 2. Live SC matrix + day-0 wow: [sc-live-matrix-20260926.txt](benchmarks/evidence/sc-live-matrix-20260926.txt) (`pass=10 skip=0 fail=0`, includes s2 + wow); earlier day-0 wow [sc-live-wow-demo-20260926.txt](benchmarks/evidence/sc-live-wow-demo-20260926.txt); post-#93 soft finish [sc-live-phases-post93-summary-20260926.txt](benchmarks/evidence/sc-live-phases-post93-summary-20260926.txt) (`pass=10 skip=1`, s2 soft-skip later cleared). Adoption packaging: [secure-containers-supported-profile.md](secure-containers-supported-profile.md), [secure-containers-15min-lab.md](secure-containers-15min-lab.md), [sentinel-wedge.md](sentinel-wedge.md).
 3. S10 live multi-host fleet cleared 2026-09-26 — [sc-live-s10-fleet-20260926.txt](benchmarks/evidence/sc-live-s10-fleet-20260926.txt) (lab `175.110.122.71` ↔ `80.79.5.173`, canary approve/resume, both nodes healthy). S11 live attached migration cleared same day — [sc-live-s11-migration-20260926.txt](benchmarks/evidence/sc-live-s11-migration-20260926.txt) (schema-11 cilium-mode fabric, quiesce/export/restore/resume). S3 live prhit directional scrape cleared same evening — [sc-live-s3-prhit-20260926.txt](benchmarks/evidence/sc-live-s3-prhit-20260926.txt) (`directional_counters=1`). Multi-CNI under load cleared same evening — [sc-live-cni-under-load-20260926.txt](benchmarks/evidence/sc-live-cni-under-load-20260926.txt). S4 EndpointSlice Service-VIP live gate cleared same evening — [sc-live-s4-endpointslice-20260926.txt](benchmarks/evidence/sc-live-s4-endpointslice-20260926.txt). Observer `CurrentSchema` bumped to 11 with live [sc-live-observer-schema11-20260926.txt](benchmarks/evidence/sc-live-observer-schema11-20260926.txt) (`schema_compatible=1`).
-4. H2 virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM.
-5. Remote seccomp policy RPC (`io.zyvor.seccomp.notify.mode=remote`) — guest→host AF_VSOCK; fail closed; optional HTTP forward via `FLUXVM_SECCOMP_POLICY_RPC_URL`.
+
+### Still open honesty
+
+1. **H2** virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM.
+2. Optional live smoke for `mode=remote` seccomp (code **Done** in `#106`; on-box NOTIFY+RPC against a running shim not yet evidenced).
+3. In-tree virtio-fs depth under load still prefers Cloud Hypervisor (**H4** honesty: attach/API shipped; full vhost-user queue bind under load is CH SoT).
 
 Portable CI maps each code-side use case to a test target in
 [secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)

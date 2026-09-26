@@ -3,6 +3,11 @@
 ## 0.4.0 (unreleased)
 
 ### Changed
+- **Docs: `NEXT-FEATURES` ranked set marked complete.** Intro, post-GA closes
+  (#104 NBD, Keep concurrency, #106 remote seccomp, #108 AppArmor build-image,
+  #111 H4), cleared live-evidence archive vs still-open honesty (H2 virtio-win,
+  optional `mode=remote` live smoke, CH-preferred virtio-fs depth). No Set 20
+  placeholders.
 - **Secure Containers live lab gates.** Provision helper
   (`scripts/provision-secure-containers-lab.sh`), evidence runner
   (`scripts/evidence-sc-live-matrix.sh`), and e2e legs for userns-load /

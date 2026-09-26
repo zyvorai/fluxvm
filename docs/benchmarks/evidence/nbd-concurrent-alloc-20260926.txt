@@ -1,0 +1,9 @@
+nbd-concurrent-alloc 20260926T155246Z
+guestkit=version = "1.2.5"
+fluxctl=fluxctl 0.3.0
+== connect 20@4 ==
+RESULT ok=20 fail=0 collisions=0 concurrency=4 runs=20 elapsed=10.348376999s
+== connect 40@8 ==
+RESULT ok=40 fail=0 collisions=0 concurrency=8 runs=40 elapsed=20.347034782s
+RACE_SYMPTOM=none
+NBD_ALLOC_FIX=PASS
