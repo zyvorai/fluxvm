@@ -1,7 +1,8 @@
 SC + FluxVM hot-cake evidence bundle — 20260926 (finish pass)
 Lab hosts: 175.110.122.71 (SC live / wow / CNI / full phase deploy+test)
 SHA-256 of member files (content-addressed pack; not a GPG signature):
-352259f04ec435cd69eb783c108dc45dd6b0c018a913b1a70914f0f65ce55bc7  docs/benchmarks/evidence/sc-live-remaining-20260926.txt
+d5b484fd7257c71b8277420c6d25a9cfa910937e6df13e51a0f38f5b77d160fa  docs/benchmarks/evidence/sc-live-remaining-20260926.txt
+2038aa1ea648d77ab926c3f12a678043c750e85cfe8656f6b372ff1192aa7ecb  docs/benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt
 838bf80bea69689b8f90899a8e00e6bbc019eec51f2754cb40515916a4c52d83  docs/benchmarks/evidence/sc-live-tty-exec-userns-20260926.txt
 730826f4daded8d4c29d819dd0eaa43bb1e0cfd0f19fb1782bb8bdd8d5f7c524  docs/benchmarks/evidence/sc-live-phases-post93-summary-20260926.txt
 9313b5dac3574e69504735345dbbb53c5a74be19b2fdce93b74eaac794de950e  docs/benchmarks/evidence/sc-live-soft-skips-fixed-20260926.txt
@@ -19,6 +20,7 @@ aeb7d92576feb227e1c8de6c49471433e617a87059068c37b91e540d12e5b966  docs/benchmark
 1c2abbddcab5c618a1239f2d35a9c331f654172c875d308976e0aa7bc10372a4  docs/benchmarks/evidence/direct-datapath-live-realguest-20260920.txt
 8b467a5ff7fcbede1e886abf8f840d7f59e5a894247fe410ccf4b389575722f1  docs/benchmarks/evidence/density-20260918-80.79.5.173.txt
 == Member summaries ==
+-- s2 real kubeconfig 20260926: SECOND CNI (kubeconfig) PASS vs 80.79.5.173
 -- soft-skips closed 20260926: e2e-ctr + seccomp-notify PASS (teardown hang OK)
 -- finish pass 20260926: pass=7 skip=3 fail=0 (SC_LIVE_FINISH=COMPLETE)
    PASS: e2e-sec, userns-k8s, userns-k8s-multi, selinux-mountlabel, ns, cni-churn, wow
@@ -27,4 +29,4 @@ aeb7d92576feb227e1c8de6c49471433e617a87059068c37b91e540d12e5b966  docs/benchmark
 -- cni-churn 20260926: 20 rounds PASS; no SECOND_CNI_KUBECONFIG
 -- s2 20260926: nftables second-policy-engine allow/deny PASS (archived)
 -- prior SC live + Observer + direct datapath + density unchanged
-bundle_sha256=1dfbd38cb054b2410e6160a9a847bb31dd8edb40ed599bcba5cc7a4566a973af
+bundle_sha256=6dd4deee5bee0e4c06522f6f7834a57c089526225f48c3a514410fab44b9fe28
