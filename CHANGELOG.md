@@ -72,6 +72,13 @@
   bounded as its host filesystem. Snapshot and AutoPause remain in-tree-backend features.
 
 ### Fixed
+- **Concurrent guest-agent token inject (NBD race).** Concurrent VM creates
+  could fail with `/dev/nbd0p1 already mounted` or inject the wrong token
+  because guestkit handed two mounts the same `/dev/nbdN` (#104). Fixed in
+  sibling [guestkit#35](https://github.com/zyvorai/guestkit/pull/35) (v1.2.5):
+  flock around allocate+connect. FluxVM CI/lab pick this up via the sibling
+  guestkit checkout — rebuild/redeploy against guestkit ≥1.2.5; Keep can raise
+  `ZYVOR_AGENT_SANDBOX_CREATE_CONCURRENCY` once that version is on the host.
 - **Dataplane resume after failed/cancelled migration.** Quiesce from `migrate start` is cleared when
   start returns an error, when QEMU reports `Failed`/`Cancelled`, on later terminal status polls, and on
   `migrate cancel` — so abandoned migrations no longer leave the VM edge stuck rejecting new flows.
