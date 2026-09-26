@@ -204,10 +204,13 @@ compatibility.
    `io.zyvor.seccomp.notify.mode=addfd`; remote policy RPC remains out of scope.
 6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
    resize testing on self-hosted nodes before production claims.**
-7. **`CLONE_NEWUSER` is opt-in.** Concurrent RuntimeClass load gate
-   (`scripts/e2e-secure-containers-userns-load.sh`) passed on lab with
-   `FLUXVM_CONTAINER_USERNS=1`; distinct user-ns inodes across pods remain a
-   follow-up when the shim env is confirmed on every CRI path.
+7. **`CLONE_NEWUSER` is opt-in.** Live ctr gate
+   (`scripts/e2e-secure-containers-userns-load.sh`, default
+   `FLUXVM_USERNS_MODE=ctr`) proves the shim forwards
+   `FLUXVM_CONTAINER_USERNS=1` and the guest agent creates a user
+   namespace. Cross-VM inode numbers often collide; set
+   `FLUXVM_USERNS_REQUIRE_DISTINCT=1` only for multi-container-in-one-VM
+   layouts. RuntimeClass/k8s load remains optional (`FLUXVM_USERNS_MODE=k8s`).
 8. **Raw block/device-plugin passthrough is scoped, not general.** Pod-scoped
    raw block volumes are hotplugged over QMP from the owning Pod's
    `volumeDevices` tree (or an explicit operator allowlist prefix); VFIO PCI
@@ -229,7 +232,7 @@ surface.
 | P0/P1 multi-VMM (QEMU/CH/FC) | **Done** | FC = ext4 block shares + `FLUXVM_CONTAINER_KERNEL` |
 | P1 seccomp NOTIFY + ADDFD | **Done** | remote policy RPC out of scope |
 | P1 warm-pool claim | **Done** | QEMU/CH; FC cold-create only |
-| Live e2e matrix (TTY, SELinux, CNI load) | **Partial (lab)** | Evidence `docs/benchmarks/evidence/sc-live-matrix-*.txt`: ctr/TTY/namespaces/userns-load/CNI-churn PASS on 175.110.122.71; SELinux mountLabel skipped (no enforcing host); seccomp NOTIFY still timing out under load |
+| Live e2e matrix (TTY, SELinux, CNI load) | **Partial (lab)** | Evidence `docs/benchmarks/evidence/sc-live-*.txt`: ctr/TTY/namespaces/CNI-churn PASS; seccomp NOTIFY deny PASS; USERNS ctr PASS; SELinux mountLabel fail-closed (guest not enforcing at check); k8s RuntimeClass userns load follow-up |
 | Remote policy RPC | **Out of scope** | Set 11 docs |
 | Phase orchestrator | **Done** | `scripts/complete-secure-containers-phases.sh` |
 

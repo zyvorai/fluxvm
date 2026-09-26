@@ -62,6 +62,11 @@ if [[ ! -f "$GUEST_IMG" || "${FLUXVM_SC_REBUILD_GUEST:-0}" == 1 ]]; then
   # Best-effort libseccomp (skip if network backend fails).
   sudo -E virt-customize -a "$TMPIMG" --install libseccomp2 || \
     echo "WARN: could not apt-install libseccomp2 into guest (install later / use image with it)"
+  # Ensure CLONE_NEWUSER works when FLUXVM_CONTAINER_USERNS=1.
+  sudo -E virt-customize -a "$TMPIMG" \
+    --write '/etc/sysctl.d/99-fluxvm-userns.conf:user.max_user_namespaces = 15000
+kernel.apparmor_restrict_unprivileged_userns = 0
+' || echo "WARN: could not write userns sysctl into guest"
   sudo mv -f "$TMPIMG" "$GUEST_IMG"
   sudo chmod 644 "$GUEST_IMG"
 else
