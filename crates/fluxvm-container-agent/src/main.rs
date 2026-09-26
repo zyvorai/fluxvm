@@ -4990,10 +4990,8 @@ fn spawn_gated(
             if want_user_ns {
                 if libc::unshare(libc::CLONE_NEWUSER) != 0 {
                     let err = std::io::Error::last_os_error();
-                    let _ = std::fs::write(
-                        "/tmp/fluxvm-agent-die.txt",
-                        format!("unshare_user:{err}"),
-                    );
+                    let _ =
+                        std::fs::write("/tmp/fluxvm-agent-die.txt", format!("unshare_user:{err}"));
                     libc::_exit(126);
                 }
                 let _ = std::fs::write("/proc/self/setgroups", "deny");

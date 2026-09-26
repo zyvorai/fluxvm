@@ -2733,7 +2733,11 @@ impl Service {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        if spec.pointer("/linux/mountLabel").and_then(|v| v.as_str()).is_none() {
+        if spec
+            .pointer("/linux/mountLabel")
+            .and_then(|v| v.as_str())
+            .is_none()
+        {
             if let Some(label) = mount_label_ann {
                 if let Some(linux) = spec.as_object_mut().and_then(|o| {
                     o.entry("linux")
@@ -4425,7 +4429,9 @@ fn resolve_guest_image(cfg: &RuntimeConfig, override_path: Option<&Path>) -> Any
                     candidate.display()
                 )
             })?;
-            let allow = image_dir.canonicalize().unwrap_or_else(|_| image_dir.clone());
+            let allow = image_dir
+                .canonicalize()
+                .unwrap_or_else(|_| image_dir.clone());
             if !canon.starts_with(&allow) {
                 bail!(
                     "secure-container guest-image annotation must be under {}; got {}",
