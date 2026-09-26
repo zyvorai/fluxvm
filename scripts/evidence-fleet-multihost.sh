@@ -40,24 +40,36 @@ if [[ "$UNIQUE" -lt 2 && "${FLUXVM_FLEET_ALLOW_SINGLE_HOST:-0}" != 1 ]]; then
   exit 2
 fi
 
-# Canary → approve → wave → optional rollback dry path.
-fluxvm-fleet plan "$FLUXVM_FLEET_PLAN" | tee /tmp/fluxvm-s10-plan.json
-# Operator-driven canary (non-interactive approve via env).
-export FLUXVM_FLEET_CANARY_APPROVED="${FLUXVM_FLEET_CANARY_APPROVED:-1}"
-fluxvm-fleet run "$FLUXVM_FLEET_PLAN" --canary-only 2>/tmp/fluxvm-s10-canary.log || {
-  # Some builds use `rollout` subcommand naming — try both.
-  fluxvm-fleet rollout "$FLUXVM_FLEET_PLAN" --canary-only 2>>/tmp/fluxvm-s10-canary.log
-}
+# Canary → approve → remaining waves. With strategy.require_canary_approval,
+# the first `run` stops after wave 0 until `approve` + `resume`.
+STATE_DIR="${FLUXVM_FLEET_STATE_DIR:-/tmp/fluxvm-s10-fleet-state}"
+mkdir -p "$STATE_DIR"
+fluxvm-fleet --state-dir "$STATE_DIR" plan "$FLUXVM_FLEET_PLAN" | tee /tmp/fluxvm-s10-plan.json
+fluxvm-fleet --state-dir "$STATE_DIR" run "$FLUXVM_FLEET_PLAN" 2>/tmp/fluxvm-s10-canary.log \
+  | tee /tmp/fluxvm-s10-canary-out.json
 echo "S10 canary log:" && tail -n 40 /tmp/fluxvm-s10-canary.log || true
+CANARY_STATUS=$(jq -r '.status // empty' /tmp/fluxvm-s10-canary-out.json)
+case "$CANARY_STATUS" in
+  awaiting-canary-approval|complete|paused) ;;
+  *)
+    echo "S10 canary run unexpected status: ${CANARY_STATUS:-missing}" >&2
+    exit 2
+    ;;
+esac
 
-# Rollback path evidence (must not be a no-op stub).
-if fluxvm-fleet rollback --help >/dev/null 2>&1; then
-  fluxvm-fleet rollback "$FLUXVM_FLEET_PLAN" --dry-run | tee /tmp/fluxvm-s10-rollback.json
-elif python3 -B "$ROOT/tools/fluxvm_fleet_rollout.py" rollback --help >/dev/null 2>&1; then
-  python3 -B "$ROOT/tools/fluxvm_fleet_rollout.py" rollback "$FLUXVM_FLEET_PLAN" --dry-run \
-    | tee /tmp/fluxvm-s10-rollback.json
-else
-  echo "WARN: no rollback subcommand; plan+canary evidence only" >&2
+if [[ "$CANARY_STATUS" == "awaiting-canary-approval" || "$CANARY_STATUS" == "paused" ]]; then
+  fluxvm-fleet --state-dir "$STATE_DIR" approve "$FLUXVM_FLEET_PLAN" | tee /tmp/fluxvm-s10-approve.json
+  fluxvm-fleet --state-dir "$STATE_DIR" resume "$FLUXVM_FLEET_PLAN" 2>/tmp/fluxvm-s10-resume.log \
+    | tee /tmp/fluxvm-s10-resume-out.json
+  FINAL=$(jq -r '.status // empty' /tmp/fluxvm-s10-resume-out.json)
+  [[ "$FINAL" == "complete" ]] || {
+    echo "S10 resume expected complete, got: ${FINAL:-missing}" >&2
+    exit 2
+  }
 fi
+
+fluxvm-fleet --state-dir "$STATE_DIR" evidence "$FLUXVM_FLEET_PLAN" | tee /tmp/fluxvm-s10-evidence-path.txt
+# Wave failure path rolls back via rollback_wave inside run; surface journal for audit.
+fluxvm-fleet --state-dir "$STATE_DIR" status "$FLUXVM_FLEET_PLAN" | tee /tmp/fluxvm-s10-status.json
 
 echo "S10 REAL MULTI-HOST FLEET: PASS"
