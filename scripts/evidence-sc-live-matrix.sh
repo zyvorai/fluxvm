@@ -55,9 +55,20 @@ source "$ROOT/scripts/lib/sc-second-cni-env.sh"
   run e2e-tty env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-tty.sh"
   run e2e-ns env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-namespaces.sh"
   run e2e-sec env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-security.sh"
-  run e2e-userns-load env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-userns-load.sh"
+  # Prefer the k8s RuntimeClass path (proven on lab); ctr mode can hang on delete.
+  run e2e-userns-load env FLUXVM_SECURE_CONTAINERS_E2E=1 FLUXVM_USERNS_MODE=k8s \
+    FLUXVM_USERNS_LOAD_N=1 "$ROOT/scripts/e2e-secure-containers-userns-load.sh"
   run e2e-seccomp-notify env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-seccomp-notify.sh"
   run e2e-selinux-mountlabel env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-selinux-mountlabel.sh"
+
+  # S2 — second CNI / second cluster (auto-sources /etc/fluxvm-second-cni.env).
+  run s2 "$ROOT/scripts/evidence-networkpolicy-second-cni.sh"
+
+  # Day-0 wow demo (RuntimeClass + userns load).
+  if [[ -x "$ROOT/scripts/demo-secure-containers-wow.sh" ]]; then
+    run wow env FLUXVM_SECURE_CONTAINERS_E2E=1 FLUXVM_SC_DEMO_MULTI=1 \
+      "$ROOT/scripts/demo-secure-containers-wow.sh"
+  fi
 
   echo "== non-goals (intentionally not implemented) =="
   echo "NON_GOAL remote_seccomp_policy_rpc=out_of_scope"

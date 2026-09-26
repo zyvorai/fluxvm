@@ -58,3 +58,8 @@ PASS: FLUXVM_SECOND_CNI_KUBECONFIG -> 80.79.5.173 (distinct k3s API)
 RuntimeClass=runc (SC not installed on second host; NetworkPolicy Set17 proof)
 Drop-in: /etc/fluxvm-second-cni.env (auto-sourced by evidence-networkpolicy-second-cni.sh)
 Evidence: docs/benchmarks/evidence/sc-live-s2-real-kubeconfig-20260926.txt
+
+== Post-S11 soft finish (20260926 evening) ==
+summary pass=10 skip=0 fail=0; SC_LIVE_MATRIX=COMPLETE
+Evidence: docs/benchmarks/evidence/sc-live-matrix-20260926.txt
+Includes s2 (second-cluster kubeconfig) + wow; prior soft-skip cleared.
