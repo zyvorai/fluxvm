@@ -1,0 +1,25 @@
+FluxVM SC soft finish (post-#93) 20260926T125827Z
+host=NLDW4-4-04-32
+E2E PASS: io.containerd.fluxvm.v2 executed docker.io/library/busybox:1.36 inside a FluxVM sandbox (ctr_rc=137)
+RESULT e2e-ctr=PASS
+E2E PASS: VSOCK stdio + init TTY + exec TTY + ResizePty
+RESULT e2e-tty=PASS
+RESULT e2e-sec=PASS
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+RESULT e2e-userns-k8s=PASS
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)
+RESULT e2e-userns-k8s-multi=PASS
+E2E PASS: seccomp NOTIFY broker denied chmod (ctr_rc=137)
+RESULT e2e-seccomp-notify=PASS
+E2E PASS: SELinux mountLabel green (context= / container_file_t)
+RESULT e2e-selinux-mountlabel=PASS
+FluxVM Set 6 namespace isolation E2E: PASS (shared IPC/UTS, private PID/mount per container)
+RESULT e2e-ns=PASS
+RESULT cni-churn=PASS
+RESULT s2=SKIP/soft-fail rc=1
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)
+WOW DEMO: OK
+RESULT wow=PASS
+summary pass=10 skip=1 fail=0
+SC_LIVE_FINISH_POST93=COMPLETE

@@ -44,3 +44,11 @@ Remote policy RPC; FC live virtiofs; Kata-equivalence claims.
 e2e-ctr + e2e-seccomp-notify PASS after hardening (skip pull if present,
 timeout -k, accept guest marker when ctr teardown hangs).
 Evidence: docs/benchmarks/evidence/sc-live-soft-skips-fixed-20260926.txt
+
+== Post-#93 soft finish (20260926) ==
+summary pass=10 skip=1 fail=0; SC_LIVE_FINISH_POST93=COMPLETE
+PASS: ctr, tty, sec, userns-k8s, userns-k8s-multi, seccomp-notify,
+      selinux-mountlabel, ns, cni-churn, wow
+soft-skip: s2 (nft stand-in already archived; needs SECOND_CNI_KUBECONFIG
+for hard pass under this wrapper)
+Evidence: docs/benchmarks/evidence/sc-live-phases-post93-summary-20260926.txt
