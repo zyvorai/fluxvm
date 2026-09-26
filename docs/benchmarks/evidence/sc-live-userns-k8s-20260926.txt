@@ -1,0 +1,4 @@
+== userns load (k8s): 1 concurrent RuntimeClass=fluxvm pods (require_distinct=0) ==
+pod/fluxvm-userns-load-900543-1 created
+pod/fluxvm-userns-load-900543-1 condition met
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)

@@ -168,6 +168,13 @@ Everything through Set 13 below, plus:
 **Status: GA.** Scope boundaries below — not a claim of full Kata Containers
 compatibility.
 
+**Supported production profile:** see
+[secure-containers-supported-profile.md](secure-containers-supported-profile.md)
+(QEMU/CH primary, allowlisted hostPath, in-cluster NetworkPolicy → Sentinel,
+isolation without TEE). Flip runbook:
+[secure-containers-flip-runtimeclass.md](secure-containers-flip-runtimeclass.md).
+Sentinel wedge: [sentinel-wedge.md](sentinel-wedge.md).
+
 1. **QEMU, Cloud Hypervisor, and Firecracker are supported Secure Containers
    VMMs.** Set `FLUXVM_CONTAINER_BACKEND=qemu|cloud-hypervisor|firecracker`.
    Firecracker has **no virtio-fs** upstream: Pod shares are packed to ext4
@@ -204,13 +211,13 @@ compatibility.
    `io.zyvor.seccomp.notify.mode=addfd`; remote policy RPC remains out of scope.
 6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
    resize testing on self-hosted nodes before production claims.**
-7. **`CLONE_NEWUSER` is opt-in.** Live ctr gate
-   (`scripts/e2e-secure-containers-userns-load.sh`, default
-   `FLUXVM_USERNS_MODE=ctr`) proves the shim forwards
-   `FLUXVM_CONTAINER_USERNS=1` and the guest agent creates a user
-   namespace. Cross-VM inode numbers often collide; set
-   `FLUXVM_USERNS_REQUIRE_DISTINCT=1` only for multi-container-in-one-VM
-   layouts. RuntimeClass/k8s load remains optional (`FLUXVM_USERNS_MODE=k8s`).
+7. **`CLONE_NEWUSER` is opt-in.** Live gates
+   (`scripts/e2e-secure-containers-userns-load.sh`) prove the shim forwards
+   `FLUXVM_CONTAINER_USERNS=1` and the guest agent creates a user namespace.
+   Cross-VM inode numbers often collide; set
+   `FLUXVM_USERNS_REQUIRE_DISTINCT=1` for multi-container-in-one-VM layouts
+   (`FLUXVM_USERNS_MODE=k8s-multi`). RuntimeClass load:
+   `FLUXVM_USERNS_MODE=k8s` (lab evidence 2026-09-26).
 8. **Raw block/device-plugin passthrough is scoped, not general.** Pod-scoped
    raw block volumes are hotplugged over QMP from the owning Pod's
    `volumeDevices` tree (or an explicit operator allowlist prefix); VFIO PCI
@@ -232,7 +239,7 @@ surface.
 | P0/P1 multi-VMM (QEMU/CH/FC) | **Done** | FC = ext4 block shares + `FLUXVM_CONTAINER_KERNEL` |
 | P1 seccomp NOTIFY + ADDFD | **Done** | remote policy RPC out of scope |
 | P1 warm-pool claim | **Done** | QEMU/CH; FC cold-create only |
-| Live e2e matrix (TTY, SELinux, CNI load) | **Partial (lab)** | Evidence `docs/benchmarks/evidence/sc-live-*.txt`: ctr/TTY/namespaces/CNI-churn PASS; seccomp NOTIFY deny PASS; USERNS ctr PASS; SELinux mountLabel fail-closed (guest not enforcing at check); k8s RuntimeClass userns load follow-up |
+| Live e2e matrix (TTY, SELinux, CNI load, userns) | **Lab archived** | `docs/benchmarks/evidence/sc-live-*.txt` + [sc-hotcake-bundle-20260926.txt](benchmarks/evidence/sc-hotcake-bundle-20260926.txt): ctr/TTY/namespaces/CNI-churn/NOTIFY; SELinux mountLabel green; k8s userns Succeeded; k8s-multi `distinct_user_ns=2`; guestkit Fedora/btrfs token inject. Multi-CNI under load prefers `FLUXVM_SECOND_CNI_KUBECONFIG` (nftables stand-in portable default) |
 | Remote policy RPC | **Out of scope** | Set 11 docs |
 | Phase orchestrator | **Done** | `scripts/complete-secure-containers-phases.sh` |
 
@@ -313,8 +320,9 @@ export FLUXVM_API_URL=http://127.0.0.1:7788
 ```
 
 Merge `deploy/containerd/fluxvm-runtime.toml` into containerd configuration,
-restart containerd, and install `deploy/containerd/runtimeclass.yaml` only on a
-development cluster until the CNI gate above lands.
+restart containerd, and install `deploy/containerd/runtimeclass.yaml`. Prefer
+[secure-containers-flip-runtimeclass.md](secure-containers-flip-runtimeclass.md)
+or `scripts/provision-secure-containers-lab.sh` for Absolute `BinaryName` on k3s.
 
 ## Test levels
 

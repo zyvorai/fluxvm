@@ -32,9 +32,23 @@ spec:
 YAML
 
 kubectl -n "$NAMESPACE" wait --for=condition=Ready "pod/$POD" --timeout=180s
-mode=$(kubectl -n "$NAMESPACE" exec "$POD" -- sh -c "grep '^Seccomp:' /proc/self/status | sed 's/^Seccomp:[[:space:]]*//' | tr -d '\r'")
+# Prefer logs over exec: with FLUXVM_CONTAINER_USERNS=1, kubectl exec joins the
+# container user ns and can fail setns (wait 32256) even when the init task is healthy.
+mode=""
+for _ in $(seq 1 30); do
+  log="$(kubectl -n "$NAMESPACE" logs "$POD" 2>/dev/null || true)"
+  mode="$(grep -E '^Seccomp:[[:space:]]*[0-9]+' <<<"$log" | head -1 | awk '{print $2}' | tr -d '\r' || true)"
+  [[ -n "$mode" ]] && break
+  sleep 2
+done
+if [[ -z "$mode" ]]; then
+  # Fallback exec (works when userns is off)
+  mode=$(kubectl -n "$NAMESPACE" exec "$POD" -- sh -c "grep '^Seccomp:' /proc/self/status | sed 's/^Seccomp:[[:space:]]*//' | tr -d '\r'" || true)
+fi
 if [[ "$mode" != "2" ]]; then
   echo "expected seccomp filter mode 2, got: ${mode:-<empty>}" >&2
+  kubectl -n "$NAMESPACE" logs "$POD" || true
+  kubectl -n "$NAMESPACE" describe "pod/$POD" || true
   exit 1
 fi
 

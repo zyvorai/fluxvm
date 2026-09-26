@@ -1,0 +1,22 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs inside the SELinux Secure Containers guest before fluxvm-guest-agent.
+# Ensures selinuxfs is mounted and policy is loaded so the container-agent's
+# libselinux is_selinux_enabled() check succeeds for OCI mountLabel.
+
+[Unit]
+Description=Ensure SELinux filesystem/policy for FluxVM SC
+DefaultDependencies=no
+After=local-fs.target
+Before=fluxvm-guest-agent.service multi-user.target
+ConditionPathExists=/etc/selinux/config
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Invoke via bash so an unlabeled script context cannot block ExecStart.
+ExecStart=/bin/bash /usr/local/libexec/fluxvm-selinux-ensure.sh
+
+[Install]
+WantedBy=multi-user.target

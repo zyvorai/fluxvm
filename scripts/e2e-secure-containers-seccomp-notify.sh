@@ -15,15 +15,18 @@ fi
 
 RUNTIME="${RUNTIME:-io.containerd.fluxvm.v2}"
 IMAGE="${IMAGE:-docker.io/library/busybox:1.36}"
-CTR="${CTR:-ctr}"
 ID="fluxvm-seccomp-notify-$$"
 PROFILE="$(mktemp)"
 OUT="$(mktemp)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib/sc-ctr-env.sh"
+ADDR="${CONTAINERD_ADDRESS}"
 
 cleanup() {
-  $CTR tasks kill -s SIGKILL "$ID" >/dev/null 2>&1 || true
-  $CTR tasks delete "$ID" >/dev/null 2>&1 || true
-  $CTR containers delete "$ID" >/dev/null 2>&1 || true
+  $CTR --address "$ADDR" tasks kill -s SIGKILL "$ID" >/dev/null 2>&1 || true
+  $CTR --address "$ADDR" tasks delete "$ID" >/dev/null 2>&1 || true
+  $CTR --address "$ADDR" containers delete "$ID" >/dev/null 2>&1 || true
   rm -f "$PROFILE" "$OUT"
 }
 trap cleanup EXIT
@@ -31,7 +34,7 @@ trap cleanup EXIT
 command -v containerd-shim-fluxvm-v2 >/dev/null
 test -e /dev/kvm
 curl -fsS "${FLUXVM_API_URL:-http://127.0.0.1:7788}/healthz" >/dev/null
-$CTR images pull "$IMAGE" >/dev/null
+$CTR --address "$ADDR" images pull "$IMAGE" >/dev/null
 
 cat >"$PROFILE" <<'JSON'
 {
@@ -45,7 +48,7 @@ JSON
 
 set +e
 timeout "${FLUXVM_SECCOMP_NOTIFY_TIMEOUT:-240}" \
-  $CTR run --rm --runtime "$RUNTIME" \
+  $CTR --address "$ADDR" run --rm --runtime "$RUNTIME" \
   --seccomp --seccomp-profile "$PROFILE" \
   --annotation io.zyvor.seccomp.notify.mode=deny \
   "$IMAGE" "$ID" \
@@ -56,9 +59,9 @@ set -e
 
 # Force-delete: notify workloads can leave the task RUNNING after printing
 # (stdio/broker teardown); the gate is the denied chmod evidence above.
-$CTR tasks kill -s SIGKILL "$ID" >/dev/null 2>&1 || true
-$CTR tasks delete --force "$ID" >/dev/null 2>&1 || true
-$CTR containers delete "$ID" >/dev/null 2>&1 || true
+$CTR --address "$ADDR" tasks kill -s SIGKILL "$ID" >/dev/null 2>&1 || true
+$CTR --address "$ADDR" tasks delete --force "$ID" >/dev/null 2>&1 || true
+$CTR --address "$ADDR" containers delete "$ID" >/dev/null 2>&1 || true
 
 if grep -q 'before' "$OUT" && grep -q 'after' "$OUT"; then
   if grep -qiE 'Permission denied|Operation not permitted|RC:[1-9]' "$OUT" \

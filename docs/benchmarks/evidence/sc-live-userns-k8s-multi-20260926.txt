@@ -1,0 +1,6 @@
+== userns load (k8s-multi): 1 pod / 2 containers RuntimeClass=fluxvm (require_distinct=1) ==
+pod/fluxvm-userns-load-904737-multi created
+pod/fluxvm-userns-load-904737-multi condition met
+  probe-1 -> user:[4026532501]
+  probe-2 -> user:[4026532504]
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)

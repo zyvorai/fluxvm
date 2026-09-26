@@ -1,0 +1,17 @@
+== wow: RuntimeClass fluxvm must exist ==
+== wow: k8s userns (N=1) ==
+== userns load (k8s): 1 concurrent RuntimeClass=fluxvm pods (require_distinct=0) ==
+pod/fluxvm-userns-load-1240521-1 created
+pod/fluxvm-userns-load-1240521-1 condition met
+E2E PASS: CLONE_NEWUSER load (1 samples; distinct_user_ns=1; mode=k8s)
+== wow: k8s-multi distinct userns (N=2) ==
+== userns load (k8s-multi): 1 pod / 2 containers RuntimeClass=fluxvm (require_distinct=1) ==
+pod/fluxvm-userns-load-1244603-multi created
+pod/fluxvm-userns-load-1244603-multi condition met
+  probe-1 -> user:[4026532501]
+  probe-2 -> user:[4026532504]
+E2E PASS: CLONE_NEWUSER load (2 samples; distinct_user_ns=2; mode=k8s-multi)
+WOW DEMO: OK
+  flip runbook: docs/secure-containers-flip-runtimeclass.md
+  supported profile: docs/secure-containers-supported-profile.md
+  evidence pack: docs/benchmarks/evidence/sc-hotcake-bundle-20260926.txt

@@ -17,6 +17,8 @@ mkdir -p "$OUT_DIR"
 
 export FLUXVM_SECURE_CONTAINERS_E2E="${FLUXVM_SECURE_CONTAINERS_E2E:-1}"
 export FLUXVM_PHASES_SOFT="${FLUXVM_PHASES_SOFT:-1}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib/sc-ctr-env.sh"
 
 {
   echo "FluxVM Secure Containers live matrix evidence"

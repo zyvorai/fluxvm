@@ -1,6 +1,9 @@
 # FluxVM — Product Overview
 
-**A host-local VM API — without the platform rewrite.**
+**A host-local VM API — without the platform rewrite.** Secure Containers add
+Kubernetes RuntimeClass `fluxvm`: a Pod with its own guest kernel, plus
+**Sentinel** host↔guest policy ([sentinel-wedge.md](sentinel-wedge.md)) — not
+Kata-equivalent packaging ([secure-containers-supported-profile.md](secure-containers-supported-profile.md)).
 
 This doc is the capability tour and the one authoritative metrics table for FluxVM. For the pitch and quick start, see the [README](../README.md); for who this is (and isn't) for, see [POSITIONING.md](POSITIONING.md); for the exhaustive feature checklist, see [FEATURES.md](../FEATURES.md).
 
@@ -43,9 +46,9 @@ The exhaustive, line-by-line checklist lives in **[FEATURES.md](../FEATURES.md)*
 
 **Kubernetes & fleet** — `DisposableVm` CRD + node-local operator (verified end to end against a real k3s cluster, 9/9 checks passing); `fluxvm-microvm` scheduler-native path as a KubeVirt alternative; `fluxvm-agent` distributed node-agent with a central fleet registry and load-aware placement, verified across two real, physically separate hosts.
 
-**Secure Containers** *(GA)* — containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one QEMU FluxVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, guest AppArmor/SELinux/seccomp enforcement. Not Kata-equivalent — see [docs/secure-containers.md](secure-containers.md) for the itemized GA boundaries.
+**Secure Containers** *(GA)* — containerd runtime-v2 shim (`containerd-shim-fluxvm-v2`) mapping a Pod/task group onto one FluxVM microVM, with CNI L2, cgroup-v2 stats, VSOCK stdio/TTY, namespaces, device passthrough, guest AppArmor/SELinux/seccomp, and Sentinel NetworkPolicy. Supported profile + flip runbook: [secure-containers-supported-profile.md](secure-containers-supported-profile.md), [secure-containers-flip-runtimeclass.md](secure-containers-flip-runtimeclass.md). Not Kata-equivalent — see [secure-containers.md](secure-containers.md).
 
-**Sentinel observability** — eBPF-based host + guest runtime intelligence: per-VM syscall/page-fault telemetry, drop-reason tracking, flight recorder, BPF-LSM VMM guard/QoS, XDP shield, topology steering.
+**Sentinel** — eBPF host + guest policy/observability for Secure Containers and the Network Fabric edge; buyer wedge: [sentinel-wedge.md](sentinel-wedge.md).
 
 ---
 
@@ -140,7 +143,26 @@ Every figure below is counted directly from source, not estimated.
 | Multi-host fleet validation | Verified across 2 real, physically separate hosts | [docs/operations.md](operations.md#distributed-node-agent) |
 | Storage backends | 4 | qcow2/raw (default), LVM thin, NBD, Ceph RBD (RBD verified against a real Rook Ceph cluster) |
 | Network modes | 4 (+1 opt-in) | user-mode NAT, TAP+bridge, netns+DHCP, macvtap — all 4 SSH-verified end to end in regression tests; bridge-less `direct` is GA for Secure Containers (`FLUXVM_CONTAINER_CNI_DATAPATH=auto\|direct\|bridge`, live Cilium/KVM evidence in [direct-datapath.md](direct-datapath.md)) |
-| Boot latency / VM density / migration downtime | **Method published, not a sizing SLA** | `scripts/record-baseline.sh` records cold create (`avg_create_ms`, control-plane time), warm pool claim (`warm_claim_ms`), Secure Containers boot, and delete on one host under `docs/benchmarks/evidence/`. `migration_downtime` comes from QMP `query-migrate` on the receiver path and is not boot latency. Repeat the same script on a second host before capacity planning. Firecracker’s 125 ms / 5-per-core figures in [capability-figures.md](capability-figures.md) are not FluxVM SLAs. |
+| Boot latency / VM density / migration downtime | **Method published; archived sample numbers below — not a sizing SLA** | `scripts/record-baseline.sh` + [benchmarks/evidence/sc-hotcake-bundle-20260926.txt](benchmarks/evidence/sc-hotcake-bundle-20260926.txt). Firecracker’s 125 ms / 5-per-core figures in [capability-figures.md](capability-figures.md) are not FluxVM SLAs. |
+
+### Capacity table (archived evidence only)
+
+Every row cites a file under `docs/benchmarks/evidence/`. Do not treat these as
+product SLAs — they are lab archives for planning conversations.
+
+| Metric | Archived value | Evidence |
+|---|---|---|
+| Warm-pool claim (API, QEMU) | 24 ms to running member | [direct-datapath-live-realguest-20260920.txt](benchmarks/evidence/direct-datapath-live-realguest-20260920.txt) §5 |
+| Bridge vs direct pod↔pod RTT (real guest) | p50 ~0.53 ms vs ~0.46 ms (inside run noise) | same file §3 |
+| Bridge vs direct TCP (1 GiB nc) | ~0.34 vs ~0.37 Gbit/s (no clear guest-visible win) | same file §3 |
+| flux-vm sandbox cold create (N=4, 256 MiB) | avg ~28.5 s; VMM RSS ~5.5 MiB | [density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt) Run B |
+| flux-vm sandbox cold create (N=8) | avg ~65 s | same file Run A |
+| Policy Observer RSS (idle scrape) | VmRSS ~8.8 MiB | [policy-observer-scrape-20260918T035554Z.txt](benchmarks/evidence/policy-observer-scrape-20260918T035554Z.txt) |
+| SC k8s userns | Succeeded, distinct_user_ns=1 | [sc-live-userns-k8s-20260926.txt](benchmarks/evidence/sc-live-userns-k8s-20260926.txt) |
+| SC in-VM distinct userns | distinct_user_ns=2 | [sc-live-userns-k8s-multi-20260926.txt](benchmarks/evidence/sc-live-userns-k8s-multi-20260926.txt) |
+| SC live finish pass (lab) | pass=7 skip=3 fail=0 | [sc-live-phases-summary-20260926.txt](benchmarks/evidence/sc-live-phases-summary-20260926.txt) |
+
+Bundle index + SHA-256 of members: [sc-hotcake-bundle-20260926.txt](benchmarks/evidence/sc-hotcake-bundle-20260926.txt).
 
 Unlike some of the figures in this table, we deliberately don't include a lines-of-code count or an aggregate REST-endpoint count — neither is currently asserted anywhere in this project's own docs, and inventing one here would just create the kind of stale, unverifiable claim this whole document is trying to avoid.
 

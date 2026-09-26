@@ -545,6 +545,15 @@ fn inject_guest_agent_token_blocking(disk: &Path, token: &str) -> Result<()> {
         .with_context(|| format!("writing {TOKEN_FILE_PATH}"))?;
     g.chmod(0o600, TOKEN_FILE_PATH)
         .context("chmod guest-agent token file")?;
+    // Fedora/RHEL enforcing guests reject unlabeled files; restorecon so the
+    // guest-agent can read the token and bind AF_VSOCK under SELinux.
+    let _ = g.command(&[
+        "bash",
+        "-c",
+        &format!(
+            "restorecon -F {TOKEN_FILE_PATH} 2>/dev/null || chcon -t etc_t {TOKEN_FILE_PATH} 2>/dev/null || true"
+        ),
+    ]);
 
     let _ = g.umount_all();
     g.shutdown().context("shutting down guestfs")?;

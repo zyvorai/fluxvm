@@ -4,8 +4,13 @@ Runtime id: `io.containerd.fluxvm.v2`
 Shim binary: `containerd-shim-fluxvm-v2`  
 Kubernetes RuntimeClass handler: `fluxvm`
 
+**Day-0:** [docs/secure-containers-15min-lab.md](../../docs/secure-containers-15min-lab.md) ·
+[flip runbook](../../docs/secure-containers-flip-runtimeclass.md) ·
+[supported profile](../../docs/secure-containers-supported-profile.md)
+
 `fluxvm-runtime.toml` is a merge fragment, not a complete containerd config.
-Use `scripts/install-secure-containers.sh` to install the host binaries, then
+Use `scripts/install-secure-containers.sh` or
+`scripts/provision-secure-containers-lab.sh` to install the host binaries, then
 merge the runtime fragment and restart containerd. Example shim environment
 variables live in [`env.example`](env.example) (backends, CNI, hostPath,
 Firecracker kernel).

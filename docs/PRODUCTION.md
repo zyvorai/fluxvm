@@ -5,21 +5,21 @@ images — not only the dataplane.
 
 ## 1. Control plane
 
-- [ ] `listen` is loopback **or** `auth.require = true` with real tokens and/or OIDC
-- [ ] Per-token `max_vms_per_token` / `max_memory_mib_per_token`
-- [ ] Tokens carry optional `tenant`; VM specs set `tenant`
-- [ ] Token/OIDC tenant is authoritative on create (inherited when omitted; mismatch → 403)
-- [ ] Token tenant auto-scopes list / get / mutate (other tenants → 404)
-- [ ] `GET /readyz` returns HTTP 503 when `"ok": false`
-- [ ] `GET /v1/vms?tenant=<id>` filters the fleet
-- [ ] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
-- [ ] `GET /healthz` for liveness; `/readyz` for readiness probes
+- [x] `listen` is loopback **or** `auth.require = true` with real tokens and/or OIDC — see [tutorials/production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md); merge [configs/production-hardening.toml](../configs/production-hardening.toml)
+- [x] Per-token `max_vms_per_token` / `max_memory_mib_per_token` — production-hardening + admission policy
+- [x] Tokens carry optional `tenant`; VM specs set `tenant` — same tutorial
+- [x] Token/OIDC tenant is authoritative on create (inherited when omitted; mismatch → 403)
+- [x] Token tenant auto-scopes list / get / mutate (other tenants → 404)
+- [x] `GET /readyz` returns HTTP 503 when `"ok": false` — DaemonSet probes in [deploy/k8s/daemonset.yaml](../deploy/k8s/daemonset.yaml); [deploy/k8s/README.md](../deploy/k8s/README.md)
+- [x] `GET /v1/vms?tenant=<id>` filters the fleet
+- [x] `GET /readyz` returns `"ok": true` (state dir + dataplane if required)
+- [x] `GET /healthz` for liveness; `/readyz` for readiness probes — DaemonSet wiring above
 - [ ] `auth.oidc_issuer` + `auth.oidc_audience` set together when using OIDC JWTs (or left unset)
 - [ ] Optional `[tls]` / `tls.client_ca` when terminating TLS on FluxVM itself
 - [ ] JSON audit target `fluxvm_audit` shipped to your collector
-- [ ] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
-- [ ] Example: [examples/create-vm-prod.json](../examples/create-vm-prod.json)
-- [ ] DevOps gates: [DEVOPS.md](DEVOPS.md) + `scripts/devops-gate.sh` / `scripts/upgrade-snapshot.sh`
+- [x] Tutorials: [production/01-readyz-tenant-auth.md](tutorials/production/01-readyz-tenant-auth.md)
+- [x] Example: [examples/create-vm-prod.json](../examples/create-vm-prod.json)
+- [x] DevOps gates: [DEVOPS.md](DEVOPS.md) + `scripts/devops-gate.sh` / `scripts/upgrade-snapshot.sh`
 - [ ] **Ship stack:** `./scripts/ship USER@HOST` (or from Fabric repo) then confirm done card
 - [ ] **Production readiness script:** `FABRIC_URL=… FLUXVM_URL=… ./scripts/test-production-readiness.sh`
   (control + Network Fabric health + Service Fabric schema/pins; optional `VIP=` SLO)
@@ -27,8 +27,8 @@ images — not only the dataplane.
 ## 2. Compute
 
 - [ ] `/dev/kvm` present; cgroup v2 delegated
-- [ ] Firecracker jailer on for untrusted guests (`[jailer] enabled = true`; set `enforce = true` or use `auth.require` + non-loopback listen so serve/launch fail closed) — merge [configs/production-hardening.toml](../configs/production-hardening.toml)
-- [ ] Jailed FC boots use serial-off defaults (`8250.nr_uarts=0`) unless you override `kernel_args`
+- [x] Firecracker jailer on for untrusted guests (`[jailer] enabled = true`; set `enforce = true` or use `auth.require` + non-loopback listen so serve/launch fail closed) — merge [configs/production-hardening.toml](../configs/production-hardening.toml); multi-tenant remains **opt-in, not a public-cloud boundary** ([README](../README.md#maturity-whats-real-today))
+- [x] Jailed FC boots use serial-off defaults (`8250.nr_uarts=0`) unless you override `kernel_args`
 - [ ] VMM logs bounded (journald/logrotate or redirect) — guest can influence FC stdout/log volume
 - [ ] `allowed_backends` pinned
 - [ ] Warm pools only on dedicated hosts
@@ -38,14 +38,14 @@ images — not only the dataplane.
 - [ ] Optional `FLUXVM_VMM_SECCOMP=1` for QEMU/Cloud Hypervisor children (log mode by default; set kill mode only after validating the allowlist) — Firecracker/jailer is not covered yet
 - [ ] AppArmor (`deploy/apparmor`) or SELinux reference module (`deploy/selinux`) loaded for the `fluxvm` unit when you want MAC confinement
 - [ ] Windows + QGA only on QEMU ([ch-windows-qga.md](ch-windows-qga.md)); `fluxvm_engine=kvm` lab-only
-- [ ] Capability figures: Track A isolation checklist done; Track B density numbers measured only if you quote microVM packing ([capability-figures.md](capability-figures.md))
+- [x] Capability figures: Track A isolation checklist done; Track B density archive productized next to SC sizing — [PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md) capacity table + [benchmarks/evidence/density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt) (not an FC Track B SLA)
 
 ## 3. Images & storage
 
-- [ ] Catalog names instead of raw paths where possible
-- [ ] Ed25519 and/or `cosign verify-blob` on catalog entries
-- [ ] `policy.require_catalog_names = true` when unsigned path creates must be rejected
-- [ ] `allowed_image_dirs` set (symlink-aware)
+- [x] Catalog names instead of raw paths where possible — [operations.md](operations.md#image-catalog--signing)
+- [x] Ed25519 and/or `cosign verify-blob` on catalog entries — same
+- [x] `policy.require_catalog_names = true` when unsigned path creates must be rejected — production-hardening
+- [x] `allowed_image_dirs` set (symlink-aware)
 - [ ] Storage backend chosen (local qcow2, LVM-thin, NBD, Ceph RBD) and backed up
 
 ## 4. Network
@@ -62,20 +62,26 @@ images — not only the dataplane.
 
 ## 5. Kubernetes
 
-- [ ] DaemonSet readiness → `/readyz`; liveness → `/healthz`
-- [ ] Privileged DaemonSet + hostNetwork as in `deploy/k8s/`
-- [ ] Host `nbd` module loaded if GuestKit customize runs on-node
+- [x] DaemonSet readiness → `/readyz`; liveness → `/healthz` — [deploy/k8s/daemonset.yaml](../deploy/k8s/daemonset.yaml)
+- [x] Privileged DaemonSet + hostNetwork as in `deploy/k8s/` — [deploy/k8s/README.md](../deploy/k8s/README.md)
+- [x] Host `nbd` module loaded if GuestKit customize runs on-node — documented in [deploy/k8s/README.md](../deploy/k8s/README.md) (`modprobe nbd`)
 - [ ] Operator talks to an already-healthy fabricd/FluxVM API
 - [ ] Optional MicroVM stack after DaemonSet: `deploy/k8s/microvm/`
       (GuestImage Ready on host files; `--convert` opt-in only)
       (`fluxvm-microvm` controller + node-agent; API
       `microvm.fluxvm.zyvor.io`) — [microvm.md](microvm.md),
       [tutorials/microvm/](tutorials/microvm/README.md)
-- [ ] Secure Containers RuntimeClass **live lab** on nodes after guest-image +
+- [x] Secure Containers RuntimeClass **live lab** on nodes after guest-image +
       CNI L2 + Set 3–11 smoke (code-side P0/P1 multi-VMM is **Done** on main;
-      this checkbox is evidence under load, not missing features) —
-      [secure-containers.md](secure-containers.md) (rollup + per-Set links),
-      `deploy/containerd/` (`FLUXVM_CONTAINER_CNI=0` for user-mode only)
+      2026-09-26 lab: SELinux mountLabel green, guestkit Fedora/btrfs token
+      inject, `FLUXVM_USERNS_MODE=k8s` Succeeded, k8s-multi
+      `distinct_user_ns=2`, finish pass `pass=7 skip=3 fail=0`
+      (`SC_LIVE_FINISH=COMPLETE`) —
+      [benchmarks/evidence/sc-hotcake-bundle-20260926.txt](benchmarks/evidence/sc-hotcake-bundle-20260926.txt)) —
+      [secure-containers.md](secure-containers.md),
+      [secure-containers-supported-profile.md](secure-containers-supported-profile.md),
+      [secure-containers-15min-lab.md](secure-containers-15min-lab.md),
+      `deploy/containerd/`
 
 ## 6. Fleet (non-k8s)
 
@@ -135,13 +141,16 @@ components, unrelated to `fluxvm-agent`'s VM-placement fleet.
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.
 Secure Containers RuntimeClass as full Kata-equivalent (Firecracker has no
-live virtiofs write-through, remote policy RPC out of scope; live SELinux
-mountLabel + seccomp NOTIFY under load still open) —
+live virtiofs write-through, remote policy RPC out of scope) —
 [secure-containers.md](secure-containers.md). Device-cgroup enforcement
 (`BPF_PROG_TYPE_CGROUP_DEVICE`, Set 10), the seccomp user-notification
-broker (Set 11), and `SECCOMP_IOCTL_NOTIF_ADDFD` are implemented; live-node
-validation of the seccomp notify path against a real containerd/Kubernetes
-Pod and a real enforcing-SELinux mount label are still open.
+broker (Set 11), and `SECCOMP_IOCTL_NOTIF_ADDFD` are implemented; live
+seccomp NOTIFY deny and enforcing-SELinux `linux.mountLabel` green path
+are gated by `scripts/e2e-secure-containers-seccomp-notify.sh` and
+`scripts/e2e-secure-containers-selinux-mountlabel.sh`; CLONE_NEWUSER load
+(including RuntimeClass and in-VM distinct userns) by
+`scripts/e2e-secure-containers-userns-load.sh` (archive under
+`docs/benchmarks/evidence/sc-live-*.txt`).
 Sentinel Pod-scoped network policy (Set 6S) automatically enforcing
 Kubernetes `NetworkPolicy` objects — a standalone `fluxvm-networkpolicy-
 controller` DaemonSet compiles both egress and ingress `NetworkPolicy`

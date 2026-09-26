@@ -1,0 +1,5 @@
+Lab host: 175.110.122.71
+Image: /var/lib/fluxvm/images/secure-container-selinux.qcow2 (Fedora Cloud btrfs)
+guestkit inspect_os roots=["btrfsvol:/dev/sda4/root"]
+mounts include / = btrfsvol:/dev/sda4/root plus /boot,/boot/efi,/home,/var
+token inject via guestkit only (no virt-customize / libguestfs): OK

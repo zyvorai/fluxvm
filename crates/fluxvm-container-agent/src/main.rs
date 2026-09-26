@@ -1301,7 +1301,12 @@ fn apply_oci_mounts(
         }
 
         let (flags, data) = mount_options(&options, is_bind);
-        let data = format_selinux_mount_data(data.as_deref(), mount_label)?;
+        let apply_label = mount_label.is_some() && selinux_context_supported(fs_type, is_bind);
+        let data = if apply_label {
+            format_selinux_mount_data(data.as_deref(), mount_label)?
+        } else {
+            data
+        };
         let mount_result = mount_one(
             source,
             &target,
@@ -1324,7 +1329,7 @@ fn apply_oci_mounts(
             }
         }
 
-        if mount_label.is_some() {
+        if apply_label {
             security_counters()
                 .selinux_mounts_labeled
                 .fetch_add(1, Ordering::Relaxed);
@@ -2421,6 +2426,36 @@ fn validate_selinux_mount_label(label: &str) -> Result<()> {
             .fetch_add(1, Ordering::Relaxed);
     }
     result
+}
+
+/// Pseudo/kernel filesystems that reject `context=` mount options with EINVAL
+/// on Fedora (and some other kernels). Bind mounts and ordinary disk/tmpfs
+/// mounts still receive OCI `linux.mountLabel`.
+fn selinux_context_supported(fs_type: &str, is_bind: bool) -> bool {
+    if is_bind {
+        return true;
+    }
+    !matches!(
+        fs_type,
+        "proc"
+            | "sysfs"
+            | "mqueue"
+            | "devpts"
+            | "cgroup"
+            | "cgroup2"
+            | "devtmpfs"
+            | "securityfs"
+            | "efivarfs"
+            | "tracefs"
+            | "debugfs"
+            | "pstore"
+            | "fusectl"
+            | "configfs"
+            | "bpf"
+            | "nsfs"
+            | "ramfs"
+            | "hugetlbfs"
+    )
 }
 
 fn format_selinux_mount_data(
@@ -4448,6 +4483,24 @@ fn rlimit_resource(kind: &str) -> Option<u32> {
     })
 }
 
+/// Kubernetes / CRI sandbox sentinel (`rancher/mirrored-pause`, etc.). Its
+/// rootfs is typically a single static `/pause` binary with no `/proc`,
+/// `/tmp`, or `/dev`. `CLONE_NEWUSER` against that layout exits 126 in the
+/// gated child (chroot/cwd/capability setup), the pause task disappears, and
+/// containerd then fails app `StartContainer` with "can't find shim for
+/// sandbox". Skip userns for pause only — workload containers still get it.
+fn is_kubernetes_pause(spec: &ProcessSpec) -> bool {
+    spec.args
+        .first()
+        .map(|arg0| {
+            std::path::Path::new(arg0)
+                .file_name()
+                .and_then(|n| n.to_str())
+                == Some("pause")
+        })
+        .unwrap_or(false)
+}
+
 fn resolve_executable(spec: &ProcessSpec) -> Result<String> {
     let arg0 = &spec.args[0];
     if arg0.contains('/') {
@@ -4781,7 +4834,8 @@ fn spawn_gated(
                     }
                 }
             }
-            if userns {
+            // Pause must stay alive for the Pod shim; userns is for workloads.
+            if userns && !is_kubernetes_pause(spec) {
                 flags |= libc::CLONE_NEWUSER;
             }
             (flags, joins)
@@ -4878,8 +4932,11 @@ fn spawn_gated(
             // 1) CLONE_NEWNS first so we can stage mounts as the init userns
             // 2) Pre-mount proc onto rootfs/proc *before* CLONE_NEWUSER —
             //    mounts on virtiofs from a nested userns return EPERM
-            // 3) CLONE_NEWUSER + uid/gid maps
-            // 4) Remaining namespaces (PID/IPC/UTS)
+            // 3) setns into shared sandbox IPC/UTS *before* CLONE_NEWUSER —
+            //    setns(2) requires CAP_SYS_ADMIN in the userns that owns the
+            //    target namespace; after NEWUSER we only have caps in the child
+            // 4) CLONE_NEWUSER + uid/gid maps
+            // 5) Remaining create flags (PID)
             let need_newns = create_flags & libc::CLONE_NEWNS != 0;
             if need_newns && libc::unshare(libc::CLONE_NEWNS) != 0 {
                 let err = std::io::Error::last_os_error();
@@ -4897,38 +4954,44 @@ fn spawn_gated(
                     std::ptr::null(),
                 );
             }
-            if want_user_ns {
-                if need_newns {
-                    // Stage proc on the to-be-pivoted root while we still have
-                    // init-userns CAP_SYS_ADMIN on the virtiofs mount.
-                    let mut proc_buf = rootfs.as_bytes().to_vec();
-                    proc_buf.extend_from_slice(b"/proc");
-                    if let Ok(proc_c) = CString::new(proc_buf) {
-                        let _ = libc::mkdir(proc_c.as_ptr(), 0o755);
-                        let _ = libc::umount2(proc_c.as_ptr(), libc::MNT_DETACH);
-                        if libc::mount(
-                            c"proc".as_ptr(),
-                            proc_c.as_ptr(),
-                            c"proc".as_ptr(),
-                            (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong,
-                            std::ptr::null(),
-                        ) != 0
-                        {
-                            let err = std::io::Error::last_os_error();
-                            let _ = std::fs::write(
-                                "/tmp/fluxvm-agent-die.txt",
-                                format!("premount_proc:{err}"),
-                            );
-                            // Continue — pivot_root_into will retry / best-effort.
-                        }
+            if want_user_ns && need_newns {
+                // Stage proc on the to-be-pivoted root while we still have
+                // init-userns CAP_SYS_ADMIN on the virtiofs mount.
+                let mut proc_buf = rootfs.as_bytes().to_vec();
+                proc_buf.extend_from_slice(b"/proc");
+                if let Ok(proc_c) = CString::new(proc_buf) {
+                    let _ = libc::mkdir(proc_c.as_ptr(), 0o755);
+                    let _ = libc::umount2(proc_c.as_ptr(), libc::MNT_DETACH);
+                    if libc::mount(
+                        c"proc".as_ptr(),
+                        proc_c.as_ptr(),
+                        c"proc".as_ptr(),
+                        (libc::MS_NOSUID | libc::MS_NOEXEC | libc::MS_NODEV) as libc::c_ulong,
+                        std::ptr::null(),
+                    ) != 0
+                    {
+                        let err = std::io::Error::last_os_error();
+                        let _ = std::fs::write(
+                            "/tmp/fluxvm-agent-die.txt",
+                            format!("premount_proc:{err}"),
+                        );
+                        // Continue — pivot_root_into will retry / best-effort.
                     }
                 }
+            }
+            // Join shared sandbox namespaces while we still hold init-userns caps.
+            for (fd, ty) in &join_list {
+                if libc::setns(*fd, *ty) != 0 {
+                    let err = std::io::Error::last_os_error();
+                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("setns:{err}"));
+                    libc::_exit(126);
+                }
+            }
+            if want_user_ns {
                 if libc::unshare(libc::CLONE_NEWUSER) != 0 {
                     let err = std::io::Error::last_os_error();
-                    let _ = std::fs::write(
-                        "/tmp/fluxvm-agent-die.txt",
-                        format!("unshare_user:{err}"),
-                    );
+                    let _ =
+                        std::fs::write("/tmp/fluxvm-agent-die.txt", format!("unshare_user:{err}"));
                     libc::_exit(126);
                 }
                 let _ = std::fs::write("/proc/self/setgroups", "deny");
@@ -4944,13 +5007,6 @@ fn spawn_gated(
                 let err = std::io::Error::last_os_error();
                 let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("unshare_ns:{err}"));
                 libc::_exit(126);
-            }
-            for (fd, ty) in &join_list {
-                if libc::setns(*fd, *ty) != 0 {
-                    let err = std::io::Error::last_os_error();
-                    let _ = std::fs::write("/tmp/fluxvm-agent-die.txt", format!("setns:{err}"));
-                    libc::_exit(126);
-                }
             }
 
             // The outer process is only a reaper; the workload is its child. Forward the

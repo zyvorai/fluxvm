@@ -16,6 +16,10 @@ if ! command -v cargo >/dev/null 2>&1; then
   export PATH="${HOME}/.cargo/bin:/usr/local/cargo/bin:${PATH}"
 fi
 
+# Root-only containerd.sock: prefer sudo ctr for live gates.
+# shellcheck disable=SC1091
+source "$ROOT/scripts/lib/sc-ctr-env.sh"
+
 PASS=0
 SKIP=0
 FAIL=0
