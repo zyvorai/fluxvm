@@ -208,7 +208,8 @@ Sentinel wedge: [sentinel-wedge.md](sentinel-wedge.md).
    in-guest broker (Set 11); `SCMP_ACT_NOTIFY` as `defaultAction` and NOTIFY
    on `sendmsg` are both rejected at OCI-parse time rather than risking a
    listener-bootstrap deadlock. `SECCOMP_IOCTL_NOTIF_ADDFD` is available via
-   `io.zyvor.seccomp.notify.mode=addfd`; remote policy RPC remains out of scope.
+   `io.zyvor.seccomp.notify.mode=addfd`; remote policy RPC via
+   `io.zyvor.seccomp.notify.mode=remote` (guest→host AF_VSOCK; fail closed).
 6. **TTY streaming is new in Set 5 and requires real KVM/containerd churn and
    resize testing on self-hosted nodes before production claims.**
 7. **`CLONE_NEWUSER` is opt-in.** Live gates
@@ -237,10 +238,10 @@ surface.
 | P0 CNI (Cilium/Calico/Flannel/Multus) | **Done** | providers + Multus hybrid/direct; live under load [sc-live-cni-under-load-20260926.txt](benchmarks/evidence/sc-live-cni-under-load-20260926.txt) |
 | P0 hostPath broker | **Done** | create-time allowlist + QEMU/CH hotplug broker |
 | P0/P1 multi-VMM (QEMU/CH/FC) | **Done** | FC = ext4 block shares + `FLUXVM_CONTAINER_KERNEL` |
-| P1 seccomp NOTIFY + ADDFD | **Done** | remote policy RPC out of scope |
+| P1 seccomp NOTIFY + ADDFD | **Done** | `mode=remote` guest→host AF_VSOCK RPC |
 | P1 warm-pool claim | **Done** | QEMU/CH; FC cold-create only |
 | Live e2e matrix (TTY, SELinux, CNI load, userns) | **Lab archived** | `docs/benchmarks/evidence/sc-live-*.txt` + [sc-hotcake-bundle-20260926.txt](benchmarks/evidence/sc-hotcake-bundle-20260926.txt): ctr/TTY/namespaces/CNI-churn/NOTIFY; SELinux mountLabel green; k8s userns Succeeded; k8s-multi `distinct_user_ns=2`; guestkit Fedora/btrfs token inject. Multi-CNI under load prefers `FLUXVM_SECOND_CNI_KUBECONFIG` (nftables stand-in portable default) |
-| Remote policy RPC | **Out of scope** | Set 11 docs |
+| Remote policy RPC | **Done** | `mode=remote`; `FLUXVM_SECCOMP_POLICY_RPC` / `_URL`; fail closed |
 | Phase orchestrator | **Done** | `scripts/complete-secure-containers-phases.sh` |
 
 ### P0 — OCI conformance fixtures

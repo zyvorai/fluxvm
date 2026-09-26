@@ -32,8 +32,14 @@ values are exported in the audit line.
 
 `io.zyvor.seccomp.notify.mode=addfd` (S9) enables `SECCOMP_IOCTL_NOTIF_ADDFD`:
 the supervisor injects `io.zyvor.seccomp.notify.addfd-src` into the notify
-target and returns the installed fd number as the syscall result. Remote
-policy RPC remains out of scope.
+target and returns the installed fd number as the syscall result.
+
+`io.zyvor.seccomp.notify.mode=remote` asks the host for each decision over
+AF_VSOCK (`DEFAULT_SECCOMP_POLICY_PORT` / `io.zyvor.seccomp.notify.rpc-port`).
+The shim listens on the host; `FLUXVM_SECCOMP_POLICY_RPC=continue|deny` (default
+deny) or `FLUXVM_SECCOMP_POLICY_RPC_URL` (HTTP POST) selects the broker. Timeouts
+and errors fail closed. Syscall argument values are never sent on the wire.
+`addfd` stays local-only (needs a supervisor fd in the guest).
 
 Guest requirements for this feature are kernel seccomp user notification
 (kernel 5.0+) and a `libseccomp.so.2` exposing the v2.5-era notification API.

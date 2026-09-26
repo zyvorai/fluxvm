@@ -141,7 +141,7 @@ components, unrelated to `fluxvm-agent`'s VM-placement fleet.
 Cilium-native VM endpoints / in-tree Hubble UI, CH Windows+QGA,
 in-tree KVM without Firecracker for production density.
 Secure Containers RuntimeClass as full Kata-equivalent (Firecracker has no
-live virtiofs write-through, remote policy RPC out of scope) —
+live virtiofs write-through; remote seccomp NOTIFY RPC is opt-in `mode=remote`) —
 [secure-containers.md](secure-containers.md). Device-cgroup enforcement
 (`BPF_PROG_TYPE_CGROUP_DEVICE`, Set 10), the seccomp user-notification
 broker (Set 11), and `SECCOMP_IOCTL_NOTIF_ADDFD` are implemented; live

@@ -91,6 +91,6 @@ wrappers against the same lab.
 
 - You need SEV-SNP/TDX + attestation (use Ragnarok + Kata/KubeVirt).
 - You need unrestricted hostPath or Firecracker + live virtio-fs.
-- You need remote seccomp policy RPC.
+- You need Kata-compatible static policy files as a drop-in (FluxVM remote NOTIFY RPC is vsock/HTTP, not Kata policy files).
 
 Otherwise `runtimeClassName: fluxvm` is the supported flip.
