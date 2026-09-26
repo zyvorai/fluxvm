@@ -156,7 +156,7 @@ elif [[ "$MODE" == ctr-shared ]]; then
     else
       cmd='readlink /proc/self/ns/user > /ns-user.txt; true'
     fi
-    timeout 180 $CTR --address "$ADDR" run --runtime "$RUNTIME" \
+    timeout -k 5 180 $CTR --address "$ADDR" run --runtime "$RUNTIME" \
       --annotation "io.containerd.runc.v2.group=${GROUP}" \
       "$IMAGE" "$ID" \
       /bin/sh -c "$cmd" \
@@ -201,7 +201,8 @@ else
     set +e
     # Write the ns path into the container rootfs (virtiofs share) so we do
     # not depend on ctr stdout, which can hang after a successful workload.
-    timeout 120 $CTR --address "$ADDR" run --runtime "$RUNTIME" \
+    # -k: ctr/shim teardown can ignore the first SIGTERM (same as e2e-ctr).
+    timeout -k 5 120 $CTR --address "$ADDR" run --runtime "$RUNTIME" \
       "$IMAGE" "$ID" \
       /bin/sh -c "readlink /proc/self/ns/user > /ns-user.txt; true" \
       >/tmp/fluxvm-userns-ctr-$$-$i.log 2>&1

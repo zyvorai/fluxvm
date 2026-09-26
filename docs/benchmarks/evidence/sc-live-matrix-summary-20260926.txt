@@ -1,0 +1,35 @@
+== cni-churn ==
+RESULT cni-churn=PASS
+== e2e-ctr ==
+RESULT e2e-ctr=PASS
+== e2e-tty ==
+RESULT e2e-tty=PASS
+== e2e-ns ==
+RESULT e2e-ns=PASS
+== e2e-sec ==
+RESULT e2e-sec=PASS
+== e2e-userns-load ==
+== userns load (k8s): 1 concurrent RuntimeClass=fluxvm pods (require_distinct=0) ==
+RESULT e2e-userns-load=PASS
+== e2e-seccomp-notify ==
+RESULT e2e-seccomp-notify=PASS
+== e2e-selinux-mountlabel ==
+RESULT e2e-selinux-mountlabel=PASS
+== s2 ==
+== S2.2 second CNI / policy engine ==
+S2 SECOND CNI (kubeconfig): PASS
+RESULT s2=PASS
+== wow ==
+== wow: RuntimeClass fluxvm must exist ==
+== wow: k8s userns (N=1) ==
+== userns load (k8s): 1 concurrent RuntimeClass=fluxvm pods (require_distinct=0) ==
+== wow: k8s-multi distinct userns (N=2) ==
+== userns load (k8s-multi): 1 pod / 2 containers RuntimeClass=fluxvm (require_distinct=1) ==
+WOW DEMO: OK
+RESULT wow=PASS
+== non-goals (intentionally not implemented) ==
+NON_GOAL remote_seccomp_policy_rpc=out_of_scope
+NON_GOAL firecracker_live_virtiofs=unsupported_upstream_use_ext4_pack
+NON_GOAL full_kata_equivalence=not_claimed
+summary pass=10 skip=0 fail=0
+SC_LIVE_MATRIX=COMPLETE
