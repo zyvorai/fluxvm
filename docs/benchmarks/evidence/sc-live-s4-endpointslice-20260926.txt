@@ -1,0 +1,8 @@
+-- Set 18: NotReady unselected backend is not routable; VIP should be admitted --
+ok  	github.com/zyvorai/fluxvm/controllers/fluxvm-networkpolicy-controller/internal/policy	0.768s
+-- Set 18: make the unselected Service backend Ready; VIP must be removed --
+ok  	github.com/zyvorai/fluxvm/controllers/fluxvm-networkpolicy-controller/internal/policy	1.212s
+Set 18 live EndpointSlice Service-VIP gate: PASS
+
+proxy_port=18089 (default was 18081; occupied by unrelated HTML service on lab)
+S4 ENDPOINTSLICE LIVE: PASS

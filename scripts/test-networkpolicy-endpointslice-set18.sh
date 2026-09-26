@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CTRL="$ROOT/controllers/fluxvm-networkpolicy-controller"
 for c in kubectl go curl; do command -v "$c" >/dev/null || { echo "missing $c" >&2; exit 2; }; done
 NS="fluxvm-set18-$RANDOM-$$"
-PROXY_PORT="${SET18_PROXY_PORT:-18081}"
+PROXY_PORT="${SET18_PROXY_PORT:-18089}"
 PROXY_PID=""
 cleanup(){ set +e; [[ -n "$PROXY_PID" ]] && kill "$PROXY_PID" 2>/dev/null; kubectl delete ns "$NS" --ignore-not-found --wait=false >/dev/null 2>&1; }
 trap cleanup EXIT
