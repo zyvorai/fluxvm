@@ -20,8 +20,11 @@ pub async fn save(st: &VmState, path: &Path) -> Result<()> {
     let mem_snap = path.with_extension("mem");
     let vmstate = path.with_extension("vmstate");
 
-    // Guest must be paused (caller should have paused; ensure here).
-    guest.pause().await.ok();
+    // Wait for the vCPU to leave KVM_RUN before reading CPU and RAM state.
+    guest
+        .pause()
+        .await
+        .context("quiescing guest for snapshot")?;
     guest
         .snapshot_create(&vmstate, &mem_snap)
         .await
