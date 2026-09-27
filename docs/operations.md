@@ -449,6 +449,43 @@ prior ~1-in-3 failure rate), including through the real WebSocket console path e
 raw vsock handshake. `zyvor-fabric`'s FluxVM driver can now safely request `agent.enabled: true` by
 default — see its own `docs/guides/vm-drivers/fluxvm.md`.
 
+## Day-2 VM operations
+
+Every `fluxctl` VM argument accepts a UUID, an exact VM name, or a unique UUID
+prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching ids.
+
+| Task | CLI | REST |
+|---|---|---|
+| Restart (graceful stop, then start) | `fluxctl restart <vm>` | `POST /v1/vms/{id}/restart` |
+| Rename | `fluxctl rename-vm <vm> <new-name>` | `PATCH /v1/vms/{id}` `{"name": "..."}` |
+| Set / remove labels | `fluxctl label <vm> env=prod team-` | `PATCH /v1/vms/{id}` `{"labels": {"env": "prod", "team": null}}` |
+| List snapshots | `fluxctl snapshot-list <vm>` | `GET /v1/vms/{id}/snapshots` |
+| Delete a snapshot | `fluxctl snapshot-delete <vm> --tag <t>` | `DELETE /v1/vms/{id}/snapshots/{tag}` |
+| Wait for a state | `fluxctl wait <vm> --for running\|stopped\|paused\|failed\|agent --timeout 120` | poll `GET /v1/vms/{id}` |
+| Events | `fluxctl events [--vm <vm>] [--event vm.] [--since RFC3339] [-f]` | `GET /v1/events?vm=&event=&since=&limit=`, `GET /v1/events/stream` (SSE) |
+| Token quota usage | `fluxctl quota [--token T \| --name N]` | `GET /v1/quotas/me` |
+| Shell completions | `fluxctl completions bash\|zsh\|fish` | — |
+
+QEMU snapshots are qcow2-internal (`qemu-img info -U` lists them; delete uses HMP
+`delvm` while running, `qemu-img snapshot -d` when stopped). Other backends keep
+snapshots under `instances/<uuid>/snapshots/<tag>/`. Tags are `[A-Za-z0-9._-]{1,128}`.
+
+Events are appended to `state_dir/events.jsonl` by the daemon **and** by local
+`fluxctl` invocations, so both `fluxctl events` and the REST routes see every
+source. Tenant-scoped tokens only see events for their own tenant's VMs.
+
+List-style commands take a global `-o json|table|wide` (`--output-format`,
+`FLUXCTL_OUTPUT`); JSON stays the default so scripts are unaffected:
+
+```bash
+fluxctl -o table list
+fluxctl list -o wide
+fluxctl -o table events --vm web -f
+```
+
+`fluxctl console` / `login` / `shell` now sizes the guest PTY from the local
+terminal and forwards resizes (SIGWINCH → `PtyFrame::Resize`).
+
 ## Resource control (cgroup v2)
 
 Every VM (all three backends) is migrated into its own `fluxvm.slice/{id}.scope` cgroup right after
@@ -1203,6 +1240,8 @@ of a surprise landing somewhere else.
 /var/lib/fluxvm/
   vms.json
   vms.lock
+  events.jsonl                (VM lifecycle/audit events; rotates to events.jsonl.1 at 16 MiB)
+  autostart/<uuid>            (fluxctl enable markers)
   network-policy/             (per-VM dataplane policy JSON)
   network-groups/             (security groups, CNP store, ipcache.json)
   downloads/

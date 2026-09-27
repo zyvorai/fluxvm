@@ -37,7 +37,7 @@ images — not only the dataplane.
 - [ ] Optional Firecracker `cpu_template` on create (static names only; not for CH/QEMU/kvm)
 - [ ] Optional `FLUXVM_VMM_SECCOMP=1` for QEMU/Cloud Hypervisor children (log mode by default; set kill mode only after validating the allowlist) — Firecracker/jailer is not covered yet
 - [ ] AppArmor (`deploy/apparmor`) or SELinux reference module (`deploy/selinux`) loaded for the `fluxvm` unit when you want MAC confinement
-- [ ] Windows + QGA only on QEMU ([ch-windows-qga.md](ch-windows-qga.md)); `fluxvm_engine=kvm` lab-only
+- [ ] Windows + QGA on QEMU or Cloud Hypervisor (CH QGA over `--serial socket=qga.sock`; named virtio-serial stays QEMU-only — [ch-windows-qga.md](ch-windows-qga.md)); `fluxvm_engine=kvm` lab-only (H2 virtio-win boot unproven)
 - [x] Capability figures: Track A isolation checklist done; Track B density archive productized next to SC sizing — [PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md) capacity table + [benchmarks/evidence/density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt) (not an FC Track B SLA)
 
 ## 3. Images & storage
@@ -106,8 +106,9 @@ components, unrelated to `fluxvm-agent`'s VM-placement fleet.
       [sentinel-ga-release-checklist.md](sentinel-ga-release-checklist.md))
 - [ ] `fluxvm-migrate` (Set 13E): crash-resumable per-VM migration
       transactions wrapping the real `fluxvm dataplane migration-*` CLI —
-      real CLI integration and real failure/rollback proven; not yet run
-      against a VM with a live dataplane actually attached
+      real CLI integration and real failure/rollback proven; live attached
+      migration (schema-11 cilium-mode fabric) cleared on the lab —
+      [sc-live-s11-migration-20260926.txt](benchmarks/evidence/sc-live-s11-migration-20260926.txt)
       ([sentinel-migration-orchestrator.md](sentinel-migration-orchestrator.md))
 - [ ] `fluxvm-upgrade` (Set 14E): crash-resumable per-node component
       upgrades with eBPF map snapshot/restore across a reload — a real
@@ -237,7 +238,7 @@ and to flag the few genuinely still-open follow-ups.
 9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see the README's [Kubernetes CRD/operator](../README.md#kubernetes-crdoperator) section and `deploy/k8s/`.
 10. **Distributed node-agent** — TLS/auth, persisted registry, and residual-capacity placement are implemented; see [operations.md](operations.md#distributed-node-agent).
 11. **Scheduler placement** — `CreateVmRequest` accepts optional `numa_node`, `cpuset`, `hugepages`, and `vfio_devices` (QEMU backend only). Broader placement policies still open.
-12. **Windows path** — Offline `windows{}` (incl. `unattend_path`/`sysprep`) and live QGA on QEMU are implemented; still missing: Cloud Hypervisor Windows + QGA — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md#2-cloud-hypervisor-windows--qga).
+12. **Windows path** — Offline `windows{}` (incl. `unattend_path`/`sysprep`) and live QGA on QEMU are implemented; Cloud Hypervisor Windows boot + QGA over serial socket are also done (named virtio-serial remains QEMU-only) — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md#2-cloud-hypervisor-windows--qga).
 13. **AI-agent sandbox hardening** (see [agent-sandbox-gaps.md](agent-sandbox-gaps.md)) — `fluxvm_engine=kvm`, multi-port proxy, native TC/eBPF + Cilium coexistence, benchmarks. Optional: Cilium-native identities / Hubble; published density numbers.
 
 "auto" backend selection is already implemented — see [operations.md](operations.md#auto-backend-selection).

@@ -22,7 +22,9 @@ use std::{collections::HashMap, fs, sync::Arc};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+pub mod events;
 mod sandbox;
+pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 
 /// A bridge-less direct tap is forwarded ONLY by the eBPF redirect. Unlike an ordinary VM, whose
@@ -292,6 +294,59 @@ fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
 fn audit_event(event: &str, pairs: &[(&str, &str)]) {
     let record = fluxvm_core::policy::format_audit_record(event, pairs);
     tracing::info!(target: "fluxvm_audit", record = %record, "audit");
+    events::record(event, pairs);
+}
+
+/// Snapshot tags become directory names / qcow2 snapshot names.
+fn validate_snapshot_tag(tag: &str) -> Result<()> {
+    if tag.is_empty()
+        || tag.len() > 128
+        || tag.starts_with('.')
+        || !tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bail!("invalid snapshot tag {tag:?}: use 1-128 chars of [A-Za-z0-9._-], not starting with '.'");
+    }
+    Ok(())
+}
+
+fn validate_vm_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 63
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        bail!("invalid VM name {name:?}: use 1-63 chars of [A-Za-z0-9._-]");
+    }
+    Ok(())
+}
+
+fn validate_label_key(key: &str) -> Result<()> {
+    if key.is_empty()
+        || key.len() > 63
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        bail!("invalid label key {key:?}: use 1-63 chars of [A-Za-z0-9._/-]");
+    }
+    Ok(())
+}
+
+fn dir_size(path: &std::path::Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => dir_size(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 /// Cert/key files must exist; optionally under `policy.allowed_migration_tls_dirs`.
@@ -519,6 +574,7 @@ impl VmManager {
         cfg.ensure_dirs()?;
         let store = Arc::new(Store::load(&cfg.state_dir)?);
         let pools = Arc::new(PoolStore::load(&cfg.state_dir)?);
+        events::init(&cfg.state_dir);
         // Best-effort: delegating cgroup controllers needs to write under
         // /sys/fs/cgroup, which isn't available in every environment this
         // constructor runs in (e.g. an unprivileged `cargo test`) — a
@@ -1786,6 +1842,7 @@ impl VmManager {
             requested_security_profile: requested_profile,
             achieved_security_profile: fluxvm_core::security::SecurityProfile::default(),
             security_evidence: None,
+            labels: Default::default(),
         };
         // Deciding the CID and reserving it happen as one atomic, locked
         // operation in the store — see fluxvm-storage::Store::insert_with_cid
@@ -2636,6 +2693,13 @@ impl VmManager {
     /// Firecracker write under `<workspace>/snapshots/<tag>/`; FluxVm uses the
     /// hypervisor control SnapshotSave path (same layout as sandbox snaps).
     pub async fn create_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
+        validate_snapshot_tag(tag)?;
+        self.create_vm_snapshot_inner(id, tag).await?;
+        audit_event("vm.snapshot", &[("vm_id", &id.to_string()), ("tag", tag)]);
+        Ok(())
+    }
+
+    async fn create_vm_snapshot_inner(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
         let vm = self.get(id).await?;
         fluxvm_core::security::check_operation(
             vm.requested_security_profile,
@@ -2822,6 +2886,11 @@ impl VmManager {
         }
         self.store.update(vm.clone()).await?;
         metrics::record_vm_start(started.elapsed().as_millis() as u64);
+        let vm_id = id.to_string();
+        audit_event(
+            "vm.start",
+            &[("vm_id", &vm_id), ("snapshot", loadvm_tag.unwrap_or(""))],
+        );
         Ok(vm)
     }
 
@@ -2891,6 +2960,7 @@ impl VmManager {
         vm.status = VmStatus::Stopped;
         vm.pid = None;
         self.store.update(vm.clone()).await?;
+        audit_event("vm.stop", &[("vm_id", &id.to_string())]);
         Ok(vm)
     }
 
@@ -2899,6 +2969,7 @@ impl VmManager {
         backend(vm.backend)?.pause(&self.cfg, &vm).await?;
         vm.status = VmStatus::Paused;
         self.store.update(vm.clone()).await?;
+        audit_event("vm.pause", &[("vm_id", &id.to_string())]);
         Ok(vm)
     }
 
@@ -2907,7 +2978,132 @@ impl VmManager {
         backend(vm.backend)?.resume(&self.cfg, &vm).await?;
         vm.status = VmStatus::Running;
         self.store.update(vm.clone()).await?;
+        audit_event("vm.resume", &[("vm_id", &id.to_string())]);
         Ok(vm)
+    }
+
+    /// Stop (graceful, then forced) and start again as one operation.
+    pub async fn restart(self: &Arc<Self>, id: Uuid) -> Result<VmRecord> {
+        let vm = self.get(id).await?;
+        if matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            self.stop(id).await.context("restart: stop")?;
+        }
+        let vm = self.start(id).await.context("restart: start")?;
+        audit_event("vm.restart", &[("vm_id", &id.to_string())]);
+        Ok(vm)
+    }
+
+    /// Rename and/or edit labels (`PATCH /v1/vms/{id}`).
+    pub async fn patch(&self, id: Uuid, patch: fluxvm_core::model::VmPatch) -> Result<VmRecord> {
+        let mut vm = self.get(id).await?;
+        let mut changed = Vec::new();
+        if let Some(name) = patch.name {
+            validate_vm_name(&name)?;
+            if name != vm.name {
+                changed.push(format!("name:{}->{}", vm.name, name));
+                vm.name = name.clone();
+                vm.request.name = name;
+            }
+        }
+        for (k, v) in patch.labels {
+            validate_label_key(&k)?;
+            match v {
+                Some(v) => {
+                    if v.len() > 253 {
+                        bail!("label {k:?} value longer than 253 chars");
+                    }
+                    changed.push(format!("{k}={v}"));
+                    vm.labels.insert(k, v);
+                }
+                None => {
+                    if vm.labels.remove(&k).is_some() {
+                        changed.push(format!("{k}-"));
+                    }
+                }
+            }
+        }
+        if !changed.is_empty() {
+            self.store.update(vm.clone()).await?;
+            audit_event(
+                "vm.patch",
+                &[("vm_id", &id.to_string()), ("changes", &changed.join(","))],
+            );
+        }
+        Ok(vm)
+    }
+
+    /// Snapshots taken by [`Self::create_vm_snapshot`]: qcow2-internal for
+    /// QEMU, `workspace/snapshots/<tag>` for every other backend.
+    pub async fn list_vm_snapshots(
+        &self,
+        id: Uuid,
+    ) -> Result<Vec<fluxvm_core::model::VmSnapshotInfo>> {
+        let vm = self.get(id).await?;
+        if vm.backend == BackendKind::Qemu {
+            return fluxvm_qemu::snapshot_list(&self.cfg, &vm).await;
+        }
+        let dir = vm.workspace.join("snapshots");
+        let mut out = Vec::new();
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Ok(out);
+        };
+        for e in entries.flatten() {
+            let Ok(meta) = e.metadata() else { continue };
+            if !meta.is_dir() {
+                continue;
+            }
+            out.push(fluxvm_core::model::VmSnapshotInfo {
+                tag: e.file_name().to_string_lossy().into_owned(),
+                created_at: meta.modified().ok().map(chrono::DateTime::<Utc>::from),
+                size_bytes: dir_size(&e.path()),
+            });
+        }
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(out)
+    }
+
+    pub async fn delete_vm_snapshot(&self, id: Uuid, tag: &str) -> Result<()> {
+        validate_snapshot_tag(tag)?;
+        let vm = self.get(id).await?;
+        if vm.backend == BackendKind::Qemu {
+            fluxvm_qemu::snapshot_delete(&self.cfg, &vm, tag).await?;
+        } else {
+            let path = vm.workspace.join("snapshots").join(tag);
+            if !path.is_dir() {
+                bail!("snapshot {tag:?} not found for VM {id}");
+            }
+            tokio::fs::remove_dir_all(&path)
+                .await
+                .with_context(|| format!("removing {}", path.display()))?;
+        }
+        audit_event(
+            "vm.snapshot.delete",
+            &[("vm_id", &id.to_string()), ("tag", tag)],
+        );
+        Ok(())
+    }
+
+    /// Limits and current usage for one API token (`GET /v1/quotas/me`).
+    pub async fn token_quota_usage(&self, actor: Option<&str>) -> Result<serde_json::Value> {
+        let actor = actor.unwrap_or("none");
+        let unlimited = actor == "anonymous-admin" || actor == "none";
+        let (vms, vcpus, memory_mib) = self
+            .list()
+            .await
+            .iter()
+            .filter(|vm| vm.request.created_by_token.as_deref() == Some(actor))
+            .fold((0u64, 0u64, 0u64), |(n, c, m), vm| {
+                (n + 1, c + vm.request.vcpus as u64, m + vm.request.memory_mib)
+            });
+        Ok(serde_json::json!({
+            "token": actor,
+            "unlimited": unlimited,
+            "limits": {
+                "max_vms": if unlimited { None } else { self.cfg.auth.max_vms_per_token },
+                "max_memory_mib": if unlimited { None } else { self.cfg.auth.max_memory_mib_per_token },
+            },
+            "usage": {"vms": vms, "vcpus": vcpus, "memory_mib": memory_mib},
+        }))
     }
 
     pub async fn exec(
@@ -4146,6 +4342,7 @@ mod tests {
             requested_security_profile: Default::default(),
             achieved_security_profile: Default::default(),
             security_evidence: None,
+            labels: Default::default(),
         }
     }
 
@@ -4297,6 +4494,7 @@ mod tests {
                 requested_security_profile: Default::default(),
                 achieved_security_profile: Default::default(),
                 security_evidence: None,
+                labels: Default::default(),
             }
         }
 

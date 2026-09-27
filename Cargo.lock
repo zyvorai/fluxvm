@@ -1928,6 +1928,7 @@ dependencies = [
  "fluxvm-intelligence",
  "fluxvm-network",
  "fluxvm-scheduler",
+ "libc",
  "reqwest",
  "rustls",
  "rustls-pemfile",

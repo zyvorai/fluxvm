@@ -75,8 +75,8 @@ Work closed after the numbered S/H/FC/F rows, still part of this ranked set:
 
 **S1–S11 / CNI / DP / F1–F2 / H1–H5 / FC1–FC3** plus the post-GA closes above
 are closed on the code + gate path. Secure Containers P0/P1 multi-VMM (incl.
-Firecracker block shares) is shipped; RuntimeClass is GA. There are **no
-further ranked items** in this document until product opens a new set.
+Firecracker block shares) is shipped; RuntimeClass is GA. The next ranked set
+is the cross-area backlog below.
 
 ### Cleared live evidence (archive)
 
@@ -87,8 +87,55 @@ further ranked items** in this document until product opens a new set.
 ### Still open honesty
 
 1. **H2** virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM.
-2. Optional live smoke for `mode=remote` seccomp (code **Done** in `#106`; on-box NOTIFY+RPC against a running shim not yet evidenced).
+2. `mode=remote` seccomp live smoke (code **Done** in `#106`): the fail-closed
+   deny path passes on the lab
+   ([sc-live-seccomp-remote-20260927.txt](benchmarks/evidence/sc-live-seccomp-remote-20260927.txt),
+   `chmod: /tmp: Operation not permitted`), but a deny can't be told apart from
+   the guest broker's own fail-closed fallback. The run that would prove the
+   RPC path (`EXPECT=continue` with containerd `FLUXVM_SECCOMP_POLICY_RPC=continue`)
+   **hangs**: `ctr` times out with no guest output. Still open. Suspects: stale
+   `containerd-shim-fluxvm-v2` processes that ignore SIGTERM and may still hold
+   vsock port 17780, or a stall in the broker's continue path.
 3. In-tree virtio-fs depth under load still prefers Cloud Hypervisor (**H4** honesty: attach/API shipped; full vhost-user queue bind under load is CH SoT).
+
+## Next set — cross-area backlog (opened 2026-09-27)
+
+Ranked by operator value vs effort. Tier 1 is being built on
+`feat/fluxctl-cli-parity`; Tiers 2–3 are the queue after it.
+
+### Tier 1 — build now
+
+| # | Item | Surface |
+|---|---|---|
+| N1 | Restart as one op | scheduler `restart`, `POST /v1/vms/{id}/restart`, `fluxctl restart` |
+| N2 | VM metadata PATCH (rename, labels) | `PATCH /v1/vms/{id}`, `fluxctl label`, `fluxctl rename-vm` |
+| N3 | Snapshot list / delete | `GET/DELETE /v1/vms/{id}/snapshots[/{tag}]`, `fluxctl snapshot-list`, `snapshot-delete` |
+| N4 | Events API + watch | `GET /v1/events`, `GET /v1/events/stream` (SSE), `fluxctl events --follow` |
+| N5 | Tenant quota usage | `GET /v1/quotas/me`, `fluxctl quota` |
+| N6 | VM name / UUID-prefix resolution | every `fluxctl` VM verb |
+| N7 | Output formats | global `-o json\|table\|wide` |
+| N8 | Shell completions | `fluxctl completions bash\|zsh\|fish` |
+| N9 | Wait for state | `fluxctl wait <vm> --for running\|stopped\|agent` |
+| N10 | Console resize | `TIOCGWINSZ` + SIGWINCH → `PtyFrame::Resize` |
+| N11 | Doc honesty fixes | secure-containers.md remote RPC, PRODUCTION.md CH Windows / 13E |
+| N12 | Seccomp `mode=remote` live smoke | `MODE=remote scripts/e2e-secure-containers-seccomp-notify.sh` + SC live matrix (deny passes; continue hangs, see honesty below) |
+
+### Tier 2 — next
+
+- `fluxctl` REST remote mode (`--server` / `FLUXVM_URL`, bearer token, contexts).
+- Disk ops: QMP `blockdev-add` / `block_resize`, `/v1/vms/{id}/disks`.
+- VM→VM clone and named VM templates.
+- Serial console websocket via QEMU chardev socket (no guest agent needed).
+- Scheduled snapshots; VM disk backup/export to file or S3.
+- Label selectors + bulk ops (`fluxctl stop -l env=dev`).
+- OpenAPI spec (utoipa) and VM lifecycle pages in `/console` (Axiom integration prerequisite).
+
+### Tier 3 — evidence / hardening (lab hardware or long runs)
+
+- H2 gate `scripts/test-kvm-windows-boot.sh` (Tiny11 on `fluxvm_engine=kvm` + OVMF).
+- In-tree virtio-fs under load bench vs CH (`scripts/bench-kvm-virtiofs.sh`).
+- Multi-container Pod Sentinel proof; aya ELF parse flake; SMP AP-wakeup stall;
+  Firecracker warm-pool claim; OIDC/mTLS; GPU-aware placement.
 
 Portable CI maps each code-side use case to a test target in
 [secure-containers-use-case-matrix.md](secure-containers-use-case-matrix.md)

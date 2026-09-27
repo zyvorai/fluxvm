@@ -316,7 +316,19 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/host/gpus/bind", post(bind_host_gpu))
         .route("/v1/host/gpus/release", post(release_host_gpu))
         .route("/v1/vms", post(create_vm).get(list_vms))
-        .route("/v1/vms/{id}", get(get_vm).delete(delete_vm))
+        .route(
+            "/v1/vms/{id}",
+            get(get_vm).delete(delete_vm).patch(patch_vm),
+        )
+        .route("/v1/vms/{id}/restart", post(restart_vm))
+        .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
+        .route(
+            "/v1/vms/{id}/snapshots/{tag}",
+            delete(delete_vm_snapshot),
+        )
+        .route("/v1/events", get(list_events))
+        .route("/v1/events/stream", get(stream_events))
+        .route("/v1/quotas/me", get(my_quota))
         .route("/v1/vms/{id}/attest", get(get_vm_evidence))
         .route("/v1/vms/{id}/secrets/release", post(release_vm_secret))
         .route("/v1/vms/{id}/start", post(start_vm))
@@ -1738,6 +1750,132 @@ async fn stop_vm(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(m.stop(id).await?)))
+}
+
+async fn restart_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.restart(id).await?)))
+}
+
+async fn patch_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(patch): Json<fluxvm_core::model::VmPatch>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.patch(id, patch).await?)))
+}
+
+async fn list_vm_snapshots(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_vm_snapshots(id).await?})))
+}
+
+async fn delete_vm_snapshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, tag)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_vm_snapshot(id, &tag).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tenant-scoped tokens only see events for their own tenant's VMs.
+async fn tenant_event_scope(
+    m: &VmManager,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> Option<std::collections::HashSet<Uuid>> {
+    let Extension(TokenTenant(t)) = token_tenant?;
+    Some(
+        m.list()
+            .await
+            .into_iter()
+            .filter(|vm| vm.request.tenant.as_deref() == Some(t.as_str()))
+            .map(|vm| vm.id)
+            .collect(),
+    )
+}
+
+fn in_scope(scope: &Option<std::collections::HashSet<Uuid>>, ev: &fluxvm_scheduler::VmEvent) -> bool {
+    match scope {
+        None => true,
+        Some(ids) => ev.vm_id.is_some_and(|id| ids.contains(&id)),
+    }
+}
+
+async fn list_events(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(mut filter): Query<fluxvm_scheduler::EventFilter>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let Some(log) = fluxvm_scheduler::events::global() else {
+        return Ok(Json(json!({"items": []})));
+    };
+    let scope = tenant_event_scope(&m, token_tenant).await;
+    let limit = filter.limit.take().unwrap_or(500).min(10_000);
+    let mut items: Vec<_> = log
+        .list(&filter)?
+        .into_iter()
+        .filter(|e| in_scope(&scope, e))
+        .collect();
+    if items.len() > limit {
+        items.drain(..items.len() - limit);
+    }
+    Ok(Json(json!({"items": items})))
+}
+
+/// Server-sent events: one `data:` JSON line per new event, tailing the
+/// shared events file so CLI-originated events show up too.
+async fn stream_events(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Query(filter): Query<fluxvm_scheduler::EventFilter>,
+) -> ApiResult<Response> {
+    let Some(log) = fluxvm_scheduler::events::global() else {
+        return Err(anyhow::anyhow!("event log not initialised").into());
+    };
+    let scope = tenant_event_scope(&m, token_tenant).await;
+    let stream = async_stream::stream! {
+        let mut offset = log.end_offset();
+        yield Ok::<_, std::io::Error>(bytes::Bytes::from_static(b": fluxvm events\n\n"));
+        loop {
+            match log.read_from(offset, &filter) {
+                Ok((events, next)) => {
+                    offset = next;
+                    for ev in events.iter().filter(|e| in_scope(&scope, e)) {
+                        if let Ok(s) = serde_json::to_string(ev) {
+                            yield Ok(bytes::Bytes::from(format!("event: {}\ndata: {s}\n\n", ev.event)));
+                        }
+                    }
+                }
+                Err(e) => {
+                    yield Ok(bytes::Bytes::from(format!("event: error\ndata: {}\n\n", json!({"error": e.to_string()}))));
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    };
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from_stream(stream))?)
+}
+
+async fn my_quota(
+    State(m): State<Arc<VmManager>>,
+    actor: Option<Extension<AuditActor>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    Ok(Json(m.token_quota_usage(actor_name).await?))
 }
 async fn pause_vm(
     State(m): State<Arc<VmManager>>,
@@ -3270,6 +3408,7 @@ mod tests {
             requested_security_profile: Default::default(),
             achieved_security_profile: Default::default(),
             security_evidence: None,
+            labels: Default::default(),
         }
     }
 

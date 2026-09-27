@@ -802,6 +802,22 @@ pub async fn savevm(socket: &Path, name: &str, timeout: Duration) -> Result<Valu
     .await
 }
 
+/// Delete an internal snapshot on a running VM. HMP reports failures as
+/// non-empty text in the return value rather than a QMP error.
+pub async fn delvm(socket: &Path, name: &str, timeout: Duration) -> Result<()> {
+    let out = execute(
+        socket,
+        "human-monitor-command",
+        Some(json!({"command-line": format!("delvm {name}")})),
+        timeout,
+    )
+    .await?;
+    match out.as_str().map(str::trim) {
+        None | Some("") => Ok(()),
+        Some(msg) => bail!("delvm {name}: {msg}"),
+    }
+}
+
 /// Alias for callers that prefer snapshot-oriented naming.
 #[allow(dead_code)]
 pub async fn snapshot_create(socket: &Path, name: &str, timeout: Duration) -> Result<Value> {
