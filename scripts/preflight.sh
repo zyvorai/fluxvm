@@ -4,7 +4,19 @@
 set -euo pipefail
 
 missing=0
-for cmd in qemu-system-x86_64 qemu-img cloud-localds ip; do
+profile="${1:-all}"
+case "$profile" in
+  all)
+    required=(qemu-system-x86_64 qemu-img cloud-localds ip)
+    optional=(cloud-hypervisor firecracker fluxctl fluxvm-hypervisor bpftool tc)
+    ;;
+  --native-kvm)
+    required=(fluxctl fluxvm-hypervisor cp ip)
+    optional=(bpftool tc)
+    ;;
+  *) echo "usage: $0 [--native-kvm]" >&2; exit 2 ;;
+esac
+for cmd in "${required[@]}"; do
   if command -v "$cmd" >/dev/null 2>&1; then
     printf '%-24s %s\n' "$cmd" "OK ($(command -v "$cmd"))"
   else
@@ -13,7 +25,7 @@ for cmd in qemu-system-x86_64 qemu-img cloud-localds ip; do
   fi
 done
 
-for cmd in cloud-hypervisor firecracker fluxctl fluxvm-hypervisor bpftool tc; do
+for cmd in "${optional[@]}"; do
   if command -v "$cmd" >/dev/null 2>&1; then
     printf '%-24s %s\n' "$cmd" "OK ($(command -v "$cmd"))"
   else

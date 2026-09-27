@@ -1,0 +1,11 @@
+{
+  "name": "native-kvm-linux",
+  "backend": "flux-vm",
+  "image": "/var/lib/fluxvm/images/linux-rootfs.raw",
+  "kernel": "/var/lib/fluxvm/kernels/vmlinux",
+  "vcpus": 1,
+  "memory_mib": 512,
+  "network": { "mode": "none" },
+  "ttl_seconds": 3600,
+  "agent": { "enabled": false }
+}

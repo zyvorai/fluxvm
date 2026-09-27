@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 use tokio::{fs as async_fs, io::AsyncWriteExt};
@@ -560,8 +561,25 @@ fn inject_guest_agent_token_blocking(disk: &Path, token: &str) -> Result<()> {
     Ok(())
 }
 
-async fn image_format(cfg: &Config, image: &Path) -> String {
-    fluxvm_core::process::output_checked(
+async fn image_format(cfg: &Config, image: &Path) -> Result<String> {
+    let mut file =
+        fs::File::open(image).with_context(|| format!("opening base image {}", image.display()))?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)
+        .with_context(|| format!("reading base image {}", image.display()))?;
+    if magic == *b"QFI\xfb" {
+        return Ok("qcow2".into());
+    }
+    // A named raw image can be cloned without installing any QEMU binary.
+    // For ambiguous extensions, ask qemu-img instead of silently treating
+    // VMDK/VHDX/other formats as raw sectors.
+    if matches!(
+        image.extension().and_then(|s| s.to_str()),
+        Some("raw" | "ext4")
+    ) {
+        return Ok("raw".into());
+    }
+    let output = fluxvm_core::process::output_checked(
         &cfg.qemu_img_binary,
         &[
             "info".into(),
@@ -570,10 +588,17 @@ async fn image_format(cfg: &Config, image: &Path) -> String {
         ],
     )
     .await
-    .ok()
-    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-    .and_then(|v| v.get("format").and_then(|f| f.as_str()).map(str::to_owned))
-    .unwrap_or_else(|| "qcow2".into())
+    .with_context(|| {
+        format!(
+            "detecting format of {} (use .raw for a known raw image without qemu-img)",
+            image.display()
+        )
+    })?;
+    let parsed: serde_json::Value = serde_json::from_str(&output)?;
+    parsed["format"]
+        .as_str()
+        .map(str::to_owned)
+        .context("qemu-img info did not return an image format")
 }
 
 pub async fn clone_for_vm(
@@ -583,7 +608,7 @@ pub async fn clone_for_vm(
     out: &Path,
     size_gib: Option<u64>,
 ) -> Result<()> {
-    let base_fmt = image_format(cfg, base).await;
+    let base_fmt = image_format(cfg, base).await?;
     match backend {
         BackendKind::Qemu => {
             // Cheap disposable copy-on-write layer.
@@ -636,15 +661,58 @@ pub async fn clone_for_vm(
         ),
     }
     if let Some(size) = size_gib {
-        run_checked(
-            &cfg.qemu_img_binary,
-            &[
-                "resize".into(),
-                out.display().to_string(),
-                format!("{}G", size),
-            ],
-        )
-        .await?;
+        let new_len = size
+            .checked_mul(1024 * 1024 * 1024)
+            .context("disk size overflow")?;
+        if backend != BackendKind::Qemu {
+            let file = fs::OpenOptions::new().write(true).open(out)?;
+            if new_len < file.metadata()?.len() {
+                bail!("requested disk size is smaller than the source image");
+            }
+            file.set_len(new_len)?;
+        } else {
+            run_checked(
+                &cfg.qemu_img_binary,
+                &[
+                    "resize".into(),
+                    out.display().to_string(),
+                    format!("{}G", size),
+                ],
+            )
+            .await?;
+        }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod qemu_free_raw_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn clones_named_raw_image_without_qemu_img() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("base.raw");
+        let dest = dir.path().join("vm.raw");
+        fs::write(&base, vec![0x5a; 4096]).unwrap();
+        let cfg = Config {
+            qemu_img_binary: "/definitely/missing/qemu-img".into(),
+            ..Config::default()
+        };
+        clone_for_vm(&cfg, &base, BackendKind::FluxVm, &dest, None)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(dest).unwrap(), fs::read(base).unwrap());
+    }
+
+    #[tokio::test]
+    async fn qcow2_header_takes_precedence_over_raw_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("misnamed.raw");
+        fs::write(&base, b"QFI\xfbpadding").unwrap();
+        assert_eq!(
+            image_format(&Config::default(), &base).await.unwrap(),
+            "qcow2"
+        );
+    }
 }
