@@ -252,6 +252,31 @@ pub async fn start_kvm_from_snapshot(
     fs::create_dir_all(workspace)?;
     let cpu = kvm_snap::load_cpu(vmstate).map_err(|e| anyhow::anyhow!("{e}"))?;
     let vm_cfg = boot_to_vm_config(cfg)?;
+    let configured_mem_len = u64::from(vm_cfg.memory_mib) * 1024 * 1024;
+    if cpu.mem_len != configured_mem_len {
+        bail!(
+            "vmstate RAM size {} does not match configured RAM {}",
+            cpu.mem_len,
+            configured_mem_len
+        );
+    }
+    if cpu.all_vcpus.len() != usize::from(vm_cfg.cpus) {
+        bail!(
+            "vmstate has {} vCPUs, configuration has {}",
+            cpu.all_vcpus.len(),
+            vm_cfg.cpus
+        );
+    }
+    let actual_mem_len = fs::metadata(mem_path)
+        .with_context(|| format!("reading snapshot RAM {}", mem_path.display()))?
+        .len();
+    if actual_mem_len != cpu.mem_len {
+        bail!(
+            "snapshot RAM size {} does not match vmstate size {}",
+            actual_mem_len,
+            cpu.mem_len
+        );
+    }
     let mem_file = mem_path.to_path_buf();
     let stop = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
