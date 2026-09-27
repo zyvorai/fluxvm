@@ -24,7 +24,7 @@ use crate::tap::Tap;
 use crate::vhost::VhostNet;
 use std::io;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{Receiver, SyncSender},
     Arc,
 };
@@ -359,6 +359,7 @@ impl VirtualMachine {
             gdb,
             true,
             None,
+            None,
         )
     }
 
@@ -371,6 +372,7 @@ impl VirtualMachine {
         gdb: Option<GdbSetup>,
         exit_on_boot_marker: bool,
         ready: Option<SyncSender<std::result::Result<(), String>>>,
+        pause_epochs: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -497,6 +499,9 @@ impl VirtualMachine {
 
         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
             while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
+                if let Some((requested, ack)) = &pause_epochs {
+                    ack.store(requested.load(Ordering::SeqCst), Ordering::SeqCst);
+                }
                 if let Some(rx) = snap_rx.as_ref() {
                     while let Ok(cmd) = rx.try_recv() {
                         let virtio: Vec<_> =

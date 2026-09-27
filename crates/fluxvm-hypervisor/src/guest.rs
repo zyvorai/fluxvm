@@ -15,7 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc,
 };
 use std::time::Duration;
@@ -26,6 +26,7 @@ use tracing::info;
 
 const FC_API_TIMEOUT: Duration = Duration::from_secs(10);
 const KVM_START_TIMEOUT: Duration = Duration::from_secs(30);
+const KVM_PAUSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 enum GuestEngine {
     Firecracker {
@@ -36,6 +37,9 @@ enum GuestEngine {
         stop: Arc<AtomicBool>,
         /// When true, the vCPU thread parks (no KVM_RUN) until cleared.
         paused: Arc<AtomicBool>,
+        pause_epoch: Arc<AtomicU64>,
+        quiesced_epoch: Arc<AtomicU64>,
+        cpus: u8,
         snap_tx: mpsc::Sender<SnapCmd>,
         thread: Option<std::thread::JoinHandle<()>>,
     },
@@ -66,8 +70,24 @@ impl GuestHandle {
     pub async fn pause(&self) -> Result<()> {
         match &self.engine {
             GuestEngine::Firecracker { api_sock, .. } => pause(api_sock).await,
-            GuestEngine::Kvm { paused, .. } => {
+            GuestEngine::Kvm {
+                paused,
+                pause_epoch,
+                quiesced_epoch,
+                cpus,
+                ..
+            } => {
+                ensure_kvm_pause_supported(*cpus)?;
                 paused.store(true, Ordering::SeqCst);
+                let epoch = pause_epoch.fetch_add(1, Ordering::SeqCst) + 1;
+                let deadline = tokio::time::Instant::now() + KVM_PAUSE_TIMEOUT;
+                while quiesced_epoch.load(Ordering::SeqCst) != epoch {
+                    if tokio::time::Instant::now() >= deadline {
+                        paused.store(false, Ordering::SeqCst);
+                        bail!("KVM vCPU did not quiesce within {KVM_PAUSE_TIMEOUT:?}");
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
                 Ok(())
             }
         }
@@ -105,10 +125,20 @@ impl GuestHandle {
                 snapshot_create(api_sock, vmstate, mem).await
             }
             GuestEngine::Kvm {
-                paused, snap_tx, ..
+                paused,
+                pause_epoch,
+                quiesced_epoch,
+                cpus,
+                snap_tx,
+                ..
             } => {
-                if !paused.load(Ordering::SeqCst) {
-                    bail!("KVM snapshot requires the guest to be paused");
+                if !paused.load(Ordering::SeqCst)
+                    || quiesced_epoch.load(Ordering::SeqCst) != pause_epoch.load(Ordering::SeqCst)
+                {
+                    bail!("KVM snapshot requires a quiesced guest");
+                }
+                if *cpus != 1 {
+                    bail!("in-tree KVM snapshots require one vCPU until AP pause is implemented");
                 }
                 let (reply_tx, reply_rx) = mpsc::sync_channel(1);
                 snap_tx
@@ -145,6 +175,13 @@ impl GuestHandle {
             }
         }
     }
+}
+
+fn ensure_kvm_pause_supported(cpus: u8) -> Result<()> {
+    if cpus != 1 {
+        bail!("in-tree KVM pause and snapshots require one vCPU until AP pause is implemented");
+    }
+    Ok(())
 }
 
 pub async fn start(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle> {
@@ -258,10 +295,14 @@ async fn spawn_kvm(
     workspace: &Path,
     restore: Option<(kvm_snap::CpuSnapshot, PathBuf)>,
 ) -> Result<GuestHandle> {
+    let cpus = vm_cfg.cpus;
     let stop = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
+    let pause_epoch = Arc::new(AtomicU64::new(0));
+    let quiesced_epoch = Arc::new(AtomicU64::new(0));
     let stop_thread = Arc::clone(&stop);
     let paused_thread = Arc::clone(&paused);
+    let pause_epochs_thread = (Arc::clone(&pause_epoch), Arc::clone(&quiesced_epoch));
     let (snap_tx, snap_rx) = mpsc::channel::<SnapCmd>();
     let (ready_tx, ready_rx) = mpsc::sync_channel::<std::result::Result<(), String>>(1);
     let thread = std::thread::Builder::new()
@@ -285,6 +326,7 @@ async fn spawn_kvm(
                     None,
                     false,
                     Some(ready_tx.clone()),
+                    Some(pause_epochs_thread),
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
                 Ok(())
@@ -300,6 +342,9 @@ async fn spawn_kvm(
         engine: GuestEngine::Kvm {
             stop,
             paused,
+            pause_epoch,
+            quiesced_epoch,
+            cpus,
             snap_tx,
             thread: Some(thread),
         },
@@ -688,6 +733,52 @@ async fn fc_request_inner(
 mod tests {
     use super::*;
     use crate::api::FluxVmEngine;
+
+    #[tokio::test]
+    async fn multi_vcpu_kvm_cannot_claim_a_complete_pause() {
+        let (snap_tx, _snap_rx) = mpsc::channel();
+        let paused = Arc::new(AtomicBool::new(false));
+        let handle = GuestHandle {
+            workspace: PathBuf::new(),
+            engine: GuestEngine::Kvm {
+                stop: Arc::new(AtomicBool::new(false)),
+                paused: Arc::clone(&paused),
+                pause_epoch: Arc::new(AtomicU64::new(0)),
+                quiesced_epoch: Arc::new(AtomicU64::new(0)),
+                cpus: 2,
+                snap_tx,
+                thread: None,
+            },
+        };
+        let err = handle.pause().await.err().unwrap();
+        assert!(format!("{err}").contains("one vCPU"));
+        assert!(!paused.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn kvm_pause_waits_for_current_worker_acknowledgment() {
+        let (snap_tx, _snap_rx) = mpsc::channel();
+        let requested = Arc::new(AtomicU64::new(0));
+        let ack = Arc::new(AtomicU64::new(0));
+        let handle = GuestHandle {
+            workspace: PathBuf::new(),
+            engine: GuestEngine::Kvm {
+                stop: Arc::new(AtomicBool::new(false)),
+                paused: Arc::new(AtomicBool::new(false)),
+                pause_epoch: Arc::clone(&requested),
+                quiesced_epoch: Arc::clone(&ack),
+                cpus: 1,
+                snap_tx,
+                thread: None,
+            },
+        };
+        let worker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            ack.store(requested.load(Ordering::SeqCst), Ordering::SeqCst);
+        });
+        handle.pause().await.unwrap();
+        worker.await.unwrap();
+    }
 
     fn base_config() -> BootConfig {
         BootConfig {

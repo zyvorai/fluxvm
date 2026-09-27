@@ -189,9 +189,6 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
         }
         ApiRequest::SnapshotSave { path } => {
             let st = state.lock().await;
-            if let Some(g) = &st.guest {
-                let _ = g.pause().await;
-            }
             let result = snapshot::save(&st, &path).await;
             if st.lifecycle == VmLifecycle::Running {
                 if let Some(g) = &st.guest {
@@ -266,9 +263,6 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                     // avoid async recursion through dispatch).
                     let st = state.lock().await;
                     if st.guest.is_some() {
-                        if let Some(g) = &st.guest {
-                            let _ = g.pause().await;
-                        }
                         let result = snapshot::save(&st, &path).await;
                         if st.lifecycle == VmLifecycle::Running {
                             if let Some(g) = &st.guest {
