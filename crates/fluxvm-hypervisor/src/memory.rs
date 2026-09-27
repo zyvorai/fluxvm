@@ -119,8 +119,11 @@ impl GuestMemory {
     }
 
     pub fn read_at(&self, gpa: u64, buf: &mut [u8]) -> Result<()> {
-        let start = gpa as usize;
-        let end = start + buf.len();
+        let start = usize::try_from(gpa)
+            .map_err(|_| FluxError::Memory("GPA does not fit host address space".into()))?;
+        let end = start
+            .checked_add(buf.len())
+            .ok_or_else(|| FluxError::Memory("GPA overflow".into()))?;
         if end > self.len {
             return Err(FluxError::Memory(format!(
                 "read GPA {gpa:#x}+{} past RAM {}",
@@ -187,5 +190,18 @@ impl Clone for GuestMemory {
             ptr: self.ptr,
             len: self.len,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_at_rejects_overflowing_guest_address() {
+        let mem = GuestMemory::allocate(4096).unwrap();
+        let mut buf = [0u8; 16];
+        assert!(mem.read_at(u64::MAX, &mut buf).is_err());
     }
 }

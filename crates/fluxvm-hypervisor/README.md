@@ -73,6 +73,7 @@ If that script soft-skips (no KERNEL/KVM), treat multi-vCPU as
 
   * The in-tree virtio-blk backend expects a nonempty, 512-byte-aligned raw disk. It rejects qcow2; convert a stopped image to raw before selecting `fluxvm_engine = "kvm"`. Requested disk, TAP and vsock devices must initialize successfully or VM creation fails.
   * In-tree KVM pause and memory snapshots currently require one vCPU. The BSP now acknowledges a pause after leaving `KVM_RUN`; AP threads do not yet participate in that barrier, so multi-vCPU pause/snapshot requests fail instead of producing an inconsistent image.
+  * The in-tree block device uses split virtqueues with direct raw-sector I/O. It rejects indirect descriptors and malformed or cyclic chains. Guest FLUSH requests call `sync_data` on the backing file.
 
 - Virtio **device live-state** in snapshots is a watermark only; backends re-attach from boot config (Firecracker remains production snap format).
 - Full virtio-pci BAR wiring / Windows production path → cloud-hypervisor SoT (P2 follow-up).
