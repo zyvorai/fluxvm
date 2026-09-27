@@ -16,6 +16,16 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 ## VM Lifecycle
 
 - Create, list, get, pause, resume, delete across all 4 backends
+- Restart, rename, labels (`PATCH /v1/vms/{id}`), label selectors (`?label=env=prod,!tmp`) and bulk `start/stop/restart/delete -l`
+- VM names or UUID prefixes accepted wherever fluxctl takes a VM id; `fluxctl wait --for running|stopped|agent`; `-o json|table|wide`; shell completions
+- Clone a stopped VM with its data disks and labels (`fluxctl clone-vm`, `POST /v1/vms/{id}/clone`)
+- QEMU data disks: qcow2 hot-add as `scsi-hd`, live `block_resize` of root or data disks, detach (`fluxctl disk`, `/v1/vms/{id}/disks`)
+- QEMU serial console on a chardev socket teeing into `console.log`; websocket `GET /v1/vms/{id}/serial` + `fluxctl serial`
+- Snapshots: save, list, delete, start-from; label-driven scheduled snapshots with retention (`fluxvm.io/snapshot-every`, `fluxvm.io/snapshot-keep`)
+- Backups to standalone qcow2 (root or `--all-disks`), live via one temporary internal snapshot
+- VM templates (`/v1/vm-templates`, `fluxctl vm-template save|list|show|delete|create`)
+- Lifecycle events (`state_dir/events.jsonl`, `GET /v1/events`, SSE `/v1/events/stream`, `fluxctl events -f`) and quota usage (`GET /v1/quotas/me`)
+- Remote fluxctl: `--server`/`FLUXVM_URL`, `--server-token`/`FLUXVM_TOKEN`, saved `fluxctl context`s; OpenAPI at `/v1/openapi.json`
 - `"backend":"auto"` resolution (picks a backend based on spec/host capability)
 - `ttl_seconds` — guaranteed cleanup of a VM even if the creating job crashes or disappears
 - vsock guest agent: `exec`, PTY console, file transfer — no SSH or network path required (QEMU native AF_VSOCK; Cloud Hypervisor / Firecracker / in-tree FluxVM KVM via Firecracker-style UDS `CONNECT` proxy)

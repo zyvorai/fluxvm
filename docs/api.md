@@ -18,14 +18,27 @@ Default bind address:
 GET    /healthz
 GET    /readyz
 GET    /metrics
+GET    /v1/openapi.json                  # OpenAPI 3.1, VM surface (no auth)
 POST   /v1/vms
 GET    /v1/vms
 GET    /v1/vms?name=<name>
 GET    /v1/vms?tenant=<tenant>
+GET    /v1/vms?label=<selector>          # env=prod,team!=x,gpu,!tmp
 GET    /v1/vms/{uuid}
+PATCH  /v1/vms/{uuid}                    # {"name": "...", "labels": {"k": "v", "gone": null}}
 POST   /v1/vms/{uuid}/start
+POST   /v1/vms/{uuid}/restart
+POST   /v1/vms/{uuid}/clone              # {"name": "..."}; source must be stopped
+POST   /v1/vms/{uuid}/backup             # {"compress": bool, "all_disks": bool}
 POST   /v1/vms/{uuid}/start-from-snapshot
 POST   /v1/vms/{uuid}/snapshot
+GET    /v1/vms/{uuid}/snapshots
+DELETE /v1/vms/{uuid}/snapshots/{tag}
+GET    /v1/vms/{uuid}/disks
+POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}
+PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
+DELETE /v1/vms/{uuid}/disks/{name}
+GET    /v1/vms/{uuid}/serial             # websocket, raw serial bytes (QEMU)
 POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
 POST   /v1/vms/{uuid}/resume
@@ -48,6 +61,14 @@ POST   /v1/vms/{uuid}/agent/put-file
 POST   /v1/vms/{uuid}/agent/get-file
 GET    /v1/vms/{uuid}/qga/network-interfaces
 DELETE /v1/vms/{uuid}
+GET    /v1/vm-templates
+POST   /v1/vm-templates                  # {"name", "description"?, "spec", "replace"?}
+GET    /v1/vm-templates/{name}
+DELETE /v1/vm-templates/{name}
+POST   /v1/vm-templates/{name}/instantiate   # {"name": "vm-1", "labels"?: {...}}
+GET    /v1/events                        # ?vm=&event=<prefix>&since=<rfc3339>&limit=
+GET    /v1/events/stream                 # Server-Sent Events, same filters
+GET    /v1/quotas/me
 POST   /v1/images/build
 GET    /v1/images/catalog
 POST   /v1/images/catalog
@@ -113,10 +134,30 @@ send before either ending (default) or switching to a live tail (`follow=true`, 
 every 300ms for new lines). Verified against a real booting VM: both the initial tail and the live
 follow stream return real, growing boot output.
 
+### Day-2 VM routes
+
+Semantics, limits and CLI equivalents for restart, PATCH/labels, snapshots,
+clone, disks, serial, backup, scheduled snapshots, VM templates and events are
+in [operations.md → Day-2 VM operations](operations.md#day-2-vm-operations).
+Highlights:
+
+- `GET /v1/vms/{uuid}/serial` is a websocket to the QEMU serial port: binary
+  and text frames are written to the guest verbatim, guest output comes back
+  as binary frames. One client at a time; no guest agent needed.
+- `POST /v1/vms/{uuid}/backup` always writes under `state_dir/backups/` (the
+  API never takes a destination path) and returns `{path, size_bytes, live,
+  disks[]}`.
+- `POST /v1/vm-templates/{name}/instantiate` goes through the same tenant,
+  `created_by_token` and token-quota handling as `POST /v1/vms`. VM templates
+  are separate from the sandbox `/v1/templates` routes.
+- `GET /v1/events/stream` emits `event: <name>` / `data: <json>` frames;
+  tenant-scoped tokens only see their tenant's VMs.
+- `GET /v1/openapi.json` is exempt from auth, like `/healthz` and `/readyz`.
+
 ## Auth / RBAC
 
 `[[auth.tokens]]` entries in the config (see `config.example.toml`) enable bearer-token auth on every
-route except `GET /healthz` and `GET /readyz` (liveness vs readiness). Absent or empty `auth.tokens`
+route except `GET /healthz`, `GET /readyz` (liveness vs readiness) and `GET /v1/openapi.json`. Absent or empty `auth.tokens`
 (the default) leaves the API exactly as open as the pre-auth MVP — every request is treated as
 `admin`. Two roles:
 

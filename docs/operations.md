@@ -1325,15 +1325,20 @@ of a surprise landing somewhere else.
   network-groups/             (security groups, CNP store, ipcache.json)
   downloads/
   images/
+    clones/                   (standalone root images written by clone-vm)
   kernels/
   templates/                 ([sandbox].templates_dir; OCI→template export)
+  vm-templates.json           (VM templates, /v1/vm-templates)
+  backups/                    (fluxctl backup / POST /v1/vms/{id}/backup output)
   instances/
     <uuid>/
       root.qcow2 | root.raw
+      disks/<name>.qcow2      (QEMU data disks)
       seed.img
       user-data
       meta-data
       console.log
+      serial.sock             (QEMU serial chardev; fluxctl serial / websocket)
       qmp.sock | ch-api.sock | firecracker.sock | fluxvm.sock
       vsock.sock              (CH / Firecracker / FluxVm, when agent.enabled)
       firecracker.json

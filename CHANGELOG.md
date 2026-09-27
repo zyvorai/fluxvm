@@ -3,6 +3,9 @@
 ## 0.4.0 (unreleased)
 
 ### Changed
+- **QEMU serial is a UNIX socket.** `-serial stdio` became
+  `-chardev socket,...,logfile=console.log,logappend=on`, so `/logs` output is
+  unchanged; VMs started before upgrading need a restart for `fluxctl serial`.
 - **Docs: `NEXT-FEATURES` ranked set marked complete.** Intro, post-GA closes
   (#104 NBD, Keep concurrency, #106 remote seccomp, #108 AppArmor build-image,
   #111 H4), cleared live-evidence archive vs still-open honesty (H2 virtio-win,
@@ -43,6 +46,29 @@
   virtiofs) remain in [docs/secure-containers.md](docs/secure-containers.md).
 
 ### Added
+- **VM platform (Tier 2).** Label selectors (`GET /v1/vms?label=`,
+  `fluxctl list -l`) and bulk `start/stop/restart/delete -l` (delete needs
+  `--yes`). VM clone (`POST /v1/vms/{id}/clone`, `fluxctl clone-vm`) of a
+  stopped VM with its data disks and labels. QEMU disks
+  (`/v1/vms/{id}/disks`, `fluxctl disk list|attach|resize|detach`): qcow2
+  data disks hot-added as `scsi-hd`, live `block_resize`. Serial console on a
+  QEMU chardev socket teeing into `console.log`, over websocket
+  `GET /v1/vms/{id}/serial` and `fluxctl serial`. Root or all-disk backup to
+  standalone qcow2 (`POST /v1/vms/{id}/backup`, `fluxctl backup
+  [--all-disks]`), live via one temporary snapshot. Label-driven scheduled
+  snapshots with retention (`fluxvm.io/snapshot-every`,
+  `fluxvm.io/snapshot-keep`). VM templates (`/v1/vm-templates`,
+  `fluxctl vm-template`). `GET /v1/openapi.json` (public).
+- **fluxctl remote mode.** `--server` / `FLUXVM_URL` (+ `--server-token` /
+  `FLUXVM_TOKEN`) and saved `fluxctl context`s drive a remote daemon for the
+  core VM verbs, including `serial` (websocket) and `events -f` (SSE); VM
+  names resolve against the server.
+- **Day-2 VM operations (Tier 1).** `restart`, `PATCH /v1/vms/{id}` (rename,
+  labels), snapshot list/delete, lifecycle events (`state_dir/events.jsonl`,
+  `GET /v1/events`, SSE `/v1/events/stream`, `fluxctl events -f`),
+  `GET /v1/quotas/me`, VM name / UUID-prefix resolution in every fluxctl VM
+  argument, `-o json|table|wide`, `fluxctl completions`, `fluxctl wait`, and
+  console resize on SIGWINCH.
 - **H4 in-tree hypervisor:** virtio-fs attach (virtiofsd + MMIO tag),
   FLUXKVM1 migrate export/import bundles, CPU hotplug (`max_cpus` /
   `KVM_CREATE_VCPU`) and disk hotplug validation. Control API actions

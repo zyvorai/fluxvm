@@ -52,6 +52,9 @@ sudo fluxctl create --spec examples/qemu.json     # boot a VM from a JSON spec
 fluxctl list                                      # every VM, every backend
 fluxctl exec <id> -- hostname                     # run a command over vsock — no SSH
 fluxctl pause <id> && fluxctl resume <id>         # park it instead of rebuilding it
+fluxctl disk attach web data --size-gib 20        # hot-add a data disk (names work anywhere an id does)
+fluxctl backup web --all-disks --compress         # live, standalone qcow2 copies
+fluxctl --server http://host:7788 list            # same verbs against a remote daemon
 fluxctl delete <id>                               # or set ttl_seconds and walk away
 ```
 
@@ -97,6 +100,15 @@ drop-in for KubeVirt/OpenShift.
 | `virsh list` / `virsh dominfo` | `fluxctl list` / `fluxctl get` | Yes |
 | `virsh suspend` / `virsh resume` | `fluxctl pause` / `fluxctl resume` | Yes |
 | `virsh destroy` | `fluxctl delete` | Yes |
+| `virsh reboot` | `fluxctl restart` | Yes |
+| `virsh domrename` / metadata | `fluxctl rename-vm` / `fluxctl label` | Yes (labels drive `-l` selectors) |
+| `virsh console` | `fluxctl serial` (websocket over REST too) | Yes |
+| `virsh attach-disk` / `blockresize` / `detach-disk` | `fluxctl disk attach\|resize\|detach` | Yes (QEMU) |
+| `virsh snapshot-create` / `-list` / `-delete` | `fluxctl snapshot` / `snapshot-list` / `snapshot-delete` | Yes (QEMU internal snapshots) |
+| `virsh backup-begin` | `fluxctl backup [--all-disks]` | Yes (standalone qcow2) |
+| `virt-clone` | `fluxctl clone-vm` | Yes |
+| `virsh event` | `fluxctl events -f` (SSE: `/v1/events/stream`) | Yes |
+| `virsh -c qemu+ssh://host` | `fluxctl --server` / `fluxctl context` | Yes (REST, bearer token) |
 | XML domain definitions | JSON VM spec (`fluxctl create --spec vm.json`) | Different format, same purpose |
 | No REST API | Full REST API (`fluxctl serve`) | FluxVM adds this |
 
@@ -187,8 +199,23 @@ fluxctl migrate start <id> --destination tcp:10.0.0.9:49152   # QEMU/CH source-s
 fluxctl migrate status <id>      # QEMU only -- Cloud Hypervisor's send-migration is fire-and-forget
 fluxctl pause <id> && fluxctl resume <id>
 fluxctl freeze <id> && fluxctl frozen <id> && fluxctl thaw <id>  # cgroup-level, independent of the VMM's own API
+fluxctl restart <id> && fluxctl wait <id> --for running
+fluxctl label <id> env=dev fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=4  # `key-` removes
+fluxctl list -l env=dev && fluxctl stop -l env=dev
+fluxctl clone-vm <stopped-id> web-2         # copies data disks + labels
+fluxctl disk attach <id> data --size-gib 10 && fluxctl disk resize <id> root --size-gib 40
+fluxctl serial <id>                         # QEMU serial console, Ctrl-] quits
+fluxctl backup <id> --all-disks --compress  # live when running
+fluxctl vm-template save base --from-vm <id> && fluxctl vm-template create base web-3
+fluxctl events -f                           # lifecycle event stream
 fluxctl delete <id>              # or wait for ttl_seconds
+
+# Remote daemon (same verbs)
+fluxctl context add lab --server http://10.0.0.5:7788 --token "$TOKEN" && fluxctl context use lab
 ```
+
+Day-2 details (scheduled snapshots, disks, backup, templates, contexts):
+[docs/operations.md](docs/operations.md#day-2-vm-operations).
 
 `cargo build --release` also produces `fluxvm-kube`, `fluxvm-agent`, `containerd-shim-fluxvm-v2`,
 and `fluxvm-container-agent` — see [Feature highlights](#feature-highlights) for what each is.
@@ -222,7 +249,7 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 | **Networking & Network Fabric** | TAP/bridge, macvtap, user-mode NAT, per-VM netns. **Network Fabric is GA (schema v4):** TC/eBPF or Cilium-coexistence dataplane with IPv4/IPv6 L3+L4 policy, rate limits, security groups, CNP, live reconfigure and REST observability; nftables by default | [docs/network-fabric.md](docs/network-fabric.md) · [docs/ebpf-cilium.md](docs/ebpf-cilium.md) · [docs/network-policy.md](docs/network-policy.md) |
 | **Service Fabric** | Node-local Maglev VIP load balancing: dual-stack NAT/DSR/SNAT, health-aware routing, per-service EDT, flow export | [docs/service-fabric.md](docs/service-fabric.md) |
 | **Images** | virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, Ed25519-signed catalog with REST CRUD, Windows golden-image customization | [docs/build-image-tutorials.md](docs/build-image-tutorials.md) · [docs/operations.md](docs/operations.md#image-catalog--signing) · [docs/windows-golden.md](docs/windows-golden.md) |
-| **Operations** | cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC | [docs/operations.md](docs/operations.md) · [docs/api.md](docs/api.md#auth--rbac) |
+| **Operations** | Day-2 VM verbs: restart, rename, labels + bulk selectors, clone, QEMU data disks (hot-add, live resize), serial console, live backups, scheduled snapshots with retention, VM templates, lifecycle events (SSE), remote `fluxctl` contexts, OpenAPI; cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC | [docs/operations.md](docs/operations.md) · [docs/api.md](docs/api.md#auth--rbac) |
 | **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native path (no KubeVirt); `fluxvm-agent` fleet registry with load-aware placement | [Kubernetes CRD/operator](#kubernetes-crdoperator) · [docs/microvm.md](docs/microvm.md) · [docs/operations.md](docs/operations.md#distributed-node-agent) |
 | **Secure Containers** *(GA)* | containerd runtime-v2 shim mapping a Pod onto one microVM: CNI L2, Sentinel policy, cgroup-v2 stats, VSOCK stdio/TTY, guest AppArmor/SELinux/seccomp | [docs/secure-containers.md](docs/secure-containers.md) · [supported profile](docs/secure-containers-supported-profile.md) · [15-min lab](docs/secure-containers-15min-lab.md) · [Sentinel wedge](docs/sentinel-wedge.md) |
 | **Security profiles (Phase 6)** | `standard` / `measured` / `confidential-snp` / `confidential-tdx`: measured software-test evidence on ordinary QEMU hosts; confidential control plane tested without claiming host-memory encryption until a hardware run | [docs/security-profiles.md](docs/security-profiles.md) · [howto / CI](docs/guides/security-profiles-howto.md) |
