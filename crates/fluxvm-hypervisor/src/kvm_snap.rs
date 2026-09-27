@@ -19,6 +19,9 @@ use std::path::Path;
 pub const MAGIC: &[u8; 8] = b"FLUXKVM1";
 pub const VERSION: u32 = 3;
 const V2_WATERMARK: usize = 256;
+const MAX_SNAPSHOT_VCPUS: usize = 256;
+const MAX_SNAPSHOT_DEVICES: usize = 64;
+const MAX_VIRTIO_QUEUES: u32 = 4;
 
 pub struct SnapCmd {
     pub vmstate: std::path::PathBuf,
@@ -35,6 +38,13 @@ pub fn is_flux_kvm_vmstate(path: &Path) -> bool {
 }
 
 fn write_virtio_v3(f: &mut File, devices: &[VirtioState]) -> Result<()> {
+    if devices.len() > MAX_SNAPSHOT_DEVICES
+        || devices.iter().any(|d| d.num_queues > MAX_VIRTIO_QUEUES)
+    {
+        return Err(FluxError::Hypervisor(
+            "snapshot virtio device or queue count exceeds limit".into(),
+        ));
+    }
     let ndev = devices.len() as u32;
     f.write_all(&ndev.to_le_bytes())
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
@@ -51,7 +61,7 @@ fn write_virtio_v3(f: &mut File, devices: &[VirtioState]) -> Result<()> {
             .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
         f.write_all(&st.num_queues.to_le_bytes())
             .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
-        let nq = st.num_queues.min(4) as usize;
+        let nq = st.num_queues as usize;
         for q in st.queues.iter().take(nq) {
             f.write_all(&q.num.to_le_bytes())
                 .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
@@ -75,6 +85,11 @@ fn read_virtio_v3(f: &mut File) -> Result<Vec<VirtioState>> {
     f.read_exact(&mut nb)
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     let ndev = u32::from_le_bytes(nb) as usize;
+    if ndev > MAX_SNAPSHOT_DEVICES {
+        return Err(FluxError::Hypervisor(format!(
+            "snapshot has too many virtio devices: {ndev}"
+        )));
+    }
     let mut out = Vec::with_capacity(ndev);
     for _ in 0..ndev {
         let mut st = VirtioState::default();
@@ -98,7 +113,13 @@ fn read_virtio_v3(f: &mut File) -> Result<Vec<VirtioState>> {
         st.interrupt_status = u32::from_le_bytes(u32b);
         f.read_exact(&mut u32b)
             .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
-        st.num_queues = u32::from_le_bytes(u32b).min(4);
+        st.num_queues = u32::from_le_bytes(u32b);
+        if st.num_queues > MAX_VIRTIO_QUEUES {
+            return Err(FluxError::Hypervisor(format!(
+                "snapshot has too many virtio queues: {}",
+                st.num_queues
+            )));
+        }
         for i in 0..st.num_queues as usize {
             let mut q = QueueState::default();
             f.read_exact(&mut u32b)
@@ -142,6 +163,11 @@ pub fn dump(
     fs::write(mem_path, mem.as_slice()).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
 
     let ncpus = kvm.num_cpus() as u32;
+    if ncpus == 0 || ncpus as usize > MAX_SNAPSHOT_VCPUS {
+        return Err(FluxError::Hypervisor(format!(
+            "unsupported snapshot vCPU count: {ncpus}"
+        )));
+    }
     let mut f = File::create(vmstate).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     f.write_all(MAGIC)
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
@@ -218,6 +244,11 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
     } else {
         1
     };
+    if ncpus == 0 || ncpus > MAX_SNAPSHOT_VCPUS {
+        return Err(FluxError::Hypervisor(format!(
+            "invalid snapshot vCPU count: {ncpus}"
+        )));
+    }
     for _ in 0..ncpus {
         let mut regs = unsafe { std::mem::zeroed::<KvmRegs>() };
         let mut sregs = unsafe { std::mem::zeroed::<KvmSregs>() };
@@ -242,7 +273,10 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
     } else {
         // v2 reserved watermark — discard.
         let mut pad = [0u8; V2_WATERMARK];
-        let _ = f.read_exact(&mut pad);
+        if version == 2 {
+            f.read_exact(&mut pad)
+                .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+        }
         Vec::new()
     };
     let (regs, sregs) = all_vcpus[0].clone();
@@ -256,24 +290,35 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
 }
 
 pub fn load_memory_into(mem: &mut GuestMemory, mem_path: &Path) -> Result<()> {
-    let bytes = fs::read(mem_path).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
-    if bytes.len() > mem.len() {
+    let file = File::open(mem_path).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+    let actual = file
+        .metadata()
+        .map_err(|e| FluxError::Hypervisor(e.to_string()))?
+        .len();
+    if actual != mem.len() as u64 {
         return Err(FluxError::Hypervisor(format!(
-            "snapshot mem {} > guest RAM {}",
-            bytes.len(),
+            "snapshot RAM size {} does not match guest RAM {}",
+            actual,
             mem.len()
         )));
     }
-    mem.write_at(0, &bytes)?;
+    let mut reader = std::io::BufReader::new(file);
+    reader
+        .read_exact(mem.as_slice_mut())
+        .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     Ok(())
 }
 
 /// Apply multi-vCPU snapshot after KvmVm is created.
 pub fn restore_vcpus(kvm: &KvmVm, snap: &CpuSnapshot) -> Result<()> {
+    if snap.all_vcpus.len() != kvm.num_cpus() {
+        return Err(FluxError::Hypervisor(format!(
+            "snapshot has {} vCPUs, VM has {}",
+            snap.all_vcpus.len(),
+            kvm.num_cpus()
+        )));
+    }
     for (i, (regs, sregs)) in snap.all_vcpus.iter().enumerate() {
-        if i >= kvm.num_cpus() {
-            break;
-        }
         kvm.set_sregs(i, *sregs)?;
         kvm.set_regs(i, *regs)?;
     }
@@ -312,6 +357,66 @@ pub fn restore_virtio(
 mod tests {
     use super::*;
     use crate::devices::virtio_mmio::{VIRTIO_ID_BLOCK, VIRTIO_ID_NET};
+
+    fn snapshot_header(version: u32, ncpus: u32) -> Vec<u8> {
+        let mut bytes = MAGIC.to_vec();
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&4096u64.to_le_bytes());
+        bytes.extend_from_slice(&ncpus.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn rejects_zero_and_excessive_vcpu_counts_before_reading_registers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vmstate");
+        for count in [0, MAX_SNAPSHOT_VCPUS as u32 + 1, u32::MAX] {
+            fs::write(&path, snapshot_header(VERSION, count)).unwrap();
+            assert!(format!("{}", load_cpu(&path).err().unwrap()).contains("vCPU count"));
+        }
+    }
+
+    #[test]
+    fn rejects_oversized_virtio_count_and_queue_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("virtio");
+        fs::write(&path, (MAX_SNAPSHOT_DEVICES as u32 + 1).to_le_bytes()).unwrap();
+        assert!(format!(
+            "{}",
+            read_virtio_v3(&mut File::open(&path).unwrap())
+                .err()
+                .unwrap()
+        )
+        .contains("devices"));
+
+        let mut bytes = 1u32.to_le_bytes().to_vec();
+        bytes.extend_from_slice(&VIRTIO_ID_NET.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 8 + 8 + 4 + 4]);
+        bytes.extend_from_slice(&(MAX_VIRTIO_QUEUES + 1).to_le_bytes());
+        fs::write(&path, bytes).unwrap();
+        assert!(format!(
+            "{}",
+            read_virtio_v3(&mut File::open(&path).unwrap())
+                .err()
+                .unwrap()
+        )
+        .contains("queues"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_truncated_ram_without_mutating_guest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mem");
+        fs::write(&path, [0x5au8; 2048]).unwrap();
+        let mut mem = GuestMemory::allocate(4096).unwrap();
+        mem.write_at(0, &[0xa5]).unwrap();
+        assert!(
+            format!("{}", load_memory_into(&mut mem, &path).err().unwrap())
+                .contains("does not match")
+        );
+        assert_eq!(mem.as_slice()[0], 0xa5);
+    }
 
     #[test]
     fn virtio_v3_round_trip_bytes() {

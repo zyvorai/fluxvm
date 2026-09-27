@@ -163,6 +163,11 @@ impl VmConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.vsock_cid.is_some() != self.vsock_uds.is_some() {
+            return Err(FluxError::Unsupported(
+                "vsock_cid and vsock_uds must be configured together".into(),
+            ));
+        }
         if self.cpus == 0 || self.cpus > 32 {
             return Err(FluxError::Unsupported("cpus must be 1..=32".into()));
         }
@@ -224,4 +229,18 @@ OPTIONS:
   -h, --help
 "
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vsock_requires_both_cid_and_socket_path() {
+        let mut cfg = VmConfig::default();
+        cfg.vsock_cid = Some(3);
+        assert!(cfg.validate().is_err());
+        cfg.vsock_uds = Some(PathBuf::from("/tmp/fluxvm-vsock-test.sock"));
+        assert!(cfg.validate().is_ok());
+    }
 }

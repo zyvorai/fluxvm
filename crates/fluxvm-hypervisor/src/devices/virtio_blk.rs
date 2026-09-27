@@ -38,7 +38,7 @@ pub struct BlockBackend {
 
 impl BlockBackend {
     pub fn open(path: &Path, read_only: bool) -> Result<Arc<Self>> {
-        let file = if read_only {
+        let mut file = if read_only {
             OpenOptions::new().read(true).open(path)
         } else {
             OpenOptions::new().read(true).write(true).open(path)
@@ -48,6 +48,23 @@ impl BlockBackend {
             .metadata()
             .map_err(|e| FluxError::Hypervisor(format!("stat block image: {e}")))?
             .len();
+        // The in-tree backend maps guest sectors directly to host offsets.
+        // Interpreting a qcow2 header as a raw disk can corrupt the image.
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic).map_err(FluxError::Io)?;
+        if magic == *b"QFI\xfb" {
+            return Err(FluxError::Unsupported(format!(
+                "qcow2 image {} requires conversion to raw before using the in-tree KVM backend",
+                path.display()
+            )));
+        }
+        file.seek(SeekFrom::Start(0)).map_err(FluxError::Io)?;
+        if len == 0 || len % SECTOR_SIZE != 0 {
+            return Err(FluxError::Unsupported(format!(
+                "raw disk {} must have nonzero, 512-byte-aligned capacity (got {len} bytes)",
+                path.display()
+            )));
+        }
         let capacity_sectors = len.div_ceil(SECTOR_SIZE);
         Ok(Arc::new(Self {
             file: Mutex::new(file),
@@ -131,6 +148,20 @@ fn process_request(
     let data_parts = &chain.parts[1..chain.parts.len() - 1];
     let mut status = VIRTIO_BLK_S_OK;
     let mut bytes_written_to_guest = 0u32;
+
+    if req_type == VIRTIO_BLK_T_IN || req_type == VIRTIO_BLK_T_OUT {
+        let transfer_len = data_parts
+            .iter()
+            .try_fold(0u64, |sum, (_, len, _)| sum.checked_add(u64::from(*len)));
+        let end = sector
+            .checked_mul(SECTOR_SIZE)
+            .and_then(|start| transfer_len.and_then(|len| start.checked_add(len)));
+        let capacity = backend.capacity_sectors.checked_mul(SECTOR_SIZE);
+        if !matches!((end, capacity), (Some(end), Some(capacity)) if end <= capacity) {
+            mem.write_at(status_gpa, &[VIRTIO_BLK_S_IOERR])?;
+            return Ok(1);
+        }
+    }
 
     match req_type {
         VIRTIO_BLK_T_IN => {
@@ -251,5 +282,34 @@ mod tests {
         f.flush().unwrap();
         let backend = BlockBackend::open(f.path(), false).unwrap();
         assert_eq!(backend.capacity_sectors, 8);
+    }
+
+    #[test]
+    fn rejects_qcow2_before_exposing_it_as_raw_sectors() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"QFI\xfb").unwrap();
+        f.as_file().set_len(4096).unwrap();
+        let err = BlockBackend::open(f.path(), false).err().unwrap();
+        assert!(format!("{err}").contains("qcow2"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_write_past_end_without_growing_disk() {
+        let f = NamedTempFile::new().unwrap();
+        f.as_file().set_len(4096).unwrap();
+        let backend = BlockBackend::open(f.path(), false).unwrap();
+        let mut mem = GuestMemory::allocate(4096).unwrap();
+        let mut header = [0u8; 16];
+        header[..4].copy_from_slice(&VIRTIO_BLK_T_OUT.to_le_bytes());
+        header[8..].copy_from_slice(&7u64.to_le_bytes());
+        mem.write_at(0, &header).unwrap();
+        let chain = DescChain {
+            head: 0,
+            parts: vec![(0, 16, false), (128, 1024, false), (2048, 1, true)],
+        };
+        assert_eq!(process_request(&mut mem, &backend, &chain).unwrap(), 1);
+        assert_eq!(mem.as_slice()[2048], VIRTIO_BLK_S_IOERR);
+        assert_eq!(f.as_file().metadata().unwrap().len(), 4096);
     }
 }

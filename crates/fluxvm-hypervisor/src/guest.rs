@@ -25,6 +25,7 @@ use tokio::process::{Child, Command};
 use tracing::info;
 
 const FC_API_TIMEOUT: Duration = Duration::from_secs(10);
+const KVM_START_TIMEOUT: Duration = Duration::from_secs(30);
 
 enum GuestEngine {
     Firecracker {
@@ -211,35 +212,7 @@ pub async fn start(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle> {
 pub async fn start_kvm(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle> {
     fs::create_dir_all(workspace)?;
     let vm_cfg = boot_to_vm_config(cfg)?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let paused = Arc::new(AtomicBool::new(false));
-    let stop_thread = Arc::clone(&stop);
-    let paused_thread = Arc::clone(&paused);
-    let (snap_tx, snap_rx) = mpsc::channel::<SnapCmd>();
-    let ws = workspace.to_path_buf();
-    let thread = std::thread::spawn(move || {
-        match VirtualMachine::from_boot_config(vm_cfg) {
-            Ok(vm) => {
-                if let Err(e) =
-                    vm.run_until(stop_thread, paused_thread, Some(snap_rx), None, None, false)
-                {
-                    eprintln!("[kvm-engine] run error: {e}");
-                }
-            }
-            Err(e) => eprintln!("[kvm-engine] instantiate failed: {e:#}"),
-        }
-        let _ = ws;
-    });
-    info!("in-tree KVM engine guest thread started");
-    Ok(GuestHandle {
-        workspace: workspace.to_path_buf(),
-        engine: GuestEngine::Kvm {
-            stop,
-            paused,
-            snap_tx,
-            thread: Some(thread),
-        },
-    })
+    spawn_kvm(vm_cfg, workspace, None).await
 }
 
 /// Restore an in-tree KVM guest from a `FLUXKVM1` memory + vCPU snapshot.
@@ -252,37 +225,77 @@ pub async fn start_kvm_from_snapshot(
     fs::create_dir_all(workspace)?;
     let cpu = kvm_snap::load_cpu(vmstate).map_err(|e| anyhow::anyhow!("{e}"))?;
     let vm_cfg = boot_to_vm_config(cfg)?;
-    let mem_file = mem_path.to_path_buf();
+    let configured_mem_len = u64::from(vm_cfg.memory_mib) * 1024 * 1024;
+    if cpu.mem_len != configured_mem_len {
+        bail!(
+            "vmstate RAM size {} does not match configured RAM {}",
+            cpu.mem_len,
+            configured_mem_len
+        );
+    }
+    if cpu.all_vcpus.len() != usize::from(vm_cfg.cpus) {
+        bail!(
+            "vmstate has {} vCPUs, configuration has {}",
+            cpu.all_vcpus.len(),
+            vm_cfg.cpus
+        );
+    }
+    let actual_mem_len = fs::metadata(mem_path)
+        .with_context(|| format!("reading snapshot RAM {}", mem_path.display()))?
+        .len();
+    if actual_mem_len != cpu.mem_len {
+        bail!(
+            "snapshot RAM size {} does not match vmstate size {}",
+            actual_mem_len,
+            cpu.mem_len
+        );
+    }
+    spawn_kvm(vm_cfg, workspace, Some((cpu, mem_path.to_path_buf()))).await
+}
+
+async fn spawn_kvm(
+    vm_cfg: VmConfig,
+    workspace: &Path,
+    restore: Option<(kvm_snap::CpuSnapshot, PathBuf)>,
+) -> Result<GuestHandle> {
     let stop = Arc::new(AtomicBool::new(false));
     let paused = Arc::new(AtomicBool::new(false));
     let stop_thread = Arc::clone(&stop);
     let paused_thread = Arc::clone(&paused);
     let (snap_tx, snap_rx) = mpsc::channel::<SnapCmd>();
-    let ws = workspace.to_path_buf();
-    let thread = std::thread::spawn(move || {
-        match VirtualMachine::from_boot_config(vm_cfg) {
-            Ok(mut vm) => {
-                if let Err(e) = kvm_snap::load_memory_into(&mut vm.mem, &mem_file) {
-                    eprintln!("[kvm-engine] load mem failed: {e}");
-                    return;
-                }
-                if let Err(e) = vm.run_until(
+    let (ready_tx, ready_rx) = mpsc::sync_channel::<std::result::Result<(), String>>(1);
+    let thread = std::thread::Builder::new()
+        .name("fluxvm-kvm".into())
+        .spawn(move || {
+            let result = (|| -> Result<()> {
+                let mut vm =
+                    VirtualMachine::from_boot_config(vm_cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let cpu = if let Some((cpu, mem_file)) = restore {
+                    kvm_snap::load_memory_into(&mut vm.mem, &mem_file)
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    Some(cpu)
+                } else {
+                    None
+                };
+                vm.run_until(
                     stop_thread,
                     paused_thread,
                     Some(snap_rx),
-                    Some(cpu),
+                    cpu,
                     None,
                     false,
-                ) {
-                    eprintln!("[kvm-engine] restored run error: {e}");
-                }
+                    Some(ready_tx.clone()),
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                let _ = ready_tx.send(Err(e.to_string()));
+                eprintln!("[kvm-engine] run error: {e:#}");
             }
-            Err(e) => eprintln!("[kvm-engine] instantiate for restore failed: {e:#}"),
-        }
-        let _ = ws;
-    });
-    info!("in-tree KVM engine restored from FLUXKVM1 snapshot");
-    Ok(GuestHandle {
+        })
+        .context("spawning in-tree KVM thread")?;
+    let mut handle = GuestHandle {
         workspace: workspace.to_path_buf(),
         engine: GuestEngine::Kvm {
             stop,
@@ -290,7 +303,29 @@ pub async fn start_kvm_from_snapshot(
             snap_tx,
             thread: Some(thread),
         },
-    })
+    };
+    let ready = tokio::task::spawn_blocking(move || ready_rx.recv_timeout(KVM_START_TIMEOUT))
+        .await
+        .context("waiting for in-tree KVM thread")?;
+    match ready {
+        Ok(Ok(())) => {
+            info!("in-tree KVM engine initialized");
+            Ok(handle)
+        }
+        Ok(Err(e)) => bail!("in-tree KVM startup failed: {e}"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // A stuck ioctl cannot be joined synchronously. Signal teardown
+            // and detach rather than blocking the API beyond its timeout.
+            if let GuestEngine::Kvm { stop, thread, .. } = &mut handle.engine {
+                stop.store(true, Ordering::SeqCst);
+                thread.take(); // Dropping JoinHandle detaches a stalled worker.
+            }
+            bail!("in-tree KVM startup timed out after {KVM_START_TIMEOUT:?}")
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            bail!("in-tree KVM thread exited before initialization")
+        }
+    }
 }
 
 fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
@@ -677,6 +712,20 @@ mod tests {
             max_vcpus: None,
             shared_folders: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn kvm_create_reports_initialization_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = base_config();
+        cfg.engine = FluxVmEngine::Kvm;
+        cfg.memory_mib = 64;
+        cfg.kernel = dir.path().join("missing-kernel");
+        let err = match start_kvm(&cfg, dir.path()).await {
+            Err(err) => err,
+            Ok(_) => panic!("invalid guest must not be reported as running"),
+        };
+        assert!(format!("{err:#}").contains("in-tree KVM startup failed"));
     }
 
     // A guest kernel with no fast entropy source (no RDRAND passthrough, no

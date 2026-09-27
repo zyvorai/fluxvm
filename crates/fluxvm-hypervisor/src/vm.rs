@@ -25,7 +25,7 @@ use crate::vhost::VhostNet;
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::Receiver,
+    mpsc::{Receiver, SyncSender},
     Arc,
 };
 use std::time::{Duration, Instant};
@@ -196,46 +196,40 @@ impl VirtualMachine {
         bus.add_mmio(net.clone());
 
         let (blk, blk_backend) = if let Some(disk) = &cfg.disk {
-            match BlockBackend::open(disk, false) {
-                Ok(backend) => {
-                    notes.push(format!(
-                        "virtio-blk {} sectors={} ({})",
-                        disk.display(),
-                        backend.capacity_sectors,
-                        backend.path.display()
-                    ));
-                    let mmio = Arc::new(VirtioMmio::block(
-                        MMIO_BLK_WINDOW,
-                        backend.capacity_sectors,
-                        backend.read_only,
-                    ));
-                    bus.add_mmio(mmio.clone());
-                    (Some(mmio), Some(backend))
-                }
-                Err(e) => {
-                    notes.push(format!("virtio-blk open failed: {e}"));
-                    (None, None)
-                }
-            }
+            let backend = BlockBackend::open(disk, false)?;
+            notes.push(format!(
+                "virtio-blk {} sectors={} ({})",
+                disk.display(),
+                backend.capacity_sectors,
+                backend.path.display()
+            ));
+            let mmio = Arc::new(VirtioMmio::block(
+                MMIO_BLK_WINDOW,
+                backend.capacity_sectors,
+                backend.read_only,
+            ));
+            bus.add_mmio(mmio.clone());
+            (Some(mmio), Some(backend))
         } else {
             notes.push("no disk — virtio-blk not attached".into());
             (None, None)
         };
 
         let (vsock, vsock_backend) = match (&cfg.vsock_cid, &cfg.vsock_uds) {
-            (Some(cid), Some(uds)) => match VsockBackend::new(uds, *cid) {
-                Ok(be) => {
-                    notes.push(format!("virtio-vsock cid={cid} uds={}", uds.display()));
-                    let mmio = Arc::new(VirtioMmio::vsock(MMIO_VSOCK_WINDOW, *cid, 7));
-                    bus.add_mmio(mmio.clone());
-                    (Some(mmio), Some(Arc::new(be)))
-                }
-                Err(e) => {
-                    notes.push(format!("virtio-vsock failed: {e}"));
-                    (None, None)
-                }
-            },
-            _ => (None, None),
+            (Some(cid), Some(uds)) => {
+                let backend = VsockBackend::new(uds, *cid)?;
+                notes.push(format!("virtio-vsock cid={cid} uds={}", uds.display()));
+                let mmio = Arc::new(VirtioMmio::vsock(MMIO_VSOCK_WINDOW, *cid, 7));
+                bus.add_mmio(mmio.clone());
+                (Some(mmio), Some(Arc::new(backend)))
+            }
+            (None, None) => (None, None),
+            _ => {
+                return Err(FluxError::Device {
+                    device: "virtio-vsock",
+                    msg: "vsock_cid and vsock_uds must be configured together".into(),
+                });
+            }
         };
 
         let balloon = if cfg.balloon {
@@ -257,16 +251,9 @@ impl VirtualMachine {
         };
 
         let tap = if let Some(tap_name) = &cfg.tap {
-            match Tap::open(tap_name, [192, 168, 100, 1]) {
-                Ok(t) => {
-                    notes.push(format!("TAP {} attached", t.name));
-                    Some(t)
-                }
-                Err(e) => {
-                    notes.push(format!("TAP optional: {e}"));
-                    None
-                }
-            }
+            let tap = Tap::open(tap_name, [192, 168, 100, 1])?;
+            notes.push(format!("TAP {} attached", tap.name));
+            Some(tap)
         } else {
             None
         };
@@ -371,6 +358,7 @@ impl VirtualMachine {
             None,
             gdb,
             true,
+            None,
         )
     }
 
@@ -382,6 +370,7 @@ impl VirtualMachine {
         restore: Option<CpuSnapshot>,
         gdb: Option<GdbSetup>,
         exit_on_boot_marker: bool,
+        ready: Option<SyncSender<std::result::Result<(), String>>>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -499,6 +488,12 @@ impl VirtualMachine {
         let mut serial_injected = false;
         let inject = std::env::var("FLUXVM_SERIAL_INJECT").ok();
         make_stdin_nonblocking();
+
+        // A control-plane create is successful only after KVM, IRQs, device
+        // state, and the guest entry registers have been configured.
+        if let Some(tx) = ready {
+            let _ = tx.send(Ok(()));
+        }
 
         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
             while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
