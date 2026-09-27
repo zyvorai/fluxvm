@@ -23,9 +23,30 @@ pub fn from_argv_env() -> Option<Remote> {
                 .or_else(|| (a == name).then(|| args.get(i + 1).cloned()).flatten())
         })
     };
-    let server = flag("--server").or_else(|| std::env::var("FLUXVM_URL").ok())?;
+    let server = flag("--server").or_else(|| std::env::var("FLUXVM_URL").ok());
     let token = flag("--server-token").or_else(|| std::env::var("FLUXVM_TOKEN").ok());
-    Some(Remote::new(&server, token))
+    let context = flag("--context").or_else(|| std::env::var("FLUXCTL_CONTEXT").ok());
+    endpoint(server, token, context.as_deref()).ok().flatten()
+}
+
+/// Reserved `--context` value forcing local mode over a current context.
+pub const LOCAL_CONTEXT: &str = "local";
+
+/// `--server` wins, then `--context`, then the current context; `None` is local mode.
+pub fn endpoint(
+    server: Option<String>,
+    token: Option<String>,
+    context: Option<&str>,
+) -> Result<Option<Remote>> {
+    if let Some(server) = server {
+        return Ok(Some(Remote::new(&server, token)));
+    }
+    if context == Some(LOCAL_CONTEXT) {
+        return Ok(None);
+    }
+    Ok(crate::contexts::Contexts::load()?
+        .resolve(context)?
+        .map(|(_, ep)| Remote::new(&ep.server, token.or(ep.token))))
 }
 
 impl Remote {
@@ -111,7 +132,96 @@ impl Remote {
     }
 }
 
-fn encode_query(s: &str) -> String {
+impl Remote {
+    /// Tail `GET /v1/events/stream` (SSE), calling `on_event` per event until
+    /// the server closes the stream.
+    pub async fn follow_events(
+        &self,
+        query: &str,
+        mut on_event: impl FnMut(fluxvm_scheduler::events::VmEvent) -> Result<()>,
+    ) -> Result<()> {
+        let url = format!("{}/v1/events/stream?{query}", self.base);
+        let mut req = self.http.get(&url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let mut resp = req.send().await.with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            bail!(
+                "GET {url}: {status}: {}",
+                resp.text().await.unwrap_or_default()
+            );
+        }
+        let mut buf = String::new();
+        while let Some(chunk) = resp.chunk().await.context("reading event stream")? {
+            buf.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(end) = buf.find("\n\n") {
+                let block: String = buf.drain(..end + 2).collect();
+                match parse_sse_block(&block) {
+                    Some(SseItem::Event(ev)) => on_event(ev)?,
+                    Some(SseItem::Error(e)) => eprintln!("event stream error: {e}"),
+                    None => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Websocket to `path` (bearer token in the handshake).
+    pub async fn websocket(
+        &self,
+        path: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    > {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!(
+            "{}{path}",
+            self.base
+                .replacen("https://", "wss://", 1)
+                .replacen("http://", "ws://", 1)
+        );
+        let mut req = url.as_str().into_client_request()?;
+        if let Some(t) = &self.token {
+            req.headers_mut()
+                .insert("authorization", format!("Bearer {t}").parse()?);
+        }
+        let (ws, _) = tokio_tungstenite::connect_async(req)
+            .await
+            .with_context(|| format!("websocket {url}"))?;
+        Ok(ws)
+    }
+}
+
+#[derive(Debug)]
+enum SseItem {
+    Event(fluxvm_scheduler::events::VmEvent),
+    Error(String),
+}
+
+fn parse_sse_block(block: &str) -> Option<SseItem> {
+    let mut kind = "message";
+    let mut data = String::new();
+    for line in block.lines() {
+        if let Some(v) = line.strip_prefix("event:") {
+            kind = v.trim();
+        } else if let Some(v) = line.strip_prefix("data:") {
+            data.push_str(v.trim_start());
+        }
+    }
+    if data.is_empty() {
+        return None;
+    }
+    if kind == "error" {
+        return Some(SseItem::Error(data));
+    }
+    serde_json::from_str(&data).ok().map(SseItem::Event)
+}
+
+pub fn encode_query(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
@@ -138,5 +248,18 @@ mod tests {
         );
         assert!(Remote::new("h", Some(String::new())).token.is_none());
         assert_eq!(encode_query("env=dev,!tmp"), "env%3Ddev%2C%21tmp");
+    }
+
+    #[test]
+    fn sse_blocks() {
+        assert!(parse_sse_block(": fluxvm events\n\n").is_none());
+        let ev = parse_sse_block(
+            "event: vm.start\ndata: {\"ts\":\"2026-09-27T00:00:00Z\",\"event\":\"vm.start\"}\n\n",
+        );
+        assert!(matches!(ev, Some(SseItem::Event(e)) if e.event == "vm.start"));
+        assert!(matches!(
+            parse_sse_block("event: error\ndata: {\"error\":\"x\"}\n\n"),
+            Some(SseItem::Error(_))
+        ));
     }
 }

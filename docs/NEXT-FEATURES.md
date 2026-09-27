@@ -133,9 +133,13 @@ Ranked by operator value vs effort. Tier 1 is being built on
 - Label selectors (`GET /v1/vms?label=`) and bulk `start/stop/restart/delete -l`.
 - `GET /v1/openapi.json` (hand-maintained OpenAPI 3.1, VM surface).
 
-Still open from this tier: `--server` contexts file, named VM templates,
-backup to S3, data-disk backup, `fluxctl serial`/`console` over `--server`,
-VM lifecycle pages in `/console`, a generated (utoipa) spec covering every route.
+- Follow-ups shipped: `fluxctl context` (named remotes), VM templates
+  (`/v1/vm-templates`, `fluxctl vm-template`), `backup --all-disks`, and
+  `serial` / `events -f` / `create` over `--server`.
+
+Still open from this tier: backup to S3, `console` (agent PTY) over
+`--server`, VM lifecycle pages in `/console`, a generated (utoipa) spec
+covering every route.
 
 ### Tier 3 — evidence / hardening (lab hardware or long runs)
 

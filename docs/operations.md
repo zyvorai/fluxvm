@@ -471,6 +471,9 @@ prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching i
 | Disks | `fluxctl disk list\|attach\|resize\|detach <vm> ...` | `GET/POST /v1/vms/{id}/disks`, `PATCH/DELETE /v1/vms/{id}/disks/{name}` |
 | Serial console | `fluxctl serial <vm>` (Ctrl-] detaches) | websocket `GET /v1/vms/{id}/serial` |
 | Backup root disk | `fluxctl backup <vm> [--compress] [--dest PATH]` | `POST /v1/vms/{id}/backup` `{"compress": true}` |
+| Backup root + data disks | `fluxctl backup <vm> --all-disks` | `POST /v1/vms/{id}/backup` `{"all_disks": true}` |
+| VM templates | `fluxctl vm-template save\|list\|show\|delete`, `fluxctl vm-template create <tpl> <vm> [--label k=v]` | `/v1/vm-templates[/{name}]`, `POST /v1/vm-templates/{name}/instantiate` |
+| Remote contexts | `fluxctl context add\|use\|list\|current\|unset\|delete` | — |
 | Scheduled snapshots | `fluxctl label <vm> fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=7` | same `PATCH` |
 | API description | — | `GET /v1/openapi.json` (no auth) |
 
@@ -519,6 +522,17 @@ started before this change need a restart to get the socket.
 captured via a temporary internal snapshot (`backup-<utc>`, deleted
 afterwards), so the copy is crash-consistent. REST backups always land in
 `state_dir/backups/<name>-<utc>.qcow2`; only the local CLI accepts `--dest`.
+With `--all-disks` the destination is a directory holding `root.qcow2` and one
+`<disk>.qcow2` per data disk; a live VM's disks all come from the same
+temporary snapshot, so they are consistent with each other.
+
+**VM templates** are named `CreateVmRequest` specs in
+`state_dir/vm-templates.json` (separate from sandbox templates at
+`/v1/templates`). Save from a spec file (its `name` may be omitted) or from an
+existing VM (`--from-vm`, which copies the VM's *spec*, not its disk — use
+`clone-vm` for that). `vm-template create` goes through the normal create path,
+so policy, tenant and token quotas apply. A template that references a clone
+base image keeps that image alive after the clone VM is deleted.
 
 **Scheduled snapshots.** The daemon's reaper takes an `auto-<utc>` snapshot of
 every running QEMU VM labelled `fluxvm.io/snapshot-every` (`3600`, `30m`, `6h`,
@@ -527,12 +541,29 @@ then prunes to `fluxvm.io/snapshot-keep` (default 7). Manual snapshots are never
 pruned.
 
 **Remote mode.** `fluxctl --server http://host:7788 [--server-token T]` (or
-`FLUXVM_URL` / `FLUXVM_TOKEN`) drives a remote daemon over REST for: `list`,
-`get`, `status <vm>`, `start`, `stop`, `restart`, `delete`, `pause`, `resume`,
-`label`, `rename-vm`, `clone-vm`, `snapshot`, `snapshot-list`,
-`snapshot-delete`, `backup`, `disk`, `events` (no `-f`), `quota`, `healthz`,
-`readyz`, `wait` (not `--for agent`). VM names/prefixes resolve against the
-server's VM list. Other commands exit with an error in remote mode.
+`FLUXVM_URL` / `FLUXVM_TOKEN`) drives a remote daemon over REST for: `create`,
+`vm-template`, `list`, `get`, `status <vm>`, `start`, `stop`, `restart`,
+`delete`, `pause`, `resume`, `label`, `rename-vm`, `clone-vm`, `snapshot`,
+`snapshot-list`, `snapshot-delete`, `backup`, `disk`, `events [-f]` (SSE),
+`serial` (websocket), `quota`, `healthz`, `readyz`, `wait` (not `--for
+agent`). VM names/prefixes resolve against the server's VM list. Other commands
+exit with an error in remote mode.
+
+**Contexts** save named endpoints so `--server` isn't needed every time:
+
+```bash
+fluxctl context add lab --server http://10.0.0.5:7788 --token "$TOKEN"
+fluxctl context use lab        # VM verbs now go to lab
+fluxctl --context prod list    # one-off
+fluxctl --context local list   # force local mode
+fluxctl context unset          # back to local by default
+```
+
+The file is `$FLUXCTL_CONTEXTS`, else `$XDG_CONFIG_HOME/fluxctl/contexts.json`,
+else `~/.config/fluxctl/contexts.json`, written mode 0600 (it holds tokens;
+`context list` never prints them). Precedence: `--server`/`FLUXVM_URL`, then
+`--context`/`FLUXCTL_CONTEXT`, then the current context, then local.
+`fluxctl serve` always runs locally.
 
 ## Resource control (cgroup v2)
 

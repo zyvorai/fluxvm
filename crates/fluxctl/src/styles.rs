@@ -110,6 +110,11 @@ pub fn after_help() -> String {
                 ("snapshot-delete", "Delete a VM snapshot tag"),
                 ("backup", "Export a VM's root disk to qcow2"),
                 ("disk", "List/attach/resize/detach data disks"),
+                ("context", "Named remote daemons (add/use/list/unset)"),
+                (
+                    "vm-template",
+                    "Named VM specs: save/list/show/create/delete",
+                ),
                 ("delete", "Delete a VM (alias: terminate)"),
                 ("set-limit", "Alias for resources (machinectl)"),
             ],

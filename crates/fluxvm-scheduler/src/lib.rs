@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 pub mod events;
 mod sandbox;
+pub mod templates;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 
@@ -614,6 +615,8 @@ pub struct VmManager {
     /// rename/clone all load the whole file, mutate, and write it back, so
     /// two concurrent calls need to not interleave.
     catalog_lock: AsyncMutex<()>,
+    /// Serializes templates.json read-modify-write within this process.
+    template_lock: AsyncMutex<()>,
     /// Serializes the "is this volume already attached?" check with the VM
     /// record write in `create_sandbox`, so two creates cannot both claim one volume.
     sandbox_volume_lock: AsyncMutex<()>,
@@ -649,6 +652,7 @@ impl VmManager {
             pools,
             backfill_locks: AsyncMutex::new(HashMap::new()),
             catalog_lock: AsyncMutex::new(()),
+            template_lock: AsyncMutex::new(()),
             sandbox_volume_lock: AsyncMutex::new(()),
             activity: AsyncMutex::new(HashMap::new()),
             scheduled_snapshots_busy: std::sync::atomic::AtomicBool::new(false),
@@ -3139,14 +3143,16 @@ impl VmManager {
     }
 
     /// Flatten a QEMU VM's root disk into a standalone qcow2 at `dest`
-    /// (default `state_dir/backups/<name>-<utc>.qcow2`). A running VM is
-    /// captured through a short-lived internal snapshot so the copy is
-    /// crash-consistent; a stopped VM is copied directly.
+    /// (default `state_dir/backups/<name>-<utc>.qcow2`), or with `all_disks`
+    /// the root and every data disk into a directory. A running VM is
+    /// captured through one short-lived internal snapshot (savevm covers all
+    /// its qcow2 disks), so the copies are crash-consistent with each other.
     pub async fn backup_vm(
         self: &Arc<Self>,
         id: Uuid,
         dest: Option<std::path::PathBuf>,
         compress: bool,
+        all_disks: bool,
     ) -> Result<serde_json::Value> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu
@@ -3156,48 +3162,113 @@ impl VmManager {
             bail!("backup supports QEMU VMs on the default qcow2 storage backend only");
         }
         let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-        let dest = match dest {
-            Some(p) => p,
-            None => {
-                let dir = self.cfg.state_dir.join("backups");
-                tokio::fs::create_dir_all(&dir).await?;
-                dir.join(format!("{}-{stamp}.qcow2", vm.request.name))
-            }
+        let data = if all_disks {
+            fluxvm_qemu::disks::data_disks(&vm.workspace)
+        } else {
+            vec![]
+        };
+        let default_base = self
+            .cfg
+            .state_dir
+            .join("backups")
+            .join(format!("{}-{stamp}", vm.request.name));
+        // One file for the root disk alone; a directory of
+        // `root.qcow2` + `<disk>.qcow2` with `all_disks`.
+        let (dest, targets) = if all_disks {
+            let dir = dest.unwrap_or(default_base);
+            let mut t = vec![(
+                fluxvm_qemu::disks::ROOT_DISK.to_string(),
+                vm.disk.clone(),
+                dir.join("root.qcow2"),
+            )];
+            t.extend(
+                data.into_iter()
+                    .map(|(n, p)| (n.clone(), p, dir.join(format!("{n}.qcow2")))),
+            );
+            (dir, t)
+        } else {
+            let file = dest.unwrap_or_else(|| default_base.with_extension("qcow2"));
+            (
+                file.clone(),
+                vec![(
+                    fluxvm_qemu::disks::ROOT_DISK.to_string(),
+                    vm.disk.clone(),
+                    file,
+                )],
+            )
         };
         if dest.exists() {
             bail!("{} already exists", dest.display());
+        }
+        let parent = if all_disks {
+            dest.clone()
+        } else {
+            dest.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+        };
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(&parent).await?;
         }
         let live = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
         let tag = format!("backup-{stamp}");
         if live {
             self.create_vm_snapshot_inner(id, &tag).await?;
         }
-        let mut cmd = tokio::process::Command::new(&self.cfg.qemu_img_binary);
-        cmd.args(["convert", "-U", "-O", "qcow2"]);
-        if compress {
-            cmd.arg("-c");
+        let mut result: Result<Vec<serde_json::Value>> = Ok(Vec::new());
+        for (name, src, dst) in &targets {
+            let mut cmd = tokio::process::Command::new(&self.cfg.qemu_img_binary);
+            cmd.args(["convert", "-U", "-O", "qcow2"]);
+            if compress {
+                cmd.arg("-c");
+            }
+            if live {
+                cmd.args(["-l", &format!("snapshot.name={tag}")]);
+            }
+            let out = cmd
+                .arg(src)
+                .arg(dst)
+                .output()
+                .await
+                .with_context(|| format!("running {}", self.cfg.qemu_img_binary));
+            match out {
+                Ok(o) if o.status.success() => {
+                    if let Ok(items) = result.as_mut() {
+                        items.push(serde_json::json!({
+                            "name": name,
+                            "path": dst,
+                            "size_bytes": fs::metadata(dst).map(|m| m.len()).unwrap_or(0),
+                        }));
+                    }
+                }
+                Ok(o) => {
+                    result = Err(anyhow::anyhow!(
+                        "qemu-img convert {name} failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
         }
-        if live {
-            cmd.args(["-l", &format!("snapshot.name={tag}")]);
-        }
-        let out = cmd
-            .arg(&vm.disk)
-            .arg(&dest)
-            .output()
-            .await
-            .with_context(|| format!("running {}", self.cfg.qemu_img_binary));
         if live && let Err(e) = fluxvm_qemu::snapshot_delete(&self.cfg, &vm, &tag).await {
             tracing::warn!(vm=%id, tag, error=?e, "dropping backup snapshot failed");
         }
-        let out = out?;
-        if !out.status.success() {
-            let _ = fs::remove_file(&dest);
-            bail!(
-                "qemu-img convert failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        let size_bytes = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        let disks = match result {
+            Ok(d) => d,
+            Err(e) => {
+                if all_disks {
+                    let _ = fs::remove_dir_all(&dest);
+                } else {
+                    let _ = fs::remove_file(&dest);
+                }
+                return Err(e);
+            }
+        };
+        let size_bytes: u64 = disks.iter().filter_map(|d| d["size_bytes"].as_u64()).sum();
         let dest_s = dest.display().to_string();
         audit_event(
             "vm.backup",
@@ -3208,6 +3279,7 @@ impl VmManager {
             "path": dest,
             "size_bytes": size_bytes,
             "live": live,
+            "disks": disks,
         }))
     }
 
@@ -3731,6 +3803,67 @@ impl VmManager {
         Ok(())
     }
 
+    pub fn list_vm_templates(&self) -> Result<Vec<templates::VmTemplate>> {
+        Ok(templates::load(&self.cfg.state_dir)?
+            .into_values()
+            .collect())
+    }
+
+    pub fn get_vm_template(&self, name: &str) -> Result<templates::VmTemplate> {
+        templates::load(&self.cfg.state_dir)?
+            .remove(name)
+            .with_context(|| format!("template {name:?} not found"))
+    }
+
+    /// Save (or with `replace`, overwrite) a named template.
+    pub async fn save_vm_template(
+        &self,
+        name: &str,
+        description: Option<String>,
+        spec: CreateVmRequest,
+        replace: bool,
+    ) -> Result<templates::VmTemplate> {
+        templates::validate_name(name)?;
+        let _guard = self.template_lock.lock().await;
+        let mut all = templates::load(&self.cfg.state_dir)?;
+        if !replace && all.contains_key(name) {
+            bail!("template {name:?} already exists");
+        }
+        let t = templates::VmTemplate {
+            name: name.to_string(),
+            description,
+            created_at: Utc::now(),
+            spec: templates::spec_from_request(spec),
+        };
+        all.insert(name.to_string(), t.clone());
+        templates::store(&self.cfg.state_dir, &all)?;
+        audit_event("vm_template.save", &[("template", name)]);
+        Ok(t)
+    }
+
+    pub async fn delete_vm_template(&self, name: &str) -> Result<()> {
+        let image = {
+            let _guard = self.template_lock.lock().await;
+            let mut all = templates::load(&self.cfg.state_dir)?;
+            let t = all
+                .remove(name)
+                .with_context(|| format!("template {name:?} not found"))?;
+            templates::store(&self.cfg.state_dir, &all)?;
+            t.spec.image
+        };
+        self.remove_unreferenced_clone_base(&image).await;
+        audit_event("vm_template.delete", &[("template", name)]);
+        Ok(())
+    }
+
+    /// The template's spec renamed to `vm_name`, ready for `create`.
+    pub fn vm_template_request(&self, template: &str, vm_name: &str) -> Result<CreateVmRequest> {
+        validate_vm_name(vm_name)?;
+        let mut req = self.get_vm_template(template)?.spec;
+        req.name = vm_name.to_string();
+        Ok(req)
+    }
+
     fn clone_base_dir(&self) -> std::path::PathBuf {
         self.cfg.state_dir.join("images").join("clones")
     }
@@ -3743,6 +3876,10 @@ impl VmManager {
         }
         if self.list().await.iter().any(|v| v.request.image == image) {
             return;
+        }
+        match templates::load(&self.cfg.state_dir) {
+            Ok(all) if all.values().all(|t| t.spec.image != image) => {}
+            _ => return,
         }
         if let Err(e) = fs::remove_file(image) {
             if e.kind() != std::io::ErrorKind::NotFound {

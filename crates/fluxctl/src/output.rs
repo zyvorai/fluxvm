@@ -80,6 +80,23 @@ pub const DISK_COLUMNS: &[Column] = &[
     wide("PATH", "/path"),
 ];
 
+pub const TEMPLATE_COLUMNS: &[Column] = &[
+    col("NAME", "/name"),
+    col("BACKEND", "/spec/backend"),
+    col("VCPUS", "/spec/vcpus"),
+    col("MEMORY_MIB", "/spec/memory_mib"),
+    col("DESCRIPTION", "/description"),
+    wide("IMAGE", "/spec/image"),
+    wide("CREATED", "/created_at"),
+];
+
+pub const CONTEXT_COLUMNS: &[Column] = &[
+    col("CURRENT", "/current"),
+    col("NAME", "/name"),
+    col("SERVER", "/server"),
+    col("TOKEN", "/token"),
+];
+
 pub const EVENT_COLUMNS: &[Column] = &[
     col("TIME", "/ts"),
     col("EVENT", "/event"),

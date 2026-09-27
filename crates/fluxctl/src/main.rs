@@ -24,6 +24,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod contexts;
 mod fleet_client;
 mod output;
 mod remote;
@@ -70,6 +71,15 @@ struct Cli {
         help_heading = "Global Flags"
     )]
     server_token: Option<String>,
+    /// Named remote from `fluxctl context add` (`local` forces local mode).
+    /// Defaults to the current context, if one is set.
+    #[arg(
+        long,
+        env = "FLUXCTL_CONTEXT",
+        global = true,
+        help_heading = "Global Flags"
+    )]
+    context: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -296,6 +306,23 @@ enum Command {
         dest: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         compress: bool,
+        /// Also back up data disks: `dest` becomes a directory of
+        /// `root.qcow2` + `<disk>.qcow2`, consistent with each other.
+        #[arg(long, default_value_t = false)]
+        all_disks: bool,
+    },
+    /// Named VM specs: save once, create many. REST: `/v1/vm-templates[/{name}]`,
+    /// `POST /v1/vm-templates/{name}/instantiate`.
+    VmTemplate {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
+    /// Named remote daemons (kubeconfig-style). With a current context set,
+    /// VM verbs go to that server; `--context local` or `context unset`
+    /// returns to local mode.
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
     },
     /// Data disks (QEMU): list, attach, resize, detach. REST:
     /// `/v1/vms/{id}/disks[/{name}]`.
@@ -989,6 +1016,70 @@ enum SandboxCommand {
 }
 
 #[derive(Subcommand)]
+enum TemplateCommand {
+    List,
+    Show {
+        name: String,
+    },
+    /// Save a template from a spec file or an existing VM's spec.
+    Save {
+        name: String,
+        #[arg(long, conflicts_with = "from_vm", required_unless_present = "from_vm")]
+        spec: Option<PathBuf>,
+        #[arg(long, value_parser = output::parse_vm_ref)]
+        from_vm: Option<Uuid>,
+        #[arg(long)]
+        description: Option<String>,
+        /// Overwrite an existing template of the same name.
+        #[arg(long, default_value_t = false)]
+        replace: bool,
+    },
+    Delete {
+        name: String,
+    },
+    /// Create a VM from a template.
+    Create {
+        template: String,
+        vm_name: String,
+        /// Label for the new VM (repeatable): `--label env=dev`.
+        #[arg(long = "label", value_parser = parse_label_pair)]
+        labels: Vec<(String, String)>,
+    },
+}
+
+fn parse_label_pair(s: &str) -> Result<(String, String)> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.is_empty() => Ok((k.to_string(), v.to_string())),
+        _ => anyhow::bail!("expected key=value, got '{s}'"),
+    }
+}
+
+#[derive(Subcommand)]
+enum ContextCommand {
+    /// Saved contexts (tokens are never printed).
+    List,
+    /// Save or overwrite a context.
+    Add {
+        name: String,
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Make a context current.
+    Use {
+        name: String,
+    },
+    /// Print the current context.
+    Current,
+    /// Clear the current context (back to local mode).
+    Unset,
+    Delete {
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum DiskCommand {
     /// Root disk plus every data disk.
     List {
@@ -1465,6 +1556,61 @@ async fn run_serial_session(m: &VmManager, id: Uuid) -> Result<()> {
     Ok(())
 }
 
+/// [`run_serial_session`] over the daemon's `/v1/vms/{id}/serial` websocket.
+async fn run_remote_serial(r: &remote::Remote, id: Uuid) -> Result<()> {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let ws = r.websocket(&format!("/v1/vms/{id}/serial")).await?;
+    let interactive = std::io::stdin().is_terminal();
+    if interactive {
+        eprintln!("Connected to {id} serial console. Escape: Ctrl-]\r");
+    }
+    let _raw = RawTerminal::enter()?;
+    let (mut tx, mut rx) = ws.split();
+    let to_guest = async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stdin.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            let chunk = &buf[..n];
+            let (data, done) = match chunk.iter().position(|b| *b == SERIAL_ESCAPE) {
+                Some(pos) if interactive => (&chunk[..pos], true),
+                _ => (chunk, false),
+            };
+            if !data.is_empty() {
+                tx.send(Message::Binary(data.to_vec().into())).await?;
+            }
+            if done {
+                break;
+            }
+        }
+        let _ = tx.send(Message::Close(None)).await;
+        Ok::<(), anyhow::Error>(())
+    };
+    let to_host = async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(msg) = rx.next().await {
+            match msg? {
+                Message::Binary(b) => stdout.write_all(&b).await?,
+                Message::Text(t) => stdout.write_all(t.as_bytes()).await?,
+                Message::Close(_) => break,
+                _ => continue,
+            }
+            stdout.flush().await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::select! {
+        result = to_guest => result?,
+        result = to_host => result?,
+    }
+    Ok(())
+}
+
 /// `(cols, rows)` of the controlling terminal, if stdout is a TTY.
 fn terminal_size() -> Option<(u16, u16)> {
     let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
@@ -1710,6 +1856,38 @@ async fn wait_for_vm(m: &VmManager, id: Uuid, state: &str, timeout: u64) -> Resu
     }
 }
 
+fn run_context(command: ContextCommand, format: output::OutputFormat) -> Result<()> {
+    let mut c = contexts::Contexts::load()?;
+    match command {
+        ContextCommand::List => {
+            return output::print_list(format, &c.summary(), output::CONTEXT_COLUMNS);
+        }
+        ContextCommand::Current => {
+            println!("{}", c.current.as_deref().unwrap_or(remote::LOCAL_CONTEXT));
+            return Ok(());
+        }
+        ContextCommand::Add {
+            name,
+            server,
+            token,
+        } => {
+            if name == remote::LOCAL_CONTEXT {
+                anyhow::bail!("'{name}' is reserved for local mode");
+            }
+            c.add(&name, contexts::Endpoint { server, token })?
+        }
+        ContextCommand::Use { name } => c.use_context(&name)?,
+        ContextCommand::Unset => c.current = None,
+        ContextCommand::Delete { name } => c.remove(&name)?,
+    }
+    c.save()?;
+    println!(
+        "{}",
+        serde_json::json!({"ok": true, "current": c.current, "path": contexts::path()})
+    );
+    Ok(())
+}
+
 /// `--server` dispatch for the core VM verbs; everything else needs a local host.
 async fn run_remote(
     r: &remote::Remote,
@@ -1834,7 +2012,12 @@ async fn run_remote(
             .await?;
             println!("{}", json!({"ok": true, "deleted": tag}));
         }
-        Command::Backup { id, dest, compress } => {
+        Command::Backup {
+            id,
+            dest,
+            compress,
+            all_disks,
+        } => {
             if dest.is_some() {
                 anyhow::bail!(
                     "--dest is local-only; remote backups land in the server's state_dir/backups"
@@ -1844,7 +2027,7 @@ async fn run_remote(
                 &r.call(
                     Method::POST,
                     &format!("/v1/vms/{id}/backup"),
-                    Some(json!({"compress": compress})),
+                    Some(json!({"compress": compress, "all_disks": all_disks})),
                 )
                 .await?,
             )?
@@ -1883,26 +2066,88 @@ async fn run_remote(
             event,
             since,
             limit,
-            follow: false,
+            follow,
         } => {
-            let mut q = vec![format!("limit={limit}")];
+            let mut q = Vec::new();
             if let Some(vm) = vm {
                 q.push(format!("vm={vm}"));
             }
             if let Some(e) = event {
-                q.push(format!(
-                    "event={}",
-                    e.replace('&', "%26").replace('+', "%2B")
-                ));
+                q.push(format!("event={}", remote::encode_query(&e)));
             }
+            let tail_query = q.join("&");
             if let Some(s) = since {
-                q.push(format!("since={}", s.to_rfc3339().replace('+', "%2B")));
+                q.push(format!("since={}", remote::encode_query(&s.to_rfc3339())));
             }
+            q.push(format!("limit={limit}"));
             let v = r
                 .call(Method::GET, &format!("/v1/events?{}", q.join("&")), None)
                 .await?;
-            output::print_list(format, &v["items"], output::EVENT_COLUMNS)?
+            output::print_list(format, &v["items"], output::EVENT_COLUMNS)?;
+            if follow {
+                r.follow_events(&tail_query, |ev| print_event_line(format, &ev))
+                    .await?;
+            }
         }
+        Command::Serial { id } => run_remote_serial(r, id).await?,
+        Command::Create { spec } => {
+            let body: serde_json::Value = serde_json::from_slice(&std::fs::read(spec)?)?;
+            pretty(&r.call(Method::POST, "/v1/vms", Some(body)).await?)?
+        }
+        Command::VmTemplate { command } => match command {
+            TemplateCommand::List => {
+                let v = r.call(Method::GET, "/v1/vm-templates", None).await?;
+                output::print_list(format, &v["items"], output::TEMPLATE_COLUMNS)?
+            }
+            TemplateCommand::Show { name } => pretty(
+                &r.call(Method::GET, &format!("/v1/vm-templates/{name}"), None)
+                    .await?,
+            )?,
+            TemplateCommand::Save {
+                name,
+                spec,
+                from_vm,
+                description,
+                replace,
+            } => {
+                let spec = match (spec, from_vm) {
+                    (Some(p), _) => serde_json::from_slice(&std::fs::read(p)?)?,
+                    (None, Some(id)) => {
+                        r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?["request"].take()
+                    }
+                    (None, None) => unreachable!("clap requires --spec or --from-vm"),
+                };
+                pretty(
+                    &r.call(
+                        Method::POST,
+                        "/v1/vm-templates",
+                        Some(json!({"name": name, "description": description, "spec": spec, "replace": replace})),
+                    )
+                    .await?,
+                )?
+            }
+            TemplateCommand::Delete { name } => {
+                r.call(Method::DELETE, &format!("/v1/vm-templates/{name}"), None)
+                    .await?;
+                println!("{}", json!({"ok": true, "deleted": name}));
+            }
+            TemplateCommand::Create {
+                template,
+                vm_name,
+                labels,
+            } => {
+                let labels: serde_json::Map<String, serde_json::Value> =
+                    labels.into_iter().map(|(k, v)| (k, json!(v))).collect();
+                pretty(
+                    &r.call(
+                        Method::POST,
+                        &format!("/v1/vm-templates/{template}/instantiate"),
+                        Some(json!({"name": vm_name, "labels": labels})),
+                    )
+                    .await?,
+                )?
+            }
+        },
         Command::Quota { .. } => pretty(&r.call(Method::GET, "/v1/quotas/me", None).await?)?,
         Command::Healthz => pretty(&r.call(Method::GET, "/healthz", None).await?)?,
         Command::Readyz => pretty(&r.call(Method::GET, "/readyz", None).await?)?,
@@ -1937,10 +2182,10 @@ async fn run_remote(
             }
         }
         _ => anyhow::bail!(
-            "this command is not available with --server; supported: list, get, status <vm>, \
-             start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, snapshot, \
-             snapshot-list, snapshot-delete, backup, disk, events (no -f), quota, healthz, readyz, \
-             wait (not --for agent)"
+            "this command is not available with --server; supported: create, vm-template, list, get, \
+             status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, snapshot, \
+             snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
+             readyz, wait (not --for agent)"
         ),
     }
     Ok(())
@@ -1969,24 +2214,33 @@ async fn print_events(
         let (events, next) = log.read_from(offset, &tail_filter)?;
         offset = next;
         for ev in events {
-            match format {
-                output::OutputFormat::Json => println!("{}", serde_json::to_string(&ev)?),
-                _ => println!(
-                    "{}  {}  {}  {}",
-                    ev.ts.to_rfc3339(),
-                    ev.event,
-                    ev.vm_id
-                        .map(|i| i.to_string())
-                        .unwrap_or_else(|| "-".into()),
-                    ev.fields
-                        .iter()
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ),
-            }
+            print_event_line(format, &ev)?;
         }
     }
+}
+
+/// One followed event: JSON line, or a `ts  event  vm  k=v,...` row.
+fn print_event_line(
+    format: output::OutputFormat,
+    ev: &fluxvm_scheduler::events::VmEvent,
+) -> Result<()> {
+    match format {
+        output::OutputFormat::Json => println!("{}", serde_json::to_string(ev)?),
+        _ => println!(
+            "{}  {}  {}  {}",
+            ev.ts.to_rfc3339(),
+            ev.event,
+            ev.vm_id
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "-".into()),
+            ev.fields
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    }
+    Ok(())
 }
 
 /// Parses `--cpuset-cpus`' set syntax (`"0-3"`, `"0,2,4"`, `"0-1,4-5"`) into
@@ -2132,8 +2386,16 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let format = cli.output;
-    if let Some(server) = &cli.server {
-        let r = remote::Remote::new(server, cli.server_token.clone());
+    if let Command::Context { command } = cli.command {
+        return run_context(command, format);
+    }
+    if !matches!(cli.command, Command::Serve)
+        && let Some(r) = remote::endpoint(
+            cli.server.clone(),
+            cli.server_token.clone(),
+            cli.context.as_deref(),
+        )?
+    {
         return run_remote(&r, cli.command, format).await;
     }
     let cfg = Config::load(cli.config.as_deref())?;
@@ -2203,6 +2465,7 @@ async fn main() -> Result<()> {
         | Command::Metrics { .. }
         | Command::Completions { .. }
         | Command::Events { .. }
+        | Command::Context { .. }
         | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
         Command::Quota { token: None, name } => {
             println!(
@@ -2254,9 +2517,68 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::json!({"ok": true, "deleted": tag}));
         }
         Command::Serial { id } => run_serial_session(&m, id).await?,
-        Command::Backup { id, dest, compress } => println!(
+        Command::VmTemplate { command } => match command {
+            TemplateCommand::List => {
+                output::print_list(format, &m.list_vm_templates()?, output::TEMPLATE_COLUMNS)?
+            }
+            TemplateCommand::Show { name } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.get_vm_template(&name)?)?
+                )
+            }
+            TemplateCommand::Save {
+                name,
+                spec,
+                from_vm,
+                description,
+                replace,
+            } => {
+                let req = match (spec, from_vm) {
+                    (Some(p), _) => fluxvm_scheduler::templates::spec_from_json(
+                        &name,
+                        serde_json::from_slice(&std::fs::read(p)?)?,
+                    )?,
+                    (None, Some(id)) => m.get(id).await?.request,
+                    (None, None) => unreachable!("clap requires --spec or --from-vm"),
+                };
+                let t = m.save_vm_template(&name, description, req, replace).await?;
+                println!("{}", serde_json::to_string_pretty(&t)?);
+            }
+            TemplateCommand::Delete { name } => {
+                m.delete_vm_template(&name).await?;
+                println!("{}", serde_json::json!({"ok": true, "deleted": name}));
+            }
+            TemplateCommand::Create {
+                template,
+                vm_name,
+                labels,
+            } => {
+                let mut vm = m
+                    .create(m.vm_template_request(&template, &vm_name)?)
+                    .await?;
+                if !labels.is_empty() {
+                    vm = m
+                        .patch(
+                            vm.id,
+                            fluxvm_core::model::VmPatch {
+                                name: None,
+                                labels: labels.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+                            },
+                        )
+                        .await?;
+                }
+                println!("{}", serde_json::to_string_pretty(&vm)?);
+            }
+        },
+        Command::Backup {
+            id,
+            dest,
+            compress,
+            all_disks,
+        } => println!(
             "{}",
-            serde_json::to_string_pretty(&m.backup_vm(id, dest, compress).await?)?
+            serde_json::to_string_pretty(&m.backup_vm(id, dest, compress, all_disks).await?)?
         ),
         Command::Disk { command } => match command {
             DiskCommand::List { id } => {
@@ -5105,5 +5427,74 @@ mod tier2_cli_tests {
         assert_eq!(c.server_token.as_deref(), Some("t"));
         let c = cli(&["--server=h:7788", "stop", "-l", "env=dev"]).unwrap();
         assert_eq!(c.server.as_deref(), Some("h:7788"));
+        let c = cli(&["--context", "lab", "list"]).unwrap();
+        assert_eq!(c.context.as_deref(), Some("lab"));
+    }
+
+    #[test]
+    fn template_subcommands_parse() {
+        let id = Uuid::nil().to_string();
+        assert!(matches!(
+            cli(&["vm-template", "save", "small", "--from-vm", &id])
+                .unwrap()
+                .command,
+            Command::VmTemplate {
+                command: TemplateCommand::Save {
+                    from_vm: Some(_),
+                    spec: None,
+                    ..
+                }
+            }
+        ));
+        assert!(cli(&["vm-template", "save", "small"]).is_err());
+        assert!(
+            cli(&[
+                "vm-template",
+                "save",
+                "s",
+                "--spec",
+                "a.json",
+                "--from-vm",
+                &id
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            cli(&["vm-template", "create", "small", "web-1", "--label", "env=dev", "--label", "t=x"])
+                .unwrap()
+                .command,
+            Command::VmTemplate { command: TemplateCommand::Create { labels, .. } } if labels.len() == 2
+        ));
+        assert!(
+            cli(&[
+                "vm-template",
+                "create",
+                "small",
+                "web-1",
+                "--label",
+                "novalue"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn context_subcommands_parse() {
+        assert!(matches!(
+            cli(&["context", "add", "lab", "--server", "http://h:7788"])
+                .unwrap()
+                .command,
+            Command::Context {
+                command: ContextCommand::Add { token: None, .. }
+            }
+        ));
+        assert!(cli(&["context", "add", "lab"]).is_err());
+        for sub in ["list", "current", "unset"] {
+            assert!(cli(&["context", sub]).is_ok(), "{sub}");
+        }
+        assert!(matches!(
+            cli(&["context", "use", "lab"]).unwrap().command,
+            Command::Context { command: ContextCommand::Use { name } } if name == "lab"
+        ));
     }
 }

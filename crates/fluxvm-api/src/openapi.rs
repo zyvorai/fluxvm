@@ -54,6 +54,7 @@ const VMS: &str = "vms";
 const DISKS: &str = "disks";
 const SNAPSHOTS: &str = "snapshots";
 const EVENTS: &str = "events";
+const TEMPLATES: &str = "vm-templates";
 const HOST: &str = "host";
 
 fn ops() -> Vec<Op> {
@@ -171,6 +172,34 @@ fn ops() -> Vec<Op> {
             DISKS,
         )
         .status("204"),
+        op("get", "/v1/vm-templates", "List VM templates", TEMPLATES).returns("TemplateList"),
+        op("post", "/v1/vm-templates", "Save a VM template", TEMPLATES)
+            .body("SaveTemplateRequest")
+            .returns("VmTemplate")
+            .status("201"),
+        op(
+            "get",
+            "/v1/vm-templates/{name}",
+            "Get a VM template",
+            TEMPLATES,
+        )
+        .returns("VmTemplate"),
+        op(
+            "delete",
+            "/v1/vm-templates/{name}",
+            "Delete a VM template",
+            TEMPLATES,
+        )
+        .status("204"),
+        op(
+            "post",
+            "/v1/vm-templates/{name}/instantiate",
+            "Create a VM from a template",
+            TEMPLATES,
+        )
+        .body("InstantiateTemplateRequest")
+        .returns("VmRecord")
+        .status("201"),
         op("get", "/v1/events", "Lifecycle events", EVENTS)
             .returns("EventList")
             .query(&[
@@ -201,12 +230,35 @@ fn schemas() -> Value {
             "labels": {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
         }},
         "CloneVmRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
-        "BackupVmRequest": {"type": "object", "properties": {"compress": {"type": "boolean"}}},
+        "BackupVmRequest": {"type": "object", "properties": {
+            "compress": {"type": "boolean"},
+            "all_disks": {"type": "boolean", "description": "Also back up data disks into a directory"}
+        }},
         "BackupResult": {"type": "object", "properties": {
             "vm_id": {"type": "string", "format": "uuid"},
             "path": {"type": "string"},
             "size_bytes": {"type": "integer"},
-            "live": {"type": "boolean"}
+            "live": {"type": "boolean"},
+            "disks": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string"}, "path": {"type": "string"}, "size_bytes": {"type": "integer"}
+            }}}
+        }},
+        "VmTemplate": {"type": "object", "properties": {
+            "name": {"type": "string"},
+            "description": {"type": ["string", "null"]},
+            "created_at": {"type": "string", "format": "date-time"},
+            "spec": {"$ref": "#/components/schemas/CreateVmRequest"}
+        }},
+        "TemplateList": list("VmTemplate"),
+        "SaveTemplateRequest": {"type": "object", "required": ["name", "spec"], "properties": {
+            "name": {"type": "string"},
+            "description": {"type": "string"},
+            "spec": {"$ref": "#/components/schemas/CreateVmRequest"},
+            "replace": {"type": "boolean"}
+        }},
+        "InstantiateTemplateRequest": {"type": "object", "required": ["name"], "properties": {
+            "name": {"type": "string"},
+            "labels": {"type": "object", "additionalProperties": {"type": "string"}}
         }},
         "SnapshotRequest": {"type": "object", "required": ["tag"], "properties": {"tag": {"type": "string"}}},
         "VmSnapshotInfo": {"type": "object", "properties": {
@@ -295,7 +347,8 @@ pub fn spec() -> Value {
         "servers": [{"url": "/"}],
         "security": [{"bearer": []}],
         "tags": [
-            {"name": VMS}, {"name": SNAPSHOTS}, {"name": DISKS}, {"name": EVENTS}, {"name": HOST}
+            {"name": VMS}, {"name": SNAPSHOTS}, {"name": DISKS}, {"name": TEMPLATES},
+            {"name": EVENTS}, {"name": HOST}
         ],
         "paths": paths,
         "components": {

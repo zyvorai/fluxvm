@@ -325,6 +325,18 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/vms/{id}/restart", post(restart_vm))
         .route("/v1/vms/{id}/clone", post(clone_vm))
+        .route(
+            "/v1/vm-templates",
+            get(list_vm_templates).post(save_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/{name}",
+            get(get_vm_template).delete(delete_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/{name}/instantiate",
+            post(instantiate_vm_template),
+        )
         .route("/v1/vms/{id}/backup", post(backup_vm))
         .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
         .route("/v1/vms/{id}/snapshots/{tag}", delete(delete_vm_snapshot))
@@ -787,9 +799,23 @@ async fn create_vm(
     Extension(role): Extension<Role>,
     actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
-    Json(mut req): Json<CreateVmRequest>,
+    Json(req): Json<CreateVmRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(create_vm_as(&m, actor, token_tenant, req).await?),
+    ))
+}
+
+/// `create` on behalf of the authenticated caller: tenant and
+/// `created_by_token` come from the token, then token quotas apply.
+async fn create_vm_as(
+    m: &Arc<VmManager>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    mut req: CreateVmRequest,
+) -> ApiResult<VmRecord> {
     // Token tenant is authoritative: inherit when omitted; reject mismatch.
     if let Some(Extension(TokenTenant(t))) = token_tenant {
         if let Some(ref body) = req.tenant
@@ -813,7 +839,86 @@ async fn create_vm(
     m.enforce_token_quotas(actor_name, &req)
         .await
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
-    Ok((StatusCode::CREATED, Json(m.create(req).await?)))
+    Ok(m.create(req).await?)
+}
+
+async fn list_vm_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_vm_templates()?})))
+}
+
+async fn get_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_scheduler::templates::VmTemplate>> {
+    Ok(Json(m.get_vm_template(&name)?))
+}
+
+#[derive(Deserialize)]
+struct SaveTemplateRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    spec: serde_json::Value,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn save_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<SaveTemplateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let spec = fluxvm_scheduler::templates::spec_from_json(&req.name, req.spec)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            m.save_vm_template(&req.name, req.description, spec, req.replace)
+                .await?,
+        ),
+    ))
+}
+
+async fn delete_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_vm_template(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct InstantiateTemplateRequest {
+    name: String,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+async fn instantiate_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(template): Path<String>,
+    Json(body): Json<InstantiateTemplateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let req = m.vm_template_request(&template, &body.name)?;
+    let mut vm = create_vm_as(&m, actor, token_tenant, req).await?;
+    if !body.labels.is_empty() {
+        vm = m
+            .patch(
+                vm.id,
+                fluxvm_core::model::VmPatch {
+                    name: None,
+                    labels: body.labels.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+                },
+            )
+            .await?;
+    }
+    Ok((StatusCode::CREATED, Json(vm)))
 }
 
 async fn create_sandbox(
@@ -1834,6 +1939,8 @@ async fn delete_vm_snapshot(
 struct BackupVmRequest {
     #[serde(default)]
     compress: bool,
+    #[serde(default)]
+    all_disks: bool,
 }
 
 /// Writes under `state_dir/backups/`; the API never takes a destination path.
@@ -1847,7 +1954,7 @@ async fn backup_vm(
     let req = body.map(|b| b.0).unwrap_or_default();
     Ok((
         StatusCode::CREATED,
-        Json(m.backup_vm(id, None, req.compress).await?),
+        Json(m.backup_vm(id, None, req.compress, req.all_disks).await?),
     ))
 }
 
