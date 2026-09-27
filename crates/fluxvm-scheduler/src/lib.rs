@@ -306,7 +306,9 @@ fn validate_snapshot_tag(tag: &str) -> Result<()> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
-        bail!("invalid snapshot tag {tag:?}: use 1-128 chars of [A-Za-z0-9._-], not starting with '.'");
+        bail!(
+            "invalid snapshot tag {tag:?}: use 1-128 chars of [A-Za-z0-9._-], not starting with '.'"
+        );
     }
     Ok(())
 }
@@ -333,6 +335,56 @@ fn validate_label_key(key: &str) -> Result<()> {
         bail!("invalid label key {key:?}: use 1-63 chars of [A-Za-z0-9._/-]");
     }
     Ok(())
+}
+
+/// VM label enabling scheduled snapshots: an interval like `3600`, `30m`,
+/// `6h` or `1d`.
+pub const SNAPSHOT_EVERY_LABEL: &str = "fluxvm.io/snapshot-every";
+/// VM label: how many `auto-*` snapshots to retain (default 7).
+pub const SNAPSHOT_KEEP_LABEL: &str = "fluxvm.io/snapshot-keep";
+const DEFAULT_SNAPSHOT_KEEP: usize = 7;
+const AUTO_SNAPSHOT_PREFIX: &str = "auto-";
+/// Anything shorter would snapshot on nearly every reaper tick.
+const MIN_SNAPSHOT_INTERVAL_SECS: u64 = 60;
+
+fn parse_interval_secs(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let (num, mult) = match v.char_indices().last()? {
+        (i, 's') => (&v[..i], 1),
+        (i, 'm') => (&v[..i], 60),
+        (i, 'h') => (&v[..i], 3600),
+        (i, 'd') => (&v[..i], 86400),
+        _ => (v, 1),
+    };
+    num.parse::<u64>()
+        .ok()?
+        .checked_mul(mult)
+        .filter(|s| *s >= MIN_SNAPSHOT_INTERVAL_SECS)
+}
+
+/// `(due, tags_to_prune)` for one VM's `auto-*` snapshots. Pruning keeps the
+/// newest `keep`; manual snapshots are never touched.
+fn snapshot_schedule_plan(
+    snaps: &[fluxvm_core::model::VmSnapshotInfo],
+    every_secs: u64,
+    keep: usize,
+    now: chrono::DateTime<Utc>,
+) -> (bool, Vec<String>) {
+    let mut auto: Vec<_> = snaps
+        .iter()
+        .filter(|s| s.tag.starts_with(AUTO_SNAPSHOT_PREFIX))
+        .collect();
+    auto.sort_by_key(|s| s.created_at);
+    let due = auto
+        .last()
+        .and_then(|s| s.created_at)
+        .is_none_or(|t| (now - t).num_seconds() >= every_secs as i64);
+    let prune = auto
+        .iter()
+        .take(auto.len().saturating_sub(keep))
+        .map(|s| s.tag.clone())
+        .collect();
+    (due, prune)
 }
 
 fn dir_size(path: &std::path::Path) -> u64 {
@@ -567,6 +619,8 @@ pub struct VmManager {
     sandbox_volume_lock: AsyncMutex<()>,
     /// Last activity timestamps for AutoPause / wake-on-request (sandbox id → UTC).
     activity: AsyncMutex<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>,
+    /// A scheduled-snapshot pass can outlast a reaper tick (savevm is slow).
+    scheduled_snapshots_busy: std::sync::atomic::AtomicBool,
 }
 
 impl VmManager {
@@ -597,6 +651,7 @@ impl VmManager {
             catalog_lock: AsyncMutex::new(()),
             sandbox_volume_lock: AsyncMutex::new(()),
             activity: AsyncMutex::new(HashMap::new()),
+            scheduled_snapshots_busy: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -3083,6 +3138,215 @@ impl VmManager {
         Ok(())
     }
 
+    /// Flatten a QEMU VM's root disk into a standalone qcow2 at `dest`
+    /// (default `state_dir/backups/<name>-<utc>.qcow2`). A running VM is
+    /// captured through a short-lived internal snapshot so the copy is
+    /// crash-consistent; a stopped VM is copied directly.
+    pub async fn backup_vm(
+        self: &Arc<Self>,
+        id: Uuid,
+        dest: Option<std::path::PathBuf>,
+        compress: bool,
+    ) -> Result<serde_json::Value> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu
+            || vm.request.storage != StorageBackend::Default
+            || !vm.disk.is_file()
+        {
+            bail!("backup supports QEMU VMs on the default qcow2 storage backend only");
+        }
+        let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let dest = match dest {
+            Some(p) => p,
+            None => {
+                let dir = self.cfg.state_dir.join("backups");
+                tokio::fs::create_dir_all(&dir).await?;
+                dir.join(format!("{}-{stamp}.qcow2", vm.request.name))
+            }
+        };
+        if dest.exists() {
+            bail!("{} already exists", dest.display());
+        }
+        let live = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
+        let tag = format!("backup-{stamp}");
+        if live {
+            self.create_vm_snapshot_inner(id, &tag).await?;
+        }
+        let mut cmd = tokio::process::Command::new(&self.cfg.qemu_img_binary);
+        cmd.args(["convert", "-U", "-O", "qcow2"]);
+        if compress {
+            cmd.arg("-c");
+        }
+        if live {
+            cmd.args(["-l", &format!("snapshot.name={tag}")]);
+        }
+        let out = cmd
+            .arg(&vm.disk)
+            .arg(&dest)
+            .output()
+            .await
+            .with_context(|| format!("running {}", self.cfg.qemu_img_binary));
+        if live && let Err(e) = fluxvm_qemu::snapshot_delete(&self.cfg, &vm, &tag).await {
+            tracing::warn!(vm=%id, tag, error=?e, "dropping backup snapshot failed");
+        }
+        let out = out?;
+        if !out.status.success() {
+            let _ = fs::remove_file(&dest);
+            bail!(
+                "qemu-img convert failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let size_bytes = fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        let dest_s = dest.display().to_string();
+        audit_event(
+            "vm.backup",
+            &[("vm_id", &id.to_string()), ("path", &dest_s)],
+        );
+        Ok(serde_json::json!({
+            "vm_id": id,
+            "path": dest,
+            "size_bytes": size_bytes,
+            "live": live,
+        }))
+    }
+
+    /// One pass of label-driven scheduled snapshots (see
+    /// [`SNAPSHOT_EVERY_LABEL`]): take an `auto-*` snapshot when the newest
+    /// is older than the interval, then prune beyond the keep count.
+    pub async fn run_scheduled_snapshots(self: &Arc<Self>) {
+        let now = Utc::now();
+        for vm in self.store.list().await {
+            let Some(every) = vm
+                .labels
+                .get(SNAPSHOT_EVERY_LABEL)
+                .and_then(|v| parse_interval_secs(v))
+            else {
+                continue;
+            };
+            if vm.status != VmStatus::Running || vm.backend != BackendKind::Qemu {
+                continue;
+            }
+            let keep = vm
+                .labels
+                .get(SNAPSHOT_KEEP_LABEL)
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_SNAPSHOT_KEEP)
+                .max(1);
+            let snaps = match self.list_vm_snapshots(vm.id).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(vm=%vm.id, error=?e, "scheduled snapshot: listing failed");
+                    continue;
+                }
+            };
+            let (due, _) = snapshot_schedule_plan(&snaps, every, keep, now);
+            if !due {
+                continue;
+            }
+            let tag = format!("{AUTO_SNAPSHOT_PREFIX}{}", now.format("%Y%m%dT%H%M%SZ"));
+            if let Err(e) = self.create_vm_snapshot(vm.id, &tag).await {
+                tracing::warn!(vm=%vm.id, error=?e, "scheduled snapshot failed");
+                continue;
+            }
+            let Ok(snaps) = self.list_vm_snapshots(vm.id).await else {
+                continue;
+            };
+            let (_, prune) = snapshot_schedule_plan(&snaps, every, keep, now);
+            for old in prune {
+                if let Err(e) = self.delete_vm_snapshot(vm.id, &old).await {
+                    tracing::warn!(vm=%vm.id, tag=old, error=?e, "pruning scheduled snapshot failed");
+                }
+            }
+        }
+    }
+
+    /// Connect to a running QEMU VM's serial socket.
+    pub async fn open_serial(&self, id: Uuid) -> Result<tokio::net::UnixStream> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu {
+            bail!("serial console is supported for the QEMU backend only");
+        }
+        if !matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            bail!("VM {id} is not running (status={:?})", vm.status);
+        }
+        let path = vm.workspace.join(fluxvm_qemu::SERIAL_SOCKET);
+        tokio::net::UnixStream::connect(&path)
+            .await
+            .with_context(|| {
+                format!(
+                    "connecting {} (VMs booted before serial sockets existed need a restart)",
+                    path.display()
+                )
+            })
+    }
+
+    async fn qemu_vm_for_disks(&self, id: Uuid) -> Result<VmRecord> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Qemu {
+            bail!("disk operations are supported for the QEMU backend only");
+        }
+        Ok(vm)
+    }
+
+    pub async fn list_vm_disks(&self, id: Uuid) -> Result<Vec<fluxvm_core::model::VmDiskInfo>> {
+        let vm = self.qemu_vm_for_disks(id).await?;
+        fluxvm_qemu::disks::list(&self.cfg, &vm).await
+    }
+
+    /// New qcow2 data disk, hot-added when the VM is running.
+    pub async fn attach_vm_disk(
+        &self,
+        id: Uuid,
+        name: &str,
+        size_gib: u64,
+    ) -> Result<fluxvm_core::model::VmDiskInfo> {
+        let vm = self.qemu_vm_for_disks(id).await?;
+        let info = fluxvm_qemu::disks::attach(&self.cfg, &vm, name, size_gib).await?;
+        audit_event(
+            "vm.disk.attach",
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", name),
+                ("size_gib", &size_gib.to_string()),
+            ],
+        );
+        Ok(info)
+    }
+
+    pub async fn detach_vm_disk(&self, id: Uuid, name: &str) -> Result<()> {
+        let vm = self.qemu_vm_for_disks(id).await?;
+        fluxvm_qemu::disks::detach(&vm, name).await?;
+        audit_event(
+            "vm.disk.detach",
+            &[("vm_id", &id.to_string()), ("disk", name)],
+        );
+        Ok(())
+    }
+
+    /// Grow `root` or a data disk (live `block_resize`, else `qemu-img resize`).
+    pub async fn resize_vm_disk(
+        &self,
+        id: Uuid,
+        name: &str,
+        size_gib: u64,
+    ) -> Result<fluxvm_core::model::VmDiskInfo> {
+        let vm = self.qemu_vm_for_disks(id).await?;
+        if name == fluxvm_qemu::disks::ROOT_DISK && vm.request.storage != StorageBackend::Default {
+            bail!("root disk resize needs the default qcow2 storage backend");
+        }
+        let info = fluxvm_qemu::disks::resize(&self.cfg, &vm, name, size_gib).await?;
+        audit_event(
+            "vm.disk.resize",
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", name),
+                ("size_gib", &size_gib.to_string()),
+            ],
+        );
+        Ok(info)
+    }
+
     /// Limits and current usage for one API token (`GET /v1/quotas/me`).
     pub async fn token_quota_usage(&self, actor: Option<&str>) -> Result<serde_json::Value> {
         let actor = actor.unwrap_or("none");
@@ -3093,7 +3357,11 @@ impl VmManager {
             .iter()
             .filter(|vm| vm.request.created_by_token.as_deref() == Some(actor))
             .fold((0u64, 0u64, 0u64), |(n, c, m), vm| {
-                (n + 1, c + vm.request.vcpus as u64, m + vm.request.memory_mib)
+                (
+                    n + 1,
+                    c + vm.request.vcpus as u64,
+                    m + vm.request.memory_mib,
+                )
             });
         Ok(serde_json::json!({
             "token": actor,
@@ -3456,10 +3724,145 @@ impl VmManager {
                 fs::remove_dir_all(jail_path)?;
             }
         }
+        self.remove_unreferenced_clone_base(&vm.request.image).await;
         let vm_id = id.to_string();
         let tenant = vm.request.tenant.clone().unwrap_or_default();
         audit_event("vm.delete", &[("vm_id", &vm_id), ("tenant", &tenant)]);
         Ok(())
+    }
+
+    fn clone_base_dir(&self) -> std::path::PathBuf {
+        self.cfg.state_dir.join("images").join("clones")
+    }
+
+    /// A clone's flattened base lives under `images/clones/` and backs the
+    /// clone's copy-on-write disk; drop it once no VM references it.
+    async fn remove_unreferenced_clone_base(&self, image: &std::path::Path) {
+        if !image.starts_with(self.clone_base_dir()) {
+            return;
+        }
+        if self.list().await.iter().any(|v| v.request.image == image) {
+            return;
+        }
+        if let Err(e) = fs::remove_file(image) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(image = %image.display(), error = %e, "failed to remove clone base");
+            }
+        }
+    }
+
+    /// Copy a stopped VM into a new VM: flatten its disk (backing chain
+    /// included) into `images/clones/`, then `create` from that with the
+    /// source's spec, a fresh MAC, and the source's labels.
+    pub async fn clone_vm(
+        self: &Arc<Self>,
+        id: Uuid,
+        name: String,
+        actor: Option<&str>,
+    ) -> Result<VmRecord> {
+        validate_vm_name(&name)?;
+        let src = self.get(id).await?;
+        if src.status != VmStatus::Stopped {
+            bail!(
+                "clone needs a stopped VM for a consistent disk (status={:?}); stop it first",
+                src.status
+            );
+        }
+        if src.request.storage != StorageBackend::Default || !src.disk.is_file() {
+            bail!("clone supports local file-backed disks only");
+        }
+        let dir = self.clone_base_dir();
+        tokio::fs::create_dir_all(&dir).await?;
+        let base = dir.join(format!(
+            "{name}-{}.qcow2",
+            &Uuid::new_v4().simple().to_string()[..8]
+        ));
+        let out = tokio::process::Command::new(&self.cfg.qemu_img_binary)
+            .args(["convert", "-O", "qcow2"])
+            .arg(&src.disk)
+            .arg(&base)
+            .output()
+            .await
+            .with_context(|| format!("running {}", self.cfg.qemu_img_binary))?;
+        if !out.status.success() {
+            let _ = fs::remove_file(&base);
+            bail!(
+                "qemu-img convert failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        let mut req = src.request.clone();
+        req.name = name;
+        req.image = base.clone();
+        req.loadvm_tag = None;
+        // The flattened base already carries the source's current virtual
+        // size, which a live `disk resize` may have grown past this value.
+        req.disk_size_gib = None;
+        if let Some(actor) = actor {
+            req.created_by_token = Some(actor.to_string());
+        }
+        if let NetworkSpec::Tap { mac, .. } = &mut req.network {
+            *mac = None;
+        }
+        let before: std::collections::HashSet<Uuid> =
+            self.store.list().await.iter().map(|v| v.id).collect();
+        let clone_name = req.name.clone();
+        let created = match self.create(req).await {
+            Ok(vm) => vm,
+            Err(e) => {
+                // `create` keeps a Failed record on error; it would point at
+                // the base removed below.
+                for vm in self.store.list().await {
+                    if vm.name == clone_name && !before.contains(&vm.id) {
+                        let _ = self.delete(vm.id).await;
+                    }
+                }
+                let _ = fs::remove_file(&base);
+                return Err(e);
+            }
+        };
+        let data = fluxvm_qemu::disks::data_disks(&src.workspace);
+        if !data.is_empty() {
+            let dst_dir = fluxvm_qemu::disks::disks_dir(&created.workspace);
+            tokio::fs::create_dir_all(&dst_dir).await?;
+            for (disk, path) in data {
+                let out = tokio::process::Command::new(&self.cfg.qemu_img_binary)
+                    .args(["convert", "-O", "qcow2"])
+                    .arg(&path)
+                    .arg(dst_dir.join(format!("{disk}.qcow2")))
+                    .output()
+                    .await
+                    .with_context(|| format!("running {}", self.cfg.qemu_img_binary))?;
+                if !out.status.success() {
+                    let _ = self.delete(created.id).await;
+                    bail!(
+                        "copying data disk {disk:?}: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                }
+            }
+        }
+        let vm = if src.labels.is_empty() {
+            created
+        } else {
+            self.patch(
+                created.id,
+                fluxvm_core::model::VmPatch {
+                    name: None,
+                    labels: src
+                        .labels
+                        .iter()
+                        .map(|(k, v)| (k.clone(), Some(v.clone())))
+                        .collect(),
+                },
+            )
+            .await?
+        };
+        audit_event(
+            "vm.clone",
+            &[("vm_id", &vm.id.to_string()), ("source", &id.to_string())],
+        );
+        Ok(vm)
     }
 
     pub async fn reconcile(&self) -> Result<()> {
@@ -3604,6 +4007,17 @@ impl VmManager {
                     }
                 }
                 me.reap_migration_receivers().await;
+                if !me
+                    .scheduled_snapshots_busy
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+                {
+                    let me2 = me.clone();
+                    tokio::spawn(async move {
+                        me2.run_scheduled_snapshots().await;
+                        me2.scheduled_snapshots_busy
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    });
+                }
             }
         });
     }
@@ -5096,5 +5510,55 @@ mod migration_tls_validation_tests {
         assert!(validate_migration_receiver_request(&req, &cfg).is_ok());
         req.listen_host.clear(); // defaults to 0.0.0.0
         assert!(validate_migration_receiver_request(&req, &cfg).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod scheduled_snapshot_tests {
+    use super::*;
+    use fluxvm_core::model::VmSnapshotInfo;
+
+    fn snap(tag: &str, secs_ago: i64, now: chrono::DateTime<Utc>) -> VmSnapshotInfo {
+        VmSnapshotInfo {
+            tag: tag.into(),
+            created_at: Some(now - Duration::seconds(secs_ago)),
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn intervals() {
+        assert_eq!(parse_interval_secs("3600"), Some(3600));
+        assert_eq!(parse_interval_secs("30m"), Some(1800));
+        assert_eq!(parse_interval_secs("6h"), Some(21600));
+        assert_eq!(parse_interval_secs("1d"), Some(86400));
+        assert_eq!(parse_interval_secs("90s"), Some(90));
+        assert_eq!(parse_interval_secs("10"), None, "below the minimum");
+        assert_eq!(parse_interval_secs("x"), None);
+        assert_eq!(parse_interval_secs(""), None);
+    }
+
+    #[test]
+    fn plan_is_due_without_auto_snapshots_and_ignores_manual_ones() {
+        let now = Utc::now();
+        let (due, prune) = snapshot_schedule_plan(&[snap("manual", 10, now)], 3600, 2, now);
+        assert!(due);
+        assert!(prune.is_empty());
+    }
+
+    #[test]
+    fn plan_respects_interval_and_prunes_oldest_auto() {
+        let now = Utc::now();
+        let snaps = [
+            snap("auto-3", 100, now),
+            snap("auto-1", 7300, now),
+            snap("keep-me", 9000, now),
+            snap("auto-2", 3700, now),
+        ];
+        let (due, prune) = snapshot_schedule_plan(&snaps, 3600, 2, now);
+        assert!(!due);
+        assert_eq!(prune, vec!["auto-1".to_string()]);
+        let (due, _) = snapshot_schedule_plan(&snaps, 60, 2, now);
+        assert!(due);
     }
 }

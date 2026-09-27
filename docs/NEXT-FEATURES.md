@@ -120,15 +120,22 @@ Ranked by operator value vs effort. Tier 1 is being built on
 | N11 | Doc honesty fixes | secure-containers.md remote RPC, PRODUCTION.md CH Windows / 13E |
 | N12 | Seccomp `mode=remote` live smoke | `MODE=remote scripts/e2e-secure-containers-seccomp-notify.sh` + SC live matrix (deny passes; continue hangs, see honesty below) |
 
-### Tier 2 — next
+### Tier 2 — shipped (see `operations.md` → Day-2 VM operations)
 
-- `fluxctl` REST remote mode (`--server` / `FLUXVM_URL`, bearer token, contexts).
-- Disk ops: QMP `blockdev-add` / `block_resize`, `/v1/vms/{id}/disks`.
-- VM→VM clone and named VM templates.
-- Serial console websocket via QEMU chardev socket (no guest agent needed).
-- Scheduled snapshots; VM disk backup/export to file or S3.
-- Label selectors + bulk ops (`fluxctl stop -l env=dev`).
-- OpenAPI spec (utoipa) and VM lifecycle pages in `/console` (Axiom integration prerequisite).
+- `fluxctl --server` / `FLUXVM_URL` remote mode for the core VM verbs.
+- Disks: `/v1/vms/{id}/disks` list/attach (QMP `blockdev-add` + `scsi-hd`
+  hotplug)/resize (`block_resize` or `qemu-img resize`)/detach.
+- VM→VM clone (`POST /v1/vms/{id}/clone`, stopped source, data disks + labels copied).
+- Serial console: QEMU chardev socket teeing into `console.log`, websocket
+  `/v1/vms/{id}/serial`, `fluxctl serial`.
+- Root-disk backup to standalone qcow2 (live via temporary snapshot);
+  label-driven scheduled snapshots with retention.
+- Label selectors (`GET /v1/vms?label=`) and bulk `start/stop/restart/delete -l`.
+- `GET /v1/openapi.json` (hand-maintained OpenAPI 3.1, VM surface).
+
+Still open from this tier: `--server` contexts file, named VM templates,
+backup to S3, data-disk backup, `fluxctl serial`/`console` over `--server`,
+VM lifecycle pages in `/console`, a generated (utoipa) spec covering every route.
 
 ### Tier 3 — evidence / hardening (lab hardware or long runs)
 

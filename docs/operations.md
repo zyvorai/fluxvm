@@ -465,6 +465,14 @@ prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching i
 | Events | `fluxctl events [--vm <vm>] [--event vm.] [--since RFC3339] [-f]` | `GET /v1/events?vm=&event=&since=&limit=`, `GET /v1/events/stream` (SSE) |
 | Token quota usage | `fluxctl quota [--token T \| --name N]` | `GET /v1/quotas/me` |
 | Shell completions | `fluxctl completions bash\|zsh\|fish` | — |
+| Filter by labels | `fluxctl list -l env=prod,!tmp` | `GET /v1/vms?label=env%3Dprod` |
+| Bulk lifecycle | `fluxctl start\|stop\|restart -l <sel>`, `fluxctl delete -l <sel> --yes` | per-VM calls |
+| Clone a stopped VM | `fluxctl clone-vm <vm> <new-name>` | `POST /v1/vms/{id}/clone` `{"name": "..."}` |
+| Disks | `fluxctl disk list\|attach\|resize\|detach <vm> ...` | `GET/POST /v1/vms/{id}/disks`, `PATCH/DELETE /v1/vms/{id}/disks/{name}` |
+| Serial console | `fluxctl serial <vm>` (Ctrl-] detaches) | websocket `GET /v1/vms/{id}/serial` |
+| Backup root disk | `fluxctl backup <vm> [--compress] [--dest PATH]` | `POST /v1/vms/{id}/backup` `{"compress": true}` |
+| Scheduled snapshots | `fluxctl label <vm> fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=7` | same `PATCH` |
+| API description | — | `GET /v1/openapi.json` (no auth) |
 
 QEMU snapshots are qcow2-internal (`qemu-img info -U` lists them; delete uses HMP
 `delvm` while running, `qemu-img snapshot -d` when stopped). Other backends keep
@@ -485,6 +493,46 @@ fluxctl -o table events --vm web -f
 
 `fluxctl console` / `login` / `shell` now sizes the guest PTY from the local
 terminal and forwards resizes (SIGWINCH → `PtyFrame::Resize`).
+
+Label selectors are a kubectl subset: `k=v`, `k==v`, `k!=v`, `k` (present),
+`!k` (absent), comma-joined, all terms must match. Bulk `delete -l` refuses to
+run without `--yes` and lists what it would have deleted.
+
+**Clone** requires a stopped VM on the default qcow2 storage. The source disk is
+flattened into `state_dir/images/clones/<name>-<hex>.qcow2`, which becomes the
+new VM's base image (removed again when the last VM using it is deleted). Data
+disks and labels are copied; a Tap MAC is regenerated.
+
+**Disks (QEMU).** The root disk is `root` (virtio). Data disks are qcow2 files
+in `instances/<uuid>/disks/<name>.qcow2`, attached as `scsi-hd` on the boot-time
+`virtio-scsi` controller; the directory is the source of truth, so a disk
+hot-added with `disk attach` comes back on every boot. `resize` only grows
+(`block_resize` live, `qemu-img resize` stopped); the guest still has to grow
+its partition/filesystem. `detach` unplugs and deletes the file.
+
+**Serial.** QEMU's first serial port is a UNIX socket
+(`instances/<uuid>/serial.sock`) that also tees into `console.log`, so
+`/logs` keeps working. It needs no guest agent; one client at a time. VMs
+started before this change need a restart to get the socket.
+
+**Backup** writes a standalone (no backing file) qcow2. Running VMs are
+captured via a temporary internal snapshot (`backup-<utc>`, deleted
+afterwards), so the copy is crash-consistent. REST backups always land in
+`state_dir/backups/<name>-<utc>.qcow2`; only the local CLI accepts `--dest`.
+
+**Scheduled snapshots.** The daemon's reaper takes an `auto-<utc>` snapshot of
+every running QEMU VM labelled `fluxvm.io/snapshot-every` (`3600`, `30m`, `6h`,
+`1d`; minimum 60s) once the newest `auto-*` snapshot is older than the interval,
+then prunes to `fluxvm.io/snapshot-keep` (default 7). Manual snapshots are never
+pruned.
+
+**Remote mode.** `fluxctl --server http://host:7788 [--server-token T]` (or
+`FLUXVM_URL` / `FLUXVM_TOKEN`) drives a remote daemon over REST for: `list`,
+`get`, `status <vm>`, `start`, `stop`, `restart`, `delete`, `pause`, `resume`,
+`label`, `rename-vm`, `clone-vm`, `snapshot`, `snapshot-list`,
+`snapshot-delete`, `backup`, `disk`, `events` (no `-f`), `quota`, `healthz`,
+`readyz`, `wait` (not `--for agent`). VM names/prefixes resolve against the
+server's VM list. Other commands exit with an error in remote mode.
 
 ## Resource control (cgroup v2)
 

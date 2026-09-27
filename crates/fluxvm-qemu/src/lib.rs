@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod confidential;
+pub mod disks;
 mod qmp;
 pub mod receiver;
 
@@ -52,6 +53,9 @@ const HOTPLUG_PCIE_PORTS: u8 = 8;
 /// First of the root ports reserved for hot-added virtiofs shares; the ports below it (0..4) are the NICs'
 /// (the scheduler caps NIC hotplug at 4). Shares are tried from the top down.
 const SHARE_PORTS_START: u8 = 4;
+
+/// First serial port's UNIX socket, relative to the VM workspace.
+pub const SERIAL_SOCKET: &str = "serial.sock";
 
 pub struct QemuBackend;
 
@@ -145,8 +149,16 @@ pub fn build_args(
         // `VmRecord::workspace`, already exposed via the REST API.
         "-vnc".into(),
         format!("unix:{}", path_arg(&ctx.workspace.join("vnc.sock"))),
+        // Serial on a UNIX socket (`fluxctl serial`, `GET /v1/vms/{id}/serial`)
+        // that also tees into the console log `GET /v1/vms/{id}/logs` reads.
+        "-chardev".into(),
+        format!(
+            "socket,id=serial0,path={},server=on,wait=off,logfile={},logappend=on",
+            path_arg(&ctx.workspace.join(SERIAL_SOCKET)),
+            path_arg(&ctx.log_path)
+        ),
         "-serial".into(),
-        "stdio".into(),
+        "chardev:serial0".into(),
         "-drive".into(),
         disk_drive,
     ];
@@ -195,6 +207,8 @@ pub fn build_args(
         "-device".into(),
         "virtio-scsi-pci,id=scsi0,bus=pcie.0".into(),
     ]);
+
+    a.extend(disks::boot_args(&ctx.workspace));
 
     if let Some(seed) = &ctx.seed_disk {
         a.extend([
@@ -759,7 +773,11 @@ mod snapshot_list_tests {
         assert_eq!(snaps[0].tag, "pre-upgrade");
         assert_eq!(snaps[0].size_bytes, 1048576);
         assert!(snaps[0].created_at.is_some());
-        assert!(super::parse_qemu_img_snapshots(br#"{"filename":"x"}"#).unwrap().is_empty());
+        assert!(
+            super::parse_qemu_img_snapshots(br#"{"filename":"x"}"#)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
 
@@ -1020,6 +1038,16 @@ mod tests {
         assert!(joined.contains("virtio-serial-pci"));
         assert!(joined.contains("name=org.qemu.guest_agent.0"));
         assert!(joined.contains("qga.sock"));
+    }
+
+    #[test]
+    fn serial_is_a_socket_that_tees_into_the_console_log() {
+        let args = build_args(&cfg(), &req(2048), &ctx(), &[]).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("-serial chardev:serial0"));
+        assert!(joined.contains("serial.sock,server=on,wait=off,logfile="));
+        assert!(joined.contains("console.log,logappend=on"));
+        assert!(!joined.contains("-serial stdio"));
     }
 
     #[test]

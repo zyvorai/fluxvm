@@ -71,6 +71,15 @@ pub const SNAPSHOT_COLUMNS: &[Column] = &[
     col("SIZE_BYTES", "/size_bytes"),
 ];
 
+pub const DISK_COLUMNS: &[Column] = &[
+    col("NAME", "/name"),
+    col("BUS", "/bus"),
+    col("FORMAT", "/format"),
+    col("SIZE_BYTES", "/size_bytes"),
+    col("ALLOCATED", "/allocated_bytes"),
+    wide("PATH", "/path"),
+];
+
 pub const EVENT_COLUMNS: &[Column] = &[
     col("TIME", "/ts"),
     col("EVENT", "/event"),
@@ -169,6 +178,12 @@ fn config_path_from_args() -> Option<PathBuf> {
         }
     }
     std::env::var_os("FLUXVM_CONFIG").map(PathBuf::from)
+}
+
+/// Use `index` (e.g. from a remote server) instead of the local `vms.json`.
+/// Must run before argument parsing.
+pub fn seed_vm_index(index: Vec<(Uuid, String)>) {
+    let _ = VM_INDEX.set(index);
 }
 
 fn load_vm_index() -> Vec<(Uuid, String)> {

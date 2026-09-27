@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 mod fleet_client;
 mod output;
+mod remote;
 mod status;
 mod styles;
 
@@ -56,6 +57,19 @@ struct Cli {
         help_heading = "Global Flags"
     )]
     output: output::OutputFormat,
+    /// Drive a remote daemon over REST (e.g. `http://host:7788`) instead of
+    /// the local state dir. Covers the core VM verbs.
+    #[arg(long, env = "FLUXVM_URL", global = true, help_heading = "Global Flags")]
+    server: Option<String>,
+    /// Bearer token for `--server`.
+    #[arg(
+        long = "server-token",
+        env = "FLUXVM_TOKEN",
+        global = true,
+        hide_env_values = true,
+        help_heading = "Global Flags"
+    )]
+    server_token: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -91,22 +105,26 @@ enum Command {
         #[arg(long)]
         spec: PathBuf,
     },
-    /// List VMs.
-    List,
+    /// List VMs. `-l env=dev,team!=x,gpu` filters by label selector.
+    List {
+        #[arg(short = 'l', long = "selector")]
+        selector: Option<String>,
+    },
     /// Get a VM by id.
     Get {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Relaunch a Stopped VM from its existing disk (skips image
-    /// clone/cloud-init reseed — see VmManager::start).
+    /// clone/cloud-init reseed — see VmManager::start). `-l` for bulk.
     Start {
-        #[arg(value_parser = output::parse_vm_ref)]
-        id: Uuid,
+        #[command(flatten)]
+        target: Target,
     },
+    /// Stop a VM, or every VM matching `-l`.
     Stop {
-        #[arg(value_parser = output::parse_vm_ref)]
-        id: Uuid,
+        #[command(flatten)]
+        target: Target,
     },
     Pause {
         #[arg(value_parser = output::parse_vm_ref)]
@@ -116,15 +134,16 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Delete a VM, or every VM matching `-l` (needs `--yes` for bulk).
     Delete {
-        #[arg(value_parser = output::parse_vm_ref)]
-        id: Uuid,
+        #[command(flatten)]
+        target: Target,
     },
     /// Stop (graceful, then forced) and start again. REST:
-    /// `POST /v1/vms/{id}/restart`.
+    /// `POST /v1/vms/{id}/restart`. `-l` for bulk.
     Restart {
-        #[arg(value_parser = output::parse_vm_ref)]
-        id: Uuid,
+        #[command(flatten)]
+        target: Target,
     },
     /// Set or remove VM labels: `key=value` sets, `key-` removes. REST:
     /// `PATCH /v1/vms/{id}` with `{"labels": {...}}`.
@@ -137,6 +156,13 @@ enum Command {
     /// Rename a VM (catalog images use `rename`). REST:
     /// `PATCH /v1/vms/{id}` with `{"name": "..."}`.
     RenameVm {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        new_name: String,
+    },
+    /// Copy a stopped VM into a new VM (disk flattened, fresh MAC, labels
+    /// kept). REST: `POST /v1/vms/{id}/clone` `{"name": "..."}`.
+    CloneVm {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         new_name: String,
@@ -258,6 +284,25 @@ enum Command {
         #[arg(long)]
         tag: String,
     },
+    /// Export a VM's root disk to a standalone qcow2 (live VMs via a
+    /// short-lived internal snapshot). Default destination:
+    /// `<state_dir>/backups/<name>-<utc>.qcow2`. REST: `POST /v1/vms/{id}/backup`.
+    /// Scheduled snapshots: label a VM `fluxvm.io/snapshot-every=6h`
+    /// (optional `fluxvm.io/snapshot-keep=7`).
+    Backup {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        dest: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        compress: bool,
+    },
+    /// Data disks (QEMU): list, attach, resize, detach. REST:
+    /// `/v1/vms/{id}/disks[/{name}]`.
+    Disk {
+        #[command(subcommand)]
+        command: DiskCommand,
+    },
     /// Relaunch a VM from a previously saved snapshot tag. REST equivalent:
     /// `POST /v1/vms/{id}/start-from-snapshot`.
     StartFromSnapshot {
@@ -280,6 +325,13 @@ enum Command {
         rows: u16,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
+    },
+    /// Attach to the VM's serial port (QEMU). No guest agent needed — shows
+    /// bootloader/kernel output and a serial getty. Ctrl-] detaches. REST:
+    /// websocket `GET /v1/vms/{id}/serial`.
+    Serial {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
     },
     /// SSH into the guest at its `guest_ip` via the host OpenSSH client.
     /// Needs a reachable address and `sshd` in the guest — distinct from
@@ -416,19 +468,11 @@ enum Command {
     ListImages,
     /// Show one catalog entry (machinectl `image-status` / `show-image`).
     #[command(visible_alias = "show-image")]
-    ImageStatus {
-        name: String,
-    },
+    ImageStatus { name: String },
     /// Clone a catalog entry (machinectl `clone`).
-    Clone {
-        name: String,
-        new_name: String,
-    },
+    Clone { name: String, new_name: String },
     /// Rename a catalog entry (machinectl `rename`).
-    Rename {
-        name: String,
-        new_name: String,
-    },
+    Rename { name: String, new_name: String },
     /// Mark a catalog entry read-only (machinectl `read-only`). Use `--off`
     /// to unlock.
     ReadOnly {
@@ -437,9 +481,7 @@ enum Command {
         off: bool,
     },
     /// Remove a catalog entry (machinectl `remove`). For VMs use `terminate`.
-    Remove {
-        name: String,
-    },
+    Remove { name: String },
     /// Remove orphaned catalog download cache (machinectl `clean`).
     Clean,
     /// Fetch a remote image into the catalog (machinectl `pull-raw`).
@@ -459,10 +501,7 @@ enum Command {
         format: String,
     },
     /// Export a catalog entry's file (machinectl `export-raw`).
-    ExportRaw {
-        name: String,
-        dest: PathBuf,
-    },
+    ExportRaw { name: String, dest: PathBuf },
     /// Not supported — FluxVM images are raw/qcow2, not tar. Use `pull-raw`.
     PullTar {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
@@ -581,9 +620,7 @@ enum Command {
         name: Option<String>,
     },
     /// Print a shell completion script: `fluxctl completions zsh > _fluxctl`.
-    Completions {
-        shell: clap_complete::Shell,
-    },
+    Completions { shell: clap_complete::Shell },
     /// Hubble-lite flows and CiliumEndpoint views.
     Hubble {
         #[command(subcommand)]
@@ -625,6 +662,20 @@ enum Command {
         #[command(subcommand)]
         command: FleetCommand,
     },
+}
+
+/// One VM by id/name/prefix, or every VM matching a label selector.
+#[derive(clap::Args, Debug, Clone)]
+#[group(skip)]
+struct Target {
+    #[arg(value_parser = output::parse_vm_ref, required_unless_present = "selector", conflicts_with = "selector")]
+    id: Option<Uuid>,
+    /// Label selector, e.g. `env=dev,team!=core,gpu`.
+    #[arg(short = 'l', long = "selector")]
+    selector: Option<String>,
+    /// Confirm a destructive bulk (`-l`) operation.
+    #[arg(long, default_value_t = false)]
+    yes: bool,
 }
 
 #[derive(Subcommand)]
@@ -934,6 +985,37 @@ enum SandboxCommand {
         timeout_seconds: Option<u64>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiskCommand {
+    /// Root disk plus every data disk.
+    List {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Create a qcow2 data disk; hot-added when the VM is running.
+    Attach {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        name: String,
+        #[arg(long)]
+        size_gib: u64,
+    },
+    /// Grow `root` or a data disk (live or stopped).
+    Resize {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        name: String,
+        #[arg(long)]
+        size_gib: u64,
+    },
+    /// Unplug and delete a data disk.
+    Detach {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        name: String,
     },
 }
 
@@ -1266,8 +1348,8 @@ async fn daemon_get(cfg: &Config, path: &str, token: Option<&str>) -> Result<Str
 /// Interactive vsock PTY session with the local TTY in raw mode so
 /// keystrokes (Ctrl-C, arrows, …) reach the guest instead of the host shell.
 async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use fluxvm_guest_protocol::PtyFrame;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let (cols, rows) = terminal_size().unwrap_or((cols, rows));
     let _raw = RawTerminal::enter()?;
     let console = m.open_console(id, cols, rows).await?;
@@ -1325,6 +1407,55 @@ async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> R
     let to_host = async move {
         let mut stdout = tokio::io::stdout();
         tokio::io::copy(&mut reader, &mut stdout).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::select! {
+        result = to_guest => result?,
+        result = to_host => result?,
+    }
+    Ok(())
+}
+
+/// Ctrl-] ends a serial session, as in telnet/virsh console.
+const SERIAL_ESCAPE: u8 = 0x1d;
+
+async fn run_serial_session(m: &VmManager, id: Uuid) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let stream = m.open_serial(id).await?;
+    let interactive = std::io::stdin().is_terminal();
+    if interactive {
+        eprintln!("Connected to {id} serial console. Escape: Ctrl-]\r");
+    }
+    let _raw = RawTerminal::enter()?;
+    let (mut reader, mut writer) = stream.into_split();
+    let to_guest = async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stdin.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            let chunk = &buf[..n];
+            if interactive && let Some(pos) = chunk.iter().position(|b| *b == SERIAL_ESCAPE) {
+                writer.write_all(&chunk[..pos]).await?;
+                break;
+            }
+            writer.write_all(chunk).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let to_host = async move {
+        let mut stdout = tokio::io::stdout();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            stdout.write_all(&buf[..n]).await?;
+            stdout.flush().await?;
+        }
         Ok::<(), anyhow::Error>(())
     };
     tokio::select! {
@@ -1454,6 +1585,83 @@ fn parse_label(s: &str) -> Result<(String, String)> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BulkOp {
+    Start,
+    Stop,
+    Restart,
+    Delete,
+}
+
+impl BulkOp {
+    async fn apply(
+        self,
+        m: &Arc<VmManager>,
+        id: Uuid,
+    ) -> Result<Option<fluxvm_core::model::VmRecord>> {
+        Ok(match self {
+            BulkOp::Start => Some(m.start(id).await?),
+            BulkOp::Stop => Some(m.stop(id).await?),
+            BulkOp::Restart => Some(m.restart(id).await?),
+            BulkOp::Delete => {
+                m.delete(id).await?;
+                None
+            }
+        })
+    }
+}
+
+/// Single id keeps the legacy output (the VM record); `-l` prints one
+/// result per matched VM and fails if any of them failed.
+async fn run_bulk(m: &Arc<VmManager>, target: Target, op: BulkOp) -> Result<()> {
+    if let Some(id) = target.id {
+        if let Some(vm) = op.apply(m, id).await? {
+            println!("{}", serde_json::to_string_pretty(&vm)?);
+        }
+        return Ok(());
+    }
+    let sel = target
+        .selector
+        .as_deref()
+        .context("pass a VM id or -l <selector>")?;
+    let selector = fluxvm_core::model::LabelSelector::parse(sel)?;
+    let matched: Vec<_> = m
+        .list()
+        .await
+        .into_iter()
+        .filter(|vm| selector.matches(&vm.labels))
+        .collect();
+    if op == BulkOp::Delete && !target.yes {
+        let names: Vec<_> = matched.iter().map(|v| v.name.as_str()).collect();
+        anyhow::bail!(
+            "refusing to delete {} VM(s) matching {sel:?} without --yes: {}",
+            matched.len(),
+            names.join(", ")
+        );
+    }
+    let mut results = Vec::new();
+    let mut failed = 0usize;
+    for vm in matched {
+        match op.apply(m, vm.id).await {
+            Ok(rec) => results.push(serde_json::json!({
+                "id": vm.id, "name": vm.name, "ok": true,
+                "status": rec.map(|r| r.status),
+            })),
+            Err(e) => {
+                failed += 1;
+                results.push(serde_json::json!({
+                    "id": vm.id, "name": vm.name, "ok": false, "error": format!("{e:#}"),
+                }));
+            }
+        }
+    }
+    println!("{}", serde_json::to_string_pretty(&results)?);
+    if failed > 0 {
+        anyhow::bail!("{op:?} failed for {failed} VM(s)");
+    }
+    Ok(())
+}
+
 /// Parses `label` edits: `key=value` sets, `key-` removes.
 fn parse_label_edit(s: &str) -> Result<(String, Option<String>)> {
     if let Some((k, v)) = s.split_once('=') {
@@ -1502,6 +1710,242 @@ async fn wait_for_vm(m: &VmManager, id: Uuid, state: &str, timeout: u64) -> Resu
     }
 }
 
+/// `--server` dispatch for the core VM verbs; everything else needs a local host.
+async fn run_remote(
+    r: &remote::Remote,
+    command: Command,
+    format: output::OutputFormat,
+) -> Result<()> {
+    use reqwest::Method;
+    use serde_json::json;
+    let pretty = |v: &serde_json::Value| -> Result<()> {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        Ok(())
+    };
+    let bulk = |target: Target, op: &'static str| async move {
+        if let Some(id) = target.id {
+            return pretty(&r.vm_op(id, op).await?);
+        }
+        let sel = target.selector.context("pass a VM id or -l <selector>")?;
+        let matched = r.list_vms(Some(&sel)).await?;
+        if op == "delete" && !target.yes {
+            let names: Vec<_> = matched
+                .iter()
+                .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+                .collect();
+            anyhow::bail!(
+                "refusing to delete {} VM(s) matching {sel:?} without --yes: {}",
+                matched.len(),
+                names.join(", ")
+            );
+        }
+        let mut results = Vec::new();
+        let mut failed = 0usize;
+        for vm in matched {
+            let (Some(id), name) = (
+                vm.get("id")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<Uuid>().ok()),
+                vm.get("name").cloned().unwrap_or_default(),
+            ) else {
+                continue;
+            };
+            match r.vm_op(id, op).await {
+                Ok(rec) => results.push(json!({
+                    "id": id, "name": name, "ok": true, "status": rec.get("status"),
+                })),
+                Err(e) => {
+                    failed += 1;
+                    results.push(
+                        json!({"id": id, "name": name, "ok": false, "error": format!("{e:#}")}),
+                    );
+                }
+            }
+        }
+        pretty(&serde_json::Value::Array(results))?;
+        if failed > 0 {
+            anyhow::bail!("{op} failed for {failed} VM(s)");
+        }
+        Ok(())
+    };
+    match command {
+        Command::List { selector } => output::print_list(
+            format,
+            &r.list_vms(selector.as_deref()).await?,
+            output::VM_COLUMNS,
+        )?,
+        Command::Get { id } | Command::Status { id: Some(id), .. } => {
+            pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
+        }
+        Command::Start { target } => bulk(target, "start").await?,
+        Command::Stop { target } => bulk(target, "stop").await?,
+        Command::Restart { target } => bulk(target, "restart").await?,
+        Command::Delete { target } => bulk(target, "delete").await?,
+        Command::Pause { id } => pretty(&r.vm_op(id, "pause").await?)?,
+        Command::Resume { id } => pretty(&r.vm_op(id, "resume").await?)?,
+        Command::Label { id, labels } => {
+            let labels: serde_json::Map<String, serde_json::Value> =
+                labels.into_iter().map(|(k, v)| (k, json!(v))).collect();
+            pretty(
+                &r.call(
+                    Method::PATCH,
+                    &format!("/v1/vms/{id}"),
+                    Some(json!({"labels": labels})),
+                )
+                .await?,
+            )?
+        }
+        Command::RenameVm { id, new_name } => pretty(
+            &r.call(
+                Method::PATCH,
+                &format!("/v1/vms/{id}"),
+                Some(json!({"name": new_name})),
+            )
+            .await?,
+        )?,
+        Command::CloneVm { id, new_name } => pretty(
+            &r.call(
+                Method::POST,
+                &format!("/v1/vms/{id}/clone"),
+                Some(json!({"name": new_name})),
+            )
+            .await?,
+        )?,
+        Command::Snapshot { id, tag } => pretty(
+            &r.call(
+                Method::POST,
+                &format!("/v1/vms/{id}/snapshot"),
+                Some(json!({"tag": tag})),
+            )
+            .await?,
+        )?,
+        Command::SnapshotList { id } => {
+            let v = r
+                .call(Method::GET, &format!("/v1/vms/{id}/snapshots"), None)
+                .await?;
+            output::print_list(format, &v["items"], output::SNAPSHOT_COLUMNS)?
+        }
+        Command::SnapshotDelete { id, tag } => {
+            r.call(
+                Method::DELETE,
+                &format!("/v1/vms/{id}/snapshots/{tag}"),
+                None,
+            )
+            .await?;
+            println!("{}", json!({"ok": true, "deleted": tag}));
+        }
+        Command::Backup { id, dest, compress } => {
+            if dest.is_some() {
+                anyhow::bail!(
+                    "--dest is local-only; remote backups land in the server's state_dir/backups"
+                );
+            }
+            pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/backup"),
+                    Some(json!({"compress": compress})),
+                )
+                .await?,
+            )?
+        }
+        Command::Disk { command } => match command {
+            DiskCommand::List { id } => {
+                let v = r
+                    .call(Method::GET, &format!("/v1/vms/{id}/disks"), None)
+                    .await?;
+                output::print_list(format, &v["items"], output::DISK_COLUMNS)?
+            }
+            DiskCommand::Attach { id, name, size_gib } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/disks"),
+                    Some(json!({"name": name, "size_gib": size_gib})),
+                )
+                .await?,
+            )?,
+            DiskCommand::Resize { id, name, size_gib } => pretty(
+                &r.call(
+                    Method::PATCH,
+                    &format!("/v1/vms/{id}/disks/{name}"),
+                    Some(json!({"size_gib": size_gib})),
+                )
+                .await?,
+            )?,
+            DiskCommand::Detach { id, name } => {
+                r.call(Method::DELETE, &format!("/v1/vms/{id}/disks/{name}"), None)
+                    .await?;
+                println!("{}", json!({"ok": true, "detached": name}));
+            }
+        },
+        Command::Events {
+            vm,
+            event,
+            since,
+            limit,
+            follow: false,
+        } => {
+            let mut q = vec![format!("limit={limit}")];
+            if let Some(vm) = vm {
+                q.push(format!("vm={vm}"));
+            }
+            if let Some(e) = event {
+                q.push(format!(
+                    "event={}",
+                    e.replace('&', "%26").replace('+', "%2B")
+                ));
+            }
+            if let Some(s) = since {
+                q.push(format!("since={}", s.to_rfc3339().replace('+', "%2B")));
+            }
+            let v = r
+                .call(Method::GET, &format!("/v1/events?{}", q.join("&")), None)
+                .await?;
+            output::print_list(format, &v["items"], output::EVENT_COLUMNS)?
+        }
+        Command::Quota { .. } => pretty(&r.call(Method::GET, "/v1/quotas/me", None).await?)?,
+        Command::Healthz => pretty(&r.call(Method::GET, "/healthz", None).await?)?,
+        Command::Readyz => pretty(&r.call(Method::GET, "/readyz", None).await?)?,
+        Command::Wait {
+            id,
+            for_state,
+            timeout,
+        } if for_state != "agent" => {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+            loop {
+                let vm = r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?;
+                let status = vm["status"].as_str().unwrap_or_default().to_string();
+                if status == for_state {
+                    println!(
+                        "{}",
+                        json!({"id": id, "reached": for_state, "status": status})
+                    );
+                    return Ok(());
+                }
+                if status == "failed" {
+                    anyhow::bail!(
+                        "VM {id} failed while waiting for {for_state}: {}",
+                        vm["error"]
+                    );
+                }
+                if std::time::Instant::now() >= deadline {
+                    anyhow::bail!(
+                        "timed out after {timeout}s waiting for {for_state} (status={status})"
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        }
+        _ => anyhow::bail!(
+            "this command is not available with --server; supported: list, get, status <vm>, \
+             start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, snapshot, \
+             snapshot-list, snapshot-delete, backup, disk, events (no -f), quota, healthz, readyz, \
+             wait (not --for agent)"
+        ),
+    }
+    Ok(())
+}
+
 /// Print events from the shared log, then optionally tail it.
 async fn print_events(
     cfg: &Config,
@@ -1531,7 +1975,9 @@ async fn print_events(
                     "{}  {}  {}  {}",
                     ev.ts.to_rfc3339(),
                     ev.event,
-                    ev.vm_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                    ev.vm_id
+                        .map(|i| i.to_string())
+                        .unwrap_or_else(|| "-".into()),
                     ev.fields
                         .iter()
                         .map(|(k, v)| format!("{k}={v}"))
@@ -1650,6 +2096,9 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "fluxvm=info,tower_http=info".into()),
         )
         .init();
+    if let Some(r) = remote::from_argv_env() {
+        output::seed_vm_index(r.vm_index().await);
+    }
     let cli = {
         let color = if std::env::var_os("NO_COLOR").is_some() {
             ColorChoice::Never
@@ -1683,6 +2132,10 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let format = cli.output;
+    if let Some(server) = &cli.server {
+        let r = remote::Remote::new(server, cli.server_token.clone());
+        return run_remote(&r, cli.command, format).await;
+    }
     let cfg = Config::load(cli.config.as_deref())?;
     if let Command::Events {
         vm,
@@ -1757,28 +2210,38 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&m.token_quota_usage(name.as_deref()).await?)?
             );
         }
-        Command::Restart { id } => {
-            println!("{}", serde_json::to_string_pretty(&m.restart(id).await?)?)
-        }
+        Command::Restart { target } => run_bulk(&m, target, BulkOp::Restart).await?,
         Command::Label { id, labels } => {
             let patch = fluxvm_core::model::VmPatch {
                 name: None,
                 labels: labels.into_iter().collect(),
             };
-            println!("{}", serde_json::to_string_pretty(&m.patch(id, patch).await?)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.patch(id, patch).await?)?
+            );
         }
         Command::RenameVm { id, new_name } => {
             let patch = fluxvm_core::model::VmPatch {
                 name: Some(new_name),
                 ..Default::default()
             };
-            println!("{}", serde_json::to_string_pretty(&m.patch(id, patch).await?)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.patch(id, patch).await?)?
+            );
         }
         Command::Wait {
             id,
             for_state,
             timeout,
         } => wait_for_vm(&m, id, &for_state, timeout).await?,
+        Command::CloneVm { id, new_name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.clone_vm(id, new_name, None).await?)?
+            );
+        }
         Command::SnapshotList { id } => {
             output::print_list(
                 format,
@@ -1790,6 +2253,28 @@ async fn main() -> Result<()> {
             m.delete_vm_snapshot(id, &tag).await?;
             println!("{}", serde_json::json!({"ok": true, "deleted": tag}));
         }
+        Command::Serial { id } => run_serial_session(&m, id).await?,
+        Command::Backup { id, dest, compress } => println!(
+            "{}",
+            serde_json::to_string_pretty(&m.backup_vm(id, dest, compress).await?)?
+        ),
+        Command::Disk { command } => match command {
+            DiskCommand::List { id } => {
+                output::print_list(format, &m.list_vm_disks(id).await?, output::DISK_COLUMNS)?;
+            }
+            DiskCommand::Attach { id, name, size_gib } => println!(
+                "{}",
+                serde_json::to_string_pretty(&m.attach_vm_disk(id, &name, size_gib).await?)?
+            ),
+            DiskCommand::Resize { id, name, size_gib } => println!(
+                "{}",
+                serde_json::to_string_pretty(&m.resize_vm_disk(id, &name, size_gib).await?)?
+            ),
+            DiskCommand::Detach { id, name } => {
+                m.detach_vm_disk(id, &name).await?;
+                println!("{}", serde_json::json!({"ok": true, "detached": name}));
+            }
+        },
         Command::Serve => {
             if cfg.auth.must_authenticate(&cfg.listen) && !cfg.auth.has_credentials() {
                 anyhow::bail!(
@@ -1888,7 +2373,14 @@ async fn main() -> Result<()> {
             let req: CreateVmRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
             println!("{}", serde_json::to_string_pretty(&m.create(req).await?)?);
         }
-        Command::List => output::print_list(format, &m.list().await, output::VM_COLUMNS)?,
+        Command::List { selector } => {
+            let mut items = m.list().await;
+            if let Some(sel) = selector.as_deref() {
+                let sel = fluxvm_core::model::LabelSelector::parse(sel)?;
+                items.retain(|vm| sel.matches(&vm.labels));
+            }
+            output::print_list(format, &items, output::VM_COLUMNS)?
+        }
         Command::Get { id } => println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?),
         Command::Diagnose { id } => {
             let vm = m.get(id).await?;
@@ -1937,8 +2429,8 @@ async fn main() -> Result<()> {
                 other => anyhow::bail!("unsupported trace output {other:?}; use json or jsonl"),
             }
         }
-        Command::Start { id } => println!("{}", serde_json::to_string_pretty(&m.start(id).await?)?),
-        Command::Stop { id } => println!("{}", serde_json::to_string_pretty(&m.stop(id).await?)?),
+        Command::Start { target } => run_bulk(&m, target, BulkOp::Start).await?,
+        Command::Stop { target } => run_bulk(&m, target, BulkOp::Stop).await?,
         Command::Pause { id } => println!("{}", serde_json::to_string_pretty(&m.pause(id).await?)?),
         Command::Resume { id } => {
             println!("{}", serde_json::to_string_pretty(&m.resume(id).await?)?)
@@ -2383,7 +2875,8 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
         },
-        Command::Delete { id } | Command::Terminate { id } => m.delete(id).await?,
+        Command::Delete { target } => run_bulk(&m, target, BulkOp::Delete).await?,
+        Command::Terminate { id } => m.delete(id).await?,
         Command::BuildImage { spec } => {
             let req: BuildImageRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
             println!(
@@ -4442,7 +4935,7 @@ mod backlog_tier1_cli_tests {
         let id = Uuid::nil();
         assert!(matches!(
             cli(&["restart", &id.to_string()]).command,
-            Command::Restart { id: p } if p == id
+            Command::Restart { target: Target { id: Some(p), selector: None, .. } } if p == id
         ));
         let Command::RenameVm { new_name, .. } =
             cli(&["rename-vm", &id.to_string(), "web-2"]).command
@@ -4480,7 +4973,9 @@ mod backlog_tier1_cli_tests {
             cli(&["wait", &id.to_string(), "--for", "agent", "--timeout", "5"]).command,
             Command::Wait { for_state, timeout: 5, .. } if for_state == "agent"
         ));
-        assert!(Cli::try_parse_from(["fluxctl", "wait", &id.to_string(), "--for", "bogus"]).is_err());
+        assert!(
+            Cli::try_parse_from(["fluxctl", "wait", &id.to_string(), "--for", "bogus"]).is_err()
+        );
         assert!(matches!(
             cli(&["events", "--follow", "--event", "vm."]).command,
             Command::Events { follow: true, .. }
@@ -4495,9 +4990,22 @@ mod backlog_tier1_cli_tests {
     #[test]
     fn output_format_is_global_and_does_not_clash_with_subcommand_output() {
         assert_eq!(cli(&["list"]).output, output::OutputFormat::Json);
-        assert_eq!(cli(&["-o", "table", "list"]).output, output::OutputFormat::Table);
-        assert_eq!(cli(&["list", "-o", "wide"]).output, output::OutputFormat::Wide);
-        let parsed = cli(&["-o", "table", "trace", &Uuid::nil().to_string(), "--output", "jsonl"]);
+        assert_eq!(
+            cli(&["-o", "table", "list"]).output,
+            output::OutputFormat::Table
+        );
+        assert_eq!(
+            cli(&["list", "-o", "wide"]).output,
+            output::OutputFormat::Wide
+        );
+        let parsed = cli(&[
+            "-o",
+            "table",
+            "trace",
+            &Uuid::nil().to_string(),
+            "--output",
+            "jsonl",
+        ]);
         assert_eq!(parsed.output, output::OutputFormat::Table);
         assert!(matches!(parsed.command, Command::Trace { output, .. } if output == "jsonl"));
     }
@@ -4511,5 +5019,91 @@ mod backlog_tier1_cli_tests {
         assert_eq!(parse_label_edit("gone-").unwrap(), ("gone".into(), None));
         assert!(parse_label_edit("=x").is_err());
         assert!(parse_label_edit("-").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tier2_cli_tests {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Result<Cli, clap::Error> {
+        let mut full = vec!["fluxctl"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full)
+    }
+
+    #[test]
+    fn bulk_selector_or_id_but_not_both() {
+        let id = Uuid::nil().to_string();
+        assert!(matches!(
+            cli(&["stop", "-l", "env=dev"]).unwrap().command,
+            Command::Stop { target: Target { id: None, selector: Some(s), .. } } if s == "env=dev"
+        ));
+        assert!(matches!(
+            cli(&["delete", "-l", "env=dev", "--yes"]).unwrap().command,
+            Command::Delete {
+                target: Target { yes: true, .. }
+            }
+        ));
+        assert!(cli(&["start", &id]).is_ok());
+        assert!(cli(&["start"]).is_err());
+        assert!(cli(&["restart", &id, "-l", "env=dev"]).is_err());
+        assert!(matches!(
+            cli(&["list", "-l", "team"]).unwrap().command,
+            Command::List { selector: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn clone_disk_serial_backup_parse() {
+        let id = Uuid::nil().to_string();
+        assert!(matches!(
+            cli(&["clone-vm", &id, "web-2"]).unwrap().command,
+            Command::CloneVm { new_name, .. } if new_name == "web-2"
+        ));
+        assert!(matches!(
+            cli(&["disk", "attach", &id, "data", "--size-gib", "10"])
+                .unwrap()
+                .command,
+            Command::Disk {
+                command: DiskCommand::Attach { size_gib: 10, .. }
+            }
+        ));
+        assert!(matches!(
+            cli(&["disk", "resize", &id, "root", "--size-gib", "20"])
+                .unwrap()
+                .command,
+            Command::Disk {
+                command: DiskCommand::Resize { size_gib: 20, .. }
+            }
+        ));
+        assert!(cli(&["disk", "attach", &id, "data"]).is_err());
+        assert!(matches!(
+            cli(&["disk", "list", &id]).unwrap().command,
+            Command::Disk {
+                command: DiskCommand::List { .. }
+            }
+        ));
+        assert!(matches!(
+            cli(&["serial", &id]).unwrap().command,
+            Command::Serial { .. }
+        ));
+        assert!(matches!(
+            cli(&["backup", &id, "--compress"]).unwrap().command,
+            Command::Backup {
+                compress: true,
+                dest: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn server_flag_is_global() {
+        let c = cli(&["list", "--server", "http://h:7788", "--server-token", "t"]).unwrap();
+        assert_eq!(c.server.as_deref(), Some("http://h:7788"));
+        assert_eq!(c.server_token.as_deref(), Some("t"));
+        let c = cli(&["--server=h:7788", "stop", "-l", "env=dev"]).unwrap();
+        assert_eq!(c.server.as_deref(), Some("h:7788"));
     }
 }
