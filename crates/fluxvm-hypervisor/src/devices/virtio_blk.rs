@@ -102,23 +102,70 @@ struct DescChain {
     parts: Vec<(u64, u32, bool)>,
 }
 
-fn walk_chain(mem: &GuestMemory, desc_base: u64, head: u16) -> Result<DescChain> {
+fn walk_chain(mem: &GuestMemory, desc_base: u64, head: u16, qnum: u32) -> Result<DescChain> {
     let mut parts = Vec::new();
     let mut idx = head;
-    for _ in 0..64 {
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..qnum.min(64) {
+        if u32::from(idx) >= qnum || !seen.insert(idx) {
+            return Err(FluxError::Device {
+                device: "virtio-blk",
+                msg: "descriptor index out of range or chain cycle".into(),
+            });
+        }
         let mut raw = [0u8; 16];
-        mem.read_at(desc_base + idx as u64 * 16, &mut raw)?;
+        let addr = desc_base
+            .checked_add(u64::from(idx) * 16)
+            .ok_or_else(|| FluxError::Memory("descriptor GPA overflow".into()))?;
+        mem.read_at(addr, &mut raw)?;
         let addr = u64::from_le_bytes(raw[0..8].try_into().unwrap());
         let len = u32::from_le_bytes(raw[8..12].try_into().unwrap());
         let flags = u16::from_le_bytes(raw[12..14].try_into().unwrap());
+        if flags & 4 != 0 {
+            return Err(FluxError::Unsupported(
+                "virtio-blk indirect descriptors are not supported".into(),
+            ));
+        }
         let next = u16::from_le_bytes(raw[14..16].try_into().unwrap());
         parts.push((addr, len, flags & VRING_DESC_F_WRITE != 0));
         if flags & VRING_DESC_F_NEXT == 0 {
-            break;
+            return Ok(DescChain { head, parts });
         }
         idx = next;
     }
-    Ok(DescChain { head, parts })
+    Err(FluxError::Device {
+        device: "virtio-blk",
+        msg: "unterminated descriptor chain".into(),
+    })
+}
+
+fn valid_io_request(
+    mem: &GuestMemory,
+    backend: &BlockBackend,
+    data_parts: &[(u64, u32, bool)],
+    sector: u64,
+    device_writes: bool,
+) -> bool {
+    let mut total = 0u64;
+    for &(gpa, len, writable) in data_parts {
+        if writable != device_writes
+            || !matches!(gpa.checked_add(u64::from(len)), Some(end) if end <= mem.len() as u64)
+        {
+            return false;
+        }
+        let Some(next) = total.checked_add(u64::from(len)) else {
+            return false;
+        };
+        total = next;
+    }
+    if total % SECTOR_SIZE != 0 {
+        return false;
+    }
+    matches!(
+        (sector.checked_mul(SECTOR_SIZE).and_then(|start| start.checked_add(total)),
+         backend.capacity_sectors.checked_mul(SECTOR_SIZE)),
+        (Some(end), Some(capacity)) if end <= capacity
+    )
 }
 
 fn process_request(
@@ -130,8 +177,8 @@ fn process_request(
         return Ok(0);
     }
     // Header is first descriptor (device-read / guest→device).
-    let (hdr_gpa, hdr_len, _) = chain.parts[0];
-    if hdr_len < 16 {
+    let (hdr_gpa, hdr_len, hdr_w) = chain.parts[0];
+    if hdr_len < 16 || hdr_w {
         return Ok(0);
     }
     let mut hdr = [0u8; 16];
@@ -150,14 +197,13 @@ fn process_request(
     let mut bytes_written_to_guest = 0u32;
 
     if req_type == VIRTIO_BLK_T_IN || req_type == VIRTIO_BLK_T_OUT {
-        let transfer_len = data_parts
-            .iter()
-            .try_fold(0u64, |sum, (_, len, _)| sum.checked_add(u64::from(*len)));
-        let end = sector
-            .checked_mul(SECTOR_SIZE)
-            .and_then(|start| transfer_len.and_then(|len| start.checked_add(len)));
-        let capacity = backend.capacity_sectors.checked_mul(SECTOR_SIZE);
-        if !matches!((end, capacity), (Some(end), Some(capacity)) if end <= capacity) {
+        if !valid_io_request(
+            mem,
+            backend,
+            data_parts,
+            sector,
+            req_type == VIRTIO_BLK_T_IN,
+        ) {
             mem.write_at(status_gpa, &[VIRTIO_BLK_S_IOERR])?;
             return Ok(1);
         }
@@ -208,8 +254,8 @@ fn process_request(
             }
         }
         VIRTIO_BLK_T_FLUSH => {
-            let mut file = backend.file.lock().unwrap();
-            if file.flush().is_err() {
+            let file = backend.file.lock().unwrap();
+            if file.sync_data().is_err() {
                 status = VIRTIO_BLK_S_IOERR;
             }
         }
@@ -250,7 +296,7 @@ pub fn handle_notify(
         }
         let slot = (q.last_avail as u32) % q.num;
         let head = mem.read_u16(q.avail + 4 + slot as u64 * 2)?;
-        let chain = walk_chain(mem, q.desc, head)?;
+        let chain = walk_chain(mem, q.desc, head, q.num)?;
         // Rough size estimate for rate limiting.
         let bytes: u64 = chain.parts.iter().map(|(_, l, _)| *l as u64).sum();
         if let Some(lim) = limiter {
@@ -311,5 +357,46 @@ mod tests {
         assert_eq!(process_request(&mut mem, &backend, &chain).unwrap(), 1);
         assert_eq!(mem.as_slice()[2048], VIRTIO_BLK_S_IOERR);
         assert_eq!(f.as_file().metadata().unwrap().len(), 4096);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_late_invalid_descriptor_without_partial_disk_write() {
+        let f = NamedTempFile::new().unwrap();
+        f.as_file().set_len(4096).unwrap();
+        let backend = BlockBackend::open(f.path(), false).unwrap();
+        let mut mem = GuestMemory::allocate(4096).unwrap();
+        let mut header = [0u8; 16];
+        header[..4].copy_from_slice(&VIRTIO_BLK_T_OUT.to_le_bytes());
+        mem.write_at(0, &header).unwrap();
+        mem.write_at(128, &[0xa5; 512]).unwrap();
+        let chain = DescChain {
+            head: 0,
+            parts: vec![
+                (0, 16, false),
+                (128, 512, false),
+                (1024, 512, true), // Wrong direction after valid data.
+                (2048, 1, true),
+            ],
+        };
+        assert_eq!(process_request(&mut mem, &backend, &chain).unwrap(), 1);
+        assert_eq!(mem.as_slice()[2048], VIRTIO_BLK_S_IOERR);
+        let mut bytes = [0u8; 512];
+        File::open(f.path())
+            .unwrap()
+            .read_exact(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [0u8; 512]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_cyclic_descriptor_chain() {
+        let mut mem = GuestMemory::allocate(4096).unwrap();
+        let mut desc = [0u8; 16];
+        desc[12..14].copy_from_slice(&VRING_DESC_F_NEXT.to_le_bytes());
+        mem.write_at(256, &desc).unwrap();
+        let err = walk_chain(&mem, 256, 0, 1).err().unwrap();
+        assert!(format!("{err}").contains("chain"));
     }
 }
