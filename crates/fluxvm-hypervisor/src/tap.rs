@@ -13,7 +13,8 @@ pub struct Tap {
 
 impl Tap {
     pub fn open(name: &str, host_ip: [u8; 4]) -> Result<Self> {
-        let c = CString::new(name).unwrap();
+        let c = CString::new(name)
+            .map_err(|_| FluxError::Network("TAP name contains a NUL byte".into()))?;
         let fd = unsafe { ffi::flux_tap_open(c.as_ptr()) };
         if fd < 0 {
             return Err(FluxError::Network(format!(
@@ -76,5 +77,16 @@ impl Drop for Tap {
                 ffi::close(self.fd);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_tap_name_is_error_not_panic() {
+        let err = Tap::open("tap\0bad", [192, 168, 100, 1]).err().unwrap();
+        assert!(format!("{err}").contains("NUL"));
     }
 }
