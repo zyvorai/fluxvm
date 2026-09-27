@@ -31,6 +31,7 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 mod oidc;
+mod openapi;
 mod rate_limit;
 
 #[derive(Clone)]
@@ -76,8 +77,9 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
     let m = &auth.manager;
     let path = req.uri().path().to_string();
     let method = req.method().clone();
-    // Liveness/readiness probes must work without auth (Kubernetes convention).
-    if path == "/healthz" || path == "/readyz" {
+    // Liveness/readiness probes must work without auth (Kubernetes convention);
+    // the API description is public so tooling can fetch it before a token.
+    if path == "/healthz" || path == "/readyz" || path == "/v1/openapi.json" {
         return next.run(req).await;
     }
     let must = m.cfg.auth.must_authenticate(&m.cfg.listen);
@@ -308,6 +310,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(|| async { Json(json!({"ok": true})) }))
         .route("/readyz", get(readyz))
+        .route("/v1/openapi.json", get(|| async { Json(openapi::spec()) }))
         .route("/metrics", get(metrics))
         .route("/v1/runtime/capabilities", get(runtime_capabilities)) // ZYVOR_RUNTIME_BOUNDARY_V1
         .route("/v1/security/capabilities", get(security_capabilities))
@@ -321,10 +324,29 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             get(get_vm).delete(delete_vm).patch(patch_vm),
         )
         .route("/v1/vms/{id}/restart", post(restart_vm))
-        .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
+        .route("/v1/vms/{id}/clone", post(clone_vm))
         .route(
-            "/v1/vms/{id}/snapshots/{tag}",
-            delete(delete_vm_snapshot),
+            "/v1/vm-templates",
+            get(list_vm_templates).post(save_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/{name}",
+            get(get_vm_template).delete(delete_vm_template),
+        )
+        .route(
+            "/v1/vm-templates/{name}/instantiate",
+            post(instantiate_vm_template),
+        )
+        .route("/v1/vms/{id}/backup", post(backup_vm))
+        .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
+        .route("/v1/vms/{id}/snapshots/{tag}", delete(delete_vm_snapshot))
+        .route(
+            "/v1/vms/{id}/disks",
+            get(list_vm_disks).post(attach_vm_disk),
+        )
+        .route(
+            "/v1/vms/{id}/disks/{name}",
+            delete(detach_vm_disk).patch(resize_vm_disk),
         )
         .route("/v1/events", get(list_events))
         .route("/v1/events/stream", get(stream_events))
@@ -507,6 +529,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/agent/put-file", post(agent_put_file))
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
         .route("/v1/vms/{id}/console", get(agent_console))
+        .route("/v1/vms/{id}/serial", get(serial_console))
         .route("/v1/vms/{id}/qga/ping", post(qga_ping))
         .route(
             "/v1/vms/{id}/qga/network-interfaces",
@@ -776,9 +799,23 @@ async fn create_vm(
     Extension(role): Extension<Role>,
     actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
-    Json(mut req): Json<CreateVmRequest>,
+    Json(req): Json<CreateVmRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(create_vm_as(&m, actor, token_tenant, req).await?),
+    ))
+}
+
+/// `create` on behalf of the authenticated caller: tenant and
+/// `created_by_token` come from the token, then token quotas apply.
+async fn create_vm_as(
+    m: &Arc<VmManager>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    mut req: CreateVmRequest,
+) -> ApiResult<VmRecord> {
     // Token tenant is authoritative: inherit when omitted; reject mismatch.
     if let Some(Extension(TokenTenant(t))) = token_tenant {
         if let Some(ref body) = req.tenant
@@ -802,7 +839,86 @@ async fn create_vm(
     m.enforce_token_quotas(actor_name, &req)
         .await
         .map_err(|e| ApiError::forbidden(e.to_string()))?;
-    Ok((StatusCode::CREATED, Json(m.create(req).await?)))
+    Ok(m.create(req).await?)
+}
+
+async fn list_vm_templates(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_vm_templates()?})))
+}
+
+async fn get_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Path(name): Path<String>,
+) -> ApiResult<Json<fluxvm_scheduler::templates::VmTemplate>> {
+    Ok(Json(m.get_vm_template(&name)?))
+}
+
+#[derive(Deserialize)]
+struct SaveTemplateRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    spec: serde_json::Value,
+    #[serde(default)]
+    replace: bool,
+}
+
+async fn save_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<SaveTemplateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let spec = fluxvm_scheduler::templates::spec_from_json(&req.name, req.spec)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            m.save_vm_template(&req.name, req.description, spec, req.replace)
+                .await?,
+        ),
+    ))
+}
+
+async fn delete_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_vm_template(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct InstantiateTemplateRequest {
+    name: String,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
+}
+
+async fn instantiate_vm_template(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    actor: Option<Extension<AuditActor>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Path(template): Path<String>,
+    Json(body): Json<InstantiateTemplateRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let req = m.vm_template_request(&template, &body.name)?;
+    let mut vm = create_vm_as(&m, actor, token_tenant, req).await?;
+    if !body.labels.is_empty() {
+        vm = m
+            .patch(
+                vm.id,
+                fluxvm_core::model::VmPatch {
+                    name: None,
+                    labels: body.labels.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+                },
+            )
+            .await?;
+    }
+    Ok((StatusCode::CREATED, Json(vm)))
 }
 
 async fn create_sandbox(
@@ -1659,6 +1775,9 @@ struct ListVmsQuery {
     name: Option<String>,
     #[serde(default)]
     tenant: Option<String>,
+    /// Label selector: `k=v,k2!=v2,k3` (all terms must match).
+    #[serde(default)]
+    label: Option<String>,
 }
 
 async fn list_vms(
@@ -1669,6 +1788,10 @@ async fn list_vms(
     let mut items = m.list().await;
     if let Some(name) = q.name {
         items.retain(|vm| vm.name == name);
+    }
+    if let Some(sel) = q.label.as_deref() {
+        let sel = fluxvm_core::model::LabelSelector::parse(sel)?;
+        items.retain(|vm| sel.matches(&vm.labels));
     }
     // Token tenant forces scope; query ?tenant= must match when both present.
     if let Some(Extension(TokenTenant(t))) = token_tenant {
@@ -1761,6 +1884,30 @@ async fn restart_vm(
     Ok(Json(json!(m.restart(id).await?)))
 }
 
+#[derive(Deserialize)]
+struct CloneVmRequest {
+    name: String,
+}
+
+async fn clone_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<CloneVmRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let src = m.get(id).await?;
+    m.enforce_token_quotas(actor_name, &src.request)
+        .await
+        .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(m.clone_vm(id, req.name, actor_name).await?),
+    ))
+}
+
 async fn patch_vm(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -1788,6 +1935,80 @@ async fn delete_vm_snapshot(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Deserialize, Default)]
+struct BackupVmRequest {
+    #[serde(default)]
+    compress: bool,
+    #[serde(default)]
+    all_disks: bool,
+}
+
+/// Writes under `state_dir/backups/`; the API never takes a destination path.
+async fn backup_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<BackupVmRequest>>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let req = body.map(|b| b.0).unwrap_or_default();
+    Ok((
+        StatusCode::CREATED,
+        Json(m.backup_vm(id, None, req.compress, req.all_disks).await?),
+    ))
+}
+
+async fn list_vm_disks(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.list_vm_disks(id).await?})))
+}
+
+#[derive(Deserialize)]
+struct DiskSizeRequest {
+    size_gib: u64,
+}
+
+#[derive(Deserialize)]
+struct AttachDiskRequest {
+    name: String,
+    size_gib: u64,
+}
+
+async fn attach_vm_disk(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<AttachDiskRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(m.attach_vm_disk(id, &req.name, req.size_gib).await?),
+    ))
+}
+
+async fn resize_vm_disk(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+    Json(req): Json<DiskSizeRequest>,
+) -> ApiResult<Json<fluxvm_core::model::VmDiskInfo>> {
+    require_admin(role)?;
+    Ok(Json(m.resize_vm_disk(id, &name, req.size_gib).await?))
+}
+
+async fn detach_vm_disk(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.detach_vm_disk(id, &name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Tenant-scoped tokens only see events for their own tenant's VMs.
 async fn tenant_event_scope(
     m: &VmManager,
@@ -1804,7 +2025,10 @@ async fn tenant_event_scope(
     )
 }
 
-fn in_scope(scope: &Option<std::collections::HashSet<Uuid>>, ev: &fluxvm_scheduler::VmEvent) -> bool {
+fn in_scope(
+    scope: &Option<std::collections::HashSet<Uuid>>,
+    ev: &fluxvm_scheduler::VmEvent,
+) -> bool {
     match scope {
         None => true,
         Some(ids) => ev.vm_id.is_some_and(|id| ids.contains(&id)),
@@ -2984,6 +3208,64 @@ async fn relay_console(
     }
 }
 
+/// Raw bytes to and from the VM's first serial port (QEMU `serial.sock`).
+/// Works without a guest agent — bootloader, kernel and getty output alike.
+/// Binary and text frames are both written verbatim; QEMU serves one client
+/// at a time.
+async fn serial_console(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let stream = m.open_serial(id).await?;
+    Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
+async fn relay_serial(socket: axum::extract::ws::WebSocket, stream: tokio::net::UnixStream) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (mut rx, mut tx) = stream.into_split();
+    let to_serial = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            let bytes = match msg {
+                Message::Close(_) => break,
+                Message::Binary(b) => b.to_vec(),
+                Message::Text(t) => t.as_bytes().to_vec(),
+                _ => continue,
+            };
+            if tx.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    };
+    let to_ws = async {
+        let mut buf = [0u8; 4096];
+        loop {
+            match rx.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if ws_tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    };
+    tokio::select! {
+        _ = to_serial => {}
+        _ = to_ws => {}
+    }
+}
+
 async fn delete_vm(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
@@ -3558,6 +3840,34 @@ mod tests {
             assert_eq!(
                 status_for(app, "GET", "/healthz", None).await,
                 StatusCode::OK
+            );
+        }
+
+        #[tokio::test]
+        async fn openapi_is_public_but_vm_routes_are_not() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let app = router(manager(auth));
+            assert_eq!(
+                status_for(app.clone(), "GET", "/v1/openapi.json", None).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                status_for(
+                    app,
+                    "GET",
+                    "/v1/vms/00000000-0000-0000-0000-000000000000/disks",
+                    None
+                )
+                .await,
+                StatusCode::UNAUTHORIZED
             );
         }
 

@@ -13,6 +13,18 @@ orchestration UI lives in [Zyvor Fabric](https://github.com/zyvorai/fabric)
 | Exec (Linux agent) | `fluxctl exec <id> -- cmd` |
 | QGA (Windows) | `fluxctl qga ping\|powershell\|firewall-open <id> …` |
 | Delete | `fluxctl delete <id>` |
+| Restart / rename / label | `fluxctl restart\|rename-vm\|label <vm> …` |
+| Bulk by label | `fluxctl list -l env=dev`, `fluxctl stop -l env=dev` (`delete -l` needs `--yes`) |
+| Wait for state | `fluxctl wait <vm> --for running --timeout 120` |
+| Clone | `fluxctl clone-vm <stopped-vm> <new-name>` |
+| Disks | `fluxctl disk list\|attach\|resize\|detach <vm> …` |
+| Serial console | `fluxctl serial <vm>` (Ctrl-] quits) |
+| Backup | `fluxctl backup <vm> [--compress] [--all-disks] [--dest f.qcow2]` |
+| Snapshots | `fluxctl snapshot\|snapshot-list\|snapshot-delete <vm> …` |
+| VM templates | `fluxctl vm-template save\|list\|show\|delete\|create …` |
+| Events / quota | `fluxctl events -f`, `fluxctl quota` |
+| Remote host | `fluxctl --server http://host:7788 list`, or `fluxctl context add\|use …` |
+| Output format | `-o json\|table\|wide` on every command |
 | Build image | `fluxctl build-image --spec examples/build-image.json` |
 | Pool | `fluxctl pool create\|claim\|list …` |
 | Serve API | `fluxctl serve` |
@@ -31,7 +43,7 @@ curl -sf "${AUTH[@]}" -H "Content-Type: application/json" \
   -d @examples/qemu.json "$API/v1/vms"
 ```
 
-Auth-exempt: `/healthz`, `/readyz`. Everything else needs a bearer token when
+Auth-exempt: `/healthz`, `/readyz`, `/v1/openapi.json`. Everything else needs a bearer token when
 `[auth] require = true`.
 
 ## When to use Fabric instead

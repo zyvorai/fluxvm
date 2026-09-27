@@ -335,8 +335,7 @@ impl KvmVm {
             }
             // SAFETY: KVM ioctls on fds owned by this KvmVm.
             unsafe {
-                let vcpu_fd =
-                    ffi::flux_ioctl(self.vm_fd, ffi::KVM_CREATE_VCPU, id as *mut c_void);
+                let vcpu_fd = ffi::flux_ioctl(self.vm_fd, ffi::KVM_CREATE_VCPU, id as *mut c_void);
                 if vcpu_fd < 0 {
                     return Err(FluxError::Hypervisor(format!("KVM_CREATE_VCPU id={id}")));
                 }

@@ -116,6 +116,34 @@ curl -sf http://127.0.0.1:7788/readyz | jq .
 
 Tutorial: [production/01-readyz-tenant-auth.md](../tutorials/production/01-readyz-tenant-auth.md).
 
+## 10. Day-2: templates, clones, disks, backups
+
+```bash
+fluxctl vm-template save web --from-vm web-1 --description "nginx base"
+fluxctl vm-template create web web-2 --label env=dev
+fluxctl disk attach web-2 data --size-gib 20      # hot-added when running
+fluxctl disk resize web-2 root --size-gib 40      # grow the filesystem in the guest
+fluxctl label web-2 fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=4
+fluxctl backup web-2 --all-disks --compress       # -> <state_dir>/backups/
+fluxctl stop web-2 && fluxctl clone-vm web-2 web-3
+fluxctl list -l env=dev -o wide
+```
+
+Semantics and limits: [operations.md → Day-2 VM operations](../operations.md#day-2-vm-operations).
+
+## 11. Drive a remote host with contexts
+
+```bash
+fluxctl context add lab --server http://10.0.0.5:7788 --token "$TOKEN"
+fluxctl context use lab
+fluxctl list && fluxctl serial web-1 && fluxctl events -f
+fluxctl --context local list                       # one-off local command
+fluxctl context unset                              # back to local mode
+```
+
+Contexts live in `~/.config/fluxctl/contexts.json` (mode 0600). `--server` /
+`FLUXVM_URL` override the context for one command.
+
 ## Related
 
 - [Use cases](use-cases.md)

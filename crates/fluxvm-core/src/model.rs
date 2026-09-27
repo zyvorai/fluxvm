@@ -860,12 +860,100 @@ pub struct VmPatch {
     pub labels: std::collections::BTreeMap<String, Option<String>>,
 }
 
+/// `k=v,k2!=v2,k3,!k4` label selector (kubectl subset); every term must match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelSelector {
+    terms: Vec<LabelTerm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LabelTerm {
+    Eq(String, String),
+    Ne(String, String),
+    Exists(String),
+    Absent(String),
+}
+
+impl LabelSelector {
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        let mut terms = Vec::new();
+        for raw in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            let term = if let Some((k, v)) = raw.split_once("!=") {
+                LabelTerm::Ne(k.trim().into(), v.trim().into())
+            } else if let Some((k, v)) = raw.split_once("==").or_else(|| raw.split_once('=')) {
+                LabelTerm::Eq(k.trim().into(), v.trim().into())
+            } else if let Some(k) = raw.strip_prefix('!') {
+                LabelTerm::Absent(k.trim().into())
+            } else {
+                LabelTerm::Exists(raw.into())
+            };
+            let key = match &term {
+                LabelTerm::Eq(k, _)
+                | LabelTerm::Ne(k, _)
+                | LabelTerm::Exists(k)
+                | LabelTerm::Absent(k) => k,
+            };
+            if key.is_empty() {
+                anyhow::bail!("invalid label selector term {raw:?}");
+            }
+            terms.push(term);
+        }
+        if terms.is_empty() {
+            anyhow::bail!("empty label selector");
+        }
+        Ok(Self { terms })
+    }
+
+    pub fn matches(&self, labels: &std::collections::BTreeMap<String, String>) -> bool {
+        self.terms.iter().all(|t| match t {
+            LabelTerm::Eq(k, v) => labels.get(k) == Some(v),
+            LabelTerm::Ne(k, v) => labels.get(k) != Some(v),
+            LabelTerm::Exists(k) => labels.contains_key(k),
+            LabelTerm::Absent(k) => !labels.contains_key(k),
+        })
+    }
+}
+
+#[cfg(test)]
+mod label_selector_tests {
+    use super::LabelSelector;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn selector_terms() {
+        let labels: BTreeMap<String, String> =
+            [("env".into(), "dev".into()), ("team".into(), "core".into())].into();
+        assert!(LabelSelector::parse("env=dev").unwrap().matches(&labels));
+        assert!(
+            LabelSelector::parse("env==dev,team")
+                .unwrap()
+                .matches(&labels)
+        );
+        assert!(!LabelSelector::parse("env!=dev").unwrap().matches(&labels));
+        assert!(LabelSelector::parse("!gpu,env").unwrap().matches(&labels));
+        assert!(!LabelSelector::parse("env=prod").unwrap().matches(&labels));
+        assert!(LabelSelector::parse("").is_err());
+        assert!(LabelSelector::parse("=x").is_err());
+    }
+}
+
 /// One entry of `GET /v1/vms/{id}/snapshots`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmSnapshotInfo {
     pub tag: String,
     pub created_at: Option<DateTime<Utc>>,
     pub size_bytes: u64,
+}
+
+/// One entry of `GET /v1/vms/{id}/disks`. `name` is `root` for the boot disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmDiskInfo {
+    pub name: String,
+    pub path: PathBuf,
+    pub bus: String,
+    pub format: String,
+    pub size_bytes: u64,
+    pub allocated_bytes: u64,
 }
 
 /// A named template for a warm pool: `size` VMs matching `template` are

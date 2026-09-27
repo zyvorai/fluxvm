@@ -73,11 +73,7 @@ pub fn attach(cfg: &VirtioFsConfig) -> Result<VirtioFsAttachment> {
             fs::create_dir_all(parent).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
         }
         let _ = fs::remove_file(&cfg.socket);
-        pid = Some(spawn_virtiofsd(
-            &cfg.virtiofsd_binary,
-            host,
-            &cfg.socket,
-        )?);
+        pid = Some(spawn_virtiofsd(&cfg.virtiofsd_binary, host, &cfg.socket)?);
         wait_for_socket(&cfg.socket, Duration::from_secs(15))?;
     } else if !cfg.socket.exists() {
         return Err(FluxError::Unsupported(format!(

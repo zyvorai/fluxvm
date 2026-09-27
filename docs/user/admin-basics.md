@@ -68,6 +68,11 @@ and [SECURITY.md](../../SECURITY.md).
 |------|------|
 | `<state_dir>/vms.json` | VM inventory (flock via `vms.lock`) |
 | `<state_dir>/instances/<uuid>/console.log` | Per-VM console |
+| `<state_dir>/instances/<uuid>/serial.sock` | QEMU serial socket (`fluxctl serial`) |
+| `<state_dir>/instances/<uuid>/disks/` | QEMU data disks (`fluxctl disk`) |
+| `<state_dir>/events.jsonl` | Lifecycle/audit events (`fluxctl events`) |
+| `<state_dir>/vm-templates.json` | VM templates (`fluxctl vm-template`) |
+| `<state_dir>/backups/` | VM backups (`fluxctl backup`) |
 | `journalctl -u fluxvm -f` | Daemon journal |
 
 ## Production checklist

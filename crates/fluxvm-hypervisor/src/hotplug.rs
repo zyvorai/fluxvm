@@ -84,12 +84,8 @@ pub fn hotplug_disk_path(path: &Path, read_only: bool) -> Result<DiskHotplugPlan
     if path.as_os_str().is_empty() {
         return Err(FluxError::Unsupported("hotplug disk path is empty".into()));
     }
-    let meta = std::fs::metadata(path).map_err(|e| {
-        FluxError::Unsupported(format!(
-            "hotplug disk {}: {e}",
-            path.display()
-        ))
-    })?;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| FluxError::Unsupported(format!("hotplug disk {}: {e}", path.display())))?;
     if !meta.is_file() {
         return Err(FluxError::Unsupported(format!(
             "hotplug disk {} is not a regular file",

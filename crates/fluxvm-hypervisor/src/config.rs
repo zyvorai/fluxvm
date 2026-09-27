@@ -118,19 +118,15 @@ impl VmConfig {
                 "--kernel" => c.kernel = Some(PathBuf::from(req(&mut args, "--kernel")?)),
                 "--initrd" => c.initrd = Some(PathBuf::from(req(&mut args, "--initrd")?)),
                 "--disk" => c.disk = Some(PathBuf::from(req(&mut args, "--disk")?)),
-                "--extra-disk" => {
-                    c.extra_disks
-                        .push(PathBuf::from(req(&mut args, "--extra-disk")?))
-                }
+                "--extra-disk" => c
+                    .extra_disks
+                    .push(PathBuf::from(req(&mut args, "--extra-disk")?)),
                 "--shared-dir" => {
                     // --shared-dir TAG=PATH  (tag defaults to fsN)
                     let raw = req(&mut args, "--shared-dir")?;
                     let (tag, path) = match raw.split_once('=') {
                         Some((t, p)) => (t.to_string(), PathBuf::from(p)),
-                        None => (
-                            format!("fs{}", c.shared_dirs.len()),
-                            PathBuf::from(raw),
-                        ),
+                        None => (format!("fs{}", c.shared_dirs.len()), PathBuf::from(raw)),
                     };
                     c.shared_dirs.push((tag, path));
                 }
@@ -171,9 +167,7 @@ impl VmConfig {
             return Err(FluxError::Unsupported("cpus must be 1..=32".into()));
         }
         if self.max_cpus < self.cpus || self.max_cpus > 32 {
-            return Err(FluxError::Unsupported(
-                "max_cpus must be cpus..=32".into(),
-            ));
+            return Err(FluxError::Unsupported("max_cpus must be cpus..=32".into()));
         }
         if self.memory_mib < 64 {
             return Err(FluxError::Unsupported("memory-mib must be >= 64".into()));
