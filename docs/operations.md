@@ -304,6 +304,33 @@ sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-to <id> ./local-file.
 sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml copy-from <id> /etc/app/config.yaml ./local-file.txt
 ```
 
+**machinectl-shaped guest access.** Beside `console`/`exec`/`copy-*`, fluxctl also speaks the verbs
+operators reach for from systemd-machined:
+
+| machinectl | fluxctl |
+|---|---|
+| `list` | `list` |
+| `status` / `show` | `status <id>` / `show <id>` (bare `status` = host panel) |
+| `start` / `stop` | `start` / `stop` |
+| `login` / `shell` | `console` (aliases `login`, `shell`; trailing args → vsock `exec`) |
+| `enable` / `disable` | `enable` / `disable` (autostart on `fluxctl serve`) |
+| `poweroff` / `reboot` | `poweroff` / `reboot` (guest agent) |
+| `kill` | `kill` (force VMM; prefer `stop` for clean) |
+| `terminate` | `terminate` → `delete` |
+| `bind` | `bind` → virtiofs `hotplug share` |
+| `copy-to` / `copy-from` | `copy-to` / `copy-from` |
+| `set-limit` | `set-limit` / `resources` |
+| `list-images` / `image-status` | `list-images` / `image-status` (`show-image`) |
+| `clone` / `rename` / `remove` | `clone` / `rename` / `remove` (catalog images) |
+| `read-only` | `read-only` / `read-only --off` |
+| `clean` | `clean` |
+| `pull-raw` / `import-raw` / `export-raw` | same |
+| `pull-tar` / `import-tar` / `import-fs` / `export-tar` | rejected — use `*-raw` (qcow2/raw) |
+| `list-transfers` / `cancel` | empty / no-op (pulls are synchronous) |
+| `edit` | rejected — use `resources` or recreate from spec |
+
+`console`/`login` put the local TTY in raw mode so keystrokes reach the guest PTY intact.
+
 `ping` sends a bare `AgentRequest::Ping` — the same health check `POST /v1/vms/{id}/agent/ping` performs
 over the REST API — so a caller can confirm the guest agent is up (and, if a token is configured, that
 this VM's own token still authenticates) without spending a real `exec` round trip and whatever

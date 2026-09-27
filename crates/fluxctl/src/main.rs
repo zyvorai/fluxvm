@@ -51,11 +51,24 @@ enum Command {
     #[command(next_help_heading = "Basic Commands")]
     /// Start the FluxVM control-plane daemon (REST API).
     Serve,
-    /// Display status (Cilium-style panel).
+    /// Display status. With no id: Cilium-style host panel. With an id:
+    /// that VM's record (machinectl `status`/`show`).
     Status {
-        /// Print host binary / kernel paths.
+        /// Print host binary / kernel paths (host panel only).
         #[arg(long, short = 'v')]
         verbose: bool,
+        /// VM id — when set, print that VM instead of the host panel.
+        id: Option<Uuid>,
+    },
+    /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
+    Healthz,
+    /// Daemon readiness probe. Hits `GET /readyz` on `listen` (no auth).
+    Readyz,
+    /// Prometheus text metrics from the running daemon (`GET /metrics`).
+    Metrics {
+        /// Bearer token when `auth.require` is on (also `FLUXVM_TOKEN`).
+        #[arg(long, env = "FLUXVM_TOKEN")]
+        token: Option<String>,
     },
     #[command(next_help_heading = "Lifecycle Commands")]
     /// Create a VM from a JSON spec file.
@@ -84,6 +97,11 @@ enum Command {
         id: Uuid,
     },
     Delete {
+        id: Uuid,
+    },
+    /// Alias for `delete` (machinectl `terminate`).
+    #[command(hide = true)]
+    Terminate {
         id: Uuid,
     },
     #[command(next_help_heading = "Runtime Control")]
@@ -115,6 +133,8 @@ enum Command {
     /// that control untouched, it does not reset it. At least one flag is
     /// required; a bare `fluxctl resources <id>` with nothing to change is
     /// rejected rather than silently doing nothing.
+    /// Alias `set-limit` matches machinectl.
+    #[command(visible_alias = "set-limit")]
     Resources {
         id: Uuid,
         /// CPU quota as a percentage of one core (150 = 1.5 cores).
@@ -134,6 +154,11 @@ enum Command {
         /// `0-1,4-5`.
         #[arg(long)]
         cpuset_cpus: Option<String>,
+    },
+    /// Read back the VM's current cgroup cpuset pin. REST equivalent:
+    /// `GET /v1/vms/{id}/cpuset`. Write via `resources --cpuset-cpus`.
+    Cpuset {
+        id: Uuid,
     },
     /// Cgroup-derived resource metrics for a VM (CPU%, memory bytes, disk
     /// read/write). REST equivalent: `GET /v1/vms/{id}/stats`.
@@ -167,14 +192,77 @@ enum Command {
         tag: String,
     },
     #[command(next_help_heading = "Guest Access")]
-    /// Open the guest PTY over vsock (requires agent.enabled in the VM spec).
-    /// Stdin is framed as `PtyFrame` data. Output is the raw PTY byte stream.
+    /// Interactive guest login over vsock PTY (machinectl `login`/`shell`).
+    /// Requires `agent.enabled`. With a trailing command, runs it via vsock
+    /// `exec` instead of opening a PTY (machinectl `shell NAME cmd…`).
+    #[command(visible_aliases = ["login", "shell"])]
     Console {
         id: Uuid,
         #[arg(long, default_value_t = 80)]
         cols: u16,
         #[arg(long, default_value_t = 24)]
         rows: u16,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// SSH into the guest at its `guest_ip` via the host OpenSSH client.
+    /// Needs a reachable address and `sshd` in the guest — distinct from
+    /// `console`/`login` (vsock agent PTY).
+    Ssh {
+        id: Uuid,
+        #[arg(long, short = 'l', default_value = "root")]
+        user: String,
+        #[arg(long, short = 'p', default_value_t = 22)]
+        port: u16,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        ssh_args: Vec<String>,
+    },
+    /// Show one VM's record (machinectl `status`/`show`). Same JSON as `get`.
+    Show {
+        id: Uuid,
+    },
+    /// Guest power-off via vsock agent (`shutdown -h now`). Distinct from
+    /// `stop`, which tears the VMM down from the host.
+    Poweroff {
+        id: Uuid,
+    },
+    /// Guest reboot via vsock agent.
+    Reboot {
+        id: Uuid,
+    },
+    /// Force-kill the VMM without guest ACPI powerdown (machinectl `kill`).
+    /// Prefer `stop` for a clean shutdown.
+    Kill {
+        id: Uuid,
+    },
+    /// Bind a host directory into the guest as virtiofs (machinectl `bind`).
+    /// Same as `hotplug share`.
+    Bind {
+        id: Uuid,
+        /// Absolute host directory to share.
+        host_path: PathBuf,
+        #[arg(long, default_value_t = false)]
+        read_only: bool,
+    },
+    /// Start this VM automatically when `fluxctl serve` boots (machinectl
+    /// `enable`). Marker under `state_dir/autostart/{id}`.
+    Enable {
+        id: Uuid,
+    },
+    /// Clear the autostart mark (machinectl `disable`).
+    Disable {
+        id: Uuid,
+    },
+    /// Tail the VM's captured console log file. REST equivalent:
+    /// `GET /v1/vms/{id}/logs?lines=&follow=`.
+    Logs {
+        id: Uuid,
+        /// How many trailing lines to print (default 100).
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
+        /// Keep following new lines (like `tail -f`).
+        #[arg(long, default_value_t = false)]
+        follow: bool,
     },
     /// Run a command inside the guest over vsock (requires agent.enabled in the VM spec).
     Exec {
@@ -235,6 +323,91 @@ enum Command {
         #[command(subcommand)]
         command: CatalogCommand,
     },
+    /// List image catalog entries (machinectl `list-images`).
+    ListImages,
+    /// Show one catalog entry (machinectl `image-status` / `show-image`).
+    #[command(visible_alias = "show-image")]
+    ImageStatus {
+        name: String,
+    },
+    /// Clone a catalog entry (machinectl `clone`).
+    Clone {
+        name: String,
+        new_name: String,
+    },
+    /// Rename a catalog entry (machinectl `rename`).
+    Rename {
+        name: String,
+        new_name: String,
+    },
+    /// Mark a catalog entry read-only (machinectl `read-only`). Use `--off`
+    /// to unlock.
+    ReadOnly {
+        name: String,
+        #[arg(long, default_value_t = false)]
+        off: bool,
+    },
+    /// Remove a catalog entry (machinectl `remove`). For VMs use `terminate`.
+    Remove {
+        name: String,
+    },
+    /// Remove orphaned catalog download cache (machinectl `clean`).
+    Clean,
+    /// Fetch a remote image into the catalog (machinectl `pull-raw`).
+    PullRaw {
+        name: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long, default_value = "qcow2")]
+        format: String,
+    },
+    /// Register a local image file in the catalog (machinectl `import-raw`).
+    ImportRaw {
+        name: String,
+        #[arg(long)]
+        source: String,
+        #[arg(long, default_value = "qcow2")]
+        format: String,
+    },
+    /// Export a catalog entry's file (machinectl `export-raw`).
+    ExportRaw {
+        name: String,
+        dest: PathBuf,
+    },
+    /// Not supported — FluxVM images are raw/qcow2, not tar. Use `pull-raw`.
+    PullTar {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Not supported — use `import-raw` for a local disk image.
+    ImportTar {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Not supported — use `import-raw` for a local disk image.
+    ImportFs {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Not supported — use `export-raw`.
+    ExportTar {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Image transfers are synchronous in FluxVM; always empty (machinectl
+    /// `list-transfers`).
+    ListTransfers,
+    #[command(name = "cancel")]
+    CancelTransfer {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
+    /// Edit is not applicable — change resources with `set-limit`/`resources`,
+    /// or recreate from an updated spec.
+    Edit {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        _args: Vec<String>,
+    },
     /// Manage warm VM pools — pre-booted, paused VMs handed out on claim in
     /// roughly resume time instead of full create time.
     Pool {
@@ -242,6 +415,13 @@ enum Command {
         command: PoolCommand,
     },
     #[command(next_help_heading = "Network Policy")]
+    /// Per-VM network policy and dataplane introspection
+    /// (`/v1/vms/{id}/network/*`). Distinct from `group`/`cnp`/`dataplane`,
+    /// which are host-wide.
+    Network {
+        #[command(subcommand)]
+        command: NetworkCommand,
+    },
     /// Security groups for the VM-edge dataplane.
     Group {
         #[command(subcommand)]
@@ -696,6 +876,33 @@ enum HubbleCommand {
 }
 
 #[derive(Subcommand)]
+enum NetworkCommand {
+    /// Declared VM network policy. REST: `GET /v1/vms/{id}/network/policy`.
+    Policy { id: Uuid },
+    /// Replace the VM network policy from a JSON file. REST:
+    /// `POST /v1/vms/{id}/network/policy`.
+    SetPolicy {
+        id: Uuid,
+        #[arg(long)]
+        spec: PathBuf,
+    },
+    /// Declared + group-merged effective policy. REST:
+    /// `GET /v1/vms/{id}/network/effective`.
+    Effective { id: Uuid },
+    /// Dataplane attachment status for the VM. REST:
+    /// `GET /v1/vms/{id}/network/status`.
+    Status { id: Uuid },
+    /// Per-VM dataplane counters. REST: `GET /v1/vms/{id}/network/stats`.
+    Stats { id: Uuid },
+    /// Recent flows for the VM. REST: `GET /v1/vms/{id}/network/flows`.
+    Flows {
+        id: Uuid,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
 enum GroupCommand {
     List,
     Get {
@@ -863,6 +1070,151 @@ async fn manager(cfg: Config) -> Result<Arc<VmManager>> {
     VmManager::new(cfg)
 }
 
+/// GET a path on the running daemon at `cfg.listen`. Used by healthz/readyz/metrics.
+async fn daemon_get(cfg: &Config, path: &str, token: Option<&str>) -> Result<String> {
+    let base = if cfg.listen.starts_with("http://") || cfg.listen.starts_with("https://") {
+        cfg.listen.clone()
+    } else {
+        format!("http://{}", cfg.listen)
+    };
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let http = reqwest::Client::new();
+    let mut req = http.get(&url);
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    let resp = req
+        .send()
+        .await
+        .with_context(|| format!("GET {url} (is fluxctl serve running on listen?)"))?;
+    let status = resp.status();
+    let body = resp.text().await.context("reading daemon response body")?;
+    if !status.is_success() {
+        anyhow::bail!("GET {url} returned {status}: {body}");
+    }
+    Ok(body)
+}
+
+/// Interactive vsock PTY session with the local TTY in raw mode so
+/// keystrokes (Ctrl-C, arrows, …) reach the guest instead of the host shell.
+async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let _raw = RawTerminal::enter()?;
+    let console = m.open_console(id, cols, rows).await?;
+    let (mut reader, mut writer) = tokio::io::split(console);
+    let to_guest = async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stdin.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            let frame = fluxvm_guest_protocol::PtyFrame::Data(buf[..n].to_vec()).encode();
+            writer.write_all(&frame).await?;
+            writer.flush().await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let to_host = async move {
+        let mut stdout = tokio::io::stdout();
+        tokio::io::copy(&mut reader, &mut stdout).await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    tokio::select! {
+        result = to_guest => result?,
+        result = to_host => result?,
+    }
+    Ok(())
+}
+
+/// Puts stdin into termios raw mode while held; restores on drop.
+struct RawTerminal {
+    fd: i32,
+    original: libc::termios,
+}
+
+impl RawTerminal {
+    fn enter() -> Result<Self> {
+        if !std::io::stdin().is_terminal() {
+            // Non-interactive pipe: leave cooked mode alone.
+            return Ok(Self {
+                fd: -1,
+                original: unsafe { std::mem::zeroed() },
+            });
+        }
+        let fd = libc::STDIN_FILENO;
+        let mut original = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::tcgetattr(fd, &mut original) };
+        if rc != 0 {
+            anyhow::bail!("tcgetattr failed: {}", std::io::Error::last_os_error());
+        }
+        let mut raw = original;
+        unsafe { libc::cfmakeraw(&mut raw) };
+        let rc = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) };
+        if rc != 0 {
+            anyhow::bail!("tcsetattr failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(Self { fd, original })
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        if self.fd >= 0 {
+            unsafe {
+                libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+            }
+        }
+    }
+}
+
+/// Tail `path` like the REST `/v1/vms/{id}/logs` handler: print the last
+/// `lines` lines, then optionally follow new ones.
+async fn tail_vm_log(path: &Path, lines: usize, follow: bool) -> Result<()> {
+    use std::collections::VecDeque;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("opening VM log {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut tail: VecDeque<String> = VecDeque::with_capacity(lines);
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                if tail.len() == lines {
+                    tail.pop_front();
+                }
+                tail.push_back(std::mem::take(&mut line));
+            }
+            Err(e) => return Err(e).context("reading VM log"),
+        }
+    }
+    let mut stdout = tokio::io::stdout();
+    for l in &tail {
+        stdout.write_all(l.as_bytes()).await?;
+    }
+    stdout.flush().await?;
+    if !follow {
+        return Ok(());
+    }
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+            Ok(_) => {
+                stdout.write_all(line.as_bytes()).await?;
+                stdout.flush().await?;
+            }
+            Err(e) => return Err(e).context("following VM log"),
+        }
+    }
+}
+
 /// Parses `migrate start --mode`, matching `MigrationMode`'s own
 /// `#[serde(rename_all = "kebab-case")]` spelling ("pre-copy"/"post-copy")
 /// exactly rather than inventing a separate CLI vocabulary for the same two
@@ -1020,18 +1372,46 @@ async fn main() -> Result<()> {
     };
     let cfg = Config::load(cli.config.as_deref())?;
 
-    // `status` is read-mostly and must work without write access to state_dir
-    // (Cilium-style partial panel). Other commands still require a manager.
-    if let Command::Status { verbose } = &cli.command {
+    // `status` without an id is the host panel (no write access required).
+    // With an id it is machinectl-style VM status and needs the manager.
+    if let Command::Status { verbose, id: None } = &cli.command {
         let m = manager(cfg.clone()).await.ok();
         status::print_status(m.as_deref(), &cfg, *verbose).await?;
+        return Ok(());
+    }
+    // Daemon probes talk HTTP to `listen` — no local VmManager / cgroup needed.
+    if matches!(
+        cli.command,
+        Command::Healthz | Command::Readyz | Command::Metrics { .. }
+    ) {
+        match cli.command {
+            Command::Healthz => {
+                println!("{}", daemon_get(&cfg, "/healthz", None).await?);
+            }
+            Command::Readyz => {
+                println!("{}", daemon_get(&cfg, "/readyz", None).await?);
+            }
+            Command::Metrics { token } => {
+                print!("{}", daemon_get(&cfg, "/metrics", token.as_deref()).await?);
+            }
+            _ => unreachable!(),
+        }
         return Ok(());
     }
 
     let m = manager(cfg.clone()).await?;
 
     match cli.command {
-        Command::Status { .. } => unreachable!("handled above"),
+        Command::Status {
+            verbose: _,
+            id: Some(id),
+        } => {
+            println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?);
+        }
+        Command::Status { id: None, .. }
+        | Command::Healthz
+        | Command::Readyz
+        | Command::Metrics { .. } => unreachable!("handled above"),
         Command::Serve => {
             if cfg.auth.must_authenticate(&cfg.listen) && !cfg.auth.has_credentials() {
                 anyhow::bail!(
@@ -1084,6 +1464,7 @@ async fn main() -> Result<()> {
             }
             m.start_reaper();
             m.spawn_autopause_loop();
+            m.start_autostart_vms().await;
             if !cfg.sandbox.egress_proxy_listen.is_empty() {
                 let addr: std::net::SocketAddr = cfg.sandbox.egress_proxy_listen.parse()?;
                 if let Err(e) = fluxvm_network::egress::apply_egress_redirect(addr.port()) {
@@ -1232,6 +1613,13 @@ async fn main() -> Result<()> {
             .await?;
             println!("{{\"ok\":true}}");
         }
+        Command::Cpuset { id } => {
+            let cpus = m.get_cpuset(id).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"cpus": cpus}))?
+            );
+        }
         Command::Stats { id } => {
             println!("{}", serde_json::to_string_pretty(&m.metrics(id).await?)?);
         }
@@ -1325,33 +1713,81 @@ async fn main() -> Result<()> {
                 serde_json::to_string_pretty(&m.start_from_snapshot(id, &tag).await?)?
             );
         }
-        Command::Console { id, cols, rows } => {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let console = m.open_console(id, cols, rows).await?;
-            let (mut reader, mut writer) = tokio::io::split(console);
-            let to_guest = async move {
-                let mut stdin = tokio::io::stdin();
-                let mut buf = [0u8; 1024];
-                loop {
-                    let n = stdin.read(&mut buf).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    let frame = fluxvm_guest_protocol::PtyFrame::Data(buf[..n].to_vec()).encode();
-                    writer.write_all(&frame).await?;
-                    writer.flush().await?;
-                }
-                Ok::<(), anyhow::Error>(())
-            };
-            let to_host = async move {
-                let mut stdout = tokio::io::stdout();
-                tokio::io::copy(&mut reader, &mut stdout).await?;
-                Ok::<(), anyhow::Error>(())
-            };
-            tokio::select! {
-                result = to_guest => result?,
-                result = to_host => result?,
+        Command::Console {
+            id,
+            cols,
+            rows,
+            command,
+        } => {
+            if !command.is_empty() {
+                let response = m.exec(id, command.join(" "), None).await?;
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                run_console_session(&m, id, cols, rows).await?;
             }
+        }
+        Command::Ssh {
+            id,
+            user,
+            port,
+            ssh_args,
+        } => {
+            let vm = m.get(id).await?;
+            let ip = vm.guest_ip.as_deref().context(
+                "VM has no guest_ip yet — wait for DHCP/lease, or use `console`/`login` over vsock",
+            )?;
+            let status = tokio::process::Command::new("ssh")
+                .arg("-tt")
+                .arg("-p")
+                .arg(port.to_string())
+                .arg(format!("{user}@{ip}"))
+                .args(&ssh_args)
+                .status()
+                .await
+                .context("running ssh (is OpenSSH client installed?)")?;
+            if !status.success() {
+                anyhow::bail!("ssh exited with {status}");
+            }
+        }
+        Command::Show { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?);
+        }
+        Command::Poweroff { id } => {
+            m.agent_poweroff(id).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Reboot { id } => {
+            m.agent_reboot(id).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Kill { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.kill(id).await?)?);
+        }
+        Command::Bind {
+            id,
+            host_path,
+            read_only,
+        } => {
+            if !host_path.is_absolute() {
+                anyhow::bail!("host_path must be absolute");
+            }
+            let tag = m.hotplug_share(id, host_path, read_only).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"tag": tag}))?
+            );
+        }
+        Command::Enable { id } => {
+            m.enable(id).await?;
+            println!("{{\"ok\":true,\"enabled\":true}}");
+        }
+        Command::Disable { id } => {
+            m.disable(id).await?;
+            println!("{{\"ok\":true,\"enabled\":false}}");
+        }
+        Command::Logs { id, lines, follow } => {
+            let vm = m.get(id).await?;
+            tail_vm_log(&vm.log_path, lines.max(1), follow).await?;
         }
         Command::Exec {
             id,
@@ -1569,7 +2005,7 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&result)?);
             }
         },
-        Command::Delete { id } => m.delete(id).await?,
+        Command::Delete { id } | Command::Terminate { id } => m.delete(id).await?,
         Command::BuildImage { spec } => {
             let req: BuildImageRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
             println!(
@@ -1780,6 +2216,48 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Command::Network { command } => match command {
+            NetworkCommand::Policy { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_policy(id).await?)?
+                );
+            }
+            NetworkCommand::SetPolicy { id, spec } => {
+                let policy: fluxvm_network::dataplane::VmNetworkPolicy =
+                    serde_json::from_slice(&std::fs::read(spec)?)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.set_network_policy(id, policy).await?)?
+                );
+            }
+            NetworkCommand::Effective { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_effective(id).await?)?
+                );
+            }
+            NetworkCommand::Status { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_status(id).await?)?
+                );
+            }
+            NetworkCommand::Stats { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.network_stats(id).await?)?
+                );
+            }
+            NetworkCommand::Flows { id, limit } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "items": m.network_flows(id, limit).await?
+                    }))?
+                );
+            }
+        },
         Command::Group { command } => match command {
             GroupCommand::List => {
                 println!(
@@ -1945,6 +2423,89 @@ async fn main() -> Result<()> {
                 );
             }
         },
+        Command::ListImages => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&image::catalog::list_with_verification(&cfg)?)?
+            );
+        }
+        Command::ImageStatus { name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.get_catalog_entry(&name).await?)?
+            );
+        }
+        Command::Clone { name, new_name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.clone_catalog_entry(&name, &new_name).await?)?
+            );
+        }
+        Command::Rename { name, new_name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.rename_catalog_entry(&name, &new_name).await?)?
+            );
+        }
+        Command::ReadOnly { name, off } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.set_catalog_read_only(&name, !off).await?)?
+            );
+        }
+        Command::Remove { name } => {
+            m.remove_catalog_entry(&name).await?;
+            println!("{{\"ok\":true}}");
+        }
+        Command::Clean => {
+            let removed = m.clean_catalog_downloads().await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"removed": removed}))?
+            );
+        }
+        Command::PullRaw {
+            name,
+            source,
+            format,
+        }
+        | Command::ImportRaw {
+            name,
+            source,
+            format,
+        } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.add_catalog_entry(name, source, format).await?)?
+            );
+        }
+        Command::ExportRaw { name, dest } => {
+            m.export_catalog_entry(&name, &dest).await?;
+            println!("{}", serde_json::json!({"exported": dest}));
+        }
+        Command::PullTar { .. }
+        | Command::ImportTar { .. }
+        | Command::ImportFs { .. }
+        | Command::ExportTar { .. } => {
+            anyhow::bail!(
+                "tar/fs image transport is not supported; use pull-raw / import-raw / export-raw \
+                 (qcow2 or raw disk images)"
+            );
+        }
+        Command::ListTransfers => {
+            println!("{{\"items\":[]}}");
+        }
+        Command::CancelTransfer { .. } => {
+            anyhow::bail!(
+                "no async image transfers to cancel (catalog pulls/imports are synchronous)"
+            );
+        }
+        Command::Edit { .. } => {
+            anyhow::bail!(
+                "edit is not applicable; use `resources`/`set-limit` for cgroup limits, \
+                 or recreate from an updated JSON spec"
+            );
+        }
         Command::Fleet {
             central,
             token,
@@ -3256,5 +3817,233 @@ mod sandbox_cli_tests {
         assert_eq!(parsed, id);
         assert_eq!(timeout_seconds, Some(30));
         assert_eq!(command, vec!["echo".to_string(), "hi".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod cpuset_network_logs_health_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn cpuset_logs_and_probes_parse() {
+        let id = Uuid::nil();
+        let Command::Cpuset { id: parsed } = parse(&["cpuset", &id.to_string()]) else {
+            panic!("expected Command::Cpuset");
+        };
+        assert_eq!(parsed, id);
+
+        let Command::Logs {
+            id: parsed,
+            lines,
+            follow,
+        } = parse(&["logs", &id.to_string(), "--lines", "50", "--follow"])
+        else {
+            panic!("expected Command::Logs");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(lines, 50);
+        assert!(follow);
+
+        assert!(matches!(parse(&["healthz"]), Command::Healthz));
+        assert!(matches!(parse(&["readyz"]), Command::Readyz));
+        let Command::Metrics { token } = parse(&["metrics", "--token", "t"]) else {
+            panic!("expected Command::Metrics");
+        };
+        assert_eq!(token.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn network_subcommands_parse() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["network", "policy", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Policy { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["network", "effective", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Effective { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["network", "status", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Status { .. }
+            }
+        ));
+        assert!(matches!(
+            parse(&["network", "stats", &id.to_string()]),
+            Command::Network {
+                command: NetworkCommand::Stats { .. }
+            }
+        ));
+        let Command::Network {
+            command: NetworkCommand::Flows { id: parsed, limit },
+        } = parse(&["network", "flows", &id.to_string(), "--limit", "20"])
+        else {
+            panic!("expected NetworkCommand::Flows");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(limit, 20);
+
+        let Command::Network {
+            command: NetworkCommand::SetPolicy { id: parsed, spec },
+        } = parse(&[
+            "network",
+            "set-policy",
+            &id.to_string(),
+            "--spec",
+            "/tmp/pol.json",
+        ])
+        else {
+            panic!("expected NetworkCommand::SetPolicy");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(spec, PathBuf::from("/tmp/pol.json"));
+    }
+}
+
+#[cfg(test)]
+mod machinectl_parity_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn login_and_shell_alias_console() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["login", &id.to_string()]),
+            Command::Console { command, .. } if command.is_empty()
+        ));
+        assert!(matches!(
+            parse(&["shell", &id.to_string()]),
+            Command::Console { command, .. } if command.is_empty()
+        ));
+        let Command::Console { command, .. } = parse(&["shell", &id.to_string(), "uname", "-a"])
+        else {
+            panic!("expected Console with command");
+        };
+        assert_eq!(command, vec!["uname".to_string(), "-a".to_string()]);
+    }
+
+    #[test]
+    fn ssh_poweroff_reboot_kill_show_bind_parse() {
+        let id = Uuid::nil();
+        let Command::Ssh {
+            id: parsed,
+            user,
+            port,
+            ssh_args,
+        } = parse(&[
+            "ssh",
+            &id.to_string(),
+            "-l",
+            "ubuntu",
+            "-p",
+            "2222",
+            "uptime",
+        ])
+        else {
+            panic!("expected Command::Ssh");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(user, "ubuntu");
+        assert_eq!(port, 2222);
+        assert_eq!(ssh_args, vec!["uptime".to_string()]);
+
+        assert!(matches!(
+            parse(&["show", &id.to_string()]),
+            Command::Show { .. }
+        ));
+        assert!(matches!(
+            parse(&["poweroff", &id.to_string()]),
+            Command::Poweroff { .. }
+        ));
+        assert!(matches!(
+            parse(&["reboot", &id.to_string()]),
+            Command::Reboot { .. }
+        ));
+        assert!(matches!(
+            parse(&["kill", &id.to_string()]),
+            Command::Kill { .. }
+        ));
+        let Command::Bind {
+            host_path,
+            read_only,
+            ..
+        } = parse(&["bind", &id.to_string(), "/var/data", "--read-only"])
+        else {
+            panic!("expected Command::Bind");
+        };
+        assert_eq!(host_path, PathBuf::from("/var/data"));
+        assert!(read_only);
+    }
+
+    #[test]
+    fn terminate_aliases_delete() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["terminate", &id.to_string()]),
+            Command::Terminate { .. }
+        ));
+    }
+
+    #[test]
+    fn enable_disable_and_image_verbs_parse() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            parse(&["enable", &id.to_string()]),
+            Command::Enable { .. }
+        ));
+        assert!(matches!(
+            parse(&["disable", &id.to_string()]),
+            Command::Disable { .. }
+        ));
+        assert!(matches!(parse(&["list-images"]), Command::ListImages));
+        assert!(matches!(
+            parse(&["image-status", "ubuntu"]),
+            Command::ImageStatus { .. }
+        ));
+        assert!(matches!(
+            parse(&["show-image", "ubuntu"]),
+            Command::ImageStatus { .. }
+        ));
+        assert!(matches!(parse(&["clone", "a", "b"]), Command::Clone { .. }));
+        assert!(matches!(
+            parse(&["pull-raw", "img", "--source", "https://example/x.qcow2"]),
+            Command::PullRaw { .. }
+        ));
+        assert!(matches!(
+            parse(&["set-limit", &id.to_string(), "--pids-max", "64"]),
+            Command::Resources { .. }
+        ));
+        assert!(matches!(parse(&["list-transfers"]), Command::ListTransfers));
+        assert!(matches!(parse(&["clean"]), Command::Clean));
+    }
+
+    #[test]
+    fn status_with_id_is_vm_status() {
+        let id = Uuid::nil();
+        let Command::Status {
+            id: Some(parsed),
+            verbose: false,
+        } = parse(&["status", &id.to_string()])
+        else {
+            panic!("expected Status with id");
+        };
+        assert_eq!(parsed, id);
     }
 }
