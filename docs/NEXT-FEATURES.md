@@ -87,7 +87,15 @@ is the cross-area backlog below.
 ### Still open honesty
 
 1. **H2** virtio-win guest boot is unproven; Cloud Hypervisor stays the production Windows VMM.
-2. Optional live smoke for `mode=remote` seccomp (code **Done** in `#106`; on-box NOTIFY+RPC against a running shim not yet evidenced).
+2. `mode=remote` seccomp live smoke (code **Done** in `#106`): the fail-closed
+   deny path passes on the lab
+   ([sc-live-seccomp-remote-20260927.txt](benchmarks/evidence/sc-live-seccomp-remote-20260927.txt),
+   `chmod: /tmp: Operation not permitted`), but a deny can't be told apart from
+   the guest broker's own fail-closed fallback. The run that would prove the
+   RPC path (`EXPECT=continue` with containerd `FLUXVM_SECCOMP_POLICY_RPC=continue`)
+   **hangs**: `ctr` times out with no guest output. Still open. Suspects: stale
+   `containerd-shim-fluxvm-v2` processes that ignore SIGTERM and may still hold
+   vsock port 17780, or a stall in the broker's continue path.
 3. In-tree virtio-fs depth under load still prefers Cloud Hypervisor (**H4** honesty: attach/API shipped; full vhost-user queue bind under load is CH SoT).
 
 ## Next set — cross-area backlog (opened 2026-09-27)
@@ -110,7 +118,7 @@ Ranked by operator value vs effort. Tier 1 is being built on
 | N9 | Wait for state | `fluxctl wait <vm> --for running\|stopped\|agent` |
 | N10 | Console resize | `TIOCGWINSZ` + SIGWINCH → `PtyFrame::Resize` |
 | N11 | Doc honesty fixes | secure-containers.md remote RPC, PRODUCTION.md CH Windows / 13E |
-| N12 | Seccomp `mode=remote` live smoke | `MODE=remote scripts/e2e-secure-containers-seccomp-notify.sh` + SC live matrix |
+| N12 | Seccomp `mode=remote` live smoke | `MODE=remote scripts/e2e-secure-containers-seccomp-notify.sh` + SC live matrix (deny passes; continue hangs, see honesty below) |
 
 ### Tier 2 — next
 

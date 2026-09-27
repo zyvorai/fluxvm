@@ -111,6 +111,7 @@ if [[ "$MODE" == remote ]]; then
     if grep -q 'before' "$OUT" && grep -q 'after' "$OUT" && grep -q 'RC:0' "$OUT" \
       && ! grep -qiE 'Permission denied|Operation not permitted' "$OUT"; then
       echo "E2E PASS: seccomp NOTIFY remote RPC continued chmod (rpc_port=${RPC_PORT} audit=${audit} ctr_rc=$rc)"
+      sed -n "1,20p" "$OUT"
       exit 0
     fi
     echo "unexpected remote-continue outcome (is containerd running with FLUXVM_SECCOMP_POLICY_RPC=continue?) ctr_rc=$rc:" >&2
@@ -119,6 +120,7 @@ if [[ "$MODE" == remote ]]; then
   fi
   if grep -q 'before' "$OUT" && grep -qiE 'Permission denied|Operation not permitted|RC:[1-9]' "$OUT"; then
     echo "E2E PASS: seccomp NOTIFY remote RPC denied chmod (rpc_port=${RPC_PORT} audit=${audit} ctr_rc=$rc)"
+    sed -n "1,20p" "$OUT"
     exit 0
   fi
   echo "unexpected remote-deny outcome (ctr_rc=$rc):" >&2

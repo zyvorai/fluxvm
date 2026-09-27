@@ -1,0 +1,23 @@
+FluxVM seccomp NOTIFY mode=remote live smoke
+stamp=20260927T014450Z
+host=NLDW4-4-04-32
+kernel=6.8.0-139-generic
+shim=0fa3c2e7ecfae770 agent=d1901a24083886ec
+containerd_env_FLUXVM_SECCOMP_POLICY_RPC=unset
+
+E2E PASS: seccomp NOTIFY remote RPC denied chmod (rpc_port=17780 audit=not-found ctr_rc=137)
+before
+RC:1
+after
+chmod: /tmp: Operation not permitted
+exit=0
+
+--- EXPECT=continue run (containerd drop-in FLUXVM_SECCOMP_POLICY_RPC=continue) ---
+stamp=20260927T014625Z
+unexpected remote-continue outcome (is containerd running with FLUXVM_SECCOMP_POLICY_RPC=continue?) ctr_rc=124:
+exit=1
+
+--- EXPECT=continue retry (after killing stale shims holding vsock 17780) ---
+stamp=20260927T014829Z
+unexpected remote-continue outcome (is containerd running with FLUXVM_SECCOMP_POLICY_RPC=continue?) ctr_rc=124:
+exit=1

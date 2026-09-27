@@ -1673,7 +1673,13 @@ async fn main() -> Result<()> {
         Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
     };
     if let Command::Completions { shell } = &cli.command {
-        clap_complete::generate(*shell, &mut Cli::command(), "fluxctl", &mut std::io::stdout());
+        use std::io::Write;
+        let mut buf = Vec::new();
+        clap_complete::generate(*shell, &mut Cli::command(), "fluxctl", &mut buf);
+        match std::io::stdout().write_all(&buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            other => other?,
+        }
         return Ok(());
     }
     let format = cli.output;
