@@ -25,7 +25,7 @@ use crate::vhost::VhostNet;
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::Receiver,
+    mpsc::{Receiver, SyncSender},
     Arc,
 };
 use std::time::{Duration, Instant};
@@ -371,6 +371,7 @@ impl VirtualMachine {
             None,
             gdb,
             true,
+            None,
         )
     }
 
@@ -382,6 +383,7 @@ impl VirtualMachine {
         restore: Option<CpuSnapshot>,
         gdb: Option<GdbSetup>,
         exit_on_boot_marker: bool,
+        ready: Option<SyncSender<std::result::Result<(), String>>>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -499,6 +501,12 @@ impl VirtualMachine {
         let mut serial_injected = false;
         let inject = std::env::var("FLUXVM_SERIAL_INJECT").ok();
         make_stdin_nonblocking();
+
+        // A control-plane create is successful only after KVM, IRQs, device
+        // state, and the guest entry registers have been configured.
+        if let Some(tx) = ready {
+            let _ = tx.send(Ok(()));
+        }
 
         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
             while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
