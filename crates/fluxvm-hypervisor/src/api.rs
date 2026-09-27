@@ -11,16 +11,28 @@ pub enum ApiRequest {
     Pause,
     Resume,
     Shutdown,
-    SnapshotSave { path: PathBuf },
-    SnapshotRestore { path: PathBuf },
+    SnapshotSave {
+        path: PathBuf,
+    },
+    SnapshotRestore {
+        path: PathBuf,
+    },
     /// H4: export FLUXKVM1 migration bundle directory (vmstate+mem).
-    MigrateExport { path: PathBuf },
+    MigrateExport {
+        path: PathBuf,
+    },
     /// H4: import FLUXKVM1 migration bundle directory.
-    MigrateImport { path: PathBuf },
+    MigrateImport {
+        path: PathBuf,
+    },
     /// H4: hot-add `add` vCPUs (requires max_vcpus headroom at boot).
-    HotplugCpu { add: u8 },
+    HotplugCpu {
+        add: u8,
+    },
     /// H4: validate + record a disk hotplug plan (path must exist).
-    HotplugDisk { path: PathBuf },
+    HotplugDisk {
+        path: PathBuf,
+    },
     Metrics,
     Ping,
 }

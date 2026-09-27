@@ -306,18 +306,14 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                             {
                                 let vsock = spec.boot.vsock_uds.as_deref();
                                 let kvm_fmt = kvm_snap::is_flux_kvm_vmstate(vmstate)
-                                    || matches!(
-                                        spec.boot.engine,
-                                        crate::api::FluxVmEngine::Kvm
-                                    );
+                                    || matches!(spec.boot.engine, crate::api::FluxVmEngine::Kvm);
                                 let loaded = if kvm_fmt {
                                     guest::start_kvm_from_snapshot(
                                         &spec.boot, workspace, vmstate, mem,
                                     )
                                     .await
                                 } else {
-                                    guest::start_from_snapshot(workspace, vmstate, mem, vsock)
-                                        .await
+                                    guest::start_from_snapshot(workspace, vmstate, mem, vsock).await
                                 };
                                 match loaded {
                                     Ok(handle) => {
@@ -326,10 +322,7 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                                         st.lifecycle = VmLifecycle::Running;
                                         st.touch();
                                         return ApiResponse::Ok {
-                                            message: format!(
-                                                "migrated in {}",
-                                                path.display()
-                                            ),
+                                            message: format!("migrated in {}", path.display()),
                                         };
                                     }
                                     Err(e) => {
@@ -379,8 +372,7 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                 },
             }
         }
-        ApiRequest::HotplugDisk { path } => match crate::hotplug::hotplug_disk_path(&path, false)
-        {
+        ApiRequest::HotplugDisk { path } => match crate::hotplug::hotplug_disk_path(&path, false) {
             Ok(plan) => ApiResponse::Ok {
                 message: format!(
                     "disk hotplug ok path={} ro={}",
@@ -391,7 +383,7 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
             Err(e) => ApiResponse::Error {
                 message: format!("{e:#}"),
             },
-        }
+        },
         ApiRequest::Metrics => {
             let st = state.lock().await;
             ApiResponse::Metrics {

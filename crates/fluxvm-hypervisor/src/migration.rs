@@ -96,8 +96,8 @@ pub fn export_state(
     let bundle = MigrationBundle::at(dir);
     kvm_snap::dump(kvm, mem, &bundle.vmstate, &bundle.mem, virtio)?;
     let meta = MigrationMeta::default();
-    let bytes = serde_json::to_vec_pretty(&meta)
-        .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+    let bytes =
+        serde_json::to_vec_pretty(&meta).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     fs::write(&bundle.meta, bytes).map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     Ok(bundle)
 }
