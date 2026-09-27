@@ -835,6 +835,7 @@ mod tests {
             requested_security_profile: Default::default(),
             achieved_security_profile: Default::default(),
             security_evidence: None,
+            labels: Default::default(),
         }
     }
 

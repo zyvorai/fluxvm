@@ -274,7 +274,9 @@ allowlisted roots at launch (no hotplug).
 Argument comparators (Set 10), bounded fail-closed `SCMP_ACT_NOTIFY` (Set 11),
 and `SECCOMP_IOCTL_NOTIF_ADDFD` (`io.zyvor.seccomp.notify.mode=addfd`) are
 implemented — see [docs/secure-containers-set11.md](secure-containers-set11.md).
-Remote policy RPC remains out of scope. Live-node gates (enforcing-SELinux
+Remote policy RPC landed later as `io.zyvor.seccomp.notify.mode=remote`
+(guest→host AF_VSOCK, port 17780, fail closed); live smoke via
+`MODE=remote scripts/e2e-secure-containers-seccomp-notify.sh`. Live-node gates (enforcing-SELinux
 guest mount label, mid-flight kill through full create/delete) still need
 containerd/Kubernetes Pod runs, not just the guest-agent binary in isolation.
 

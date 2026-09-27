@@ -845,6 +845,27 @@ pub struct VmRecord {
     /// Phase 6: last collected evidence bundle (also on disk as security-evidence.json).
     #[serde(default)]
     pub security_evidence: Option<crate::security::SecurityEvidence>,
+    /// Operator key/value labels, editable after create via `PATCH /v1/vms/{id}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+/// Body of `PATCH /v1/vms/{id}`: rename and/or edit labels. A label value of
+/// `None` removes the key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VmPatch {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, Option<String>>,
+}
+
+/// One entry of `GET /v1/vms/{id}/snapshots`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VmSnapshotInfo {
+    pub tag: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub size_bytes: u64,
 }
 
 /// A named template for a warm pool: `size` VMs matching `template` are

@@ -679,6 +679,90 @@ pub async fn snapshot_save(_cfg: &Config, vm: &VmRecord, name: &str) -> Result<(
     Ok(())
 }
 
+/// Internal qcow2 snapshots, read with `qemu-img info -U` so it works while
+/// the VM holds the image lock.
+pub async fn snapshot_list(
+    cfg: &Config,
+    vm: &VmRecord,
+) -> Result<Vec<fluxvm_core::model::VmSnapshotInfo>> {
+    let out = tokio::process::Command::new(&cfg.qemu_img_binary)
+        .args(["info", "-U", "--output=json"])
+        .arg(&vm.disk)
+        .output()
+        .await
+        .with_context(|| format!("running {}", cfg.qemu_img_binary))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "qemu-img info failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    parse_qemu_img_snapshots(&out.stdout)
+}
+
+fn parse_qemu_img_snapshots(json: &[u8]) -> Result<Vec<fluxvm_core::model::VmSnapshotInfo>> {
+    let info: serde_json::Value = serde_json::from_slice(json).context("parsing qemu-img info")?;
+    let snaps = info
+        .get("snapshots")
+        .and_then(|s| s.as_array())
+        .cloned()
+        .unwrap_or_default();
+    Ok(snaps
+        .iter()
+        .filter_map(|s| {
+            let tag = s.get("name")?.as_str()?.to_string();
+            let created_at = s
+                .get("date-sec")
+                .and_then(|v| v.as_i64())
+                .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0));
+            let size_bytes = s.get("vm-state-size").and_then(|v| v.as_u64()).unwrap_or(0);
+            Some(fluxvm_core::model::VmSnapshotInfo {
+                tag,
+                created_at,
+                size_bytes,
+            })
+        })
+        .collect())
+}
+
+/// Drop an internal snapshot: HMP `delvm` while running/paused, otherwise
+/// `qemu-img snapshot -d` on the stopped disk.
+pub async fn snapshot_delete(cfg: &Config, vm: &VmRecord, tag: &str) -> Result<()> {
+    use fluxvm_core::model::VmStatus;
+    if matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+        return qmp::delvm(&vm.workspace.join("qmp.sock"), tag, QMP_SAVEVM_TIMEOUT).await;
+    }
+    let out = tokio::process::Command::new(&cfg.qemu_img_binary)
+        .args(["snapshot", "-d", tag])
+        .arg(&vm.disk)
+        .output()
+        .await
+        .with_context(|| format!("running {}", cfg.qemu_img_binary))?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "qemu-img snapshot -d {tag} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_list_tests {
+    #[test]
+    fn parses_qemu_img_info_snapshots() {
+        let json = br#"{"filename":"d.qcow2","snapshots":[
+            {"id":"1","name":"pre-upgrade","vm-state-size":1048576,"date-sec":1790000000,"date-nsec":0},
+            {"id":"2","name":"b","vm-state-size":0,"date-sec":1790000100,"date-nsec":0}]}"#;
+        let snaps = super::parse_qemu_img_snapshots(json).unwrap();
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].tag, "pre-upgrade");
+        assert_eq!(snaps[0].size_bytes, 1048576);
+        assert!(snaps[0].created_at.is_some());
+        assert!(super::parse_qemu_img_snapshots(br#"{"filename":"x"}"#).unwrap().is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1151,6 +1235,7 @@ mod snapshot_save_tests {
             requested_security_profile: Default::default(),
             achieved_security_profile: Default::default(),
             security_evidence: None,
+            labels: Default::default(),
         }
     }
 

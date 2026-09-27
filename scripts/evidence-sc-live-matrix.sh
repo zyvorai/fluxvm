@@ -5,8 +5,8 @@
 # Run the remaining live Secure Containers honesty gates and archive evidence.
 # Prefer: sudo -E env FLUXVM_SECURE_CONTAINERS_E2E=1 ... ./scripts/evidence-sc-live-matrix.sh
 # (ctr needs /run/containerd/containerd.sock; kubectl needs KUBECONFIG readable).
-# Non-goals (remote policy RPC, FC live virtiofs, Kata-equivalence) are recorded
-# as intentionally not implemented.
+# Non-goals (FC live virtiofs, Kata-equivalence) are recorded as intentionally
+# not implemented. Remote seccomp policy RPC runs as e2e-seccomp-notify-remote.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -59,6 +59,10 @@ source "$ROOT/scripts/lib/sc-second-cni-env.sh"
   run e2e-userns-load env FLUXVM_SECURE_CONTAINERS_E2E=1 FLUXVM_USERNS_MODE=k8s \
     FLUXVM_USERNS_LOAD_N=1 "$ROOT/scripts/e2e-secure-containers-userns-load.sh"
   run e2e-seccomp-notify env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-seccomp-notify.sh"
+  # Remote policy RPC: default shim decision is fail-closed deny.
+  run e2e-seccomp-notify-remote env FLUXVM_SECURE_CONTAINERS_E2E=1 MODE=remote \
+    EXPECT="${FLUXVM_SECCOMP_REMOTE_EXPECT:-deny}" \
+    "$ROOT/scripts/e2e-secure-containers-seccomp-notify.sh"
   run e2e-selinux-mountlabel env FLUXVM_SECURE_CONTAINERS_E2E=1 "$ROOT/scripts/e2e-secure-containers-selinux-mountlabel.sh"
 
   # S2 — second CNI / second cluster (auto-sources /etc/fluxvm-second-cni.env).
@@ -71,7 +75,6 @@ source "$ROOT/scripts/lib/sc-second-cni-env.sh"
   fi
 
   echo "== non-goals (intentionally not implemented) =="
-  echo "NON_GOAL remote_seccomp_policy_rpc=out_of_scope"
   echo "NON_GOAL firecracker_live_virtiofs=unsupported_upstream_use_ext4_pack"
   echo "NON_GOAL full_kata_equivalence=not_claimed"
   echo

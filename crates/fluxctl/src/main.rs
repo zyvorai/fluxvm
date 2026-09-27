@@ -25,6 +25,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 mod fleet_client;
+mod output;
 mod status;
 mod styles;
 
@@ -42,6 +43,19 @@ mod styles;
 struct Cli {
     #[arg(long, env = "FLUXVM_CONFIG", help_heading = "Global Flags")]
     config: Option<PathBuf>,
+    /// Output format for list-style commands (`list`, `list-images`,
+    /// `snapshot-list`, `events`, `sandbox list`).
+    #[arg(
+        id = "output_format",
+        short = 'o',
+        long = "output-format",
+        global = true,
+        value_enum,
+        default_value_t = output::OutputFormat::Json,
+        env = "FLUXCTL_OUTPUT",
+        help_heading = "Global Flags"
+    )]
+    output: output::OutputFormat,
     #[command(subcommand)]
     command: Command,
 }
@@ -58,6 +72,7 @@ enum Command {
         #[arg(long, short = 'v')]
         verbose: bool,
         /// VM id — when set, print that VM instead of the host panel.
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Option<Uuid>,
     },
     /// Daemon liveness probe. Hits `GET /healthz` on `listen` (no auth).
@@ -80,28 +95,67 @@ enum Command {
     List,
     /// Get a VM by id.
     Get {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Relaunch a Stopped VM from its existing disk (skips image
     /// clone/cloud-init reseed — see VmManager::start).
     Start {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     Stop {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     Pause {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     Resume {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     Delete {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
+    },
+    /// Stop (graceful, then forced) and start again. REST:
+    /// `POST /v1/vms/{id}/restart`.
+    Restart {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Set or remove VM labels: `key=value` sets, `key-` removes. REST:
+    /// `PATCH /v1/vms/{id}` with `{"labels": {...}}`.
+    Label {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(required = true, value_parser = parse_label_edit)]
+        labels: Vec<(String, Option<String>)>,
+    },
+    /// Rename a VM (catalog images use `rename`). REST:
+    /// `PATCH /v1/vms/{id}` with `{"name": "..."}`.
+    RenameVm {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        new_name: String,
+    },
+    /// Block until a VM reaches a state: `running`, `stopped`, `paused`,
+    /// `failed`, or `agent` (guest agent answers a ping).
+    Wait {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long = "for", default_value = "running", value_parser = ["running", "stopped", "paused", "failed", "agent"])]
+        for_state: String,
+        /// Give up after this many seconds (exit non-zero).
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
     },
     /// Alias for `delete` (machinectl `terminate`).
     #[command(hide = true)]
     Terminate {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     #[command(next_help_heading = "Runtime Control")]
@@ -112,16 +166,19 @@ enum Command {
     /// `POST /v1/vms/{id}/freeze`. See docs/operations.md's "Resource
     /// control (cgroup v2)" section.
     Freeze {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Thaw a VM previously frozen with `freeze`. REST equivalent:
     /// `POST /v1/vms/{id}/thaw`.
     Thaw {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Report whether a VM's cgroup is currently frozen. REST equivalent:
     /// `GET /v1/vms/{id}/frozen`.
     Frozen {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Apply cgroup v2 resource-control settings to a running VM — CPU
@@ -136,6 +193,7 @@ enum Command {
     /// Alias `set-limit` matches machinectl.
     #[command(visible_alias = "set-limit")]
     Resources {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         /// CPU quota as a percentage of one core (150 = 1.5 cores).
         #[arg(long)]
@@ -158,17 +216,20 @@ enum Command {
     /// Read back the VM's current cgroup cpuset pin. REST equivalent:
     /// `GET /v1/vms/{id}/cpuset`. Write via `resources --cpuset-cpus`.
     Cpuset {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Cgroup-derived resource metrics for a VM (CPU%, memory bytes, disk
     /// read/write). REST equivalent: `GET /v1/vms/{id}/stats`.
     Stats {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// PSI (Pressure Stall Information) for the VM's cgroup — cpu/memory/io
     /// some+full with avg10/60/300. REST equivalent:
     /// `GET /v1/vms/{id}/pressure`.
     Pressure {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Day-2 hotplug of CPU, memory, NIC, or a virtiofs share onto a running
@@ -180,6 +241,19 @@ enum Command {
     /// Save full VM state under a tag so a later `start-from-snapshot` can
     /// restore it. REST equivalent: `POST /v1/vms/{id}/snapshot`.
     Snapshot {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        tag: String,
+    },
+    /// List a VM's snapshots. REST: `GET /v1/vms/{id}/snapshots`.
+    SnapshotList {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Delete one snapshot tag. REST: `DELETE /v1/vms/{id}/snapshots/{tag}`.
+    SnapshotDelete {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         tag: String,
@@ -187,6 +261,7 @@ enum Command {
     /// Relaunch a VM from a previously saved snapshot tag. REST equivalent:
     /// `POST /v1/vms/{id}/start-from-snapshot`.
     StartFromSnapshot {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         tag: String,
@@ -197,6 +272,7 @@ enum Command {
     /// `exec` instead of opening a PTY (machinectl `shell NAME cmd…`).
     #[command(visible_aliases = ["login", "shell"])]
     Console {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long, default_value_t = 80)]
         cols: u16,
@@ -209,6 +285,7 @@ enum Command {
     /// Needs a reachable address and `sshd` in the guest — distinct from
     /// `console`/`login` (vsock agent PTY).
     Ssh {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long, short = 'l', default_value = "root")]
         user: String,
@@ -219,25 +296,30 @@ enum Command {
     },
     /// Show one VM's record (machinectl `status`/`show`). Same JSON as `get`.
     Show {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Guest power-off via vsock agent (`shutdown -h now`). Distinct from
     /// `stop`, which tears the VMM down from the host.
     Poweroff {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Guest reboot via vsock agent.
     Reboot {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Force-kill the VMM without guest ACPI powerdown (machinectl `kill`).
     /// Prefer `stop` for a clean shutdown.
     Kill {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Bind a host directory into the guest as virtiofs (machinectl `bind`).
     /// Same as `hotplug share`.
     Bind {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         /// Absolute host directory to share.
         host_path: PathBuf,
@@ -247,15 +329,18 @@ enum Command {
     /// Start this VM automatically when `fluxctl serve` boots (machinectl
     /// `enable`). Marker under `state_dir/autostart/{id}`.
     Enable {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Clear the autostart mark (machinectl `disable`).
     Disable {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Tail the VM's captured console log file. REST equivalent:
     /// `GET /v1/vms/{id}/logs?lines=&follow=`.
     Logs {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         /// How many trailing lines to print (default 100).
         #[arg(long, default_value_t = 100)]
@@ -266,6 +351,7 @@ enum Command {
     },
     /// Run a command inside the guest over vsock (requires agent.enabled in the VM spec).
     Exec {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -276,12 +362,14 @@ enum Command {
     /// spending a real `exec` round trip just to find out it's reachable —
     /// distinct from `qga ping`, which checks the QEMU guest-agent channel.
     Ping {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Copy a local file into the guest over vsock (requires agent.enabled)
     /// — the REST `/agent/put-file` route's CLI equivalent, previously only
     /// reachable by hand-rolling the HTTP call yourself.
     CopyTo {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         /// Path to the file on this host.
         local: PathBuf,
@@ -297,6 +385,7 @@ enum Command {
     /// the REST `/agent/get-file` route's CLI equivalent. The guest file's
     /// own Unix permission bits are restored on the copy this host writes.
     CopyFrom {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         /// Path to the file inside the guest.
         remote: String,
@@ -446,10 +535,12 @@ enum Command {
     /// Correlate Runtime Intelligence with VM-edge policy and flow state.
     /// Works as a direct one-shot and does not require the intelligence HTTP daemon.
     Diagnose {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Live VM Flight Recorder events from KVM/scheduler/block/vhost eBPF probes.
     Trace {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long, default_value_t = 5)]
         seconds: u64,
@@ -461,6 +552,38 @@ enum Command {
     },
     /// Snapshot of identities, groups, CNPs, and labeled VMs.
     Observe,
+    /// VM lifecycle / audit events from `state_dir/events.jsonl`. REST:
+    /// `GET /v1/events`, `GET /v1/events/stream` (SSE).
+    Events {
+        /// Only events for this VM (id, name, or id prefix).
+        #[arg(long, value_parser = output::parse_vm_ref)]
+        vm: Option<Uuid>,
+        /// Event-name prefix, e.g. `vm.` or `quota.deny`.
+        #[arg(long)]
+        event: Option<String>,
+        /// Only events after this RFC 3339 timestamp.
+        #[arg(long)]
+        since: Option<chrono::DateTime<chrono::Utc>>,
+        /// Newest N events (default 100).
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        /// Keep printing new events as they are appended.
+        #[arg(long, short = 'f', default_value_t = false)]
+        follow: bool,
+    },
+    /// Per-token quota limits and usage. With `--token` (or `FLUXVM_TOKEN`)
+    /// asks the running daemon (`GET /v1/quotas/me`); otherwise computes
+    /// locally for `--name` (a configured token name).
+    Quota {
+        #[arg(long, env = "FLUXVM_TOKEN")]
+        token: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Print a shell completion script: `fluxctl completions zsh > _fluxctl`.
+    Completions {
+        shell: clap_complete::Shell,
+    },
     /// Hubble-lite flows and CiliumEndpoint views.
     Hubble {
         #[command(subcommand)]
@@ -572,9 +695,13 @@ enum FleetCommand {
 #[derive(Subcommand)]
 enum QgaCommand {
     /// guest-ping over the VM's QGA unix socket.
-    Ping { id: Uuid },
+    Ping {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Run PowerShell (-Command) inside the guest via QGA guest-exec.
     Powershell {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -583,6 +710,7 @@ enum QgaCommand {
     },
     /// Raw guest-exec (path + args).
     Exec {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         path: String,
@@ -593,6 +721,7 @@ enum QgaCommand {
     },
     /// Open an inbound Windows firewall port (live PowerShell).
     FirewallOpen {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         name: String,
@@ -605,6 +734,7 @@ enum QgaCommand {
     },
     /// Remove a Windows firewall rule by display name.
     FirewallClose {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         name: String,
@@ -620,6 +750,7 @@ enum MigrateCommand {
     /// the REST route validates against). Requires the VM to already be
     /// Running; both QEMU and Cloud Hypervisor sources are supported.
     Start {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         destination: String,
@@ -637,9 +768,15 @@ enum MigrateCommand {
     /// send-migration is fire-and-forget and exposes no status-polling
     /// primitive (see docs/runtime-boundary.md); this errors clearly for a
     /// Cloud Hypervisor VM rather than hanging or guessing.
-    Status { id: Uuid },
+    Status {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Cancel an in-flight migration. QEMU only, same reason as `status`.
-    Cancel { id: Uuid },
+    Cancel {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Target-side QEMU migrate-incoming receivers
     /// (`POST/DELETE /v1/migration/receivers…`). Pair with `migrate start`
     /// on the source after `activate`.
@@ -683,13 +820,17 @@ enum MigrateReceiverCommand {
     /// Arm `migrate-incoming` with the receiver's token. REST equivalent:
     /// `POST /v1/migration/receivers/{id}/activate`.
     Activate {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         token: String,
     },
     /// Tear down a receiver reservation. REST equivalent:
     /// `DELETE /v1/migration/receivers/{id}`.
-    Delete { id: Uuid },
+    Delete {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
 }
 
 #[derive(Subcommand)]
@@ -697,6 +838,7 @@ enum HotplugCommand {
     /// Add unrealized vCPUs reserved via `max_vcpus` at create time.
     /// REST: `POST /v1/vms/{id}/hotplug/cpu`.
     Cpu {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         add_vcpus: u8,
@@ -704,6 +846,7 @@ enum HotplugCommand {
     /// Add RAM as a new DIMM into slots reserved via `max_memory_mib`.
     /// REST: `POST /v1/vms/{id}/hotplug/memory`.
     Memory {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         add_memory_mib: u64,
@@ -712,6 +855,7 @@ enum HotplugCommand {
     /// of `--bridge` or `--outer` is required. REST:
     /// `POST /v1/vms/{id}/hotplug/nic`.
     Nic {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         bridge: Option<String>,
@@ -731,6 +875,7 @@ enum HotplugCommand {
     },
     /// Hot-add a virtiofs share. REST: `POST /v1/vms/{id}/hotplug/share`.
     Share {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         host_path: PathBuf,
@@ -753,6 +898,7 @@ enum SandboxCommand {
     /// Snapshot sandbox disk/state to a host path. REST:
     /// `POST /v1/sandboxes/{id}/snapshot`.
     Snapshot {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         path: PathBuf,
@@ -760,6 +906,7 @@ enum SandboxCommand {
     /// Read a file from the sandbox guest over vsock. REST:
     /// `POST /v1/sandboxes/{id}/fs/read`.
     FsRead {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         path: String,
@@ -767,6 +914,7 @@ enum SandboxCommand {
     /// Write a local file into the sandbox guest over vsock. REST:
     /// `POST /v1/sandboxes/{id}/fs/write`.
     FsWrite {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         /// Destination path inside the guest.
         #[arg(long)]
@@ -780,6 +928,7 @@ enum SandboxCommand {
     /// Run a command in the sandbox guest over vsock. REST:
     /// `POST /v1/sandboxes/{id}/process`.
     Process {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         timeout_seconds: Option<u64>,
@@ -818,26 +967,31 @@ enum DataplaneCommand {
     RefreshDns,
     /// Show the VM-edge migration gate and schema generation.
     MigrationState {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Freeze creation of new flows while preserving established conntrack.
     MigrationQuiesce {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
     /// Export a migration-consistent conntrack/observability snapshot.
     MigrationExport {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         output: Option<PathBuf>,
     },
     /// Import network state on the destination and leave it in restoring mode.
     MigrationRestore {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         input: PathBuf,
     },
     /// Re-enable new flows after destination cutover, or cancel source quiesce.
     MigrationResume {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
 }
@@ -878,24 +1032,38 @@ enum HubbleCommand {
 #[derive(Subcommand)]
 enum NetworkCommand {
     /// Declared VM network policy. REST: `GET /v1/vms/{id}/network/policy`.
-    Policy { id: Uuid },
+    Policy {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Replace the VM network policy from a JSON file. REST:
     /// `POST /v1/vms/{id}/network/policy`.
     SetPolicy {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long)]
         spec: PathBuf,
     },
     /// Declared + group-merged effective policy. REST:
     /// `GET /v1/vms/{id}/network/effective`.
-    Effective { id: Uuid },
+    Effective {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Dataplane attachment status for the VM. REST:
     /// `GET /v1/vms/{id}/network/status`.
-    Status { id: Uuid },
+    Status {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Per-VM dataplane counters. REST: `GET /v1/vms/{id}/network/stats`.
-    Stats { id: Uuid },
+    Stats {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Recent flows for the VM. REST: `GET /v1/vms/{id}/network/flows`.
     Flows {
+        #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         #[arg(long, default_value_t = 100)]
         limit: usize,
@@ -1099,22 +1267,60 @@ async fn daemon_get(cfg: &Config, path: &str, token: Option<&str>) -> Result<Str
 /// keystrokes (Ctrl-C, arrows, …) reach the guest instead of the host shell.
 async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use fluxvm_guest_protocol::PtyFrame;
+    let (cols, rows) = terminal_size().unwrap_or((cols, rows));
     let _raw = RawTerminal::enter()?;
     let console = m.open_console(id, cols, rows).await?;
     let (mut reader, mut writer) = tokio::io::split(console);
-    let to_guest = async move {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<PtyFrame>(64);
+    let writer_task = async move {
+        while let Some(frame) = rx.recv().await {
+            writer.write_all(&frame.encode()).await?;
+            writer.flush().await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let resize_tx = tx.clone();
+    let resize_task = async move {
+        let mut winch =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
+        let mut last = (cols, rows);
+        while winch.recv().await.is_some() {
+            if let Some(size) = terminal_size() {
+                if size != last {
+                    last = size;
+                    if resize_tx
+                        .send(PtyFrame::Resize {
+                            cols: size.0,
+                            rows: size.1,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+    let stdin_task = async move {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 1024];
         loop {
             let n = stdin.read(&mut buf).await?;
-            if n == 0 {
+            if n == 0 || tx.send(PtyFrame::Data(buf[..n].to_vec())).await.is_err() {
                 break;
             }
-            let frame = fluxvm_guest_protocol::PtyFrame::Data(buf[..n].to_vec()).encode();
-            writer.write_all(&frame).await?;
-            writer.flush().await?;
         }
         Ok::<(), anyhow::Error>(())
+    };
+    let to_guest = async move {
+        tokio::select! {
+            r = writer_task => r,
+            r = stdin_task => r,
+            r = resize_task => r,
+        }
     };
     let to_host = async move {
         let mut stdout = tokio::io::stdout();
@@ -1126,6 +1332,13 @@ async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> R
         result = to_host => result?,
     }
     Ok(())
+}
+
+/// `(cols, rows)` of the controlling terminal, if stdout is a TTY.
+fn terminal_size() -> Option<(u16, u16)> {
+    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+    (rc == 0 && ws.ws_col > 0 && ws.ws_row > 0).then_some((ws.ws_col, ws.ws_row))
 }
 
 /// Puts stdin into termios raw mode while held; restores on drop.
@@ -1238,6 +1451,95 @@ fn parse_label(s: &str) -> Result<(String, String)> {
     match s.split_once('=') {
         Some((k, v)) if !k.is_empty() => Ok((k.to_string(), v.to_string())),
         _ => anyhow::bail!("expected key=value, got '{s}'"),
+    }
+}
+
+/// Parses `label` edits: `key=value` sets, `key-` removes.
+fn parse_label_edit(s: &str) -> Result<(String, Option<String>)> {
+    if let Some((k, v)) = s.split_once('=') {
+        if k.is_empty() {
+            anyhow::bail!("expected key=value or key-, got '{s}'");
+        }
+        return Ok((k.to_string(), Some(v.to_string())));
+    }
+    match s.strip_suffix('-') {
+        Some(k) if !k.is_empty() => Ok((k.to_string(), None)),
+        _ => anyhow::bail!("expected key=value or key-, got '{s}'"),
+    }
+}
+
+/// Poll until `id` reaches `state` (or the guest agent answers, for `agent`).
+async fn wait_for_vm(m: &VmManager, id: Uuid, state: &str, timeout: u64) -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    loop {
+        let vm = m.get(id).await?;
+        let status = serde_json::to_value(vm.status)?
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let reached = if state == "agent" {
+            status == "running" && m.agent_ping(id).await.is_ok()
+        } else {
+            status == state
+        };
+        if reached {
+            println!(
+                "{}",
+                serde_json::json!({"id": id, "reached": state, "status": status})
+            );
+            return Ok(());
+        }
+        if state != "failed" && status == "failed" {
+            anyhow::bail!(
+                "VM {id} failed while waiting for {state}: {}",
+                vm.error.unwrap_or_default()
+            );
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("timed out after {timeout}s waiting for {state} (status={status})");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
+/// Print events from the shared log, then optionally tail it.
+async fn print_events(
+    cfg: &Config,
+    format: output::OutputFormat,
+    filter: fluxvm_scheduler::EventFilter,
+    follow: bool,
+) -> Result<()> {
+    let log = fluxvm_scheduler::events::EventLog::new(&cfg.state_dir);
+    let items = log.list(&filter)?;
+    output::print_list(format, &items, output::EVENT_COLUMNS)?;
+    if !follow {
+        return Ok(());
+    }
+    let mut offset = log.end_offset();
+    let tail_filter = fluxvm_scheduler::EventFilter {
+        limit: None,
+        ..filter
+    };
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let (events, next) = log.read_from(offset, &tail_filter)?;
+        offset = next;
+        for ev in events {
+            match format {
+                output::OutputFormat::Json => println!("{}", serde_json::to_string(&ev)?),
+                _ => println!(
+                    "{}  {}  {}  {}",
+                    ev.ts.to_rfc3339(),
+                    ev.event,
+                    ev.vm_id.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                    ev.fields
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            }
+        }
     }
 }
 
@@ -1370,7 +1672,35 @@ async fn main() -> Result<()> {
         let matches = cmd.get_matches_mut();
         Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())
     };
+    if let Command::Completions { shell } = &cli.command {
+        clap_complete::generate(*shell, &mut Cli::command(), "fluxctl", &mut std::io::stdout());
+        return Ok(());
+    }
+    let format = cli.output;
     let cfg = Config::load(cli.config.as_deref())?;
+    if let Command::Events {
+        vm,
+        event,
+        since,
+        limit,
+        follow,
+    } = &cli.command
+    {
+        let filter = fluxvm_scheduler::EventFilter {
+            vm: *vm,
+            since: *since,
+            event: event.clone(),
+            limit: Some(*limit),
+        };
+        return print_events(&cfg, format, filter, *follow).await;
+    }
+    if let Command::Quota {
+        token: Some(token), ..
+    } = &cli.command
+    {
+        println!("{}", daemon_get(&cfg, "/v1/quotas/me", Some(token)).await?);
+        return Ok(());
+    }
 
     // `status` without an id is the host panel (no write access required).
     // With an id it is machinectl-style VM status and needs the manager.
@@ -1411,7 +1741,49 @@ async fn main() -> Result<()> {
         Command::Status { id: None, .. }
         | Command::Healthz
         | Command::Readyz
-        | Command::Metrics { .. } => unreachable!("handled above"),
+        | Command::Metrics { .. }
+        | Command::Completions { .. }
+        | Command::Events { .. }
+        | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
+        Command::Quota { token: None, name } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.token_quota_usage(name.as_deref()).await?)?
+            );
+        }
+        Command::Restart { id } => {
+            println!("{}", serde_json::to_string_pretty(&m.restart(id).await?)?)
+        }
+        Command::Label { id, labels } => {
+            let patch = fluxvm_core::model::VmPatch {
+                name: None,
+                labels: labels.into_iter().collect(),
+            };
+            println!("{}", serde_json::to_string_pretty(&m.patch(id, patch).await?)?);
+        }
+        Command::RenameVm { id, new_name } => {
+            let patch = fluxvm_core::model::VmPatch {
+                name: Some(new_name),
+                ..Default::default()
+            };
+            println!("{}", serde_json::to_string_pretty(&m.patch(id, patch).await?)?);
+        }
+        Command::Wait {
+            id,
+            for_state,
+            timeout,
+        } => wait_for_vm(&m, id, &for_state, timeout).await?,
+        Command::SnapshotList { id } => {
+            output::print_list(
+                format,
+                &m.list_vm_snapshots(id).await?,
+                output::SNAPSHOT_COLUMNS,
+            )?;
+        }
+        Command::SnapshotDelete { id, tag } => {
+            m.delete_vm_snapshot(id, &tag).await?;
+            println!("{}", serde_json::json!({"ok": true, "deleted": tag}));
+        }
         Command::Serve => {
             if cfg.auth.must_authenticate(&cfg.listen) && !cfg.auth.has_credentials() {
                 anyhow::bail!(
@@ -1510,7 +1882,7 @@ async fn main() -> Result<()> {
             let req: CreateVmRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
             println!("{}", serde_json::to_string_pretty(&m.create(req).await?)?);
         }
-        Command::List => println!("{}", serde_json::to_string_pretty(&m.list().await)?),
+        Command::List => output::print_list(format, &m.list().await, output::VM_COLUMNS)?,
         Command::Get { id } => println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?),
         Command::Diagnose { id } => {
             let vm = m.get(id).await?;
@@ -1919,7 +2291,7 @@ async fn main() -> Result<()> {
                             || v.workspace.join("sandbox-proxy.json").exists()
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&items)?);
+                output::print_list(format, &items, output::VM_COLUMNS)?;
             }
             SandboxCommand::Snapshot { id, path } => {
                 m.snapshot_sandbox(id, &path).await?;
@@ -2424,10 +2796,11 @@ async fn main() -> Result<()> {
             }
         },
         Command::ListImages => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&image::catalog::list_with_verification(&cfg)?)?
-            );
+            output::print_list(
+                format,
+                &image::catalog::list_with_verification(&cfg)?,
+                output::IMAGE_COLUMNS,
+            )?;
         }
         Command::ImageStatus { name } => {
             println!(
@@ -4045,5 +4418,92 @@ mod machinectl_parity_cli_tests {
             panic!("expected Status with id");
         };
         assert_eq!(parsed, id);
+    }
+}
+
+#[cfg(test)]
+mod backlog_tier1_cli_tests {
+    use super::*;
+
+    fn cli(args: &[&str]) -> Cli {
+        let mut full = vec!["fluxctl"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap()
+    }
+
+    #[test]
+    fn restart_rename_label_parse() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            cli(&["restart", &id.to_string()]).command,
+            Command::Restart { id: p } if p == id
+        ));
+        let Command::RenameVm { new_name, .. } =
+            cli(&["rename-vm", &id.to_string(), "web-2"]).command
+        else {
+            panic!("expected RenameVm");
+        };
+        assert_eq!(new_name, "web-2");
+        let Command::Label { labels, .. } =
+            cli(&["label", &id.to_string(), "env=prod", "team-"]).command
+        else {
+            panic!("expected Label");
+        };
+        assert_eq!(
+            labels,
+            vec![
+                ("env".to_string(), Some("prod".to_string())),
+                ("team".to_string(), None)
+            ]
+        );
+        assert!(Cli::try_parse_from(["fluxctl", "label", &id.to_string(), "bad"]).is_err());
+    }
+
+    #[test]
+    fn snapshot_list_delete_wait_events_quota_completions_parse() {
+        let id = Uuid::nil();
+        assert!(matches!(
+            cli(&["snapshot-list", &id.to_string()]).command,
+            Command::SnapshotList { .. }
+        ));
+        assert!(matches!(
+            cli(&["snapshot-delete", &id.to_string(), "--tag", "t1"]).command,
+            Command::SnapshotDelete { tag, .. } if tag == "t1"
+        ));
+        assert!(matches!(
+            cli(&["wait", &id.to_string(), "--for", "agent", "--timeout", "5"]).command,
+            Command::Wait { for_state, timeout: 5, .. } if for_state == "agent"
+        ));
+        assert!(Cli::try_parse_from(["fluxctl", "wait", &id.to_string(), "--for", "bogus"]).is_err());
+        assert!(matches!(
+            cli(&["events", "--follow", "--event", "vm."]).command,
+            Command::Events { follow: true, .. }
+        ));
+        assert!(matches!(cli(&["quota"]).command, Command::Quota { .. }));
+        assert!(matches!(
+            cli(&["completions", "zsh"]).command,
+            Command::Completions { .. }
+        ));
+    }
+
+    #[test]
+    fn output_format_is_global_and_does_not_clash_with_subcommand_output() {
+        assert_eq!(cli(&["list"]).output, output::OutputFormat::Json);
+        assert_eq!(cli(&["-o", "table", "list"]).output, output::OutputFormat::Table);
+        assert_eq!(cli(&["list", "-o", "wide"]).output, output::OutputFormat::Wide);
+        let parsed = cli(&["-o", "table", "trace", &Uuid::nil().to_string(), "--output", "jsonl"]);
+        assert_eq!(parsed.output, output::OutputFormat::Table);
+        assert!(matches!(parsed.command, Command::Trace { output, .. } if output == "jsonl"));
+    }
+
+    #[test]
+    fn label_edit_parser() {
+        assert_eq!(
+            parse_label_edit("a=b=c").unwrap(),
+            ("a".into(), Some("b=c".into()))
+        );
+        assert_eq!(parse_label_edit("gone-").unwrap(), ("gone".into(), None));
+        assert!(parse_label_edit("=x").is_err());
+        assert!(parse_label_edit("-").is_err());
     }
 }
