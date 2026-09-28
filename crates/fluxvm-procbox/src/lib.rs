@@ -6,12 +6,15 @@
 //! no KVM, no image, but it shares the host kernel (see `docs/procbox.md`).
 
 pub mod landlock;
+pub mod learn;
 pub mod policy;
 pub mod probe;
+pub mod profile;
 mod run;
 #[cfg(target_os = "linux")]
 pub mod seccomp;
 pub mod selftest;
 
 pub use policy::{parse_size, Enforcement, Policy, SeccompMode, TcpRule};
-pub use run::{build_env, run, RunOptions, RunResult};
+pub use profile::Profile;
+pub use run::{build_env, run, run_with, RunOptions, RunResult, SyscallOverrides};

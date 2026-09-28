@@ -74,6 +74,127 @@ fn errno_or_kill(mode: SeccompMode) -> SeccompAction {
 /// namespace flags the first filter can inspect (clone3 takes them from
 /// user memory, which seccomp cannot read).
 pub fn compile(mode: SeccompMode, allow_namespaces: bool) -> Result<Vec<BpfProgram>> {
+    compile_with(mode, allow_namespaces, &[], &[])
+}
+
+/// Look up a syscall by name: everything in the default denylist plus a
+/// curated set of calls a profile may reasonably want to deny.
+pub fn syscall_by_name(name: &str) -> Option<i64> {
+    if let Some((_, nr)) = denied_syscalls()
+        .into_iter()
+        .chain(namespace_syscalls())
+        .find(|(n, _)| *n == name)
+    {
+        return Some(nr);
+    }
+    let nr = match name {
+        "fchmod" => libc::SYS_fchmod,
+        "fchmodat" => libc::SYS_fchmodat,
+        "fchown" => libc::SYS_fchown,
+        "fchownat" => libc::SYS_fchownat,
+        "kill" => libc::SYS_kill,
+        "tkill" => libc::SYS_tkill,
+        "tgkill" => libc::SYS_tgkill,
+        "socket" => libc::SYS_socket,
+        "connect" => libc::SYS_connect,
+        "bind" => libc::SYS_bind,
+        "listen" => libc::SYS_listen,
+        "accept" => libc::SYS_accept,
+        "accept4" => libc::SYS_accept4,
+        "sendto" => libc::SYS_sendto,
+        "recvfrom" => libc::SYS_recvfrom,
+        "sendmsg" => libc::SYS_sendmsg,
+        "recvmsg" => libc::SYS_recvmsg,
+        "execve" => libc::SYS_execve,
+        "execveat" => libc::SYS_execveat,
+        "clone" => libc::SYS_clone,
+        "clone3" => libc::SYS_clone3,
+        "unlinkat" => libc::SYS_unlinkat,
+        "renameat" => libc::SYS_renameat,
+        "renameat2" => libc::SYS_renameat2,
+        "mkdirat" => libc::SYS_mkdirat,
+        "symlinkat" => libc::SYS_symlinkat,
+        "linkat" => libc::SYS_linkat,
+        "truncate" => libc::SYS_truncate,
+        "ftruncate" => libc::SYS_ftruncate,
+        "mknodat" => libc::SYS_mknodat,
+        "setuid" => libc::SYS_setuid,
+        "setgid" => libc::SYS_setgid,
+        "setreuid" => libc::SYS_setreuid,
+        "setregid" => libc::SYS_setregid,
+        "setresuid" => libc::SYS_setresuid,
+        "setresgid" => libc::SYS_setresgid,
+        "setgroups" => libc::SYS_setgroups,
+        "prctl" => libc::SYS_prctl,
+        "personality" => libc::SYS_personality,
+        "syslog" => libc::SYS_syslog,
+        "acct" => libc::SYS_acct,
+        "settimeofday" => libc::SYS_settimeofday,
+        "clock_settime" => libc::SYS_clock_settime,
+        "sethostname" => libc::SYS_sethostname,
+        "setdomainname" => libc::SYS_setdomainname,
+        "mlock" => libc::SYS_mlock,
+        "mlockall" => libc::SYS_mlockall,
+        "io_uring_setup" => libc::SYS_io_uring_setup,
+        "io_uring_enter" => libc::SYS_io_uring_enter,
+        "io_uring_register" => libc::SYS_io_uring_register,
+        "memfd_create" => libc::SYS_memfd_create,
+        "seccomp" => libc::SYS_seccomp,
+        "capset" => libc::SYS_capset,
+        "fanotify_init" => libc::SYS_fanotify_init,
+        "name_to_handle_at" => libc::SYS_name_to_handle_at,
+        "kcmp" => libc::SYS_kcmp,
+        "quotactl" => libc::SYS_quotactl,
+        "setpriority" => libc::SYS_setpriority,
+        "sched_setaffinity" => libc::SYS_sched_setaffinity,
+        #[cfg(target_arch = "x86_64")]
+        "chmod" => libc::SYS_chmod,
+        #[cfg(target_arch = "x86_64")]
+        "chown" => libc::SYS_chown,
+        #[cfg(target_arch = "x86_64")]
+        "lchown" => libc::SYS_lchown,
+        #[cfg(target_arch = "x86_64")]
+        "unlink" => libc::SYS_unlink,
+        #[cfg(target_arch = "x86_64")]
+        "rename" => libc::SYS_rename,
+        #[cfg(target_arch = "x86_64")]
+        "mkdir" => libc::SYS_mkdir,
+        #[cfg(target_arch = "x86_64")]
+        "rmdir" => libc::SYS_rmdir,
+        #[cfg(target_arch = "x86_64")]
+        "symlink" => libc::SYS_symlink,
+        #[cfg(target_arch = "x86_64")]
+        "link" => libc::SYS_link,
+        #[cfg(target_arch = "x86_64")]
+        "mknod" => libc::SYS_mknod,
+        #[cfg(target_arch = "x86_64")]
+        "fork" => libc::SYS_fork,
+        #[cfg(target_arch = "x86_64")]
+        "vfork" => libc::SYS_vfork,
+        #[cfg(target_arch = "x86_64")]
+        "iopl" => libc::SYS_iopl,
+        #[cfg(target_arch = "x86_64")]
+        "ioperm" => libc::SYS_ioperm,
+        #[cfg(target_arch = "x86_64")]
+        "modify_ldt" => libc::SYS_modify_ldt,
+        _ => return None,
+    };
+    Some(nr)
+}
+
+/// Like [`compile`], with per-profile edits to the denylist: every name in
+/// `extra_deny` is denied too, and every name in `allow` is removed from the
+/// default denylist (allowing `clone3` also drops the `ENOSYS` shim).
+pub fn compile_with(
+    mode: SeccompMode,
+    allow_namespaces: bool,
+    extra_deny: &[String],
+    allow: &[String],
+) -> Result<Vec<BpfProgram>> {
+    let lookup = |n: &String| {
+        syscall_by_name(n)
+            .ok_or_else(|| anyhow!("unknown syscall name {n:?} in the seccomp overrides"))
+    };
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     for (_, nr) in denied_syscalls() {
         rules.insert(nr, vec![]);
@@ -98,18 +219,27 @@ pub fn compile(mode: SeccompMode, allow_namespaces: bool) -> Result<Vec<BpfProgr
         }
         rules.insert(libc::SYS_clone, clone_rules);
 
-        let mut clone3 = BTreeMap::new();
-        clone3.insert(libc::SYS_clone3, vec![]);
-        let filter = SeccompFilter::new(
-            clone3,
-            SeccompAction::Allow,
-            SeccompAction::Errno(libc::ENOSYS as u32),
-            ARCH,
-        )
-        .map_err(|e| anyhow!("building clone3 filter: {e:?}"))?;
-        programs.push(
-            BpfProgram::try_from(filter).map_err(|e| anyhow!("compiling clone3 filter: {e:?}"))?,
-        );
+        if !allow.iter().any(|n| n == "clone3") {
+            let mut clone3 = BTreeMap::new();
+            clone3.insert(libc::SYS_clone3, vec![]);
+            let filter = SeccompFilter::new(
+                clone3,
+                SeccompAction::Allow,
+                SeccompAction::Errno(libc::ENOSYS as u32),
+                ARCH,
+            )
+            .map_err(|e| anyhow!("building clone3 filter: {e:?}"))?;
+            programs.push(
+                BpfProgram::try_from(filter)
+                    .map_err(|e| anyhow!("compiling clone3 filter: {e:?}"))?,
+            );
+        }
+    }
+    for n in allow {
+        rules.remove(&lookup(n)?);
+    }
+    for n in extra_deny {
+        rules.insert(lookup(n)?, vec![]);
     }
     let filter = SeccompFilter::new(rules, SeccompAction::Allow, errno_or_kill(mode), ARCH)
         .map_err(|e| anyhow!("building seccomp denylist: {e:?}"))?;
@@ -157,6 +287,35 @@ mod tests {
         ] {
             assert!(names.contains(&want), "missing {want}");
         }
+    }
+
+    #[test]
+    fn syscall_names_resolve_and_unknown_ones_do_not() {
+        assert_eq!(syscall_by_name("ptrace"), Some(libc::SYS_ptrace));
+        assert_eq!(syscall_by_name("unshare"), Some(libc::SYS_unshare));
+        assert_eq!(syscall_by_name("prctl"), Some(libc::SYS_prctl));
+        assert_eq!(syscall_by_name("definitely_not_a_syscall"), None);
+    }
+
+    #[test]
+    fn overrides_compile_and_reject_unknown_names() {
+        let deny = vec!["prctl".to_string()];
+        let allow = vec!["ptrace".to_string()];
+        assert_eq!(
+            compile_with(SeccompMode::Errno, false, &deny, &allow)
+                .unwrap()
+                .len(),
+            2
+        );
+        // Allowing clone3 drops its ENOSYS shim program.
+        let a = vec!["clone3".to_string()];
+        assert_eq!(
+            compile_with(SeccompMode::Errno, false, &[], &a)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(compile_with(SeccompMode::Errno, false, &["nope".to_string()], &[]).is_err());
     }
 
     #[test]

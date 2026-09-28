@@ -7,6 +7,15 @@ use crate::policy::{Enforcement, Policy};
 use anyhow::Result;
 use serde::Serialize;
 
+/// Per-run edits to the default seccomp denylist (from a profile's
+/// `syscall_deny` / `syscall_allow`). Names are resolved by
+/// `seccomp::syscall_by_name`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyscallOverrides {
+    pub deny: Vec<String>,
+    pub allow: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     /// Capture stdout/stderr into the result (stdin is closed). Otherwise the
@@ -48,13 +57,29 @@ pub fn build_env(policy: &Policy) -> Vec<(String, String)> {
     env
 }
 
-#[cfg(target_os = "linux")]
+/// Run `argv` confined by `policy` with the default seccomp denylist.
 pub fn run(policy: &Policy, argv: &[String], opts: &RunOptions) -> Result<RunResult> {
-    imp::run(policy, argv, opts)
+    run_with(policy, &SyscallOverrides::default(), argv, opts)
+}
+
+/// Like [`run`], with edits to the seccomp denylist.
+#[cfg(target_os = "linux")]
+pub fn run_with(
+    policy: &Policy,
+    overrides: &SyscallOverrides,
+    argv: &[String],
+    opts: &RunOptions,
+) -> Result<RunResult> {
+    imp::run(policy, overrides, argv, opts)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn run(_policy: &Policy, _argv: &[String], _opts: &RunOptions) -> Result<RunResult> {
+pub fn run_with(
+    _policy: &Policy,
+    _overrides: &SyscallOverrides,
+    _argv: &[String],
+    _opts: &RunOptions,
+) -> Result<RunResult> {
     anyhow::bail!("fluxvm-procbox only runs on Linux (Landlock and seccomp)")
 }
 
@@ -124,7 +149,12 @@ mod imp {
         })
     }
 
-    pub fn run(policy: &Policy, argv: &[String], opts: &RunOptions) -> Result<RunResult> {
+    pub fn run(
+        policy: &Policy,
+        overrides: &SyscallOverrides,
+        argv: &[String],
+        opts: &RunOptions,
+    ) -> Result<RunResult> {
         if argv.is_empty() {
             bail!("no command given");
         }
@@ -137,7 +167,12 @@ mod imp {
         let programs = match policy.seccomp {
             Some(mode) => {
                 plan.enforcement.seccomp = true;
-                seccomp::compile(mode, policy.allow_namespaces)?
+                seccomp::compile_with(
+                    mode,
+                    policy.allow_namespaces,
+                    &overrides.deny,
+                    &overrides.allow,
+                )?
             }
             None => {
                 plan.enforcement
