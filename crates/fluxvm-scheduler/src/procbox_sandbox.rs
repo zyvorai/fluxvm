@@ -217,13 +217,6 @@ fn allocate_uid(cfg: &ProcboxConfig, instances: &Path) -> Result<Option<u32>> {
         )
         .into());
     }
-    let end = cfg
-        .uid_base
-        .checked_add(cfg.uid_count)
-        .filter(|_| cfg.uid_base != 0)
-        .ok_or_else(|| {
-            anyhow::anyhow!("sandbox.procbox.uid_base/uid_count must be a non-zero range in u32")
-        })?;
     let mut used = std::collections::HashSet::new();
     if let Ok(rd) = std::fs::read_dir(instances) {
         for ent in rd.flatten() {
@@ -237,9 +230,20 @@ fn allocate_uid(cfg: &ProcboxConfig, instances: &Path) -> Result<Option<u32>> {
             }
         }
     }
+    pick_uid(cfg, &used).map(Some)
+}
+
+/// The lowest uid of the pool that is not in `used`.
+fn pick_uid(cfg: &ProcboxConfig, used: &std::collections::HashSet<u32>) -> Result<u32> {
+    let end = cfg
+        .uid_base
+        .checked_add(cfg.uid_count)
+        .filter(|_| cfg.uid_base != 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!("sandbox.procbox.uid_base/uid_count must be a non-zero range in u32")
+        })?;
     (cfg.uid_base..end)
         .find(|u| !used.contains(u))
-        .map(Some)
         .ok_or_else(|| {
             ProcboxError::Unavailable(format!(
                 "the procbox uid pool is exhausted ({} sandboxes); delete some or raise \
@@ -1439,6 +1443,103 @@ mod tests {
     }
 
     #[test]
+    fn uid_pool_hands_out_the_lowest_free_uid_and_reports_exhaustion() {
+        let mut c = cfg();
+        c.uid_base = 5000;
+        c.uid_count = 3;
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(pick_uid(&c, &used).unwrap(), 5000);
+        used.insert(5000);
+        used.insert(5002);
+        assert_eq!(pick_uid(&c, &used).unwrap(), 5001);
+        used.insert(5001);
+        let e = pick_uid(&c, &used).unwrap_err();
+        assert!(matches!(
+            e.downcast_ref::<ProcboxError>(),
+            Some(ProcboxError::Unavailable(_))
+        ));
+        c.uid_base = 0;
+        assert!(pick_uid(&c, &Default::default()).is_err());
+        c.uid_base = u32::MAX - 1;
+        c.uid_count = 10;
+        assert!(pick_uid(&c, &Default::default()).is_err());
+    }
+
+    #[test]
+    fn markers_written_before_the_uid_pool_still_parse() {
+        let old = r#"{"net_ports":[],"max_memory_mib":512,"max_processes":4096,"timeout_seconds":30,"cpu_seconds":null}"#;
+        let s: ProcboxSpec = serde_json::from_str(old).unwrap();
+        assert_eq!(s.uid, None);
+        let with = serde_json::to_string(&ProcboxSpec {
+            uid: Some(200_001),
+            ..s
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<ProcboxSpec>(&with).unwrap().uid,
+            Some(200_001)
+        );
+    }
+
+    #[test]
+    fn policy_carries_the_sandbox_uid_and_the_isolation_mode() {
+        let mut spec = resolve_limits(&cfg(), &ProcboxRequest::default()).unwrap();
+        spec.uid = Some(200_007);
+        let mut c = cfg();
+        c.isolation = "strict".to_string();
+        let p = build_policy(&c, &spec, Path::new("/w"), None, |_| true);
+        assert_eq!(
+            p.run_as,
+            Some(fluxvm_procbox::RunAs {
+                uid: 200_007,
+                gid: 200_007
+            })
+        );
+        assert_eq!(p.isolation, fluxvm_procbox::Isolation::Strict);
+        assert!(!p.allow_unix && !p.allow_udp);
+        c.isolation = "bogus".to_string();
+        assert!(isolation_mode(&c).is_err());
+        let none = build_policy(
+            &cfg(),
+            &resolve_limits(&cfg(), &Default::default()).unwrap(),
+            Path::new("/w"),
+            None,
+            |_| true,
+        );
+        assert!(none.run_as.is_none());
+    }
+
+    #[test]
+    fn a_root_daemon_refuses_a_sandbox_without_a_uid_unless_allowed() {
+        if !is_root() {
+            eprintln!("skip: needs a root caller");
+            return;
+        }
+        let mut c = cfg();
+        c.allow_root = false;
+        let spec = resolve_limits(&c, &ProcboxRequest::default()).unwrap();
+        let e = run_confined(&c, &spec, Path::new("/tmp"), "true", Some(5))
+            .err()
+            .expect("must refuse");
+        assert!(matches!(
+            e.downcast_ref::<ProcboxError>(),
+            Some(ProcboxError::Unavailable(_))
+        ));
+        let mut none = c.clone();
+        none.uid_count = 0;
+        let e = allocate_uid(&none, Path::new("/nonexistent")).unwrap_err();
+        assert!(matches!(
+            e.downcast_ref::<ProcboxError>(),
+            Some(ProcboxError::Unavailable(_))
+        ));
+        none.allow_root = true;
+        assert_eq!(
+            allocate_uid(&none, Path::new("/nonexistent")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn policy_timeout_is_capped_by_the_server() {
         let spec = resolve_limits(&cfg(), &ProcboxRequest::default()).unwrap();
         let p = build_policy(&cfg(), &spec, Path::new("/w"), Some(99_999), |_| true);
@@ -1676,7 +1777,13 @@ mod tests {
                 eprintln!("skip: Landlock/seccomp not fully available on this host");
                 return;
             }
-            let (_d, m) = manager(true);
+            let (d, m) = manager(true);
+            {
+                // A root daemon drops commands to a sandbox uid, which must
+                // be able to search down to the workspace.
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
             let rec = m
                 .create_sandbox(create_req(), Some("acme"), Some("tok"))
                 .await
@@ -1688,9 +1795,10 @@ mod tests {
             let ws = rec.workspace.clone();
             {
                 use std::os::unix::fs::PermissionsExt;
+                let expect = if is_root() { 0o711 } else { 0o700 };
                 assert_eq!(
                     std::fs::metadata(&ws).unwrap().permissions().mode() & 0o777,
-                    0o700
+                    expect
                 );
             }
 

@@ -25,6 +25,35 @@ Creation is checked against the real policy: unless `best_effort = true`, the
 create call fails with **503** if the kernel cannot enforce it (Landlock too old
 for the requested rules, no seccomp). It never silently runs weaker.
 
+### Identity and isolation
+
+```toml
+[sandbox.procbox]
+uid_base   = 200000     # pool of sandbox uids: uid_base .. uid_base + uid_count
+uid_count  = 4096       # = the most procbox sandboxes at once (root daemon)
+allow_root = false      # only matters when uid_count = 0
+isolation  = "auto"     # "off" | "auto" | "strict"
+```
+
+When the daemon runs **as root**, every sandbox is given its own uid from the
+pool at creation (recorded in `procbox.json`; a deleted sandbox frees it) and
+each command is dropped to that uid and gid with no extra groups. `max_processes`
+(`RLIMIT_NPROC`) is then really per sandbox, the workspace is owned by that uid,
+and files written through the API are chowned to it. The uid needs to reach the
+workspace, so `instances/` and the workspace are made searchable (`o+x`); any
+directory above `state_dir` that is not raises **503** naming it. With
+`uid_count = 0` a root daemon refuses to create or run a sandbox (**503**) unless
+`allow_root = true`; a sandbox created before the pool existed has no uid and is
+refused the same way. An **unprivileged daemon** cannot switch uid and runs
+commands as itself, as before.
+
+`isolation` puts each command in private mount, pid, ipc and uts namespaces with
+a root holding only the granted system paths and the workspace, and with no
+network namespace access at all when `net_ports` is empty. `strict` makes
+creation fail with **503** where the host cannot do that; `auto` runs anyway and
+appends `[procbox] not enforced: namespace isolation (...)` to the command's
+stderr. See [procbox.md](procbox.md#namespace-isolation-uid-drop-and-socket-filters).
+
 ## Create
 
 ```http
@@ -121,27 +150,30 @@ honest to report changes without reverting them.
 | 404 | Unknown sandbox, or another tenant's |
 | 413 | Workspace or file over a size cap |
 | 501 | The route needs a guest VM |
-| 503 | The host cannot enforce the confinement (strict mode) |
+| 503 | The host cannot enforce the confinement (strict mode), a root daemon has no sandbox uid to give, the uid pool is exhausted, or a directory above the workspace is not searchable |
 
 ## Limits worth knowing
 
 - **Shared kernel.** A kernel bug is a host bug. This is not a substitute for a
   microVM.
-- **Unix sockets are not confined.** On Landlock ABI 8 (this lab's kernel) a
-  confined command can still `connect()` to a *pathname* Unix socket anywhere on
-  the host. Verified by test: a command with no access to the socket's
-  directory reached a listener there. A host daemon socket (the container
-  runtime's, or an API socket) is therefore reachable. Abstract sockets and
-  signals are scoped (ABI 6+); pathname sockets are not until a newer ABI. Keep
-  such sockets owned by a different user with mode `0600`.
-- **Same user as the daemon.** Commands run as the daemon's own user. Run the
-  daemon unprivileged when enabling procbox; as root, the sandboxed process is
-  root-owned (still confined by Landlock and seccomp, but with more to lose if
-  a rule is missed).
-- **UDP is not filtered.** Landlock's network rules cover TCP only, so "no
-  network" means no TCP.
-- **`RLIMIT_NPROC` counts the daemon user's processes**, not just the sandbox's,
-  so it is a coarse fork-bomb bound, and root is exempt from it.
+- **Unix sockets.** Landlock ABI 8 does not stop `connect()` to a *pathname* Unix
+  socket, so procbox denies `socket(AF_UNIX)` with seccomp instead (a command
+  cannot create the socket to connect with; `socketpair` still works). With
+  isolation the host's socket files are not in the command's root at all.
+  Abstract sockets and signals are scoped (ABI 6+).
+- **UDP, raw, packet and netlink sockets** are denied by the same seccomp socket
+  filters while the network is shared with the host, and unreachable when
+  `net_ports` is empty and isolation is on (empty network namespace). With
+  `net_ports` set, DNS over UDP is therefore not available to the command.
+- **Identity.** A root daemon isolates each sandbox under its own uid (above); an
+  unprivileged daemon runs commands as itself, so `RLIMIT_NPROC` counts all of
+  that user's processes and is only a coarse fork-bomb bound. Enabling procbox
+  under a root daemon without a uid pool is refused, not run as root.
+- **Namespaces need kernel support.** A root daemon always can; an unprivileged
+  daemon needs unprivileged user namespaces, which some distributions disable
+  (Ubuntu 24.04+ with `apparmor_restrict_unprivileged_userns=1`, as on the lab
+  host). Use `isolation = "auto"` to run anyway and see the gap, or `"strict"`
+  to refuse.
 - **Disk use by commands is not capped.** `max_workspace_mib` bounds API writes
   and dry-run copies; a command can still fill the disk.
 - **Quota accounting** treats the memory cap as a VM of that size.
