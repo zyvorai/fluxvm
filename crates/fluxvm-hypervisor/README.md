@@ -14,7 +14,7 @@ A **lightweight KVM Virtual Machine Monitor** in Rust (Firecracker / cloud-hyper
 ## What works (in-tree KVM)
 
 - **Boot:** PVH (preferred) + ELF/bzImage fallback; Firecracker-style e820/memmap; cmdline auto-appends `virtio_mmio.device=`
-- **CPU:** SMP, CPUID, boot MSRs, FPU, LAPIC lint, TSC-deadline, `KVM_SET_TSS_ADDR`
+- **CPU:** CPUID, boot MSRs, FPU, LAPIC lint, TSC-deadline, `KVM_SET_TSS_ADDR`. SMP is implemented but **confirmed non-functional on real hardware** (AP wake-up fails — see SMP section below); single-vCPU boots are solid.
 - **Devices (virtio-mmio):** net, blk, vsock, balloon, rng + 16550 serial (all on `KVM_IRQFD`)
 - **Host I/O:** TAP userspace net; optional `/dev/vhost-net` open; token-bucket `--net-mbit-limit` / `--blk-mbit-limit`
 - **Firmware extras:** minimal ACPI (RSDP/XSDT/FADT/MADT) + PVH `rsdp_paddr`; optional `--pci` ECAM; `--jailer` / `FLUXVM_JAILER`
@@ -25,6 +25,14 @@ the CLI demo): a Linux 5.10 + systemd guest reaches `zbud: loaded`,
 mounts `root=/dev/vda`, runs `/sbin/init`, and **the in-guest
 `fluxvm-guest-agent` (vsock ping/exec/shutdown) actually starts** —
 `[ OK ] Started Zyvor FluxVM in-guest agent`.
+
+Also verified (2026-09-28) through `fluxctl create` itself, not just the
+raw `fluxvm-hypervisor` binary: `backend: "flux-vm"` +
+`fluxvm_engine = "kvm"` end to end via `scripts/test-native-kvm-no-qemu.sh`
+against a real Firecracker-quickstart kernel/rootfs — `create` correctly
+blocks until the guest reaches `running` (see
+[docs/native-kvm-no-qemu.md](../../docs/native-kvm-no-qemu.md)). This run
+is what found and fixed the seccomp/jailer syscall gap below.
 
 ## Host requirements
 
@@ -65,15 +73,26 @@ sudo ./scripts/test-kvm-smp-boot.sh   # --cpus 2, asserts userspace + no do_boot
 If that script soft-skips (no KERNEL/KVM), treat multi-vCPU as
 **experimental** until it has been green on a lab host.
 
+**Confirmed broken on real KVM hardware (2026-09-28):** `test-kvm-smp-boot.sh`
+against a real kernel/rootfs on `/dev/kvm` fails AP bring-up —
+`smpboot: do_boot_cpu failed(-1) to wakeup CPU#1`, falling back to 1 active
+processor. The BSP boots and reaches userspace correctly; only the
+secondary vCPU's INIT-SIPI-SIPI delivery is affected. Until this is fixed,
+treat `--cpus > 1` as **non-functional**, not just unverified — this is why
+pause/snapshot (see Known limitations) are deliberately restricted to one
+vCPU rather than attempting to support a multi-vCPU barrier on top of AP
+bring-up that doesn't work yet.
+
 ## Debugging: gdbstub
 
 `--gdb 127.0.0.1:1234` — register/memory reads, SW breakpoints, break-in. No reg/mem write or single-step.
 
 ## Known limitations
 
-  * The in-tree virtio-blk backend expects a nonempty, 512-byte-aligned raw disk. It rejects qcow2; convert a stopped image to raw before selecting `fluxvm_engine = "kvm"`. Requested disk, TAP and vsock devices must initialize successfully or VM creation fails.
-  * In-tree KVM pause and memory snapshots currently require one vCPU. The BSP now acknowledges a pause after leaving `KVM_RUN`; AP threads do not yet participate in that barrier, so multi-vCPU pause/snapshot requests fail instead of producing an inconsistent image.
+  * The in-tree virtio-blk backend expects a nonempty, 512-byte-aligned raw disk. It rejects qcow2 and VMDK/VHDX headers; convert a stopped image to raw before selecting `fluxvm_engine = "kvm"`. Requested disk, TAP and vsock devices must initialize successfully or VM creation fails.
+  * In-tree KVM pause and memory snapshots currently require one vCPU. The BSP now acknowledges a pause after leaving `KVM_RUN`; AP threads do not yet participate in that barrier, so multi-vCPU pause/snapshot requests fail instead of producing an inconsistent image. This is a deliberate restriction, not just an unimplemented feature — see the SMP section: AP bring-up itself is confirmed broken on real hardware, so there's no working multi-vCPU state to snapshot yet anyway.
   * The in-tree block device uses split virtqueues with direct raw-sector I/O. It rejects indirect descriptors and malformed or cyclic chains. Guest FLUSH requests call `sync_data` on the backing file.
+  * `jailer::apply()` (`--jailer` / `FLUXVM_JAILER`, and implicitly whenever `seccomp` is requested — `guest.rs` pairs them 1:1) calls `unshare()`/`chroot()`/`setuid()`/`setgid()`. These must stay in `seccomp.rs`'s allowlist: they were missing until 2026-09-28, which meant a seccomp-enabled KVM boot through the real control plane was an instant `SIGSYS` the moment the jailer ran, found via `strace` against a real `fluxctl create`. If you extend the jailer with a new syscall, add it to the allowlist in the same change — the two are never exercised together except through the full control-plane path, so `cargo test` alone won't catch a gap here.
 
 - Virtio **device live-state** in snapshots is a watermark only; backends re-attach from boot config (Firecracker remains production snap format).
 - Full virtio-pci BAR wiring / Windows production path → cloud-hypervisor SoT (P2 follow-up).
