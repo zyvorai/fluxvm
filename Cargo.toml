@@ -27,6 +27,7 @@ members = [
     "crates/fluxvm-container-client",
     "crates/fluxvm-containerd-shim",
     "crates/fluxvm-intelligence",
+    "crates/fluxvm-procbox",
 ]
 
 # containerd-shim 0.11 fatally mis-parses containerd ≥ 2.3 BootstrapParams on
