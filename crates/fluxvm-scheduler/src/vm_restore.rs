@@ -1,0 +1,370 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
+//! In-place snapshot restore for flux-vm VMs, and the VM-sandbox dry-run built
+//! on it (snapshot, run, diff, restore).
+//!
+//! How a flux-vm snapshot restores (found by reading the code, then proved on
+//! a real guest):
+//!
+//! * `SnapshotSave` (hypervisor control API) pauses the guest and writes
+//!   `snap.mem`, `snap.vmstate`, a reflink/copy of the root disk
+//!   (`snap.rootfs`) and `snap` (JSON metadata) under
+//!   `<workspace>/snapshots/<tag>/`, then resumes.
+//! * `SnapshotRestore` on a **running** hypervisor already restores in place:
+//!   it shuts the guest down and boots it again from the snapshot inside the
+//!   same hypervisor process (same pid and control socket).
+//! * The metadata points the restored guest at `snap.rootfs`, not at the VM's
+//!   own disk. Restoring it verbatim would revert file contents, but leave the
+//!   VM record pointing at a stale `root.raw`, let the guest write into the
+//!   snapshot itself (so the snapshot could not be restored twice), and make
+//!   deleting the tag delete the disk in use. This module therefore swaps a
+//!   fresh copy of `snap.rootfs` over the VM's own disk while the guest is
+//!   paused and restores from a private copy of the metadata that names that
+//!   disk. Snapshots stay immutable and reusable.
+
+use crate::VmManager;
+use crate::changes::{diff_manifests, validate_paths};
+use crate::procbox_sandbox::DryRunReport;
+use anyhow::{Context, Result, bail};
+use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
+use fluxvm_guest_protocol::AgentResponse;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use uuid::Uuid;
+
+const AGENT_PROBE_TIMEOUT_SECS: u64 = 10;
+const RESTORE_META: &str = "snap.restore.json";
+
+/// Typed failures so the API can answer with precise statuses.
+#[derive(Debug)]
+pub enum RestoreError {
+    /// The tag has no snapshot for this VM.
+    NoSnapshot(String),
+    /// The VM is in the wrong state, or another restore/dry-run is running.
+    Conflict(String),
+    /// This backend or engine has no complete in-place snapshot/restore.
+    Unsupported(String),
+}
+
+impl std::fmt::Display for RestoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoSnapshot(m) | Self::Conflict(m) | Self::Unsupported(m) => write!(f, "{m}"),
+        }
+    }
+}
+
+impl std::error::Error for RestoreError {}
+
+static BUSY: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+
+/// Held while a restore or dry-run runs on one VM; a second one is rejected.
+struct BusyGuard(Uuid);
+
+impl BusyGuard {
+    fn acquire(id: Uuid) -> Result<Self, RestoreError> {
+        let set = BUSY.get_or_init(|| Mutex::new(HashSet::new()));
+        let mut set = set.lock().unwrap_or_else(|p| p.into_inner());
+        if !set.insert(id) {
+            return Err(RestoreError::Conflict(format!(
+                "another restore or dry-run is already running on {id}"
+            )));
+        }
+        Ok(Self(id))
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        if let Some(set) = BUSY.get() {
+            set.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&self.0);
+        }
+    }
+}
+
+/// Rewrite snapshot metadata so a restore boots from `disk` (the VM's own
+/// root disk) instead of the snapshot's private clone. Returns the JSON text
+/// and the snapshot's clone path.
+pub(crate) fn retarget_metadata(raw: &[u8], disk: &std::path::Path) -> Result<(Vec<u8>, PathBuf)> {
+    let mut spec: serde_json::Value =
+        serde_json::from_slice(raw).context("snapshot metadata is not valid JSON")?;
+    let clone = spec
+        .get("disk_path")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .context("snapshot metadata has no disk_path")?;
+    spec["disk_path"] = serde_json::json!(disk);
+    let boot = spec
+        .get_mut("boot")
+        .and_then(|b| b.as_object_mut())
+        .context("snapshot metadata has no boot section")?;
+    boot.insert("rootfs".into(), serde_json::json!(disk));
+    Ok((serde_json::to_vec_pretty(&spec)?, clone))
+}
+
+impl VmManager {
+    /// Restore a VM from a snapshot tag. A running or paused flux-vm VM is
+    /// restored in place (memory, CPU, devices and disk); a stopped VM of any
+    /// backend takes the existing relaunch path; other running backends must
+    /// be stopped first.
+    pub async fn restore_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
+        crate::validate_snapshot_tag(tag)?;
+        let vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::SnapshotRestore,
+        )?;
+        if crate::procbox_sandbox::is_procbox(&vm) {
+            return Err(RestoreError::Unsupported(
+                "a procbox sandbox has no VM state to restore".into(),
+            )
+            .into());
+        }
+        if let Some(e) = crate::snapshot_backend_error(vm.backend) {
+            return Err(RestoreError::Unsupported(e).into());
+        }
+        let running = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
+        if !running {
+            return self.start_from_snapshot(id, tag).await;
+        }
+        if vm.backend != BackendKind::FluxVm {
+            return Err(RestoreError::Conflict(format!(
+                "in-place restore is only implemented for the flux-vm backend; stop the {:?} VM \
+                 first and restore it from the tag",
+                vm.backend
+            ))
+            .into());
+        }
+        let _guard = BusyGuard::acquire(id)?;
+        let out = self.restore_fluxvm_in_place(id, tag).await;
+        if out.is_ok() {
+            crate::audit_event(
+                "vm.snapshot.restore",
+                &[("vm_id", &id.to_string()), ("tag", tag)],
+            );
+        }
+        out
+    }
+
+    async fn restore_fluxvm_in_place(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
+        let mut vm = self.get(id).await?;
+        let dest = vm.workspace.join("snapshots").join(tag);
+        let meta = dest.join("snap");
+        let raw = match tokio::fs::read(&meta).await {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(RestoreError::NoSnapshot(format!(
+                    "snapshot {tag:?} not found for VM {id}"
+                ))
+                .into());
+            }
+            Err(e) => return Err(e).context("reading snapshot metadata"),
+        };
+        let sock = vm
+            .control_socket
+            .clone()
+            .context("flux-vm VM has no control socket")?;
+        let (retargeted, clone) = retarget_metadata(&raw, &vm.disk)?;
+        if !clone.exists() {
+            bail!("snapshot disk {} is missing", clone.display());
+        }
+
+        // Quiesce the guest so nothing writes the disk while it is swapped.
+        // "Already paused" is fine; a dead control socket is not.
+        match fluxvm_hypervisor::control::request(&sock, &fluxvm_hypervisor::ApiRequest::Pause)
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => bail!("pausing the guest before restore: {e:#}"),
+        }
+
+        // Fresh copy of the snapshot's disk, renamed over the VM's own disk.
+        // The running guest keeps the old inode open until it is shut down by
+        // the restore itself.
+        let disk = vm.disk.clone();
+        let tmp = disk.with_extension("restore.tmp");
+        let src = clone.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            fluxvm_hypervisor::snapshot::clone_cow(&src, &tmp)
+                .with_context(|| format!("copying snapshot disk {}", src.display()))?;
+            std::fs::rename(&tmp, &disk)
+                .with_context(|| format!("replacing {}", disk.display()))?;
+            Ok(())
+        })
+        .await
+        .context("disk restore worker panicked")??;
+
+        let restore_meta = dest.join(RESTORE_META);
+        tokio::fs::write(&restore_meta, &retargeted)
+            .await
+            .context("writing restore metadata")?;
+
+        let req = fluxvm_hypervisor::ApiRequest::SnapshotRestore { path: restore_meta };
+        let resp = fluxvm_hypervisor::control::request(&sock, &req).await;
+        let failure = match resp {
+            Ok(fluxvm_hypervisor::ApiResponse::Ok { .. }) => None,
+            Ok(fluxvm_hypervisor::ApiResponse::Error { message }) => Some(message),
+            Ok(other) => Some(format!("unexpected restore response: {other:?}")),
+            Err(e) => Some(format!("{e:#}")),
+        };
+        if let Some(message) = failure {
+            // The hypervisor shut the guest down before trying: the VM is not
+            // in a state we can vouch for.
+            vm.status = VmStatus::Failed;
+            vm.error = Some(format!("snapshot restore failed: {message}"));
+            self.store.update(vm).await?;
+            bail!("snapshot restore failed and the VM is now in a failed state: {message}");
+        }
+
+        vm.status = VmStatus::Running;
+        vm.error = None;
+        self.store.update(vm.clone()).await?;
+        Ok(vm)
+    }
+
+    /// Dry-run a command on a VM sandbox: snapshot, measure, run, measure,
+    /// restore, delete the snapshot. The guest (memory, processes and disk) is
+    /// put back exactly as it was before the command.
+    pub(crate) async fn vm_sandbox_dry_run(
+        self: &Arc<Self>,
+        id: Uuid,
+        command: String,
+        timeout: Option<u64>,
+        paths: Option<Vec<String>>,
+    ) -> Result<DryRunReport> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::FluxVm {
+            return Err(RestoreError::Unsupported(format!(
+                "dry-run on a VM sandbox needs in-place snapshot restore, which only the \
+                 flux-vm backend implements (this one is {:?})",
+                vm.backend
+            ))
+            .into());
+        }
+        if vm.status != VmStatus::Running {
+            return Err(RestoreError::Conflict(format!(
+                "dry-run needs a running sandbox (status={:?})",
+                vm.status
+            ))
+            .into());
+        }
+        let paths = match paths {
+            Some(p) => validate_paths(&p)?,
+            None => bail!(
+                "paths is required for a VM sandbox dry-run: the guest root is too large to scan"
+            ),
+        };
+        let _guard = BusyGuard::acquire(id)?;
+
+        match self
+            .exec(id, "true".into(), Some(AGENT_PROBE_TIMEOUT_SECS))
+            .await
+        {
+            Ok(AgentResponse::Exec { exit_code: 0, .. }) => {}
+            Ok(other) => {
+                return Err(RestoreError::Conflict(format!(
+                    "guest agent is not usable for a dry-run: {other:?}"
+                ))
+                .into());
+            }
+            Err(e) => {
+                return Err(
+                    RestoreError::Conflict(format!("guest agent unreachable: {e:#}")).into(),
+                );
+            }
+        }
+
+        let tag = format!("dryrun-{}", Uuid::new_v4());
+        if let Err(e) = self.create_vm_snapshot(id, &tag).await {
+            let _ = self.delete_vm_snapshot(id, &tag).await;
+            return Err(e.context("creating the dry-run snapshot"));
+        }
+
+        let measured: Result<DryRunReport> = async {
+            let before = self.take_manifest(id, &paths).await?;
+            let (exit_code, stdout, stderr) = match self.exec(id, command, timeout).await? {
+                AgentResponse::Exec {
+                    exit_code,
+                    stdout,
+                    stderr,
+                } => (exit_code, stdout, stderr),
+                AgentResponse::Error { message } => bail!("guest agent error: {message}"),
+                other => bail!("unexpected guest response: {other:?}"),
+            };
+            let after = self.take_manifest(id, &paths).await?;
+            let changes = diff_manifests(&before, &after)?;
+            Ok(DryRunReport {
+                changes,
+                exit_code,
+                stdout,
+                stderr,
+                discarded: true,
+                reverted_via: "snapshot",
+                paths: paths.clone(),
+            })
+        }
+        .await;
+
+        // Always try to put the guest back, whatever the command did.
+        let restored = self.restore_fluxvm_in_place(id, &tag).await;
+        let _ = self.delete_vm_snapshot(id, &tag).await;
+        self.touch_activity(id).await;
+
+        match (measured, restored) {
+            (Ok(report), Ok(_)) => Ok(report),
+            (Ok(_), Err(e)) => Err(e.context(
+                "the dry-run ran but restoring the snapshot failed; the command's changes may \
+                 still be in the VM (NOT discarded)",
+            )),
+            (Err(run), Ok(_)) => Err(run.context("the dry-run failed; the VM was restored")),
+            (Err(run), Err(restore)) => Err(anyhow::anyhow!(
+                "the dry-run failed ({run:#}) and restoring the snapshot also failed \
+                 ({restore:#}); the VM may still contain the command's changes"
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retarget_points_the_restore_at_the_vms_own_disk() {
+        let raw = br#"{"memory_path":"/w/s/snap.mem","disk_path":"/w/s/snap.rootfs",
+            "vmstate_path":"/w/s/snap.vmstate",
+            "boot":{"kernel":"/k","rootfs":"/w/s/snap.rootfs","memory_mib":64,"vcpus":1}}"#;
+        let (out, clone) = retarget_metadata(raw, std::path::Path::new("/w/root.raw")).unwrap();
+        assert_eq!(clone, PathBuf::from("/w/s/snap.rootfs"));
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["disk_path"], "/w/root.raw");
+        assert_eq!(v["boot"]["rootfs"], "/w/root.raw");
+        assert_eq!(v["memory_path"], "/w/s/snap.mem");
+        assert_eq!(v["boot"]["memory_mib"], 64);
+    }
+
+    #[test]
+    fn retarget_rejects_metadata_without_a_disk_or_boot_section() {
+        assert!(retarget_metadata(b"not json", std::path::Path::new("/d")).is_err());
+        assert!(retarget_metadata(br#"{"boot":{}}"#, std::path::Path::new("/d")).is_err());
+        assert!(retarget_metadata(br#"{"disk_path":"/x"}"#, std::path::Path::new("/d")).is_err());
+    }
+
+    #[test]
+    fn a_second_restore_on_the_same_vm_is_rejected_until_the_first_ends() {
+        let id = Uuid::new_v4();
+        let first = BusyGuard::acquire(id).unwrap();
+        let err = BusyGuard::acquire(id).err().unwrap();
+        assert!(matches!(err, RestoreError::Conflict(_)));
+        assert!(
+            BusyGuard::acquire(Uuid::new_v4()).is_ok(),
+            "other VMs are independent"
+        );
+        drop(first);
+        assert!(BusyGuard::acquire(id).is_ok(), "released on drop");
+    }
+}

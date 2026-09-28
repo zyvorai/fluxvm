@@ -372,6 +372,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             post(start_vm_from_snapshot),
         )
         .route("/v1/vms/{id}/snapshot", post(snapshot_vm))
+        .route("/v1/vms/{id}/restore", post(restore_vm))
         .route("/v1/vms/{id}/migration/start", post(start_migration))
         .route("/v1/vms/{id}/migration/status", get(migration_status))
         .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
@@ -1079,10 +1080,17 @@ struct ChangesBody {
 /// is 404, an incomparable one 409; everything else keeps the default 400.
 fn change_error(e: anyhow::Error) -> ApiError {
     use fluxvm_scheduler::changes::ChangeError;
-    let status = match e.downcast_ref::<ChangeError>() {
-        Some(ChangeError::NoBaseline) => StatusCode::NOT_FOUND,
-        Some(ChangeError::ModeMismatch { .. }) => StatusCode::CONFLICT,
-        None => return ApiError::from(e),
+    use fluxvm_scheduler::vm_restore::RestoreError;
+    let status = match (
+        e.downcast_ref::<ChangeError>(),
+        e.downcast_ref::<RestoreError>(),
+    ) {
+        (Some(ChangeError::NoBaseline), _) => StatusCode::NOT_FOUND,
+        (Some(ChangeError::ModeMismatch { .. }), _) => StatusCode::CONFLICT,
+        (_, Some(RestoreError::NoSnapshot(_))) => StatusCode::NOT_FOUND,
+        (_, Some(RestoreError::Conflict(_))) => StatusCode::CONFLICT,
+        (_, Some(RestoreError::Unsupported(_))) => StatusCode::NOT_IMPLEMENTED,
+        (None, None) => return ApiError::from(e),
     };
     ApiError {
         status,
@@ -1976,6 +1984,22 @@ async fn snapshot_vm(
     require_admin(role)?;
     m.create_vm_snapshot(id, &req.tag).await?;
     Ok(Json(json!({"ok": true, "tag": req.tag})))
+}
+
+/// Restore a VM from a snapshot tag. A running flux-vm VM is restored in place
+/// (memory, CPU, devices and disk); a stopped VM is relaunched from the tag.
+async fn restore_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<VmSnapshotRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let vm = m
+        .restore_vm_snapshot(id, &req.tag)
+        .await
+        .map_err(change_error)?;
+    Ok(Json(json!(vm)))
 }
 
 async fn stop_vm(
@@ -4392,20 +4416,103 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn dry_run_on_a_vm_sandbox_is_501_and_tenant_scoped() {
+        async fn vm_dry_run_is_tenant_scoped_and_reports_precise_statuses() {
             let m = procbox_manager(tenant_tokens(), true);
             let mut vm = fixture(BackendKind::FluxVm, VmStatus::Running, true);
             vm.request.tenant = Some("acme".into());
             let id = vm.id;
             m.store.insert(vm).await.unwrap();
+            // A running non-flux-vm sandbox cannot restore in place: 501.
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Running, true);
+            qemu.request.tenant = Some("acme".into());
+            let qid = qemu.id;
+            m.store.insert(qemu).await.unwrap();
             let app = router(m);
             let uri = format!("/v1/sandboxes/{id}/dry-run");
-            let body = r#"{"command":"true"}"#;
+            // Another tenant sees nothing.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "other",
+                Some(r#"{"command":"true","paths":["/work"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            // The guest root is too large to scan: paths are required (400).
+            let (st, msg) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"command":"true"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{msg}");
+            assert!(msg.contains("paths is required"), "{msg}");
+            // No reachable guest agent behind the fixture: 409, never a fake success.
+            let (st, msg) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"command":"true","paths":["/work"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{msg}");
+            assert!(msg.contains("agent"), "{msg}");
+            let (st, msg) = call(
+                app,
+                "POST",
+                &format!("/v1/sandboxes/{qid}/dry-run"),
+                "acme",
+                Some(r#"{"command":"true","paths":["/work"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{msg}");
+            assert!(msg.contains("flux-vm"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn restore_route_is_tenant_scoped_with_precise_statuses() {
+            let m = procbox_manager(tenant_tokens(), true);
+            let mut vm = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut qemu = fixture(BackendKind::Qemu, VmStatus::Running, true);
+            qemu.request.tenant = Some("acme".into());
+            let qid = qemu.id;
+            m.store.insert(qemu).await.unwrap();
+            let app = router(m);
+            let uri = format!("/v1/vms/{id}/restore");
+            let body = r#"{"tag":"nope"}"#;
             let (st, _) = call(app.clone(), "POST", &uri, "other", Some(body)).await;
             assert_eq!(st, StatusCode::NOT_FOUND);
-            let (st, msg) = call(app, "POST", &uri, "acme", Some(body)).await;
-            assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{msg}");
-            assert!(msg.contains("snapshot-restore"), "{msg}");
+            // Unknown tag: 404 (nothing is touched).
+            let (st, msg) = call(app.clone(), "POST", &uri, "acme", Some(body)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND, "{msg}");
+            // Path-like tags are rejected before anything runs.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &uri,
+                "acme",
+                Some(r#"{"tag":"../etc"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST);
+            // A running QEMU VM must be stopped first: 409.
+            let (st, msg) = call(
+                app,
+                "POST",
+                &format!("/v1/vms/{qid}/restore"),
+                "acme",
+                Some(body),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CONFLICT, "{msg}");
+            assert!(msg.contains("stop"), "{msg}");
         }
 
         #[tokio::test]

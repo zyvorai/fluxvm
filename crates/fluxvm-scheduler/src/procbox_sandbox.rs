@@ -944,6 +944,9 @@ pub struct DryRunReport {
     pub stdout: String,
     pub stderr: String,
     pub discarded: bool,
+    /// How the discard was done: `workspace-copy` (procbox ran on a throwaway
+    /// copy) or `snapshot` (VM restored from a snapshot).
+    pub reverted_via: &'static str,
     pub paths: Vec<String>,
 }
 
@@ -1177,7 +1180,7 @@ impl VmManager {
     /// Run `command` against a throwaway copy of the workspace and report what
     /// it changed. The real workspace is only ever read.
     pub async fn sandbox_dry_run(
-        &self,
+        self: &std::sync::Arc<Self>,
         id: Uuid,
         command: String,
         timeout: Option<u64>,
@@ -1185,12 +1188,8 @@ impl VmManager {
     ) -> Result<DryRunReport> {
         let vm = self.get(id).await?;
         let Some(spec) = load_spec(&vm)? else {
-            return Err(ProcboxError::Unsupported(
-                "dry-run on a VM sandbox needs snapshot-restore, which the API does not expose; \
-                 use baseline/changes and roll back from a snapshot yourself"
-                    .into(),
-            )
-            .into());
+            // Not a procbox sandbox: a VM sandbox reverts through a snapshot.
+            return self.vm_sandbox_dry_run(id, command, timeout, paths).await;
         };
         let cfg = self.cfg.sandbox.procbox.clone();
         if !cfg.enabled {
@@ -1236,6 +1235,7 @@ impl VmManager {
                 stdout: out.stdout,
                 stderr: out.stderr,
                 discarded: true,
+                reverted_via: "workspace-copy",
                 paths,
             })
         })
@@ -1950,14 +1950,25 @@ mod tests {
             // No marker file: this record stands in for an ordinary VM sandbox.
             let vm = make_record(id, &ws, minimal_request(Some("vm".into()), &spec), None);
             m.store.insert(vm).await.unwrap();
+            // A VM sandbox no longer answers 501 outright: it needs `paths` (the
+            // guest root is too big to scan) and a reachable guest agent.
             let e = m
                 .sandbox_dry_run(id, "true".into(), None, None)
                 .await
                 .unwrap_err();
-            assert!(matches!(
-                e.downcast_ref::<ProcboxError>(),
-                Some(ProcboxError::Unsupported(_))
-            ));
+            assert!(format!("{e:#}").contains("paths is required"), "{e:#}");
+            let e = m
+                .sandbox_dry_run(id, "true".into(), None, Some(vec!["/work".into()]))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    e.downcast_ref::<crate::vm_restore::RestoreError>(),
+                    Some(crate::vm_restore::RestoreError::Conflict(_))
+                ),
+                "{e:#}"
+            );
+            assert!(format!("{e:#}").contains("agent"), "{e:#}");
         }
 
         #[test]
