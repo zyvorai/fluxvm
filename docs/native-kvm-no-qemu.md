@@ -44,7 +44,12 @@ vCPU's registers, MP state and (FLUXKVM1 v5) full-fidelity state: XSAVE/FPU,
 XCRS, MSRs including the TSC, LAPIC, vCPU events, debug registers, TSC kHz,
 kvmclock, PIC/IOAPIC and PIT. Older v1-v4 snapshots still load but restore
 registers only, with a warning. Restore is intended for the same host CPU
-class and the guest clock resumes from the pause instant. A native KVM restore now checks the snapshot before stopping a
+class and the guest clock resumes from the pause instant -- restore calls
+`KVM_KVMCLOCK_CTRL` on every vCPU (Firecracker does the same) so a
+multi-vCPU guest's clocks stay consistent with each other after resume; skip
+that call and the vCPUs' views of elapsed time can disagree, intermittently,
+in a way a single-vCPU guest never shows (there is nothing to disagree
+with). A native KVM restore now checks the snapshot before stopping a
 running guest and returns a restore error rather than silently cold-booting
 when the memory restore fails. Snapshot tags must be deleted before reuse.
 
@@ -89,6 +94,38 @@ it, a VM with no network sat 120 s in `systemd-networkd-wait-online` before the
 agent started (the acceptance gate's 90 s budget expired); with it the agent
 answers about 20 s after create. `FLUXVM_AGENT=1 scripts/test-native-kvm-no-qemu.sh`
 defaults to these paths.
+
+**Guest networking (verified 2026-09-29).** The in-tree virtio-net device now
+has a full tap<->guest datapath, not just transmit. The queue worker thread
+(`queue_service.rs`) polls the tap fd alongside the ioeventfds; each frame is
+copied into the next buffer chain the guest posted on RX queue 0
+(`devices/virtio_net.rs::rx_deliver`), a bounds-checked descriptor walk with a
+proper used-ring publish (release fence before the index bump) and interrupt
+suppression when the guest sets `VRING_AVAIL_F_NO_INTERRUPT`. Polling
+disarms itself once the guest has no free RX buffer, or while the VM is
+paused, and re-arms on the next queue-0 kick or the 100 ms tick, so a slow
+guest cannot spin the worker thread. `vhost-net`'s `VHOST_NET_SET_BACKEND`
+still runs before the guest programs its vrings and fails with `EFAULT`; that
+failure (and a failed late `program_vrings`) now falls back to the userspace
+pump with one log line instead of leaving the device half configured.
+
+The host also used to address its own tap device wrong: `Tap::open` built the
+`sin_addr` word with `u32::from_be_bytes`, which byte-swaps the octets on a
+little-endian host, so 192.168.100.1/24 was actually applied as
+1.100.168.192/8. It now uses native-endian conversion (the bytes are already
+in network order in memory) via a small helper with a unit test
+(`tap::tests::ipv4_is_stored_in_network_byte_order`).
+
+`scripts/test-kvm-net.sh` (opt-in, root, lab; not in hosted CI — no golden
+agent image on the runner) boots the golden agent guest on a tap in a
+throwaway namespace, 5 runs at 1 vCPU and 5 at 2 vCPUs: DHCP lease, ping both
+directions, and an 8 MiB HTTP upload/download each way with matching SHA-256.
+All 10 runs passed with 0% packet loss and matching checksums; each run's
+namespace, tap and processes are torn down and verified gone, and the host
+`nft` ruleset and `ip netns list` are asserted unchanged at the end.
+`scripts/test-egress-guest.sh` stage 2 (the golden guest through the egress
+proxy) now runs its traffic cases instead of reporting `BLOCKED`; see
+[http-acl.md](http-acl.md).
 
 The rest of this section explains the pieces.
 

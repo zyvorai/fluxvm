@@ -6,6 +6,14 @@ use crate::ffi;
 use std::ffi::CString;
 use std::os::raw::c_void;
 
+/// `flux_if_addr` stores its arguments verbatim in `sin_addr.s_addr`, which is
+/// network byte order: the four octets must sit in memory in written order.
+/// `from_be_bytes` would byte-swap them on little-endian hosts (192.168.100.1
+/// became 1.100.168.192, /24 became /8).
+pub(crate) fn ipv4_net_order(octets: [u8; 4]) -> u32 {
+    u32::from_ne_bytes(octets)
+}
+
 pub struct Tap {
     pub fd: i32,
     pub name: String,
@@ -27,8 +35,8 @@ impl Tap {
                 ffi::flux_errno()
             });
         }
-        let addr = u32::from_be_bytes(host_ip);
-        let mask = u32::from_be_bytes([255, 255, 255, 0]);
+        let addr = ipv4_net_order(host_ip);
+        let mask = ipv4_net_order([255, 255, 255, 0]);
         if unsafe { ffi::flux_if_addr(c.as_ptr(), addr, mask) } < 0 {
             eprintln!("[tap] warning: could not set IP errno {}", unsafe {
                 ffi::flux_errno()
@@ -83,6 +91,20 @@ impl Drop for Tap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ipv4_is_stored_in_network_byte_order() {
+        let v = ipv4_net_order([192, 168, 100, 1]);
+        assert_eq!(v.to_ne_bytes(), [192, 168, 100, 1]);
+        assert_eq!(
+            ipv4_net_order([255, 255, 255, 0]).to_ne_bytes(),
+            [255, 255, 255, 0]
+        );
+        if cfg!(target_endian = "little") {
+            assert_eq!(v, 0x0164_a8c0);
+            assert_eq!(ipv4_net_order([255, 255, 255, 0]), 0x00ff_ffff);
+        }
+    }
 
     #[test]
     fn invalid_tap_name_is_error_not_panic() {

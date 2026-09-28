@@ -246,7 +246,7 @@ port outside `egress_tls_ports` and a client that did not trust the proxy CA
 both failed. Note that when the daemon runs as root and `egress_proxy_listen`
 is set, it also installs the nftables redirect for ports 80/443.
 
-## Verified with real traffic (2026-09-28)
+## Verified with real traffic (2026-09-29)
 
 `scripts/test-egress-guest.sh` (opt-in, root, lab) builds two throwaway network
 namespaces, a stand-alone proxy (`crates/fluxvm-network/examples/egress_proxy_ns.rs`),
@@ -260,17 +260,17 @@ set of cases:
   transparent HTTPS and plain HTTP with no proxy settings in the client (a real
   nft `redirect` and `SO_ORIGINAL_DST`), and an upstream log proving no denied
   request ever reached it.
-* **Stage 2 - the golden native-KVM guest**: boots, the agent answers over
-  vsock, cloud-init's `ca_certs` installs the proxy CA and the guest's
-  `openssl verify` accepts it, and the guest's curl 7.58 has HTTP/2. The
-  traffic cases **could not run**: the guest sends its DHCP request (dnsmasq in
-  the namespace sees and answers it) but never receives the reply. The in-tree
-  KVM virtio-net only implements guest-to-tap transmit (plus synthesized
-  gateway ARP/ICMP replies); nothing reads the tap to fill the guest's RX
-  queue, and the vhost-net binding fails (`VHOST_NET_SET_BACKEND` returns
-  `EFAULT` because it runs before the vrings exist). The script reports
-  `BLOCKED` (exit 3) until receive is implemented; the same cases then run
-  through the guest agent unchanged.
+* **Stage 2 - the golden native-KVM guest** (19 checks, all passing): boots,
+  the agent answers over vsock, cloud-init's `ca_certs` installs the proxy CA
+  and the guest's `openssl verify` accepts it, the guest's curl 7.58 has
+  HTTP/2, it gets a real DHCP lease and resolves `up.test` via dnsmasq, and
+  then runs the same explicit-proxy and transparent-redirect cases as stage 1
+  over the guest agent. The in-tree KVM virtio-net now has a receive path
+  (tap -> guest RX queue 0, see [native-kvm-no-qemu.md](native-kvm-no-qemu.md));
+  vhost-net still cannot bind before the guest programs its vrings
+  (`VHOST_NET_SET_BACKEND` returns `EFAULT`), so this runs over the userspace
+  pump, which now falls back cleanly with one log line instead of leaving the
+  device half set up.
 
 The script asserts afterwards that `ip netns list` and `nft list ruleset`
 (counters stripped) are identical to before, that `/etc/netns/<ns>` files are

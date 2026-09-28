@@ -54,6 +54,8 @@ pub struct QueueService {
     pub blk_limiter: Arc<RateLimiter>,
     pub tap: Option<Tap>,
     pub vhost: Option<VhostNet>,
+    pub net_stats: virtio_net::NetStats,
+    rx_scratch: Vec<u8>,
 }
 
 // SAFETY: the raw RAM pointer is a process-wide shared mapping that outlives
@@ -90,7 +92,67 @@ impl QueueService {
             blk_limiter,
             tap,
             vhost,
+            net_stats: virtio_net::NetStats::default(),
+            rx_scratch: vec![0u8; virtio_net::RX_FRAME_MAX],
         }
+    }
+
+    /// Tap fd the worker should poll for guest-bound frames, when the
+    /// userspace datapath owns it.
+    fn rx_poll_fd(&self) -> Option<i32> {
+        if self.net.is_none() || self.vhost_owns_tap() {
+            return None;
+        }
+        self.tap.as_ref().map(|t| t.fd)
+    }
+
+    fn vhost_owns_tap(&self) -> bool {
+        self.vhost
+            .as_ref()
+            .map(|v| v.kernel_datapath())
+            .unwrap_or(false)
+    }
+
+    /// Deliver pending tap frames into guest RX buffers (queue 0).
+    fn net_rx(&mut self) -> Result<virtio_net::RxPump> {
+        let (Some(net), Some(tap)) = (self.net.clone(), self.tap.as_ref()) else {
+            return Ok(virtio_net::RxPump::NoBuffers);
+        };
+        if self.vhost_owns_tap() {
+            return Ok(virtio_net::RxPump::NoBuffers);
+        }
+        let mut st = net.state.lock().unwrap();
+        if st.queues.is_empty() {
+            return Ok(virtio_net::RxPump::NoBuffers);
+        }
+        let (state, irq) = virtio_net::rx_pump(
+            &mut self.mem,
+            &mut st,
+            tap,
+            Some(self.net_limiter.as_ref()),
+            &mut self.net_stats,
+            &mut self.rx_scratch,
+            32,
+        )?;
+        drop(st);
+        if irq {
+            net.raise_vring_interrupt();
+        }
+        Ok(state)
+    }
+
+    fn net_stats_line(&self) -> String {
+        let s = &self.net_stats;
+        format!(
+            "[net] rx frames={} bytes={} drops(no_buf={} too_small={} invalid={} rate={}) tx frames={}",
+            s.rx_frames,
+            s.rx_bytes,
+            s.rx_no_buffer,
+            s.rx_too_small,
+            s.rx_invalid,
+            s.rx_rate_limited,
+            s.tx_frames
+        )
     }
 
     fn device(&self, dev: Dev) -> Option<&Arc<VirtioMmio>> {
@@ -146,7 +208,12 @@ impl QueueService {
                 if ready {
                     match v.program_vrings(self.mem.host_ptr(), self.mem.len(), &qs) {
                         Ok(()) => eprintln!("[net] vhost VRING GPA programmed (H3)"),
-                        Err(e) => eprintln!("[net] vhost VRING program deferred: {e}"),
+                        Err(e) => {
+                            eprintln!(
+                                "[net] vhost-net cannot program vrings ({e}); falling back to userspace virtio-net"
+                            );
+                            self.vhost = None;
+                        }
                     }
                 }
             }
@@ -172,9 +239,11 @@ impl QueueService {
             Some(self.net_limiter.as_ref()),
         ) {
             Ok(n) => {
-                eprintln!("[net] processed q={q} frames={n}");
                 drop(st);
-                net.raise_vring_interrupt();
+                if q == 1 {
+                    self.net_stats.tx_frames += n as u64;
+                    net.raise_vring_interrupt();
+                }
             }
             Err(e) => eprintln!("[net] notify err {e}"),
         }
@@ -280,7 +349,12 @@ struct Binding {
 /// worker that drains them. Returns once registration is complete; any
 /// registration failure is fatal because without it guest notifies would be
 /// silently dropped.
-pub fn start(kvm: &KvmVm, svc: Arc<Mutex<QueueService>>, stop: Arc<AtomicBool>) -> Result<()> {
+pub fn start(
+    kvm: &KvmVm,
+    svc: Arc<Mutex<QueueService>>,
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+) -> Result<()> {
     let mut bindings: Vec<Binding> = Vec::new();
     {
         let s = svc.lock().unwrap();
@@ -311,12 +385,19 @@ pub fn start(kvm: &KvmVm, svc: Arc<Mutex<QueueService>>, stop: Arc<AtomicBool>) 
     if bindings.is_empty() {
         return Ok(());
     }
-    std::thread::spawn(move || worker(svc, bindings, stop));
+    std::thread::spawn(move || worker(svc, bindings, stop, paused));
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn worker(svc: Arc<Mutex<QueueService>>, bindings: Vec<Binding>, stop: Arc<AtomicBool>) {
+fn worker(
+    svc: Arc<Mutex<QueueService>>,
+    bindings: Vec<Binding>,
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+) {
+    use crate::devices::virtio_net::RxPump;
+    let tap_fd = svc.lock().unwrap().rx_poll_fd();
     let mut pfds: Vec<libc::pollfd> = bindings
         .iter()
         .map(|b| libc::pollfd {
@@ -325,11 +406,46 @@ fn worker(svc: Arc<Mutex<QueueService>>, bindings: Vec<Binding>, stop: Arc<Atomi
             revents: 0,
         })
         .collect();
+    let tap_idx = pfds.len();
+    if let Some(fd) = tap_fd {
+        pfds.push(libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+    // Level-triggered tap polling stays off while the guest has no RX buffer
+    // (or the VM is paused) so a backlog cannot spin this thread; a queue 0
+    // kick or the 100 ms tick turns it back on.
+    let mut rx_armed = tap_fd.is_some();
+    let mut last_stats = String::new();
+    let mut last_log = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        let is_paused = paused.load(Ordering::Relaxed);
+        if tap_fd.is_some() {
+            pfds[tap_idx].events = if rx_armed && !is_paused {
+                libc::POLLIN
+            } else {
+                0
+            };
+        }
+        if tap_fd.is_some() && last_log.elapsed() >= std::time::Duration::from_secs(5) {
+            last_log = std::time::Instant::now();
+            let line = svc.lock().unwrap().net_stats_line();
+            if line != last_stats {
+                eprintln!("{line}");
+                last_stats = line;
+            }
+        }
         let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 100) };
-        if rc <= 0 {
+        if rc == 0 {
+            rx_armed = tap_fd.is_some();
             continue;
         }
+        if rc < 0 {
+            continue;
+        }
+        let mut rx_kick = false;
         for (pfd, b) in pfds.iter_mut().zip(&bindings) {
             if pfd.revents & libc::POLLIN == 0 {
                 continue;
@@ -344,17 +460,52 @@ fn worker(svc: Arc<Mutex<QueueService>>, bindings: Vec<Binding>, stop: Arc<Atomi
                 )
             };
             if n == std::mem::size_of::<u64>() as isize {
-                svc.lock().unwrap().notify(b.dev, b.queue);
+                if b.dev == Dev::Net && b.queue == 0 && tap_fd.is_some() {
+                    rx_kick = true;
+                } else {
+                    svc.lock().unwrap().notify(b.dev, b.queue);
+                }
+            }
+        }
+        if tap_fd.is_some() {
+            let tap_ready = pfds[tap_idx].revents & (libc::POLLIN | libc::POLLERR) != 0;
+            pfds[tap_idx].revents = 0;
+            if rx_kick {
+                rx_armed = true;
+            }
+            if (tap_ready || rx_kick) && !paused.load(Ordering::Relaxed) {
+                loop {
+                    let r = svc.lock().unwrap().net_rx();
+                    match r {
+                        Ok(RxPump::More) if !stop.load(Ordering::Relaxed) => continue,
+                        Ok(RxPump::More) | Ok(RxPump::Idle) => break,
+                        Ok(RxPump::NoBuffers) => {
+                            rx_armed = false;
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("[net] rx: {e}");
+                            rx_armed = false;
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
+    eprintln!("{}", svc.lock().unwrap().net_stats_line());
     for b in &bindings {
         close_eventfd(b.fd);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn worker(_svc: Arc<Mutex<QueueService>>, bindings: Vec<Binding>, _stop: Arc<AtomicBool>) {
+fn worker(
+    _svc: Arc<Mutex<QueueService>>,
+    bindings: Vec<Binding>,
+    _stop: Arc<AtomicBool>,
+    _paused: Arc<AtomicBool>,
+) {
     for b in &bindings {
         close_eventfd(b.fd);
     }

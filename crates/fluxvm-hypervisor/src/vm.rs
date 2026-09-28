@@ -262,6 +262,7 @@ impl VirtualMachine {
         let vhost = if cfg.vhost_net {
             match VhostNet::open() {
                 Ok(mut v) => {
+                    let mut bind_failed = false;
                     if let Some(ref tap) = tap {
                         match v.bind_tap(tap.fd, 2) {
                             Ok(()) => {
@@ -272,8 +273,9 @@ impl VirtualMachine {
                             }
                             Err(e) => {
                                 notes.push(format!(
-                                    "vhost-net open ok, bind deferred to userspace pump: {e}"
+                                    "vhost-net cannot bind before the guest sets up its rings ({e}); using userspace virtio-net"
                                 ));
+                                bind_failed = true;
                             }
                         }
                     } else {
@@ -282,7 +284,11 @@ impl VirtualMachine {
                                 .into(),
                         );
                     }
-                    Some(v)
+                    if bind_failed {
+                        None
+                    } else {
+                        Some(v)
+                    }
                 }
                 Err(e) => {
                     notes.push(format!("vhost-net fallback to userspace TAP: {e}"));
@@ -496,7 +502,7 @@ impl VirtualMachine {
             self.tap.take(),
             self.vhost.take(),
         )));
-        queue_service::start(&kvm, queue_svc.clone(), stop.clone())?;
+        queue_service::start(&kvm, queue_svc.clone(), stop.clone(), paused.clone())?;
 
         let mut gdb_cmd_rx: Option<Receiver<GdbCmd>> = None;
         let mut gdb_stop_tx: Option<std::sync::mpsc::SyncSender<()>> = None;
