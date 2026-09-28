@@ -36,6 +36,13 @@ reaper_interval_secs = 5
 # autopause_idle_secs = 300
 # autopause_scan_secs = 10
 # egress_allow_domains = ["api.openai.com", ".github.com"]
+# HTTP method/host/path rules for the egress proxy (see docs/http-acl.md). Deny
+# wins; if any allow rule exists, a request must match one. Empty = off.
+# egress_http_rules = [
+#   "allow GET docs.python.org/*",
+#   "allow POST api.openai.com/v1/chat/completions",
+#   "deny * */admin/*",
+# ]
 # templates_dir = "/var/lib/fluxvm/templates"
 # egress_proxy_listen = "127.0.0.1:18080"
 # http_proxy_default_port = 8080

@@ -137,6 +137,10 @@ pub struct SandboxConfig {
     pub autopause_scan_secs: u64,
     /// Domain allowlist for L7 egress (empty = no L7 filter).
     pub egress_allow_domains: Vec<String>,
+    /// HTTP method/host/path rules for the L7 egress proxy, e.g.
+    /// `allow GET docs.python.org/*` or `deny * */admin/*` (empty = off). See
+    /// `docs/http-acl.md`.
+    pub egress_http_rules: Vec<String>,
     /// Inject `Authorization` on matching Host (never exposed to the guest).
     pub credential_vault: Vec<CredentialInject>,
     /// Directory for OCI→template builds and snapshot templates.
@@ -165,6 +169,7 @@ impl Default for SandboxConfig {
             autopause_idle_secs: 0,
             autopause_scan_secs: 10,
             egress_allow_domains: Vec::new(),
+            egress_http_rules: Vec::new(),
             credential_vault: Vec::new(),
             templates_dir: None,
             volumes_dir: None,
