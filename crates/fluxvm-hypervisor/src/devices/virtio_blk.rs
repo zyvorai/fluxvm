@@ -58,6 +58,12 @@ impl BlockBackend {
                 path.display()
             )));
         }
+        if magic == *b"KDMV" || magic == *b"vhdx" {
+            return Err(FluxError::Unsupported(format!(
+                "image {} contains a VMDK/VHDX header, not raw sectors",
+                path.display()
+            )));
+        }
         file.seek(SeekFrom::Start(0)).map_err(FluxError::Io)?;
         if len == 0 || len % SECTOR_SIZE != 0 {
             return Err(FluxError::Unsupported(format!(
@@ -337,6 +343,15 @@ mod tests {
         f.as_file().set_len(4096).unwrap();
         let err = BlockBackend::open(f.path(), false).err().unwrap();
         assert!(format!("{err}").contains("qcow2"));
+    }
+
+    #[test]
+    fn rejects_vmdk_before_exposing_it_as_raw_sectors() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(b"KDMV").unwrap();
+        f.as_file().set_len(4096).unwrap();
+        let err = BlockBackend::open(f.path(), false).err().unwrap();
+        assert!(format!("{err}").contains("VMDK"));
     }
 
     #[cfg(target_os = "linux")]

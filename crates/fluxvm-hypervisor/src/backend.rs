@@ -42,7 +42,7 @@ impl VmBackend for FluxVmBackend {
         let boot = BootConfig {
             kernel: kernel.clone(),
             rootfs: ctx.disk.clone(),
-            initrd: None,
+            initrd: req.initrd.clone(),
             seed: ctx.seed_disk.clone(),
             memory_mib: req.memory_mib,
             vcpus: req.vcpus,

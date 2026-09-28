@@ -609,7 +609,25 @@ pub async fn clone_for_vm(
     out: &Path,
     size_gib: Option<u64>,
 ) -> Result<()> {
+    if backend == BackendKind::FluxVm
+        && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
+        && !matches!(base.extension().and_then(|e| e.to_str()), Some("raw" | "ext4"))
+    {
+        bail!(
+            "native KVM accepts only named .raw or .ext4 images; convert {} to raw before launch",
+            base.display()
+        );
+    }
     let base_fmt = image_format(cfg, base).await?;
+    if backend == BackendKind::FluxVm
+        && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
+        && base_fmt != "raw"
+    {
+        bail!(
+            "native KVM requires a raw image, but {} contains {base_fmt} data",
+            base.display()
+        );
+    }
     match backend {
         BackendKind::Qemu => {
             // Cheap disposable copy-on-write layer.
