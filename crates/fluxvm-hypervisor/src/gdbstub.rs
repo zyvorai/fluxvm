@@ -83,7 +83,7 @@ extern "C" fn noop_signal_handler(_: i32) {}
 /// harmless handler once, before any break-in attempt, so sending it just
 /// interrupts the blocking KVM_RUN ioctl (EINTR) instead of killing the
 /// hypervisor the first time a client connects.
-fn install_signal_handler() {
+pub(crate) fn install_signal_handler() {
     unsafe {
         libc::signal(libc::SIGUSR1, noop_signal_handler as *const () as usize);
     }
@@ -93,24 +93,24 @@ fn install_signal_handler() {
 // gettid/tgkill split below exists solely so the crate still type-checks
 // when built for local tooling on a non-Linux host (macOS dev machine).
 #[cfg(target_os = "linux")]
-fn current_tid() -> i32 {
+pub(crate) fn current_tid() -> i32 {
     unsafe { libc::syscall(libc::SYS_gettid) as i32 }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn current_tid() -> i32 {
+pub(crate) fn current_tid() -> i32 {
     0
 }
 
 #[cfg(target_os = "linux")]
-fn signal_thread(tid: i32, sig: i32) {
+pub(crate) fn signal_thread(tid: i32, sig: i32) {
     unsafe {
         libc::syscall(libc::SYS_tgkill, libc::getpid(), tid, sig);
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-fn signal_thread(_tid: i32, _sig: i32) {}
+pub(crate) fn signal_thread(_tid: i32, _sig: i32) {}
 
 /// `(addr, control, cmd_tx, cmd_rx, stop_tx, stop_rx)` -- everything
 /// `run_until` needs to wire up a gdbstub session. `cmd_tx`/`stop_rx` are

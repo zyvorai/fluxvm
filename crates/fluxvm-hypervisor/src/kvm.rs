@@ -670,6 +670,26 @@ impl KvmVm {
                     // Clear x2APIC until MADT grows type-9 entries; leaf-1
                     // APIC ID + MADT local-APIC records are the topology.
                     e.ecx &= !(1 << 21);
+                    // HTT (EDX[28]) must be set for a multi-vCPU guest --
+                    // Firecracker's CPUID normalize does the same. Without
+                    // it Linux's detect_ht() bails out early and leaves
+                    // phys_proc_id == raw APIC id, so CPU1 lands in
+                    // "package 1" and identify_secondary_cpu() hits
+                    // BUG_ON("Package 1 of CPU 1 exceeds BIOS package data")
+                    // -- found live by decoding the AP thread's own serial
+                    // output (the BSP-side log never shows it).
+                    if n > 1 {
+                        e.edx |= 1 << 28;
+                    }
+                }
+                // Deterministic cache parameters: EAX[31:26] = cores per
+                // package - 1. The host value (e.g. a whole physical
+                // package) makes Linux's siblings/cores division nonsense
+                // for a small guest; report the guest's own vCPU count
+                // (one thread per core, matching Firecracker's smt=false).
+                if e.function == 4 && self.vcpus.len() > 1 {
+                    let n = self.vcpus.len() as u32;
+                    e.eax = (e.eax & 0x03ff_ffff) | ((n - 1) << 26);
                 }
                 // Host extended topology leaves (0xB / 0x1F) describe the
                 // physical package. Zero them so the guest falls back to

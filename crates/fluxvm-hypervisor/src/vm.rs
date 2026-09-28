@@ -363,6 +363,156 @@ impl VirtualMachine {
         )
     }
 
+    /// Drain pending virtio queue-notifies on the BSP thread. Guest
+    /// notifies from any vCPU only set a flag; guest RAM and backends are
+    /// owned here, so this is the single place they get serviced.
+    fn process_notifies(&mut self) {
+        let net_dev = self.net.clone();
+        if let Some(net) = net_dev {
+            if let Some(q) = virtio_mmio::take_notify(&net.state) {
+                // H3: when vhost rings are programmed, kick the
+                // kernel datapath instead of the userspace pump.
+                let use_vhost = self
+                    .vhost
+                    .as_ref()
+                    .map(|v| v.kernel_datapath())
+                    .unwrap_or(false);
+                if use_vhost {
+                    if let Some(v) = self.vhost.as_ref() {
+                        if let Err(e) = v.signal_kick(q as usize) {
+                            eprintln!("[net] vhost kick q={q}: {e}");
+                        }
+                    }
+                } else {
+                    // Late-bind VRING GPA once the guest marks
+                    // both net queues ready (desc/avail/used set).
+                    if let Some(v) = self.vhost.as_mut() {
+                        if v.bound && !v.rings_programmed {
+                            let qs = {
+                                let st = net.state.lock().unwrap();
+                                st.queues[..st.num_queues.min(2) as usize].to_vec()
+                            };
+                            let ready = qs.len() >= 2
+                                && qs.iter().all(|qq| {
+                                    qq.ready != 0
+                                        && qq.num > 0
+                                        && qq.desc != 0
+                                        && qq.avail != 0
+                                        && qq.used != 0
+                                });
+                            if ready {
+                                match v.program_vrings(self.mem.host_ptr(), self.mem.len(), &qs) {
+                                    Ok(()) => {
+                                        eprintln!("[net] vhost VRING GPA programmed (H3)");
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[net] vhost VRING program deferred: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // If programming just succeeded, kick instead of pump.
+                    if self
+                        .vhost
+                        .as_ref()
+                        .map(|v| v.kernel_datapath())
+                        .unwrap_or(false)
+                    {
+                        if let Some(v) = self.vhost.as_ref() {
+                            let _ = v.signal_kick(q as usize);
+                        }
+                    } else {
+                        let mut st = net.state.lock().unwrap();
+                        match virtio_net::handle_notify(
+                            &mut self.mem,
+                            &mut st,
+                            self.tap.as_ref(),
+                            q,
+                            Some(self.net_limiter.as_ref()),
+                        ) {
+                            Ok(n) => {
+                                eprintln!("[net] processed q={q} frames={n}");
+                                drop(st);
+                                net.raise_vring_interrupt();
+                            }
+                            Err(e) => eprintln!("[net] notify err {e}"),
+                        }
+                    }
+                }
+            }
+        }
+        if let (Some(blk), Some(backend)) = (&self.blk, &self.blk_backend) {
+            if let Some(q) = virtio_mmio::take_notify(&blk.state) {
+                let mut st = blk.state.lock().unwrap();
+                match virtio_blk::handle_notify(
+                    &mut self.mem,
+                    &mut st,
+                    backend.as_ref(),
+                    q,
+                    Some(self.blk_limiter.as_ref()),
+                ) {
+                    Ok(n) => {
+                        eprintln!("[blk] processed q={q} reqs={n}");
+                        drop(st);
+                        blk.raise_vring_interrupt();
+                    }
+                    Err(e) => eprintln!("[blk] notify err {e}"),
+                }
+            }
+        }
+        if let Some(vsock) = &self.vsock {
+            if let Some(q) = virtio_mmio::take_notify(&vsock.state) {
+                let mut st = vsock.state.lock().unwrap();
+                match virtio_vsock::handle_notify(
+                    &mut self.mem,
+                    &mut st,
+                    q,
+                    self.vsock_backend.as_deref(),
+                ) {
+                    Ok(n) => {
+                        if n > 0 {
+                            eprintln!("[vsock] processed q={q} pkts={n}");
+                        }
+                        drop(st);
+                        vsock.raise_vring_interrupt();
+                    }
+                    Err(e) => eprintln!("[vsock] notify err {e}"),
+                }
+            }
+        }
+        if let Some(balloon) = &self.balloon {
+            if let Some(q) = virtio_mmio::take_notify(&balloon.state) {
+                let mut st = balloon.state.lock().unwrap();
+                match virtio_balloon::handle_notify(&mut self.mem, &mut st, q) {
+                    Ok(n) => {
+                        if n > 0 {
+                            eprintln!("[balloon] q={q} bufs={n}");
+                        }
+                        drop(st);
+                        balloon.raise_vring_interrupt();
+                    }
+                    Err(e) => eprintln!("[balloon] notify err {e}"),
+                }
+            }
+        }
+        if let Some(rng) = &self.rng {
+            if let Some(q) = virtio_mmio::take_notify(&rng.state) {
+                let mut st = rng.state.lock().unwrap();
+                match virtio_rng::handle_notify(&mut self.mem, &mut st, q) {
+                    Ok(n) => {
+                        if n > 0 {
+                            eprintln!("[rng] q={q} bufs={n}");
+                        }
+                        drop(st);
+                        rng.raise_vring_interrupt();
+                    }
+                    Err(e) => eprintln!("[rng] notify err {e}"),
+                }
+            }
+        }
+    }
+
     pub fn run_until(
         mut self,
         stop: Arc<AtomicBool>,
@@ -452,11 +602,17 @@ impl VirtualMachine {
         // joining here could block VM teardown indefinitely; each AP
         // notices `stop` on its next wake (or the thread just outlives
         // the VM harmlessly, kept alive by its own Arc<KvmVm> clone).
+        let notify_pending = Arc::new(AtomicBool::new(false));
+        let bsp_tid = gdbstub::current_tid();
+        if num_cpus > 1 {
+            gdbstub::install_signal_handler();
+        }
         for idx in 1..num_cpus as usize {
             let kvm = kvm.clone();
             let bus = self.bus.clone();
             let stop = stop.clone();
-            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &stop));
+            let notify_pending = notify_pending.clone();
+            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &stop, &notify_pending, bsp_tid));
         }
 
         let mut gdb_cmd_rx: Option<Receiver<GdbCmd>> = None;
@@ -634,6 +790,15 @@ impl VirtualMachine {
                 }
             }
 
+            // Clear before draining: an AP that flags a notify after the
+            // swap below re-arms immediate_exit, so the next KVM_RUN
+            // returns at once instead of sleeping on a stranded request.
+            if !paused.load(Ordering::SeqCst) {
+                kvm.request_immediate_exit(0, false);
+            }
+            if notify_pending.swap(false, Ordering::SeqCst) {
+                this.process_notifies();
+            }
             let reason = kvm.run_once(0)?;
             exits += 1;
             if exits <= 20 {
@@ -678,158 +843,7 @@ impl VirtualMachine {
                         let _ = this.bus.mmio_read(addr, &mut buf);
                         kvm.mmio_set_data(0, &buf);
                     }
-                    let net_dev = this.net.clone();
-                    if let Some(net) = net_dev {
-                        if let Some(q) = virtio_mmio::take_notify(&net.state) {
-                            // H3: when vhost rings are programmed, kick the
-                            // kernel datapath instead of the userspace pump.
-                            let use_vhost = this
-                                .vhost
-                                .as_ref()
-                                .map(|v| v.kernel_datapath())
-                                .unwrap_or(false);
-                            if use_vhost {
-                                if let Some(v) = this.vhost.as_ref() {
-                                    if let Err(e) = v.signal_kick(q as usize) {
-                                        eprintln!("[net] vhost kick q={q}: {e}");
-                                    }
-                                }
-                            } else {
-                                // Late-bind VRING GPA once the guest marks
-                                // both net queues ready (desc/avail/used set).
-                                if let Some(v) = this.vhost.as_mut() {
-                                    if v.bound && !v.rings_programmed {
-                                        let qs = {
-                                            let st = net.state.lock().unwrap();
-                                            st.queues[..st.num_queues.min(2) as usize].to_vec()
-                                        };
-                                        let ready = qs.len() >= 2
-                                            && qs.iter().all(|qq| {
-                                                qq.ready != 0
-                                                    && qq.num > 0
-                                                    && qq.desc != 0
-                                                    && qq.avail != 0
-                                                    && qq.used != 0
-                                            });
-                                        if ready {
-                                            match v.program_vrings(
-                                                this.mem.host_ptr(),
-                                                this.mem.len(),
-                                                &qs,
-                                            ) {
-                                                Ok(()) => {
-                                                    eprintln!(
-                                                        "[net] vhost VRING GPA programmed (H3)"
-                                                    );
-                                                }
-                                                Err(e) => {
-                                                    eprintln!(
-                                                        "[net] vhost VRING program deferred: {e}"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                // If programming just succeeded, kick instead of pump.
-                                if this
-                                    .vhost
-                                    .as_ref()
-                                    .map(|v| v.kernel_datapath())
-                                    .unwrap_or(false)
-                                {
-                                    if let Some(v) = this.vhost.as_ref() {
-                                        let _ = v.signal_kick(q as usize);
-                                    }
-                                } else {
-                                    let mut st = net.state.lock().unwrap();
-                                    match virtio_net::handle_notify(
-                                        &mut this.mem,
-                                        &mut st,
-                                        this.tap.as_ref(),
-                                        q,
-                                        Some(this.net_limiter.as_ref()),
-                                    ) {
-                                        Ok(n) => {
-                                            eprintln!("[net] processed q={q} frames={n}");
-                                            drop(st);
-                                            net.raise_vring_interrupt();
-                                        }
-                                        Err(e) => eprintln!("[net] notify err {e}"),
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if let (Some(blk), Some(backend)) = (&this.blk, &this.blk_backend) {
-                        if let Some(q) = virtio_mmio::take_notify(&blk.state) {
-                            let mut st = blk.state.lock().unwrap();
-                            match virtio_blk::handle_notify(
-                                &mut this.mem,
-                                &mut st,
-                                backend.as_ref(),
-                                q,
-                                Some(this.blk_limiter.as_ref()),
-                            ) {
-                                Ok(n) => {
-                                    eprintln!("[blk] processed q={q} reqs={n}");
-                                    drop(st);
-                                    blk.raise_vring_interrupt();
-                                }
-                                Err(e) => eprintln!("[blk] notify err {e}"),
-                            }
-                        }
-                    }
-                    if let Some(vsock) = &this.vsock {
-                        if let Some(q) = virtio_mmio::take_notify(&vsock.state) {
-                            let mut st = vsock.state.lock().unwrap();
-                            match virtio_vsock::handle_notify(
-                                &mut this.mem,
-                                &mut st,
-                                q,
-                                this.vsock_backend.as_deref(),
-                            ) {
-                                Ok(n) => {
-                                    if n > 0 {
-                                        eprintln!("[vsock] processed q={q} pkts={n}");
-                                    }
-                                    drop(st);
-                                    vsock.raise_vring_interrupt();
-                                }
-                                Err(e) => eprintln!("[vsock] notify err {e}"),
-                            }
-                        }
-                    }
-                    if let Some(balloon) = &this.balloon {
-                        if let Some(q) = virtio_mmio::take_notify(&balloon.state) {
-                            let mut st = balloon.state.lock().unwrap();
-                            match virtio_balloon::handle_notify(&mut this.mem, &mut st, q) {
-                                Ok(n) => {
-                                    if n > 0 {
-                                        eprintln!("[balloon] q={q} bufs={n}");
-                                    }
-                                    drop(st);
-                                    balloon.raise_vring_interrupt();
-                                }
-                                Err(e) => eprintln!("[balloon] notify err {e}"),
-                            }
-                        }
-                    }
-                    if let Some(rng) = &this.rng {
-                        if let Some(q) = virtio_mmio::take_notify(&rng.state) {
-                            let mut st = rng.state.lock().unwrap();
-                            match virtio_rng::handle_notify(&mut this.mem, &mut st, q) {
-                                Ok(n) => {
-                                    if n > 0 {
-                                        eprintln!("[rng] q={q} bufs={n}");
-                                    }
-                                    drop(st);
-                                    rng.raise_vring_interrupt();
-                                }
-                                Err(e) => eprintln!("[rng] notify err {e}"),
-                            }
-                        }
-                    }
+                    this.process_notifies();
                 }
                 ffi::KVM_EXIT_HLT => {
                     // BSP HLT ends the VM (as before). An idle AP HLTing
@@ -948,7 +962,14 @@ impl VirtualMachine {
 /// Secondary-vCPU (AP) run loop. See the comment in `run_until` for the
 /// scope boundary: register-level PIO/MMIO only, no virtio queue-notify
 /// processing (that stays BSP-only).
-fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, stop: &AtomicBool) {
+fn run_ap(
+    idx: usize,
+    kvm: &KvmVm,
+    bus: &Bus,
+    stop: &AtomicBool,
+    notify_pending: &AtomicBool,
+    bsp_tid: i32,
+) {
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -978,6 +999,14 @@ fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, stop: &AtomicBool) {
                 let (addr, data, _len, is_write) = kvm.mmio_info(idx);
                 if is_write {
                     let _ = bus.mmio_write(addr, &data);
+                    // virtio-mmio QueueNotify: the BSP owns guest RAM and
+                    // the device backends, so hand the request over and
+                    // kick it out of KVM_RUN.
+                    if addr & (MMIO_LEN - 1) == 0x50 {
+                        notify_pending.store(true, Ordering::SeqCst);
+                        kvm.request_immediate_exit(0, true);
+                        gdbstub::signal_thread(bsp_tid, libc::SIGUSR1);
+                    }
                 } else {
                     let mut buf = data;
                     let _ = bus.mmio_read(addr, &mut buf);
