@@ -1,0 +1,224 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# The in-tree KVM engine ("native", no QEMU): real guest boots on hosted
+# runners (the repo is public, so /dev/kvm is available), the static guest
+# agent, and -- on the self-hosted lab runner -- the full fluxctl golden-
+# template gate.
+name: native-kvm
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-hypervisor/**'
+      - 'crates/fluxvm-image/**'
+      - 'crates/fluxvm-guest-agent/**'
+      - 'scripts/test-kvm-*.sh'
+      - 'scripts/build-guest-agent-static.sh'
+      - 'scripts/build-native-guest-image.sh'
+      - 'scripts/setup-native-agent-template.sh'
+      - 'scripts/test-native-kvm-no-qemu.sh'
+      - 'examples/fluxvm-native-*.json'
+      - 'systemd/fluxvm-guest-agent.service'
+      - '.github/workflows/native-kvm.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-hypervisor/**'
+      - 'crates/fluxvm-image/**'
+      - 'crates/fluxvm-guest-agent/**'
+      - 'scripts/test-kvm-*.sh'
+      - 'scripts/build-guest-agent-static.sh'
+      - 'scripts/build-native-guest-image.sh'
+      - 'scripts/setup-native-agent-template.sh'
+      - 'scripts/test-native-kvm-no-qemu.sh'
+      - 'examples/fluxvm-native-*.json'
+      - 'systemd/fluxvm-guest-agent.service'
+      - '.github/workflows/native-kvm.yml'
+  workflow_dispatch:
+  schedule:
+    - cron: '43 4 * * 2'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FC_KERNEL_URL: https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/kernels/vmlinux.bin
+  FC_ROOTFS_URL: https://s3.amazonaws.com/spec.ccfc.min/img/quickstart_guide/x86_64/rootfs/bionic.rootfs.ext4
+
+jobs:
+  # Boots real Linux guests through the in-tree VMM: single and multi-vCPU
+  # boot, virtio-blk from every CPU, the pause barrier across all vCPUs, and
+  # memory snapshots with restore. The scripts exit 0 with "SKIP:" when KVM or
+  # assets are missing, so every run is checked for that -- a skip is a failure
+  # unless the repo var FLUXVM_CI_KVM_OPTIONAL=1 says the runner has no KVM.
+  kvm-smokes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev e2fsprogs
+      - name: Enable KVM for the runner
+        env:
+          KVM_OPTIONAL: ${{ vars.FLUXVM_CI_KVM_OPTIONAL }}
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          ls -l /dev/kvm || true
+          if [ ! -e /dev/kvm ]; then
+            if [ "$KVM_OPTIONAL" = "1" ]; then
+              echo "::warning::/dev/kvm missing; KVM smokes will be skipped"
+              echo "NO_KVM=1" >> "$GITHUB_ENV"
+            else
+              echo "::error::/dev/kvm missing on this runner. Set repo var FLUXVM_CI_KVM_OPTIONAL=1 to accept skipping."
+              exit 1
+            fi
+          fi
+      - uses: Swatinem/rust-cache@v2
+        if: env.NO_KVM != '1'
+        with:
+          workspaces: fluxvm
+          key: native-kvm-smokes
+      - name: Build fluxvm-hypervisor
+        if: env.NO_KVM != '1'
+        working-directory: fluxvm
+        run: cargo build --release -p fluxvm-hypervisor
+      - name: Cache guest kernel + rootfs
+        if: env.NO_KVM != '1'
+        id: assets
+        uses: actions/cache@v6
+        with:
+          path: ~/kvm-assets
+          key: kvm-assets-${{ env.FC_KERNEL_URL }}-${{ env.FC_ROOTFS_URL }}
+      - name: Download guest kernel + rootfs
+        if: env.NO_KVM != '1' && steps.assets.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/kvm-assets
+          curl -fsSL --retry 3 --retry-delay 5 -o ~/kvm-assets/vmlinux "$FC_KERNEL_URL"
+          curl -fsSL --retry 3 --retry-delay 5 -o ~/kvm-assets/bionic-fabric-rootfs.ext4 "$FC_ROOTFS_URL"
+      - name: Install guest assets
+        if: env.NO_KVM != '1'
+        run: |
+          sudo install -D -m0644 ~/kvm-assets/vmlinux /var/lib/fluxvm/kernels/vmlinux
+          sudo install -D -m0644 ~/kvm-assets/bionic-fabric-rootfs.ext4 /var/lib/fluxvm/images/bionic-fabric-rootfs.ext4
+      - name: Run smokes
+        if: env.NO_KVM != '1'
+        working-directory: fluxvm
+        env:
+          FLUXVM_HYPERVISOR: ${{ github.workspace }}/fluxvm/target/release/fluxvm-hypervisor
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/logs"
+          run() {  # run NAME VAR=VAL... -- script
+            name="$1"; shift
+            echo "::group::$name"
+            sudo env FLUXVM_HYPERVISOR="$FLUXVM_HYPERVISOR" "$@" 2>&1 | tee "$RUNNER_TEMP/logs/$name.log"
+            rc=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            if [ "$rc" != 0 ]; then echo "::error::$name failed (rc=$rc)"; return 1; fi
+            if grep -q '^SKIP' "$RUNNER_TEMP/logs/$name.log"; then echo "::error::$name skipped instead of running"; return 1; fi
+          }
+          run boot bash scripts/test-kvm-linux-boot-smoke.sh
+          run smp2 CPUS=2 bash scripts/test-kvm-smp-boot.sh
+          run smp4 CPUS=4 bash scripts/test-kvm-smp-boot.sh
+          run pause1 VCPUS=1 PAUSE_DELAY=6 bash scripts/test-kvm-pause-smoke.sh
+          run pause2 VCPUS=2 PAUSE_DELAY=6 bash scripts/test-kvm-pause-smoke.sh
+          run snapshot1 VCPUS=1 PAUSE_DELAY=6 bash scripts/test-kvm-snapshot-smoke.sh
+          run snapshot2 VCPUS=2 PAUSE_DELAY=6 bash scripts/test-kvm-snapshot-smoke.sh
+      - name: Upload smoke logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: kvm-smoke-logs
+          path: ${{ runner.temp }}/logs/
+
+  # The guest agent must run in any guest regardless of its glibc (a modern-
+  # host build failed to exec in Ubuntu 18.04). No KVM needed.
+  static-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev shellcheck
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: native-kvm-static-agent
+      - name: Build static guest agent
+        working-directory: fluxvm
+        run: scripts/build-guest-agent-static.sh
+      - name: Assert static and runnable
+        working-directory: fluxvm
+        run: |
+          bin=target/x86_64-unknown-linux-musl/release/fluxvm-guest-agent
+          ldd "$bin" 2>&1 | tee /dev/stderr | grep -qiE 'not a dynamic executable|statically linked'
+          "$bin" --help >/dev/null
+      - name: Lint the image and template scripts
+        working-directory: fluxvm
+        run: |
+          for f in scripts/build-guest-agent-static.sh scripts/build-native-guest-image.sh \
+                   scripts/setup-native-agent-template.sh scripts/test-native-kvm-no-qemu.sh \
+                   scripts/test-kvm-linux-boot-smoke.sh scripts/test-kvm-smp-boot.sh \
+                   scripts/test-kvm-pause-smoke.sh scripts/test-kvm-snapshot-smoke.sh; do
+            bash -n "$f"
+            shellcheck -S error "$f"
+          done
+      - name: Validate the golden template spec
+        working-directory: fluxvm
+        run: |
+          python3 - <<'PY'
+          import json
+          spec = json.load(open("examples/fluxvm-native-agent.json"))
+          assert spec["backend"] == "flux-vm", spec
+          assert spec["agent"]["enabled"] is True, spec
+          assert spec["network"]["mode"] == "none", spec
+          for key in ("image", "kernel", "name"):
+              assert spec.get(key), key
+          print("native-agent spec OK")
+          PY
+
+  # Full acceptance on the lab host, through a real fluxctl create: builds the
+  # golden Cloud-init + static-agent template once (idempotent), then asserts
+  # the native VMM runs, the agent answers over vsock inside the guest, and the
+  # NoCloud hostname is applied. Also drives a VM sandbox change-set through the
+  # Python SDK. Enable with repo var FLUXVM_NATIVE_KVM_LIVE_CI=1.
+  native-gate-lab:
+    if: ${{ vars.FLUXVM_NATIVE_KVM_LIVE_CI == '1' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') }}
+    runs-on: [self-hosted, linux, x64, fluxvm-lab]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build or refresh the golden template
+        run: sudo scripts/setup-native-agent-template.sh
+      - name: Native acceptance gate (agent + NoCloud)
+        run: sudo env FLUXVM_AGENT=1 scripts/test-native-kvm-no-qemu.sh
+      - name: VM sandbox change-set through the SDK
+        env:
+          FLUXVM_LIVE_URL: ${{ vars.FLUXVM_LAB_API_URL || 'http://127.0.0.1:7788' }}
+        run: python3 -m unittest python/tests/live_vm.py -v

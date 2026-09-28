@@ -251,3 +251,104 @@ jobs:
           sudo apt-get install -y -qq nftables iproute2 python3
           sudo -E ./scripts/evidence-networkpolicy-second-cni.sh
           sudo -E env FLUXVM_CNI_CHURN_ROUNDS=3 bash scripts/evidence-cni-churn.sh
+
+  egress-acl:
+    name: Egress HTTP/HTTPS ACL
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-egress
+      - name: Egress ACL + TLS interception tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-network -p fluxvm-core
+
+  sandbox-api:
+    name: Sandbox API (change-set, procbox kind)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-sandbox-api
+      - name: Scheduler + API tests
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-scheduler -p fluxvm-api
+
+  procbox:
+    name: procbox (Landlock + seccomp)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit sibling
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: all-features-procbox
+      - name: procbox tests (unprivileged)
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-procbox
+
+  python-sdk:
+    name: Python SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: SDK unit tests
+        run: python3 -m unittest discover -s python/tests -v
+
+  go-sdk:
+    name: Go SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: gofmt, vet and tests
+        working-directory: go
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+          go test -race ./...
