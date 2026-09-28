@@ -1,30 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="FluxVM — Real VMs. Real API. One Rust control plane and one REST API for Firecracker, Cloud Hypervisor, QEMU/KVM and the FluxVM hypervisor. No libvirtd, no XML.">
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="640" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#f5f5f7"/>
+      <stop offset="0" stop-color="#000000"/>
+      <stop offset="1" stop-color="#0b0b0f"/>
     </linearGradient>
     <radialGradient id="wash" cx="1010" cy="300" r="520" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0071e3" stop-opacity="0.10"/>
-      <stop offset="0.6" stop-color="#0071e3" stop-opacity="0.05"/>
-      <stop offset="1" stop-color="#0071e3" stop-opacity="0"/>
+      <stop offset="0" stop-color="#2997ff" stop-opacity="0.20"/>
+      <stop offset="0.6" stop-color="#2997ff" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#2997ff" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0071e3"/>
-      <stop offset="1" stop-color="#2997ff"/>
+      <stop offset="0" stop-color="#0a84ff"/>
+      <stop offset="1" stop-color="#5eb0ff"/>
     </linearGradient>
     <linearGradient id="blueText" x1="78" y1="0" x2="470" y2="0" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#0071e3"/>
-      <stop offset="1" stop-color="#2997ff"/>
+      <stop offset="0" stop-color="#0a84ff"/>
+      <stop offset="1" stop-color="#5eb0ff"/>
     </linearGradient>
     <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#0071e3" stop-opacity="0.9"/>
-      <stop offset="1" stop-color="#0071e3" stop-opacity="0.35"/>
+      <stop offset="0" stop-color="#2997ff" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#2997ff" stop-opacity="0.35"/>
     </linearGradient>
     <filter id="shadow" x="-20%" y="-30%" width="140%" height="180%" color-interpolation-filters="sRGB">
       <feGaussianBlur in="SourceAlpha" stdDeviation="9"/>
       <feOffset dy="8" result="b"/>
-      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.10 0" result="s"/>
+      <feColorMatrix in="b" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.55 0" result="s"/>
       <feMerge><feMergeNode in="s"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
     <filter id="glow" x="-30%" y="-40%" width="160%" height="200%" color-interpolation-filters="sRGB">
@@ -43,28 +43,28 @@
   <path d="M96.5 79.5 127.5 79.5 96.5 112.5 127.5 112.5" fill="none" stroke="#ffffff"
         stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
   <text x="162" y="108" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif"
-        font-size="40" font-weight="700" fill="#1d1d1f" letter-spacing="-0.8">FluxVM</text>
+        font-size="40" font-weight="700" fill="#f5f5f7" letter-spacing="-0.8">FluxVM</text>
 
   <!-- headline -->
   <text font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="80" font-weight="700"
         letter-spacing="-2.4">
-    <tspan x="76" y="252" fill="#1d1d1f">Real VMs.</tspan>
+    <tspan x="76" y="252" fill="#f5f5f7">Real VMs.</tspan>
     <tspan x="76" y="336" fill="url(#blueText)">Real API.</tspan>
   </text>
 
   <!-- sub -->
-  <g font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="26" fill="#6e6e73">
+  <g font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="26" fill="#a1a1a6">
     <text x="80" y="398">One Rust control plane. One REST API.</text>
     <text x="80" y="434">No libvirtd, no XML.</text>
   </g>
 
   <!-- proof chips -->
-  <g font-family="'Menlo','JetBrains Mono',monospace" font-size="17" font-weight="700" fill="#0066cc">
-    <rect x="80" y="478" width="222" height="46" rx="23" fill="#e8f2fd" stroke="#b9d7f7"/>
+  <g font-family="'Menlo','JetBrains Mono',monospace" font-size="17" font-weight="700" fill="#66b2ff">
+    <rect x="80" y="478" width="222" height="46" rx="23" fill="#0b2542" stroke="#17426f"/>
     <text x="102" y="507">Network Fabric GA</text>
-    <rect x="316" y="478" width="150" height="46" rx="23" fill="#e8f2fd" stroke="#b9d7f7"/>
+    <rect x="316" y="478" width="150" height="46" rx="23" fill="#0b2542" stroke="#17426f"/>
     <text x="338" y="507">Apache-2.0</text>
-    <rect x="480" y="478" width="242" height="46" rx="23" fill="#e8f2fd" stroke="#b9d7f7"/>
+    <rect x="480" y="478" width="242" height="46" rx="23" fill="#0b2542" stroke="#17426f"/>
     <text x="502" y="507">k3s + 2-host tested</text>
   </g>
 
@@ -76,7 +76,7 @@
       <path d="M912 320 C 940 320, 940 374, 956 374"/>
       <path d="M912 320 C 940 320, 940 470, 956 470"/>
     </g>
-    <g fill="#0071e3">
+    <g fill="#2997ff">
       <circle cx="912" cy="320" r="5.5"/>
       <circle cx="956" cy="170" r="4.5"/>
       <circle cx="956" cy="266" r="4.5"/>
@@ -88,34 +88,34 @@
     <text x="817" y="312" text-anchor="middle" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif"
           font-size="30" font-weight="700" fill="#ffffff">REST API</text>
     <text x="817" y="346" text-anchor="middle" font-family="'Menlo','JetBrains Mono',monospace"
-          font-size="16" fill="#dcecff">fluxctl serve</text>
+          font-size="16" fill="#d6e9ff">fluxctl serve</text>
 
     <g font-family="'Helvetica Neue',Helvetica,Arial,sans-serif">
-      <rect x="964" y="138" width="246" height="64" rx="16" fill="#ffffff" stroke="#d2d2d7" filter="url(#shadow)"/>
-      <text x="986" y="166" font-size="21" font-weight="700" fill="#1d1d1f">Firecracker</text>
-      <text x="986" y="187" font-size="14" font-family="'Menlo',monospace" fill="#6e6e73">microVM · jailer</text>
+      <rect x="964" y="138" width="246" height="64" rx="16" fill="#1c1c1e" stroke="#3a3a3c" filter="url(#shadow)"/>
+      <text x="986" y="166" font-size="21" font-weight="700" fill="#f5f5f7">Firecracker</text>
+      <text x="986" y="187" font-size="14" font-family="'Menlo',monospace" fill="#a1a1a6">microVM · jailer</text>
 
-      <rect x="964" y="234" width="246" height="64" rx="16" fill="#ffffff" stroke="#d2d2d7" filter="url(#shadow)"/>
-      <text x="986" y="262" font-size="21" font-weight="700" fill="#1d1d1f">Cloud Hypervisor</text>
-      <text x="986" y="283" font-size="14" font-family="'Menlo',monospace" fill="#6e6e73">Rust VMM</text>
+      <rect x="964" y="234" width="246" height="64" rx="16" fill="#1c1c1e" stroke="#3a3a3c" filter="url(#shadow)"/>
+      <text x="986" y="262" font-size="21" font-weight="700" fill="#f5f5f7">Cloud Hypervisor</text>
+      <text x="986" y="283" font-size="14" font-family="'Menlo',monospace" fill="#a1a1a6">Rust VMM</text>
 
-      <rect x="964" y="342" width="246" height="64" rx="16" fill="#ffffff" stroke="#d2d2d7" filter="url(#shadow)"/>
-      <text x="986" y="370" font-size="21" font-weight="700" fill="#1d1d1f">QEMU / KVM</text>
-      <text x="986" y="391" font-size="14" font-family="'Menlo',monospace" fill="#6e6e73">qcow2 · QMP</text>
+      <rect x="964" y="342" width="246" height="64" rx="16" fill="#1c1c1e" stroke="#3a3a3c" filter="url(#shadow)"/>
+      <text x="986" y="370" font-size="21" font-weight="700" fill="#f5f5f7">QEMU / KVM</text>
+      <text x="986" y="391" font-size="14" font-family="'Menlo',monospace" fill="#a1a1a6">qcow2 · QMP</text>
 
-      <rect x="964" y="438" width="246" height="64" rx="16" fill="#ffffff" stroke="#0071e3" stroke-opacity="0.75" stroke-width="1.5" filter="url(#shadow)"/>
-      <text x="986" y="466" font-size="21" font-weight="700" fill="#1d1d1f">FluxVM hypervisor</text>
-      <text x="986" y="487" font-size="14" font-family="'Menlo',monospace" fill="#6e6e73">snapshots · sandboxes</text>
+      <rect x="964" y="438" width="246" height="64" rx="16" fill="#1c1c1e" stroke="#2997ff" stroke-opacity="0.75" stroke-width="1.5" filter="url(#shadow)"/>
+      <text x="986" y="466" font-size="21" font-weight="700" fill="#f5f5f7">FluxVM hypervisor</text>
+      <text x="986" y="487" font-size="14" font-family="'Menlo',monospace" fill="#a1a1a6">snapshots · sandboxes</text>
       <circle cx="1192" cy="456" r="5" fill="#ff6a2a"/>
     </g>
   </g>
 
   <!-- footer -->
-  <line x1="80" y1="556" x2="1200" y2="556" stroke="#e5e5ea" stroke-width="1"/>
+  <line x1="80" y1="556" x2="1200" y2="556" stroke="#2c2c2e" stroke-width="1"/>
   <text x="80" y="598" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif" font-size="18"
-        fill="#6e6e73">Secure, isolated VMs on Linux · Host-local libvirt replacement</text>
+        fill="#a1a1a6">Secure, isolated VMs on Linux · Host-local libvirt replacement</text>
   <text x="1200" y="586" text-anchor="end" font-family="'Menlo','JetBrains Mono',monospace"
-        font-size="16" fill="#6e6e73">github.com/zyvorai/fluxvm</text>
+        font-size="16" fill="#a1a1a6">github.com/zyvorai/fluxvm</text>
   <text x="1200" y="614" text-anchor="end" font-family="'Helvetica Neue',Helvetica,Arial,sans-serif"
-        font-size="24" font-weight="700" fill="#0071e3">zyvor.dev</text>
+        font-size="24" font-weight="700" fill="#2997ff">zyvor.dev</text>
 </svg>
