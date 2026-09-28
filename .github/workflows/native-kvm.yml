@@ -136,10 +136,16 @@ jobs:
           run boot bash scripts/test-kvm-linux-boot-smoke.sh
           run smp2 CPUS=2 bash scripts/test-kvm-smp-boot.sh
           run smp4 CPUS=4 bash scripts/test-kvm-smp-boot.sh
+          run topo1 CPUS=1 bash scripts/test-kvm-topology.sh
+          run topo2 CPUS=2 bash scripts/test-kvm-topology.sh
+          run topo4 CPUS=4 bash scripts/test-kvm-topology.sh
+          run topo2max4 CPUS=2 MAX_CPUS=4 bash scripts/test-kvm-topology.sh
           run pause1 VCPUS=1 PAUSE_DELAY=6 bash scripts/test-kvm-pause-smoke.sh
           run pause2 VCPUS=2 PAUSE_DELAY=6 bash scripts/test-kvm-pause-smoke.sh
           run snapshot1 VCPUS=1 PAUSE_DELAY=6 bash scripts/test-kvm-snapshot-smoke.sh
           run snapshot2 VCPUS=2 PAUSE_DELAY=6 bash scripts/test-kvm-snapshot-smoke.sh
+          run snapshot-progress1 VCPUS=1 bash scripts/test-kvm-snapshot-progress.sh
+          run snapshot-progress2 VCPUS=2 bash scripts/test-kvm-snapshot-progress.sh
       - name: Upload smoke logs
         if: failure()
         uses: actions/upload-artifact@v7

@@ -12,7 +12,7 @@
 use crate::policy::TcpRule;
 use crate::profile::{NetRule, Profile};
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -21,7 +21,8 @@ use std::path::{Component, Path, PathBuf};
 
 /// Everything the traced program did that a profile could care about. Paths
 /// are canonical (symlinks resolved) where the path existed.
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, default)]
 pub struct Observed {
     /// Regular files opened read-only.
     pub read_files: BTreeSet<PathBuf>,
@@ -1116,6 +1117,664 @@ mod tracer {
     }
 }
 
+// ------------------------------------------------------------------ merging
+
+/// Version of the `<profile>.observed.json` sidecar this build reads and writes.
+pub const SIDECAR_VERSION: u32 = 1;
+const MAX_SIDECAR_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RUNS: usize = 256;
+const MAX_ENTRIES: usize = 200_000;
+const MAX_TEXT: usize = 4096;
+/// Label of the synthetic run that carries a hand-written prior profile.
+pub const PRIOR_LABEL: &str = "prior";
+/// Label of the synthetic run that carries hand edits found in a prior profile.
+pub const PRIOR_EDITED_LABEL: &str = "prior-edited";
+
+impl Observed {
+    /// Union `other` into `self`: sets are unioned, counters add.
+    pub fn merge(&mut self, other: &Observed) {
+        self.read_files.extend(other.read_files.iter().cloned());
+        self.read_dirs.extend(other.read_dirs.iter().cloned());
+        self.exec.extend(other.exec.iter().cloned());
+        self.write_files.extend(other.write_files.iter().cloned());
+        self.create_files.extend(other.create_files.iter().cloned());
+        self.mutated_dirs.extend(other.mutated_dirs.iter().cloned());
+        self.tcp_connect.extend(other.tcp_connect.iter().copied());
+        self.tcp_bind.extend(other.tcp_bind.iter().copied());
+        self.tcp_endpoints
+            .extend(other.tcp_endpoints.iter().cloned());
+        self.unix_sockets.extend(other.unix_sockets.iter().cloned());
+        self.other_endpoints
+            .extend(other.other_endpoints.iter().cloned());
+        self.notes.extend(other.notes.iter().cloned());
+        self.processes = self.processes.saturating_add(other.processes);
+        self.syscalls = self.syscalls.saturating_add(other.syscalls);
+    }
+
+    fn entry_count(&self) -> usize {
+        self.read_files.len()
+            + self.read_dirs.len()
+            + self.exec.len()
+            + self.write_files.len()
+            + self.create_files.len()
+            + self.mutated_dirs.len()
+            + self.tcp_connect.len()
+            + self.tcp_bind.len()
+            + self.tcp_endpoints.len()
+            + self.unix_sockets.len()
+            + self.other_endpoints.len()
+            + self.notes.len()
+    }
+
+    fn validate(&self, what: &str) -> Result<()> {
+        anyhow::ensure!(
+            self.entry_count() <= MAX_ENTRIES,
+            "{what}: more than {MAX_ENTRIES} observations"
+        );
+        let paths = self
+            .read_files
+            .iter()
+            .chain(&self.read_dirs)
+            .chain(&self.exec)
+            .chain(&self.write_files)
+            .chain(&self.create_files)
+            .chain(&self.mutated_dirs)
+            .chain(&self.unix_sockets);
+        for p in paths {
+            let s = p.as_os_str().as_bytes();
+            anyhow::ensure!(
+                p.is_absolute() && s.len() <= MAX_TEXT && !s.contains(&0),
+                "{what}: bad path {p:?} (must be absolute, under {MAX_TEXT} bytes, no NUL)"
+            );
+        }
+        for t in self
+            .tcp_endpoints
+            .iter()
+            .chain(&self.other_endpoints)
+            .chain(&self.notes)
+        {
+            anyhow::ensure!(
+                t.len() <= MAX_TEXT,
+                "{what}: text entry over {MAX_TEXT} bytes"
+            );
+        }
+        Ok(())
+    }
+}
+
+/// One observed run: what a command touched, plus how it ended. The wall
+/// time is deliberately not stored so re-learning the same run is a no-op.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunRecord {
+    pub label: String,
+    pub observed: Observed,
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    #[serde(default)]
+    pub signal: Option<i32>,
+    #[serde(default)]
+    pub timed_out: bool,
+}
+
+impl RunRecord {
+    pub fn from_result(label: impl Into<String>, r: &LearnResult) -> RunRecord {
+        RunRecord {
+            label: label.into(),
+            observed: r.observed.clone(),
+            exit_code: r.exit_code,
+            signal: r.signal,
+            timed_out: r.timed_out,
+        }
+    }
+
+    /// The command exited 0 within the time limit. Synthetic runs (`prior`,
+    /// `prior-edited`) count as fine.
+    pub fn succeeded(&self) -> bool {
+        (self.exit_code == Some(0) && !self.timed_out)
+            || (self.exit_code.is_none() && self.signal.is_none() && !self.timed_out)
+    }
+
+    fn how(&self) -> String {
+        if self.timed_out {
+            "killed by the time limit".into()
+        } else if let Some(c) = self.exit_code {
+            format!("exited with status {c}")
+        } else if let Some(s) = self.signal {
+            format!("killed by signal {s}")
+        } else {
+            "carried over from the prior profile".into()
+        }
+    }
+}
+
+/// What [`Sidecar::add_run`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunChange {
+    Added,
+    Replaced,
+    Unchanged,
+}
+
+/// The raw observations behind a learned profile, saved next to it as
+/// `<profile>.observed.json` so later runs can be merged losslessly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sidecar {
+    pub version: u32,
+    pub runs: Vec<RunRecord>,
+}
+
+impl Default for Sidecar {
+    fn default() -> Self {
+        Sidecar {
+            version: SIDECAR_VERSION,
+            runs: Vec::new(),
+        }
+    }
+}
+
+impl Sidecar {
+    /// `<profile>.observed.json`: the profile's full file name plus the suffix.
+    pub fn path_for(profile: &Path) -> PathBuf {
+        let mut s = profile.as_os_str().to_owned();
+        s.push(".observed.json");
+        PathBuf::from(s)
+    }
+
+    /// Reject anything a well-formed file from this tool could not contain.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.version == SIDECAR_VERSION,
+            "unsupported observation file version {} (this build reads version {SIDECAR_VERSION})",
+            self.version
+        );
+        anyhow::ensure!(self.runs.len() <= MAX_RUNS, "more than {MAX_RUNS} runs");
+        let mut seen = BTreeSet::new();
+        let mut total = 0usize;
+        for r in &self.runs {
+            anyhow::ensure!(
+                !r.label.is_empty() && r.label.len() <= MAX_TEXT,
+                "a run label is empty or over {MAX_TEXT} bytes"
+            );
+            anyhow::ensure!(seen.insert(&r.label), "duplicate run label {:?}", r.label);
+            r.observed.validate(&format!("run {:?}", r.label))?;
+            total = total.saturating_add(r.observed.entry_count());
+        }
+        anyhow::ensure!(total <= MAX_ENTRIES * 4, "observation file is too large");
+        Ok(())
+    }
+
+    pub fn from_json_str(s: &str) -> Result<Sidecar> {
+        anyhow::ensure!(
+            s.len() as u64 <= MAX_SIDECAR_BYTES,
+            "observation file over {MAX_SIDECAR_BYTES} bytes"
+        );
+        let sc: Sidecar = serde_json::from_str(s)
+            .map_err(|e| anyhow::anyhow!("invalid observation file: {e}"))?;
+        sc.validate()?;
+        Ok(sc)
+    }
+
+    pub fn load(path: &Path) -> Result<Sidecar> {
+        let len = std::fs::metadata(path)
+            .with_context(|| format!("reading {}", path.display()))?
+            .len();
+        anyhow::ensure!(
+            len <= MAX_SIDECAR_BYTES,
+            "{} is over {MAX_SIDECAR_BYTES} bytes",
+            path.display()
+        );
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        Sidecar::from_json_str(&text).with_context(|| path.display().to_string())
+    }
+
+    /// Stable JSON: runs sorted by label, sets already sorted.
+    pub fn to_json_string(&self) -> Result<String> {
+        let mut sorted = self.clone();
+        sorted.runs.sort_by(|a, b| a.label.cmp(&b.label));
+        let mut text = serde_json::to_string_pretty(&sorted)?;
+        text.push('\n');
+        Ok(text)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        write_atomic(path, &self.to_json_string()?)
+    }
+
+    /// Add a run, replacing any earlier run with the same label. Re-adding an
+    /// identical run changes nothing.
+    pub fn add_run(&mut self, run: RunRecord) -> RunChange {
+        let change = match self.runs.iter_mut().find(|r| r.label == run.label) {
+            Some(existing) if *existing == run => RunChange::Unchanged,
+            Some(existing) => {
+                *existing = run;
+                RunChange::Replaced
+            }
+            None => {
+                self.runs.push(run);
+                RunChange::Added
+            }
+        };
+        self.runs.sort_by(|a, b| a.label.cmp(&b.label));
+        change
+    }
+
+    /// Drop a run by label; false if there was none.
+    pub fn forget(&mut self, label: &str) -> bool {
+        let before = self.runs.len();
+        self.runs.retain(|r| r.label != label);
+        self.runs.len() != before
+    }
+
+    /// Everything every run observed, unioned.
+    pub fn union(&self) -> Observed {
+        let mut all = Observed::default();
+        for r in &self.runs {
+            all.merge(&r.observed);
+        }
+        all
+    }
+}
+
+/// Write `text` to `path` through a temporary file in the same directory.
+fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("{} has no file name", path.display()))?
+        .to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.tmp{}", std::process::id()));
+    std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::anyhow!("replacing {}: {e}", path.display())
+    })
+}
+
+/// Write the profile text and its sidecar; the sidecar lands first so a
+/// failure between the two never leaves a profile without its observations.
+pub fn write_profile_and_sidecar(
+    profile_path: &Path,
+    profile_text: &str,
+    sidecar: &Sidecar,
+) -> Result<()> {
+    sidecar.save(&Sidecar::path_for(profile_path))?;
+    write_atomic(profile_path, profile_text)
+}
+
+/// The prior state a merge starts from.
+pub enum Prior {
+    /// A fresh learn: nothing to merge with.
+    None,
+    /// A learned profile with its sidecar.
+    Full { profile: Profile, sidecar: Sidecar },
+    /// A hand-written or sidecar-less profile: its grants become observations
+    /// labelled `prior`.
+    ProfileOnly { profile: Profile },
+}
+
+/// The outcome of [`plan_merge`].
+#[derive(Debug, Clone)]
+pub struct Merged {
+    pub sidecar: Sidecar,
+    /// The union of every run's observations.
+    pub observed: Observed,
+    /// The merged profile (learned keys regenerated, other keys kept from
+    /// the prior profile) and the reasoning behind it.
+    pub generalized: Generalized,
+    /// What the merge itself did: runs added/replaced, keys kept, hand edits.
+    pub notes: Vec<String>,
+}
+
+impl Merged {
+    pub fn runs_succeeded(&self) -> bool {
+        self.sidecar.runs.iter().all(RunRecord::succeeded)
+    }
+}
+
+fn is_learned_broad(p: &Path) -> bool {
+    too_broad(p) && !SCRATCH_DIRS.iter().any(|d| p == Path::new(d))
+}
+
+/// Observations equivalent to a profile's grants (`is_file` says whether a
+/// path is an existing regular file; anything else becomes a directory rule).
+/// Grants too broad for `learn` to ever produce (`/`, `/home`, `/etc`, ...)
+/// are not carried over.
+pub fn observed_from_profile(
+    profile: &Profile,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> (Observed, Vec<String>) {
+    let mut o = Observed::default();
+    let mut notes = Vec::new();
+    for p in &profile.fs_read {
+        if is_learned_broad(p) {
+            notes.push(format!(
+                "prior read grant {} is too broad for a learned profile and was not carried over",
+                p.display()
+            ));
+        } else if is_file(p) {
+            o.read_files.insert(p.clone());
+        } else {
+            o.read_dirs.insert(p.clone());
+        }
+    }
+    for p in &profile.fs_write {
+        if is_learned_broad(p) {
+            notes.push(format!(
+                "prior write grant {} is too broad for a learned profile and was not carried over",
+                p.display()
+            ));
+        } else if is_file(p) {
+            o.write_files.insert(p.clone());
+        } else {
+            o.mutated_dirs.insert(p.clone());
+        }
+    }
+    if let Some(NetRule::Ports(ports)) = &profile.net_connect {
+        o.tcp_connect.extend(ports.iter().copied());
+    }
+    if let Some(NetRule::Ports(ports)) = &profile.net_bind {
+        o.tcp_bind.extend(ports.iter().copied());
+    }
+    (o, notes)
+}
+
+/// Merge new runs (and an optional prior profile) into one profile.
+///
+/// Pure apart from the `is_file` probe used to read a hand-written prior. The
+/// merged profile always comes out of [`generalize`] over the union of all
+/// observations, so merging can never grant more than generalizing those
+/// same observations would.
+pub fn plan_merge(
+    prior: Prior,
+    forget: &[String],
+    new_runs: Vec<RunRecord>,
+    is_file: &dyn Fn(&Path) -> bool,
+) -> Result<Merged> {
+    let mut notes = Vec::new();
+    let (prior_profile, mut sidecar) = match prior {
+        Prior::None => (None, Sidecar::default()),
+        Prior::Full { profile, sidecar } => {
+            sidecar.validate()?;
+            let mut sidecar = sidecar;
+            // Hand edits: grants in the prior profile that the tool's own
+            // output for the recorded runs would not contain.
+            let regen = generalize(&sidecar.union()).profile;
+            let mut extra = Profile {
+                fs_read: profile
+                    .fs_read
+                    .iter()
+                    .filter(|p| !regen.fs_read.contains(p))
+                    .cloned()
+                    .collect(),
+                fs_write: profile
+                    .fs_write
+                    .iter()
+                    .filter(|p| !regen.fs_write.contains(p))
+                    .cloned()
+                    .collect(),
+                ..Profile::default()
+            };
+            extra.net_connect = ports_not_in(&profile.net_connect, &regen.net_connect);
+            extra.net_bind = ports_not_in(&profile.net_bind, &regen.net_bind);
+            let (edited, skipped) = observed_from_profile(&extra, is_file);
+            notes.extend(skipped);
+            if edited.entry_count() > 0 {
+                let mut combined = sidecar
+                    .runs
+                    .iter()
+                    .find(|r| r.label == PRIOR_EDITED_LABEL)
+                    .map(|r| r.observed.clone())
+                    .unwrap_or_default();
+                combined.merge(&edited);
+                notes.push(format!(
+                    "the prior profile was edited by hand: {} extra grant(s) are kept as run \
+                     \"{PRIOR_EDITED_LABEL}\"; hand removals of learned grants are not \
+                     preserved (drop a run with --forget instead)",
+                    edited.entry_count()
+                ));
+                sidecar.add_run(RunRecord {
+                    label: PRIOR_EDITED_LABEL.into(),
+                    observed: combined,
+                    exit_code: None,
+                    signal: None,
+                    timed_out: false,
+                });
+            }
+            (Some(profile), sidecar)
+        }
+        Prior::ProfileOnly { profile } => {
+            let (o, skipped) = observed_from_profile(&profile, is_file);
+            notes.extend(skipped);
+            notes.push(format!(
+                "no observation file for the prior profile: its grants are treated as observations \
+                 labelled \"{PRIOR_LABEL}\""
+            ));
+            let mut sc = Sidecar::default();
+            sc.add_run(RunRecord {
+                label: PRIOR_LABEL.into(),
+                observed: o,
+                exit_code: None,
+                signal: None,
+                timed_out: false,
+            });
+            (Some(profile), sc)
+        }
+    };
+    for label in forget {
+        anyhow::ensure!(
+            sidecar.forget(label),
+            "--forget {label:?}: no such run (have: {})",
+            sidecar
+                .runs
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        notes.push(format!("forgot run \"{label}\""));
+    }
+    for run in new_runs {
+        let label = run.label.clone();
+        match sidecar.add_run(run) {
+            RunChange::Added => notes.push(format!("added run \"{label}\"")),
+            RunChange::Replaced => notes.push(format!("replaced run \"{label}\" with the new one")),
+            RunChange::Unchanged => notes.push(format!("run \"{label}\" was already recorded")),
+        }
+    }
+    sidecar.validate()?;
+
+    let observed = sidecar.union();
+    let mut g = generalize(&observed);
+    let nruns = sidecar.runs.len();
+    for r in g.review.iter_mut() {
+        if r.starts_with("one run cannot prove completeness") {
+            *r = format!(
+                "{nruns} run(s) cannot prove completeness: code paths that none of them executed \
+                 are not in this profile"
+            );
+        }
+    }
+
+    // Learned keys come from the union; everything else is the prior's.
+    let learned = g.profile.clone();
+    let mut profile = prior_profile.clone().unwrap_or_default();
+    profile.fs_read = learned.fs_read;
+    profile.fs_write = learned.fs_write;
+    for (slot, fresh, name) in [
+        (&mut profile.net_connect, learned.net_connect, "net_connect"),
+        (&mut profile.net_bind, learned.net_bind, "net_bind"),
+    ] {
+        if matches!(slot, Some(NetRule::Keyword(k)) if k == "any") {
+            g.review.push(format!(
+                "{name} = \"any\" was set by hand in the prior profile and is kept as is"
+            ));
+        } else {
+            *slot = fresh;
+        }
+    }
+    if prior_profile.is_some() {
+        notes.push(
+            "learned keys (fs_read, fs_write, net_*) were regenerated from all runs; other keys \
+             (limits, syscall overrides, env, ...) are kept from the prior profile; comments in \
+             the prior file are not preserved"
+                .into(),
+        );
+    }
+    profile
+        .validate()
+        .context("the merged profile failed validation")?;
+    g.profile = profile;
+    Ok(Merged {
+        sidecar,
+        observed,
+        generalized: g,
+        notes,
+    })
+}
+
+fn ports_not_in(prior: &Option<NetRule>, regen: &Option<NetRule>) -> Option<NetRule> {
+    let Some(NetRule::Ports(p)) = prior else {
+        return None;
+    };
+    let have: BTreeSet<u16> = match regen {
+        Some(NetRule::Ports(r)) => r.iter().copied().collect(),
+        _ => BTreeSet::new(),
+    };
+    let extra: Vec<u16> = p.iter().copied().filter(|x| !have.contains(x)).collect();
+    if extra.is_empty() {
+        None
+    } else {
+        Some(NetRule::Ports(extra))
+    }
+}
+
+/// The merged profile as commented TOML: the same header and review blocks as
+/// [`render_toml`], plus the list of runs.
+pub fn render_merged_toml(m: &Merged) -> Result<String> {
+    let mut out = String::new();
+    out.push_str("# Generated by `fluxvm-procbox learn`. REVIEW BEFORE USE.\n");
+    out.push_str(&format!(
+        "# Merged {} run(s); observed {} process(es), {} decoded syscall(s) in total:\n",
+        m.sidecar.runs.len(),
+        m.observed.processes,
+        m.observed.syscalls
+    ));
+    for r in &m.sidecar.runs {
+        out.push_str(&format!("#   - {}: {}\n", one_line(&r.label), r.how()));
+    }
+    let failed = m.sidecar.runs.iter().filter(|r| !r.succeeded()).count();
+    if failed > 0 {
+        out.push_str(&format!(
+            "# WARNING: {failed} run(s) did not exit 0, so this profile may be missing accesses \
+             they would\n# have made on a successful run.\n"
+        ));
+    }
+    if !m.notes.is_empty() {
+        out.push_str("#\n# This merge:\n");
+        for n in &m.notes {
+            out.push_str(&format!("#   - {}\n", one_line(n)));
+        }
+    }
+    if !m.generalized.generalized.is_empty() {
+        out.push_str("#\n# Generalized:\n");
+        for g in &m.generalized.generalized {
+            out.push_str(&format!("#   - {}\n", one_line(g)));
+        }
+    }
+    if !m.generalized.review.is_empty() {
+        out.push_str("#\n# Needs human review:\n");
+        for r in &m.generalized.review {
+            out.push_str(&format!("#   - {}\n", one_line(r)));
+        }
+    }
+    out.push('\n');
+    out.push_str(&m.generalized.profile.to_toml_string()?);
+    Ok(out)
+}
+
+/// Keep a value on one comment line (labels are command lines).
+fn one_line(s: &str) -> String {
+    s.replace(['\n', '\r'], " ")
+}
+
+/// Learn several commands in sequence, one [`RunRecord`] each.
+pub fn learn_all(runs: &[(String, Vec<String>)], opts: &LearnOptions) -> Result<Vec<RunRecord>> {
+    let mut out = Vec::new();
+    for (label, argv) in runs {
+        let res = learn(argv, opts).with_context(|| format!("learning {label:?}"))?;
+        out.push(RunRecord::from_result(label.clone(), &res));
+    }
+    Ok(out)
+}
+
+/// Split a command line into arguments the way a POSIX shell would for the
+/// simple cases (whitespace, single and double quotes, backslash escapes).
+/// No expansion of any kind happens.
+pub fn split_command(s: &str) -> Result<Vec<String>> {
+    let mut args: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if in_word {
+                    args.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            '\'' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('\'') => break,
+                        Some(ch) => cur.push(ch),
+                        None => anyhow::bail!("unterminated single quote in {s:?}"),
+                    }
+                }
+            }
+            '"' => {
+                in_word = true;
+                loop {
+                    match chars.next() {
+                        Some('"') => break,
+                        Some('\\') => match chars.next() {
+                            Some(n @ ('"' | '\\' | '$' | '`')) => cur.push(n),
+                            Some('\n') => {}
+                            Some(n) => {
+                                cur.push('\\');
+                                cur.push(n);
+                            }
+                            None => anyhow::bail!("unterminated double quote in {s:?}"),
+                        },
+                        Some(ch) => cur.push(ch),
+                        None => anyhow::bail!("unterminated double quote in {s:?}"),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                match chars.next() {
+                    Some('\n') => {}
+                    Some(n) => cur.push(n),
+                    None => anyhow::bail!("trailing backslash in {s:?}"),
+                }
+            }
+            c => {
+                in_word = true;
+                cur.push(c);
+            }
+        }
+    }
+    if in_word {
+        args.push(cur);
+    }
+    anyhow::ensure!(!args.is_empty(), "empty command");
+    Ok(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1356,5 +2015,346 @@ mod tests {
         assert_eq!(normalize_lexical(Path::new("/a/./b//c/../d")), p("/a/b/d"));
         assert_eq!(normalize_lexical(Path::new("/../..")), p("/"));
         assert_eq!(normalize_lexical(Path::new("/")), p("/"));
+    }
+
+    // ---------------------------------------------------------------- merging
+
+    fn rec(label: &str, f: impl FnOnce(&mut Observed)) -> RunRecord {
+        let mut o = Observed::default();
+        f(&mut o);
+        RunRecord {
+            label: label.into(),
+            observed: o,
+            exit_code: Some(0),
+            signal: None,
+            timed_out: false,
+        }
+    }
+
+    fn nofile(_: &Path) -> bool {
+        false
+    }
+
+    fn fresh(runs: Vec<RunRecord>) -> Merged {
+        plan_merge(Prior::None, &[], runs, &nofile).unwrap()
+    }
+
+    fn again(prev: &Merged, forget: &[String], runs: Vec<RunRecord>) -> Merged {
+        plan_merge(
+            Prior::Full {
+                profile: prev.generalized.profile.clone(),
+                sidecar: prev.sidecar.clone(),
+            },
+            forget,
+            runs,
+            &nofile,
+        )
+        .unwrap()
+    }
+
+    fn a_run() -> RunRecord {
+        rec("a", |o| {
+            o.read_files.insert(p("/opt/app/data/a"));
+            o.read_files.insert(p("/opt/app/data/b"));
+            o.write_files.insert(p("/srv/out/a.txt"));
+            o.tcp_connect.insert(8080);
+        })
+    }
+
+    fn b_run() -> RunRecord {
+        rec("b", |o| {
+            o.read_files.insert(p("/opt/app/data/c"));
+            o.create_files.insert(p("/srv/other/b.txt"));
+            o.tcp_connect.insert(9090);
+        })
+    }
+
+    fn toml_of(m: &Merged) -> String {
+        m.generalized.profile.to_toml_string().unwrap()
+    }
+
+    #[test]
+    fn sidecar_add_run_reports_what_it_did() {
+        let mut sc = Sidecar::default();
+        assert_eq!(sc.add_run(a_run()), RunChange::Added);
+        assert_eq!(sc.add_run(a_run()), RunChange::Unchanged);
+        let mut changed = a_run();
+        changed.observed.tcp_connect.insert(1);
+        assert_eq!(sc.add_run(changed), RunChange::Replaced);
+        assert_eq!(sc.runs.len(), 1);
+        assert!(sc.forget("a"));
+        assert!(!sc.forget("a"));
+    }
+
+    #[test]
+    fn merging_the_same_run_twice_changes_nothing() {
+        let first = fresh(vec![a_run(), b_run()]);
+        let second = again(&first, &[], vec![a_run(), b_run()]);
+        assert_eq!(toml_of(&first), toml_of(&second));
+        assert_eq!(first.sidecar, second.sidecar);
+        assert!(second.notes.iter().any(|n| n.contains("already recorded")));
+    }
+
+    #[test]
+    fn merge_does_not_depend_on_the_order_of_runs() {
+        let ab = fresh(vec![a_run(), b_run()]);
+        let ba = fresh(vec![b_run(), a_run()]);
+        assert_eq!(toml_of(&ab), toml_of(&ba));
+        assert_eq!(
+            ab.sidecar.to_json_string().unwrap(),
+            ba.sidecar.to_json_string().unwrap()
+        );
+        // Learning them one after the other gives the same profile too.
+        let seq = again(&fresh(vec![a_run()]), &[], vec![b_run()]);
+        assert_eq!(toml_of(&ab), toml_of(&seq));
+    }
+
+    #[test]
+    fn generalizing_the_union_collapses_siblings_from_different_runs() {
+        let a_only = fresh(vec![a_run()]);
+        assert_eq!(
+            a_only.generalized.profile.fs_read,
+            vec![p("/opt/app/data/a"), p("/opt/app/data/b")],
+            "two files alone stay listed"
+        );
+        let both = fresh(vec![a_run(), b_run()]);
+        assert_eq!(both.generalized.profile.fs_read, vec![p("/opt/app/data")]);
+        // Ports from both runs, created files -> their directories.
+        assert_eq!(
+            both.generalized.profile.net_connect,
+            Some(NetRule::Ports(vec![8080, 9090]))
+        );
+        assert!(both.generalized.profile.fs_write.contains(&p("/srv/other")));
+        assert!(both
+            .generalized
+            .profile
+            .fs_write
+            .contains(&p("/srv/out/a.txt")));
+    }
+
+    #[test]
+    fn completeness_note_counts_the_runs() {
+        let m = fresh(vec![a_run(), b_run()]);
+        assert!(
+            m.generalized
+                .review
+                .iter()
+                .any(|r| r.starts_with("2 run(s) cannot prove completeness")),
+            "{:?}",
+            m.generalized.review
+        );
+    }
+
+    #[test]
+    fn merging_never_grants_more_than_generalizing_would() {
+        // A hand-written prior with broad grants: none of them may survive.
+        let prior = Profile {
+            fs_read: vec![p("/"), p("/home"), p("/etc"), p("/opt/app")],
+            fs_write: vec![p("/"), p("/home/alice"), p("/var")],
+            ..Profile::default()
+        };
+        let m = plan_merge(
+            Prior::ProfileOnly { profile: prior },
+            &[],
+            vec![b_run()],
+            &nofile,
+        )
+        .unwrap();
+        let g = &m.generalized.profile;
+        for bad in ["/", "/home", "/etc", "/home/alice", "/var"] {
+            assert!(!g.fs_read.contains(&p(bad)), "read {bad}: {g:?}");
+            assert!(!g.fs_write.contains(&p(bad)), "write {bad}: {g:?}");
+        }
+        assert!(g.fs_read.contains(&p("/opt/app")), "{g:?}");
+        assert!(m
+            .notes
+            .iter()
+            .any(|n| n.contains("too broad for a learned profile")));
+        // The result is exactly what generalizing the union yields.
+        let again_from_union = generalize(&m.observed).profile;
+        assert_eq!(g.fs_read, again_from_union.fs_read);
+        assert_eq!(g.fs_write, again_from_union.fs_write);
+    }
+
+    #[test]
+    fn profile_only_prior_becomes_a_labelled_run() {
+        let prior = Profile {
+            fs_read: vec![p("/usr")],
+            net_connect: Some(NetRule::Ports(vec![443])),
+            max_memory: Some(crate::profile::SizeValue::Text("256M".into())),
+            ..Profile::default()
+        };
+        let m = plan_merge(
+            Prior::ProfileOnly { profile: prior },
+            &[],
+            vec![a_run()],
+            &nofile,
+        )
+        .unwrap();
+        assert!(m.sidecar.runs.iter().any(|r| r.label == PRIOR_LABEL));
+        assert_eq!(
+            m.generalized.profile.net_connect,
+            Some(NetRule::Ports(vec![443, 8080]))
+        );
+        // Non-learned keys come from the prior profile.
+        assert_eq!(
+            m.generalized.profile.max_memory,
+            Some(crate::profile::SizeValue::Text("256M".into()))
+        );
+    }
+
+    #[test]
+    fn hand_edits_and_other_keys_survive_a_merge() {
+        let first = fresh(vec![a_run()]);
+        let mut edited = first.generalized.profile.clone();
+        edited.fs_read.push(p("/opt/extra"));
+        edited.max_processes = Some(64);
+        edited.syscall_deny = vec!["chmod".into()];
+        let prev = Merged {
+            generalized: Generalized {
+                profile: edited,
+                ..first.generalized.clone()
+            },
+            ..first
+        };
+        let merged = again(&prev, &[], vec![b_run()]);
+        let g = &merged.generalized.profile;
+        assert!(g.fs_read.contains(&p("/opt/extra")), "{g:?}");
+        assert_eq!(g.max_processes, Some(64));
+        assert_eq!(g.syscall_deny, vec!["chmod".to_string()]);
+        assert!(merged
+            .sidecar
+            .runs
+            .iter()
+            .any(|r| r.label == PRIOR_EDITED_LABEL));
+        assert!(merged.notes.iter().any(|n| n.contains("edited by hand")));
+        // The hand edit is now recorded, so merging again is a no-op.
+        let third = again(&merged, &[], vec![b_run()]);
+        assert_eq!(merged.sidecar, third.sidecar);
+        assert_eq!(toml_of(&merged), toml_of(&third));
+    }
+
+    #[test]
+    fn a_hand_set_any_rule_is_kept_and_flagged() {
+        let first = fresh(vec![a_run()]);
+        let mut prof = first.generalized.profile.clone();
+        prof.net_connect = Some(NetRule::Keyword("any".into()));
+        let m = plan_merge(
+            Prior::Full {
+                profile: prof,
+                sidecar: first.sidecar.clone(),
+            },
+            &[],
+            vec![b_run()],
+            &nofile,
+        )
+        .unwrap();
+        assert_eq!(
+            m.generalized.profile.net_connect,
+            Some(NetRule::Keyword("any".into()))
+        );
+        assert!(m
+            .generalized
+            .review
+            .iter()
+            .any(|r| r.contains("net_connect = \"any\" was set by hand")));
+    }
+
+    #[test]
+    fn forgetting_a_run_shrinks_the_profile_and_unknown_labels_fail() {
+        let both = fresh(vec![a_run(), b_run()]);
+        let only_a = again(&both, &["b".to_string()], vec![]);
+        assert_eq!(only_a.sidecar.runs.len(), 1);
+        assert_eq!(
+            only_a.generalized.profile.net_connect,
+            Some(NetRule::Ports(vec![8080]))
+        );
+        let err = plan_merge(
+            Prior::Full {
+                profile: both.generalized.profile.clone(),
+                sidecar: both.sidecar.clone(),
+            },
+            &["nope".to_string()],
+            vec![],
+            &nofile,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("no such run"), "{err:#}");
+    }
+
+    #[test]
+    fn sidecar_json_round_trips_and_rejects_bad_files() {
+        let m = fresh(vec![b_run(), a_run()]);
+        let text = m.sidecar.to_json_string().unwrap();
+        let back = Sidecar::from_json_str(&text).unwrap();
+        assert_eq!(back.to_json_string().unwrap(), text);
+        // Runs come out sorted by label whatever the insertion order.
+        assert!(text.find("\"a\"").unwrap() < text.find("\"b\"").unwrap());
+
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let mut with_extra = v.clone();
+        with_extra["surprise"] = 1.into();
+        assert!(Sidecar::from_json_str(&with_extra.to_string()).is_err());
+        v["version"] = 2.into();
+        let err = Sidecar::from_json_str(&v.to_string()).unwrap_err();
+        assert!(format!("{err:#}").contains("unsupported observation file version"));
+
+        let mut dup = m.sidecar.clone();
+        dup.runs.push(dup.runs[0].clone());
+        assert!(dup.validate().is_err(), "duplicate labels");
+        let mut rel = m.sidecar.clone();
+        rel.runs[0].observed.read_files.insert(p("relative/path"));
+        assert!(rel.validate().is_err(), "relative path");
+        let mut many = Sidecar::default();
+        for i in 0..=MAX_RUNS {
+            many.runs.push(rec(&format!("r{i}"), |_| {}));
+        }
+        assert!(many.validate().is_err(), "too many runs");
+        assert!(Sidecar::from_json_str("{not json").is_err());
+        assert!(Sidecar::from_json_str("").is_err());
+    }
+
+    #[test]
+    fn sidecar_path_appends_to_the_profile_file_name() {
+        assert_eq!(
+            Sidecar::path_for(Path::new("/x/p.toml")),
+            p("/x/p.toml.observed.json")
+        );
+    }
+
+    #[test]
+    fn rendered_merge_lists_runs_notes_and_review_and_reparses() {
+        let mut failed = b_run();
+        failed.exit_code = Some(3);
+        let m = fresh(vec![a_run(), failed]);
+        let text = render_merged_toml(&m).unwrap();
+        assert!(text.contains("Merged 2 run(s)"), "{text}");
+        assert!(text.contains("#   - a: exited with status 0"), "{text}");
+        assert!(text.contains("#   - b: exited with status 3"), "{text}");
+        assert!(text.contains("WARNING: 1 run(s) did not exit 0"), "{text}");
+        assert!(text.contains("# This merge:"), "{text}");
+        assert!(text.contains("# Needs human review:"), "{text}");
+        let reparsed = Profile::from_toml_str(&text).unwrap();
+        assert_eq!(reparsed, m.generalized.profile);
+        assert!(!m.runs_succeeded());
+    }
+
+    #[test]
+    fn split_command_follows_shell_quoting() {
+        let v = |s: &str| split_command(s).unwrap();
+        assert_eq!(v("ls -l  /tmp"), ["ls", "-l", "/tmp"]);
+        assert_eq!(v("sh -c 'echo a b'"), ["sh", "-c", "echo a b"]);
+        assert_eq!(
+            v(r#"sh -c "echo \"hi\" > /tmp/x""#),
+            ["sh", "-c", r#"echo "hi" > /tmp/x"#]
+        );
+        assert_eq!(v(r"a\ b c"), ["a b", "c"]);
+        assert_eq!(v("x '' y"), ["x", "", "y"]);
+        assert_eq!(v(r#"p 'it'"'"'s'"#), ["p", "it's"]);
+        assert!(split_command("").is_err());
+        assert!(split_command("   ").is_err());
+        assert!(split_command("echo 'open").is_err());
+        assert!(split_command("echo \"open").is_err());
+        assert!(split_command("echo trailing\\").is_err());
     }
 }

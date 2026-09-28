@@ -157,6 +157,144 @@ pub fn run_op(op: &str, arg: Option<&str>) -> (String, bool) {
             },
             Err(m) => (m, false),
         },
+        "ids" => unsafe {
+            (
+                format!(
+                    "uid={} gid={} pid={}",
+                    libc::getuid(),
+                    libc::getgid(),
+                    libc::getpid()
+                ),
+                true,
+            )
+        },
+        "capeff" => match std::fs::read_to_string("/proc/self/status") {
+            Ok(s) => {
+                let v = s
+                    .lines()
+                    .find_map(|l| l.strip_prefix("CapEff:"))
+                    .map(|v| v.trim().to_string())
+                    .unwrap_or_default();
+                (format!("capeff={v}"), true)
+            }
+            Err(e) => err(e),
+        },
+        // socket <udp|tcp|raw|packet|netlink|unix|unix-dgram|unixpair>
+        "socket" => match need(op) {
+            Ok(kind) => unsafe {
+                let (domain, ty) = match kind {
+                    "udp" => (libc::AF_INET, libc::SOCK_DGRAM),
+                    "tcp" => (libc::AF_INET, libc::SOCK_STREAM),
+                    "raw" => (libc::AF_INET, libc::SOCK_RAW),
+                    "packet" => (libc::AF_PACKET, libc::SOCK_RAW),
+                    "netlink" => (libc::AF_NETLINK, libc::SOCK_RAW),
+                    "unix" => (libc::AF_UNIX, libc::SOCK_STREAM),
+                    "unix-dgram" => (libc::AF_UNIX, libc::SOCK_DGRAM),
+                    "unixpair" => {
+                        let mut fds = [0i32; 2];
+                        let rc =
+                            libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr());
+                        return if rc == 0 { ok() } else { last() };
+                    }
+                    other => return (format!("unknown socket kind {other:?}"), false),
+                };
+                let fd = libc::socket(domain, ty | libc::SOCK_CLOEXEC, 0);
+                if fd < 0 {
+                    return last();
+                }
+                libc::close(fd);
+                ok()
+            },
+            Err(m) => (m, false),
+        },
+        // unix-path <path>: connect to a pathname unix socket.
+        "unix-path" => match need(op) {
+            Ok(path) => unsafe {
+                let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+                if fd < 0 {
+                    return last();
+                }
+                let mut addr: libc::sockaddr_un = std::mem::zeroed();
+                addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+                if path.len() >= addr.sun_path.len() {
+                    return ("path too long".to_string(), false);
+                }
+                for (i, b) in path.bytes().enumerate() {
+                    addr.sun_path[i] = b as libc::c_char;
+                }
+                let rc = libc::connect(
+                    fd,
+                    &addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+                );
+                let out = if rc == 0 { ok() } else { last() };
+                libc::close(fd);
+                out
+            },
+            Err(m) => (m, false),
+        },
+        // udp-send <port>: one datagram to 127.0.0.1:<port>.
+        "udp-send" => match need(op).and_then(|a| a.parse::<u16>().map_err(|e| e.to_string())) {
+            Ok(port) => match std::net::UdpSocket::bind("127.0.0.1:0")
+                .and_then(|s| s.send_to(b"ping", ("127.0.0.1", port)))
+            {
+                Ok(_) => ok(),
+                Err(e) => err(e),
+            },
+            Err(m) => (m, false),
+        },
+        // ifaces: names of the network interfaces this process can see.
+        "ifaces" => unsafe {
+            let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
+            if libc::getifaddrs(&mut ifap) != 0 {
+                return last();
+            }
+            let mut names = std::collections::BTreeSet::new();
+            let mut cur = ifap;
+            while !cur.is_null() {
+                let name = std::ffi::CStr::from_ptr((*cur).ifa_name)
+                    .to_string_lossy()
+                    .into_owned();
+                names.insert(name);
+                cur = (*cur).ifa_next;
+            }
+            libc::freeifaddrs(ifap);
+            (
+                format!("ifaces={}", names.into_iter().collect::<Vec<_>>().join(",")),
+                true,
+            )
+        },
+        "mounts" => match std::fs::read_to_string("/proc/self/mountinfo") {
+            Ok(s) => (format!("mounts={}", s.lines().count()), true),
+            Err(e) => err(e),
+        },
+        // spawn-count <n>: fork up to n short-lived children and report how
+        // many succeeded (RLIMIT_NPROC).
+        "spawn-count" => match need(op).and_then(|a| a.parse::<usize>().map_err(|e| e.to_string()))
+        {
+            Ok(n) => unsafe {
+                let mut spawned = 0;
+                let mut pids = Vec::new();
+                for _ in 0..n {
+                    let pid = libc::fork();
+                    if pid == 0 {
+                        libc::usleep(1_500_000);
+                        libc::_exit(0);
+                    }
+                    if pid < 0 {
+                        break;
+                    }
+                    spawned += 1;
+                    pids.push(pid);
+                }
+                for p in pids {
+                    libc::kill(p, libc::SIGKILL);
+                    libc::waitpid(p, std::ptr::null_mut(), 0);
+                }
+                (format!("spawned={spawned}"), true)
+            },
+            Err(m) => (m, false),
+        },
         "env" => match need(op) {
             Ok(name) => match std::env::var(name) {
                 Ok(v) => (format!("value={v}"), true),

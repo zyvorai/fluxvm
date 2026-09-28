@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-tree KVM snapshot format (`FLUXKVM1` / v2–v4).
+//! In-tree KVM snapshot format (`FLUXKVM1` / v2–v5).
 //!
 //! - **v2**: all vCPUs + 256-byte reserved virtio watermark (zeros).
 //! - **v3**: all vCPUs + packed virtio device live-state (queue rings /
@@ -9,17 +9,22 @@
 //!   re-init of queue pointers. Disk/TAP paths still come from boot config.
 //! - **v4**: v3 plus one `KVM_MP_STATE` u32 per vCPU, so restored APs come
 //!   back runnable (or still waiting for SIPI) exactly as they were.
+//! - **v5**: v4 plus tagged, length-prefixed full-fidelity state (see
+//!   [`crate::kvm_state`]): per-vCPU XSAVE/XCRS/MSRs/LAPIC/events/debug regs/TSC
+//!   kHz and VM-wide clock/PIC/IOAPIC/PIT. v2-v4 restores are register-only
+//!   and log a warning.
 
 use crate::devices::virtio_mmio::{QueueState, VirtioState};
 use crate::error::{FluxError, Result};
 use crate::kvm::{KvmRegs, KvmSregs, KvmVm};
+use crate::kvm_state::{self, VcpuState, VmState};
 use crate::memory::GuestMemory;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 8] = b"FLUXKVM1";
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 const V2_WATERMARK: usize = 256;
 const MAX_SNAPSHOT_VCPUS: usize = 256;
 const MAX_SNAPSHOT_DEVICES: usize = 64;
@@ -202,6 +207,10 @@ pub fn dump(
         f.write_all(&kvm.get_mp_state(i)?.to_le_bytes())
             .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     }
+    // v5: full-fidelity vCPU and VM state (the vCPUs are parked by now).
+    let (vcpu_states, vm_state) = kvm_state::capture(kvm)?;
+    kvm_state::write_sections(&mut f, &vcpu_states, &vm_state)
+        .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     f.sync_all()
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     Ok(())
@@ -218,6 +227,13 @@ pub struct CpuSnapshot {
     /// Per-vCPU `KVM_MP_STATE` from v4; empty for older snapshots (which
     /// only ever held one vCPU).
     pub mp_states: Vec<u32>,
+    /// On-disk format version.
+    pub version: u32,
+    /// Per-vCPU full-fidelity state from v5; entries are incomplete
+    /// (`!is_complete()`) for older snapshots.
+    pub vcpu_states: Vec<VcpuState>,
+    /// VM-wide clock/irqchip/PIT state from v5; `None` for older snapshots.
+    pub vm_state: Option<VmState>,
 }
 
 pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
@@ -297,6 +313,12 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
             mp_states.push(u32::from_le_bytes(b));
         }
     }
+    let (vcpu_states, vm_state) = if version >= 5 {
+        let (v, vm) = kvm_state::read_sections(&mut f, ncpus)?;
+        (v, Some(vm))
+    } else {
+        (vec![VcpuState::default(); ncpus], None)
+    };
     let (regs, sregs) = all_vcpus[0].clone();
     Ok(CpuSnapshot {
         mem_len,
@@ -305,6 +327,9 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
         all_vcpus,
         virtio,
         mp_states,
+        version,
+        vcpu_states,
+        vm_state,
     })
 }
 
@@ -337,9 +362,29 @@ pub fn restore_vcpus(kvm: &KvmVm, snap: &CpuSnapshot) -> Result<()> {
             kvm.num_cpus()
         )));
     }
+    let full = snap.version >= 5
+        && snap.vcpu_states.len() == snap.all_vcpus.len()
+        && snap.vcpu_states.iter().all(VcpuState::is_complete)
+        && snap.vm_state.as_ref().map_or(false, VmState::is_complete);
+    if !full {
+        eprintln!(
+            "[kvm] vmstate v{} has no full-fidelity state: restoring registers only \
+             (LAPIC, MSRs, FPU, clock, irqchip and PIT start fresh)",
+            snap.version
+        );
+    }
+    // VM-wide clock/PIC/IOAPIC/PIT first, then each vCPU (Firecracker's order).
+    if full {
+        if let Some(vm) = &snap.vm_state {
+            kvm_state::apply_vm(kvm, vm)?;
+        }
+    }
     for (i, (regs, sregs)) in snap.all_vcpus.iter().enumerate() {
         kvm.set_sregs(i, *sregs)?;
         kvm.set_regs(i, *regs)?;
+        if full {
+            kvm_state::apply_vcpu(kvm, i, &snap.vcpu_states[i])?;
+        }
     }
     // APs are created UNINITIALIZED; put each back in the state it had when
     // the snapshot was taken (a booted AP must be RUNNABLE or it never runs).
@@ -388,6 +433,49 @@ mod tests {
         bytes.extend_from_slice(&4096u64.to_le_bytes());
         bytes.extend_from_slice(&ncpus.to_le_bytes());
         bytes
+    }
+
+    /// A pre-v5 file (registers, empty virtio list, one MP state) must keep
+    /// loading, with no full-fidelity state, so old snapshots still restore.
+    #[test]
+    fn v4_file_still_loads_without_full_state() {
+        let mut bytes = snapshot_header(4, 1);
+        bytes.extend(vec![
+            0u8;
+            std::mem::size_of::<KvmRegs>()
+                + std::mem::size_of::<KvmSregs>()
+        ]);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // virtio device count
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // MP state of vCPU 0
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v4.vmstate");
+        fs::write(&path, bytes).unwrap();
+        let cpu = load_cpu(&path).unwrap();
+        assert_eq!(cpu.version, 4);
+        assert_eq!(cpu.mp_states, vec![0]);
+        assert!(cpu.vm_state.is_none());
+        assert!(!cpu.vcpu_states[0].is_complete());
+    }
+
+    /// A v5 header with no sections at all loads but is not restorable
+    /// (preflight rejects it), rather than silently restoring half a guest.
+    #[test]
+    fn v5_file_without_sections_loads_as_incomplete() {
+        let mut bytes = snapshot_header(5, 1);
+        bytes.extend(vec![
+            0u8;
+            std::mem::size_of::<KvmRegs>()
+                + std::mem::size_of::<KvmSregs>()
+        ]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v5.vmstate");
+        fs::write(&path, bytes).unwrap();
+        let cpu = load_cpu(&path).unwrap();
+        assert_eq!(cpu.version, 5);
+        assert!(!cpu.vcpu_states[0].is_complete());
+        assert!(!cpu.vm_state.unwrap().is_complete());
     }
 
     #[test]

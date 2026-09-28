@@ -160,6 +160,15 @@ pub struct SandboxConfig {
     /// Extra PEM root certificates trusted when the proxy verifies upstream
     /// servers (for a private CA). Verification is never disabled.
     pub egress_upstream_ca_file: String,
+    /// Largest request or response body the egress proxy will stream, in bytes
+    /// (default 1 GiB, `0` = unlimited). A larger request is refused with 413; a
+    /// larger response is cut off with an error. See `docs/http-acl.md`.
+    pub egress_max_body_bytes: u64,
+    /// Bind address of the transparent-mode listener (empty = off). Point an
+    /// nftables `redirect` for guest ports 80/443 at it, inside the guest's
+    /// network namespace; it needs `egress_tls_intercept` for HTTPS. See
+    /// `docs/http-acl.md`.
+    pub egress_transparent_listen: String,
     /// Inject `Authorization` on matching Host (never exposed to the guest).
     pub credential_vault: Vec<CredentialInject>,
     /// Directory for OCI→template builds and snapshot templates.
@@ -202,6 +211,23 @@ pub struct ProcboxConfig {
     pub max_processes: u64,
     /// Cap on a workspace copied for a dry-run and on files written by the API.
     pub max_workspace_mib: u64,
+    /// First uid of the pool sandbox commands are dropped to when the daemon
+    /// runs as root. Each sandbox gets its own uid from
+    /// `uid_base..uid_base + uid_count`, so `max_processes` (RLIMIT_NPROC) and
+    /// file ownership are per sandbox. Pick a range no real account uses.
+    pub uid_base: u32,
+    /// Size of the uid pool = the most procbox sandboxes that can exist at
+    /// once when the daemon is root. `0` disables the pool.
+    pub uid_count: u32,
+    /// Let a root daemon run commands as root when the uid pool is disabled
+    /// (`uid_count = 0`). Off: creating or running a sandbox then fails with
+    /// 503 instead of silently running as root.
+    pub allow_root: bool,
+    /// Namespace isolation for every command: `"off"`, `"auto"` (use private
+    /// user/mount/pid/ipc/uts and, without network, net namespaces when the
+    /// kernel allows, else report what was not enforced) or `"strict"`
+    /// (refuse to run without them).
+    pub isolation: String,
 }
 
 impl Default for ProcboxConfig {
@@ -216,6 +242,10 @@ impl Default for ProcboxConfig {
             max_memory_mib: 2048,
             max_processes: 4096,
             max_workspace_mib: 1024,
+            uid_base: 200_000,
+            uid_count: 4096,
+            allow_root: false,
+            isolation: "auto".to_string(),
         }
     }
 }
@@ -237,6 +267,8 @@ impl Default for SandboxConfig {
             egress_tls_ports: Vec::new(),
             egress_tls_allow_private: false,
             egress_upstream_ca_file: String::new(),
+            egress_max_body_bytes: 1 << 30,
+            egress_transparent_listen: String::new(),
             credential_vault: Vec::new(),
             templates_dir: None,
             volumes_dir: None,

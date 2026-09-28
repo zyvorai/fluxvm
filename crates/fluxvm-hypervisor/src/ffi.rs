@@ -132,6 +132,40 @@ pub const KVM_SET_FPU: c_ulong = 0x41a0_ae8d;
 /// `sizeof(struct kvm_lapic_state)` == 0x400.
 pub const KVM_GET_LAPIC: c_ulong = 0x8400_ae8e;
 pub const KVM_SET_LAPIC: c_ulong = 0x4400_ae8f;
+
+// State capture/restore ioctls used by FLUXKVM1 v5 snapshots. Numbers come from
+// <linux/kvm.h> on the lab host (a C program printing them), not hand-computed.
+/// `sizeof(struct kvm_xsave)` == 4096.
+pub const KVM_GET_XSAVE: c_ulong = 0x9000_aea4;
+pub const KVM_SET_XSAVE: c_ulong = 0x5000_aea5;
+/// Variable-size XSAVE (`KVM_CAP_XSAVE2` returns the byte size, may exceed 4096).
+pub const KVM_GET_XSAVE2: c_ulong = 0x9000_aecf;
+pub const KVM_CAP_XSAVE2: c_ulong = 208;
+/// `sizeof(struct kvm_xcrs)` == 392.
+pub const KVM_GET_XCRS: c_ulong = 0x8188_aea6;
+pub const KVM_SET_XCRS: c_ulong = 0x4188_aea7;
+/// `sizeof(struct kvm_vcpu_events)` == 64.
+pub const KVM_GET_VCPU_EVENTS: c_ulong = 0x8040_ae9f;
+pub const KVM_SET_VCPU_EVENTS: c_ulong = 0x4040_aea0;
+/// `sizeof(struct kvm_debugregs)` == 128.
+pub const KVM_GET_DEBUGREGS: c_ulong = 0x8080_aea1;
+pub const KVM_SET_DEBUGREGS: c_ulong = 0x4080_aea2;
+/// Header-only `struct kvm_msrs` (8 bytes); entries are 16 bytes each.
+pub const KVM_GET_MSRS: c_ulong = 0xc008_ae88;
+/// System ioctl on /dev/kvm: header `struct kvm_msr_list` (4 bytes) + u32 indices.
+pub const KVM_GET_MSR_INDEX_LIST: c_ulong = 0xc004_ae02;
+/// `sizeof(struct kvm_clock_data)` == 48.
+pub const KVM_GET_CLOCK: c_ulong = 0x8030_ae7c;
+pub const KVM_SET_CLOCK: c_ulong = 0x4030_ae7b;
+/// `sizeof(struct kvm_irqchip)` == 520 (chip_id 0 = PIC master, 1 = slave, 2 = IOAPIC).
+pub const KVM_GET_IRQCHIP: c_ulong = 0xc208_ae62;
+pub const KVM_SET_IRQCHIP: c_ulong = 0x8208_ae63;
+/// `sizeof(struct kvm_pit_state2)` == 112.
+pub const KVM_GET_PIT2: c_ulong = 0x8070_ae9f;
+pub const KVM_SET_PIT2: c_ulong = 0x4070_aea0;
+/// `_IO`: the guest TSC frequency in kHz is the return value / the argument.
+pub const KVM_GET_TSC_KHZ: c_ulong = 0xaea3;
+pub const KVM_SET_TSC_KHZ: c_ulong = 0xaea2;
 /// `sizeof(struct kvm_cpuid2)` header only (8); buffer must hold `nent` entries.
 pub const KVM_GET_SUPPORTED_CPUID: c_ulong = 0xc008_ae05;
 pub const KVM_SET_CPUID2: c_ulong = 0x4008_ae90;

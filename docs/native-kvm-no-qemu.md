@@ -40,14 +40,18 @@ enforcing guests need the token file labeled appropriately in the image.
 qcow2 inputs require `qemu-img` conversion before launch.
 Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs)
 parks before a pause is reported complete, and the snapshot records each
-vCPU's registers and MP state. Restore reloads registers only (no
-LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than
-bit-exact. A native KVM restore now checks the snapshot before stopping a
+vCPU's registers, MP state and (FLUXKVM1 v5) full-fidelity state: XSAVE/FPU,
+XCRS, MSRs including the TSC, LAPIC, vCPU events, debug registers, TSC kHz,
+kvmclock, PIC/IOAPIC and PIT. Older v1-v4 snapshots still load but restore
+registers only, with a warning. Restore is intended for the same host CPU
+class and the guest clock resumes from the pause instant. A native KVM restore now checks the snapshot before stopping a
 running guest and returns a restore error rather than silently cold-booting
 when the memory restore fails. Snapshot tags must be deleted before reuse.
 
+Multi-vCPU guests see their own topology (one package, N cores, no SMT siblings) through CPUID leaves 1, 4, `0xB` and `0x1F`; `scripts/test-kvm-topology.sh` checks what the guest kernel derived. The topology is computed from the vCPUs present at boot: measuring with `max_cpus` headroom on 4.14 and 5.10 kernels showed no difference in the guest's view, and in-tree CPU hotplug is not yet wired end to end (no caller, no MPTABLE/MADT entries, no AP thread). See the hypervisor README for the evidence and the untested AMD leaves.
+
 This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
-full-fidelity snapshots (LAPIC/MSR/FPU/TSC state), broad storage backends, and
+cross-CPU-model snapshot portability, broad storage backends, and
 a fully QEMU-free image build pipeline (partitioned cloud images still need
 `qemu-img` once, to extract the root) are separate work.
 

@@ -123,6 +123,32 @@ mod tests {
         assert!(plan_add_vcpu(1, 8, 0).is_err());
     }
 
+    /// Live KVM: a hot-added vCPU starts parked (UNINITIALIZED, waiting for the
+    /// guest's INIT-SIPI) without any explicit `KVM_SET_MP_STATE`. Skips when
+    /// /dev/kvm is missing or not accessible.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn hot_added_vcpu_starts_uninitialized() {
+        let mem = match crate::memory::GuestMemory::allocate(16 * 1024 * 1024) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let mut kvm = match KvmVm::create(&mem, 1) {
+            Ok(k) => k,
+            Err(e) => {
+                eprintln!("skipping: no usable /dev/kvm ({e})");
+                return;
+            }
+        };
+        kvm.create_vcpu(1).unwrap();
+        assert_eq!(kvm.num_cpus(), 2);
+        assert_eq!(
+            kvm.get_mp_state(1).unwrap(),
+            crate::ffi::KVM_MP_STATE_UNINITIALIZED
+        );
+        assert_eq!(kvm.get_mp_state(0).unwrap(), 0, "the BSP stays RUNNABLE");
+    }
+
     #[test]
     fn remove_vcpu_is_explicit_unsupported() {
         assert!(remove_vcpu(1).is_err());

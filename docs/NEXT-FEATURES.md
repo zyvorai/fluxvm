@@ -143,17 +143,17 @@ covering every route.
 
 ### Sandlock gap follow-ups
 
-- procbox sandboxes: pathname Unix-socket connects are not blocked by Landlock ABI 8, UDP is unfiltered, commands run as the daemon's user (see procbox-backend.md); per-sandbox uid/userns would close these.
+- procbox sandboxes: closed by per-sandbox uid, private mount/pid/ipc/uts/net namespaces and seccomp socket-arg filters (see procbox-backend.md). Still open: a live run of a root daemon with the uid pool through the HTTP API, and disk quotas for commands.
 - Dry-run for VM sandboxes needs a snapshot-restore API route to truly revert; today only baseline/changes report.
-- HTTPS interception: HTTP/2, transparent (non-proxy-aware) redirect, and guest-side CA trust have not been exercised in a real guest.
+- HTTPS interception: HTTP/2, a body cap and a transparent (redirect) mode are implemented and verified with real curl in a throwaway namespace (`scripts/test-egress-guest.sh`, see [http-acl.md](http-acl.md)). The remaining gap is running those cases inside the golden KVM guest: its virtio-net has no tap-to-guest receive path (`devices/virtio_net.rs`; the vhost-net bind returns `EFAULT`), so it cannot get a DHCP reply; boot, agent, cloud-init CA install and `openssl verify` are proven. The hypervisor also byte-swaps the tap address it assigns (`192.168.100.1` becomes `1.100.168.192`).
 - procbox `learn`: policy inference beyond one observed run (merge multiple runs); seccomp-notify variant for non-ptrace environments.
-- Live-verified 2026-09-28: change-set on a real VM guest, both SDKs against real daemons, procbox as an unprivileged daemon, and the egress ACL over HTTP/HTTPS. Still open: a live guest-side CA trust test for HTTPS interception, and HTTP/2.
+- Live-verified 2026-09-28: change-set on a real VM guest, both SDKs against real daemons, procbox as an unprivileged daemon, and the egress ACL over HTTP/HTTPS. HTTP/2 and transparent interception were then verified with real curl (see above).
 
 ### Tier 3 — evidence / hardening (lab hardware or long runs)
 
 - H2 gate `scripts/test-kvm-windows-boot.sh` (Tiny11 on `fluxvm_engine=kvm` + OVMF).
 - In-tree virtio-fs under load bench vs CH (`scripts/bench-kvm-virtiofs.sh`).
-- Multi-container Pod Sentinel proof; aya ELF parse flake; full-fidelity KVM snapshots (LAPIC/MSR/FPU/TSC state);
+- Multi-container Pod Sentinel proof; aya ELF parse flake; full-fidelity KVM snapshots (**done**: FLUXKVM1 v5 captures XSAVE/MSR/LAPIC/TSC/clock/irqchip/PIT; cross-CPU-model portability remains);
   Firecracker warm-pool claim; OIDC/mTLS; GPU-aware placement.
 
 Portable CI maps each code-side use case to a test target in

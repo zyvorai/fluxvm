@@ -18,7 +18,7 @@ A **lightweight KVM Virtual Machine Monitor** in Rust (Firecracker / cloud-hyper
 - **Devices (virtio-mmio):** net, blk, vsock, balloon, rng + 16550 serial (all on `KVM_IRQFD`)
 - **Host I/O:** TAP userspace net; optional `/dev/vhost-net` open; token-bucket `--net-mbit-limit` / `--blk-mbit-limit`
 - **Firmware extras:** minimal ACPI (RSDP/XSDT/FADT/MADT) + PVH `rsdp_paddr`; optional `--pci` ECAM; `--jailer` / `FLUXVM_JAILER`
-- **Control:** UDS JSON API, pause/resume, seccomp, gdbstub, `FLUXKVM1` v2 snapshots (all vCPUs)
+- **Control:** UDS JSON API, pause/resume, seccomp, gdbstub, `FLUXKVM1` v5 snapshots (all vCPUs, full-fidelity CPU/VM state)
 
 Verified end-to-end through the real control-plane boot path (not just
 the CLI demo): a Linux 5.10 + systemd guest reaches `zbud: loaded`,
@@ -62,11 +62,23 @@ Useful flags: `--vsock-cid` / `--vsock-uds`, `--no-balloon`, `--no-rng`, `--no-a
 
 One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for the guest's INIT-SIPI-SIPI, handled by the in-kernel LAPIC. Each AP runs on its own thread (`run_ap`) and services only PIO/MMIO. Virtio queues are not handled by any vCPU: see "Virtio queue servicing" below.
 
-**Verified on real KVM hardware (2026-09-28):** `scripts/test-kvm-smp-boot.sh` boots a 2-vCPU Linux guest to userspace (`smp: Brought up 1 node, 2 CPUs`). Pause and snapshot cover all vCPUs (see "Pause barrier" below).
+**Verified on real KVM hardware (2026-09-28):** `scripts/test-kvm-smp-boot.sh` boots 2, 4 and 8-vCPU Linux guests to userspace (`smp: Brought up 1 node, 4 CPUs`), and `scripts/test-kvm-topology.sh` reads the topology the guest kernel derived. Pause and snapshot cover all vCPUs (see "Pause barrier" below).
+
+### Guest CPU topology
+
+The host's CPUID describes the physical package, so `cpuid_topology.rs` (pure functions, unit-tested) rewrites what the guest sees: one package, one thread per core (`smt=false`, as Firecracker), `--cpus` cores.
+
+- **Intel:** leaf 1 (initial APIC id, logical processors per package, HTT), leaf 4 (cores per package; L1/L2 private to a core, L3 shared by the package), leaves `0xB` and `0x1F` (SMT and core levels, x2APIC id in EDX, terminating sub-leaf; the host's are replaced, not zeroed).
+- **AMD** (vendor-gated): `0x80000008` (core count, APIC id size) and `0x8000001E` (extended APIC id, core id, threads per core). These follow the APM and Firecracker but have **not been run on AMD hardware**; the lab CPU is Intel.
+- **Verified in the guest** (`scripts/test-kvm-topology.sh`, 1/2/4/8 vCPUs): `physical_package_id` is 0 everywhere, `core_id` is 0..N-1, `thread_siblings_list` is the CPU itself, `core_siblings_list` is `0-(N-1)`, `nproc` is N.
+- **`max_cpus` headroom does not change the topology (measured, decision: keep computing from the vCPUs present).** Computing the leaves from `max_cpus` instead was tried on the Intel lab host with `cpus=1/2` and `max_cpus=4/8` on a 4.14 and a 5.10 kernel. The guest view was identical: same `core_id`, package and sibling lists, `nproc`, `/proc/cpuinfo` `siblings` and `cpu cores`, and `smpboot: Allowing N CPUs, 0 hotplug CPUs`, because Linux derives siblings from the CPUs the MPTABLE/MADT list rather than from CPUID counts. So there is no benefit, and the extra CPUID claims (cores that do not exist) would only be a lie about the package. `scripts/test-kvm-topology.sh` with `MAX_CPUS` set pins that the topology does not depend on the headroom.
+- **Guest-visible in-tree CPU hotplug is not wired up, independent of CPUID.** `KvmVm::create_vcpu` has no caller outside its unit test (the scheduler's `hotplug_cpu` serves QEMU and Cloud Hypervisor only), the MPTABLE and MADT list only the boot `cpus`, no AP thread is spawned for a hot-added vCPU, and there is no ACPI hotplug notification. A hot-added vCPU exists in KVM (created parked and verified by `hotplug::hot_added_vcpu_starts_uninitialized`) but the guest can neither see nor run it; a topology consistency check for such a CPU is not possible until that plumbing exists.
+
+AP parking: with the in-kernel irqchip KVM creates non-BSP vCPUs `KVM_MP_STATE_UNINITIALIZED` by itself, so `create()`/hotplug no longer call `KVM_SET_MP_STATE`; they verify the state after setup and log `parking it` if a KVM ever disagrees (not seen on the lab kernel). Snapshot restore still sets MP state explicitly.
 
 Root causes found while getting there, kept so they are not re-derived:
 
-1. **Guest CPUID topology (the real AP crash).** With >1 vCPU the AP panicked in `start_secondary` (`Package 1 of CPU 1 exceeds BIOS package data 1`, `kernel BUG at arch/x86/kernel/cpu/common.c:1276`) and the `reboot=k` path turned that into a silent triple fault. Linux derives the package/thread topology from CPUID leaf 1 (HTT bit, logical processor count in EBX[23:16]) and leaf 4 (EAX[31:26], cores per package). `setup_cpuid` now sets HTT and the leaf-4 core count for more than one vCPU, matching Firecracker's `cpuid.normalize()`. The panic text was recovered by decoding the AP's own 0x3f8 writes; nothing reaches the console because BSP and AP serial output interleave.
+1. **Guest CPUID topology (the real AP crash).** With >1 vCPU the AP panicked in `start_secondary` (`Package 1 of CPU 1 exceeds BIOS package data 1`, `kernel BUG at arch/x86/kernel/cpu/common.c:1276`) and the `reboot=k` path turned that into a silent triple fault. Linux derives the package/thread topology from CPUID leaf 1 (HTT bit, logical processor count in EBX[23:16]) and leaf 4 (EAX[31:26], cores per package). `setup_cpuid` now presents the guest's own topology (see "Guest CPU topology" below), matching Firecracker's `cpuid.normalize()`. The panic text was recovered by decoding the AP's own 0x3f8 writes; nothing reaches the console because BSP and AP serial output interleave.
 2. **`KVM_SET_IDENTITY_MAP_ADDR` was never called.** Intel VMX hosts with an in-kernel irqchip need it alongside `KVM_SET_TSS_ADDR` so an AP can run in real mode after SIPI (Firecracker/crosvm/cloud-hypervisor all call both).
 3. **`KVM_RUN` returning `EAGAIN` is not an error.** For a not-yet-runnable vCPU (freshly SIPI'd AP) the kernel blocks and then returns `-EAGAIN` by design; retrying is correct. `run_once` treats it like `EINTR`.
 4. **AP virtio notifies were dropped.** Only the BSP drained the per-device pending-notify flag, so once the guest issued a block request from CPU 1 the boot stalled after the first request. Fixed properly by the ioeventfd design below (an intermediate AP-to-BSP signal hack was replaced by it).
@@ -82,7 +94,13 @@ Same shape as Firecracker (`Pause` event + signal kick + `Paused` reply from eve
 2. Each vCPU loop clears `immediate_exit` and *then* re-checks `paused`, so a pause that races the check still forces the next `KVM_RUN` to return instead of sleeping in the guest.
 3. Each AP parks in userspace and acknowledges the current epoch; the BSP publishes the quiesced epoch only once every AP has acknowledged, so a snapshot never sees a vCPU still running. Pausing times out with an error if any vCPU fails to park.
 
-Snapshot format is `FLUXKVM1` v4: v3 plus one `KVM_MP_STATE` per vCPU so restored APs come back runnable. v1-v3 files still load. The pause and snapshot smokes take `VCPUS=N` and verify each AP parked once per pause (`[kvm] vcpuN paused`), 12 back-to-back cycles at 4 vCPUs, and that a restored 2/4-vCPU guest does not crash after resume.
+Snapshot format is `FLUXKVM1` v5: v4 (v3 plus one `KVM_MP_STATE` per vCPU so restored APs come back runnable) followed by tagged, length-prefixed sections (`[tag u32][len u32][payload]`, unknown tags skipped) holding full-fidelity KVM state:
+
+* per vCPU: XSAVE (`KVM_GET_XSAVE2` when `KVM_CAP_XSAVE2` reports more than 4 KiB), XCRS, every MSR in `KVM_GET_MSR_INDEX_LIST` (including `TSC`/`TSC_DEADLINE`), LAPIC, vCPU events, debug registers, TSC kHz;
+* per VM: `kvmclock`, PIC master/slave + IOAPIC (`KVM_GET_IRQCHIP`), PIT2.
+
+Restore applies VM state first, then per vCPU sregs, regs, XSAVE, XCRS, LAPIC, TSC kHz, MSRs (skip-and-continue over MSRs the destination rejects), events and debug registers. The guest clock is restored without `KVM_CLOCK_REALTIME`/`HOST_TSC`, so the guest resumes from the instant it was paused rather than jumping forward by the wall time spent in the snapshot. v1-v4 files still load but restore registers only and print a warning; `preflight_restore` rejects a v5 file whose sections are missing or incomplete. Shutting down a guest (including the old guest during a restore) now kicks every vCPU out of `KVM_RUN` until its thread exits, so an idle vCPU can no longer hang the restore. `scripts/test-kvm-snapshot-progress.sh` (`VCPUS=1|2`, `MODE=v4` for the register-only comparison) proves the restored guest rewinds, keeps its clock and timers, and keeps doing checksummed disk I/O.
+ The pause and snapshot smokes take `VCPUS=N` and verify each AP parked once per pause (`[kvm] vcpuN paused`), 12 back-to-back cycles at 4 vCPUs, and that a restored 2/4-vCPU guest does not crash after resume.
 
 ### Virtio queue servicing
 
@@ -99,7 +117,7 @@ The worker and everything it touches (guest RAM alias, backends, rate limiters, 
 ## Known limitations
 
   * The in-tree virtio-blk backend expects a nonempty, 512-byte-aligned raw disk. It rejects qcow2 and VMDK/VHDX headers; convert a stopped image to raw before selecting `fluxvm_engine = "kvm"`. Requested disk, TAP and vsock devices must initialize successfully or VM creation fails.
-  * In-tree KVM snapshots save and restore registers, special registers and `KVM_MP_STATE` per vCPU plus RAM and virtio queue state. LAPIC, MSR, FPU and TSC state are not captured, so a restored guest is best-effort, not bit-exact; Firecracker remains the production snapshot format.
+  * In-tree KVM snapshots (v5) save and restore registers, special registers, `KVM_MP_STATE`, XSAVE/XCRS, MSRs, LAPIC, vCPU events, debug registers, TSC kHz, kvmclock, PIC/IOAPIC and PIT plus RAM and virtio queue state. Restore is same-host-class only (no CPUID/MSR normalisation across different CPU models), the guest clock resumes from the pause instant, and virtio device state is a queue watermark only, so treat it as high-fidelity rather than bit-exact; Firecracker remains the production snapshot format.
   * The in-tree block device uses split virtqueues with direct raw-sector I/O. It rejects indirect descriptors and malformed or cyclic chains. Guest FLUSH requests call `sync_data` on the backing file.
   * `jailer::apply()` (`--jailer` / `FLUXVM_JAILER`, and implicitly whenever `seccomp` is requested — `guest.rs` pairs them 1:1) calls `unshare()`/`chroot()`/`setuid()`/`setgid()`. These must stay in `seccomp.rs`'s allowlist: they were missing until 2026-09-28, which meant a seccomp-enabled KVM boot through the real control plane was an instant `SIGSYS` the moment the jailer ran, found via `strace` against a real `fluxctl create`. If you extend the jailer with a new syscall, add it to the allowlist in the same change — the two are never exercised together except through the full control-plane path, so `cargo test` alone won't catch a gap here.
 

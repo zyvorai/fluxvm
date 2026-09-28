@@ -388,3 +388,246 @@ fn profile_syscall_overrides_change_the_denylist() {
     };
     assert_eq!(selftest("connect", &deny, Some(&port)), "errno=1");
 }
+
+// ------------------------------------------------------- merging across runs
+
+const SCRIPT_A: &str = "cat /etc/hostname > /dev/null; echo a > \"$1/a-out\"";
+/// Reads /etc/os-release, connects to a loopback port, writes a file. Only
+/// double quotes, so it can also be passed through `--cmd '...'`.
+const SCRIPT_B: &str = "import socket,sys; open(\"/etc/os-release\").read(); \
+    socket.create_connection((\"127.0.0.1\", int(sys.argv[2]))).close(); \
+    open(sys.argv[1]+\"/b-out\",\"w\").write(\"b\")";
+
+fn learn_merge(out: &Path, prior: &Path, extra: &[&str], cmd: &[&str]) -> Output {
+    Command::new(bin())
+        .args(["learn", "--merge"])
+        .arg(prior)
+        .arg("--out")
+        .arg(out)
+        .args(extra)
+        .arg("--")
+        .args(cmd)
+        .output()
+        .expect("spawn learn --merge")
+}
+
+fn sidecar_path(profile: &Path) -> PathBuf {
+    fluxvm_procbox::learn::Sidecar::path_for(profile)
+}
+
+fn sidecar_labels(profile: &Path) -> Vec<String> {
+    let sc = fluxvm_procbox::learn::Sidecar::load(&sidecar_path(profile)).expect("sidecar");
+    sc.runs.iter().map(|r| r.label.clone()).collect()
+}
+
+/// Both scripts must succeed confined by `prof`; an unlearned write and an
+/// unlearned port must still fail.
+fn assert_runs_both_confined(prof: &Path, d1: &Path, d2: &Path, port: &str, other_port: &str) {
+    let p = load(prof);
+    assert!(grants_write(&p, d1), "{p:?}");
+    assert!(grants_write(&p, d2), "{p:?}");
+    assert_eq!(
+        p.net_connect,
+        Some(fluxvm_procbox::profile::NetRule::Ports(vec![port
+            .parse()
+            .unwrap()])),
+        "{}",
+        std::fs::read_to_string(prof).unwrap()
+    );
+    let _ = std::fs::remove_file(d1.join("a-out"));
+    let _ = std::fs::remove_file(d2.join("b-out"));
+    let (c, out) = confined(
+        prof,
+        &["/bin/sh", "-c", SCRIPT_A, "sh", d1.to_str().unwrap()],
+    );
+    assert_eq!(c, Some(0), "script A under the merged profile: {out}");
+    assert!(d1.join("a-out").exists());
+    let (c, out) = confined(
+        prof,
+        &["python3", "-c", SCRIPT_B, d2.to_str().unwrap(), port],
+    );
+    assert_eq!(c, Some(0), "script B under the merged profile: {out}");
+    assert!(d2.join("b-out").exists());
+
+    // A variation nobody learned: write elsewhere, and another port.
+    let other = tempfile::tempdir().unwrap();
+    let (c, out) = confined(
+        prof,
+        &[
+            "/bin/sh",
+            "-c",
+            "echo y > \"$1/evil\"",
+            "sh",
+            other.path().to_str().unwrap(),
+        ],
+    );
+    assert_ne!(c, Some(0), "unlearned write must fail: {out}");
+    assert!(!other.path().join("evil").exists());
+    let (c, out) = confined(
+        prof,
+        &["python3", "-c", SCRIPT_B, d2.to_str().unwrap(), other_port],
+    );
+    assert_ne!(c, Some(0), "unlearned port must fail: {out}");
+}
+
+#[test]
+fn merge_updates_a_profile_in_place_and_covers_both_runs() {
+    need_abi!(6);
+    need_ptrace!();
+    need_tool!("python3");
+    let work = tempfile::tempdir().unwrap();
+    let prof = work.path().join("p.toml");
+    let (d1, d2) = (work.path().join("out1"), work.path().join("out2"));
+    std::fs::create_dir(&d1).unwrap();
+    std::fs::create_dir(&d2).unwrap();
+    let l1 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let l2 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (port, other_port) = (
+        l1.local_addr().unwrap().port().to_string(),
+        l2.local_addr().unwrap().port().to_string(),
+    );
+
+    let o = Command::new(bin())
+        .args(["learn", "--label", "a", "--out"])
+        .arg(&prof)
+        .args(["--", "/bin/sh", "-c", SCRIPT_A, "sh", d1.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", s(&o));
+    assert_eq!(sidecar_labels(&prof), ["a"]);
+
+    // No --force needed: --out is the profile being merged into.
+    let o = learn_merge(
+        &prof,
+        &prof,
+        &["--label", "b"],
+        &["python3", "-c", SCRIPT_B, d2.to_str().unwrap(), &port],
+    );
+    assert!(o.status.success(), "{}", s(&o));
+    assert_eq!(sidecar_labels(&prof), ["a", "b"]);
+    let text = std::fs::read_to_string(&prof).unwrap();
+    assert!(text.contains("Merged 2 run(s)"), "{text}");
+    assert_runs_both_confined(&prof, &d1, &d2, &port, &other_port);
+
+    // Learning the same command again yields the same profile. Its output
+    // file must be gone first, otherwise the re-run legitimately observes a
+    // write to an existing file instead of a create. (Byte-exact idempotency
+    // of the merge itself is covered by the unit tests; a real re-run also
+    // differs in pids and syscall counts, so compare the parsed profile.)
+    let _ = std::fs::remove_file(d1.join("a-out"));
+    let _ = std::fs::remove_file(d2.join("b-out"));
+    let before = load(&prof);
+    let o = learn_merge(
+        &prof,
+        &prof,
+        &["--label", "b"],
+        &["python3", "-c", SCRIPT_B, d2.to_str().unwrap(), &port],
+    );
+    assert!(o.status.success(), "{}", s(&o));
+    assert_eq!(load(&prof), before);
+    assert_eq!(sidecar_labels(&prof), ["a", "b"]);
+
+    // --forget drops run "a": its directory is no longer granted.
+    let o = learn_merge(
+        &prof,
+        &prof,
+        &["--forget", "a", "--label", "c"],
+        &["/bin/true"],
+    );
+    assert!(o.status.success(), "{}", s(&o));
+    assert_eq!(sidecar_labels(&prof), ["b", "c"]);
+    assert!(!grants_write(&load(&prof), &d1));
+    assert!(grants_write(&load(&prof), &d2));
+}
+
+#[test]
+fn several_cmd_runs_in_one_invocation_match_merging_them_one_by_one() {
+    need_abi!(6);
+    need_ptrace!();
+    need_tool!("python3");
+    let work = tempfile::tempdir().unwrap();
+    let l1 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let l2 = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (port, other_port) = (
+        l1.local_addr().unwrap().port().to_string(),
+        l2.local_addr().unwrap().port().to_string(),
+    );
+    let mk = |name: &str| {
+        let d = work.path().join(name);
+        std::fs::create_dir(&d).unwrap();
+        d
+    };
+    let (d1, d2) = (mk("m1"), mk("m2"));
+    let cmd_a = format!("/bin/sh -c '{SCRIPT_A}' sh {}", d1.display());
+    let cmd_b = format!("python3 -c '{SCRIPT_B}' {} {port}", d2.display());
+    let multi = work.path().join("multi.toml");
+    let o = Command::new(bin())
+        .args(["learn", "--out"])
+        .arg(&multi)
+        .args(["--cmd", &cmd_a, "--cmd", &cmd_b])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", s(&o));
+    assert_eq!(sidecar_labels(&multi).len(), 2);
+    assert_runs_both_confined(&multi, &d1, &d2, &port, &other_port);
+
+    // The same two commands merged one after the other, in fresh directories.
+    let (e1, e2) = (mk("s1"), mk("s2"));
+    let seq = work.path().join("seq.toml");
+    let o = Command::new(bin())
+        .args(["learn", "--out"])
+        .arg(&seq)
+        .args(["--", "/bin/sh", "-c", SCRIPT_A, "sh", e1.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", s(&o));
+    let o = learn_merge(
+        &seq,
+        &seq,
+        &[],
+        &["python3", "-c", SCRIPT_B, e2.to_str().unwrap(), &port],
+    );
+    assert!(o.status.success(), "{}", s(&o));
+    let (m, q) = (load(&multi), load(&seq));
+    assert_eq!(m.fs_read, q.fs_read, "same reads either way");
+    assert_eq!(m.net_connect, q.net_connect);
+    assert_eq!(m.fs_write.len(), q.fs_write.len());
+}
+
+#[test]
+fn merge_without_an_observation_file_needs_an_explicit_opt_in() {
+    need_ptrace!();
+    let work = tempfile::tempdir().unwrap();
+    let prior = work.path().join("hand.toml");
+    let d = work.path().join("w");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(
+        &prior,
+        format!(
+            "fs_read = [\"/usr\"]\nfs_write = [{:?}]\nmax_processes = 32\n",
+            d
+        ),
+    )
+    .unwrap();
+    let out = work.path().join("merged.toml");
+    let o = learn_merge(&out, &prior, &[], &["/bin/true"]);
+    assert!(!o.status.success(), "{}", s(&o));
+    assert!(
+        String::from_utf8_lossy(&o.stderr).contains("--merge-profile-only"),
+        "{}",
+        s(&o)
+    );
+    assert!(!out.exists());
+
+    let o = learn_merge(&out, &prior, &["--merge-profile-only"], &["/bin/true"]);
+    assert!(o.status.success(), "{}", s(&o));
+    let p = load(&out);
+    assert_eq!(p.max_processes, Some(32), "non-learned keys are kept");
+    assert!(grants_write(&p, &d), "{p:?}");
+    assert_eq!(sidecar_labels(&out).len(), 2, "prior + the new run");
+
+    // A different existing --out still needs --force.
+    let o = learn_merge(&out, &prior, &["--merge-profile-only"], &["/bin/true"]);
+    assert!(!o.status.success(), "{}", s(&o));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--force"));
+}

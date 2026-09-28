@@ -51,18 +51,38 @@ pub struct GuestHandle {
     engine: GuestEngine,
 }
 
+/// Ask the in-tree VMM thread to stop and wait for it. A vCPU that is idle in
+/// `KVM_RUN` (guest HLT, no userspace exits) never looks at `stop` by itself,
+/// so kick every vCPU out of the kernel until the thread has exited. Gives up
+/// and detaches after 30 s rather than blocking the caller forever.
+fn stop_kvm_thread(
+    stop: &AtomicBool,
+    kick: &VcpuKick,
+    thread: Option<std::thread::JoinHandle<()>>,
+) {
+    stop.store(true, Ordering::SeqCst);
+    let Some(t) = thread else { return };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !t.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            eprintln!("[kvm-engine] vCPU thread did not stop within 30s; detaching");
+            return;
+        }
+        kick.kick_all();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let _ = t.join();
+}
+
 impl Drop for GuestHandle {
     fn drop(&mut self) {
         match &mut self.engine {
             GuestEngine::Firecracker { child, .. } => {
                 let _ = child.start_kill();
             }
-            GuestEngine::Kvm { stop, thread, .. } => {
-                stop.store(true, Ordering::SeqCst);
-                if let Some(t) = thread.take() {
-                    let _ = t.join();
-                }
-            }
+            GuestEngine::Kvm {
+                stop, thread, kick, ..
+            } => stop_kvm_thread(stop, kick, thread.take()),
         }
     }
 }
@@ -115,12 +135,9 @@ impl GuestHandle {
                 shutdown(api_sock).await.ok();
                 let _ = child.kill().await;
             }
-            GuestEngine::Kvm { stop, thread, .. } => {
-                stop.store(true, Ordering::SeqCst);
-                if let Some(t) = thread.take() {
-                    let _ = t.join();
-                }
-            }
+            GuestEngine::Kvm {
+                stop, thread, kick, ..
+            } => stop_kvm_thread(stop, kick, thread.take()),
         }
         Ok(())
     }
@@ -169,12 +186,9 @@ impl GuestHandle {
             GuestEngine::Firecracker { child, .. } => {
                 let _ = child.start_kill();
             }
-            GuestEngine::Kvm { stop, thread, .. } => {
-                stop.store(true, Ordering::SeqCst);
-                if let Some(t) = thread.take() {
-                    let _ = t.join();
-                }
-            }
+            GuestEngine::Kvm {
+                stop, thread, kick, ..
+            } => stop_kvm_thread(stop, kick, thread.take()),
         }
     }
 }
