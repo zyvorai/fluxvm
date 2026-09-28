@@ -198,3 +198,36 @@ against it over HTTP: create, files, confined `process`, `baseline`/`changes`,
 (denied), `..`, absolute and symlink path escapes (400), `snapshot` (501) and
 delete. Both SDKs expose it as `procbox=` / `Procbox` on create and a
 `dry_run` / `DryRun` method.
+
+## Verified live with a root daemon (2026-09-28)
+
+A private daemon (`fluxctl serve` as root on `127.0.0.1:17791`, its own config,
+`state_dir=/tmp/ws3-state`, `[sandbox.procbox] enabled = true, uid_base = 231000,
+uid_count = 16, isolation = "auto"`) was driven with the Python SDK
+(`python/tests/live_procbox_uidpool.py`, plus the stock `live_procbox.py`) and
+`curl`, on the Linux 7.0 lab host. The production service (port 7788,
+`/var/lib/fluxvm`, `/etc/fluxvm.toml`) was not touched: same PID, start time,
+config and binary hashes afterwards; the private daemon, sandboxes, state and
+config were removed.
+
+| Check | Result |
+|---|---|
+| Two sandboxes run as different uids from the pool, gid = uid, no extra groups, no capabilities | pass |
+| Sandbox A cannot read sandbox B's `secret.txt` or list the state dir | pass |
+| Workspace, dirs and files written through the API are owned by the sandbox uid (`231000:231000`, `files` mode 700, workspace 711, `instances/` 755) | pass |
+| Fork bomb in A (`max_processes = 40`) hits `fork` failures in A only; B keeps forking and running | pass |
+| write/read, baseline, changes, dry-run (workspace unchanged), snapshot 501 | pass |
+| `..`, absolute and sandbox-created symlink escapes (`ln -s /etc/passwd`) rejected on read and write; a write to `/etc` from inside blocked | pass |
+| 17th sandbox with `uid_count = 16` -> 503 "pool exhausted"; deleting one frees its uid | pass |
+| Daemon with `uid_count = 0`, `allow_root = false`: create -> **503** ("refusing to run sandbox commands as root") | pass |
+| Same daemon on an existing uid-less sandbox: exec -> **503** | pass |
+| `allow_root = true`: create and exec work; the command is uid 0 in the private root with all capabilities dropped | pass |
+
+The real unprivileged user-namespace path on this host (Ubuntu,
+`kernel.apparmor_restrict_unprivileged_userns=1`, left as is): `fluxvm-procbox
+probe` as an ordinary user reports `namespaces (isolation): no (writing the
+uid/gid map failed: Permission denied (os error 13) (AppArmor restricts
+unprivileged user namespaces ...))`; `--isolation strict` exits 2 with that
+reason, and `--isolation auto` runs the command and lists it under
+`enforcement.not_enforced`. A root daemon is not affected because it builds the
+namespaces with its own privileges.
