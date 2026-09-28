@@ -11,7 +11,8 @@
 //! if any `allow` rule exists a request must match one (default deny). `*` in
 //! a host or path glob matches any run of characters, including `/`. Hosts and
 //! methods compare case-insensitively; paths are case-sensitive and are matched
-//! without the query string, after [`normalize_path`].
+//! without the query string, after [`normalize_path`]. A trailing `/*` in a
+//! path glob also matches the directory itself (`*/admin/*` covers `/admin`).
 
 /// Result of an ACL check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +57,9 @@ impl Rule {
     }
 
     fn path_matches(&self, path: &str) -> bool {
-        self.path.as_deref().is_none_or(|p| glob_match(p, path))
+        self.path
+            .as_deref()
+            .is_none_or(|p| path_glob_match(p, path))
     }
 
     /// True when the rule constrains neither method nor path.
@@ -128,6 +131,34 @@ impl HttpAcl {
             }
         }
         Verdict::Deny(format!("no allow rule matches {method} {host}{path}"))
+    }
+
+    /// Pre-TLS check for a `CONNECT` that the proxy will intercept: method
+    /// and path are enforced per request afterwards, so the tunnel itself is
+    /// refused only when no request to `host` could ever be allowed (a deny
+    /// rule covering the whole host, or allow rules none of which name it).
+    pub fn check_intercepted_connect(&self, host: &str) -> Verdict {
+        if !self.is_active() {
+            return Verdict::Allow;
+        }
+        let host = host.to_ascii_lowercase();
+        if let Some(r) = self.rules.iter().find(|r| {
+            r.action == Action::Deny
+                && r.method.is_none()
+                && r.path.as_deref().is_none_or(|p| p == "/*")
+                && r.host_matches(&host)
+        }) {
+            return Verdict::Deny(format!("host {host} denied by rule {:?}", r.source));
+        }
+        if self.has_allow()
+            && !self
+                .rules
+                .iter()
+                .any(|r| r.action == Action::Allow && r.host_matches(&host))
+        {
+            return Verdict::Deny(format!("no allow rule covers host {host}"));
+        }
+        Verdict::Allow
     }
 
     /// Check a `CONNECT` tunnel. Inside a tunnel the method and path are
@@ -222,6 +253,19 @@ fn validate_path_glob(p: &str) -> Result<(), String> {
         return Err("path glob must not contain `.` or `..` segments".into());
     }
     Ok(())
+}
+
+/// Match a rule's path glob against a normalized path. A trailing `/*` also
+/// matches the directory itself, so `deny * */admin/*` covers `/admin` and
+/// `/admin/` as well as everything below them.
+fn path_glob_match(glob: &str, path: &str) -> bool {
+    if glob_match(glob, path) {
+        return true;
+    }
+    match glob.strip_suffix("/*") {
+        Some(dir) => glob_match(dir, path.strip_suffix('/').unwrap_or(path)),
+        None => false,
+    }
 }
 
 /// Glob match where `*` matches any run of characters (including `/` and
@@ -469,12 +513,67 @@ mod tests {
     }
 
     #[test]
-    fn deny_trailing_star_does_not_cover_bare_directory() {
-        // Documented: `/admin/*` needs a companion `/admin` rule for the bare path.
+    fn deny_trailing_star_also_covers_the_bare_directory() {
         let a = acl(&["deny * */admin/*"]);
-        assert!(a.check("GET", "h.example", "/admin").is_allow());
-        let both = acl(&["deny * */admin/*", "deny * */admin"]);
-        assert!(denied(both.check("GET", "h.example", "/admin")));
+        for p in [
+            "/admin",
+            "/admin/",
+            "/admin/x",
+            "/a/../admin",
+            "/%61dmin",
+            "//admin",
+            "/admin/.",
+        ] {
+            assert!(denied(a.check("GET", "h.example", p)), "{p}");
+        }
+        // The path glob is `/admin/*`: a different segment or a nested `admin` is not covered.
+        for p in [
+            "/superadmin",
+            "/administrator",
+            "/adminx/y",
+            "/x/admin",
+            "/",
+        ] {
+            assert!(a.check("GET", "h.example", p).is_allow(), "{p}");
+        }
+    }
+
+    #[test]
+    fn trailing_star_allow_rules_cover_the_bare_directory_too() {
+        let a = acl(&["allow GET api.example.com/v1/*"]);
+        assert!(a.check("GET", "api.example.com", "/v1").is_allow());
+        assert!(a.check("GET", "api.example.com", "/v1/").is_allow());
+        assert!(a.check("GET", "api.example.com", "/v1/x").is_allow());
+        assert!(denied(a.check("GET", "api.example.com", "/v10")));
+        assert!(denied(a.check("GET", "api.example.com", "/v")));
+    }
+
+    #[test]
+    fn intercepted_connect_precheck_only_refuses_unreachable_hosts() {
+        let a = acl(&[
+            "allow GET docs.python.org/*",
+            "allow POST api.openai.com/v1/chat/completions",
+            "deny * */admin/*",
+            "deny * blocked.example",
+        ]);
+        assert!(a.check_intercepted_connect("docs.python.org").is_allow());
+        assert!(a.check_intercepted_connect("API.openai.com").is_allow());
+        // No allow rule names it.
+        assert!(denied(a.check_intercepted_connect("other.example")));
+        // A whole-host deny.
+        assert!(denied(a.check_intercepted_connect("blocked.example")));
+        // Inactive ACL: no opinion.
+        assert!(acl(&[]).check_intercepted_connect("any.example").is_allow());
+        // Only deny rules that are path-scoped never block the tunnel itself.
+        let d = acl(&["deny * */admin/*"]);
+        assert!(d.check_intercepted_connect("any.example").is_allow());
+    }
+
+    #[test]
+    fn root_glob_matches_the_root() {
+        let a = acl(&["deny * h.example/*"]);
+        assert!(denied(a.check("GET", "h.example", "/")));
+        assert!(denied(a.check("GET", "h.example", "/x")));
     }
 
     #[test]

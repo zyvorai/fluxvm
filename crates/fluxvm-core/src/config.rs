@@ -141,6 +141,25 @@ pub struct SandboxConfig {
     /// `allow GET docs.python.org/*` or `deny * */admin/*` (empty = off). See
     /// `docs/http-acl.md`.
     pub egress_http_rules: Vec<String>,
+    /// Terminate TLS in the egress proxy so `egress_http_rules` also apply to
+    /// HTTPS (`CONNECT` tunnels). Off by default; the guest must trust the CA
+    /// in `egress_ca_cert`. See `docs/http-acl.md`.
+    pub egress_tls_intercept: bool,
+    /// PEM CA certificate used to sign per-host leaf certificates. Empty =
+    /// `/var/lib/fluxvm/egress-ca.crt`. Generated (with the key) if absent.
+    pub egress_ca_cert: String,
+    /// PEM private key of that CA, written mode 0600. Empty =
+    /// `/var/lib/fluxvm/egress-ca.key`.
+    pub egress_ca_key: String,
+    /// Destination ports an intercepted `CONNECT` may target (empty = 443).
+    pub egress_tls_ports: Vec<u16>,
+    /// Let intercepted tunnels reach loopback / private / link-local upstream
+    /// addresses. Off by default so the proxy cannot be used to reach
+    /// internal services or cloud metadata.
+    pub egress_tls_allow_private: bool,
+    /// Extra PEM root certificates trusted when the proxy verifies upstream
+    /// servers (for a private CA). Verification is never disabled.
+    pub egress_upstream_ca_file: String,
     /// Inject `Authorization` on matching Host (never exposed to the guest).
     pub credential_vault: Vec<CredentialInject>,
     /// Directory for OCI→template builds and snapshot templates.
@@ -170,6 +189,12 @@ impl Default for SandboxConfig {
             autopause_scan_secs: 10,
             egress_allow_domains: Vec::new(),
             egress_http_rules: Vec::new(),
+            egress_tls_intercept: false,
+            egress_ca_cert: String::new(),
+            egress_ca_key: String::new(),
+            egress_tls_ports: Vec::new(),
+            egress_tls_allow_private: false,
+            egress_upstream_ca_file: String::new(),
             credential_vault: Vec::new(),
             templates_dir: None,
             volumes_dir: None,
