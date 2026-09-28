@@ -41,6 +41,64 @@ qcow2 inputs require `qemu-img` conversion before launch.
 Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs) parks before a pause is reported complete, and the snapshot records each vCPU's registers and MP state. Restore reloads registers only (no LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than bit-exact.
 
 This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
+full-fidelity snapshots (LAPIC/MSR/FPU/TSC state), broad storage backends, and
+a fully QEMU-free image build pipeline (partitioned cloud images still need
+`qemu-img` once, to extract the root) are separate work.
+
+**Verified (2026-09-28) via a real `fluxctl create`, not just unit tests:**
+the auto-generated per-VM token showed up correctly at
+`/etc/fluxvm-guest-agent.token` on the actual cloned instance disk
+(`debugfs -R 'cat ...' <instance>/root.raw`), matching the token in the
+`create` response — the offline `debugfs` injection path works end to end
+through the real control plane.
+
+**Guest-agent binary compatibility gotcha, found the same way:** a
+`fluxvm-guest-agent` built on a modern host (glibc 2.39+) fails to exec in an
+older guest (e.g. Ubuntu 18.04, glibc 2.27) with `version 'GLIBC_2.28' not
+found`. Build it statically instead:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+scripts/build-guest-agent-static.sh        # verifies the result is static
+```
+
+**Cloud-init image and kernel (verified 2026-09-28).** Firecracker's public
+quickstart rootfs has no dpkg database and no Cloud-init, so it cannot verify
+NoCloud. `scripts/build-native-guest-image.sh` builds a flat ext4 root with
+Cloud-init and the static agent enabled from a Debian/Ubuntu base:
+
+```bash
+sudo scripts/build-native-guest-image.sh bionic-server-cloudimg-amd64.img \
+    /var/lib/fluxvm/images/linux-agent.raw
+```
+
+A partitioned cloud image (qcow2 or raw) has its root partition extracted into
+a flat ext4 (a one-time step that uses `qemu-img`/`losetup`; the image and the
+runtime profile need no QEMU). It also pins `datasource_list: [NoCloud, None]`
+and drops `/boot` and `/boot/efi` fstab entries.
+
+Use a kernel that seeds its entropy pool. The 4.14.174 quickstart kernel
+never finished initialising it (`random: fast init done` only, no
+`crng init done`), so Cloud-init's Python blocked in `getrandom()` and boot
+stalled at "Starting Initial cloud-init job (pre-networking)"; the agent
+never started. A 5.10 kernel with `CONFIG_HW_RANDOM_VIRTIO=y`,
+`CONFIG_RANDOM_TRUST_CPU=y`, `CONFIG_VIRTIO_MMIO=y` and vsock (for example
+Firecracker CI's `vmlinux-5.10.225-no-acpi`, under
+`s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/x86_64/`) boots it
+cleanly. With that kernel and image,
+
+```bash
+sudo env KERNEL=/path/to/vmlinux-5.10.225-no-acpi ROOTFS=/path/to/linux-agent.raw \
+    FLUXVM_AGENT=1 ./scripts/test-native-kvm-no-qemu.sh
+```
+
+passed end to end through a real `fluxctl create`: native VMM running, the
+static agent answering over vsock inside the glibc 2.27 guest, and the
+Cloud-init hostname from the offline NoCloud injection applied.
+
+Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs) parks before a pause is reported complete, and the snapshot records each vCPU's registers and MP state. Restore reloads registers only (no LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than bit-exact.
+
+This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
 multi-vCPU snapshots, broad storage backends, and a QEMU-free image
 build pipeline are separate work.
 

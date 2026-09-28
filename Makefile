@@ -6,7 +6,7 @@ HOST ?=
 USER ?= sus
 DEPLOY_FLAGS ?= --key
 
-.PHONY: help build release install test fmt fmt-check clippy \
+.PHONY: help build release guest-agent-static install test fmt fmt-check clippy \
 	test-policy bpf preflight check test-devops test-packetflow test-microvm \
 	test-fc deploy deploy-quick deploy-verify deploy-preflight \
 	test-h1-snap evidence-s8
@@ -29,6 +29,10 @@ build:
 release:
 	cargo build --release -p fluxctl -p fluxvm-guest-agent \
 		-p fluxvm-hypervisor -p fluxvm-microvm -p fluxvm-kube
+
+# Static musl guest agent that runs in any guest regardless of its glibc.
+guest-agent-static:
+	scripts/build-guest-agent-static.sh
 
 install: release
 	install -m755 target/release/fluxctl /usr/local/bin/fluxctl
