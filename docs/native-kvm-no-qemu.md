@@ -16,14 +16,30 @@ matching the kernel command line (`root=/dev/vda` by default).
    `sudo fluxctl --config /etc/fluxvm.toml create --spec examples/fluxvm-native-kvm.json`.
    Check `fluxctl list` and the VM's console log.
 
-`backend: "auto"` can select QEMU; always request `flux-vm` explicitly.
+Create waits for the in-tree VMM to reach its running state and reports
+initialization failures. This readiness check does not wait for the guest OS
+to finish booting; inspect the console or guest agent for that.
+On a Linux host with `/dev/kvm`, run the acceptance gate with
+`sudo KERNEL=/path/to/vmlinux ROOTFS=/path/to/root.raw ./scripts/test-native-kvm-no-qemu.sh`.
+Set `FLUXVM_AGENT=1` when the image includes the enabled guest agent and
+Cloud-init to check the vsock path and offline NoCloud injection too.
+
+`backend: "auto"` selects the in-tree VMM only when `fluxvm_engine = "kvm"`,
+a direct kernel is available, and the image is named `.raw` or `.ext4`.
+Use `flux-vm` explicitly for a predictable deployment.
 The default `fluxvm_engine` is Firecracker, so set it to `kvm` explicitly.
-This profile disables the guest agent: its per-VM token injection currently
-uses GuestKit's `qemu-nbd` path. Do not request cloud-init, since seed creation
-uses `cloud-localds` and the native KVM boot config does not currently attach
-the seed disk. qcow2 inputs require `qemu-img` conversion before launch.
+The example disables the guest agent for a first boot. For agent control,
+install and enable `fluxvm-guest-agent` in the guest image and set
+`"agent": {"enabled": true}`. On a flat ext4 root disk, FluxVM injects its
+per-VM token with `debugfs` instead of GuestKit's `qemu-nbd`. Cloud-init
+requests are embedded as NoCloud files in the cloned root disk, without
+`cloud-localds`; the guest must have Cloud-init installed. Install
+`e2fsprogs` (`debugfs`) on the host for either feature. Injection supports
+flat ext4 rootfs images only and fails for GPT-partitioned images. SELinux
+enforcing guests need the token file labeled appropriately in the image.
+qcow2 inputs require `qemu-img` conversion before launch.
 Snapshots and pause in the native engine currently require one vCPU.
 
 This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
 multi-vCPU snapshots, broad storage backends, and a QEMU-free image
-customization pipeline are separate work.
+build pipeline are separate work.

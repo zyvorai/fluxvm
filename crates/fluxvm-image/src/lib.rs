@@ -5,7 +5,10 @@ pub mod catalog;
 pub mod cloudinit;
 pub mod oci;
 pub mod qga;
+pub mod raw_ext4;
 pub mod storage;
+mod vmdk;
+mod vmdk_descriptor;
 pub mod windows;
 
 pub use windows::{FirewallPort, RunOnceEntry, WindowsAgentSpec, WindowsCustomize, WindowsScript};
@@ -115,27 +118,28 @@ pub async fn build_image(cfg: &Config, req: &BuildImageRequest) -> Result<BuildI
         fs::create_dir_all(parent)?;
     }
 
-    run_checked(
-        &cfg.qemu_img_binary,
-        &[
-            "convert".into(),
-            "-O".into(),
-            req.format.clone(),
-            src.display().to_string(),
-            req.output.display().to_string(),
-        ],
-    )
-    .await?;
+    convert_image(cfg, &src, &req.output, &req.format).await?;
     if let Some(size) = req.size_gib {
-        run_checked(
-            &cfg.qemu_img_binary,
-            &[
-                "resize".into(),
-                req.output.display().to_string(),
-                format!("{}G", size),
-            ],
-        )
-        .await?;
+        if req.format == "raw" {
+            let new_len = size
+                .checked_mul(1024 * 1024 * 1024)
+                .context("disk size overflow")?;
+            let output = fs::OpenOptions::new().write(true).open(&req.output)?;
+            if new_len < output.metadata()?.len() {
+                bail!("requested disk size is smaller than the source image");
+            }
+            output.set_len(new_len)?;
+        } else {
+            run_checked(
+                &cfg.qemu_img_binary,
+                &[
+                    "resize".into(),
+                    req.output.display().to_string(),
+                    format!("{}G", size),
+                ],
+            )
+            .await?;
+        }
     }
 
     if let Some(win) = &req.windows {
@@ -570,6 +574,12 @@ async fn image_format(cfg: &Config, image: &Path) -> Result<String> {
     if magic == *b"QFI\xfb" {
         return Ok("qcow2".into());
     }
+    if magic == *b"KDMV" {
+        return Ok("vmdk".into());
+    }
+    if vmdk_descriptor::is_descriptor(image)? {
+        return Ok("vmdk".into());
+    }
     // A named raw image can be cloned without installing any QEMU binary.
     // For ambiguous extensions, ask qemu-img instead of silently treating
     // VMDK/VHDX/other formats as raw sectors.
@@ -601,6 +611,40 @@ async fn image_format(cfg: &Config, image: &Path) -> Result<String> {
         .context("qemu-img info did not return an image format")
 }
 
+/// Import the common uncompressed sparse VMDK layout without a QEMU process.
+/// Complex VMDK variants retain qemu-img compatibility until native readers exist.
+async fn convert_image(cfg: &Config, src: &Path, out: &Path, format: &str) -> Result<()> {
+    if format == "raw" && (vmdk::is_sparse_vmdk(src)? || vmdk_descriptor::is_descriptor(src)?) {
+        let source = src.to_owned();
+        let target = out.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            if vmdk::is_sparse_vmdk(&source)? {
+                vmdk::convert_sparse_to_raw(&source, &target)
+            } else {
+                vmdk_descriptor::convert_descriptor_to_raw(&source, &target)
+            }
+        })
+        .await
+        .context("VMDK conversion worker panicked")?;
+        match result {
+            Ok(vmdk::ConvertResult::Converted) => return Ok(()),
+            Ok(vmdk::ConvertResult::Unsupported) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    run_checked(
+        &cfg.qemu_img_binary,
+        &[
+            "convert".into(),
+            "-O".into(),
+            format.into(),
+            src.display().to_string(),
+            out.display().to_string(),
+        ],
+    )
+    .await
+}
+
 pub async fn clone_for_vm(
     cfg: &Config,
     base: &Path,
@@ -608,7 +652,28 @@ pub async fn clone_for_vm(
     out: &Path,
     size_gib: Option<u64>,
 ) -> Result<()> {
+    if backend == BackendKind::FluxVm
+        && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
+        && !matches!(
+            base.extension().and_then(|e| e.to_str()),
+            Some("raw" | "ext4")
+        )
+    {
+        bail!(
+            "native KVM accepts only named .raw or .ext4 images; convert {} to raw before launch",
+            base.display()
+        );
+    }
     let base_fmt = image_format(cfg, base).await?;
+    if backend == BackendKind::FluxVm
+        && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
+        && base_fmt != "raw"
+    {
+        bail!(
+            "native KVM requires a raw image, but {} contains {base_fmt} data",
+            base.display()
+        );
+    }
     match backend {
         BackendKind::Qemu => {
             // Cheap disposable copy-on-write layer.
@@ -643,17 +708,7 @@ pub async fn clone_for_vm(
                 )
                 .await?;
             } else {
-                run_checked(
-                    &cfg.qemu_img_binary,
-                    &[
-                        "convert".into(),
-                        "-O".into(),
-                        "raw".into(),
-                        base.display().to_string(),
-                        out.display().to_string(),
-                    ],
-                )
-                .await?;
+                convert_image(cfg, base, out, "raw").await?;
             }
         }
         BackendKind::Auto => bail!(
@@ -714,5 +769,38 @@ mod qemu_free_raw_tests {
             image_format(&Config::default(), &base).await.unwrap(),
             "qcow2"
         );
+    }
+
+    #[tokio::test]
+    async fn vmdk_header_takes_precedence_over_raw_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("misnamed.raw");
+        fs::write(&base, b"KDMVpadding").unwrap();
+        assert_eq!(
+            image_format(&Config::default(), &base).await.unwrap(),
+            "vmdk"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_kvm_rejects_misnamed_vmdk_without_qemu_img() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("vmdk-disguised.raw");
+        fs::write(&base, b"KDMVpayload").unwrap();
+        let cfg = Config {
+            qemu_img_binary: "/definitely/missing/qemu-img".into(),
+            fluxvm_engine: fluxvm_core::config::FluxVmEngine::Kvm,
+            ..Config::default()
+        };
+        let err = clone_for_vm(
+            &cfg,
+            &base,
+            BackendKind::FluxVm,
+            &dir.path().join("out.raw"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("vmdk"));
     }
 }

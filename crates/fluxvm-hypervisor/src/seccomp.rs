@@ -102,6 +102,18 @@ fn apply_seccomp_filter() -> Result<()> {
         libc::SYS_readlink,
         libc::SYS_chmod,
         libc::SYS_fchmod,
+        // jailer::apply() (paired 1:1 with this filter -- see
+        // guest.rs's `jailer: cfg.seccomp`) unshare()s new namespaces
+        // unconditionally, and chroot()s / setuid()s / setgid()s when
+        // FLUXVM_JAILER_CHROOT/_UID/_GID are set. None of these were
+        // in this allowlist, so any KVM-engine boot through the real
+        // control plane (which always requests seccomp) was an
+        // instant SIGSYS the moment the jailer ran -- confirmed via
+        // strace against a real `fluxctl create` on the lab host.
+        libc::SYS_unshare,
+        libc::SYS_chroot,
+        libc::SYS_setuid,
+        libc::SYS_setgid,
         libc::SYS_chown,
         libc::SYS_umask,
         libc::SYS_gettimeofday,

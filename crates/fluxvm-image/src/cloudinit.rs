@@ -20,15 +20,13 @@ fn yaml_quote(s: &str) -> String {
 /// valid when `ci.static_network` is false (checked by the caller, not
 /// re-validated here, since which networking modes have a known address is
 /// this module's caller's concern, not cloud-init seed-building's).
-pub async fn build_seed(
-    cfg: &Config,
+fn write_seed_files(
     dir: &Path,
     ci: &CloudInitSpec,
     static_net: Option<(&str, &str)>,
-) -> Result<PathBuf> {
+) -> Result<(PathBuf, PathBuf, Option<PathBuf>)> {
     let user_data = dir.join("user-data");
     let meta_data = dir.join("meta-data");
-    let seed = dir.join("seed.img");
     let hostname = ci.hostname.clone().unwrap_or_else(|| "fluxvm-vm".into());
     let user = ci.user.clone().unwrap_or_else(|| "cloud".into());
 
@@ -79,9 +77,8 @@ pub async fn build_seed(
         format!("instance-id: {}\nlocal-hostname: {}\n", hostname, hostname),
     )?;
 
-    let mut args = vec!["--disk-format".to_string(), "raw".to_string()];
     let network_config = dir.join("network-config");
-    if ci.static_network {
+    let network_config = if ci.static_network {
         let (cidr, gateway) = static_net
             .context("static_network is set but no address was prepared -- network prep must run before build_seed")?;
         // `match: {name: en*}` rather than a specific interface name: which
@@ -92,6 +89,23 @@ pub async fn build_seed(
             "network:\n  version: 2\n  ethernets:\n    guestnet0:\n      match:\n        name: en*\n      dhcp4: false\n      addresses:\n        - {cidr}\n      routes:\n        - to: default\n          via: {gateway}\n"
         );
         fs::write(&network_config, netcfg).context("writing cloud-init network-config")?;
+        Some(network_config)
+    } else {
+        None
+    };
+    Ok((user_data, meta_data, network_config))
+}
+
+pub async fn build_seed(
+    cfg: &Config,
+    dir: &Path,
+    ci: &CloudInitSpec,
+    static_net: Option<(&str, &str)>,
+) -> Result<PathBuf> {
+    let (user_data, meta_data, network_config) = write_seed_files(dir, ci, static_net)?;
+    let seed = dir.join("seed.img");
+    let mut args = vec!["--disk-format".to_string(), "raw".to_string()];
+    if let Some(network_config) = network_config {
         args.push("--network-config".into());
         args.push(network_config.display().to_string());
     }
@@ -101,4 +115,73 @@ pub async fn build_seed(
 
     run_checked(&cfg.cloud_localds_binary, &args).await?;
     Ok(seed)
+}
+
+/// Seed Cloud-init's NoCloud datasource inside a flat ext4 VM clone.
+/// This avoids cloud-localds and a second virtio disk in the native engine.
+pub fn inject_nocloud_raw(
+    disk: &Path,
+    dir: &Path,
+    ci: &CloudInitSpec,
+    static_net: Option<(&str, &str)>,
+) -> Result<()> {
+    let (user_data, meta_data, network_config) = write_seed_files(dir, ci, static_net)?;
+    let base = "/var/lib/cloud/seed/nocloud";
+    crate::raw_ext4::write_file(
+        disk,
+        &format!("{base}/user-data"),
+        &fs::read(user_data)?,
+        0o600,
+    )?;
+    crate::raw_ext4::write_file(
+        disk,
+        &format!("{base}/meta-data"),
+        &fs::read(meta_data)?,
+        0o600,
+    )?;
+    if let Some(network_config) = network_config {
+        crate::raw_ext4::write_file(
+            disk,
+            &format!("{base}/network-config"),
+            &fs::read(network_config)?,
+            0o600,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn embeds_nocloud_in_flat_ext4_without_cloud_localds() {
+        if Command::new("mkfs.ext4").arg("-V").output().is_err()
+            || Command::new("debugfs").arg("-V").output().is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("root.raw");
+        fs::File::create(&disk)
+            .unwrap()
+            .set_len(16 * 1024 * 1024)
+            .unwrap();
+        assert!(
+            Command::new("mkfs.ext4")
+                .args(["-q", "-F"])
+                .arg(&disk)
+                .status()
+                .unwrap()
+                .success()
+        );
+        inject_nocloud_raw(&disk, dir.path(), &CloudInitSpec::default(), None).unwrap();
+        let output = Command::new("debugfs")
+            .args(["-R", "cat /var/lib/cloud/seed/nocloud/user-data"])
+            .arg(&disk)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("#cloud-config"));
+    }
 }

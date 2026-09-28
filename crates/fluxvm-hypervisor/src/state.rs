@@ -26,6 +26,8 @@ impl VmLifecycle {
 
 pub struct VmState {
     pub lifecycle: VmLifecycle,
+    /// Initial boot failure, returned to the launching control plane.
+    pub boot_error: Option<String>,
     pub boot: Option<BootConfig>,
     pub last_activity: DateTime<Utc>,
     pub marker: Option<std::path::PathBuf>,
@@ -36,6 +38,7 @@ impl VmState {
     pub fn new() -> Self {
         Self {
             lifecycle: VmLifecycle::Created,
+            boot_error: None,
             boot: None,
             last_activity: Utc::now(),
             marker: None,

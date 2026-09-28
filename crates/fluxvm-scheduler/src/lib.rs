@@ -208,7 +208,8 @@ pub fn backend(kind: BackendKind) -> Result<Box<dyn VmBackend>> {
     })
 }
 
-/// Picks a concrete backend for `BackendKind::Auto`, preferring Firecracker
+/// Picks a concrete backend for `BackendKind::Auto`, preferring the in-tree
+/// KVM engine for a raw Linux image when explicitly configured, then Firecracker
 /// (fastest microVM start) when a direct-boot kernel is available, then
 /// Cloud Hypervisor when a kernel or firmware is available, falling back to
 /// QEMU (works with just a disk image, no kernel/firmware required — the
@@ -218,6 +219,20 @@ pub fn backend(kind: BackendKind) -> Result<Box<dyn VmBackend>> {
 pub fn resolve_backend(req: &CreateVmRequest, cfg: &Config) -> BackendKind {
     if req.backend != BackendKind::Auto {
         return req.backend;
+    }
+    let native_kernel =
+        req.kernel.is_some() || cfg.fluxvm_kernel.is_some() || cfg.firecracker_kernel.is_some();
+    let raw_image = matches!(
+        req.image.extension().and_then(|e| e.to_str()),
+        Some("raw" | "ext4")
+    );
+    if cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
+        && native_kernel
+        && raw_image
+        && req.firmware.is_none()
+        && !req.hyperv
+    {
+        return BackendKind::FluxVm;
     }
     let firecracker_ok = req.kernel.is_some() || cfg.firecracker_kernel.is_some();
     let cloud_hypervisor_ok =
@@ -543,6 +558,30 @@ fn validate_cpu_template(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
             "cpu_template is Firecracker-only (got backend {other:?}; Cloud Hypervisor/QEMU have no FC-style CPU templates)"
         ),
     }
+}
+
+/// Do not accept options that the native VMM would silently discard.
+fn validate_native_kvm_profile(req: &CreateVmRequest, cfg: &Config) -> Result<()> {
+    if req.backend != BackendKind::FluxVm
+        || cfg.fluxvm_engine != fluxvm_core::config::FluxVmEngine::Kvm
+    {
+        return Ok(());
+    }
+    if req.firmware.is_some() || req.hyperv {
+        bail!("in-tree KVM requires Linux direct kernel boot; UEFI and Hyper-V are unsupported");
+    }
+    if !req.shared_folders.is_empty() {
+        bail!("in-tree KVM does not attach shared_folders yet");
+    }
+    if req.storage != StorageBackend::Default {
+        bail!(
+            "QEMU-free in-tree KVM provisioning currently requires storage=default (a cloned raw disk)"
+        );
+    }
+    if req.max_vcpus.is_some_and(|max| max > req.vcpus) {
+        bail!("in-tree KVM does not support live vCPU hotplug");
+    }
+    Ok(())
 }
 
 /// Aggregate per-tenant admission check -- see `Policy::tenants`'s own doc
@@ -1810,6 +1849,7 @@ impl VmManager {
         let signed_by = resolved.signed_by.clone().unwrap_or_default();
         req.image = resolved.path;
         validate_policy(&req, &self.cfg)?;
+        validate_native_kvm_profile(&req, &self.cfg)?;
         let ledger = self.store.quota_ledger().await?;
         if let Some(tenant) = req.tenant.as_deref()
             && !self.cfg.policy.tenants.is_empty()
@@ -1971,7 +2011,26 @@ impl VmManager {
                 .guest_cidr
                 .as_deref()
                 .zip(network.gateway.as_deref());
+            let native_kvm = req.backend == BackendKind::FluxVm
+                && self.cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm;
             let seed = match &effective_cloud_init {
+                Some(ci) if native_kvm => {
+                    let disk = record.disk.clone();
+                    let workspace = workspace.clone();
+                    let ci = ci.clone();
+                    let static_net = static_net.map(|(cidr, gateway)| (cidr.to_owned(), gateway.to_owned()));
+                    tokio::task::spawn_blocking(move || {
+                        fluxvm_image::cloudinit::inject_nocloud_raw(
+                            &disk,
+                            &workspace,
+                            &ci,
+                            static_net.as_ref().map(|(cidr, gateway)| (cidr.as_str(), gateway.as_str())),
+                        )
+                    })
+                    .await
+                    .context("native KVM NoCloud worker panicked")??;
+                    None
+                }
                 Some(ci) => Some(
                     fluxvm_image::cloudinit::build_seed(&self.cfg, &workspace, ci, static_net)
                         .await?,
@@ -4608,6 +4667,31 @@ mod tests {
         cfg.firecracker_kernel = Some("/boot/vmlinux".into());
         let r = req(BackendKind::Auto, None, None);
         assert_eq!(resolve_backend(&r, &cfg), BackendKind::Firecracker);
+    }
+
+    #[test]
+    fn auto_uses_opted_in_native_kvm_for_raw_linux() {
+        let mut cfg = Config::default();
+        cfg.fluxvm_engine = fluxvm_core::config::FluxVmEngine::Kvm;
+        cfg.fluxvm_kernel = Some("/boot/vmlinux".into());
+        let mut r = req(BackendKind::Auto, None, None);
+        r.image = "/images/root.raw".into();
+        assert_eq!(resolve_backend(&r, &cfg), BackendKind::FluxVm);
+        r.image = "/images/root.qcow2".into();
+        assert_ne!(resolve_backend(&r, &cfg), BackendKind::FluxVm);
+    }
+
+    #[test]
+    fn native_kvm_rejects_ignored_features_before_provisioning() {
+        let mut cfg = Config::default();
+        cfg.fluxvm_engine = fluxvm_core::config::FluxVmEngine::Kvm;
+        let mut r = req(BackendKind::FluxVm, Some("/boot/vmlinux"), None);
+        assert!(validate_native_kvm_profile(&r, &cfg).is_ok());
+        r.firmware = Some("/boot/OVMF.fd".into());
+        assert!(validate_native_kvm_profile(&r, &cfg).is_err());
+        r.firmware = None;
+        r.storage = StorageBackend::Nbd;
+        assert!(validate_native_kvm_profile(&r, &cfg).is_err());
     }
 
     #[test]

@@ -13,7 +13,7 @@ use fluxvm_core::{
 };
 use std::{fs, path::Path, time::Duration};
 
-const API_TIMEOUT: Duration = Duration::from_secs(15);
+const API_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub struct FluxVmBackend;
 
@@ -42,7 +42,7 @@ impl VmBackend for FluxVmBackend {
         let boot = BootConfig {
             kernel: kernel.clone(),
             rootfs: ctx.disk.clone(),
-            initrd: None,
+            initrd: req.initrd.clone(),
             seed: ctx.seed_disk.clone(),
             memory_mib: req.memory_mib,
             vcpus: req.vcpus,
@@ -133,7 +133,7 @@ impl VmBackend for FluxVmBackend {
             &cfg.fluxvm_hypervisor_binary,
             &args,
         );
-        let child = spawn_logged_with_env(
+        let mut child = spawn_logged_with_env(
             &program,
             &args,
             &ctx.log_path,
@@ -153,16 +153,43 @@ impl VmBackend for FluxVmBackend {
             .id()
             .context("fluxvm-hypervisor exited before PID was available")?;
 
-        // Wait until the API answers Ping (boot may be in progress).
+        // Ping only proves the API socket is up; the guest may still be
+        // booting (or may already have failed). Wait for actual VM state.
         let deadline = tokio::time::Instant::now() + API_TIMEOUT;
-        loop {
-            if tokio::time::Instant::now() > deadline {
-                bail!("fluxvm-hypervisor API did not become ready within {API_TIMEOUT:?}");
+        let ready: Result<()> = async {
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    bail!("FluxVm guest did not reach running state within {API_TIMEOUT:?}");
+                }
+                if let Some(status) = child.try_wait()? {
+                    bail!("fluxvm-hypervisor exited during boot: {status}");
+                }
+                match control::request_with_timeout(
+                    &api,
+                    &ApiRequest::Metrics,
+                    remaining.min(Duration::from_secs(35)),
+                )
+                .await
+                {
+                    Ok(crate::api::ApiResponse::Metrics { lifecycle, .. })
+                        if lifecycle == "running" =>
+                    {
+                        break Ok(())
+                    }
+                    Ok(crate::api::ApiResponse::Error { message }) => {
+                        bail!("FluxVm guest boot failed: {message}")
+                    }
+                    Ok(crate::api::ApiResponse::Metrics { .. }) | Err(_) => {}
+                    Ok(other) => bail!("unexpected FluxVm boot response: {other:?}"),
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            match control::request(&api, &ApiRequest::Ping).await {
-                Ok(_) => break,
-                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
-            }
+        }
+        .await;
+        if let Err(e) = ready {
+            let _ = child.kill().await;
+            return Err(e);
         }
 
         Ok(LaunchResult {
