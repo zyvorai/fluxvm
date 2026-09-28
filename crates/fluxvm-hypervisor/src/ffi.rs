@@ -157,6 +157,19 @@ pub const KVM_GET_MSR_INDEX_LIST: c_ulong = 0xc004_ae02;
 /// `sizeof(struct kvm_clock_data)` == 48.
 pub const KVM_GET_CLOCK: c_ulong = 0x8030_ae7c;
 pub const KVM_SET_CLOCK: c_ulong = 0x4030_ae7b;
+/// `_IO(KVMIO, 0xad)`, no payload. Tells KVM this vCPU was just involuntarily
+/// paused for an extended real-time interval (a snapshot restore), so its
+/// pvclock/kvmclock bookkeeping should not treat that gap as elapsed guest
+/// time. Firecracker calls this on every vCPU as the last step of its own
+/// snapshot restore (`KvmVcpu::restore_state`) specifically to keep multiple
+/// vCPUs' views of the guest clock consistent with each other after resume;
+/// without it, a multi-vCPU guest can come back with per-vCPU clocks that
+/// disagree (observed here: `test-kvm-snapshot-progress.sh` intermittently
+/// failing at 2 vCPUs, never at 1, where there is only one clock to disagree
+/// with). Best-effort: some guest kernels build without kvm-clock, and older
+/// hosts may not implement it (`KVM_CAP_KVMCLOCK_CTRL`), so an ioctl failure
+/// here is a warning, not a hard error.
+pub const KVM_KVMCLOCK_CTRL: c_ulong = 0xaead;
 /// `sizeof(struct kvm_irqchip)` == 520 (chip_id 0 = PIC master, 1 = slave, 2 = IOAPIC).
 pub const KVM_GET_IRQCHIP: c_ulong = 0xc208_ae62;
 pub const KVM_SET_IRQCHIP: c_ulong = 0x8208_ae63;

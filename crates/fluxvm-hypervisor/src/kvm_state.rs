@@ -332,7 +332,18 @@ pub fn apply_vcpu(kvm: &KvmVm, idx: usize, st: &VcpuState) -> Result<()> {
         ffi::KVM_SET_DEBUGREGS,
         &st.debugregs,
         "KVM_SET_DEBUGREGS",
-    )
+    )?;
+    // Last step, matching Firecracker's restore order: tell KVM this vCPU's
+    // clock just had a long involuntary pause. See the constant's doc comment
+    // in ffi.rs for why this specifically matters for multi-vCPU restores.
+    // Best-effort -- e.g. EINVAL when the guest never enabled kvm-clock.
+    if unsafe { ffi::flux_ioctl(fd, ffi::KVM_KVMCLOCK_CTRL, std::ptr::null_mut()) } < 0 {
+        eprintln!(
+            "[kvm] vcpu{idx}: KVM_KVMCLOCK_CTRL failed (errno {}); guest clock may be off by the pause duration",
+            unsafe { ffi::flux_errno() }
+        );
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------ codec
