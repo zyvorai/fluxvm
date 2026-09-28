@@ -20,7 +20,11 @@ fluxvm-hypervisor = { path = "../fluxvm-hypervisor" }
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
 fluxvm-cgroup = { path = "../fluxvm-cgroup" }
+fluxvm-procbox = { path = "../fluxvm-procbox" }
 anyhow = "1"
+base64 = "0.22"
+libc = "0.2"
+sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

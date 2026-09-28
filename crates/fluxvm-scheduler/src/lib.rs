@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub mod changes;
 pub mod confidential;
 pub mod events;
+pub mod procbox_sandbox;
 mod sandbox;
 pub mod templates;
 pub use events::{EventFilter, VmEvent};
@@ -3086,6 +3087,7 @@ impl VmManager {
 
     pub async fn pause(&self, id: Uuid) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
+        procbox_sandbox::require_guest(&vm, "pausing")?;
         backend(vm.backend)?.pause(&self.cfg, &vm).await?;
         vm.status = VmStatus::Paused;
         self.store.update(vm.clone()).await?;
@@ -3095,6 +3097,7 @@ impl VmManager {
 
     pub async fn resume(&self, id: Uuid) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
+        procbox_sandbox::require_guest(&vm, "resuming")?;
         backend(vm.backend)?.resume(&self.cfg, &vm).await?;
         vm.status = VmStatus::Running;
         self.store.update(vm.clone()).await?;
@@ -3514,6 +3517,9 @@ impl VmManager {
         timeout_seconds: Option<u64>,
     ) -> Result<fluxvm_guest_protocol::AgentResponse> {
         let vm = self.get(id).await?;
+        if let Some(spec) = procbox_sandbox::load_spec(&vm)? {
+            return self.procbox_exec(&vm, spec, command, timeout_seconds).await;
+        }
         let wait = std::time::Duration::from_secs(
             timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS) + 5,
         );
@@ -3750,6 +3756,9 @@ impl VmManager {
         mode: Option<u32>,
     ) -> Result<fluxvm_guest_protocol::AgentResponse> {
         let vm = self.get(id).await?;
+        if procbox_sandbox::is_procbox(&vm) {
+            return self.procbox_put_file(&vm, path, content_base64, mode).await;
+        }
         fluxvm_vsock_client::call(
             &vm,
             AgentRequest::PutFile {
@@ -3770,6 +3779,9 @@ impl VmManager {
         path: String,
     ) -> Result<fluxvm_guest_protocol::AgentResponse> {
         let vm = self.get(id).await?;
+        if procbox_sandbox::is_procbox(&vm) {
+            return self.procbox_get_file(&vm, path).await;
+        }
         fluxvm_vsock_client::call(
             &vm,
             AgentRequest::GetFile { path },
@@ -3789,6 +3801,7 @@ impl VmManager {
         rows: u16,
     ) -> Result<fluxvm_vsock_client::ConsoleStream> {
         let vm = self.get(id).await?;
+        procbox_sandbox::require_guest(&vm, "an interactive console")?;
         fluxvm_vsock_client::open_shell(&vm, cols, rows, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
             .await
     }

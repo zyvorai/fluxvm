@@ -47,6 +47,11 @@ pub struct SandboxCreateRequest {
     /// normal one; `required` refuses to run without one. See [`crate::confidential`].
     #[serde(default)]
     pub confidential: Option<crate::confidential::ConfidentialMode>,
+    /// Run this sandbox as a rootless Landlock + seccomp process on the host
+    /// instead of a VM (`{}` for defaults). Needs `sandbox.procbox.enabled`;
+    /// see [`crate::procbox_sandbox`].
+    #[serde(default)]
+    pub procbox: Option<crate::procbox_sandbox::ProcboxRequest>,
 }
 
 pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
@@ -190,6 +195,11 @@ impl VmManager {
         token_tenant: Option<&str>,
         created_by_token: Option<&str>,
     ) -> Result<VmRecord> {
+        if let Some(pb) = req.procbox.clone() {
+            return self
+                .create_procbox_sandbox(req, pb, token_tenant, created_by_token)
+                .await;
+        }
         // Decide first, so a `required` request on a host that cannot honor it
         // fails before anything is created.
         let confidential =
@@ -458,6 +468,7 @@ impl VmManager {
     /// Snapshot a running FluxVm sandbox into its template dir (or a named path).
     pub async fn snapshot_sandbox(&self, id: Uuid, dest: &Path) -> Result<()> {
         let vm = self.get(id).await?;
+        crate::procbox_sandbox::require_guest(&vm, "a snapshot")?;
         if vm.backend != BackendKind::FluxVm {
             bail!("snapshot_sandbox requires BackendKind::FluxVm");
         }
@@ -485,7 +496,10 @@ impl VmManager {
         let cutoff = Utc::now() - Duration::seconds(idle as i64);
         let mut n = 0;
         for vm in self.list().await {
-            if vm.backend != BackendKind::FluxVm || vm.status != VmStatus::Running {
+            if vm.backend != BackendKind::FluxVm
+                || vm.status != VmStatus::Running
+                || crate::procbox_sandbox::is_procbox(&vm)
+            {
                 continue;
             }
             let last = self.last_activity(vm.id).await.unwrap_or(vm.created_at);
