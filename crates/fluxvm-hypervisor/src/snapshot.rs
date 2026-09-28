@@ -32,6 +32,14 @@ pub fn preflight_restore(spec: &SnapshotSpec) -> Result<()> {
     if cpu.all_vcpus.len() != usize::from(spec.boot.vcpus) {
         bail!("snapshot vCPU count does not match the saved VM configuration");
     }
+    if cpu.version >= 5 {
+        let complete = cpu.vcpu_states.len() == cpu.all_vcpus.len()
+            && cpu.vcpu_states.iter().all(|v| v.is_complete())
+            && cpu.vm_state.as_ref().map_or(false, |v| v.is_complete());
+        if !complete {
+            bail!("FLUXKVM1 v5 vmstate is missing vCPU or VM state sections");
+        }
+    }
     if cpu.all_vcpus.len() > 1 && cpu.mp_states.len() != cpu.all_vcpus.len() {
         bail!("multi-vCPU restore requires FLUXKVM1 v4 MP state for every vCPU");
     }

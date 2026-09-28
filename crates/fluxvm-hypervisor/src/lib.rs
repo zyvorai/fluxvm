@@ -23,6 +23,7 @@ pub mod hypervisor;
 pub mod jailer;
 pub mod kvm;
 pub mod kvm_snap;
+pub mod kvm_state;
 pub mod memory;
 pub mod migration;
 pub mod mptable;
