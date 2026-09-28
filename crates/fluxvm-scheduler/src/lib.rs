@@ -22,6 +22,7 @@ use std::{collections::HashMap, fs, sync::Arc};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+pub mod changes;
 pub mod confidential;
 pub mod events;
 mod sandbox;
