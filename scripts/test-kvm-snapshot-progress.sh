@@ -143,13 +143,13 @@ PY
 }
 
 # Last "TICK n uptime" line after line number $1 (default 0).
-last_tick() { awk -v from="${1:-0}" 'NR>from && /TICK [0-9]+ [0-9.]+/ {l=$0} END{print l}' "${TMP}/hv.log" | grep -ao 'TICK [0-9]* [0-9.]*' | tail -1; }
+last_tick() { awk -v from="${1:-0}" 'NR>from && /TICK [0-9]+ [0-9]+\.[0-9][0-9]/ {l=$0} END{print l}' "${TMP}/hv.log" | grep -ao 'TICK [0-9]* [0-9]*\.[0-9][0-9]' | tail -1; }
 tick_field() { echo "$1" | awk -v f="$2" '{print $f}'; }
 log_lines() { wc -l < "${TMP}/hv.log" | tr -d ' '; }
 wait_ticks() {  # wait_ticks FROM_LINE MIN_COUNT TIMEOUT
   local from="$1" want="$2" t="$3" end=$((SECONDS + $3)) c
   while [ "$SECONDS" -lt "$end" ]; do
-    c=$(awk -v from="$from" 'NR>from && /TICK [0-9]+ [0-9.]+/ {n++} END{print n+0}' "${TMP}/hv.log")
+    c=$(awk -v from="$from" 'NR>from && /TICK [0-9]+ [0-9]+\.[0-9][0-9]/ {n++} END{print n+0}' "${TMP}/hv.log")
     [ "$c" -ge "$want" ] && return 0
     kill -0 "$HPID" 2>/dev/null || fail "hypervisor exited"
     sleep 0.5
@@ -225,7 +225,7 @@ if ! wait_ticks "$RL" 8 60; then
   fail "restored guest produced no ticks (hung after restore)"
 fi
 ELAPSED=$((SECONDS - START))
-T2="$(awk -v from="$RL" 'NR>from && /TICK [0-9]+ [0-9.]+/ {print}' "${TMP}/hv.log" | grep -ao 'TICK [0-9]* [0-9.]*' | head -1)"
+T2="$(awk -v from="$RL" 'NR>from && /TICK [0-9]+ [0-9]+\.[0-9][0-9]/ {print}' "${TMP}/hv.log" | grep -ao 'TICK [0-9]* [0-9]*\.[0-9][0-9]' | head -1)"
 T3="$(last_tick "$RL")"
 N2="$(tick_field "$T2" 2)"; U2="$(tick_field "$T2" 3)"
 N3="$(tick_field "$T3" 2)"
