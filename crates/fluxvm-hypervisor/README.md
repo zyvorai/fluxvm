@@ -76,12 +76,42 @@ If that script soft-skips (no KERNEL/KVM), treat multi-vCPU as
 **Confirmed broken on real KVM hardware (2026-09-28):** `test-kvm-smp-boot.sh`
 against a real kernel/rootfs on `/dev/kvm` fails AP bring-up —
 `smpboot: do_boot_cpu failed(-1) to wakeup CPU#1`, falling back to 1 active
-processor. The BSP boots and reaches userspace correctly; only the
-secondary vCPU's INIT-SIPI-SIPI delivery is affected. Until this is fixed,
-treat `--cpus > 1` as **non-functional**, not just unverified — this is why
-pause/snapshot (see Known limitations) are deliberately restricted to one
-vCPU rather than attempting to support a multi-vCPU barrier on top of AP
-bring-up that doesn't work yet.
+processor. The BSP boots and reaches userspace correctly. Until this is
+fixed, treat `--cpus > 1` as **non-functional**, not just unverified — this
+is why pause/snapshot (see Known limitations) are deliberately restricted
+to one vCPU rather than attempting to support a multi-vCPU barrier on top
+of AP bring-up that doesn't work yet.
+
+Root-caused further the same day, via KVM tracepoints
+(`kvm_apic_ipi`/`kvm_apic_accept_irq`/`kvm_entry`/`kvm_exit`) and `strace -f`
+against a real reproduction — recorded here so the next attempt doesn't
+re-derive it from scratch:
+
+- The guest's INIT-SIPI-SIPI **is** delivered and accepted by KVM's
+  in-kernel APIC (`kvm_apic_accept_irq: apicid 1 vec 154 (SIPI|edge)`,
+  seen twice as the universal startup algorithm sends). The earlier
+  wording above ("secondary vCPU's INIT-SIPI-SIPI delivery is affected")
+  was wrong — delivery succeeds.
+- `run_ap`'s thread **does** call `KVM_RUN` on the AP's fd (confirmed via
+  `kvm_entry`/`kvm_exit` tracepoints and `strace`) — it doesn't hang or
+  never start, which was the first hypothesis.
+- `KVM_RUN` fails immediately with **`EAGAIN`**, every single call, not
+  transiently — patching `run_once()` to treat `EAGAIN` like `EINTR`
+  (retry/continue, same handling this file already gives a gdbstub
+  break-in signal) does not help: it just spins on `EAGAIN` forever
+  instead of ever entering the guest.
+- At the moment of that `EAGAIN`, `KVM_GET_MP_STATE` on the same fd reports
+  **`KVM_MP_STATE_RUNNABLE`** (0) — i.e. by KVM's own bookkeeping the
+  SIPI handshake already completed — yet `KVM_RUN` still refuses entry.
+- Ruled out: host oversubscription (12 logical CPUs, load average 3.85,
+  one other VM running) and nested virtualization (`systemd-detect-virt`
+  → `none`, bare-metal Dell hardware).
+- Not yet tried: reading this exact kernel's `kvm_arch_vcpu_ioctl_run()`
+  source for what else can produce `-EAGAIN` beyond the well-known
+  `immediate_exit`/signal paths (neither applies to a fresh AP thread with
+  no gdbstub attached); bisecting against a different host/kernel version;
+  checking whether disabling `KVM_CREATE_PIT2` or the per-vCPU
+  `KVM_SET_LAPIC` template copy for APs changes anything.
 
 ## Debugging: gdbstub
 
