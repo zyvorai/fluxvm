@@ -44,7 +44,12 @@ vCPU's registers, MP state and (FLUXKVM1 v5) full-fidelity state: XSAVE/FPU,
 XCRS, MSRs including the TSC, LAPIC, vCPU events, debug registers, TSC kHz,
 kvmclock, PIC/IOAPIC and PIT. Older v1-v4 snapshots still load but restore
 registers only, with a warning. Restore is intended for the same host CPU
-class and the guest clock resumes from the pause instant. A native KVM restore now checks the snapshot before stopping a
+class and the guest clock resumes from the pause instant -- restore calls
+`KVM_KVMCLOCK_CTRL` on every vCPU (Firecracker does the same) so a
+multi-vCPU guest's clocks stay consistent with each other after resume; skip
+that call and the vCPUs' views of elapsed time can disagree, intermittently,
+in a way a single-vCPU guest never shows (there is nothing to disagree
+with). A native KVM restore now checks the snapshot before stopping a
 running guest and returns a restore error rather than silently cold-booting
 when the memory restore fails. Snapshot tags must be deleted before reuse.
 
