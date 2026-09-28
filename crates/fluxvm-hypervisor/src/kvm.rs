@@ -109,6 +109,9 @@ fn host_cpuid(_leaf: u32, _subleaf: u32) -> (u32, u32, u32, u32) {
 /// access to *different* indices from different vCPU threads is sound —
 /// there is no shared mutable state between vCPUs here, only per-vCPU
 /// raw-pointer access that was already unsafe before this struct existed.
+/// One hardware thread per core (Firecracker `smt=false`): every vCPU is a core.
+const GUEST_THREADS_PER_CORE: u32 = 1;
+
 pub struct VcpuHandle {
     pub fd: i32,
     pub run: *mut u8,
@@ -678,18 +681,7 @@ impl KvmVm {
     /// LAPIC model) would never reach the intended AP.
     fn setup_cpuid(&self, idx: usize) -> Result<()> {
         const MAX: usize = 256;
-        #[repr(C)]
-        #[derive(Clone, Copy)]
-        struct Entry {
-            function: u32,
-            index: u32,
-            flags: u32,
-            eax: u32,
-            ebx: u32,
-            ecx: u32,
-            edx: u32,
-            padding: [u32; 3],
-        }
+        type Entry = crate::cpuid_topology::CpuidEntry;
         #[repr(C)]
         struct Header {
             nent: u32,
@@ -711,8 +703,8 @@ impl KvmVm {
             }
             let nent = (*hdr).nent as usize;
             let entries = (buf.as_mut_ptr().add(std::mem::size_of::<Header>())) as *mut Entry;
-            for i in 0..nent {
-                let e = &mut *entries.add(i);
+            let mut leaves: Vec<Entry> = (0..nent).map(|i| *entries.add(i)).collect();
+            for e in leaves.iter_mut() {
                 if e.function == 0 && e.index == 0 {
                     // A guest's CPUID leaf reader may refuse to query leaf
                     // 0x15 at all if leaf 0's reported max-standard-
@@ -720,12 +712,6 @@ impl KvmVm {
                     e.eax = e.eax.max(0x15);
                 }
                 if e.function == 1 {
-                    // EBX[31:24] = initial APIC ID; EBX[23:16] = logical
-                    // processors per package. Leaving the host's count
-                    // (often > guest vCPU count) makes Linux's AP bring-up
-                    // disagree with MADT and fail do_boot_cpu.
-                    let n = self.vcpus.len() as u32;
-                    e.ebx = (e.ebx & 0x0000_ffff) | ((n & 0xff) << 16) | (apic_id << 24);
                     // "Hypervisor present" -- always true here, and some
                     // guest-kernel paravirt/topology decisions gate on it
                     // (matches crosvm, which sets this unconditionally).
@@ -736,35 +722,6 @@ impl KvmVm {
                     // Clear x2APIC until MADT grows type-9 entries; leaf-1
                     // APIC ID + MADT local-APIC records are the topology.
                     e.ecx &= !(1 << 21);
-                    // HTT (EDX[28]) must be set for a multi-vCPU guest --
-                    // Firecracker's CPUID normalize does the same. Without
-                    // it Linux's detect_ht() bails out early and leaves
-                    // phys_proc_id == raw APIC id, so CPU1 lands in
-                    // "package 1" and identify_secondary_cpu() hits
-                    // BUG_ON("Package 1 of CPU 1 exceeds BIOS package data")
-                    // -- found live by decoding the AP thread's own serial
-                    // output (the BSP-side log never shows it).
-                    if n > 1 {
-                        e.edx |= 1 << 28;
-                    }
-                }
-                // Deterministic cache parameters: EAX[31:26] = cores per
-                // package - 1. The host value (e.g. a whole physical
-                // package) makes Linux's siblings/cores division nonsense
-                // for a small guest; report the guest's own vCPU count
-                // (one thread per core, matching Firecracker's smt=false).
-                if e.function == 4 && self.vcpus.len() > 1 {
-                    let n = self.vcpus.len() as u32;
-                    e.eax = (e.eax & 0x03ff_ffff) | ((n - 1) << 26);
-                }
-                // Host extended topology leaves (0xB / 0x1F) describe the
-                // physical package. Zero them so the guest falls back to
-                // the patched leaf-1 APIC ID and MADT.
-                if e.function == 0xb || e.function == 0x1f {
-                    e.eax = 0;
-                    e.ebx = 0;
-                    e.ecx = 0;
-                    e.edx = 0;
                 }
                 // KVM_GET_SUPPORTED_CPUID always zeroes leaf 0x15 (TSC /
                 // "core crystal clock" ratio) even when the host CPU
@@ -790,6 +747,23 @@ impl KvmVm {
                     }
                 }
             }
+            // Topology: leaves 1, 4, 0xB, 0x1F (and AMD 0x80000008 /
+            // 0x8000001E) describe the guest's own package, not the host's.
+            crate::cpuid_topology::apply(
+                &mut leaves,
+                crate::cpuid_topology::Topology {
+                    vcpus: self.vcpus.len() as u32,
+                    threads_per_core: GUEST_THREADS_PER_CORE,
+                    apic_id,
+                },
+                MAX,
+            )
+            .map_err(|e| FluxError::Hypervisor(format!("CPUID topology: {e}")))?;
+            for (i, e) in leaves.iter().enumerate() {
+                *entries.add(i) = *e;
+            }
+            let nent = leaves.len();
+            (*hdr).nent = nent as u32;
             if ffi::flux_ioctl(
                 self.vcpus[idx].fd,
                 ffi::KVM_SET_CPUID2,

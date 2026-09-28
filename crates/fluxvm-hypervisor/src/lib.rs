@@ -13,6 +13,7 @@ pub mod boot;
 pub mod bus;
 pub mod config;
 pub mod control;
+pub mod cpuid_topology;
 pub mod devices;
 pub mod error;
 pub mod ffi;
