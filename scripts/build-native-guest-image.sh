@@ -20,6 +20,9 @@
 # Environment:
 #   SIZE_MIB   grow the output to this size before installing (default 1536)
 #   APT_MIRROR override the apt mirror (default: keep the image's sources)
+#   NETWORK    dhcp (default): bake /etc/systemd/network/10-fluxvm.network for the
+#              virtio NIC (DHCP, not required for online) and disable Cloud-init
+#              network rendering; keep: leave the base image's network setup as is
 set -euo pipefail
 
 if [ "$(id -u)" != "0" ]; then
@@ -146,6 +149,37 @@ EOF
 rm -rf "${MNT}/var/lib/cloud/instance" "${MNT}/var/lib/cloud/instances" "${MNT}/var/lib/cloud/data" "${MNT}/var/lib/cloud/sem"
 rm -rf "${MNT}/var/log/cloud-init.log" "${MNT}/var/log/cloud-init-output.log"
 chroot "$MNT" systemctl enable cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service >/dev/null 2>&1 || true
+
+# Bake the guest's own systemd-networkd config: one .network file matching the
+# virtio NIC (eth0/ens*/enp*), DHCP when a TAP/DHCP server exists. It is
+# RequiredForOnline=no, so a VM created with `network: none` (no link, no DHCP)
+# never makes systemd-networkd-wait-online block for its 120 s timeout, which
+# would otherwise delay everything ordered behind network-online.target.
+# Cloud-init's own network rendering is disabled so it cannot write a second,
+# conflicting netplan/networkd config for the same interface at first boot.
+if [ "${NETWORK:-dhcp}" != "keep" ]; then
+  install -d "${MNT}/etc/systemd/network"
+  rm -f "${MNT}"/etc/netplan/*.yaml 2>/dev/null || true
+  cat > "${MNT}/etc/systemd/network/10-fluxvm.network" <<'NETEOF'
+[Match]
+Name=eth* en*
+Driver=virtio_net
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+
+[DHCP]
+UseDNS=yes
+UseHostname=no
+
+[Link]
+RequiredForOnline=no
+NETEOF
+  printf 'network:\n  config: disabled\n' > "${MNT}/etc/cloud/cloud.cfg.d/91-fluxvm-no-network-config.cfg"
+  chroot "$MNT" systemctl enable systemd-networkd.service systemd-resolved.service >/dev/null 2>&1 || true
+fi
 
 install -D -m755 "$AGENT" "${MNT}/usr/local/bin/fluxvm-guest-agent"
 install -D -m644 "$UNIT" "${MNT}/etc/systemd/system/fluxvm-guest-agent.service"

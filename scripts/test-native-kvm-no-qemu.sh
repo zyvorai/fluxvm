@@ -6,10 +6,17 @@
 set -euo pipefail
 
 CONFIG="${FLUXVM_CONFIG:-/etc/fluxvm.toml}"
-KERNEL="${KERNEL:-/var/lib/fluxvm/kernels/vmlinux}"
-ROOTFS="${ROOTFS:-/var/lib/fluxvm/images/linux-rootfs.raw}"
 CLI="${FLUXVM_BIN:-fluxctl}"
 AGENT="${FLUXVM_AGENT:-0}"
+# With FLUXVM_AGENT=1 the default is the golden template from
+# scripts/setup-native-agent-template.sh (Cloud-init + agent + 5.10 kernel).
+if [[ "$AGENT" == "1" ]]; then
+  KERNEL="${KERNEL:-/var/lib/fluxvm/kernels/vmlinux-5.10.225-no-acpi}"
+  ROOTFS="${ROOTFS:-/var/lib/fluxvm/images/linux-agent.raw}"
+else
+  KERNEL="${KERNEL:-/var/lib/fluxvm/kernels/vmlinux}"
+  ROOTFS="${ROOTFS:-/var/lib/fluxvm/images/linux-rootfs.raw}"
+fi
 
 [[ -e /dev/kvm ]] || { echo "FAIL: /dev/kvm is unavailable" >&2; exit 2; }
 [[ -f "$KERNEL" && -f "$ROOTFS" && -f "$CONFIG" ]] || {
