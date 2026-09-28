@@ -82,36 +82,70 @@ is why pause/snapshot (see Known limitations) are deliberately restricted
 to one vCPU rather than attempting to support a multi-vCPU barrier on top
 of AP bring-up that doesn't work yet.
 
-Root-caused further the same day, via KVM tracepoints
-(`kvm_apic_ipi`/`kvm_apic_accept_irq`/`kvm_entry`/`kvm_exit`) and `strace -f`
-against a real reproduction — recorded here so the next attempt doesn't
-re-derive it from scratch:
+Root-caused further via KVM tracepoints, `strace -f`, and `bpftrace`
+kprobes against real reproductions on the lab host — recorded here so
+the next attempt doesn't re-derive it from scratch. Two real, distinct
+bugs were found and fixed along the way; the AP still doesn't come up,
+but the failure point moved substantially further into real execution.
 
-- The guest's INIT-SIPI-SIPI **is** delivered and accepted by KVM's
-  in-kernel APIC (`kvm_apic_accept_irq: apicid 1 vec 154 (SIPI|edge)`,
-  seen twice as the universal startup algorithm sends). The earlier
-  wording above ("secondary vCPU's INIT-SIPI-SIPI delivery is affected")
-  was wrong — delivery succeeds.
-- `run_ap`'s thread **does** call `KVM_RUN` on the AP's fd (confirmed via
-  `kvm_entry`/`kvm_exit` tracepoints and `strace`) — it doesn't hang or
-  never start, which was the first hypothesis.
-- `KVM_RUN` fails immediately with **`EAGAIN`**, every single call, not
-  transiently — patching `run_once()` to treat `EAGAIN` like `EINTR`
-  (retry/continue, same handling this file already gives a gdbstub
-  break-in signal) does not help: it just spins on `EAGAIN` forever
-  instead of ever entering the guest.
-- At the moment of that `EAGAIN`, `KVM_GET_MP_STATE` on the same fd reports
-  **`KVM_MP_STATE_RUNNABLE`** (0) — i.e. by KVM's own bookkeeping the
-  SIPI handshake already completed — yet `KVM_RUN` still refuses entry.
-- Ruled out: host oversubscription (12 logical CPUs, load average 3.85,
-  one other VM running) and nested virtualization (`systemd-detect-virt`
-  → `none`, bare-metal Dell hardware).
-- Not yet tried: reading this exact kernel's `kvm_arch_vcpu_ioctl_run()`
-  source for what else can produce `-EAGAIN` beyond the well-known
-  `immediate_exit`/signal paths (neither applies to a fresh AP thread with
-  no gdbstub attached); bisecting against a different host/kernel version;
-  checking whether disabling `KVM_CREATE_PIT2` or the per-vCPU
-  `KVM_SET_LAPIC` template copy for APs changes anything.
+**Bug 1 (fixed): `KVM_SET_IDENTITY_MAP_ADDR` was never called.** Intel
+VMX hosts with an in-kernel irqchip need this alongside
+`KVM_SET_TSS_ADDR` (Firecracker/crosvm/cloud-hypervisor all call both) —
+it's a one-page identity-mapped region KVM uses to run a vCPU in
+real/unpaged mode. The BSP never needed it (PVH/long-mode setup skips
+real mode entirely), but an AP always starts real-mode at the SIPI
+vector. Adding it alone did not fix AP bring-up, but it's a genuine,
+independent correctness gap, now closed.
+
+**Bug 2 (fixed): `KVM_RUN` returning `EAGAIN` was treated as fatal.**
+The guest's INIT-SIPI-SIPI *is* delivered and accepted by KVM's
+in-kernel APIC (`kvm_apic_accept_irq: apicid 1 vec 154 (SIPI|edge)`,
+seen twice as the universal startup algorithm sends), and `run_ap`'s
+thread *does* call `KVM_RUN` on the AP's fd — it doesn't hang or never
+start. But that first `KVM_RUN` call reliably returned `EAGAIN`.
+`kprobe`/`kretprobe` tracing of `kvm_arch_vcpu_ioctl_run`,
+`kvm_vcpu_block`, and `kvm_arch_vcpu_runnable` showed why: the call
+enters `kvm_vcpu_block()`, loops `kvm_arch_vcpu_runnable()` + `schedule()`
+a few times over about a second, then gives up and returns `-EAGAIN`
+*without ever calling `vcpu_enter_guest()`*. At that point
+`KVM_GET_MP_STATE` already read back `RUNNABLE`, and `KVM_GET_REGS`/
+`KVM_GET_SREGS` showed `RIP=0`, `CS=(0x9A00, base=0x9A000)` — the exact,
+correct SIPI-vector real-mode entry point. The vCPU's own state was
+never the problem. An earlier attempt at this same fix appeared not to
+work, but that was a measurement error (the test window was too short
+relative to the ~1s block/retry cycle to see it actually clear); a
+clean, isolated retry confirms `EAGAIN` clears after exactly one retry.
+Fixed by treating `EAGAIN` the same as the existing `EINTR` case in
+`run_once()`.
+
+**With both fixes, the AP genuinely enters the guest and runs real
+64-bit kernel code**, then silently triple-faults. At the
+`KVM_EXIT_SHUTDOWN` that follows, `KVM_GET_SREGS` shows a fully valid
+IDT (256 entries, correct limit), GDT, and `CR0=0x80050033`/
+`CR4`/`EFER=0xD01` (`LME`/`LMA`/`NXE` all set) — this is normal,
+in-progress Linux SMP bring-up (`start_secondary()`), not a bad initial
+state. No panic text reaches the serial console before the crash,
+consistent with the fault happening too early for the exception path
+itself to be safely usable (e.g. a double fault whose own handler
+can't run). Immediately before the `KVM_EXIT_SHUTDOWN`, the AP performs
+the classic `reboot=k` sequence — polling read of I/O port `0x64`
+(i8042 status), then writes to `0x64`, `0x70`, `0x71` — which is Linux's
+own keyboard-controller-based emergency-restart path, falling through
+to a deliberate triple fault as the reset method of last resort when
+earlier ones don't visibly take effect. So the actual open question is
+narrower than "AP bring-up is broken": **something makes the AP crash
+(and thus panic-reboot) very early in `start_secondary()`**, silently
+enough that no diagnostic text escapes before the triple fault.
+
+Ruled out along the way: host oversubscription (12 logical CPUs, load
+average 3.85, one other VM running) and nested virtualization
+(`systemd-detect-virt` → `none`, bare-metal Dell hardware). Not yet
+tried: a gdbstub breakpoint at `start_secondary`/`secondary_startup_64`
+to catch the actual faulting instruction before the reboot sequence
+overwrites the evidence; checking whether the ~1s `kvm_vcpu_block()`
+delay from Bug 2 makes the AP arrive *after* some BSP-side per-cpu
+setup it depends on has already been torn down or skipped once Linux's
+own ~10s `do_boot_cpu` ack-timeout looked close to firing.
 
 ## Debugging: gdbstub
 
