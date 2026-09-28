@@ -143,7 +143,7 @@ covering every route.
 
 ### Sandlock gap follow-ups
 
-- procbox sandboxes: closed by per-sandbox uid, private mount/pid/ipc/uts/net namespaces and seccomp socket-arg filters (see procbox-backend.md). Still open: a real-guest-free live daemon run of a root daemon with the uid pool, and disk quotas for commands.
+- procbox sandboxes: closed by per-sandbox uid, private mount/pid/ipc/uts/net namespaces and seccomp socket-arg filters (see procbox-backend.md). Still open: a live run of a root daemon with the uid pool through the HTTP API, and disk quotas for commands.
 - Dry-run for VM sandboxes needs a snapshot-restore API route to truly revert; today only baseline/changes report.
 - HTTPS interception: HTTP/2, transparent (non-proxy-aware) redirect, and guest-side CA trust have not been exercised in a real guest.
 - procbox `learn`: policy inference beyond one observed run (merge multiple runs); seccomp-notify variant for non-ptrace environments.

@@ -53,24 +53,34 @@ macro_rules! need_root {
 }
 
 /// A world-searchable directory holding a copy of the helper binary, so a
-/// sandbox that runs as another uid can still execute it.
+/// sandbox that runs as another uid can still execute it. It is copied once per
+/// test process: copying per test races other tests' `fork` (`ETXTBSY`).
 struct Fixture {
-    _dir: tempfile::TempDir,
     dir: PathBuf,
     bin: String,
 }
 
-fn fixture() -> Fixture {
-    let d = tempfile::tempdir_in("/tmp").unwrap();
-    std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    let bin = d.path().join("procbox");
-    std::fs::copy(env!("CARGO_BIN_EXE_fluxvm-procbox"), &bin).unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    Fixture {
-        dir: d.path().to_path_buf(),
-        bin: bin.to_string_lossy().into_owned(),
-        _dir: d,
+static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
+
+extern "C" fn remove_fixture() {
+    if let Some(f) = FIXTURE.get() {
+        let _ = std::fs::remove_dir_all(&f.dir);
     }
+}
+
+fn fixture() -> &'static Fixture {
+    FIXTURE.get_or_init(|| {
+        let dir = tempfile::tempdir_in("/tmp").unwrap().keep();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let bin = dir.join("procbox");
+        std::fs::copy(env!("CARGO_BIN_EXE_fluxvm-procbox"), &bin).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { libc::atexit(remove_fixture) };
+        Fixture {
+            bin: bin.to_string_lossy().into_owned(),
+            dir,
+        }
+    })
 }
 
 /// A world-accessible scratch directory (created by the test, who may be
