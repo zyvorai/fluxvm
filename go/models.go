@@ -142,9 +142,11 @@ type DryRunResult struct {
 		Deleted   []string `json:"deleted"`
 		Unchanged int      `json:"unchanged"`
 	} `json:"changes"`
-	ExitCode  int      `json:"exit_code"`
-	Stdout    string   `json:"stdout"`
-	Stderr    string   `json:"stderr"`
-	Discarded bool     `json:"discarded"`
-	Paths     []string `json:"paths"`
+	ExitCode  int    `json:"exit_code"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	Discarded bool   `json:"discarded"`
+	// RevertedVia is "workspace-copy" (procbox) or "snapshot" (VM restored).
+	RevertedVia string   `json:"reverted_via"`
+	Paths       []string `json:"paths"`
 }

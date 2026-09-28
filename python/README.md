@@ -37,7 +37,7 @@ with fx.create_sandbox(name="demo", ttl_seconds=600, memory_mib=512) as sb:
 | `sb.write_file(path, data, mode=None)` | `POST …/fs/write` |
 | `sb.read_file(path)` → `bytes`; `read_text`; `read_file_info` → `FileContent(data, mode)` | `POST …/fs/read` |
 | `sb.snapshot(path)` | `POST …/snapshot` |
-| `sb.dry_run(command, timeout=None, paths=None)` → dict (`changes`, `discarded`, exit result); `create_sandbox(procbox={...})` for a rootless process sandbox | `POST …/dry-run` (procbox only; VM sandboxes answer 501) |
+| `sb.dry_run(command, timeout=None, paths=None)` → dict (`changes`, `discarded`, `reverted_via`, exit result); `create_sandbox(procbox={...})` for a rootless process sandbox | `POST …/dry-run` (procbox: workspace copy; native flux-vm VMs: snapshot/restore, `paths` required; other VM backends 501) |
 | `sb.baseline(paths)` → `BaselineSummary`; `sb.changes(paths=None)` → `ChangeSet(added, modified, deleted, unchanged, …)` | `POST …/baseline`, `POST …/changes` (see `docs/sandbox-changes.md`) |
 | `sb.http(port, method, path, body=None, headers=None, params=None, timeout=None)` → `HttpResponse` | `ANY …/http/{port}/{path}`; `port=None` uses `ANY /sandbox/{id}/{path}` |
 | `sb.refresh()`, `sb.delete()`, `with sb:` | `GET` / `DELETE /v1/vms/{id}` |

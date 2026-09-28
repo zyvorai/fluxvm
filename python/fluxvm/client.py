@@ -382,10 +382,13 @@ class Sandbox:
         timeout: Optional[int] = None,
         paths: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
-        """``POST /dry-run`` (procbox sandboxes): run ``command`` against a
-        throwaway copy of the workspace and return the exec result plus
-        ``changes`` (added/modified/deleted); the real workspace is untouched.
-        VM sandboxes answer 501 (no snapshot-restore API to revert with)."""
+        """``POST /dry-run``: run ``command`` and return the exec result plus
+        ``changes`` (added/modified/deleted), then discard everything.
+        Procbox sandboxes run on a throwaway copy of the workspace
+        (``reverted_via: "workspace-copy"``). Native flux-vm sandboxes are
+        snapshotted and restored (``reverted_via: "snapshot"``, memory and
+        disk both revert); ``paths`` is required there and the restore takes
+        seconds. Other VM backends answer 501."""
         body: Dict[str, Any] = {"command": command}
         if timeout is not None:
             body["timeout_seconds"] = timeout

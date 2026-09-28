@@ -133,13 +133,15 @@ command succeeded or not. The real workspace is only read. Response:
 
 ```json
 { "changes": { "added": ["/out.bin"], "modified": [], "deleted": ["/tmp.txt"], "unchanged": 12 },
-  "exit_code": 0, "stdout": "...", "stderr": "...", "discarded": true, "paths": ["/"] }
+  "exit_code": 0, "stdout": "...", "stderr": "...", "discarded": true,
+  "reverted_via": "workspace-copy", "paths": ["/"] }
 ```
 
-A workspace over `max_workspace_mib` is refused (413) rather than copied. For a
-**VM** sandbox the route returns **501**: a real discard there needs a
-snapshot-restore API, which this server does not expose, and it would not be
-honest to report changes without reverting them.
+`reverted_via` is `"workspace-copy"`. A workspace over `max_workspace_mib` is
+refused (413) rather than copied. A native flux-vm **VM** sandbox is dry-run by
+snapshot and restore instead (`reverted_via: "snapshot"`, see
+[sandbox-changes.md](sandbox-changes.md#dry-run-on-a-vm-sandbox)); other VM
+backends answer **501** rather than report changes without reverting them.
 
 ## Errors
 

@@ -54,9 +54,15 @@ class LiveVm(unittest.TestCase):
             self.assertEqual(ch.modified, ["/root/work/a.txt"])
             self.assertEqual(ch.deleted, ["/root/work/b.txt"])
             self.assertEqual(sb.read_text("/root/work/a.txt").strip(), "changed")
-            with self.assertRaises(ApiError) as cm:
-                sb.dry_run("true")
-            self.assertEqual(cm.exception.status, 501)
+            # Dry-run on a VM reverts memory and disk through snapshot/restore.
+            dr = sb.dry_run("echo x > /root/work/dry.txt; rm /root/work/a.txt", timeout=30,
+                            paths=["/root/work"])
+            self.assertTrue(dr["discarded"])
+            self.assertEqual(dr["reverted_via"], "snapshot")
+            self.assertEqual(dr["changes"]["added"], ["/root/work/dry.txt"])
+            self.assertEqual(dr["changes"]["deleted"], ["/root/work/a.txt"])
+            self.assertEqual(sb.read_text("/root/work/a.txt").strip(), "changed")
+            self.assertTrue(sb.run("test ! -e /root/work/dry.txt", timeout=10).exit_code == 0)
         finally:
             sb.delete()
         with self.assertRaises(NotFound):

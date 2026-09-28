@@ -1122,8 +1122,8 @@ struct DryRunBody {
     paths: Option<Vec<String>>,
 }
 
-/// Run a command against a throwaway copy of a procbox sandbox's workspace and
-/// report what it changed (discarded afterwards). VM sandboxes answer 501.
+/// Run a command and report what it changed, then discard it: procbox sandboxes
+/// use a throwaway workspace copy, native flux-vm sandboxes snapshot/restore.
 async fn sandbox_dry_run(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,

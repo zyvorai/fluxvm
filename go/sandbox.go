@@ -244,10 +244,11 @@ func (s *Sandbox) Changes(ctx context.Context, paths []string) (*ChangeSet, erro
 	return &out, nil
 }
 
-// DryRun runs command against a throwaway copy of a procbox sandbox's
-// workspace and reports the changes; the real workspace is untouched.
-// timeoutSeconds 0 and nil paths use the server defaults. VM sandboxes answer
-// 501: there is no snapshot-restore API to revert with.
+// DryRun runs command and reports the changes, then discards them. A procbox
+// sandbox runs on a throwaway copy of its workspace; a native flux-vm sandbox
+// is snapshotted and restored (memory and disk both revert, paths is required
+// and the restore takes seconds). Other VM backends answer 501.
+// timeoutSeconds 0 uses the server default.
 func (s *Sandbox) DryRun(ctx context.Context, command string, timeoutSeconds int, paths []string) (*DryRunResult, error) {
 	body := map[string]interface{}{"command": command}
 	if timeoutSeconds > 0 {
