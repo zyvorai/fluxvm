@@ -207,6 +207,23 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(sb.snapshot("/var/lib/fluxvm/snap1"), "/var/lib/fluxvm/snap1")
         self.assertEqual(json.loads(self.last()[3]), {"path": "/var/lib/fluxvm/snap1"})
 
+    def test_unknown_vm_answered_400_maps_to_not_found(self):
+        from fluxvm.client import _error_from_response
+        err = _error_from_response(400, b'{"error":"VM not found"}', {})
+        self.assertIsInstance(err, NotFound)
+        self.assertEqual(err.status, 400)
+        self.assertNotIsInstance(_error_from_response(400, b'{"error":"bad path"}', {}), NotFound)
+
+    def test_procbox_create_option_and_dry_run(self):
+        sb = self.fx.create_sandbox(name="pb", procbox={"timeout_seconds": 5})
+        self.assertEqual(json.loads(self.state.requests[0][3])["procbox"], {"timeout_seconds": 5})
+        sb2 = self.fx.create_sandbox(procbox={})
+        self.assertEqual(json.loads(self.state.requests[-1][3])["procbox"], {})
+        out = sb.dry_run("touch x", timeout=3, paths=["/"])
+        self.assertTrue(out["discarded"])
+        self.assertEqual(out["changes"]["added"], ["/x"])
+        self.assertEqual(json.loads(self.last()[3]), {"command": "touch x", "timeout_seconds": 3, "paths": ["/"]})
+
     # ---- change-set
     def test_baseline_then_changes_reports_added_modified_deleted(self):
         sb = self.fx.create_sandbox()

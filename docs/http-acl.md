@@ -176,3 +176,15 @@ the key like a root secret and give each deployment its own CA.
 * Rules cannot see inside a tunnel that is not intercepted; keep
   `egress_tls_intercept` on for any sandbox that relies on path or method
   rules for HTTPS.
+
+## Verified live (2026-09-28)
+
+Against a running daemon with `egress_http_rules`, `egress_tls_intercept` and a
+credential-vault entry, using `curl` through the proxy to local HTTP and HTTPS
+upstreams: allowed `GET`/`POST` reached the upstream; a request with no
+matching allow rule, a `deny` match, a wrong method, `/ok/../admin/x`,
+`/%61dmin/x` and `//admin/x` all got 403 (HTTP and HTTPS); the vault
+`Authorization` replaced the guest-supplied one; an intercepted CONNECT to a
+port outside `egress_tls_ports` and a client that did not trust the proxy CA
+both failed. Note that when the daemon runs as root and `egress_proxy_listen`
+is set, it also installs the nftables redirect for ports 80/443.

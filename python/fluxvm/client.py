@@ -69,6 +69,10 @@ def _error_from_response(status: int, raw: bytes, headers: Mapping[str, str]) ->
         return ForbiddenError(status, body, message)
     if status == 404:
         return NotFound(status, body, message)
+    # GET/DELETE /v1/vms/{id} answer an unknown VM with 400 "VM not found"
+    # (the server maps most handler errors to 400), not 404.
+    if status == 400 and message.strip().lower() == "vm not found":
+        return NotFound(status, body, message)
     if status == 429:
         retry_after = None
         value = headers.get("Retry-After")
@@ -195,12 +199,16 @@ class FluxVM:
         vcpus: Optional[int] = None,
         memory_mib: Optional[int] = None,
         confidential: Optional[str] = None,
+        procbox: Optional[Mapping[str, Any]] = None,
         timeout: Optional[float] = None,
     ) -> "Sandbox":
         """``POST /v1/sandboxes``. Fields left as ``None`` are omitted so the
         server's defaults apply. ``template`` names a template under the
         server's templates dir; ``spec`` is a raw create spec (as accepted by
-        ``POST /v1/vms``). ``confidential`` is ``"auto"`` or ``"required"``.
+        ``POST /v1/vms``). ``confidential`` is ``"auto"`` or ``"required"``. ``procbox`` (``{}`` for
+        defaults, or limits such as ``{"timeout_seconds": 60, "max_memory_mib": 512}``)
+        selects a rootless process sandbox instead of a VM; the server must have
+        ``[sandbox.procbox] enabled = true``.
         """
         if confidential is not None and confidential not in ("auto", "required"):
             raise ValueError('confidential must be "auto" or "required"')
@@ -217,6 +225,7 @@ class FluxVM:
             ("vcpus", vcpus),
             ("memory_mib", memory_mib),
             ("confidential", confidential),
+            ("procbox", dict(procbox) if procbox is not None else None),
         ):
             if value is not None:
                 payload[key] = value
@@ -366,6 +375,23 @@ class Sandbox:
             paths=list(data.get("paths", [])),
             baseline_taken_at_unix=int(data.get("baseline_taken_at_unix", 0)),
         )
+
+    def dry_run(
+        self,
+        command: str,
+        timeout: Optional[int] = None,
+        paths: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """``POST /dry-run`` (procbox sandboxes): run ``command`` against a
+        throwaway copy of the workspace and return the exec result plus
+        ``changes`` (added/modified/deleted); the real workspace is untouched.
+        VM sandboxes answer 501 (no snapshot-restore API to revert with)."""
+        body: Dict[str, Any] = {"command": command}
+        if timeout is not None:
+            body["timeout_seconds"] = timeout
+        if paths is not None:
+            body["paths"] = list(paths)
+        return self._client._json("POST", self._path("/dry-run"), body)
 
     def http(
         self,

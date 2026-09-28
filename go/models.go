@@ -60,6 +60,10 @@ type CreateSandboxRequest struct {
 	VCPUs          uint8                  `json:"vcpus,omitempty"`
 	MemoryMiB      uint64                 `json:"memory_mib,omitempty"`
 	Confidential   string                 `json:"confidential,omitempty"`
+	// Procbox selects a rootless process sandbox instead of a VM: an empty
+	// non-nil map means defaults, or set limits such as timeout_seconds and
+	// max_memory_mib. The server needs [sandbox.procbox] enabled = true.
+	Procbox map[string]interface{} `json:"procbox,omitempty"`
 }
 
 // ExecResult is the outcome of a command run through the guest agent.
@@ -127,4 +131,20 @@ func (r *HTTPResponse) RaiseForStatus() error {
 		return nil
 	}
 	return newAPIError(r.Status, r.Header, r.Body)
+}
+
+// DryRunResult is the outcome of Sandbox.DryRun: the exec result plus the
+// changes the command made to a throwaway copy of the workspace.
+type DryRunResult struct {
+	Changes struct {
+		Added     []string `json:"added"`
+		Modified  []string `json:"modified"`
+		Deleted   []string `json:"deleted"`
+		Unchanged int      `json:"unchanged"`
+	} `json:"changes"`
+	ExitCode  int      `json:"exit_code"`
+	Stdout    string   `json:"stdout"`
+	Stderr    string   `json:"stderr"`
+	Discarded bool     `json:"discarded"`
+	Paths     []string `json:"paths"`
 }

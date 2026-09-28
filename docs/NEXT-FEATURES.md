@@ -147,7 +147,7 @@ covering every route.
 - Dry-run for VM sandboxes needs a snapshot-restore API route to truly revert; today only baseline/changes report.
 - HTTPS interception: HTTP/2, transparent (non-proxy-aware) redirect, and guest-side CA trust have not been exercised in a real guest.
 - procbox `learn`: policy inference beyond one observed run (merge multiple runs); seccomp-notify variant for non-ptrace environments.
-- Verify baseline/changes and both SDKs against a live guest through `fluxctl` (only mocks and the generated shell script have run so far).
+- Live-verified 2026-09-28: change-set on a real VM guest, both SDKs against real daemons, procbox as an unprivileged daemon, and the egress ACL over HTTP/HTTPS. Still open: a live guest-side CA trust test for HTTPS interception, and HTTP/2.
 
 ### Tier 3 — evidence / hardening (lab hardware or long runs)
 

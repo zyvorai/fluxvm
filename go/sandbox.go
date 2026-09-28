@@ -244,6 +244,25 @@ func (s *Sandbox) Changes(ctx context.Context, paths []string) (*ChangeSet, erro
 	return &out, nil
 }
 
+// DryRun runs command against a throwaway copy of a procbox sandbox's
+// workspace and reports the changes; the real workspace is untouched.
+// timeoutSeconds 0 and nil paths use the server defaults. VM sandboxes answer
+// 501: there is no snapshot-restore API to revert with.
+func (s *Sandbox) DryRun(ctx context.Context, command string, timeoutSeconds int, paths []string) (*DryRunResult, error) {
+	body := map[string]interface{}{"command": command}
+	if timeoutSeconds > 0 {
+		body["timeout_seconds"] = timeoutSeconds
+	}
+	if paths != nil {
+		body["paths"] = paths
+	}
+	var out DryRunResult
+	if err := s.client.call(ctx, http.MethodPost, s.path("/dry-run"), body, &out, 0); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // HTTPRequest describes a call to an HTTP service inside the guest.
 type HTTPRequest struct {
 	// Port selects /v1/sandboxes/{id}/http/{port}/{path}; 0 uses the

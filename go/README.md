@@ -102,3 +102,11 @@ cd go && go vet ./... && go test ./... -race
 The tests run against an in-process `httptest` server that copies the real
 handlers' status codes, auth rules and body shapes (a port of the Python SDK's
 `tests/mock_server.py`). Nothing here has run against a live FluxVM server.
+
+## Procbox, dry-run and live tests
+
+`CreateSandboxRequest.Procbox` selects a rootless process sandbox (the server needs
+`[sandbox.procbox] enabled = true`); `Sandbox.DryRun` runs a command on a throwaway
+copy of its workspace and returns the changes. The server answers an unknown VM on
+`GET`/`DELETE /v1/vms/{id}` with `400 "VM not found"`, which `errors.Is(err, ErrNotFound)`
+also matches. Live check: `FLUXVM_LIVE_URL=http://127.0.0.1:PORT go test -tags live -run Live ./...`.

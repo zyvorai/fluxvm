@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -58,7 +59,9 @@ func (e *APIError) Is(target error) bool {
 	case ErrForbidden:
 		return e.Status == http.StatusForbidden
 	case ErrNotFound:
-		return e.Status == http.StatusNotFound
+		// GET/DELETE /v1/vms/{id} answer an unknown VM with 400 "VM not found".
+		return e.Status == http.StatusNotFound ||
+			(e.Status == http.StatusBadRequest && strings.EqualFold(strings.TrimSpace(e.Message), "vm not found"))
 	case ErrRateLimited:
 		return e.Status == http.StatusTooManyRequests
 	}

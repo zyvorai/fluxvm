@@ -159,6 +159,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "path": body["path"]})
             if op == "baseline" and len(segs) == 4:
                 return self._baseline(sid, body)
+            if op == "dry-run" and len(segs) == 4:
+                return self._send(200, {"changes": {"added": ["/x"], "modified": [], "deleted": [], "unchanged": 0},
+                                        "exit_code": 0, "stdout": "", "stderr": "", "discarded": True,
+                                        "paths": body.get("paths", ["/"])})
             if op == "changes" and len(segs) == 4:
                 return self._changes(sid, body)
             if op == "process" and len(segs) == 4:

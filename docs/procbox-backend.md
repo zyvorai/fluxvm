@@ -156,3 +156,13 @@ end-to-end through the real router (create, files, process, baseline/changes,
 dry-run, 501 routes, tenant scoping, delete). They skip cleanly when the host
 cannot enforce Landlock with TCP rules (ABI 4+) and seccomp. The end-to-end
 drives the in-process router and manager, not a deployed daemon.
+
+## Verified live (2026-09-28)
+
+With a daemon started by an unprivileged user (Linux 7.0, Landlock ABI 8) and
+`[sandbox.procbox] enabled = true`, the Python and Go SDKs ran the whole flow
+against it over HTTP: create, files, confined `process`, `baseline`/`changes`,
+`dry-run` (workspace unchanged afterwards), a write outside the workspace
+(denied), `..`, absolute and symlink path escapes (400), `snapshot` (501) and
+delete. Both SDKs expose it as `procbox=` / `Procbox` on create and a
+`dry_run` / `DryRun` method.

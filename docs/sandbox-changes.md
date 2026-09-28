@@ -91,3 +91,14 @@ curl -s -XPOST $FLUXVM/v1/sandboxes/$ID/baseline -d '{"paths":["/workspace"]}'
 # ... let the agent work ...
 curl -s -XPOST $FLUXVM/v1/sandboxes/$ID/changes | jq '{added, modified, deleted}'
 ```
+
+## Verified live (2026-09-28)
+
+On the lab host through the deployed service, with the Python SDK: a real VM
+sandbox created from the golden `native-agent` guest (`spec`), then
+`baseline(["/root/work"])`, a command that edited, deleted and created files
+(including a name with a space), and `changes()` returned exactly one
+added, one modified and one deleted path in `sha256` mode. `dry-run` on the VM
+returned 501 as documented. The same flow ran against a procbox sandbox
+(`docs/procbox-backend.md`); paths there are rooted at the workspace, so use
+`/work`, not `work`.
