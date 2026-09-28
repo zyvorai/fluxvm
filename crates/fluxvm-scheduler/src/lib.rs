@@ -1971,7 +1971,26 @@ impl VmManager {
                 .guest_cidr
                 .as_deref()
                 .zip(network.gateway.as_deref());
+            let native_kvm = req.backend == BackendKind::FluxVm
+                && self.cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm;
             let seed = match &effective_cloud_init {
+                Some(ci) if native_kvm => {
+                    let disk = record.disk.clone();
+                    let workspace = workspace.clone();
+                    let ci = ci.clone();
+                    let static_net = static_net.map(|(cidr, gateway)| (cidr.to_owned(), gateway.to_owned()));
+                    tokio::task::spawn_blocking(move || {
+                        fluxvm_image::cloudinit::inject_nocloud_raw(
+                            &disk,
+                            &workspace,
+                            &ci,
+                            static_net.as_ref().map(|(cidr, gateway)| (cidr.as_str(), gateway.as_str())),
+                        )
+                    })
+                    .await
+                    .context("native KVM NoCloud worker panicked")??;
+                    None
+                }
                 Some(ci) => Some(
                     fluxvm_image::cloudinit::build_seed(&self.cfg, &workspace, ci, static_net)
                         .await?,

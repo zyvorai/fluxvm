@@ -44,8 +44,7 @@ pub fn disk_format(vmm: BackendKind, storage: StorageBackend) -> String {
     }
 }
 
-/// `agent_token`, when set, is injected into the disk (via
-/// `crate::inject_guest_agent_token`) as the last step of provisioning,
+/// `agent_token`, when set, is injected into the disk as the last step of provisioning,
 /// before anything else gets a chance to open/lock/export it — critical for
 /// `StorageBackend::Nbd`: injecting *after* `qemu-nbd` starts exporting the
 /// file races that export's own write lock (found on real hardware — see
@@ -66,7 +65,24 @@ pub async fn provision(
         StorageBackend::Default => {
             clone_for_vm(cfg, base, vmm, disk_out, size_gib).await?;
             if let Some(token) = agent_token {
-                crate::inject_guest_agent_token(disk_out, token).await?;
+                if vmm == BackendKind::FluxVm
+                    && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
+                {
+                    let disk = disk_out.to_path_buf();
+                    let token = token.to_owned();
+                    tokio::task::spawn_blocking(move || {
+                        crate::raw_ext4::write_file(
+                            &disk,
+                            fluxvm_guest_protocol::TOKEN_FILE_PATH,
+                            token.as_bytes(),
+                            0o600,
+                        )
+                    })
+                    .await
+                    .context("native KVM token injection worker panicked")??;
+                } else {
+                    crate::inject_guest_agent_token(disk_out, token).await?;
+                }
             }
             Ok(ProvisionedDisk {
                 disk: disk_out.to_path_buf(),

@@ -9,6 +9,7 @@ license = "Apache-2.0"
 description = "Image build/clone and cloud-init seed generation for Zyvor FluxVM"
 
 [dependencies]
+tempfile = "3"
 fluxvm-core = { path = "../fluxvm-core" }
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 guestkit = { path = "../../../guestkit", features = ["registry-write", "agent"] }
@@ -22,6 +23,3 @@ serde_json = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-
-[dev-dependencies]
-tempfile = "3"

@@ -5,6 +5,7 @@ pub mod catalog;
 pub mod cloudinit;
 pub mod oci;
 pub mod qga;
+pub mod raw_ext4;
 pub mod storage;
 pub mod windows;
 

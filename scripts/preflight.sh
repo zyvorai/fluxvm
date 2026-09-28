@@ -12,7 +12,7 @@ case "$profile" in
     ;;
   --native-kvm)
     required=(fluxctl fluxvm-hypervisor cp ip)
-    optional=(bpftool tc)
+    optional=(debugfs bpftool tc)
     ;;
   *) echo "usage: $0 [--native-kvm]" >&2; exit 2 ;;
 esac
