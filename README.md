@@ -16,7 +16,7 @@ No libvirtd. No XML. A REST API and a CLI that do the same thing on every backen
 [![Security profiles](https://img.shields.io/github/actions/workflow/status/zyvorai/fluxvm/security-profiles.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=security%20profiles)](https://github.com/zyvorai/fluxvm/actions/workflows/security-profiles.yml)
 [![DevOps gates](https://img.shields.io/github/actions/workflow/status/zyvorai/fluxvm/devops-gates.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=devops%20gates)](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml)
 [![License: Apache-2.0](https://img.shields.io/github/license/zyvorai/fluxvm?style=flat-square&color=0071e3&labelColor=1d1d1f)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/zyvorai/fluxvm?sort=semver&style=flat-square&color=0071e3&labelColor=1d1d1f)](https://github.com/zyvorai/fluxvm/releases)
+[![Last commit](https://img.shields.io/github/last-commit/zyvorai/fluxvm/main?style=flat-square&color=0071e3&labelColor=1d1d1f)](https://github.com/zyvorai/fluxvm/commits/main)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-0071e3?style=flat-square&labelColor=1d1d1f&logo=rust&logoColor=white)](https://www.rust-lang.org)
 
 [**Quick start**](#quick-start) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)
@@ -94,7 +94,7 @@ We only claim what has been run. Every line links to how it was verified.
 ## Quick start
 
 ```bash
-git clone https://github.com/zyvorai/fluxvm.git && cd fluxvm   # fluxvm-image needs a sibling guestkit checkout
+git clone https://github.com/zyvorai/fluxvm.git && cd fluxvm   # needs a sibling guestkit checkout
 sudo ./scripts/bootstrap-host.sh vmbr0 && ./scripts/preflight.sh
 cargo build --release
 sudo install -m 0755 target/release/fluxctl /usr/local/bin/fluxctl
@@ -150,23 +150,12 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 
 ## Go deeper
 
-### Architecture at a glance
-The control plane, the four backends and the image path: [docs/architecture.md](docs/architecture.md).
-
-### Feature highlights
-Every area in one table, with its docs: [docs/index.md](docs/index.md#feature-highlights).
-
-### Kubernetes CRD/operator
-`DisposableVm` and the node-local operator: [docs/kubernetes-operator.md](docs/kubernetes-operator.md).
-
-### FAQ
-Is it for you, and the questions people ask first: [docs/faq.md](docs/faq.md).
-
-### Ecosystem
-<a id="who-does-what-users"></a>How FluxVM relates to zyvor-fabric, Ragnarok, h2kvm and GuestKit: [docs/ecosystem.md](docs/ecosystem.md).
-
-### Using FluxVM through Ragnarok
-[docs/ragnarok.md](docs/ragnarok.md), and [zyvor-fabric](docs/zyvor-fabric.md) for the private-cloud control plane.
+- <a id="architecture-at-a-glance"></a>**Architecture:** the control plane, the four backends and the image path — [docs/architecture.md](docs/architecture.md).
+- <a id="feature-highlights"></a>**Feature highlights:** every area in one table, with its docs — [docs/index.md](docs/index.md#feature-highlights).
+- <a id="kubernetes-crdoperator"></a>**Kubernetes:** `DisposableVm` and the node-local operator — [docs/kubernetes-operator.md](docs/kubernetes-operator.md).
+- <a id="faq"></a>**FAQ:** is it for you, and the questions people ask first — [docs/faq.md](docs/faq.md).
+- <a id="ecosystem"></a><a id="who-does-what-users"></a>**Ecosystem:** how FluxVM relates to zyvor-fabric, Ragnarok, h2kvm and GuestKit — [docs/ecosystem.md](docs/ecosystem.md).
+- <a id="using-fluxvm-through-ragnarok"></a>**Using FluxVM through Ragnarok:** [docs/ragnarok.md](docs/ragnarok.md), and [zyvor-fabric](docs/zyvor-fabric.md) for the private-cloud control plane.
 
 ## Contributing & community
 
