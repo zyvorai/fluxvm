@@ -460,6 +460,7 @@ threat model, **[talk to Zyvor](https://zyvor.dev?utm_source=github&utm_medium=f
 | Sandbox file change-set (baseline / changes) | [docs/sandbox-changes.md](docs/sandbox-changes.md) |
 | procbox: rootless Landlock + seccomp sandbox, and as a `/v1/sandboxes` kind | [docs/procbox.md](docs/procbox.md) · [docs/procbox-backend.md](docs/procbox-backend.md) |
 | Python and Go SDKs | [python/README.md](python/README.md) · [go/README.md](go/README.md) |
+| CI for these features (portable lane, hosted KVM smokes, lab gate) | [agent-sandbox.yml](.github/workflows/agent-sandbox.yml) · [native-kvm.yml](.github/workflows/native-kvm.yml) · [all-features.yml](.github/workflows/all-features.yml) |
 | Ranked backlog / next features | [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md) |
 
 Hands-on tutorials: [network policy](docs/tutorials/network-policy/README.md) ·

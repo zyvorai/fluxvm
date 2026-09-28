@@ -160,3 +160,13 @@ http_proxy_default_port = 8080
 - virtiofs, macvtap, per-VM netns, image catalog Ed25519 signing
 - Native TC/eBPF + safe Cilium coexistence without CNI lock-in
 - Suite fit: GuestKit → FluxVM → h2kvm / Ragnarok
+
+## CI
+
+- `agent-sandbox.yml` (portable, PR + main): fmt for the touched crates, egress ACL + TLS interception,
+  scheduler/API (change-set, procbox kind), procbox with an explicit Landlock check, the Python and Go
+  SDKs, and both SDKs against a real `fluxctl serve` with procbox enabled.
+- `native-kvm.yml`: real guest boots on hosted runners (SMP, pause, snapshot; `/dev/kvm` required unless
+  repo var `FLUXVM_CI_KVM_OPTIONAL=1`), the static musl guest agent, and, on the self-hosted lab runner
+  (repo var `FLUXVM_NATIVE_KVM_LIVE_CI=1`, dispatch/weekly), the golden-template gate through `fluxctl create`.
+- `all-features.yml` runs the portable jobs on every push to `main`.

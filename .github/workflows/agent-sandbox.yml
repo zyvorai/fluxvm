@@ -1,0 +1,266 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# Agent-sandbox tooling: egress HTTP/HTTPS ACL, sandbox change-set, rootless
+# procbox (and its /v1/sandboxes kind), and the Python and Go SDKs. Portable:
+# nothing here needs KVM (see native-kvm.yml for that).
+name: agent-sandbox
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+      - 'crates/fluxvm-procbox/**'
+      - 'python/**'
+      - 'go/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/agent-sandbox.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-network/**'
+      - 'crates/fluxvm-scheduler/**'
+      - 'crates/fluxvm-api/**'
+      - 'crates/fluxvm-procbox/**'
+      - 'python/**'
+      - 'go/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/agent-sandbox.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+
+jobs:
+  # Crate-scoped like the other fmt gates: a bare `cargo fmt --all` would also
+  # check the guestkit path dependency, which is not ours.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        working-directory: fluxvm
+        run: cargo fmt -p fluxvm-core -p fluxvm-network -p fluxvm-scheduler -p fluxvm-api -p fluxvm-procbox -p fluxvm-hypervisor -p fluxvm-image -- --check
+
+  # http_acl unit tests plus tests/https_intercept.rs, which runs the proxy
+  # against a local TLS upstream with an in-test CA (loopback only).
+  egress-acl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: agent-sandbox-egress
+      - name: Test egress ACL + TLS interception
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-network -p fluxvm-core
+
+  # Change-set diff, procbox sandbox kind (workspace, dry-run) and the API
+  # routes with their tenant/role scoping.
+  sandbox-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: agent-sandbox-api
+      - name: Test scheduler + API
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-scheduler -p fluxvm-api
+
+  # procbox confines real children with Landlock + seccomp. Its tests skip
+  # cleanly when the kernel has no Landlock, which would hide a regression, so
+  # the ABI is asserted explicitly first (set repo var
+  # FLUXVM_CI_LANDLOCK_OPTIONAL=1 only if the runner kernel truly lacks it).
+  procbox:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: agent-sandbox-procbox
+      - name: Build fluxvm-procbox
+        working-directory: fluxvm
+        run: cargo build -p fluxvm-procbox
+      - name: Landlock probe (must be available)
+        working-directory: fluxvm
+        env:
+          LANDLOCK_OPTIONAL: ${{ vars.FLUXVM_CI_LANDLOCK_OPTIONAL }}
+        run: |
+          uname -r
+          out="$(./target/debug/fluxvm-procbox probe)"
+          echo "$out"
+          { echo '### procbox probe'; echo '```'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          abi="$(echo "$out" | awk -F: '/landlock ABI/ {gsub(/[ \t]/, "", $2); print $2}')"
+          if [ -z "$abi" ] || [ "$abi" = "0" ]; then
+            if [ "$LANDLOCK_OPTIONAL" = "1" ]; then
+              echo "::warning::Landlock unavailable on this runner; procbox enforcement tests will skip"
+            else
+              echo "::error::Landlock unavailable (ABI '${abi:-?}'); its tests would skip and hide regressions. Set repo var FLUXVM_CI_LANDLOCK_OPTIONAL=1 to accept."
+              exit 1
+            fi
+          fi
+      - name: Test procbox (unprivileged)
+        working-directory: fluxvm
+        run: cargo test -p fluxvm-procbox
+
+  python-sdk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (mock server)
+        run: python3 -m unittest discover -s python/tests -v
+
+  go-sdk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.21", "stable"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+      - name: gofmt
+        working-directory: go
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        working-directory: go
+        run: go vet ./... && go vet -tags live ./...
+      - name: go test
+        working-directory: go
+        run: go test -race ./...
+
+  # The SDKs against a real daemon: fluxctl serve as the unprivileged runner
+  # user with [sandbox.procbox] enabled, then the same flow verified by hand on
+  # the lab host (create, files, confined process, change-set, dry-run,
+  # path-escape rejection, 501 for guest-only routes, delete).
+  procbox-live:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: agent-sandbox-live
+      - name: Build fluxctl
+        working-directory: fluxvm
+        run: cargo build -p fluxctl
+      - name: Start a daemon with procbox enabled
+        working-directory: fluxvm
+        run: |
+          mkdir -p "$RUNNER_TEMP/fv/state" "$RUNNER_TEMP/fv/run"
+          cat > "$RUNNER_TEMP/fv/fluxvm.toml" <<EOF
+          listen = "127.0.0.1:17788"
+          state_dir = "$RUNNER_TEMP/fv/state"
+          run_dir = "$RUNNER_TEMP/fv/run"
+
+          [sandbox.procbox]
+          enabled = true
+          EOF
+          nohup ./target/debug/fluxctl --config "$RUNNER_TEMP/fv/fluxvm.toml" serve > "$RUNNER_TEMP/fv/daemon.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/fv/pid"
+          for _ in $(seq 1 60); do
+            curl -fsS -m 2 http://127.0.0.1:17788/healthz >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "::error::daemon did not become healthy"; tail -40 "$RUNNER_TEMP/fv/daemon.log"; exit 1
+      - name: Python SDK live test
+        working-directory: fluxvm
+        env:
+          FLUXVM_LIVE_URL: http://127.0.0.1:17788
+        run: python3 -m unittest python/tests/live_procbox.py -v
+      - name: Go SDK live test
+        working-directory: fluxvm/go
+        env:
+          FLUXVM_LIVE_URL: http://127.0.0.1:17788
+        run: go test -tags live -run Live -v ./...
+      - name: Daemon log (on failure)
+        if: failure()
+        run: tail -80 "$RUNNER_TEMP/fv/daemon.log" || true
+      - name: Stop daemon
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/fv/pid")" 2>/dev/null || true
