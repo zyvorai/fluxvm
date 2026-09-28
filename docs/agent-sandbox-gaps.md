@@ -26,7 +26,8 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 | **File change-set** (`/v1/sandboxes/{id}/baseline` + `/changes`: added/modified/deleted) — [sandbox-changes.md](sandbox-changes.md) | Yes |
 | **Python and Go SDKs** (`python/`, `go/`, stdlib only) for `/v1/sandboxes` | Yes |
 | **`fluxvm-procbox`** rootless Landlock + seccomp process sandbox with TOML profiles and a ptrace `learn` mode — [procbox.md](procbox.md) | Yes |
-| **procbox sandboxes via `/v1/sandboxes`** (`procbox` create kind, opt-in `[sandbox.procbox]`): confined `/process`, workspace fs, baseline/changes, and a real-discard **dry-run** (`POST /v1/sandboxes/{id}/dry-run`); VM dry-run returns 501 — [procbox-backend.md](procbox-backend.md) | Yes |
+| **procbox sandboxes via `/v1/sandboxes`** (`procbox` create kind, opt-in `[sandbox.procbox]`): confined `/process`, workspace fs, baseline/changes, and a real-discard **dry-run** (`POST /v1/sandboxes/{id}/dry-run`) — [procbox-backend.md](procbox-backend.md) | Yes |
+| **VM sandbox dry-run and `POST /v1/vms/{id}/restore`**: native flux-vm sandboxes are snapshotted, run, diffed and restored (memory and disk both revert, snapshot stays reusable) — [sandbox-changes.md](sandbox-changes.md#dry-run-on-a-vm-sandbox) | Yes (native KVM only) |
 | **Sandbox dataplane** — Network Fabric **GA (schema v4)**: `legacy` nftables (default), `ebpf` TC IPv4/IPv6 L3+L4 + rate limits + groups/deny/CT, `cilium` coexistence, CNP/identities/observe, health/ipcache/refresh-dns, policy/status/stats/flows API, optional XDP, schema/fingerprint repair | Yes — [network-fabric.md](network-fabric.md), [network-groups.md](network-groups.md), [network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md) |
 | OCI → template export | Yes |
 | **Redis shared sandbox index** (`FLUXVM_SANDBOX_STATE_URL`) | Yes |

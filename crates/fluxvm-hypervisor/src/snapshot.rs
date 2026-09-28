@@ -7,7 +7,6 @@ use crate::state::{VmLifecycle, VmState};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Check the saved CPU/RAM shape before stopping a currently running VM.
 /// The guest still needs a real restore after this check; this only rejects
@@ -140,23 +139,47 @@ pub async fn restore_meta(st: &mut VmState, path: &Path) -> Result<SnapshotSpec>
     Ok(spec)
 }
 
-/// Prefer `cp --reflink=auto`; fall back to plain copy.
+/// `_IOW(0x94, 9, int)`: share the source's extents with the destination.
+const FICLONE: libc::c_ulong = 0x4004_9409;
+
+/// Clone `src` to `dst`: a reflink where the filesystem has one, otherwise a
+/// sparse-preserving copy. Done in process on purpose: a `cp` child inherits
+/// the VMM's seccomp allowlist and dies of SIGSYS on syscalls the allowlist
+/// does not know (statfs, fadvise64, ...), and `std::fs::copy` needs
+/// copy_file_range.
 pub fn clone_cow(src: &Path, dst: &Path) -> Result<()> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::unix::io::AsRawFd;
+
     if dst.exists() {
         fs::remove_file(dst)?;
     }
-    let status = Command::new("cp")
-        .args(["--reflink=auto", "--sparse=always"])
-        .arg(src)
-        .arg(dst)
-        .status();
-    match status {
-        Ok(s) if s.success() => Ok(()),
-        _ => {
-            fs::copy(src, dst)?;
-            Ok(())
+    let mut input = fs::File::open(src).with_context(|| format!("opening {}", src.display()))?;
+    let meta = input.metadata()?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+        .with_context(|| format!("creating {}", dst.display()))?;
+    // SAFETY: both descriptors are open for the duration of the call.
+    let cloned = unsafe { libc::ioctl(output.as_raw_fd(), FICLONE, input.as_raw_fd()) } == 0;
+    if !cloned {
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = input.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            if buf[..n].iter().all(|b| *b == 0) {
+                output.seek(SeekFrom::Current(n as i64))?;
+            } else {
+                output.write_all(&buf[..n])?;
+            }
         }
+        output.set_len(meta.len())?;
     }
+    fs::set_permissions(dst, meta.permissions())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -173,6 +196,25 @@ mod tests {
             "engine": "kvm"
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn clone_cow_copies_content_and_keeps_zero_runs_sparse() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src.raw");
+        let dst = dir.path().join("dst.raw");
+        let mut data = vec![0u8; 8 * 1024 * 1024];
+        data[..4].copy_from_slice(b"HEAD");
+        let n = data.len();
+        data[n - 4..].copy_from_slice(b"TAIL");
+        fs::write(&src, &data).unwrap();
+        clone_cow(&src, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), data);
+        assert!(fs::metadata(&dst).unwrap().blocks() * 512 < data.len() as u64);
+        // An existing destination is replaced, not appended to.
+        clone_cow(&src, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), data);
     }
 
     #[test]

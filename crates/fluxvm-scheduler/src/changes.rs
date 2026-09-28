@@ -300,7 +300,7 @@ pub struct ChangesReport {
 }
 
 impl VmManager {
-    async fn take_manifest(&self, id: Uuid, paths: &[String]) -> Result<Manifest> {
+    pub(crate) async fn take_manifest(&self, id: Uuid, paths: &[String]) -> Result<Manifest> {
         let vm = self.get(id).await?;
         if crate::procbox_sandbox::is_procbox(&vm) {
             // No guest to ask: walk the host workspace directly.

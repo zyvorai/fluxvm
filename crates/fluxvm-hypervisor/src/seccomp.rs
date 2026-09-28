@@ -166,6 +166,14 @@ fn apply_seccomp_filter() -> Result<()> {
         libc::SYS_accept4,
         libc::SYS_eventfd2,
         libc::SYS_fallocate,
+        // Snapshot save stages files in a temp directory and removes it with
+        // std::fs::remove_dir_all (getdents64); statfs/fstatfs/copy_file_range
+        // keep std's copy helpers working.
+        libc::SYS_getdents,
+        libc::SYS_getdents64,
+        libc::SYS_statfs,
+        libc::SYS_fstatfs,
+        libc::SYS_copy_file_range,
     ];
 
     let map: BTreeMap<i64, Vec<seccompiler::SeccompRule>> =
