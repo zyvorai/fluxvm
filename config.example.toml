@@ -52,6 +52,10 @@ reaper_interval_secs = 5
 # egress_tls_ports = [443]           # destination ports an intercepted CONNECT may use
 # egress_tls_allow_private = false   # keep false: blocks loopback/private/metadata upstreams
 # egress_upstream_ca_file = ""       # extra roots for verifying upstreams (never disables verification)
+# egress_max_body_bytes = 1073741824 # cap on a proxied request/response body (0 = unlimited)
+# Transparent mode: accept guest traffic redirected by nftables (ports 80/443) with no proxy
+# settings in the guest. Needs egress_tls_intercept for HTTPS. See docs/http-acl.md.
+# egress_transparent_listen = "0.0.0.0:18889"
 
 # Rootless process sandboxes ("procbox": Landlock + seccomp on the host kernel).
 # Off by default; a weaker boundary than a microVM (see docs/procbox-backend.md).

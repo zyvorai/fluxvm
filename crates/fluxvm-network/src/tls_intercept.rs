@@ -259,8 +259,8 @@ impl TlsIntercept {
         &self.ca
     }
 
-    /// The rustls config presenting a certificate for `host`. HTTP/2 is not
-    /// offered: only `http/1.1` is advertised via ALPN.
+    /// The rustls config presenting a certificate for `host`. ALPN offers `h2`
+    /// and `http/1.1`; the proxy serves whichever the client picks.
     pub fn server_config_for(&self, host: &str) -> Result<Arc<ServerConfig>> {
         let host = host.to_ascii_lowercase();
         {
@@ -279,7 +279,7 @@ impl TlsIntercept {
             .with_no_client_auth()
             .with_single_cert(vec![cert], key)
             .context("building TLS server config")?;
-        cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+        cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         let cfg = Arc::new(cfg);
 
         let mut cache = self.cache.lock().unwrap();
@@ -488,6 +488,6 @@ mod tests {
             t.server_config_for(&format!("h{i}.example")).unwrap();
         }
         assert!(t.cached_hosts() <= LEAF_CACHE_MAX);
-        assert_eq!(a.alpn_protocols, vec![b"http/1.1".to_vec()]);
+        assert_eq!(a.alpn_protocols, vec![b"h2".to_vec(), b"http/1.1".to_vec()]);
     }
 }

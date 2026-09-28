@@ -160,6 +160,15 @@ pub struct SandboxConfig {
     /// Extra PEM root certificates trusted when the proxy verifies upstream
     /// servers (for a private CA). Verification is never disabled.
     pub egress_upstream_ca_file: String,
+    /// Largest request or response body the egress proxy will stream, in bytes
+    /// (default 1 GiB, `0` = unlimited). A larger request is refused with 413; a
+    /// larger response is cut off with an error. See `docs/http-acl.md`.
+    pub egress_max_body_bytes: u64,
+    /// Bind address of the transparent-mode listener (empty = off). Point an
+    /// nftables `redirect` for guest ports 80/443 at it, inside the guest's
+    /// network namespace; it needs `egress_tls_intercept` for HTTPS. See
+    /// `docs/http-acl.md`.
+    pub egress_transparent_listen: String,
     /// Inject `Authorization` on matching Host (never exposed to the guest).
     pub credential_vault: Vec<CredentialInject>,
     /// Directory for OCI→template builds and snapshot templates.
@@ -237,6 +246,8 @@ impl Default for SandboxConfig {
             egress_tls_ports: Vec::new(),
             egress_tls_allow_private: false,
             egress_upstream_ca_file: String::new(),
+            egress_max_body_bytes: 1 << 30,
+            egress_transparent_listen: String::new(),
             credential_vault: Vec::new(),
             templates_dir: None,
             volumes_dir: None,

@@ -38,11 +38,16 @@ egress_http_rules = [
    denied (default deny). With only `deny` rules, everything else is allowed.
 4. Denials return `403` with the reason and count in the egress-deny metric.
 
-A trailing `/*` in a path glob also matches the directory itself, so
-`deny * */admin/*` (host `*`, path `/admin/*`) covers `/admin`, `/admin/` and
-everything below `/admin/`. It does not cover `/administrator`, `/superadmin`
-or `/x/admin/y`: the first `*` is the host glob, and the path glob starts at
-`/admin`.
+What `deny * */admin/*` covers. The rule is host glob `*`, path glob
+`/admin/*`; a trailing `/*` also matches the directory itself:
+
+| Request path | Denied? |
+|---|---|
+| `/admin`, `/admin/` | yes (the directory itself) |
+| `/admin/x`, `/admin/x/y` | yes |
+| `/a/../admin`, `//admin`, `/%61dmin` | yes (normalized to `/admin` first) |
+| `/administrator`, `/superadmin` | no (different segment) |
+| `/x/admin/y` | no (the path glob starts at `/admin`; add `deny * */*/admin/*` to cover nested ones) |
 
 ## Evasion resistance
 
@@ -132,9 +137,9 @@ How a request flows:
 5. The proxy fetches `https://host:port<normalized path>` itself with
    **certificate verification on** (it never disables it), a resolver that
    refuses non-public addresses (unless allowed), and injects the vault
-   `Authorization`. Request and response bodies are streamed, hop-by-hop
-   headers are dropped, and the guest's own `Authorization` header is never
-   forwarded.
+   `Authorization`. Request and response bodies are streamed (with the
+   [size cap](#body-size-cap)), hop-by-hop headers are dropped, and the
+   guest's own `Authorization` header is never forwarded.
 
 #### Trusting the CA in the guest
 
@@ -156,22 +161,74 @@ Language runtimes with their own trust store need it too, for example
 truststore. The intercepting CA can mint a certificate for any host, so treat
 the key like a root secret and give each deployment its own CA.
 
+#### HTTP/2
+
+Intercepted connections speak whichever protocol the client negotiates via ALPN:
+`h2` or `http/1.1`. Every HTTP/2 stream is judged on its own with the same
+rules, normalization and vault as HTTP/1.1, and the request's `:authority`
+must name the tunnel host (otherwise `403`, so an `h2` client cannot use one
+tunnel to reach another host). The upstream leg negotiates `h2` or `http/1.1`
+by ALPN too, with certificate verification still on. HTTP/1.1 and HTTP/2
+clients can use the proxy at the same time.
+
+#### Body size cap
+
+`egress_max_body_bytes` (default 1 GiB, `0` = unlimited) bounds every request
+and response body the proxy streams, over plain HTTP and intercepted HTTPS:
+
+* a request whose `Content-Length` exceeds the cap gets `413` before it is
+  forwarded; a chunked request that grows past it is cut off and answered
+  `413`;
+* a response whose `Content-Length` exceeds the cap becomes `502`; a streamed
+  response that grows past it is aborted mid-stream so the client sees a
+  failed transfer instead of silently truncated data.
+
+#### Transparent mode
+
+Clients that do not know about the proxy (no `HTTPS_PROXY`) can be redirected
+to it:
+
+```toml
+[sandbox]
+egress_tls_intercept = true
+egress_transparent_listen = "0.0.0.0:18889"   # empty = off
+```
+
+The listener accepts redirected connections, works out what they are from the
+first bytes, and recovers the address the client dialed with `SO_ORIGINAL_DST`:
+
+* **TLS** (a ClientHello): the SNI is required and names the host; there is no
+  `CONNECT`, so the checks that `CONNECT` gets run first, against the SNI host
+  and the dialed port (`egress_tls_ports`, the allowlist, no rule that could
+  never allow the host, private/metadata refusal). A ClientHello without SNI is
+  dropped. The proxy then terminates TLS as above (h2 or http/1.1) and reaches
+  the upstream by the **name** (SNI), never by the IP the client dialed, so a
+  client cannot pair an allowed name with another address.
+* **Plain HTTP**: judged by its `Host` header exactly like a proxied request,
+  and forwarded to that host on the dialed port.
+
+The redirect itself is an nftables rule that must live inside the guest's
+network namespace. `fluxvm_network::transparent_redirect` builds it (table
+`inet fluxvm_egress_tp`, a `prerouting` `redirect` restricted to one interface
+and a port list) and applies or removes it only through
+`ip netns exec <namespace> nft`; it refuses to act without a namespace name,
+never touches the host's default namespace, and validates every name it
+interpolates. This is separate from the older host-output redirect in
+`egress.rs`, which is unchanged.
+
+```bash
+cargo run -p fluxvm-network --example egress_proxy_ns -- snippet fvegress fvtap0 80,443 18889
+```
+
 #### Limits
 
-* **HTTP/1.1 only.** HTTP/2 is not intercepted (ALPN advertises `http/1.1`),
-  and upstream requests are HTTP/1.1.
 * **Certificate pinning fails**: clients that pin the upstream certificate or
   key will reject the minted leaf. Do not intercept those hosts (leave them
   off the allowlist, or do not route them through the proxy).
 * **No WebSockets or other upgrades** inside a tunnel (`501`).
-* **Explicit proxy only.** Clients must be configured to use the proxy
-  (`HTTPS_PROXY`), which makes them send `CONNECT`. Transparent interception
-  of raw TLS redirected to the proxy port (for example the `redirect to`
-  nftables snippet in `egress.rs`) is not implemented: the proxy speaks HTTP,
-  so a bare ClientHello is not understood. Making sure guests cannot bypass
-  the proxy is the dataplane's job.
-* Bodies are streamed with no size cap; apply limits at the dataplane if
-  needed.
+* Transparent mode covers TCP ports you redirect (TLS and plain HTTP only);
+  other protocols on those ports are dropped. Making sure guests cannot bypass
+  the proxy at all is the dataplane's job.
 * The leaf-certificate cache holds at most 256 hosts.
 * Rules cannot see inside a tunnel that is not intercepted; keep
   `egress_tls_intercept` on for any sandbox that relies on path or method
@@ -188,3 +245,33 @@ matching allow rule, a `deny` match, a wrong method, `/ok/../admin/x`,
 port outside `egress_tls_ports` and a client that did not trust the proxy CA
 both failed. Note that when the daemon runs as root and `egress_proxy_listen`
 is set, it also installs the nftables redirect for ports 80/443.
+
+## Verified with real traffic (2026-09-28)
+
+`scripts/test-egress-guest.sh` (opt-in, root, lab) builds two throwaway network
+namespaces, a stand-alone proxy (`crates/fluxvm-network/examples/egress_proxy_ns.rs`),
+an HTTPS+HTTP upstream with a private CA and the nft redirect, and runs a fixed
+set of cases:
+
+* **Stage 1 - a real `curl` in a second namespace over a veth** (20 checks, all
+  passing): explicit proxy allow/deny by method and path, the bypass forms
+  `/a/../admin`, `/%61dmin` and `//admin`, a `CONNECT` to an unlisted host,
+  `curl --http2` negotiating h2 with the proxy (both explicit and transparent),
+  transparent HTTPS and plain HTTP with no proxy settings in the client (a real
+  nft `redirect` and `SO_ORIGINAL_DST`), and an upstream log proving no denied
+  request ever reached it.
+* **Stage 2 - the golden native-KVM guest**: boots, the agent answers over
+  vsock, cloud-init's `ca_certs` installs the proxy CA and the guest's
+  `openssl verify` accepts it, and the guest's curl 7.58 has HTTP/2. The
+  traffic cases **could not run**: the guest sends its DHCP request (dnsmasq in
+  the namespace sees and answers it) but never receives the reply. The in-tree
+  KVM virtio-net only implements guest-to-tap transmit (plus synthesized
+  gateway ARP/ICMP replies); nothing reads the tap to fill the guest's RX
+  queue, and the vhost-net binding fails (`VHOST_NET_SET_BACKEND` returns
+  `EFAULT` because it runs before the vrings exist). The script reports
+  `BLOCKED` (exit 3) until receive is implemented; the same cases then run
+  through the guest agent unchanged.
+
+The script asserts afterwards that `ip netns list` and `nft list ruleset`
+(counters stripped) are identical to before, that `/etc/netns/<ns>` files are
+gone, and that no dnsmasq, hypervisor, proxy or upstream of the run is left.
