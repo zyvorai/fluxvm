@@ -270,29 +270,6 @@ impl KvmVm {
                 if run as usize == ffi::MAP_FAILED {
                     return Err(FluxError::Hypervisor("mmap kvm_run".into()));
                 }
-                if id != 0 {
-                    // A freshly created vCPU defaults to
-                    // KVM_MP_STATE_RUNNABLE, not "wait for SIPI" -- left
-                    // alone it would immediately execute whatever garbage
-                    // sits at the reset vector (no RIP/sregs are ever set
-                    // for APs) instead of blocking for the guest's real
-                    // INIT-SIPI-SIPI. This is what made the AP thread
-                    // block forever in a single KVM_RUN with zero vmexits
-                    // (a tight, exit-free decode loop over unmapped/zero
-                    // memory) while the BSP spun waiting for it to check
-                    // in -- exactly the original hang symptom, just with
-                    // the real vCPU now silently running junk instead of
-                    // not existing at all.
-                    let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
-                    if ffi::flux_ioctl(
-                        vcpu_fd,
-                        ffi::KVM_SET_MP_STATE,
-                        &mut mp_state as *mut _ as *mut c_void,
-                    ) < 0
-                    {
-                        return Err(FluxError::Hypervisor(format!("KVM_SET_MP_STATE id={id}")));
-                    }
-                }
                 vcpus.push(VcpuHandle {
                     fd: vcpu_fd,
                     run: run as *mut u8,
@@ -313,23 +290,32 @@ impl KvmVm {
                 this.setup_fpu(id)?;
                 this.set_lint(id)?;
             }
-            // Re-park APs after lint/MSR setup. Some KVM versions leave APs
-            // RUNNABLE after LAPIC writes; INIT-SIPI must find them waiting.
+            // With the in-kernel irqchip KVM creates every non-BSP vCPU in
+            // KVM_MP_STATE_UNINITIALIZED (it waits for the guest's
+            // INIT-SIPI-SIPI); nothing here changes that, and Firecracker /
+            // Cloud Hypervisor make no explicit call. Verify it instead of
+            // setting it, and only intervene if a KVM version ever disagrees.
             for id in 1..num_cpus as usize {
-                let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
-                if ffi::flux_ioctl(
-                    this.vcpus[id].fd,
-                    ffi::KVM_SET_MP_STATE,
-                    &mut mp_state as *mut _ as *mut c_void,
-                ) < 0
-                {
-                    return Err(FluxError::Hypervisor(format!(
-                        "KVM_SET_MP_STATE re-park id={id}"
-                    )));
-                }
+                this.ensure_ap_uninitialized(id)?;
             }
             Ok(this)
         }
+    }
+
+    /// An AP must start `KVM_MP_STATE_UNINITIALIZED` so it blocks for the
+    /// guest's INIT-SIPI instead of executing whatever sits at the reset
+    /// vector (the original "AP runs junk forever" hang). KVM already does
+    /// this for a non-BSP vCPU when an in-kernel irqchip exists; this checks
+    /// it after all per-vCPU setup and only writes the state if it is not.
+    fn ensure_ap_uninitialized(&self, idx: usize) -> Result<()> {
+        let state = self.get_mp_state(idx)?;
+        if state != ffi::KVM_MP_STATE_UNINITIALIZED {
+            eprintln!(
+                "[kvm] vcpu{idx} mp_state={state} after setup (expected UNINITIALIZED); parking it"
+            );
+            self.set_mp_state(idx, ffi::KVM_MP_STATE_UNINITIALIZED)?;
+        }
+        Ok(())
     }
 
     /// `KVM_GET_MP_STATE` for one vCPU (0 = RUNNABLE, 1 = UNINITIALIZED, ...).
@@ -366,8 +352,9 @@ impl KvmVm {
         self.vcpus.len()
     }
 
-    /// Hot-add a vCPU with the next contiguous id (H4). Parks it
-    /// `KVM_MP_STATE_UNINITIALIZED` so the guest INIT-SIPI path can bring it up.
+    /// Hot-add a vCPU with the next contiguous id (H4). It starts
+    /// `KVM_MP_STATE_UNINITIALIZED` (verified after setup) so the guest
+    /// INIT-SIPI path can bring it up.
     pub fn create_vcpu(&mut self, id: i32) -> Result<()> {
         #[cfg(not(target_os = "linux"))]
         {
@@ -402,17 +389,6 @@ impl KvmVm {
                 if run as usize == ffi::MAP_FAILED {
                     return Err(FluxError::Hypervisor("mmap kvm_run (hotplug)".into()));
                 }
-                let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
-                if ffi::flux_ioctl(
-                    vcpu_fd,
-                    ffi::KVM_SET_MP_STATE,
-                    &mut mp_state as *mut _ as *mut c_void,
-                ) < 0
-                {
-                    return Err(FluxError::Hypervisor(format!(
-                        "KVM_SET_MP_STATE hotplug id={id}"
-                    )));
-                }
                 self.vcpus.push(VcpuHandle {
                     fd: vcpu_fd,
                     run: run as *mut u8,
@@ -423,20 +399,7 @@ impl KvmVm {
             self.setup_boot_msrs(idx)?;
             self.setup_fpu(idx)?;
             self.set_lint(idx)?;
-            // Re-park after LAPIC/MSR setup.
-            unsafe {
-                let mut mp_state = ffi::KVM_MP_STATE_UNINITIALIZED;
-                if ffi::flux_ioctl(
-                    self.vcpus[idx].fd,
-                    ffi::KVM_SET_MP_STATE,
-                    &mut mp_state as *mut _ as *mut c_void,
-                ) < 0
-                {
-                    return Err(FluxError::Hypervisor(format!(
-                        "KVM_SET_MP_STATE re-park hotplug id={id}"
-                    )));
-                }
-            }
+            self.ensure_ap_uninitialized(idx)?;
             Ok(())
         }
     }
