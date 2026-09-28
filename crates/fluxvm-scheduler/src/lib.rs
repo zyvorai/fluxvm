@@ -22,8 +22,8 @@ use std::{collections::HashMap, fs, sync::Arc};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-pub mod events;
 pub mod confidential;
+pub mod events;
 mod sandbox;
 pub mod templates;
 pub use events::{EventFilter, VmEvent};

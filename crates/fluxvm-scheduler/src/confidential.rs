@@ -17,7 +17,7 @@
 //! `auto` falls back to a normal VM with an accurate reason. Flip
 //! [`LAUNCH_SUPPORTED`] only together with the launch code.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -143,7 +143,8 @@ mod tests {
         pub struct Root(PathBuf);
         impl Root {
             pub fn new(files: &[(&str, &str)]) -> Self {
-                let root = std::env::temp_dir().join(format!("fluxvm-conf-{}", uuid::Uuid::new_v4()));
+                let root =
+                    std::env::temp_dir().join(format!("fluxvm-conf-{}", uuid::Uuid::new_v4()));
                 for (path, content) in files {
                     let full = root.join(path);
                     std::fs::create_dir_all(full.parent().unwrap()).unwrap();
@@ -180,7 +181,10 @@ mod tests {
             ("dev/sev", ""),
         ]);
         assert!(detect_at(both.path()).sev_snp);
-        let off = tree(&[("sys/module/kvm_amd/parameters/sev_snp", "N\n"), ("dev/sev", "")]);
+        let off = tree(&[
+            ("sys/module/kvm_amd/parameters/sev_snp", "N\n"),
+            ("dev/sev", ""),
+        ]);
         assert!(!detect_at(off.path()).sev_snp);
     }
 
@@ -218,7 +222,10 @@ mod tests {
         let error = resolve(Some(ConfidentialMode::Required), &cap(false, false, false))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("required") && error.contains("no hardware"), "{error}");
+        assert!(
+            error.contains("required") && error.contains("no hardware"),
+            "{error}"
+        );
     }
 
     #[test]
