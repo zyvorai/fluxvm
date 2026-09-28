@@ -14,6 +14,10 @@ pub struct Probe {
     pub tcp_rules: bool,
     pub scope_ipc: bool,
     pub seccomp: bool,
+    /// Unprivileged user + mount namespaces work for this caller (isolation).
+    pub namespaces: bool,
+    /// Why namespaces are unavailable, when they are.
+    pub namespaces_reason: Option<String>,
     /// Whether the default policy (strict) would run here.
     pub default_policy_ok: bool,
 }
@@ -24,6 +28,10 @@ pub fn probe() -> Probe {
     let seccomp = crate::seccomp::available();
     #[cfg(not(target_os = "linux"))]
     let seccomp = false;
+    #[cfg(target_os = "linux")]
+    let ns = crate::isolate::userns_status(None);
+    #[cfg(not(target_os = "linux"))]
+    let ns: Result<(), String> = Err("namespaces are Linux-only".into());
     Probe {
         landlock_abi: abi,
         filesystem: abi >= 1,
@@ -32,6 +40,8 @@ pub fn probe() -> Probe {
         tcp_rules: abi >= 4,
         scope_ipc: abi >= 6,
         seccomp,
+        namespaces: ns.is_ok(),
+        namespaces_reason: ns.err(),
         default_policy_ok: crate::landlock::plan(&crate::policy::Policy::default(), abi).is_ok()
             && seccomp,
     }
@@ -48,6 +58,7 @@ impl Probe {
              TCP port rules    (>=4) : {}\n\
              IPC scoping       (>=6) : {}\n\
              seccomp-bpf             : {}\n\
+             namespaces (isolation)  : {}\n\
              default policy (strict) : {}\n",
             self.landlock_abi,
             yn(self.filesystem),
@@ -56,6 +67,11 @@ impl Probe {
             yn(self.tcp_rules),
             yn(self.scope_ipc),
             yn(self.seccomp),
+            match (&self.namespaces, &self.namespaces_reason) {
+                (true, _) => "yes".to_string(),
+                (false, Some(r)) => format!("no ({r})"),
+                (false, None) => "no".to_string(),
+            },
             if self.default_policy_ok {
                 "runs"
             } else {

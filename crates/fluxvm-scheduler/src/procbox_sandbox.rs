@@ -125,6 +125,10 @@ pub struct ProcboxSpec {
     pub max_processes: u64,
     pub timeout_seconds: u64,
     pub cpu_seconds: Option<u64>,
+    /// The uid/gid this sandbox's commands run as (root daemon only), taken
+    /// from the server's uid pool when the sandbox is created.
+    #[serde(default)]
+    pub uid: Option<u32>,
 }
 
 /// Check a request against the server caps and fill in defaults. Values over a
@@ -169,7 +173,114 @@ pub fn resolve_limits(cfg: &ProcboxConfig, req: &ProcboxRequest) -> Result<Procb
         max_processes: procs,
         timeout_seconds: timeout,
         cpu_seconds: req.cpu_seconds,
+        uid: None,
     })
+}
+
+fn is_root() -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions.
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+/// The configured namespace-isolation mode.
+pub fn isolation_mode(cfg: &ProcboxConfig) -> Result<fluxvm_procbox::Isolation> {
+    cfg.isolation
+        .parse()
+        .map_err(|e: String| anyhow::anyhow!("sandbox.procbox.isolation: {e}"))
+}
+
+/// Serializes uid allocation with the marker write that claims it.
+static UID_ALLOC: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Pick the lowest free uid of the pool for a new sandbox (root daemon only).
+/// Claimed uids are read from the markers of the existing workspaces, so a
+/// deleted sandbox frees its uid with its directory. Call with `UID_ALLOC` held.
+fn allocate_uid(cfg: &ProcboxConfig, instances: &Path) -> Result<Option<u32>> {
+    if !is_root() {
+        return Ok(None);
+    }
+    if cfg.uid_count == 0 {
+        if cfg.allow_root {
+            return Ok(None);
+        }
+        return Err(ProcboxError::Unavailable(
+            "the daemon runs as root and sandbox.procbox.uid_count = 0: refusing to run \
+             sandbox commands as root (configure a uid pool, or set allow_root = true)"
+                .into(),
+        )
+        .into());
+    }
+    let end = cfg
+        .uid_base
+        .checked_add(cfg.uid_count)
+        .filter(|_| cfg.uid_base != 0)
+        .ok_or_else(|| {
+            anyhow::anyhow!("sandbox.procbox.uid_base/uid_count must be a non-zero range in u32")
+        })?;
+    let mut used = std::collections::HashSet::new();
+    if let Ok(rd) = std::fs::read_dir(instances) {
+        for ent in rd.flatten() {
+            if let Ok(raw) = std::fs::read(ent.path().join(MARKER_FILE)) {
+                if let Some(u) = serde_json::from_slice::<ProcboxSpec>(&raw)
+                    .ok()
+                    .and_then(|s| s.uid)
+                {
+                    used.insert(u);
+                }
+            }
+        }
+    }
+    (cfg.uid_base..end)
+        .find(|u| !used.contains(u))
+        .map(Some)
+        .ok_or_else(|| {
+            ProcboxError::Unavailable(format!(
+                "the procbox uid pool is exhausted ({} sandboxes); delete some or raise \
+                 sandbox.procbox.uid_count",
+                cfg.uid_count
+            ))
+            .into()
+        })
+}
+
+/// The sandbox uid must be able to reach its workspace: every ancestor needs
+/// search permission for others. `instances/` and the workspace are opened up
+/// here; anything above must already allow it.
+#[cfg(unix)]
+fn prepare_traversal(workspace: &Path, uid: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let instances = workspace.parent().unwrap_or(workspace);
+    let mode = std::fs::metadata(instances)?.permissions().mode();
+    if mode & 0o001 == 0 {
+        std::fs::set_permissions(instances, std::fs::Permissions::from_mode(mode | 0o001))?;
+    }
+    std::fs::set_permissions(workspace, std::fs::Permissions::from_mode(0o711))?;
+    for a in instances.ancestors().skip(1) {
+        if a.as_os_str().is_empty() {
+            break;
+        }
+        let m = std::fs::metadata(a)?.permissions().mode();
+        if m & 0o001 == 0 {
+            return Err(ProcboxError::Unavailable(format!(
+                "{} must be searchable by other users (chmod o+x) so sandbox uid {uid} can reach its workspace",
+                a.display()
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_traversal(_: &Path, _: u32) -> Result<()> {
+    Ok(())
 }
 
 /// Whether this host can run a procbox sandbox under the strict default
@@ -298,6 +409,8 @@ pub fn build_policy(
         ],
         cwd: Some(workdir.to_path_buf()),
         best_effort: cfg.best_effort,
+        run_as: spec.uid.map(|uid| fluxvm_procbox::RunAs { uid, gid: uid }),
+        isolation: isolation_mode(cfg).unwrap_or(fluxvm_procbox::Isolation::Auto),
         ..Policy::default()
     }
 }
@@ -317,6 +430,15 @@ fn run_confined(
     command: &str,
     timeout: Option<u64>,
 ) -> Result<Confined> {
+    if is_root() && spec.uid.is_none() && !cfg.allow_root {
+        return Err(ProcboxError::Unavailable(
+            "refusing to run a sandbox command as root: this sandbox has no uid (it predates the \
+             uid pool, or the pool is off); recreate it or set sandbox.procbox.allow_root"
+                .into(),
+        )
+        .into());
+    }
+    isolation_mode(cfg)?;
     let policy = build_policy(cfg, spec, workdir, timeout, |p| p.exists());
     let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
     let res = fluxvm_procbox::run(
@@ -432,6 +554,9 @@ mod fsroot {
     pub struct Root {
         fd: OwnedFd,
         path: PathBuf,
+        /// Files and directories created through this root are given to this
+        /// (uid, gid), so the sandbox uid can use what the API wrote.
+        owner: Option<(u32, u32)>,
     }
 
     struct Entry {
@@ -466,7 +591,34 @@ mod fsroot {
                 // SAFETY: fresh descriptor.
                 fd: unsafe { OwnedFd::from_raw_fd(fd) },
                 path: path.to_path_buf(),
+                owner: None,
             })
+        }
+
+        pub fn with_owner(mut self, owner: Option<(u32, u32)>) -> Root {
+            self.owner = owner;
+            self
+        }
+
+        fn chown_fd(&self, fd: RawFd) -> Result<()> {
+            if let Some((uid, gid)) = self.owner {
+                // SAFETY: fd is open for the duration of the call.
+                if unsafe { libc::fchown(fd, uid, gid) } != 0 {
+                    return Err(io::Error::last_os_error()).context("chown to the sandbox uid");
+                }
+            }
+            Ok(())
+        }
+
+        pub fn chown_path(&self, p: &Path) -> Result<()> {
+            if let Some((uid, gid)) = self.owner {
+                let c = CString::new(p.as_os_str().as_bytes())?;
+                // SAFETY: valid NUL-terminated path; lchown does not follow symlinks.
+                if unsafe { libc::lchown(c.as_ptr(), uid, gid) } != 0 {
+                    return Err(io::Error::last_os_error()).context("chown to the sandbox uid");
+                }
+            }
+            Ok(())
         }
 
         pub fn path(&self) -> &Path {
@@ -528,6 +680,7 @@ mod fsroot {
                 let c = CString::new(comp.as_bytes())?;
                 // SAFETY: valid dirfd and NUL-terminated single component.
                 let rc = unsafe { libc::mkdirat(base, c.as_ptr(), 0o755) };
+                let created = rc == 0;
                 if rc != 0 {
                     let e = io::Error::last_os_error();
                     if e.raw_os_error() != Some(libc::EEXIST) {
@@ -536,6 +689,9 @@ mod fsroot {
                 }
                 let next = openat2(base, Path::new(comp), libc::O_RDONLY | libc::O_DIRECTORY, 0)
                     .map_err(|e| open_err(e, rel))?;
+                if created {
+                    self.chown_fd(next.as_raw_fd())?;
+                }
                 cur = Some(next);
             }
             let base = cur
@@ -553,6 +709,7 @@ mod fsroot {
             if !file.metadata()?.is_file() {
                 bail!("{} is not a regular file", rel.display());
             }
+            self.chown_fd(file.as_raw_fd())?;
             file.write_all(data)?;
             Ok(())
         }
@@ -661,6 +818,7 @@ mod fsroot {
                 match e.kind {
                     Kind::Dir => {
                         std::fs::create_dir(&target)?;
+                        self.chown_path(&target)?;
                     }
                     Kind::File => {
                         let fd = openat2(dir, &e.name, libc::O_RDONLY | libc::O_NONBLOCK, 0)
@@ -681,6 +839,7 @@ mod fsroot {
                             &target,
                             std::os::unix::fs::PermissionsExt::from_mode(meta_mode(&meta)),
                         )?;
+                        self.chown_path(&target)?;
                     }
                     Kind::Symlink => {
                         let link = std::fs::read_link(format!(
@@ -688,6 +847,7 @@ mod fsroot {
                             e.name.to_string_lossy()
                         ))?;
                         std::os::unix::fs::symlink(link, &target)?;
+                        self.chown_path(&target)?;
                     }
                     Kind::Other => {}
                 }
@@ -714,6 +874,12 @@ mod fsroot {
         }
         pub fn path(&self) -> &Path {
             Path::new("")
+        }
+        pub fn with_owner(self, _: Option<(u32, u32)>) -> Root {
+            self
+        }
+        pub fn chown_path(&self, _: &Path) -> Result<()> {
+            Ok(())
         }
         pub fn read_file(&self, _: &Path, _: usize) -> Result<(Vec<u8>, u32)> {
             Err(unsupported("procbox workspaces (Linux only)"))
@@ -812,7 +978,8 @@ impl VmManager {
         if pb.max_memory_mib.is_none() {
             pb.max_memory_mib = req.memory_mib;
         }
-        let spec = resolve_limits(cfg, &pb)?;
+        let mut spec = resolve_limits(cfg, &pb)?;
+        let isolation = isolation_mode(cfg)?;
 
         // Fail closed at create time if the host cannot enforce this policy.
         let probe_policy = build_policy(cfg, &spec, Path::new("/"), None, |p: &Path| p.exists());
@@ -835,6 +1002,15 @@ impl VmManager {
             }
             if !cfg.best_effort && !fluxvm_procbox::seccomp::available() {
                 return Err(ProcboxError::Unavailable("seccomp is not available".into()).into());
+            }
+            if isolation == fluxvm_procbox::Isolation::Strict {
+                let ids = is_root().then_some((cfg.uid_base.max(1), cfg.uid_base.max(1)));
+                if let Err(why) = fluxvm_procbox::isolate::userns_status(ids) {
+                    return Err(ProcboxError::Unavailable(format!(
+                        "isolation = strict but namespaces are unavailable: {why}"
+                    ))
+                    .into());
+                }
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -859,9 +1035,28 @@ impl VmManager {
         let files = workspace.join(FILES_DIR);
         let staged = (|| -> Result<()> {
             use std::os::unix::fs::PermissionsExt;
+            let _claim = UID_ALLOC.lock().unwrap_or_else(|e| e.into_inner());
+            spec.uid = allocate_uid(
+                cfg,
+                &workspace
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default(),
+            )?;
             std::fs::create_dir_all(&files)?;
             std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700))?;
             std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o700))?;
+            if let Some(uid) = spec.uid {
+                prepare_traversal(&workspace, uid)?;
+                let c = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+                    files.as_os_str(),
+                ))?;
+                // SAFETY: valid NUL-terminated path.
+                if unsafe { libc::chown(c.as_ptr(), uid, uid) } != 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .context("giving the sandbox uid its workspace");
+                }
+            }
             std::fs::write(
                 workspace.join(MARKER_FILE),
                 serde_json::to_vec_pretty(&spec)?,
@@ -947,6 +1142,7 @@ impl VmManager {
     ) -> Result<AgentResponse> {
         let root_path = files_root(vm);
         let cap_bytes = self.cfg.sandbox.procbox.max_workspace_mib << 20;
+        let owner = load_spec(vm)?.and_then(|s| s.uid).map(|u| (u, u));
         tokio::task::spawn_blocking(move || -> Result<AgentResponse> {
             let rel = sanitize_rel(&root_path, &path)?;
             let data = base64::engine::general_purpose::STANDARD
@@ -959,7 +1155,7 @@ impl VmManager {
                 ))
                 .into());
             }
-            let root = Root::open(&root_path)?;
+            let root = Root::open(&root_path)?.with_owner(owner);
             if root.total_size()? + data.len() as u64 > cap_bytes {
                 return Err(ProcboxError::TooLarge(format!(
                     "writing this file would exceed the {} MiB workspace cap",
@@ -1021,6 +1217,8 @@ impl VmManager {
                 std::fs::DirBuilder::new().mode(0o700).create(&copy)?;
             }
             let guard = TempTree(copy.clone());
+            let root = root.with_owner(spec.uid.map(|u| (u, u)));
+            root.chown_path(&copy)?;
             root.copy_to(&copy)?;
             let copy_root = Root::open(&copy)?;
             let before = copy_root.manifest()?.restrict_to(&paths);
@@ -1139,6 +1337,8 @@ mod tests {
     fn cfg() -> ProcboxConfig {
         ProcboxConfig {
             enabled: true,
+            allow_root: true,
+            isolation: "off".to_string(),
             ..ProcboxConfig::default()
         }
     }

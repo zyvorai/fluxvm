@@ -7,7 +7,7 @@
 //! `fs_reed` is an error instead of silently granting less (or more) than the
 //! author meant. Filesystem paths must be absolute.
 
-use crate::policy::{parse_size, Policy, SeccompMode, TcpRule};
+use crate::policy::{parse_size, Isolation, Policy, RunAs, SeccompMode, TcpRule};
 use crate::run::SyscallOverrides;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -101,6 +101,19 @@ pub struct Profile {
     pub best_effort: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_abi: Option<u32>,
+    /// `"off"`, `"auto"` or `"strict"`: private user/mount/pid/ipc/uts (and
+    /// network) namespaces.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub isolation: Option<String>,
+    /// `"UID:GID"` (or `"UID"`): drop to this unprivileged id (root caller only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_as: Option<String>,
+    /// Allow `socket(AF_UNIX)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_unix: Option<bool>,
+    /// Allow UDP/raw/packet/netlink sockets on a shared network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_udp: Option<bool>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 }
@@ -175,6 +188,12 @@ impl Profile {
         if let Some(m) = &self.max_memory {
             m.bytes("max_memory")?;
         }
+        if let Some(i) = &self.isolation {
+            i.parse::<Isolation>().map_err(|e| anyhow!("{e}"))?;
+        }
+        if let Some(r) = &self.run_as {
+            r.parse::<RunAs>().map_err(|e| anyhow!("run_as: {e}"))?;
+        }
         for (key, names) in [
             ("syscall_deny", &self.syscall_deny),
             ("syscall_allow", &self.syscall_allow),
@@ -246,6 +265,18 @@ impl Profile {
         }
         if let Some(v) = self.max_abi {
             policy.max_abi = Some(v);
+        }
+        if let Some(i) = &self.isolation {
+            policy.isolation = i.parse().map_err(|e: String| anyhow!(e))?;
+        }
+        if let Some(r) = &self.run_as {
+            policy.run_as = Some(r.parse().map_err(|e: String| anyhow!("run_as: {e}"))?);
+        }
+        if let Some(v) = self.allow_unix {
+            policy.allow_unix = v;
+        }
+        if let Some(v) = self.allow_udp {
+            policy.allow_udp = v;
         }
         for (k, v) in &self.env {
             policy.env.push((k.clone(), v.clone()));
@@ -402,6 +433,26 @@ FOO = "bar"
             assert!(Profile::from_toml_str(bad).is_err(), "accepted {bad:?}");
         }
         assert!(Profile::from_toml_str("net_connect = \"any\"\nnet_bind = [0]").is_ok());
+    }
+
+    #[test]
+    fn isolation_keys_apply_and_are_validated() {
+        let p = Profile::from_toml_str(
+            "isolation = \"strict\"\nrun_as = \"4000:4000\"\nallow_unix = true\nallow_udp = true",
+        )
+        .unwrap();
+        let (pol, _) = p.into_policy().unwrap();
+        assert_eq!(pol.isolation, Isolation::Strict);
+        assert_eq!(
+            pol.run_as,
+            Some(RunAs {
+                uid: 4000,
+                gid: 4000
+            })
+        );
+        assert!(pol.allow_unix && pol.allow_udp);
+        assert!(Profile::from_toml_str("isolation = \"full\"").is_err());
+        assert!(Profile::from_toml_str("run_as = \"0\"").is_err());
     }
 
     #[test]

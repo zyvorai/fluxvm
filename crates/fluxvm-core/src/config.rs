@@ -202,6 +202,23 @@ pub struct ProcboxConfig {
     pub max_processes: u64,
     /// Cap on a workspace copied for a dry-run and on files written by the API.
     pub max_workspace_mib: u64,
+    /// First uid of the pool sandbox commands are dropped to when the daemon
+    /// runs as root. Each sandbox gets its own uid from
+    /// `uid_base..uid_base + uid_count`, so `max_processes` (RLIMIT_NPROC) and
+    /// file ownership are per sandbox. Pick a range no real account uses.
+    pub uid_base: u32,
+    /// Size of the uid pool = the most procbox sandboxes that can exist at
+    /// once when the daemon is root. `0` disables the pool.
+    pub uid_count: u32,
+    /// Let a root daemon run commands as root when the uid pool is disabled
+    /// (`uid_count = 0`). Off: creating or running a sandbox then fails with
+    /// 503 instead of silently running as root.
+    pub allow_root: bool,
+    /// Namespace isolation for every command: `"off"`, `"auto"` (use private
+    /// user/mount/pid/ipc/uts and, without network, net namespaces when the
+    /// kernel allows, else report what was not enforced) or `"strict"`
+    /// (refuse to run without them).
+    pub isolation: String,
 }
 
 impl Default for ProcboxConfig {
@@ -216,6 +233,10 @@ impl Default for ProcboxConfig {
             max_memory_mib: 2048,
             max_processes: 4096,
             max_workspace_mib: 1024,
+            uid_base: 200_000,
+            uid_count: 4096,
+            allow_root: false,
+            isolation: "auto".to_string(),
         }
     }
 }

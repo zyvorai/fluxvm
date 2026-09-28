@@ -86,11 +86,13 @@ pub fn run_with(
 #[cfg(target_os = "linux")]
 mod imp {
     use super::*;
-    use crate::{landlock, seccomp};
+    use crate::policy::{Isolation, TcpRule};
+    use crate::{isolate, landlock, seccomp};
     use anyhow::{bail, Context};
     use std::io::{self, Read};
     use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::process::{Command, Stdio};
+    use std::sync::Arc;
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
@@ -164,14 +166,66 @@ mod imp {
         let (prepared, notes) = landlock::prepare(&plan, policy)?;
         plan.enforcement.not_enforced.extend(notes);
 
+        let run_as = policy.run_as.map(|r| (r.uid, r.gid));
+        if run_as.is_some() && unsafe { libc::geteuid() } != 0 {
+            bail!("run_as needs a root caller (it switches to an unprivileged uid/gid)");
+        }
+        // The ids the command runs as inside any user namespace.
+        let ids = run_as.unwrap_or_else(|| unsafe { (libc::geteuid(), libc::getegid()) });
+
+        let iso: Option<Arc<isolate::Prepared>> = match policy.isolation {
+            Isolation::Off => None,
+            mode => match isolate::userns_status(run_as) {
+                Ok(()) => {
+                    let mut iso_notes = Vec::new();
+                    let p = isolate::prepare(policy, ids, plan.handled_fs, &mut iso_notes)?;
+                    plan.enforcement.not_enforced.extend(iso_notes);
+                    Some(Arc::new(p))
+                }
+                Err(why) if mode == Isolation::Strict => {
+                    bail!("isolation = strict, but namespaces are unavailable: {why}")
+                }
+                Err(why) => {
+                    plan.enforcement
+                        .not_enforced
+                        .push(format!("namespace isolation ({why})"));
+                    None
+                }
+            },
+        };
+        plan.enforcement.uid_dropped = run_as.is_some();
+        plan.enforcement.namespaces = iso.is_some();
+        let newnet = iso.as_ref().is_some_and(|i| i.newnet());
+        plan.enforcement.network_isolated = newnet;
+
+        // Socket-creation filters cover what Landlock's TCP rules cannot: UDP,
+        // raw/packet/netlink, and pathname unix sockets. They only apply when
+        // the policy restricts the network at all.
+        let net_restricted = policy.tcp_connect != TcpRule::Any || policy.tcp_bind != TcpRule::Any;
+        let mut net = seccomp::NetDeny::default();
+        if net_restricted && !newnet {
+            if !policy.allow_udp {
+                net.dgram_raw = true;
+                net.packet_netlink = true;
+            }
+            // A private mount namespace hides host socket files, and Landlock
+            // scoping covers abstract sockets; otherwise deny AF_UNIX.
+            let hidden = iso.is_some() && plan.enforcement.scope_abstract_unix;
+            if !policy.allow_unix && !hidden {
+                net.unix = true;
+            }
+        }
+
         let programs = match policy.seccomp {
             Some(mode) => {
                 plan.enforcement.seccomp = true;
-                seccomp::compile_with(
+                plan.enforcement.seccomp_sockets = net.any();
+                seccomp::compile_full(
                     mode,
                     policy.allow_namespaces,
                     &overrides.deny,
                     &overrides.allow,
+                    &net,
                 )?
             }
             None => {
@@ -205,14 +259,23 @@ mod imp {
                 .stderr(Stdio::piped());
         }
         cmd.process_group(0);
+        if let Some((uid, gid)) = run_as {
+            // std clears supplementary groups when it switches as root.
+            cmd.gid(gid).uid(uid);
+        }
+        let iso_child = iso.clone();
 
         // SAFETY: the closure only makes raw syscalls on data prepared above
-        // (setrlimit, prctl, landlock_restrict_self, seccomp). Order matters:
-        // limits, no_new_privs, Landlock, and seccomp last so the filter does
-        // not have to allow the setup calls above.
+        // (setrlimit, namespace setup, prctl, landlock_restrict_self,
+        // seccomp). Order matters: limits, namespaces and private root (which
+        // drop every capability), no_new_privs, Landlock, and seccomp last so
+        // the filter does not have to allow the setup calls above.
         unsafe {
             cmd.pre_exec(move || {
                 apply_rlimits(&limits)?;
+                if let Some(i) = &iso_child {
+                    isolate::enter(i, ll_fd)?;
+                }
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(io::Error::last_os_error());
                 }
