@@ -38,7 +38,7 @@ requests are embedded as NoCloud files in the cloned root disk, without
 flat ext4 rootfs images only and fails for GPT-partitioned images. SELinux
 enforcing guests need the token file labeled appropriately in the image.
 qcow2 inputs require `qemu-img` conversion before launch.
-Snapshots and pause in the native engine currently require one vCPU.
+Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs) parks before a pause is reported complete, and the snapshot records each vCPU's registers and MP state. Restore reloads registers only (no LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than bit-exact.
 
 This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
 multi-vCPU snapshots, broad storage backends, and a QEMU-free image

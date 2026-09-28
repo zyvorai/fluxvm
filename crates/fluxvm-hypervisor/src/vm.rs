@@ -18,6 +18,7 @@ use crate::jailer::{self, JailerConfig};
 use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
 use crate::memory::{self, GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
+use crate::pause::{ApAcks, KickGuard, PauseHandles, VcpuKick};
 use crate::pci::{MsixBar, PciEcam};
 use crate::queue_service::{self, QueueService};
 use crate::tap::Tap;
@@ -372,7 +373,7 @@ impl VirtualMachine {
         gdb: Option<GdbSetup>,
         exit_on_boot_marker: bool,
         ready: Option<SyncSender<std::result::Result<(), String>>>,
-        pause_epochs: Option<(Arc<AtomicU64>, Arc<AtomicU64>)>,
+        pause: Option<PauseHandles>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
         let num_cpus = self.cfg.cpus.max(1);
@@ -450,11 +451,31 @@ impl VirtualMachine {
         // joining here could block VM teardown indefinitely; each AP
         // notices `stop` on its next wake (or the thread just outlives
         // the VM harmlessly, kept alive by its own Arc<KvmVm> clone).
+        // Pause barrier state shared by every vCPU thread. Without a
+        // controller (`pause == None`) the kick registry is private and the
+        // epoch stays 0, so APs just park while `paused` (gdbstub) is set.
+        let kick = pause
+            .as_ref()
+            .map(|p| p.kick.clone())
+            .unwrap_or_else(|| VcpuKick::new(num_cpus as usize));
+        let requested_epoch = pause
+            .as_ref()
+            .map(|p| p.requested.clone())
+            .unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+        let ap_acks = ApAcks::new(num_cpus as usize);
+        kick.register(0, kvm.vcpus[0].run);
+        let _kick_guard = KickGuard(kick.clone());
         for idx in 1..num_cpus as usize {
             let kvm = kvm.clone();
             let bus = self.bus.clone();
-            let stop = stop.clone();
-            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &stop));
+            let ctx = ApCtx {
+                stop: stop.clone(),
+                paused: paused.clone(),
+                requested: requested_epoch.clone(),
+                acks: ap_acks.clone(),
+                kick: kick.clone(),
+            };
+            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &ctx));
         }
 
         // Virtio queues are serviced by a dedicated worker fed by
@@ -517,8 +538,13 @@ impl VirtualMachine {
 
         while Instant::now() < deadline && !stop.load(Ordering::Relaxed) {
             while paused.load(Ordering::Relaxed) && !stop.load(Ordering::Relaxed) {
-                if let Some((requested, ack)) = &pause_epochs {
-                    ack.store(requested.load(Ordering::SeqCst), Ordering::SeqCst);
+                if let Some(p) = &pause {
+                    // Publish the quiesce only once every AP has parked
+                    // and acknowledged this epoch, not just the BSP.
+                    let epoch = p.requested.load(Ordering::SeqCst);
+                    if ap_acks.all_aps_acked(epoch) {
+                        p.quiesced.store(epoch, Ordering::SeqCst);
+                    }
                 }
                 if let Some(rx) = snap_rx.as_ref() {
                     while let Ok(cmd) = rx.try_recv() {
@@ -648,6 +674,13 @@ impl VirtualMachine {
                 svc.vsock_poll();
             }
 
+            // Clear, then re-check `paused`: a pause that lands after the
+            // check re-arms immediate_exit after this clear, so the next
+            // KVM_RUN returns at once instead of sleeping in the guest.
+            kvm.request_immediate_exit(0, false);
+            if paused.load(Ordering::SeqCst) {
+                continue;
+            }
             let reason = kvm.run_once(0)?;
             exits += 1;
             if exits <= 20 {
@@ -810,10 +843,32 @@ impl VirtualMachine {
 /// Secondary-vCPU (AP) run loop: register-level PIO/MMIO only. Virtio
 /// queue notifies never reach it -- they are bound to eventfds with
 /// `KVM_IOEVENTFD` and serviced by the queue worker.
-fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, stop: &AtomicBool) {
+/// Shared state an AP thread needs for stop and the pause barrier.
+struct ApCtx {
+    stop: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    requested: Arc<AtomicU64>,
+    acks: Arc<ApAcks>,
+    kick: Arc<VcpuKick>,
+}
+
+fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, ctx: &ApCtx) {
+    let stop = &ctx.stop;
+    ctx.kick.register(idx, kvm.vcpus[idx].run);
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
+        }
+        // Clear, then re-check `paused` (see the BSP loop): parked in
+        // userspace, out of KVM_RUN, is what the acknowledgement asserts.
+        kvm.request_immediate_exit(idx, false);
+        if ctx.paused.load(Ordering::SeqCst) {
+            eprintln!("[kvm] vcpu{idx} paused");
+            while ctx.paused.load(Ordering::SeqCst) && !stop.load(Ordering::Relaxed) {
+                ctx.acks.ack(idx, ctx.requested.load(Ordering::SeqCst));
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            continue;
         }
         let reason = match kvm.run_once(idx) {
             Ok(r) => r,

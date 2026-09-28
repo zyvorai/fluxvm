@@ -64,7 +64,7 @@ optional for native). See [network-fabric.md](network-fabric.md),
 - ~~Hubble SID attribution for VM traffic beyond agent CEP enrichment~~ **Done** (F1)
 - ~~Optional: scrape `MICROVM_METRICS_ADDR` (default `127.0.0.1:9108`) from Prometheus~~ **Done** (F2)
 - Ranked backlog (Sentinel Set 16 candidates, vhost VRING GPA bind, etc.): [NEXT-FEATURES.md](NEXT-FEATURES.md)
-- SMP: 2/4/8-vCPU guests boot to userspace on the in-tree KVM engine (fixed: guest CPUID topology, `KVM_SET_IDENTITY_MAP_ADDR`, ioeventfd-driven virtio queues; see `crates/fluxvm-hypervisor/README.md`). Pause/snapshot are still single-vCPU only until APs join the pause barrier.
+- SMP: 2/4/8-vCPU guests boot to userspace on the in-tree KVM engine (fixed: guest CPUID topology, `KVM_SET_IDENTITY_MAP_ADDR`, ioeventfd-driven virtio queues; see `crates/fluxvm-hypervisor/README.md`). Pause and snapshot cover all vCPUs (APs join the pause barrier).
 
 **Resolved:** in-tree KVM late-boot hang (`init_zbud`) — fixed by matching Firecracker/CH TSS, boot MSRs, FPU, LAPIC lint, and serial irqfd/THRE semantics. Linux guests now mount `root=/dev/vda` (auto `virtio_mmio.device=` cmdline) through `/sbin/init`.
 

@@ -45,10 +45,10 @@ cat >"$BOOT" <<JSON
 {
   "kernel": "$KERNEL",
   "rootfs": "$ROOTFS",
-  "vcpus": 1,
+  "vcpus": ${VCPUS:-1},
   "memory_mib": 256,
   "engine": "kvm",
-  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep -- 3600 virtio_mmio.device=0x200@0xfeb00000:5 virtio_mmio.device=0x200@0xfeb00200:6"
+  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
 }
 JSON
 
@@ -96,7 +96,7 @@ done
 
 # Pause + snapshot promptly. Guests that cannot mount root still keep a live
 # vCPU for a short window; waiting several seconds lets a panic tear it down.
-sleep 0.3
+sleep "${PAUSE_DELAY:-0.3}"
 echo "=== Pause ==="
 RESP=$(req '{"action":"pause"}')
 echo "$RESP" | grep -q '"lifecycle":"paused"' || {
@@ -120,7 +120,12 @@ from pathlib import Path
 p = Path("${SNAP}.vmstate")
 magic = p.read_bytes()[:8]
 assert magic == b"FLUXKVM1", magic
-print("vmstate magic OK", magic)
+import struct
+data = p.read_bytes()
+version, = struct.unpack_from("<I", data, 8)
+ncpus, = struct.unpack_from("<I", data, 20)
+assert ncpus == ${VCPUS:-1}, (ncpus, ${VCPUS:-1})
+print("vmstate magic OK", magic, "version", version, "vcpus", ncpus)
 PY
 
 echo "=== SnapshotRestore ==="
@@ -132,4 +137,19 @@ echo "$RESP" | grep -q '"status":"ok"' || {
   exit 1
 }
 
-echo "=== PASS kvm memory snapshot ==="
+# The restored guest must keep running, not die the moment it resumes.
+sleep "${POST_RESTORE_SECS:-4}"
+if sed -n '/restored FLUXKVM1 snapshot/,$p' "${TMP}/hv.log" \
+  | grep -aE "Kernel panic|kernel BUG|shutdown rip|unhandled exit|run error|HLT after" >/dev/null; then
+  echo "FAIL: restored guest crashed after resume" >&2
+  sed -n '/restored FLUXKVM1 snapshot/,$p' "${TMP}/hv.log" | grep -av '^\[blk\]' | tail -30 >&2
+  exit 1
+fi
+if [ "${VCPUS:-1}" -gt 1 ]; then
+  grep -q "restored FLUXKVM1 snapshot vcpus=${VCPUS}" "${TMP}/hv.log" || {
+    echo "restore did not report vcpus=${VCPUS}" >&2
+    tail -40 "${TMP}/hv.log" >&2
+    exit 1
+  }
+fi
+echo "=== PASS kvm memory snapshot (vcpus=${VCPUS:-1}) ==="

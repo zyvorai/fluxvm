@@ -44,10 +44,10 @@ cat >"$BOOT" <<JSON
 {
   "kernel": "$KERNEL",
   "rootfs": "$ROOTFS",
-  "vcpus": 1,
+  "vcpus": ${VCPUS:-1},
   "memory_mib": 256,
   "engine": "kvm",
-  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/bin/sleep -- 3600 virtio_mmio.device=0x200@0xfeb00000:5 virtio_mmio.device=0x200@0xfeb00200:6"
+  "kernel_args": "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
 }
 JSON
 
@@ -92,20 +92,37 @@ for _ in $(seq 1 50); do
   sleep 0.2
 done
 
-echo "=== Pause ==="
-RESP=$(req '{"action":"pause"}')
-echo "$RESP"
-echo "$RESP" | grep -q '"lifecycle":"paused"' || {
-  echo "pause failed: $RESP" >&2
-  tail -40 "${TMP}/hv.log" >&2
-  exit 1
-}
-sleep 0.5
-echo "=== Resume ==="
-RESP=$(req '{"action":"resume"}')
-echo "$RESP"
-echo "$RESP" | grep -q '"lifecycle":"running"' || {
-  echo "resume failed: $RESP" >&2
-  exit 1
-}
-echo "=== PASS pause/resume ==="
+VCPUS="${VCPUS:-1}"
+CYCLES="${CYCLES:-2}"
+# First cycle pauses right away (APs may still be waiting for SIPI); later
+# cycles pause after PAUSE_DELAY (APs idle in HLT inside KVM_RUN).
+for cycle in $(seq 1 "$CYCLES"); do
+  if [ "$cycle" -gt 1 ]; then sleep "${PAUSE_DELAY:-0.5}"; fi
+  echo "=== Pause (cycle ${cycle}, vcpus=${VCPUS}) ==="
+  RESP=$(req '{"action":"pause"}')
+  echo "$RESP"
+  echo "$RESP" | grep -q '"lifecycle":"paused"' || {
+    echo "pause failed: $RESP" >&2
+    tail -40 "${TMP}/hv.log" >&2
+    exit 1
+  }
+  sleep 0.5
+  echo "=== Resume ==="
+  RESP=$(req '{"action":"resume"}')
+  echo "$RESP"
+  echo "$RESP" | grep -q '"lifecycle":"running"' || {
+    echo "resume failed: $RESP" >&2
+    exit 1
+  }
+done
+
+# Every AP must have parked once per pause, or the barrier only covered the BSP.
+for ap in $(seq 1 $((VCPUS - 1))); do
+  n=$(grep -c "\[kvm\] vcpu${ap} paused" "${TMP}/hv.log" || true)
+  if [ "$n" -lt "$CYCLES" ]; then
+    echo "FAIL: vcpu${ap} parked ${n} times, expected >= ${CYCLES}" >&2
+    tail -40 "${TMP}/hv.log" >&2
+    exit 1
+  fi
+done
+echo "=== PASS pause/resume (vcpus=${VCPUS}, cycles=${CYCLES}) ==="

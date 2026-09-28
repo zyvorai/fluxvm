@@ -329,6 +329,36 @@ impl KvmVm {
         }
     }
 
+    /// `KVM_GET_MP_STATE` for one vCPU (0 = RUNNABLE, 1 = UNINITIALIZED, ...).
+    pub fn get_mp_state(&self, idx: usize) -> Result<u32> {
+        let mut state: u32 = 0;
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_GET_MP_STATE,
+                &mut state as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!("KVM_GET_MP_STATE id={idx}")));
+        }
+        Ok(state)
+    }
+
+    pub fn set_mp_state(&self, idx: usize, mut state: u32) -> Result<()> {
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vcpus[idx].fd,
+                ffi::KVM_SET_MP_STATE,
+                &mut state as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!("KVM_SET_MP_STATE id={idx}")));
+        }
+        Ok(())
+    }
+
     pub fn num_cpus(&self) -> usize {
         self.vcpus.len()
     }

@@ -1,12 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! In-tree KVM snapshot format (`FLUXKVM1` / v2–v3).
+//! In-tree KVM snapshot format (`FLUXKVM1` / v2–v4).
 //!
 //! - **v2**: all vCPUs + 256-byte reserved virtio watermark (zeros).
 //! - **v3**: all vCPUs + packed virtio device live-state (queue rings /
 //!   status / features) so restore can reattach backends without cold
 //!   re-init of queue pointers. Disk/TAP paths still come from boot config.
+//! - **v4**: v3 plus one `KVM_MP_STATE` u32 per vCPU, so restored APs come
+//!   back runnable (or still waiting for SIPI) exactly as they were.
 
 use crate::devices::virtio_mmio::{QueueState, VirtioState};
 use crate::error::{FluxError, Result};
@@ -17,7 +19,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 pub const MAGIC: &[u8; 8] = b"FLUXKVM1";
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 const V2_WATERMARK: usize = 256;
 const MAX_SNAPSHOT_VCPUS: usize = 256;
 const MAX_SNAPSHOT_DEVICES: usize = 64;
@@ -196,6 +198,10 @@ pub fn dump(
         }
     }
     write_virtio_v3(&mut f, virtio)?;
+    for i in 0..ncpus as usize {
+        f.write_all(&kvm.get_mp_state(i)?.to_le_bytes())
+            .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+    }
     f.sync_all()
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     Ok(())
@@ -209,6 +215,9 @@ pub struct CpuSnapshot {
     pub all_vcpus: Vec<(KvmRegs, KvmSregs)>,
     /// Virtio device live-state from FLUXKVM1 v3 (empty for v1/v2).
     pub virtio: Vec<VirtioState>,
+    /// Per-vCPU `KVM_MP_STATE` from v4; empty for older snapshots (which
+    /// only ever held one vCPU).
+    pub mp_states: Vec<u32>,
 }
 
 pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
@@ -225,7 +234,7 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
     f.read_exact(&mut ver)
         .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
     let version = u32::from_le_bytes(ver);
-    if version != 1 && version != 2 && version != VERSION {
+    if !(1..=VERSION).contains(&version) {
         return Err(FluxError::Hypervisor(format!(
             "unsupported KVM vmstate version {version}"
         )));
@@ -279,6 +288,15 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
         }
         Vec::new()
     };
+    let mut mp_states = Vec::new();
+    if version >= 4 {
+        for _ in 0..ncpus {
+            let mut b = [0u8; 4];
+            f.read_exact(&mut b)
+                .map_err(|e| FluxError::Hypervisor(e.to_string()))?;
+            mp_states.push(u32::from_le_bytes(b));
+        }
+    }
     let (regs, sregs) = all_vcpus[0].clone();
     Ok(CpuSnapshot {
         mem_len,
@@ -286,6 +304,7 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
         sregs,
         all_vcpus,
         virtio,
+        mp_states,
     })
 }
 
@@ -321,6 +340,11 @@ pub fn restore_vcpus(kvm: &KvmVm, snap: &CpuSnapshot) -> Result<()> {
     for (i, (regs, sregs)) in snap.all_vcpus.iter().enumerate() {
         kvm.set_sregs(i, *sregs)?;
         kvm.set_regs(i, *regs)?;
+    }
+    // APs are created UNINITIALIZED; put each back in the state it had when
+    // the snapshot was taken (a booted AP must be RUNNABLE or it never runs).
+    for (i, state) in snap.mp_states.iter().enumerate().skip(1) {
+        kvm.set_mp_state(i, *state)?;
     }
     Ok(())
 }
