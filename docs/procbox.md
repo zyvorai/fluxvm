@@ -11,8 +11,9 @@ Use a microVM (`backend: "flux-vm"`, Firecracker, Cloud Hypervisor, QEMU) for
 hostile code or multi-tenant isolation, and procbox for cheap, fast, defence in
 depth around code you mostly trust: build steps, tool calls, agent scripts.
 
-> Status: standalone crate and CLI. It is **not** wired into `/v1/sandboxes`
-> or the scheduler yet; that integration is not done.
+> Status: a standalone CLI and library, and also selectable as a sandbox kind
+> through `/v1/sandboxes` (opt-in `[sandbox.procbox]`, with a dry-run): see
+> [procbox-backend.md](procbox-backend.md).
 
 ## Usage
 

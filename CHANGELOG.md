@@ -2,6 +2,28 @@
 
 ## 0.4.0 (unreleased)
 
+### Added
+- **Native KVM hardening.** Preflight of a KVM snapshot before stopping the
+  running guest, no silent cold-boot fallback when a native memory restore
+  fails, staged atomic snapshot writes (a tag must be deleted before reuse),
+  and VHD-footer images rejected as raw sectors.
+- **Multi-vCPU in-tree KVM.** 2/4/8-vCPU guests boot (guest CPUID topology,
+  `KVM_SET_IDENTITY_MAP_ADDR`), virtio queues are serviced by an
+  ioeventfd-fed worker, APs join the pause barrier, and snapshots carry every
+  vCPU's registers and MP state (FLUXKVM1 v4).
+- **Golden native-agent template.** Static musl guest agent
+  (`scripts/build-guest-agent-static.sh`), a Cloud-init image builder with a
+  baked systemd-networkd config, and `scripts/setup-native-agent-template.sh`
+  to register the `native-agent` vm-template.
+- **Agent-sandbox tooling.** HTTP method/host/path egress ACL
+  (`egress_http_rules`) with opt-in HTTPS interception
+  (`egress_tls_intercept`); sandbox file change-set
+  (`POST /v1/sandboxes/{id}/baseline`, `/changes`); rootless `fluxvm-procbox`
+  (Landlock + seccomp, TOML profiles, ptrace `learn`) also selectable as a
+  sandbox kind with a real-discard `dry-run`; stdlib-only Python and Go SDKs
+  (`python/`, `go/`); confidential auto/required detection
+  (`GET /v1/host/confidential`).
+
 ### Changed
 - **QEMU serial is a UNIX socket.** `-serial stdio` became
   `-chardev socket,...,logfile=console.log,logappend=on`, so `/logs` output is

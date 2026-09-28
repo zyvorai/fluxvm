@@ -68,6 +68,26 @@ rustup target add x86_64-unknown-linux-musl
 scripts/build-guest-agent-static.sh        # verifies the result is static
 ```
 
+**Golden template (recommended).** Build the guest once and register it, so a
+VM is one command instead of a hand-built image and spec each time:
+
+```bash
+sudo scripts/setup-native-agent-template.sh          # image + kernel + vm-template
+fluxctl --config /etc/fluxvm.toml vm-template create native-agent my-vm
+```
+
+It installs `/var/lib/fluxvm/images/linux-agent.raw` (read-only base, cloned per
+VM) and the 5.10 kernel, and saves `examples/fluxvm-native-agent.json` as the
+`native-agent` template. The image bakes a systemd-networkd `.network` file
+matching the virtio NIC (`/etc/systemd/network/10-fluxvm.network`, DHCP,
+`RequiredForOnline=no`) and disables Cloud-init's own network rendering. Without
+it, a VM with no network sat 120 s in `systemd-networkd-wait-online` before the
+agent started (the acceptance gate's 90 s budget expired); with it the agent
+answers about 20 s after create. `FLUXVM_AGENT=1 scripts/test-native-kvm-no-qemu.sh`
+defaults to these paths.
+
+The rest of this section explains the pieces.
+
 **Cloud-init image and kernel (verified 2026-09-28).** Firecracker's public
 quickstart rootfs has no dpkg database and no Cloud-init, so it cannot verify
 NoCloud. `scripts/build-native-guest-image.sh` builds a flat ext4 root with
