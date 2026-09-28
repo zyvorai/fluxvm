@@ -10,6 +10,7 @@ pub mod egress;
 pub mod egress_proxy;
 pub mod endpoint;
 pub mod groups;
+pub mod http_acl;
 pub mod identity;
 pub mod ipam;
 pub mod ipcache;
