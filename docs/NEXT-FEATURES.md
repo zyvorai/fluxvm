@@ -143,11 +143,11 @@ covering every route.
 
 ### Sandlock gap follow-ups
 
-- HTTPS method/path rules need TLS interception (MITM) in the egress proxy; today only host-level rules apply to CONNECT (see [http-acl.md](http-acl.md)).
-- Make `fluxvm-procbox` a `/v1/sandboxes` backend (rootless tier) instead of a standalone CLI.
-- Change-set: dry-run wrapper (snapshot, run, report, restore) on top of baseline/changes and the existing snapshot/restore.
-- Go SDK; policy profiles and a `learn` mode that derives a procbox/egress policy from an observed run.
-- Verify baseline/changes against a live guest through `fluxctl` (only the generated shell script has run on real directories so far).
+- Make `fluxvm-procbox` a `/v1/sandboxes` backend (rootless tier) instead of a standalone CLI (in progress).
+- Dry-run for VM sandboxes needs a snapshot-restore API route to truly revert; today only baseline/changes report.
+- HTTPS interception: HTTP/2, transparent (non-proxy-aware) redirect, and guest-side CA trust have not been exercised in a real guest.
+- procbox `learn`: policy inference beyond one observed run (merge multiple runs); seccomp-notify variant for non-ptrace environments.
+- Verify baseline/changes and both SDKs against a live guest through `fluxctl` (only mocks and the generated shell script have run so far).
 
 ### Tier 3 — evidence / hardening (lab hardware or long runs)
 

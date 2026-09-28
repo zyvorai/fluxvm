@@ -40,7 +40,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - **Cloud Hypervisor** — Rust VMM, direct-kernel or firmware boot, emulated vTPM (no Secure Boot — see [docs/secure-boot-tpm.md](docs/secure-boot-tpm.md))
 - **Firecracker** — microVM backend, Linux kernel + raw root filesystem, includes the **Firecracker jailer** (chroot + uid/gid isolation, see [docs/operations.md](docs/operations.md#firecracker-jailer-chroot-uidgid-isolation-cgroups))
 - **FluxVM hypervisor** (`backend: "flux-vm"`, binary `fluxvm-hypervisor`) — agent-sandbox track: memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console`; in-tree KVM virtio-vsock host→guest CSM (guest-agent ping/exec); guest→host `uds_path_<port>` muxer still deferred
-- **Agent-sandbox tooling** — HTTP method/host/path egress ACL ([docs/http-acl.md](docs/http-acl.md)), guest file change-set API ([docs/sandbox-changes.md](docs/sandbox-changes.md)), a stdlib-only Python SDK (`python/`), and `fluxvm-procbox`, a rootless Landlock + seccomp process sandbox for the lightweight tier ([docs/procbox.md](docs/procbox.md))
+- **Agent-sandbox tooling** — HTTP method/host/path egress ACL incl. opt-in HTTPS interception ([docs/http-acl.md](docs/http-acl.md)), guest file change-set API ([docs/sandbox-changes.md](docs/sandbox-changes.md)), stdlib-only Python and Go SDKs (`python/`, `go/`), and `fluxvm-procbox`, a rootless Landlock + seccomp process sandbox with profiles and `learn` for the lightweight tier ([docs/procbox.md](docs/procbox.md))
 
 ## Networking
 
