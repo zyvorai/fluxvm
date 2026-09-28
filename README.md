@@ -121,7 +121,8 @@ No libvirtd and no XML: FluxVM speaks its own REST API and manages TAP/bridge/ne
 | **QEMU/KVM** | Broad guest/device compatibility, qcow2 CoW overlays, QMP socket |
 | **Cloud Hypervisor** | Modern cloud workloads on a Rust VMM; direct-kernel or firmware boot |
 | **Firecracker** | MicroVMs from a Linux kernel + raw root filesystem, with the jailer |
-| **FluxVM hypervisor** (`"backend":"flux-vm"`) | Agent sandboxes: memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console` — [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) |
+| **FluxVM hypervisor** (`"backend":"flux-vm"`) | Agent sandboxes: memory snapshots, `/v1/sandboxes`, guest HTTP proxy + AutoResume, L7 egress, AutoPause, `/console`. With `fluxvm_engine = "kvm"` it is a **pure in-tree KVM VMM with no QEMU or Firecracker process**: multi-vCPU (verified at 2/4/8), pause/snapshot across all vCPUs, virtio queues on ioeventfd, direct-kernel boot from a raw ext4 — [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) · [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) |
+| **procbox** (`"procbox": {}` on `/v1/sandboxes`) | The lightest tier: a rootless **Landlock + seccomp process sandbox** on the host kernel (no VM, no root; a weaker boundary than a microVM, off by default) — [docs/procbox.md](docs/procbox.md) · [docs/procbox-backend.md](docs/procbox-backend.md) |
 
 ---
 
@@ -129,7 +130,7 @@ No libvirtd and no XML: FluxVM speaks its own REST API and manages TAP/bridge/ne
 
 ## Use cases
 
-Nine use cases map onto what is implemented today — nothing below is aspirational. Detail:
+Eleven use cases map onto what is implemented today — nothing below is aspirational. Detail:
 [docs/use-cases.md](docs/use-cases.md).
 
 | Outcome you want | What it uses |
@@ -140,6 +141,8 @@ Nine use cases map onto what is implemented today — nothing below is aspiratio
 | **OCI workloads with a per-Pod guest kernel** | `containerd-shim-fluxvm-v2` — **GA** (not Kata-equivalent; see GA boundaries in [docs/secure-containers.md](docs/secure-containers.md)) |
 | **A multi-host fleet without Kubernetes** | `fluxvm-agent` central registry + load-aware placement, verified across two physically separate hosts |
 | **Sandboxed / untrusted code execution** | Firecracker jailer + cgroup v2 + netns + vsock `exec` + TTL reaper — the same isolation *shape* as gVisor/Firecracker-based CI sandboxes |
+| **AI-agent sandboxes with guard rails** | `/v1/sandboxes` in two tiers (microVM, or rootless procbox), an egress ACL on **method + host + path** (HTTPS via opt-in TLS interception), a file **change-set** of what the agent touched, and Python and Go SDKs — [docs/http-acl.md](docs/http-acl.md) · [docs/sandbox-changes.md](docs/sandbox-changes.md) |
+| **Linux VMs with no QEMU installed** | In-tree KVM engine + a golden Cloud-init/agent template: `fluxctl vm-template create native-agent <name>` — [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
 | **Per-branch dev and test environments** | Cheap qcow2 CoW cloning, optional `ttl_seconds`, `pause`/`resume` to park instead of rebuild |
 | **Your own storage backend** | LVM thin, NBD or Ceph RBD |
 | **Networking that matches your environment** | User-mode NAT, TAP+bridge or macvtap, plus an opt-in bridge-less direct tap (eBPF redirect; [docs/direct-datapath.md](docs/direct-datapath.md)) |
@@ -250,6 +253,8 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
 | **Service Fabric** | Node-local Maglev VIP load balancing: dual-stack NAT/DSR/SNAT, health-aware routing, per-service EDT, flow export | [docs/service-fabric.md](docs/service-fabric.md) |
 | **Images** | virt-builder-style `build-image` (guestkit-based, never libguestfs), per-distro package install, Ed25519-signed catalog with REST CRUD, Windows golden-image customization | [docs/build-image-tutorials.md](docs/build-image-tutorials.md) · [docs/operations.md](docs/operations.md#image-catalog--signing) · [docs/windows-golden.md](docs/windows-golden.md) |
 | **Operations** | Day-2 VM verbs: restart, rename, labels + bulk selectors, clone, QEMU data disks (hot-add, live resize), serial console, live backups, scheduled snapshots with retention, VM templates, lifecycle events (SSE), remote `fluxctl` contexts, OpenAPI; cgroup v2 limits, freeze/thaw and PSI; warm VM pools; Firecracker jailer; LVM thin / NBD / Ceph RBD; admission limits; bearer-token auth/RBAC | [docs/operations.md](docs/operations.md) · [docs/api.md](docs/api.md#auth--rbac) |
+| **Native KVM (no QEMU)** | In-tree KVM engine for Linux guests: SMP, pause/snapshot for every vCPU, restore preflight (no silent cold boot), atomic snapshot writes, raw-ext4 direct-kernel boot, static musl guest agent, and a golden Cloud-init template with a baked systemd-networkd config | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) · [crate README](crates/fluxvm-hypervisor/README.md) |
+| **Agent sandboxes** | Egress **HTTP ACL** (method/host/path rules, deny wins, path normalisation; HTTPS via opt-in interception) · guest file **change-set** (`baseline` / `changes`) · rootless **procbox** tier with profiles, a ptrace `learn` mode and a real-discard `dry-run` · stdlib-only **Python** and **Go** SDKs | [docs/http-acl.md](docs/http-acl.md) · [docs/sandbox-changes.md](docs/sandbox-changes.md) · [docs/procbox.md](docs/procbox.md) · [`python/`](python/README.md) · [`go/`](go/README.md) |
 | **Kubernetes & fleet** | `DisposableVm` CRD + node-local operator; `fluxvm-microvm` scheduler-native path (no KubeVirt); `fluxvm-agent` fleet registry with load-aware placement | [Kubernetes CRD/operator](#kubernetes-crdoperator) · [docs/microvm.md](docs/microvm.md) · [docs/operations.md](docs/operations.md#distributed-node-agent) |
 | **Secure Containers** *(GA)* | containerd runtime-v2 shim mapping a Pod onto one microVM: CNI L2, Sentinel policy, cgroup-v2 stats, VSOCK stdio/TTY, guest AppArmor/SELinux/seccomp | [docs/secure-containers.md](docs/secure-containers.md) · [supported profile](docs/secure-containers-supported-profile.md) · [15-min lab](docs/secure-containers-15min-lab.md) · [Sentinel wedge](docs/sentinel-wedge.md) |
 | **Security profiles (Phase 6)** | `standard` / `measured` / `confidential-snp` / `confidential-tdx`: measured software-test evidence on ordinary QEMU hosts; confidential control plane tested without claiming host-memory encryption until a hardware run | [docs/security-profiles.md](docs/security-profiles.md) · [howto / CI](docs/guides/security-profiles-howto.md) |
@@ -325,7 +330,7 @@ Network Fabric dataplane diagrams (packet decision and control-plane sequence):
 
 ## Project layout
 
-A Cargo workspace of **23 crates**, structured for FluxVM's multi-node architecture.
+A Cargo workspace of **24 crates** (plus the [`python/`](python/README.md) and [`go/`](go/README.md) SDKs), structured for FluxVM's multi-node architecture.
 
 <details>
 <summary><b>Show the crate map</b></summary>
@@ -345,6 +350,7 @@ crates/
 ├── fluxvm-guest-protocol        wire types shared by the guest agent and its host client
 ├── fluxvm-guest-agent           in-guest AF_VSOCK agent binary (ping/exec/shutdown)
 ├── fluxvm-vsock-client          host-side vsock dialing (native for QEMU, UDS proxy for CH/Firecracker)
+├── fluxvm-procbox               rootless Landlock + seccomp process sandbox (CLI + library, profiles, `learn`)
 ├── fluxvm-scheduler             VmManager: VM lifecycle orchestration + TTL reaper
 ├── fluxvm-api                   REST API (axum)
 ├── fluxctl                      `fluxctl` CLI + `fluxctl serve` (composition root)
@@ -449,6 +455,11 @@ threat model, **[talk to Zyvor](https://zyvor.dev?utm_source=github&utm_medium=f
 | Using FluxVM through zyvor-fabric | [docs/zyvor-fabric.md](docs/zyvor-fabric.md) |
 | Using FluxVM through Ragnarok | [docs/ragnarok.md](docs/ragnarok.md) |
 | AI-agent sandbox capability gaps | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) |
+| Native KVM, no QEMU (golden template, snapshots, SMP) | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) · [crates/fluxvm-hypervisor/README.md](crates/fluxvm-hypervisor/README.md) |
+| Egress HTTP method/path ACL and HTTPS interception | [docs/http-acl.md](docs/http-acl.md) |
+| Sandbox file change-set (baseline / changes) | [docs/sandbox-changes.md](docs/sandbox-changes.md) |
+| procbox: rootless Landlock + seccomp sandbox, and as a `/v1/sandboxes` kind | [docs/procbox.md](docs/procbox.md) · [docs/procbox-backend.md](docs/procbox-backend.md) |
+| Python and Go SDKs | [python/README.md](python/README.md) · [go/README.md](go/README.md) |
 | Ranked backlog / next features | [docs/NEXT-FEATURES.md](docs/NEXT-FEATURES.md) |
 
 Hands-on tutorials: [network policy](docs/tutorials/network-policy/README.md) ·
