@@ -26,12 +26,12 @@ hand-rolling XML for `virsh`.** Everything else in this doc builds on that.
 
 | Persona | Role | What they care about | Where FluxVM fits |
 |---------|------|----------------------|--------------------|
-| **Platform/infra engineer evaluating a libvirt replacement** | Owns host-local VM lifecycle tooling | A real API instead of XML + `virsh`, without adopting a whole private-cloud platform | Drop-in command mapping (`fluxctl create` ≈ `virsh define`+`start`, etc.) — see [README: vs. libvirt/virsh](../README.md#vs-libvirtvirsh) |
-| **CI/platform engineer building ephemeral infra** | Needs VM-per-job isolation that actually cleans up | TTL-guaranteed cleanup, no network path for untrusted code, cheap CoW cloning | Optional `ttl_seconds`, `network.mode: "none"` + vsock `exec`, qcow2 overlays — see [Use cases](../README.md#use-cases) |
+| **Platform/infra engineer evaluating a libvirt replacement** | Owns host-local VM lifecycle tooling | A real API instead of XML + `virsh`, without adopting a whole private-cloud platform | Drop-in command mapping (`fluxctl create` ≈ `virsh define`+`start`, etc.) — see [README: vs. libvirt/virsh](vs-libvirt.md#vs-libvirtvirsh) |
+| **CI/platform engineer building ephemeral infra** | Needs VM-per-job isolation that actually cleans up | TTL-guaranteed cleanup, no network path for untrusted code, cheap CoW cloning | Optional `ttl_seconds`, `network.mode: "none"` + vsock `exec`, qcow2 overlays — see [Use cases](index.md#use-cases) |
 | **Kubernetes platform engineer wanting VMs without KubeVirt** | Runs a K8s cluster, needs real VMs for some workloads | A lighter-weight, non-KubeVirt path that still feels Kubernetes-native | `DisposableVm` CRD + `fluxvm-kube` operator, or `fluxvm-microvm` for scheduler-driven placement — see [docs/microvm.md](../docs/microvm.md) |
-| **Economic buyer evaluating build-vs-adopt for a host-local VM layer** | Deciding whether to build this in-house or adopt FluxVM | Whether the maturity level matches the use case, whether it's a maintained open project or a dead end | Apache-2.0, actively developed, but read the [maturity caveat](../README.md#maturity-whats-real-today) honestly before committing — this is not yet a finished multi-tenant security boundary |
+| **Economic buyer evaluating build-vs-adopt for a host-local VM layer** | Deciding whether to build this in-house or adopt FluxVM | Whether the maturity level matches the use case, whether it's a maintained open project or a dead end | Apache-2.0, actively developed, but read the [maturity caveat](proof-and-status.md#maturity-whats-real-today) honestly before committing — this is not yet a finished multi-tenant security boundary |
 
-The economic-buyer row matters here specifically because FluxVM is explicit about *not* being finished in one dimension (multi-tenant security hardening) while being solid in others (core VM lifecycle, Network Fabric GA, k3s-verified Kubernetes operator). A buyer should read the [maturity caveat](../README.md#maturity-whats-real-today) as the actual scoping tool, not a boilerplate disclaimer.
+The economic-buyer row matters here specifically because FluxVM is explicit about *not* being finished in one dimension (multi-tenant security hardening) while being solid in others (core VM lifecycle, Network Fabric GA, k3s-verified Kubernetes operator). A buyer should read the [maturity caveat](proof-and-status.md#maturity-whats-real-today) as the actual scoping tool, not a boilerplate disclaimer.
 
 ---
 
@@ -65,7 +65,7 @@ If you're not sure which layer you need: start with FluxVM directly. Both Fabric
 
 ### vs. libvirt/virsh
 
-FluxVM's most concrete, already-shipping differentiation. No libvirtd, no XML domain definitions — a direct command mapping exists today (`fluxctl create` ≈ `virsh define`+`start`, `fluxctl list`/`get` ≈ `virsh list`/`dominfo`, `fluxctl pause`/`resume` ≈ `virsh suspend`/`resume`, `fluxctl delete` ≈ `virsh destroy`), plus a real REST API libvirt doesn't have. See [README](../README.md#vs-libvirtvirsh) for the full table.
+FluxVM's most concrete, already-shipping differentiation. No libvirtd, no XML domain definitions — a direct command mapping exists today (`fluxctl create` ≈ `virsh define`+`start`, `fluxctl list`/`get` ≈ `virsh list`/`dominfo`, `fluxctl pause`/`resume` ≈ `virsh suspend`/`resume`, `fluxctl delete` ≈ `virsh destroy`), plus a real REST API libvirt doesn't have. See [README](vs-libvirt.md#vs-libvirtvirsh) for the full table.
 
 ### vs. KubeVirt/OpenShift
 
@@ -77,7 +77,7 @@ FluxVM's sandboxed-execution use case (Firecracker jailer + cgroups + netns + vs
 
 ### When to look elsewhere
 
-- **You need a finished multi-tenant security boundary today** — see the [maturity caveat](../README.md#maturity-whats-real-today).
+- **You need a finished multi-tenant security boundary today** — see the [maturity caveat](proof-and-status.md#maturity-whats-real-today).
 - **You need full Kata / CDI / non-QEMU Secure Containers VMM parity** — Secure Containers is GA with documented scope boundaries; see [secure-containers.md](secure-containers.md).
 - **You need KubeVirt/OpenShift API compatibility** — not a goal here; see the vs. KubeVirt section above.
 - **You need published boot-latency/density/throughput numbers for capacity planning** — measure with [capability-figures.md](capability-figures.md) / benches; don't cite unpublished SPECs as product claims.
@@ -118,4 +118,4 @@ Apache License 2.0, applied to the entire repository — see [README.md — Lice
 - Product overview + metrics: [PRODUCT_OVERVIEW.md](PRODUCT_OVERVIEW.md)
 - Exhaustive feature checklist: [../FEATURES.md](../FEATURES.md)
 - Use cases: [../docs/use-cases.md](../docs/use-cases.md)
-- Documentation map: [../README.md#documentation-map](../README.md#documentation-map)
+- Documentation map: [index.md#documentation-map](index.md#documentation-map)

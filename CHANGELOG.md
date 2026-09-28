@@ -25,6 +25,10 @@
   (`GET /v1/host/confidential`).
 
 ### Changed
+- **Docs: README is now a landing page.** The detailed sections moved verbatim to `docs/`
+  (`getting-started`, `architecture`, `proof-and-status`, `vs-libvirt`, `faq`, `kubernetes-operator`,
+  `ecosystem`, `index`); every old README anchor still resolves, and `scripts/check-doc-links.py` checks
+  relative links and anchors across the docs.
 - **QEMU serial is a UNIX socket.** `-serial stdio` became
   `-chardev socket,...,logfile=console.log,logappend=on`, so `/logs` output is
   unchanged; VMs started before upgrading need a restart for `fluxctl serial`.

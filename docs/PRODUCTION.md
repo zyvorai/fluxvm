@@ -27,7 +27,7 @@ images — not only the dataplane.
 ## 2. Compute
 
 - [ ] `/dev/kvm` present; cgroup v2 delegated
-- [x] Firecracker jailer on for untrusted guests (`[jailer] enabled = true`; set `enforce = true` or use `auth.require` + non-loopback listen so serve/launch fail closed) — merge [configs/production-hardening.toml](../configs/production-hardening.toml); multi-tenant remains **opt-in, not a public-cloud boundary** ([README](../README.md#maturity-whats-real-today))
+- [x] Firecracker jailer on for untrusted guests (`[jailer] enabled = true`; set `enforce = true` or use `auth.require` + non-loopback listen so serve/launch fail closed) — merge [configs/production-hardening.toml](../configs/production-hardening.toml); multi-tenant remains **opt-in, not a public-cloud boundary** ([README](proof-and-status.md#maturity-whats-real-today))
 - [x] Jailed FC boots use serial-off defaults (`8250.nr_uarts=0`) unless you override `kernel_args`
 - [ ] VMM logs bounded (journald/logrotate or redirect) — guest can influence FC stdout/log volume
 - [ ] `allowed_backends` pinned
@@ -235,7 +235,7 @@ and to flag the few genuinely still-open follow-ups.
 6. **Policy** — `allowed_network_modes` and `allow_extra_args` (default false) are enforced alongside existing vCPU/RAM/disk/TTL/backend/image-dir limits. See [operations.md](operations.md#policy-admission-limits).
 7. **Auth** — fail-closed off-loopback, JSON audit (`fluxvm_audit`), per-token quotas, VM/token `tenant`, `/readyz`. Still open: mTLS/OIDC token exchange (`auth.oidc_issuer` reserved). See [api.md](api.md#auth--rbac).
 8. **Observability** — Prometheus `/metrics` now includes auth/egress deny counters and create/start latency; OpenTelemetry remains optional.
-9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see the README's [Kubernetes CRD/operator](../README.md#kubernetes-crdoperator) section and `deploy/k8s/`.
+9. **Kubernetes CRD/operator** — DaemonSet packaging, tap/macvtap CR fields, and optional `--enable-placement` are implemented; see the [Kubernetes CRD/operator](kubernetes-operator.md#kubernetes-crdoperator) section and `deploy/k8s/`.
 10. **Distributed node-agent** — TLS/auth, persisted registry, and residual-capacity placement are implemented; see [operations.md](operations.md#distributed-node-agent).
 11. **Scheduler placement** — `CreateVmRequest` accepts optional `numa_node`, `cpuset`, `hugepages`, and `vfio_devices` (QEMU backend only). Broader placement policies still open.
 12. **Windows path** — Offline `windows{}` (incl. `unattend_path`/`sysprep`) and live QGA on QEMU are implemented; Cloud Hypervisor Windows boot + QGA over serial socket are also done (named virtio-serial remains QEMU-only) — see [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md#2-cloud-hypervisor-windows--qga).

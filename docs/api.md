@@ -116,8 +116,8 @@ GET    /console
 ```
 
 Sandbox routes are the agent-sandbox surface on the FluxVm backend — see
-[agent-sandbox-gaps.md](agent-sandbox-gaps.md) and the README's
-[Feature highlights](../README.md#feature-highlights).
+[agent-sandbox-gaps.md](agent-sandbox-gaps.md) and the
+[Feature highlights](index.md#feature-highlights).
 
 `GET /v1/vms?name=<name>` exact-matches on `VmRecord.name` server-side. `POST /v1/vms/{uuid}/start`
 relaunches a `Stopped` VM from its existing disk/seed, skipping the image-clone/cloud-init/token-inject
@@ -286,8 +286,8 @@ Optional `tenant` is a first-class string for multi-team hosts (`GET /v1/vms?ten
 `examples/create-vm-prod.json`.
 
 `agent.enabled` turns on the vsock guest agent (`fluxctl exec`) for this VM — the guest image must
-have `fluxvm-guest-agent` installed and enabled (see the README's
-[Quick start](../README.md#quick-start) section and [build-image-tutorials.md](build-image-tutorials.md)).
+have `fluxvm-guest-agent` installed and enabled (see the
+[Quick start](getting-started.md#quick-start) section and [build-image-tutorials.md](build-image-tutorials.md)).
 `agent.port` is the AF_VSOCK port the guest listens on (not a host TCP port); it defaults to `17777`
 and rarely needs changing, since each VM already gets its own host-unique vsock CID.
 

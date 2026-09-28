@@ -193,7 +193,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 
 ## Security Posture (what's implemented vs. what's still open)
 
-This mirrors the [maturity caveat](README.md#maturity-whats-real-today) in the README rather than contradicting it — read both together.
+This mirrors the [maturity caveat](docs/proof-and-status.md#maturity-whats-real-today) on the proof-and-status page rather than contradicting it — read both together.
 
 | Implemented today | Still open before untrusted multi-tenant use |
 |---|---|
