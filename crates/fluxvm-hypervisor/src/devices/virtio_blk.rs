@@ -64,6 +64,18 @@ impl BlockBackend {
                 path.display()
             )));
         }
+        if len >= SECTOR_SIZE {
+            file.seek(SeekFrom::End(-(SECTOR_SIZE as i64)))
+                .map_err(FluxError::Io)?;
+            let mut footer = [0u8; 8];
+            file.read_exact(&mut footer).map_err(FluxError::Io)?;
+            if footer == *b"conectix" {
+                return Err(FluxError::Unsupported(format!(
+                    "image {} contains a VHD footer, not raw sectors",
+                    path.display()
+                )));
+            }
+        }
         file.seek(SeekFrom::Start(0)).map_err(FluxError::Io)?;
         if len == 0 || len % SECTOR_SIZE != 0 {
             return Err(FluxError::Unsupported(format!(
@@ -352,6 +364,16 @@ mod tests {
         f.as_file().set_len(4096).unwrap();
         let err = BlockBackend::open(f.path(), false).err().unwrap();
         assert!(format!("{err}").contains("VMDK"));
+    }
+
+    #[test]
+    fn rejects_vhd_footer_before_exposing_it_as_raw_sectors() {
+        let mut f = NamedTempFile::new().unwrap();
+        let mut bytes = vec![0u8; 4096];
+        bytes[3584..3592].copy_from_slice(b"conectix");
+        f.write_all(&bytes).unwrap();
+        let err = BlockBackend::open(f.path(), false).err().unwrap();
+        assert!(format!("{err}").contains("VHD footer"));
     }
 
     #[cfg(target_os = "linux")]

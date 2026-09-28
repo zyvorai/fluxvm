@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::Read,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 use tokio::{fs as async_fs, io::AsyncWriteExt};
@@ -577,6 +577,18 @@ async fn image_format(cfg: &Config, image: &Path) -> Result<String> {
     if magic == *b"KDMV" {
         return Ok("vmdk".into());
     }
+    if magic == *b"vhdx" {
+        return Ok("vhdx".into());
+    }
+    let len = file.metadata()?.len();
+    if len >= 512 {
+        file.seek(SeekFrom::End(-512))?;
+        let mut footer = [0u8; 8];
+        file.read_exact(&mut footer)?;
+        if footer == *b"conectix" {
+            return Ok("vpc".into());
+        }
+    }
     if vmdk_descriptor::is_descriptor(image)? {
         return Ok("vmdk".into());
     }
@@ -779,6 +791,19 @@ mod qemu_free_raw_tests {
         assert_eq!(
             image_format(&Config::default(), &base).await.unwrap(),
             "vmdk"
+        );
+    }
+
+    #[tokio::test]
+    async fn vhd_footer_takes_precedence_over_raw_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("misnamed.raw");
+        let mut bytes = vec![0u8; 1024];
+        bytes[512..520].copy_from_slice(b"conectix");
+        fs::write(&base, bytes).unwrap();
+        assert_eq!(
+            image_format(&Config::default(), &base).await.unwrap(),
+            "vpc"
         );
     }
 

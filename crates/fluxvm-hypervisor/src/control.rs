@@ -207,6 +207,12 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
         }
         ApiRequest::SnapshotRestore { path } => {
             let mut st = state.lock().await;
+            if let Err(e) = snapshot::load_spec(&path).and_then(|s| snapshot::preflight_restore(&s))
+            {
+                return ApiResponse::Error {
+                    message: format!("{e:#}"),
+                };
+            }
             st.shutdown_guest().await;
             match snapshot::restore_meta(&mut st, &path).await {
                 Ok(spec) => {
@@ -236,6 +242,11 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                                 };
                             }
                             Err(e) => {
+                                if kvm_fmt {
+                                    return ApiResponse::Error {
+                                        message: format!("native KVM memory restore failed: {e:#}"),
+                                    };
+                                }
                                 tracing::warn!(error = %e, "memory snapshot load failed; falling back to cold boot");
                             }
                         }
@@ -293,6 +304,13 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                 Ok(()) => {
                     // Inline SnapshotRestore path (no async recursion).
                     let mut st = state.lock().await;
+                    if let Err(e) =
+                        snapshot::load_spec(&path).and_then(|s| snapshot::preflight_restore(&s))
+                    {
+                        return ApiResponse::Error {
+                            message: format!("{e:#}"),
+                        };
+                    }
                     st.shutdown_guest().await;
                     match snapshot::restore_meta(&mut st, &path).await {
                         Ok(spec) => {
@@ -321,6 +339,13 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                                         };
                                     }
                                     Err(e) => {
+                                        if kvm_fmt {
+                                            return ApiResponse::Error {
+                                                message: format!(
+                                                    "native KVM migration restore failed: {e:#}"
+                                                ),
+                                            };
+                                        }
                                         tracing::warn!(error = %e, "migrate import snapshot load failed; cold boot");
                                     }
                                 }

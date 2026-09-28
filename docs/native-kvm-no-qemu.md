@@ -38,7 +38,13 @@ requests are embedded as NoCloud files in the cloned root disk, without
 flat ext4 rootfs images only and fails for GPT-partitioned images. SELinux
 enforcing guests need the token file labeled appropriately in the image.
 qcow2 inputs require `qemu-img` conversion before launch.
-Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs) parks before a pause is reported complete, and the snapshot records each vCPU's registers and MP state. Restore reloads registers only (no LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than bit-exact.
+Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs)
+parks before a pause is reported complete, and the snapshot records each
+vCPU's registers and MP state. Restore reloads registers only (no
+LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than
+bit-exact. A native KVM restore now checks the snapshot before stopping a
+running guest and returns a restore error rather than silently cold-booting
+when the memory restore fails. Snapshot tags must be deleted before reuse.
 
 This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
 full-fidelity snapshots (LAPIC/MSR/FPU/TSC state), broad storage backends, and
@@ -95,31 +101,3 @@ sudo env KERNEL=/path/to/vmlinux-5.10.225-no-acpi ROOTFS=/path/to/linux-agent.ra
 passed end to end through a real `fluxctl create`: native VMM running, the
 static agent answering over vsock inside the glibc 2.27 guest, and the
 Cloud-init hostname from the offline NoCloud injection applied.
-
-Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs) parks before a pause is reported complete, and the snapshot records each vCPU's registers and MP state. Restore reloads registers only (no LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than bit-exact.
-
-This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
-multi-vCPU snapshots, broad storage backends, and a QEMU-free image
-build pipeline are separate work.
-
-**Verified (2026-09-28) via a real `fluxctl create`, not just unit tests:**
-the auto-generated per-VM token showed up correctly at
-`/etc/fluxvm-guest-agent.token` on the actual cloned instance disk
-(`debugfs -R 'cat ...' <instance>/root.raw`), matching the token in the
-`create` response — the offline `debugfs` injection path works end to end
-through the real control plane.
-
-**Guest-agent binary compatibility gotcha, found the same way:** build
-`fluxvm-guest-agent` for a glibc no newer than the guest's. A binary built
-on a modern host (e.g. glibc 2.39) dropped into an older guest image
-(e.g. Ubuntu 18.04 "bionic", glibc 2.27) fails to exec at all —
-`version 'GLIBC_2.28' not found` and further, repeated for each missing
-symbol version, visible on the guest's own console. This isn't specific to
-the native KVM profile, but it's easy to hit here because the natural test
-images (Firecracker's public quickstart rootfs) are old. Either build the
-agent in an environment matching the guest, or link it statically
-(e.g. against musl) for portability across guest glibc versions. The same
-quickstart image also has no Cloud-init installed at all, so the NoCloud
-seed-consumption half of this profile (as opposed to seed-*writing*, which
-is what the token-injection test above already proves) still needs a
-properly equipped guest image to verify end to end.
