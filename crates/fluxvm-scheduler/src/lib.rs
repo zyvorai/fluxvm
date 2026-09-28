@@ -28,6 +28,7 @@ pub mod events;
 pub mod procbox_sandbox;
 mod sandbox;
 pub mod templates;
+pub mod vm_restore;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 
