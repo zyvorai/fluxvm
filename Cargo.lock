@@ -2256,6 +2256,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-procbox"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fluxvm-qemu"
 version = "0.3.0"
 dependencies = [

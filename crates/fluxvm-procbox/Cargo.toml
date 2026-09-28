@@ -1,0 +1,30 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-procbox"
+version = "0.3.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rootless Landlock + seccomp process sandbox (lightweight tier under FluxVM microVMs)"
+
+[[bin]]
+name = "fluxvm-procbox"
+path = "src/main.rs"
+
+[lib]
+name = "fluxvm_procbox"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
