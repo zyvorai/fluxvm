@@ -83,6 +83,7 @@ pub async fn serve(
             let mut st = state_boot.lock().await;
             if let Err(e) = boot_inner(&mut st, boot, &workspace_boot).await {
                 warn!(error = %e, "initial boot_config failed");
+                st.boot_error = Some(format!("{e:#}"));
             }
         });
     }
@@ -380,6 +381,11 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
         },
         ApiRequest::Metrics => {
             let st = state.lock().await;
+            if let Some(message) = &st.boot_error {
+                return ApiResponse::Error {
+                    message: message.clone(),
+                };
+            }
             ApiResponse::Metrics {
                 memory_mib: st.boot.as_ref().map(|b| b.memory_mib).unwrap_or(0),
                 vcpus: st.boot.as_ref().map(|b| b.vcpus).unwrap_or(0),
@@ -410,6 +416,7 @@ async fn boot_inner(st: &mut VmState, cfg: BootConfig, workspace: &Path) -> Resu
     };
     st.guest = Some(handle);
     st.boot = Some(cfg);
+    st.boot_error = None;
     st.lifecycle = VmLifecycle::Running;
     st.touch();
     if let Some(boot) = &st.boot {
@@ -485,6 +492,37 @@ async fn request_inner(api_sock: &Path, req: &ApiRequest) -> Result<ApiResponse>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn initial_boot_failure_is_reported_by_metrics() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("api.sock");
+        let boot: BootConfig = serde_json::from_value(serde_json::json!({
+            "kernel": dir.path().join("missing-kernel"),
+            "rootfs": dir.path().join("missing-rootfs"),
+            "memory_mib": 64,
+            "vcpus": 1,
+            "engine": "kvm"
+        }))
+        .unwrap();
+        let server = tokio::spawn(serve(sock.clone(), Some(boot), dir.path().to_path_buf()));
+        let response = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(resp) = request(&sock, &ApiRequest::Metrics).await {
+                    if matches!(resp, ApiResponse::Error { .. }) {
+                        break resp;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            matches!(response, ApiResponse::Error { message } if message.contains("kernel not found"))
+        );
+        server.abort();
+    }
 
     #[test]
     fn timeout_for_uses_the_longer_bound_for_snapshot_requests() {

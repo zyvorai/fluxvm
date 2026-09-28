@@ -16,6 +16,10 @@ matching the kernel command line (`root=/dev/vda` by default).
    `sudo fluxctl --config /etc/fluxvm.toml create --spec examples/fluxvm-native-kvm.json`.
    Check `fluxctl list` and the VM's console log.
 
+Create waits for the in-tree VMM to reach its running state and reports
+initialization failures. This readiness check does not wait for the guest OS
+to finish booting; inspect the console or guest agent for that.
+
 `backend: "auto"` can select QEMU; always request `flux-vm` explicitly.
 The default `fluxvm_engine` is Firecracker, so set it to `kvm` explicitly.
 This profile disables the guest agent: its per-VM token injection currently
