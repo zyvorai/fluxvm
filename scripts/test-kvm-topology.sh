@@ -11,7 +11,9 @@
 # Usage (Linux/KVM host, root for the loop-mounted probe):
 #   sudo env FLUXVM_HYPERVISOR=... CPUS=4 ./scripts/test-kvm-topology.sh
 #
-# Env: KERNEL, ROOTFS, MEMORY_MIB, TIMEOUT_SECS (default 60), CPUS (default 2).
+# Env: KERNEL, ROOTFS, MEMORY_MIB, TIMEOUT_SECS (default 60), CPUS (default 2),
+# MAX_CPUS (optional hotplug headroom passed as --max-cpus; the guest topology
+# must NOT depend on it), TOPO_LOG_COPY (optional path to keep the full run log).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,6 +24,7 @@ ROOTFS="${ROOTFS:-/var/lib/fluxvm/images/bionic-fabric-rootfs.ext4}"
 TIMEOUT_SECS="${TIMEOUT_SECS:-60}"
 MEMORY_MIB="${MEMORY_MIB:-512}"
 CPUS="${CPUS:-2}"
+MAX_CPUS="${MAX_CPUS:-}"
 
 if [ "$(uname -s)" != "Linux" ] || [ ! -e /dev/kvm ]; then
   echo "SKIP: requires Linux/KVM"
@@ -71,6 +74,7 @@ for d in /sys/devices/system/cpu/cpu[0-9]*; do
   echo "TOPO cpu=$n core=$(cat $t/core_id) pkg=$(cat $t/physical_package_id) tsib=$(cat $t/thread_siblings_list) csib=$(cat $t/core_siblings_list)"
 done
 echo "TOPO_NPROC=$(grep -c '^cpu[0-9]' /proc/stat)"
+echo "TOPO_CPUINFO siblings=$(grep -m1 '^siblings' /proc/cpuinfo | cut -d: -f2 | tr -d ' ') cores=$(grep -m1 '^cpu cores' /proc/cpuinfo | cut -d: -f2 | tr -d ' ')"
 echo FLUXVM_TOPO_DONE
 echo FLUXVM_STDIN_OK
 exec sleep 3600
@@ -80,15 +84,16 @@ umount "${TMP}/mnt"
 
 CMDLINE="console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw init=/topology-probe.sh"
 LOG="${TMP}/run.log"
-echo "=== topology: cpus=${CPUS} timeout=${TIMEOUT_SECS}s ==="
+echo "=== topology: cpus=${CPUS} max_cpus=${MAX_CPUS:-unset} timeout=${TIMEOUT_SECS}s ==="
 set +e
 timeout --signal=KILL "$((TIMEOUT_SECS + 5))" \
   env FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" FLUXVM_SERIAL_INJECT= \
-  "$BIN" --guest linux --memory-mib "$MEMORY_MIB" --cpus "$CPUS" \
+  "$BIN" --guest linux --memory-mib "$MEMORY_MIB" --cpus "$CPUS" ${MAX_CPUS:+--max-cpus "$MAX_CPUS"} \
   --kernel "$KERNEL" --cmdline "$CMDLINE" --disk "$PROBE_DISK" >"$LOG" 2>&1
 set -e
 
 grep -aE '^(TOPO|FLUXVM_)' "$LOG" | sed 's/\r$//' || true
+if [ -n "${TOPO_LOG_COPY:-}" ]; then cp "$LOG" "$TOPO_LOG_COPY"; fi
 
 python3 - "$LOG" "$CPUS" <<'PY'
 import re
@@ -96,16 +101,33 @@ import sys
 
 log, want = sys.argv[1], int(sys.argv[2])
 text = open(log, errors="replace").read().replace("\r", "")
-# The VMM interleaves its own [blk]/[net] log lines into the live serial
-# stream; at exit it prints the guest's serial output cleanly. Parse that.
-if "[kvm] serial log:" in text:
-    text = text.rsplit("[kvm] serial log:", 1)[-1]
+# Two views of the guest's serial output, either of which can be imperfect:
+# the live stream has the VMM's own [blk]/[net]/... log lines spliced into
+# guest lines (removing those lines, newline included, rejoins the guest line),
+# and the dump the VMM prints at exit occasionally loses the start of a line.
+# Take whatever complete records either view holds.
+dump = text.rsplit("[kvm] serial log:", 1)[-1] if "[kvm] serial log:" in text else ""
+live = re.sub(r"\[(?:blk|net|vsock|rng|balloon|kvm|bus)\][^\n]*\n", "", text.split("[kvm] serial log:", 1)[0])
+views = [dump, live]
 rows = {}
-for m in re.finditer(r"^TOPO cpu=(\d+) core=(\d+) pkg=(\d+) tsib=(\S+) csib=(\S+)$", text, re.M):
-    cpu, core, pkg, tsib, csib = m.groups()
-    rows[int(cpu)] = (int(core), int(pkg), tsib, csib)
-nproc = re.search(r"^TOPO_NPROC=(\d+)$", text, re.M)
+for view in views:
+    for m in re.finditer(r"^TOPO cpu=(\d+) core=(\d+) pkg=(\d+) tsib=(\S+) csib=(\S+)$", view, re.M):
+        cpu, core, pkg, tsib, csib = m.groups()
+        rows[int(cpu)] = (int(core), int(pkg), tsib, csib)
+def first(pattern):
+    for view in views:
+        m = re.search(pattern, view, re.M)
+        if m:
+            return m
+    return None
+nproc = first(r"^TOPO_NPROC=(\d+)$")
+info = first(r"^TOPO_CPUINFO siblings=(\d*) cores=(\d*)$")
+text = dump + "\n" + live
 errs = []
+if not info:
+    errs.append("no /proc/cpuinfo siblings/cpu cores line")
+elif (info.group(1), info.group(2)) != (str(want), str(want)):
+    errs.append(f"/proc/cpuinfo siblings={info.group(1)!r} cpu cores={info.group(2)!r}, want {want} and {want}")
 if "FLUXVM_TOPO_DONE" not in text:
     errs.append("probe did not finish (guest did not reach userspace or hung)")
 if sorted(rows) != list(range(want)):
