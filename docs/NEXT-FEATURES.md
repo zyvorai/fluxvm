@@ -143,7 +143,7 @@ covering every route.
 
 ### Sandlock gap follow-ups
 
-- Make `fluxvm-procbox` a `/v1/sandboxes` backend (rootless tier) instead of a standalone CLI (in progress).
+- procbox sandboxes: pathname Unix-socket connects are not blocked by Landlock ABI 8, UDP is unfiltered, commands run as the daemon's user (see procbox-backend.md); per-sandbox uid/userns would close these.
 - Dry-run for VM sandboxes needs a snapshot-restore API route to truly revert; today only baseline/changes report.
 - HTTPS interception: HTTP/2, transparent (non-proxy-aware) redirect, and guest-side CA trust have not been exercised in a real guest.
 - procbox `learn`: policy inference beyond one observed run (merge multiple runs); seccomp-notify variant for non-ptrace environments.

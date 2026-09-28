@@ -25,7 +25,8 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 | **HTTP method/host/path ACL** in the egress proxy (`egress_http_rules`, deny wins, normalized paths); HTTPS via opt-in TLS interception (`egress_tls_intercept`, HTTP/1.1, explicit-proxy clients) — [http-acl.md](http-acl.md) | Yes |
 | **File change-set** (`/v1/sandboxes/{id}/baseline` + `/changes`: added/modified/deleted) — [sandbox-changes.md](sandbox-changes.md) | Yes |
 | **Python and Go SDKs** (`python/`, `go/`, stdlib only) for `/v1/sandboxes` | Yes |
-| **`fluxvm-procbox`** rootless Landlock + seccomp process sandbox with TOML profiles and a ptrace `learn` mode (standalone CLI/library; not yet a `/v1/sandboxes` backend) — [procbox.md](procbox.md) | Yes |
+| **`fluxvm-procbox`** rootless Landlock + seccomp process sandbox with TOML profiles and a ptrace `learn` mode — [procbox.md](procbox.md) | Yes |
+| **procbox sandboxes via `/v1/sandboxes`** (`procbox` create kind, opt-in `[sandbox.procbox]`): confined `/process`, workspace fs, baseline/changes, and a real-discard **dry-run** (`POST /v1/sandboxes/{id}/dry-run`); VM dry-run returns 501 — [procbox-backend.md](procbox-backend.md) | Yes |
 | **Sandbox dataplane** — Network Fabric **GA (schema v4)**: `legacy` nftables (default), `ebpf` TC IPv4/IPv6 L3+L4 + rate limits + groups/deny/CT, `cilium` coexistence, CNP/identities/observe, health/ipcache/refresh-dns, policy/status/stats/flows API, optional XDP, schema/fingerprint repair | Yes — [network-fabric.md](network-fabric.md), [network-groups.md](network-groups.md), [network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md) |
 | OCI → template export | Yes |
 | **Redis shared sandbox index** (`FLUXVM_SANDBOX_STATE_URL`) | Yes |
