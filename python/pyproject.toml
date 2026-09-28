@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fluxvm"
+version = "0.1.0"
+description = "Python client for the FluxVM agent-sandbox REST API (/v1/sandboxes)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[tool.setuptools]
+packages = ["fluxvm"]
+
+[tool.setuptools.package-data]
+fluxvm = ["py.typed"]
