@@ -69,6 +69,18 @@ reaper_interval_secs = 5
 # max_memory_mib = 2048
 # max_processes = 4096       # RLIMIT_NPROC counts every process of the daemon's UID
 # max_workspace_mib = 1024   # cap for API writes and the copy a dry-run makes
+# When the daemon runs as root, every sandbox command is dropped to its own uid
+# from this pool (RLIMIT_NPROC and file ownership become per sandbox). The pool
+# size is also the most procbox sandboxes that can exist at once. Pick a range
+# no real account uses. uid_count = 0 disables the pool; a root daemon then
+# refuses to create/run sandboxes (HTTP 503) unless allow_root = true.
+# uid_base = 200000
+# uid_count = 4096
+# allow_root = false
+# Private user/mount/pid/ipc/uts namespaces (plus no network namespace when no
+# ports are open): "off", "auto" (use them when the kernel allows, report the
+# gap otherwise) or "strict" (fail closed, 503, without them).
+# isolation = "auto"
 # templates_dir = "/var/lib/fluxvm/templates"
 # egress_proxy_listen = "127.0.0.1:18080"
 # http_proxy_default_port = 8080

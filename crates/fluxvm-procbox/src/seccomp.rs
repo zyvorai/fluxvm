@@ -182,6 +182,62 @@ pub fn syscall_by_name(name: &str) -> Option<i64> {
     Some(nr)
 }
 
+/// Which `socket()` calls to refuse. seccomp cannot read a `sockaddr`, so
+/// pathname Unix sockets are stopped at creation (`AF_UNIX`), not at
+/// `connect`; `socketpair` is a different syscall and stays allowed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetDeny {
+    /// `SOCK_DGRAM` and `SOCK_RAW` (UDP, ICMP, raw IP).
+    pub dgram_raw: bool,
+    /// `AF_PACKET` and `AF_NETLINK`.
+    pub packet_netlink: bool,
+    /// `AF_UNIX`.
+    pub unix: bool,
+}
+
+impl NetDeny {
+    pub fn any(&self) -> bool {
+        self.dgram_raw || self.packet_netlink || self.unix
+    }
+}
+
+const AF_UNIX: u64 = 1;
+const AF_NETLINK: u64 = 16;
+const AF_PACKET: u64 = 17;
+const SOCK_DGRAM: u64 = 2;
+const SOCK_RAW: u64 = 3;
+/// Low bits of the `type` argument; the rest are SOCK_NONBLOCK/SOCK_CLOEXEC.
+const SOCK_TYPE_MASK: u64 = 0xf;
+
+/// Argument rules for `socket()` implementing `net`.
+pub fn socket_rules(net: &NetDeny) -> Result<Vec<SeccompRule>> {
+    let mut rules = Vec::new();
+    let mut push = |cond: SeccompCondition| -> Result<()> {
+        rules.push(
+            SeccompRule::new(vec![cond]).map_err(|e| anyhow!("building socket rule: {e:?}"))?,
+        );
+        Ok(())
+    };
+    let cond = |arg: u8, op: SeccompCmpOp, v: u64| -> Result<SeccompCondition> {
+        SeccompCondition::new(arg, SeccompCmpArgLen::Dword, op, v)
+            .map_err(|e| anyhow!("building socket condition: {e:?}"))
+    };
+    if net.dgram_raw {
+        for t in [SOCK_DGRAM, SOCK_RAW] {
+            push(cond(1, SeccompCmpOp::MaskedEq(SOCK_TYPE_MASK), t)?)?;
+        }
+    }
+    if net.packet_netlink {
+        for d in [AF_PACKET, AF_NETLINK] {
+            push(cond(0, SeccompCmpOp::Eq, d)?)?;
+        }
+    }
+    if net.unix {
+        push(cond(0, SeccompCmpOp::Eq, AF_UNIX)?)?;
+    }
+    Ok(rules)
+}
+
 /// Like [`compile`], with per-profile edits to the denylist: every name in
 /// `extra_deny` is denied too, and every name in `allow` is removed from the
 /// default denylist (allowing `clone3` also drops the `ENOSYS` shim).
@@ -190,6 +246,23 @@ pub fn compile_with(
     allow_namespaces: bool,
     extra_deny: &[String],
     allow: &[String],
+) -> Result<Vec<BpfProgram>> {
+    compile_full(
+        mode,
+        allow_namespaces,
+        extra_deny,
+        allow,
+        &NetDeny::default(),
+    )
+}
+
+/// [`compile_with`] plus `socket()` argument filters.
+pub fn compile_full(
+    mode: SeccompMode,
+    allow_namespaces: bool,
+    extra_deny: &[String],
+    allow: &[String],
+    net: &NetDeny,
 ) -> Result<Vec<BpfProgram>> {
     let lookup = |n: &String| {
         syscall_by_name(n)
@@ -234,6 +307,9 @@ pub fn compile_with(
                     .map_err(|e| anyhow!("compiling clone3 filter: {e:?}"))?,
             );
         }
+    }
+    if net.any() {
+        rules.insert(libc::SYS_socket, socket_rules(net)?);
     }
     for n in allow {
         rules.remove(&lookup(n)?);
@@ -316,6 +392,38 @@ mod tests {
             1
         );
         assert!(compile_with(SeccompMode::Errno, false, &["nope".to_string()], &[]).is_err());
+    }
+
+    #[test]
+    fn socket_rules_follow_the_requested_denials() {
+        assert!(socket_rules(&NetDeny::default()).unwrap().is_empty());
+        let all = NetDeny {
+            dgram_raw: true,
+            packet_netlink: true,
+            unix: true,
+        };
+        // DGRAM + RAW + PACKET + NETLINK + UNIX
+        assert_eq!(socket_rules(&all).unwrap().len(), 5);
+        let unix_only = NetDeny {
+            unix: true,
+            ..NetDeny::default()
+        };
+        assert_eq!(socket_rules(&unix_only).unwrap().len(), 1);
+        assert!(all.any() && !NetDeny::default().any());
+    }
+
+    #[test]
+    fn net_filters_compile_alongside_the_denylist() {
+        let net = NetDeny {
+            dgram_raw: true,
+            packet_netlink: true,
+            unix: true,
+        };
+        let progs = compile_full(SeccompMode::Errno, false, &[], &[], &net).unwrap();
+        assert_eq!(progs.len(), 2);
+        // Allowing `socket` by name removes the argument rules again.
+        let allow = vec!["socket".to_string()];
+        assert!(compile_full(SeccompMode::Errno, false, &[], &allow, &net).is_ok());
     }
 
     #[test]

@@ -196,7 +196,7 @@ pub fn plan(policy: &Policy, kernel_abi: u32) -> Result<Plan> {
 }
 
 #[cfg(target_os = "linux")]
-pub use sys::{kernel_abi, prepare, restrict_self, Prepared};
+pub use sys::{add_path_raw, kernel_abi, prepare, restrict_self, Prepared};
 
 /// Non-Linux hosts have no Landlock.
 #[cfg(not(target_os = "linux"))]
@@ -385,6 +385,35 @@ mod sys {
         if rc != 0 {
             return Err(io::Error::last_os_error())
                 .with_context(|| format!("landlock_add_rule for TCP port {port}"));
+        }
+        Ok(())
+    }
+
+    /// Add a path-beneath rule for a directory to an existing ruleset fd.
+    /// Async-signal-safe (open, add_rule, close), so it can run in the child
+    /// after the private root exists.
+    pub fn add_path_raw(ruleset_fd: i32, path: &std::ffi::CStr, rights: u64) -> io::Result<()> {
+        let raw = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if raw < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let rule = PathBeneathAttr {
+            allowed_access: rights,
+            parent_fd: raw,
+        };
+        let rc = unsafe {
+            libc::syscall(
+                SYS_ADD_RULE,
+                ruleset_fd,
+                RULE_PATH_BENEATH,
+                &rule as *const PathBeneathAttr,
+                0u32,
+            )
+        };
+        let err = io::Error::last_os_error();
+        unsafe { libc::close(raw) };
+        if rc != 0 {
+            return Err(err);
         }
         Ok(())
     }

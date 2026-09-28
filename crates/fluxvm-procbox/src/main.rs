@@ -5,7 +5,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use fluxvm_procbox::learn::{self, LearnOptions};
 use fluxvm_procbox::{
-    parse_size, Policy, Profile, RunOptions, SeccompMode, SyscallOverrides, TcpRule,
+    parse_size, Isolation, Policy, Profile, RunAs, RunOptions, SeccompMode, SyscallOverrides,
+    TcpRule,
 };
 use std::path::PathBuf;
 
@@ -158,6 +159,18 @@ struct RunArgs {
     /// Treat the kernel's Landlock ABI as at most this.
     #[arg(long = "max-abi")]
     max_abi: Option<u32>,
+    /// Namespace isolation: off, auto (use when available) or strict (required).
+    #[arg(long = "isolation")]
+    isolation: Option<Isolation>,
+    /// Drop to this unprivileged UID[:GID] before confining (needs root).
+    #[arg(long = "run-as")]
+    run_as: Option<RunAs>,
+    /// Allow socket(AF_UNIX) even when the network is restricted.
+    #[arg(long = "allow-unix")]
+    allow_unix: bool,
+    /// Allow UDP/raw/netlink sockets while sharing the host network.
+    #[arg(long = "allow-udp")]
+    allow_udp: bool,
     #[arg(last = true, required = true)]
     command: Vec<String>,
 }
@@ -217,6 +230,14 @@ fn policy_from(a: &RunArgs) -> Result<(Policy, SyscallOverrides)> {
     if a.max_abi.is_some() {
         p.max_abi = a.max_abi;
     }
+    if let Some(i) = a.isolation {
+        p.isolation = i;
+    }
+    if a.run_as.is_some() {
+        p.run_as = a.run_as;
+    }
+    p.allow_unix |= a.allow_unix;
+    p.allow_udp |= a.allow_udp;
     Ok((p, ov))
 }
 

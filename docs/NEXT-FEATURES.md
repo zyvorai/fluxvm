@@ -143,7 +143,7 @@ covering every route.
 
 ### Sandlock gap follow-ups
 
-- procbox sandboxes: pathname Unix-socket connects are not blocked by Landlock ABI 8, UDP is unfiltered, commands run as the daemon's user (see procbox-backend.md); per-sandbox uid/userns would close these.
+- procbox sandboxes: closed by per-sandbox uid, private mount/pid/ipc/uts/net namespaces and seccomp socket-arg filters (see procbox-backend.md). Still open: a live run of a root daemon with the uid pool through the HTTP API, and disk quotas for commands.
 - Dry-run for VM sandboxes needs a snapshot-restore API route to truly revert; today only baseline/changes report.
 - HTTPS interception: HTTP/2, a body cap and a transparent (redirect) mode are implemented and verified with real curl in a throwaway namespace (`scripts/test-egress-guest.sh`, see [http-acl.md](http-acl.md)). The remaining gap is running those cases inside the golden KVM guest: its virtio-net has no tap-to-guest receive path (`devices/virtio_net.rs`; the vhost-net bind returns `EFAULT`), so it cannot get a DHCP reply; boot, agent, cloud-init CA install and `openssl verify` are proven. The hypervisor also byte-swaps the tap address it assigns (`192.168.100.1` becomes `1.100.168.192`).
 - procbox `learn`: policy inference beyond one observed run (merge multiple runs); seccomp-notify variant for non-ptrace environments.
