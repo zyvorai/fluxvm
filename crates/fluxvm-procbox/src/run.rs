@@ -170,15 +170,12 @@ mod imp {
         if run_as.is_some() && unsafe { libc::geteuid() } != 0 {
             bail!("run_as needs a root caller (it switches to an unprivileged uid/gid)");
         }
-        // The ids the command runs as inside any user namespace.
-        let ids = run_as.unwrap_or_else(|| unsafe { (libc::geteuid(), libc::getegid()) });
-
         let iso: Option<Arc<isolate::Prepared>> = match policy.isolation {
             Isolation::Off => None,
             mode => match isolate::userns_status(run_as) {
                 Ok(()) => {
                     let mut iso_notes = Vec::new();
-                    let p = isolate::prepare(policy, ids, plan.handled_fs, &mut iso_notes)?;
+                    let p = isolate::prepare(policy, plan.handled_fs, &mut iso_notes)?;
                     plan.enforcement.not_enforced.extend(iso_notes);
                     Some(Arc::new(p))
                 }
@@ -259,8 +256,9 @@ mod imp {
                 .stderr(Stdio::piped());
         }
         cmd.process_group(0);
-        if let Some((uid, gid)) = run_as {
-            // std clears supplementary groups when it switches as root.
+        if let (Some((uid, gid)), None) = (run_as, &iso) {
+            // std clears supplementary groups when it switches as root. With
+            // isolation the switch happens after the private root is built.
             cmd.gid(gid).uid(uid);
         }
         let iso_child = iso.clone();

@@ -63,6 +63,14 @@ pub fn userns_status(ids: Option<(u32, u32)>) -> std::result::Result<(), String>
     }
 }
 
+/// A root caller builds the namespaces with its real privileges and needs no
+/// user namespace. `FLUXVM_PROCBOX_FORCE_USERNS` (a testing knob; `run_as` is
+/// ignored then) makes even a root caller take the unprivileged-user path, so
+/// that path can be exercised on hosts that restrict unprivileged userns.
+fn use_userns() -> bool {
+    unsafe { libc::geteuid() != 0 || std::env::var_os("FLUXVM_PROCBOX_FORCE_USERNS").is_some() }
+}
+
 fn sysctl(path: &str) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
@@ -84,6 +92,7 @@ fn hints() -> String {
 }
 
 fn check(ids: Option<(u32, u32)>) -> std::result::Result<(), String> {
+    let userns = use_userns();
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(format!("pipe: {}", io::Error::last_os_error()));
@@ -100,7 +109,7 @@ fn check(ids: Option<(u32, u32)>) -> std::result::Result<(), String> {
     if pid == 0 {
         // SAFETY: raw syscalls only, then _exit.
         unsafe {
-            let (step, errno) = probe_child(ids);
+            let (step, errno) = probe_child(ids, userns);
             let buf = [step, errno];
             libc::write(fds[1], buf.as_ptr() as *const libc::c_void, 2);
             libc::_exit(0);
@@ -181,7 +190,15 @@ unsafe fn write_file(path: &[u8], data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-unsafe fn probe_child(ids: Option<(u32, u32)>) -> (u8, u8) {
+unsafe fn probe_child(ids: Option<(u32, u32)>, userns: bool) -> (u8, u8) {
+    if !userns {
+        // A root caller needs no user namespace (and is not subject to the
+        // unprivileged-userns restrictions): only a mount namespace.
+        if libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWPID) != 0 {
+            return (2, errno());
+        }
+        return probe_mounts();
+    }
     if let Some((uid, gid)) = ids {
         if libc::setgroups(0, std::ptr::null()) != 0
             || libc::setgid(gid) != 0
@@ -210,6 +227,10 @@ unsafe fn probe_child(ids: Option<(u32, u32)>) -> (u8, u8) {
     if write_file(b"/proc/self/gid_map\0", &buf[..n]).is_err() {
         return (3, errno());
     }
+    probe_mounts()
+}
+
+unsafe fn probe_mounts() -> (u8, u8) {
     if libc::mount(
         std::ptr::null(),
         b"/\0".as_ptr() as *const libc::c_char,
@@ -260,6 +281,11 @@ pub struct Prepared {
     lo_up: bool,
     proc_rule: Option<(CString, u64)>,
     newnet: bool,
+    /// A user namespace is used (non-root caller). A root caller keeps its
+    /// real privileges to build the namespaces and root, then drops them.
+    userns: bool,
+    /// Root caller only: uid/gid to switch to once the root is built.
+    switch: Option<(u32, u32)>,
 }
 
 impl Prepared {
@@ -306,12 +332,14 @@ fn under(stage: &Path, p: &Path) -> PathBuf {
 /// Build the private-root plan for `policy`, running as `ids` (uid, gid).
 /// `handled_fs` is the Landlock filesystem rights in effect (for `/proc`).
 /// Paths that do not exist are skipped and noted.
-pub fn prepare(
-    policy: &Policy,
-    ids: (u32, u32),
-    handled_fs: u64,
-    notes: &mut Vec<String>,
-) -> Result<Prepared> {
+pub fn prepare(policy: &Policy, handled_fs: u64, notes: &mut Vec<String>) -> Result<Prepared> {
+    let userns = use_userns();
+    let ids = unsafe { (libc::geteuid(), libc::getegid()) };
+    let switch = if userns {
+        None
+    } else {
+        policy.run_as.map(|r| (r.uid, r.gid))
+    };
     let base = std::env::temp_dir();
     let mut template = base.join(".fvpb-XXXXXX").as_os_str().as_bytes().to_vec();
     template.push(0);
@@ -326,8 +354,6 @@ pub fn prepare(
         std::os::unix::fs::PermissionsExt::from_mode(0o755),
     );
     let stage = CString::new(stage_path.as_os_str().as_bytes())?;
-    // Owned by the sandbox uid so it is a valid mountpoint inside its userns.
-    unsafe { libc::chown(stage.as_ptr(), ids.0, ids.1) };
 
     let mut dirs: BTreeSet<PathBuf> = BTreeSet::new();
     let mut files: Vec<PathBuf> = Vec::new();
@@ -431,7 +457,11 @@ pub fn prepare(
     };
     let newnet = wants_net_isolation(policy);
     Ok(Prepared {
-        flags: NS_FLAGS | if newnet { libc::CLONE_NEWNET } else { 0 },
+        flags: (if userns {
+            NS_FLAGS
+        } else {
+            NS_FLAGS & !libc::CLONE_NEWUSER
+        }) | if newnet { libc::CLONE_NEWNET } else { 0 },
         stage,
         stage_path: stage_path.clone(),
         uid_map: format!("{} {} 1\n", ids.0, ids.0).into_bytes(),
@@ -448,6 +478,8 @@ pub fn prepare(
         lo_up: newnet,
         proc_rule,
         newnet,
+        userns,
+        switch,
     })
 }
 
@@ -537,11 +569,22 @@ unsafe fn bring_up_lo() {
     libc::close(fd);
 }
 
-unsafe fn drop_capabilities() {
+/// Drop every capability: ambient and bounding sets first (they need
+/// CAP_SETPCAP), then the optional uid/gid switch (which needs CAP_SETUID and
+/// CAP_SETGID), then the permitted/effective/inheritable sets.
+unsafe fn drop_capabilities(switch: Option<(u32, u32)>) -> io::Result<()> {
     // PR_CAP_AMBIENT = 47, PR_CAP_AMBIENT_CLEAR_ALL = 4
     libc::prctl(47, 4, 0, 0, 0);
     for cap in 0..64 {
         libc::prctl(libc::PR_CAPBSET_DROP, cap as libc::c_ulong, 0, 0, 0);
+    }
+    if let Some((uid, gid)) = switch {
+        if libc::setgroups(0, std::ptr::null()) != 0
+            || libc::setgid(gid) != 0
+            || libc::setuid(uid) != 0
+        {
+            return Err(last());
+        }
     }
     #[repr(C)]
     struct Header {
@@ -564,7 +607,10 @@ unsafe fn drop_capabilities() {
         permitted: 0,
         inheritable: 0,
     }; 2];
-    libc::syscall(libc::SYS_capset, &hdr as *const Header, data.as_ptr());
+    if libc::syscall(libc::SYS_capset, &hdr as *const Header, data.as_ptr()) != 0 {
+        return Err(last());
+    }
+    Ok(())
 }
 
 unsafe fn build_root(p: &Prepared, ruleset_fd: Option<i32>) -> io::Result<()> {
@@ -661,14 +707,16 @@ pub unsafe fn enter(p: &Prepared, ruleset_fd: Option<i32>) -> io::Result<()> {
     if libc::unshare(p.flags) != 0 {
         return Err(last());
     }
-    write_file(b"/proc/self/setgroups\0", b"deny")?;
-    let mut buf = [0u8; 48];
-    let n = p.uid_map.len().min(buf.len());
-    buf[..n].copy_from_slice(&p.uid_map[..n]);
-    write_file(b"/proc/self/uid_map\0", &buf[..n])?;
-    let n = p.gid_map.len().min(buf.len());
-    buf[..n].copy_from_slice(&p.gid_map[..n]);
-    write_file(b"/proc/self/gid_map\0", &buf[..n])?;
+    if p.userns {
+        write_file(b"/proc/self/setgroups\0", b"deny")?;
+        let mut buf = [0u8; 48];
+        let n = p.uid_map.len().min(buf.len());
+        buf[..n].copy_from_slice(&p.uid_map[..n]);
+        write_file(b"/proc/self/uid_map\0", &buf[..n])?;
+        let n = p.gid_map.len().min(buf.len());
+        buf[..n].copy_from_slice(&p.gid_map[..n]);
+        write_file(b"/proc/self/gid_map\0", &buf[..n])?;
+    }
 
     let pid = libc::fork();
     if pid < 0 {
@@ -681,8 +729,7 @@ pub unsafe fn enter(p: &Prepared, ruleset_fd: Option<i32>) -> io::Result<()> {
     if p.lo_up {
         bring_up_lo();
     }
-    drop_capabilities();
-    Ok(())
+    drop_capabilities(p.switch)
 }
 
 #[cfg(test)]
@@ -736,7 +783,7 @@ mod tests {
         p.tcp_connect = TcpRule::Deny;
         p.tcp_bind = TcpRule::Deny;
         let mut notes = Vec::new();
-        let prepared = prepare(&p, (1000, 1000), 0, &mut notes).unwrap();
+        let prepared = prepare(&p, 0, &mut notes).unwrap();
         let stage = prepared.stage_path().to_path_buf();
         assert!(stage.is_dir());
         assert!(prepared.newnet());
@@ -762,6 +809,6 @@ mod tests {
         let mut p = Policy::default();
         p.read = vec!["relative/path".into()];
         let mut notes = Vec::new();
-        assert!(prepare(&p, (1, 1), 0, &mut notes).is_err());
+        assert!(prepare(&p, 0, &mut notes).is_err());
     }
 }
