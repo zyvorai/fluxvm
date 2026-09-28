@@ -34,7 +34,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
-const AGENT_PROBE_TIMEOUT_SECS: u64 = 10;
+/// After a pause/resume or a restore the guest agent is briefly unreachable
+/// (the vsock proxy refuses the connection); wait this long for it to return.
+const AGENT_READY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 const RESTORE_META: &str = "snap.restore.json";
 
 /// Typed failures so the API can answer with precise statuses.
@@ -141,6 +143,13 @@ impl VmManager {
         }
         let _guard = BusyGuard::acquire(id)?;
         let out = self.restore_fluxvm_in_place(id, tag).await;
+        if let Ok(vm) = &out {
+            if vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
+                if let Err(e) = self.wait_for_agent(id).await {
+                    tracing::warn!(%id, "guest agent did not return after restore: {e:#}");
+                }
+            }
+        }
         if out.is_ok() {
             crate::audit_event(
                 "vm.snapshot.restore",
@@ -148,6 +157,35 @@ impl VmManager {
             );
         }
         out
+    }
+
+    /// Wait until the guest agent answers again; returns how long that took.
+    async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
+        let started = std::time::Instant::now();
+        let mut last = String::from("no attempt");
+        while started.elapsed() < AGENT_READY_DEADLINE {
+            match self.exec(id, "true".into(), Some(5)).await {
+                Ok(AgentResponse::Exec { exit_code: 0, .. }) => {
+                    let took = started.elapsed();
+                    tracing::info!(%id, ?took, "guest agent is answering");
+                    return Ok(took);
+                }
+                Ok(other) => last = format!("{other:?}"),
+                Err(e) => {
+                    last = format!("{e:#}");
+                    // Only "the agent is not up yet" is worth waiting out; a
+                    // missing socket or a dead VMM will not fix itself.
+                    let transient = last.contains("vsock proxy refused")
+                        || last.contains("timed out")
+                        || last.contains("timeout");
+                    if !transient {
+                        bail!("guest agent unreachable: {last}");
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        bail!("guest agent did not answer within {AGENT_READY_DEADLINE:?}: {last}")
     }
 
     async fn restore_fluxvm_in_place(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
@@ -260,22 +298,14 @@ impl VmManager {
         };
         let _guard = BusyGuard::acquire(id)?;
 
-        match self
-            .exec(id, "true".into(), Some(AGENT_PROBE_TIMEOUT_SECS))
-            .await
-        {
-            Ok(AgentResponse::Exec { exit_code: 0, .. }) => {}
-            Ok(other) => {
-                return Err(RestoreError::Conflict(format!(
-                    "guest agent is not usable for a dry-run: {other:?}"
-                ))
-                .into());
-            }
-            Err(e) => {
-                return Err(
-                    RestoreError::Conflict(format!("guest agent unreachable: {e:#}")).into(),
-                );
-            }
+        if !vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
+            return Err(RestoreError::Conflict(
+                "dry-run needs the guest agent, and this sandbox was created without it".into(),
+            )
+            .into());
+        }
+        if let Err(e) = self.wait_for_agent(id).await {
+            return Err(RestoreError::Conflict(format!("guest agent unreachable: {e:#}")).into());
         }
 
         let tag = format!("dryrun-{}", Uuid::new_v4());
@@ -285,6 +315,8 @@ impl VmManager {
         }
 
         let measured: Result<DryRunReport> = async {
+            // Pausing for the snapshot briefly drops the agent connection.
+            self.wait_for_agent(id).await?;
             let before = self.take_manifest(id, &paths).await?;
             let (exit_code, stdout, stderr) = match self.exec(id, command, timeout).await? {
                 AgentResponse::Exec {
@@ -311,6 +343,11 @@ impl VmManager {
 
         // Always try to put the guest back, whatever the command did.
         let restored = self.restore_fluxvm_in_place(id, &tag).await;
+        if restored.is_ok() {
+            if let Err(e) = self.wait_for_agent(id).await {
+                tracing::warn!(%id, "guest agent did not return after the dry-run restore: {e:#}");
+            }
+        }
         let _ = self.delete_vm_snapshot(id, &tag).await;
         self.touch_activity(id).await;
 
