@@ -297,7 +297,7 @@ remote host: [docs/operations.md](docs/operations.md#deploy-to-a-remote-host).
      KVM + TAP/bridge + Linux host
 
 Image path:
-base image -> SHA256 -> qemu-img -> customize -> reusable template
+base image -> SHA256 -> native VMDK-to-raw / qemu-img fallback -> customize -> reusable template
                                       |
 VM launch: template -> CoW clone -> cloud-init -> VMM -> optional TTL delete
 
@@ -306,6 +306,19 @@ Kubernetes/ctr -> containerd -> containerd-shim-fluxvm-v2
   -> FluxVM REST -> QEMU + virtiofs Pod share (+ Pod-UID write-through volumes)
   -> fluxvm-guest-agent :17777 -> fluxvm-container-agent :17778 / stdio :17779
 ```
+
+For VMDK input, `fluxvm-image` natively imports uncompressed `monolithicSparse`
+disks, descriptor-based flat and split sparse extents, stream-optimized zlib
+grains, and monolithic sparse snapshot chains (including a flat or split base).
+It verifies the parent CID before flattening a delta. Unsupported VMDK variants
+use the configured `qemu-img` binary; malformed supported disks fail conversion.
+For raw-only backends, `build-image` with `format: "raw"` creates a reusable
+template; converting a VMDK on every VM launch still incurs the full import cost.
+
+For example, save `{"source":"/images/vm/disk.vmdk","output":"/images/templates/vm.raw","format":"raw"}`
+as `import.json` and run `fluxctl build-image --spec import.json`. Keep every
+split extent beside its descriptor. A full image import should use a stopped
+VM or an immutable source snapshot.
 
 Network Fabric dataplane diagrams (packet decision and control-plane sequence):
 [docs/network-fabric.md](docs/network-fabric.md#packet-decision-and-control-plane-diagrams).
