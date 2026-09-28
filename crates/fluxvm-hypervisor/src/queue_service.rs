@@ -429,17 +429,17 @@ fn worker(
                 0
             };
         }
+        if tap_fd.is_some() && last_log.elapsed() >= std::time::Duration::from_secs(5) {
+            last_log = std::time::Instant::now();
+            let line = svc.lock().unwrap().net_stats_line();
+            if line != last_stats {
+                eprintln!("{line}");
+                last_stats = line;
+            }
+        }
         let rc = unsafe { libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, 100) };
         if rc == 0 {
             rx_armed = tap_fd.is_some();
-            if last_log.elapsed() >= std::time::Duration::from_secs(5) {
-                last_log = std::time::Instant::now();
-                let line = svc.lock().unwrap().net_stats_line();
-                if line != last_stats {
-                    eprintln!("{line}");
-                    last_stats = line;
-                }
-            }
             continue;
         }
         if rc < 0 {
