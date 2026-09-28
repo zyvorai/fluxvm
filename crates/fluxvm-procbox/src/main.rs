@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use fluxvm_procbox::learn::{self, LearnOptions};
 use fluxvm_procbox::{
@@ -70,7 +70,27 @@ struct LearnArgs {
     /// Print the full observation and profile as JSON instead of TOML.
     #[arg(long)]
     json: bool,
-    #[arg(last = true, required = true)]
+    /// Merge with an earlier learned profile: its `<profile>.observed.json`
+    /// observations are unioned with this run's and the profile is
+    /// regenerated. Non-learned keys (limits, syscall overrides, env, ...) are
+    /// kept; comments are not. Use `--out` with the same path to update in place.
+    #[arg(long, value_name = "PROFILE")]
+    merge: Option<PathBuf>,
+    /// With --merge: the prior profile has no observation file (hand-written
+    /// or older); treat its grants as observations labelled `prior`.
+    #[arg(long, requires = "merge")]
+    merge_profile_only: bool,
+    /// Drop an earlier run (by label) from the merged observations; repeatable.
+    #[arg(long, value_name = "LABEL", requires = "merge")]
+    forget: Vec<String>,
+    /// Label for the command after `--` (default: the command line).
+    #[arg(long, value_name = "NAME")]
+    label: Option<String>,
+    /// Another command to learn in the same invocation, split like a shell
+    /// would ('sh -c "..."'); repeatable, run in order. Its label is the text.
+    #[arg(long = "cmd", value_name = "COMMAND")]
+    cmd: Vec<String>,
+    #[arg(last = true, required_unless_present = "cmd")]
     command: Vec<String>,
 }
 
@@ -245,8 +265,16 @@ fn real_main() -> Result<i32> {
             Ok(0)
         }
         Cmd::Learn(a) => {
+            // `--out P --merge P` updates a profile in place.
+            let same_path = match (&a.out, &a.merge) {
+                (Some(o), Some(m)) => {
+                    o == m
+                        || matches!((o.canonicalize(), m.canonicalize()), (Ok(x), Ok(y)) if x == y)
+                }
+                _ => false,
+            };
             if let Some(out) = &a.out {
-                if out.exists() && !a.force {
+                if out.exists() && !a.force && !same_path {
                     bail!("{} exists; pass --force to overwrite it", out.display());
                 }
             }
@@ -256,33 +284,129 @@ fn real_main() -> Result<i32> {
                 timeout_secs: a.timeout,
                 stdout_to_stderr: a.out.is_none() && !a.json,
             };
-            let res = learn::learn(&a.command, &opts)?;
-            let text = if a.json {
-                let mut v = serde_json::to_value(&res)?;
-                v["profile_toml"] = learn::render_toml(&res)?.into();
-                serde_json::to_string_pretty(&v)?
+            if a.label.is_some() && a.command.is_empty() {
+                bail!(
+                    "--label names the command after `--`; --cmd runs are labelled by their text"
+                );
+            }
+            if a.merge.is_none() && a.forget.is_empty() && a.cmd.is_empty() {
+                // One fresh run: the original behaviour, plus the observation file.
+                let res = learn::learn(&a.command, &opts)?;
+                let text = if a.json {
+                    let mut v = serde_json::to_value(&res)?;
+                    v["profile_toml"] = learn::render_toml(&res)?.into();
+                    serde_json::to_string_pretty(&v)?
+                } else {
+                    learn::render_toml(&res)?
+                };
+                match &a.out {
+                    Some(out) => {
+                        let label = a.label.clone().unwrap_or_else(|| a.command.join(" "));
+                        let mut sidecar = learn::Sidecar::default();
+                        sidecar.add_run(learn::RunRecord::from_result(label, &res));
+                        learn::write_profile_and_sidecar(out, &text, &sidecar)?;
+                        eprintln!(
+                            "fluxvm-procbox: wrote {} ({} read, {} write path(s)) and {}; review \
+                             the comments at the top before using it",
+                            out.display(),
+                            res.generalized.profile.fs_read.len(),
+                            res.generalized.profile.fs_write.len(),
+                            learn::Sidecar::path_for(out).display()
+                        );
+                    }
+                    None => println!("{text}"),
+                }
+                if !res.program_succeeded() {
+                    eprintln!(
+                        "fluxvm-procbox: the traced program did not exit 0; the profile may be incomplete"
+                    );
+                }
+                return Ok(if res.program_succeeded() { 0 } else { 3 });
+            }
+
+            // Merge and/or several runs.
+            let mut runs: Vec<(String, Vec<String>)> = Vec::new();
+            if !a.command.is_empty() {
+                runs.push((
+                    a.label.clone().unwrap_or_else(|| a.command.join(" ")),
+                    a.command.clone(),
+                ));
+            }
+            for c in &a.cmd {
+                runs.push((c.clone(), learn::split_command(c)?));
+            }
+            let prior = match &a.merge {
+                None => learn::Prior::None,
+                Some(path) => {
+                    let text = std::fs::read_to_string(path)
+                        .with_context(|| format!("reading {}", path.display()))?;
+                    let profile = Profile::from_toml_str(&text)
+                        .with_context(|| format!("prior profile {}", path.display()))?;
+                    let side = learn::Sidecar::path_for(path);
+                    if side.exists() {
+                        learn::Prior::Full {
+                            profile,
+                            sidecar: learn::Sidecar::load(&side)?,
+                        }
+                    } else if a.merge_profile_only {
+                        learn::Prior::ProfileOnly { profile }
+                    } else {
+                        bail!(
+                            "{} has no observation file ({}); pass --merge-profile-only to treat \
+                             its grants as observations, or learn it again to create one",
+                            path.display(),
+                            side.display()
+                        );
+                    }
+                }
+            };
+            // Fail before running anything for a label that cannot be dropped.
+            if let learn::Prior::Full { sidecar, .. } = &prior {
+                for f in &a.forget {
+                    if !sidecar.runs.iter().any(|r| &r.label == f) {
+                        bail!("--forget {f:?}: no such run in the prior observations");
+                    }
+                }
+            } else if !a.forget.is_empty() {
+                bail!("--forget needs a prior profile with an observation file");
+            }
+            let records = learn::learn_all(&runs, &opts)?;
+            let new_ok = records.iter().all(learn::RunRecord::succeeded);
+            let is_file =
+                |p: &std::path::Path| std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false);
+            let merged = learn::plan_merge(prior, &a.forget, records, &is_file)?;
+            let text = learn::render_merged_toml(&merged)?;
+            let printed = if a.json {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "runs": merged.sidecar.runs,
+                    "observed": merged.observed,
+                    "notes": merged.notes,
+                    "profile_toml": text,
+                }))?
             } else {
-                learn::render_toml(&res)?
+                text.clone()
             };
             match &a.out {
                 Some(out) => {
-                    std::fs::write(out, &text)?;
+                    learn::write_profile_and_sidecar(out, &text, &merged.sidecar)?;
                     eprintln!(
-                        "fluxvm-procbox: wrote {} ({} read, {} write path(s)); review the \
-                         comments at the top before using it",
+                        "fluxvm-procbox: wrote {} ({} run(s), {} read, {} write path(s)) and {}; \
+                         review the comments at the top before using it",
                         out.display(),
-                        res.generalized.profile.fs_read.len(),
-                        res.generalized.profile.fs_write.len()
+                        merged.sidecar.runs.len(),
+                        merged.generalized.profile.fs_read.len(),
+                        merged.generalized.profile.fs_write.len(),
+                        learn::Sidecar::path_for(out).display()
                     );
                 }
-                None => println!("{text}"),
+                None => println!("{printed}"),
             }
-            if !res.program_succeeded() {
+            if !new_ok {
                 eprintln!(
-                    "fluxvm-procbox: the traced program did not exit 0; the profile may be incomplete"
+                    "fluxvm-procbox: a traced program did not exit 0; the profile may be incomplete"
                 );
             }
-            Ok(if res.program_succeeded() { 0 } else { 3 })
+            Ok(if new_ok { 0 } else { 3 })
         }
         Cmd::Run(a) => {
             let (policy, overrides) = policy_from(&a)?;
