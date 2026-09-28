@@ -3181,7 +3181,7 @@ impl VmManager {
                 size_bytes: dir_size(&e.path()),
             });
         }
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|s| s.created_at);
         Ok(out)
     }
 

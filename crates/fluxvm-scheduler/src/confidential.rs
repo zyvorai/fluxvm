@@ -248,6 +248,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn launch_is_not_claimed_until_it_exists() {
         // If this fails, someone flipped LAUNCH_SUPPORTED: the launch code and
         // its hardware verification must land in the same change.
