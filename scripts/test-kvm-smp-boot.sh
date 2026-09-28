@@ -63,12 +63,25 @@ if [ -f "$ROOTFS" ] && [ "${SKIP_ROOTFS:-0}" != "1" ]; then
   mount -o loop "$PROBE_DISK" "$MNT"
   cat > "${MNT}/userspace-probe.sh" <<'EOF'
 #!/bin/sh
+# Running as init: /proc and /sys are not mounted yet, and without them
+# getconf/nproc guess instead of reading the real online CPU set.
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sys /sys 2>/dev/null
 if [ -c /dev/ttyS0 ]; then
   exec >/dev/ttyS0 2>&1 </dev/ttyS0
 fi
 echo FLUXVM_USERSPACE_OK
-nproc=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+nproc=$(grep -c '^cpu[0-9]' /proc/stat 2>/dev/null || echo 1)
 echo "FLUXVM_NPROC:${nproc}"
+# One reader per CPU so QueueNotify writes come from every vCPU at once.
+i=0
+while [ "$i" -lt "$nproc" ]; do
+  dd if=/dev/vda of=/dev/null bs=64k skip=$((i * 256)) count=1024 2>/dev/null &
+  i=$((i + 1))
+done
+wait
+echo FLUXVM_IO_OK
+echo FLUXVM_STDIN_OK
 exec sleep 3600
 EOF
   chmod +x "${MNT}/userspace-probe.sh"
@@ -87,11 +100,12 @@ echo "=== SMP boot: cpus=${CPUS} timeout=${TIMEOUT_SECS}s ==="
 LOG="${TMP}/run.log"
 set +e
 timeout --signal=KILL "$((TIMEOUT_SECS + 5))" \
-  env FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" \
+  env FLUXVM_KVM_RUN_SECS="${TIMEOUT_SECS}" FLUXVM_SERIAL_INJECT= \
   "$BIN" "${ARGS[@]}" >"$LOG" 2>&1
 RC=$?
 set -e
 tail -n 160 "$LOG" || true
+grep -aE 'smp: Brought up|smpboot: Total of|FLUXVM_NPROC' "$LOG" || true
 
 FAIL=0
 if grep -qE 'do_boot_cpu failed|smpboot:.*failed' "$LOG"; then
@@ -104,7 +118,15 @@ if ! grep -qE 'FLUXVM_USERSPACE_OK|Run /sbin/init|Freeing unused kernel memory|V
 else
   echo "PASS: guest reached userspace/root"
 fi
-if grep -qE "FLUXVM_NPROC:${CPUS}|smp: Brought up ${CPUS} CPUs|Brought up ${CPUS} CPUs" "$LOG"; then
+if grep -q 'FLUXVM_NPROC:' "$LOG"; then
+  if grep -q 'FLUXVM_IO_OK' "$LOG"; then
+    echo "PASS: parallel virtio-blk reads from ${CPUS} vCPUs completed"
+  else
+    echo "FAIL: parallel virtio-blk reads did not complete"
+    FAIL=1
+  fi
+fi
+if grep -qE "FLUXVM_NPROC:${CPUS}\\b|Brought up [0-9]+ nodes?, ${CPUS} CPUs" "$LOG"; then
   echo "PASS: guest reports ${CPUS} CPUs"
 elif grep -q 'FLUXVM_NPROC:' "$LOG"; then
   echo "FAIL: guest nproc mismatch (want ${CPUS})"
@@ -112,7 +134,7 @@ elif grep -q 'FLUXVM_NPROC:' "$LOG"; then
   FAIL=1
 else
   echo "WARN: no explicit nproc marker (kernel log may still show SMP OK)"
-  if ! grep -qE "smp: Brought up ${CPUS} CPUs|Brought up ${CPUS} CPUs" "$LOG"; then
+  if ! grep -qE "Brought up [0-9]+ nodes?, ${CPUS} CPUs" "$LOG"; then
     # Soft-fail only when userspace OK but no SMP evidence at all.
     if grep -q 'FLUXVM_USERSPACE_OK' "$LOG"; then
       echo "FAIL: userspace OK but no evidence ${CPUS} CPUs came up"

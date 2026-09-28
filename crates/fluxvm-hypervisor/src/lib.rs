@@ -28,6 +28,7 @@ pub mod migration;
 pub mod mptable;
 pub mod net;
 pub mod pci;
+pub mod queue_service;
 pub mod seccomp;
 pub mod snapshot;
 pub mod state;

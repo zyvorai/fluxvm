@@ -115,6 +115,10 @@ pub const KVM_IRQ_LINE: c_ulong = 0x4008_ae61;
 /// `sizeof(struct kvm_irqfd)` == 32 — Firecracker wires COM1 via this (GSI 4).
 pub const KVM_IRQFD: c_ulong = 0x4020_ae76;
 /// `sizeof(struct kvm_pit_config)` == 64
+/// `sizeof(struct kvm_ioeventfd)` == 64 -- binds a guest MMIO/PIO write to an eventfd.
+pub const KVM_IOEVENTFD: c_ulong = 0x4040_ae79;
+/// Only fire when the written value equals `datamatch`.
+pub const KVM_IOEVENTFD_FLAG_DATAMATCH: u32 = 1;
 pub const KVM_CREATE_PIT2: c_ulong = 0x4040_ae77;
 pub const KVM_RUN: c_ulong = 0xae80;
 pub const KVM_GET_REGS: c_ulong = 0x8090_ae81;

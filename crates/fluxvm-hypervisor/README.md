@@ -60,7 +60,7 @@ Useful flags: `--vsock-cid` / `--vsock-uds`, `--no-balloon`, `--no-rng`, `--no-a
 
 ## SMP
 
-One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for the guest's INIT-SIPI-SIPI, handled by the in-kernel LAPIC. Each AP runs on its own thread (`run_ap`) and services PIO/MMIO; virtio queue-notify processing stays on the BSP, so an AP's `QueueNotify` write sets a pending flag, sets `immediate_exit` and signals the BSP thread (SIGUSR1), which drains it before re-entering `KVM_RUN`.
+One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for the guest's INIT-SIPI-SIPI, handled by the in-kernel LAPIC. Each AP runs on its own thread (`run_ap`) and services only PIO/MMIO. Virtio queues are not handled by any vCPU: see "Virtio queue servicing" below.
 
 **Verified on real KVM hardware (2026-09-28):** `scripts/test-kvm-smp-boot.sh` boots a 2-vCPU Linux guest to userspace (`smp: Brought up 1 node, 2 CPUs`). Multi-vCPU pause/snapshot remain restricted to one vCPU (APs don't join the pause barrier yet).
 
@@ -69,10 +69,18 @@ Root causes found while getting there, kept so they are not re-derived:
 1. **Guest CPUID topology (the real AP crash).** With >1 vCPU the AP panicked in `start_secondary` (`Package 1 of CPU 1 exceeds BIOS package data 1`, `kernel BUG at arch/x86/kernel/cpu/common.c:1276`) and the `reboot=k` path turned that into a silent triple fault. Linux derives the package/thread topology from CPUID leaf 1 (HTT bit, logical processor count in EBX[23:16]) and leaf 4 (EAX[31:26], cores per package). `setup_cpuid` now sets HTT and the leaf-4 core count for more than one vCPU, matching Firecracker's `cpuid.normalize()`. The panic text was recovered by decoding the AP's own 0x3f8 writes; nothing reaches the console because BSP and AP serial output interleave.
 2. **`KVM_SET_IDENTITY_MAP_ADDR` was never called.** Intel VMX hosts with an in-kernel irqchip need it alongside `KVM_SET_TSS_ADDR` so an AP can run in real mode after SIPI (Firecracker/crosvm/cloud-hypervisor all call both).
 3. **`KVM_RUN` returning `EAGAIN` is not an error.** For a not-yet-runnable vCPU (freshly SIPI'd AP) the kernel blocks and then returns `-EAGAIN` by design; retrying is correct. `run_once` treats it like `EINTR`.
-4. **AP virtio notifies were dropped.** Only the BSP drained the pending flag, so once the guest issued a block request from CPU 1 the boot stalled after the first request. Fixed by the AP-to-BSP kick above.
+4. **AP virtio notifies were dropped.** Only the BSP drained the per-device pending-notify flag, so once the guest issued a block request from CPU 1 the boot stalled after the first request. Fixed properly by the ioeventfd design below (an intermediate AP-to-BSP signal hack was replaced by it).
 
 Ruled out: host oversubscription, nested virtualization, vCPU register state, and retry timing alone.
 
+
+### Virtio queue servicing
+
+Every virtio-mmio `QueueNotify` register (offset `0x50`) is bound with `KVM_IOEVENTFD` to one eventfd per device queue, matched on the queue index -- the same approach as Firecracker and Cloud Hypervisor. A guest notify from *any* vCPU completes in the kernel and wakes a dedicated worker thread (`queue_service.rs`); no vCPU exits to userspace for it, so it does not matter which CPU the guest happens to notify from, and simultaneous notifies for different queues can no longer coalesce into one pending slot. Completions go back through the existing `KVM_IRQFD` interrupts.
+
+The worker and everything it touches (guest RAM alias, backends, rate limiters, TAP/vhost) live in one `QueueService` behind a mutex. Snapshot dumps take that lock so device state and RAM are consistent while paused, and the BSP's host-initiated vsock poll uses `try_lock` so a vCPU never stalls behind disk I/O. A failed `KVM_IOEVENTFD` registration fails VM creation rather than silently dropping notifies. The worker is spawned after the jailer/seccomp setup and uses only `poll`/`read`/`futex` beyond what the vCPU threads already need (checked with `strace -f` against the allowlist).
+
+`scripts/test-kvm-smp-boot.sh` covers it: it boots N vCPUs (`CPUS=2|4|8`), and its probe runs one `dd` reader per CPU so notifies arrive from every vCPU at once. Verified on real hardware at 2, 4 and 8 vCPUs.
 
 ## Debugging: gdbstub
 

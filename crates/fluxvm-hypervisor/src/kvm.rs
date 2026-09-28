@@ -570,6 +570,42 @@ impl KvmVm {
         Ok(())
     }
 
+    /// Bind a 4-byte guest MMIO write of `datamatch` at `addr` to `eventfd`
+    /// (`KVM_IOEVENTFD`). Used for virtio `QueueNotify` so a notify from any
+    /// vCPU is completed in the kernel without a userspace exit.
+    pub fn register_ioeventfd(&self, addr: u64, datamatch: u32, eventfd: i32) -> Result<()> {
+        #[repr(C)]
+        struct KvmIoeventfd {
+            datamatch: u64,
+            addr: u64,
+            len: u32,
+            fd: i32,
+            flags: u32,
+            pad: [u8; 36],
+        }
+        let mut ev = KvmIoeventfd {
+            datamatch: datamatch as u64,
+            addr,
+            len: 4,
+            fd: eventfd,
+            flags: ffi::KVM_IOEVENTFD_FLAG_DATAMATCH,
+            pad: [0; 36],
+        };
+        if unsafe {
+            ffi::flux_ioctl(
+                self.vm_fd,
+                ffi::KVM_IOEVENTFD,
+                &mut ev as *mut _ as *mut c_void,
+            )
+        } < 0
+        {
+            return Err(FluxError::Hypervisor(format!(
+                "KVM_IOEVENTFD addr={addr:#x} queue={datamatch} fd={eventfd}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Firecracker `register_irq` — bind an eventfd to a GSI via `KVM_IRQFD`.
     pub fn register_irqfd(&self, eventfd: i32, gsi: u32) -> Result<()> {
         #[repr(C)]

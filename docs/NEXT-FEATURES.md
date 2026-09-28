@@ -145,7 +145,7 @@ covering every route.
 
 - H2 gate `scripts/test-kvm-windows-boot.sh` (Tiny11 on `fluxvm_engine=kvm` + OVMF).
 - In-tree virtio-fs under load bench vs CH (`scripts/bench-kvm-virtiofs.sh`).
-- Multi-container Pod Sentinel proof; aya ELF parse flake; SMP AP-wakeup stall;
+- Multi-container Pod Sentinel proof; aya ELF parse flake; multi-vCPU pause/snapshot (APs must join the pause barrier);
   Firecracker warm-pool claim; OIDC/mTLS; GPU-aware placement.
 
 Portable CI maps each code-side use case to a test target in

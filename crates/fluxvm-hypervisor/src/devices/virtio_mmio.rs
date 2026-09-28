@@ -171,6 +171,10 @@ impl VirtioMmio {
         Ok(Self::new(base, st))
     }
 
+    pub fn base(&self) -> u64 {
+        self.base
+    }
+
     pub fn irq(&self) -> u32 {
         self.state.lock().unwrap().irq
     }

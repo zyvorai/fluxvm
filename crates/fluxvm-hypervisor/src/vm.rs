@@ -7,11 +7,10 @@ use crate::config::VmConfig;
 use crate::devices::cmos::CmosRtc;
 use crate::devices::rate_limiter::RateLimiter;
 use crate::devices::serial::Serial16550;
-use crate::devices::virtio_blk::{self, BlockBackend};
-use crate::devices::virtio_mmio::{self, VirtioMmio, MMIO_LEN};
-use crate::devices::virtio_net::{self, VirtioNetConfig};
+use crate::devices::virtio_blk::BlockBackend;
+use crate::devices::virtio_mmio::{VirtioMmio, MMIO_LEN};
+use crate::devices::virtio_net::VirtioNetConfig;
 use crate::devices::virtio_vsock::VsockBackend;
-use crate::devices::{virtio_balloon, virtio_rng, virtio_vsock};
 use crate::error::{FluxError, Result};
 use crate::ffi;
 use crate::gdbstub::{self, GdbCmd, GdbControl, GdbSetup};
@@ -20,13 +19,14 @@ use crate::kvm::KvmVm;
 use crate::kvm_snap::{self, CpuSnapshot, SnapCmd};
 use crate::memory::{self, GuestMemory, GUEST_STACK, KERNEL_LOAD_ADDR, MMIO_WINDOW};
 use crate::pci::{MsixBar, PciEcam};
+use crate::queue_service::{self, QueueService};
 use crate::tap::Tap;
 use crate::vhost::VhostNet;
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{Receiver, SyncSender},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 
@@ -363,156 +363,6 @@ impl VirtualMachine {
         )
     }
 
-    /// Drain pending virtio queue-notifies on the BSP thread. Guest
-    /// notifies from any vCPU only set a flag; guest RAM and backends are
-    /// owned here, so this is the single place they get serviced.
-    fn process_notifies(&mut self) {
-        let net_dev = self.net.clone();
-        if let Some(net) = net_dev {
-            if let Some(q) = virtio_mmio::take_notify(&net.state) {
-                // H3: when vhost rings are programmed, kick the
-                // kernel datapath instead of the userspace pump.
-                let use_vhost = self
-                    .vhost
-                    .as_ref()
-                    .map(|v| v.kernel_datapath())
-                    .unwrap_or(false);
-                if use_vhost {
-                    if let Some(v) = self.vhost.as_ref() {
-                        if let Err(e) = v.signal_kick(q as usize) {
-                            eprintln!("[net] vhost kick q={q}: {e}");
-                        }
-                    }
-                } else {
-                    // Late-bind VRING GPA once the guest marks
-                    // both net queues ready (desc/avail/used set).
-                    if let Some(v) = self.vhost.as_mut() {
-                        if v.bound && !v.rings_programmed {
-                            let qs = {
-                                let st = net.state.lock().unwrap();
-                                st.queues[..st.num_queues.min(2) as usize].to_vec()
-                            };
-                            let ready = qs.len() >= 2
-                                && qs.iter().all(|qq| {
-                                    qq.ready != 0
-                                        && qq.num > 0
-                                        && qq.desc != 0
-                                        && qq.avail != 0
-                                        && qq.used != 0
-                                });
-                            if ready {
-                                match v.program_vrings(self.mem.host_ptr(), self.mem.len(), &qs) {
-                                    Ok(()) => {
-                                        eprintln!("[net] vhost VRING GPA programmed (H3)");
-                                    }
-                                    Err(e) => {
-                                        eprintln!("[net] vhost VRING program deferred: {e}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    // If programming just succeeded, kick instead of pump.
-                    if self
-                        .vhost
-                        .as_ref()
-                        .map(|v| v.kernel_datapath())
-                        .unwrap_or(false)
-                    {
-                        if let Some(v) = self.vhost.as_ref() {
-                            let _ = v.signal_kick(q as usize);
-                        }
-                    } else {
-                        let mut st = net.state.lock().unwrap();
-                        match virtio_net::handle_notify(
-                            &mut self.mem,
-                            &mut st,
-                            self.tap.as_ref(),
-                            q,
-                            Some(self.net_limiter.as_ref()),
-                        ) {
-                            Ok(n) => {
-                                eprintln!("[net] processed q={q} frames={n}");
-                                drop(st);
-                                net.raise_vring_interrupt();
-                            }
-                            Err(e) => eprintln!("[net] notify err {e}"),
-                        }
-                    }
-                }
-            }
-        }
-        if let (Some(blk), Some(backend)) = (&self.blk, &self.blk_backend) {
-            if let Some(q) = virtio_mmio::take_notify(&blk.state) {
-                let mut st = blk.state.lock().unwrap();
-                match virtio_blk::handle_notify(
-                    &mut self.mem,
-                    &mut st,
-                    backend.as_ref(),
-                    q,
-                    Some(self.blk_limiter.as_ref()),
-                ) {
-                    Ok(n) => {
-                        eprintln!("[blk] processed q={q} reqs={n}");
-                        drop(st);
-                        blk.raise_vring_interrupt();
-                    }
-                    Err(e) => eprintln!("[blk] notify err {e}"),
-                }
-            }
-        }
-        if let Some(vsock) = &self.vsock {
-            if let Some(q) = virtio_mmio::take_notify(&vsock.state) {
-                let mut st = vsock.state.lock().unwrap();
-                match virtio_vsock::handle_notify(
-                    &mut self.mem,
-                    &mut st,
-                    q,
-                    self.vsock_backend.as_deref(),
-                ) {
-                    Ok(n) => {
-                        if n > 0 {
-                            eprintln!("[vsock] processed q={q} pkts={n}");
-                        }
-                        drop(st);
-                        vsock.raise_vring_interrupt();
-                    }
-                    Err(e) => eprintln!("[vsock] notify err {e}"),
-                }
-            }
-        }
-        if let Some(balloon) = &self.balloon {
-            if let Some(q) = virtio_mmio::take_notify(&balloon.state) {
-                let mut st = balloon.state.lock().unwrap();
-                match virtio_balloon::handle_notify(&mut self.mem, &mut st, q) {
-                    Ok(n) => {
-                        if n > 0 {
-                            eprintln!("[balloon] q={q} bufs={n}");
-                        }
-                        drop(st);
-                        balloon.raise_vring_interrupt();
-                    }
-                    Err(e) => eprintln!("[balloon] notify err {e}"),
-                }
-            }
-        }
-        if let Some(rng) = &self.rng {
-            if let Some(q) = virtio_mmio::take_notify(&rng.state) {
-                let mut st = rng.state.lock().unwrap();
-                match virtio_rng::handle_notify(&mut self.mem, &mut st, q) {
-                    Ok(n) => {
-                        if n > 0 {
-                            eprintln!("[rng] q={q} bufs={n}");
-                        }
-                        drop(st);
-                        rng.raise_vring_interrupt();
-                    }
-                    Err(e) => eprintln!("[rng] notify err {e}"),
-                }
-            }
-        }
-    }
-
     pub fn run_until(
         mut self,
         stop: Arc<AtomicBool>,
@@ -593,27 +443,39 @@ impl VirtualMachine {
         // the guest's own real INIT-SIPI-SIPI sequence arrives -- handled
         // entirely by KVM's in-kernel LAPIC, no userspace SIPI emulation
         // needed here. AP threads service register-level PIO/MMIO traps
-        // (bus/serial are already thread-safe for concurrent access) but
-        // deliberately do not run the virtio queue-notify -> guest-RAM
-        // path -- that stays BSP-only, the same scope boundary many
-        // minimal VMMs use by pinning device-queue processing to one
-        // vCPU. Threads are intentionally not joined: an idle AP parked
+        // (bus/serial are already thread-safe for concurrent access);
+        // virtio queue notifies are handled by the ioeventfd-fed worker
+        // below, not by any vCPU. Threads are intentionally not joined: an idle AP parked
         // in KVM_RUN on HLT only wakes on its own next interrupt, so
         // joining here could block VM teardown indefinitely; each AP
         // notices `stop` on its next wake (or the thread just outlives
         // the VM harmlessly, kept alive by its own Arc<KvmVm> clone).
-        let notify_pending = Arc::new(AtomicBool::new(false));
-        let bsp_tid = gdbstub::current_tid();
-        if num_cpus > 1 {
-            gdbstub::install_signal_handler();
-        }
         for idx in 1..num_cpus as usize {
             let kvm = kvm.clone();
             let bus = self.bus.clone();
             let stop = stop.clone();
-            let notify_pending = notify_pending.clone();
-            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &stop, &notify_pending, bsp_tid));
+            std::thread::spawn(move || run_ap(idx, &kvm, &bus, &stop));
         }
+
+        // Virtio queues are serviced by a dedicated worker fed by
+        // KVM_IOEVENTFD, so a QueueNotify from any vCPU is handled without
+        // a userspace exit. Built after the jailer so the worker inherits
+        // the same syscall filter.
+        let queue_svc = Arc::new(Mutex::new(QueueService::new(
+            &self.mem,
+            self.net.clone(),
+            self.blk.clone(),
+            self.blk_backend.clone(),
+            self.vsock.clone(),
+            self.vsock_backend.clone(),
+            self.balloon.clone(),
+            self.rng.clone(),
+            self.net_limiter.clone(),
+            self.blk_limiter.clone(),
+            self.tap.take(),
+            self.vhost.take(),
+        )));
+        queue_service::start(&kvm, queue_svc.clone(), stop.clone())?;
 
         let mut gdb_cmd_rx: Option<Receiver<GdbCmd>> = None;
         let mut gdb_stop_tx: Option<std::sync::mpsc::SyncSender<()>> = None;
@@ -660,6 +522,9 @@ impl VirtualMachine {
                 }
                 if let Some(rx) = snap_rx.as_ref() {
                     while let Ok(cmd) = rx.try_recv() {
+                        // Wait out any in-flight queue handling so device
+                        // state and RAM are consistent for the dump.
+                        let _quiesce = queue_svc.lock().unwrap();
                         let virtio: Vec<_> =
                             [&this.net, &this.blk, &this.vsock, &this.balloon, &this.rng]
                                 .into_iter()
@@ -778,27 +643,11 @@ impl VirtualMachine {
 
             // Host↔guest vsock: accept CONNECT / shuttle RW even when the
             // guest is not notifying (Firecracker-style unix backend).
-            if let (Some(vsock), Some(be)) = (&this.vsock, &this.vsock_backend) {
-                let mut st = vsock.state.lock().unwrap();
-                match virtio_vsock::poll(&mut this.mem, &mut st, be.as_ref()) {
-                    Ok(n) if n > 0 => {
-                        drop(st);
-                        vsock.raise_vring_interrupt();
-                    }
-                    Ok(_) => {}
-                    Err(e) => eprintln!("[vsock] poll err {e}"),
-                }
+            // try_lock: never stall the BSP behind in-flight disk I/O.
+            if let Ok(mut svc) = queue_svc.try_lock() {
+                svc.vsock_poll();
             }
 
-            // Clear before draining: an AP that flags a notify after the
-            // swap below re-arms immediate_exit, so the next KVM_RUN
-            // returns at once instead of sleeping on a stranded request.
-            if !paused.load(Ordering::SeqCst) {
-                kvm.request_immediate_exit(0, false);
-            }
-            if notify_pending.swap(false, Ordering::SeqCst) {
-                this.process_notifies();
-            }
             let reason = kvm.run_once(0)?;
             exits += 1;
             if exits <= 20 {
@@ -843,7 +692,6 @@ impl VirtualMachine {
                         let _ = this.bus.mmio_read(addr, &mut buf);
                         kvm.mmio_set_data(0, &buf);
                     }
-                    this.process_notifies();
                 }
                 ffi::KVM_EXIT_HLT => {
                     // BSP HLT ends the VM (as before). An idle AP HLTing
@@ -959,17 +807,10 @@ impl VirtualMachine {
     }
 }
 
-/// Secondary-vCPU (AP) run loop. See the comment in `run_until` for the
-/// scope boundary: register-level PIO/MMIO only, no virtio queue-notify
-/// processing (that stays BSP-only).
-fn run_ap(
-    idx: usize,
-    kvm: &KvmVm,
-    bus: &Bus,
-    stop: &AtomicBool,
-    notify_pending: &AtomicBool,
-    bsp_tid: i32,
-) {
+/// Secondary-vCPU (AP) run loop: register-level PIO/MMIO only. Virtio
+/// queue notifies never reach it -- they are bound to eventfds with
+/// `KVM_IOEVENTFD` and serviced by the queue worker.
+fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, stop: &AtomicBool) {
     loop {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -977,7 +818,11 @@ fn run_ap(
         let reason = match kvm.run_once(idx) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[kvm] vcpu{idx} run error: {e}");
+                // KVM_RUN fails with EFAULT once the VM's RAM is unmapped at
+                // teardown; only report errors from a still-running VM.
+                if !stop.load(Ordering::Relaxed) {
+                    eprintln!("[kvm] vcpu{idx} run error: {e}");
+                }
                 return;
             }
         };
@@ -999,14 +844,6 @@ fn run_ap(
                 let (addr, data, _len, is_write) = kvm.mmio_info(idx);
                 if is_write {
                     let _ = bus.mmio_write(addr, &data);
-                    // virtio-mmio QueueNotify: the BSP owns guest RAM and
-                    // the device backends, so hand the request over and
-                    // kick it out of KVM_RUN.
-                    if addr & (MMIO_LEN - 1) == 0x50 {
-                        notify_pending.store(true, Ordering::SeqCst);
-                        kvm.request_immediate_exit(0, true);
-                        gdbstub::signal_thread(bsp_tid, libc::SIGUSR1);
-                    }
                 } else {
                     let mut buf = data;
                     let _ = bus.mmio_read(addr, &mut buf);
