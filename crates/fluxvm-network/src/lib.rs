@@ -27,6 +27,7 @@ pub mod service_policy;
 pub mod service_pressure;
 mod store;
 pub mod tcx;
+pub mod tls_intercept;
 pub mod xdp;
 
 use anyhow::{Context, Result, bail};

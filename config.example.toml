@@ -43,6 +43,15 @@ reaper_interval_secs = 5
 #   "allow POST api.openai.com/v1/chat/completions",
 #   "deny * */admin/*",
 # ]
+# Terminate TLS in the egress proxy so the rules above also apply to HTTPS
+# (default off). Guests must trust the CA certificate (docs/http-acl.md). The CA
+# is generated on first start if absent; its key is written with mode 0600.
+# egress_tls_intercept = true
+# egress_ca_cert = "/var/lib/fluxvm/egress-ca.crt"
+# egress_ca_key = "/var/lib/fluxvm/egress-ca.key"
+# egress_tls_ports = [443]           # destination ports an intercepted CONNECT may use
+# egress_tls_allow_private = false   # keep false: blocks loopback/private/metadata upstreams
+# egress_upstream_ca_file = ""       # extra roots for verifying upstreams (never disables verification)
 # templates_dir = "/var/lib/fluxvm/templates"
 # egress_proxy_listen = "127.0.0.1:18080"
 # http_proxy_default_port = 8080
