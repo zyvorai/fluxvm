@@ -62,11 +62,22 @@ Useful flags: `--vsock-cid` / `--vsock-uds`, `--no-balloon`, `--no-rng`, `--no-a
 
 One KVM vCPU per `--cpus`. APs start `KVM_MP_STATE_UNINITIALIZED` and wait for the guest's INIT-SIPI-SIPI, handled by the in-kernel LAPIC. Each AP runs on its own thread (`run_ap`) and services only PIO/MMIO. Virtio queues are not handled by any vCPU: see "Virtio queue servicing" below.
 
-**Verified on real KVM hardware (2026-09-28):** `scripts/test-kvm-smp-boot.sh` boots a 2-vCPU Linux guest to userspace (`smp: Brought up 1 node, 2 CPUs`). Pause and snapshot cover all vCPUs (see "Pause barrier" below).
+**Verified on real KVM hardware (2026-09-28):** `scripts/test-kvm-smp-boot.sh` boots 2, 4 and 8-vCPU Linux guests to userspace (`smp: Brought up 1 node, 4 CPUs`), and `scripts/test-kvm-topology.sh` reads the topology the guest kernel derived. Pause and snapshot cover all vCPUs (see "Pause barrier" below).
+
+### Guest CPU topology
+
+The host's CPUID describes the physical package, so `cpuid_topology.rs` (pure functions, unit-tested) rewrites what the guest sees: one package, one thread per core (`smt=false`, as Firecracker), `--cpus` cores.
+
+- **Intel:** leaf 1 (initial APIC id, logical processors per package, HTT), leaf 4 (cores per package; L1/L2 private to a core, L3 shared by the package), leaves `0xB` and `0x1F` (SMT and core levels, x2APIC id in EDX, terminating sub-leaf; the host's are replaced, not zeroed).
+- **AMD** (vendor-gated): `0x80000008` (core count, APIC id size) and `0x8000001E` (extended APIC id, core id, threads per core). These follow the APM and Firecracker but have **not been run on AMD hardware**; the lab CPU is Intel.
+- **Verified in the guest** (`scripts/test-kvm-topology.sh`, 1/2/4/8 vCPUs): `physical_package_id` is 0 everywhere, `core_id` is 0..N-1, `thread_siblings_list` is the CPU itself, `core_siblings_list` is `0-(N-1)`, `nproc` is N.
+- Hot-added vCPUs get the same treatment but the running vCPUs' CPUID is not rewritten for the new total, so a hotplugged guest's topology is not updated.
+
+AP parking: with the in-kernel irqchip KVM creates non-BSP vCPUs `KVM_MP_STATE_UNINITIALIZED` by itself, so `create()`/hotplug no longer call `KVM_SET_MP_STATE`; they verify the state after setup and log `parking it` if a KVM ever disagrees (not seen on the lab kernel). Snapshot restore still sets MP state explicitly.
 
 Root causes found while getting there, kept so they are not re-derived:
 
-1. **Guest CPUID topology (the real AP crash).** With >1 vCPU the AP panicked in `start_secondary` (`Package 1 of CPU 1 exceeds BIOS package data 1`, `kernel BUG at arch/x86/kernel/cpu/common.c:1276`) and the `reboot=k` path turned that into a silent triple fault. Linux derives the package/thread topology from CPUID leaf 1 (HTT bit, logical processor count in EBX[23:16]) and leaf 4 (EAX[31:26], cores per package). `setup_cpuid` now sets HTT and the leaf-4 core count for more than one vCPU, matching Firecracker's `cpuid.normalize()`. The panic text was recovered by decoding the AP's own 0x3f8 writes; nothing reaches the console because BSP and AP serial output interleave.
+1. **Guest CPUID topology (the real AP crash).** With >1 vCPU the AP panicked in `start_secondary` (`Package 1 of CPU 1 exceeds BIOS package data 1`, `kernel BUG at arch/x86/kernel/cpu/common.c:1276`) and the `reboot=k` path turned that into a silent triple fault. Linux derives the package/thread topology from CPUID leaf 1 (HTT bit, logical processor count in EBX[23:16]) and leaf 4 (EAX[31:26], cores per package). `setup_cpuid` now presents the guest's own topology (see "Guest CPU topology" below), matching Firecracker's `cpuid.normalize()`. The panic text was recovered by decoding the AP's own 0x3f8 writes; nothing reaches the console because BSP and AP serial output interleave.
 2. **`KVM_SET_IDENTITY_MAP_ADDR` was never called.** Intel VMX hosts with an in-kernel irqchip need it alongside `KVM_SET_TSS_ADDR` so an AP can run in real mode after SIPI (Firecracker/crosvm/cloud-hypervisor all call both).
 3. **`KVM_RUN` returning `EAGAIN` is not an error.** For a not-yet-runnable vCPU (freshly SIPI'd AP) the kernel blocks and then returns `-EAGAIN` by design; retrying is correct. `run_once` treats it like `EINTR`.
 4. **AP virtio notifies were dropped.** Only the BSP drained the per-device pending-notify flag, so once the guest issued a block request from CPU 1 the boot stalled after the first request. Fixed properly by the ioeventfd design below (an intermediate AP-to-BSP signal hack was replaced by it).

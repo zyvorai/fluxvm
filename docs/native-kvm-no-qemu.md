@@ -48,6 +48,8 @@ class and the guest clock resumes from the pause instant. A native KVM restore n
 running guest and returns a restore error rather than silently cold-booting
 when the memory restore fails. Snapshot tags must be deleted before reuse.
 
+Multi-vCPU guests see their own topology (one package, N cores, no SMT siblings) through CPUID leaves 1, 4, `0xB` and `0x1F`; `scripts/test-kvm-topology.sh` checks what the guest kernel derived. See the hypervisor README for details and the untested AMD leaves.
+
 This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
 cross-CPU-model snapshot portability, broad storage backends, and
 a fully QEMU-free image build pipeline (partitioned cloud images still need
