@@ -52,6 +52,19 @@ reaper_interval_secs = 5
 # egress_tls_ports = [443]           # destination ports an intercepted CONNECT may use
 # egress_tls_allow_private = false   # keep false: blocks loopback/private/metadata upstreams
 # egress_upstream_ca_file = ""       # extra roots for verifying upstreams (never disables verification)
+
+# Rootless process sandboxes ("procbox": Landlock + seccomp on the host kernel).
+# Off by default; a weaker boundary than a microVM (see docs/procbox-backend.md).
+# [sandbox.procbox]
+# enabled = true
+# best_effort = false        # false = fail closed if the kernel cannot enforce the policy
+# allow_net = false          # let requests open outbound TCP ports (net_ports)
+# default_timeout_secs = 30
+# max_timeout_secs = 300
+# default_memory_mib = 512
+# max_memory_mib = 2048
+# max_processes = 4096       # RLIMIT_NPROC counts every process of the daemon's UID
+# max_workspace_mib = 1024   # cap for API writes and the copy a dry-run makes
 # templates_dir = "/var/lib/fluxvm/templates"
 # egress_proxy_listen = "127.0.0.1:18080"
 # http_proxy_default_port = 8080

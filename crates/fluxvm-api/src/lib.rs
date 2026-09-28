@@ -47,9 +47,21 @@ struct ApiError {
 }
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
+        let e: anyhow::Error = e.into();
+        use fluxvm_scheduler::procbox_sandbox::ProcboxError;
+        // Procbox sandboxes fail in ways a plain 400 would hide: a disabled
+        // feature, a guest-only route, an unenforceable policy, a too-large
+        // workspace. Anything else keeps the historical 400.
+        let status = match e.downcast_ref::<ProcboxError>() {
+            Some(ProcboxError::Disabled) => StatusCode::FORBIDDEN,
+            Some(ProcboxError::Unsupported(_)) => StatusCode::NOT_IMPLEMENTED,
+            Some(ProcboxError::Unavailable(_)) => StatusCode::SERVICE_UNAVAILABLE,
+            Some(ProcboxError::TooLarge(_)) => StatusCode::PAYLOAD_TOO_LARGE,
+            Some(ProcboxError::PathEscape(_)) | None => StatusCode::BAD_REQUEST,
+        };
         Self {
-            status: StatusCode::BAD_REQUEST,
-            message: format!("{:#}", e.into()),
+            status,
+            message: format!("{:#}", e),
         }
     }
 }
@@ -549,6 +561,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/sandboxes/{id}/process", post(sandbox_process))
         .route("/v1/sandboxes/{id}/baseline", post(sandbox_baseline))
         .route("/v1/sandboxes/{id}/changes", post(sandbox_changes))
+        .route("/v1/sandboxes/{id}/dry-run", post(sandbox_dry_run))
         .route(
             "/v1/sandboxes/{id}/http/{port}/{*path}",
             any(sandbox_http_proxy),
@@ -1069,7 +1082,7 @@ fn change_error(e: anyhow::Error) -> ApiError {
     let status = match e.downcast_ref::<ChangeError>() {
         Some(ChangeError::NoBaseline) => StatusCode::NOT_FOUND,
         Some(ChangeError::ModeMismatch { .. }) => StatusCode::CONFLICT,
-        None => StatusCode::BAD_REQUEST,
+        None => return ApiError::from(e),
     };
     ApiError {
         status,
@@ -1090,6 +1103,32 @@ async fn sandbox_baseline(
         .await
         .map_err(change_error)?;
     Ok(Json(json!(summary)))
+}
+
+#[derive(Deserialize)]
+struct DryRunBody {
+    command: String,
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+/// Run a command against a throwaway copy of a procbox sandbox's workspace and
+/// report what it changed (discarded afterwards). VM sandboxes answer 501.
+async fn sandbox_dry_run(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<DryRunBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    let report = m
+        .sandbox_dry_run(id, body.command, body.timeout_seconds, body.paths)
+        .await
+        .map_err(change_error)?;
+    Ok(Json(json!(report)))
 }
 
 // `paths` is optional, and the body itself may be omitted entirely.
@@ -1332,6 +1371,13 @@ async fn sandbox_proxy_inner(
                 .into_response();
         }
     };
+    if fluxvm_scheduler::procbox_sandbox::is_procbox(&vm) {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            "a procbox sandbox has no guest network to proxy HTTP into",
+        )
+            .into_response();
+    }
     let Some(guest_ip) = vm.guest_ip.clone() else {
         return (
             StatusCode::BAD_REQUEST,
@@ -4293,6 +4339,244 @@ mod tests {
                 1,
                 "expected exactly one sandbox (the caller's own) in:\n{body}"
             );
+        }
+
+        fn procbox_manager(auth: AuthConfig, enabled: bool) -> Arc<VmManager> {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let mut cfg = Config {
+                state_dir: dir.path().join("state"),
+                run_dir: dir.path().join("run"),
+                auth,
+                ..Config::default()
+            };
+            cfg.sandbox.procbox.enabled = enabled;
+            VmManager::new(cfg).unwrap()
+        }
+
+        async fn call(
+            app: Router,
+            method: &str,
+            uri: &str,
+            bearer: &str,
+            body: Option<&str>,
+        ) -> (StatusCode, String) {
+            let mut b = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+            let body = match body {
+                Some(j) => {
+                    b = b.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(j.to_string())
+                }
+                None => Body::empty(),
+            };
+            let resp = app.oneshot(b.body(body).unwrap()).await.unwrap();
+            let status = resp.status();
+            (status, body_string(resp).await)
+        }
+
+        #[tokio::test]
+        async fn procbox_create_is_403_until_an_operator_enables_it() {
+            let app = router(procbox_manager(tenant_tokens(), false));
+            let (st, body) = call(
+                app,
+                "POST",
+                "/v1/sandboxes",
+                "acme",
+                Some(r#"{"procbox":{}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
+            assert!(body.contains("disabled"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn dry_run_on_a_vm_sandbox_is_501_and_tenant_scoped() {
+            let m = procbox_manager(tenant_tokens(), true);
+            let mut vm = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            vm.request.tenant = Some("acme".into());
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let app = router(m);
+            let uri = format!("/v1/sandboxes/{id}/dry-run");
+            let body = r#"{"command":"true"}"#;
+            let (st, _) = call(app.clone(), "POST", &uri, "other", Some(body)).await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+            let (st, msg) = call(app, "POST", &uri, "acme", Some(body)).await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{msg}");
+            assert!(msg.contains("snapshot-restore"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn procbox_sandbox_end_to_end_over_http() {
+            if !fluxvm_scheduler::procbox_sandbox::confinement_available() {
+                eprintln!("skip: Landlock/seccomp not fully available on this host");
+                return;
+            }
+            let app = router(procbox_manager(tenant_tokens(), true));
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                "/v1/sandboxes",
+                "acme",
+                Some(r#"{"procbox":{}}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::CREATED, "{body}");
+            let id = serde_json::from_str::<serde_json::Value>(&body).unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let p = |suffix: &str| format!("/v1/sandboxes/{id}/{suffix}");
+
+            // Another tenant cannot see or use it.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &p("process"),
+                "other",
+                Some(r#"{"command":"true"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_FOUND);
+
+            // Files inside the workspace work; escapes are 400.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("fs/write"),
+                "acme",
+                Some(r#"{"path":"a.txt","content_base64":"aGk="}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("fs/read"),
+                "acme",
+                Some(r#"{"path":"a.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains("aGk="), "{b}");
+            for bad in ["../x", "/etc/passwd"] {
+                let (st, b) = call(
+                    app.clone(),
+                    "POST",
+                    &p("fs/read"),
+                    "acme",
+                    Some(&format!(r#"{{"path":"{bad}"}}"#)),
+                )
+                .await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {b}");
+            }
+
+            // Process: same response shape as a VM sandbox.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("process"),
+                "acme",
+                Some(r#"{"command":"cat a.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            assert_eq!(v["result"], "exec");
+            assert_eq!(v["exit_code"], 0);
+            assert_eq!(v["stdout"], "hi");
+
+            // Baseline, change, changes, dry-run.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("baseline"),
+                "acme",
+                Some(r#"{"paths":["/"]}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &p("process"),
+                "acme",
+                Some(r#"{"command":"echo x > b.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            let (st, b) = call(app.clone(), "POST", &p("changes"), "acme", None).await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            assert!(b.contains("/b.txt"), "{b}");
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("dry-run"),
+                "acme",
+                Some(r#"{"command":"rm a.txt; echo n > c.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{b}");
+            let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+            assert_eq!(v["discarded"], true);
+            assert_eq!(v["changes"]["added"], serde_json::json!(["/c.txt"]));
+            assert_eq!(v["changes"]["deleted"], serde_json::json!(["/a.txt"]));
+            // ...and a.txt is still there.
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &p("fs/read"),
+                "acme",
+                Some(r#"{"path":"a.txt"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+
+            // Guest-only routes say so.
+            let (st, b) = call(
+                app.clone(),
+                "POST",
+                &p("snapshot"),
+                "acme",
+                Some(r#"{"path":"/tmp/s"}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{b}");
+            let (st, _) = call(
+                app.clone(),
+                "GET",
+                &format!("/sandbox/{id}/x"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
+            let (st, _) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/vms/{id}/pause"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::NOT_IMPLEMENTED);
+
+            // It is listed for its tenant only, and deletable.
+            let (_, list) = call(app.clone(), "GET", "/v1/sandboxes", "acme", None).await;
+            assert!(list.contains(&id), "{list}");
+            let (_, other) = call(app.clone(), "GET", "/v1/sandboxes", "other", None).await;
+            assert!(!other.contains(&id), "{other}");
+            let (st, b) = call(
+                app.clone(),
+                "DELETE",
+                &format!("/v1/vms/{id}"),
+                "acme",
+                None,
+            )
+            .await;
+            assert!(st.is_success(), "{st} {b}");
         }
 
         #[tokio::test]

@@ -301,6 +301,16 @@ pub struct ChangesReport {
 
 impl VmManager {
     async fn take_manifest(&self, id: Uuid, paths: &[String]) -> Result<Manifest> {
+        let vm = self.get(id).await?;
+        if crate::procbox_sandbox::is_procbox(&vm) {
+            // No guest to ask: walk the host workspace directly.
+            let paths = paths.to_vec();
+            return tokio::task::spawn_blocking(move || {
+                crate::procbox_sandbox::take_manifest(&vm, &paths)
+            })
+            .await
+            .context("manifest worker panicked")?;
+        }
         let resp = self
             .exec(id, manifest_command(paths), Some(GUEST_TIMEOUT_SECS))
             .await?;

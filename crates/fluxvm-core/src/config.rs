@@ -176,6 +176,48 @@ pub struct SandboxConfig {
     /// VM-edge dataplane. Legacy nftables is the default; native eBPF and
     /// Cilium-coexistence modes are explicit opt-ins.
     pub dataplane: DataplaneConfig,
+    /// Rootless process sandboxes (`SandboxCreateRequest.procbox`).
+    pub procbox: ProcboxConfig,
+}
+
+/// Server-side gate and caps for `procbox` sandboxes: a Landlock + seccomp
+/// process confined to a per-sandbox workspace (see `docs/procbox-backend.md`).
+/// A caller's requested limits are checked against these caps, never above.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProcboxConfig {
+    /// Off unless an operator turns it on: a process sandbox shares the host
+    /// kernel, so it is a weaker boundary than a microVM.
+    pub enabled: bool,
+    /// Run with whatever the kernel can enforce and only warn about the rest.
+    /// Default false: creating or running a sandbox fails closed instead.
+    pub best_effort: bool,
+    /// Allow requests to open outbound TCP ports (`net_ports`). Off = no network.
+    pub allow_net: bool,
+    pub default_timeout_secs: u64,
+    pub max_timeout_secs: u64,
+    pub default_memory_mib: u64,
+    pub max_memory_mib: u64,
+    /// `RLIMIT_NPROC` for every command (counts all processes of the daemon's UID).
+    pub max_processes: u64,
+    /// Cap on a workspace copied for a dry-run and on files written by the API.
+    pub max_workspace_mib: u64,
+}
+
+impl Default for ProcboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            best_effort: false,
+            allow_net: false,
+            default_timeout_secs: 30,
+            max_timeout_secs: 300,
+            default_memory_mib: 512,
+            max_memory_mib: 2048,
+            max_processes: 4096,
+            max_workspace_mib: 1024,
+        }
+    }
 }
 
 fn default_http_proxy_port() -> u16 {
@@ -201,6 +243,7 @@ impl Default for SandboxConfig {
             egress_proxy_listen: String::new(),
             http_proxy_default_port: default_http_proxy_port(),
             dataplane: DataplaneConfig::default(),
+            procbox: ProcboxConfig::default(),
         }
     }
 }

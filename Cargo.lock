@@ -2349,6 +2349,7 @@ name = "fluxvm-scheduler"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "fluxvm-cgroup",
  "fluxvm-cloud-hypervisor",
@@ -2358,12 +2359,14 @@ dependencies = [
  "fluxvm-hypervisor",
  "fluxvm-image",
  "fluxvm-network",
+ "fluxvm-procbox",
  "fluxvm-qemu",
  "fluxvm-storage",
  "fluxvm-vsock-client",
  "libc",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tracing",
