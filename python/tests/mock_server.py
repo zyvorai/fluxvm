@@ -157,11 +157,49 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw or b"{}")
             if op == "snapshot":
                 return self._send(200, {"ok": True, "path": body["path"]})
+            if op == "baseline" and len(segs) == 4:
+                return self._baseline(sid, body)
+            if op == "changes" and len(segs) == 4:
+                return self._changes(sid, body)
             if op == "process" and len(segs) == 4:
                 return self._process(sid, body)
             if op == "fs" and len(segs) == 5:
                 return self._fs(sid, segs[4], body)
         return self._err(404, "no such route")
+
+    # Change-set: the mock keeps {path: content} per sandbox in `state.files`
+    # (written through fs/write) and diffs it, mirroring the real routes'
+    # statuses: 400 bad paths, 404 no baseline.
+    def _baseline(self, sid, body):
+        paths = body.get("paths") or []
+        if not paths or any((not p.startswith("/")) or ".." in p.split("/") for p in paths):
+            return self._err(400, "invalid baseline paths")
+        files = getattr(self.state, "files", {}).get(sid, {})
+        snap = {f: c for f, c in files.items() if any(f.startswith(p.rstrip("/") + "/") for p in paths)}
+        if not hasattr(self.state, "baselines"):
+            self.state.baselines = {}
+        self.state.baselines[sid] = (sorted(paths), dict(snap))
+        return self._send(200, {"ok": True, "files": len(snap), "mode": "sha256", "paths": sorted(paths)})
+
+    def _changes(self, sid, body):
+        base = getattr(self.state, "baselines", {}).get(sid)
+        if base is None:
+            return self._err(404, "no baseline recorded for this sandbox")
+        paths, before = base
+        want = body.get("paths") or paths
+        files = getattr(self.state, "files", {}).get(sid, {})
+        def under(f):
+            return any(f.startswith(p.rstrip("/") + "/") for p in want)
+        now = {f: c for f, c in files.items() if under(f)}
+        before = {f: c for f, c in before.items() if under(f)}
+        added = sorted(f for f in now if f not in before)
+        deleted = sorted(f for f in before if f not in now)
+        modified = sorted(f for f in now if f in before and now[f] != before[f])
+        return self._send(200, {
+            "added": added, "modified": modified, "deleted": deleted,
+            "unchanged": len(now) - len(added) - len(modified),
+            "mode": "sha256", "paths": sorted(want), "baseline_taken_at_unix": 1790585116,
+        })
 
     def _process(self, sid, body):
         cmd = body["command"]

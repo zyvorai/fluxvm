@@ -22,6 +22,10 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 | **Multi-port proxy defaults** on sandbox create (`http_proxy_port(s)`) | Yes |
 | AutoPause + activity tracking + wake-on-request | Yes |
 | Egress allowlist + credential vault + live L7 proxy | Yes |
+| **HTTP method/host/path ACL** in the egress proxy (`egress_http_rules`, deny wins, normalized paths; plain HTTP only, no HTTPS interception) — [http-acl.md](http-acl.md) | Yes |
+| **File change-set** (`/v1/sandboxes/{id}/baseline` + `/changes`: added/modified/deleted) — [sandbox-changes.md](sandbox-changes.md) | Yes |
+| **Python SDK** (`python/`, stdlib only) for `/v1/sandboxes` | Yes |
+| **`fluxvm-procbox`** rootless Landlock + seccomp process sandbox (standalone CLI/library; not yet a `/v1/sandboxes` backend) — [procbox.md](procbox.md) | Yes |
 | **Sandbox dataplane** — Network Fabric **GA (schema v4)**: `legacy` nftables (default), `ebpf` TC IPv4/IPv6 L3+L4 + rate limits + groups/deny/CT, `cilium` coexistence, CNP/identities/observe, health/ipcache/refresh-dns, policy/status/stats/flows API, optional XDP, schema/fingerprint repair | Yes — [network-fabric.md](network-fabric.md), [network-groups.md](network-groups.md), [network-policy.md](network-policy.md), [production-dataplane.md](production-dataplane.md) |
 | OCI → template export | Yes |
 | **Redis shared sandbox index** (`FLUXVM_SANDBOX_STATE_URL`) | Yes |

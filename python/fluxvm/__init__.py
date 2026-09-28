@@ -13,12 +13,12 @@ from .errors import (
     RateLimited,
     RequestTimeout,
 )
-from .models import ExecResult, FileContent, HttpResponse, SandboxInfo, Volume
+from .models import BaselineSummary, ChangeSet, ExecResult, FileContent, HttpResponse, SandboxInfo, Volume
 
 __version__ = "0.1.0"
 
 __all__ = [
-    "FluxVM", "Sandbox", "SandboxInfo", "ExecResult", "FileContent",
+    "FluxVM", "Sandbox", "SandboxInfo", "ExecResult", "BaselineSummary", "ChangeSet", "FileContent",
     "HttpResponse", "Volume", "FluxVMError", "ApiError", "AuthError",
     "ForbiddenError", "NotFound", "RateLimited", "RequestTimeout",
     "ConnectionFailed",

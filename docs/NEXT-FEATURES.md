@@ -141,6 +141,14 @@ Still open from this tier: backup to S3, `console` (agent PTY) over
 `--server`, VM lifecycle pages in `/console`, a generated (utoipa) spec
 covering every route.
 
+### Sandlock gap follow-ups
+
+- HTTPS method/path rules need TLS interception (MITM) in the egress proxy; today only host-level rules apply to CONNECT (see [http-acl.md](http-acl.md)).
+- Make `fluxvm-procbox` a `/v1/sandboxes` backend (rootless tier) instead of a standalone CLI.
+- Change-set: dry-run wrapper (snapshot, run, report, restore) on top of baseline/changes and the existing snapshot/restore.
+- Go SDK; policy profiles and a `learn` mode that derives a procbox/egress policy from an observed run.
+- Verify baseline/changes against a live guest through `fluxctl` (only the generated shell script has run on real directories so far).
+
 ### Tier 3 — evidence / hardening (lab hardware or long runs)
 
 - H2 gate `scripts/test-kvm-windows-boot.sh` (Tiny11 on `fluxvm_engine=kvm` + OVMF).

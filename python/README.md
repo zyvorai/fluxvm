@@ -37,6 +37,7 @@ with fx.create_sandbox(name="demo", ttl_seconds=600, memory_mib=512) as sb:
 | `sb.write_file(path, data, mode=None)` | `POST …/fs/write` |
 | `sb.read_file(path)` → `bytes`; `read_text`; `read_file_info` → `FileContent(data, mode)` | `POST …/fs/read` |
 | `sb.snapshot(path)` | `POST …/snapshot` |
+| `sb.baseline(paths)` → `BaselineSummary`; `sb.changes(paths=None)` → `ChangeSet(added, modified, deleted, unchanged, …)` | `POST …/baseline`, `POST …/changes` (see `docs/sandbox-changes.md`) |
 | `sb.http(port, method, path, body=None, headers=None, params=None, timeout=None)` → `HttpResponse` | `ANY …/http/{port}/{path}`; `port=None` uses `ANY /sandbox/{id}/{path}` |
 | `sb.refresh()`, `sb.delete()`, `with sb:` | `GET` / `DELETE /v1/vms/{id}` |
 

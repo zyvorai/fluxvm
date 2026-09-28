@@ -22,7 +22,7 @@ from .errors import (
     RateLimited,
     RequestTimeout,
 )
-from .models import ExecResult, FileContent, HttpResponse, SandboxInfo, Volume
+from .models import BaselineSummary, ChangeSet, ExecResult, FileContent, HttpResponse, SandboxInfo, Volume
 
 # Mirrors fluxvm_guest_protocol::MAX_FILE_TRANSFER_BYTES: the guest agent
 # moves a whole file as one base64 JSON line and refuses anything larger.
@@ -338,6 +338,34 @@ class Sandbox:
         the snapshot is written. Returns the path the server reports."""
         data = self._client._json("POST", self._path("/snapshot"), {"path": path})
         return str(data.get("path", path))
+
+    def baseline(self, paths: Sequence[str]) -> BaselineSummary:
+        """``POST /baseline``: record the regular files under ``paths``
+        (absolute guest directories) so :meth:`changes` can diff against them.
+        Replaces any earlier baseline. Needs the guest agent."""
+        data = self._client._json("POST", self._path("/baseline"), {"paths": list(paths)})
+        return BaselineSummary(
+            files=int(data.get("files", 0)),
+            mode=str(data.get("mode", "")),
+            paths=list(data.get("paths", [])),
+        )
+
+    def changes(self, paths: Optional[Sequence[str]] = None) -> ChangeSet:
+        """``POST /changes``: files added, modified or deleted since the last
+        :meth:`baseline`. ``paths`` narrows the diff to a subset of the
+        baseline directories. Raises :class:`NotFound` if no baseline exists.
+        Reports changes only; use snapshot/restore to roll back."""
+        body = {} if paths is None else {"paths": list(paths)}
+        data = self._client._json("POST", self._path("/changes"), body)
+        return ChangeSet(
+            added=list(data.get("added", [])),
+            modified=list(data.get("modified", [])),
+            deleted=list(data.get("deleted", [])),
+            unchanged=int(data.get("unchanged", 0)),
+            mode=str(data.get("mode", "")),
+            paths=list(data.get("paths", [])),
+            baseline_taken_at_unix=int(data.get("baseline_taken_at_unix", 0)),
+        )
 
     def http(
         self,

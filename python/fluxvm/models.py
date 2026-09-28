@@ -4,7 +4,7 @@
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import List, Any, Dict, Optional
 
 
 @dataclass
@@ -54,6 +54,36 @@ class ExecResult:
     @property
     def ok(self) -> bool:
         return self.exit_code == 0
+
+
+@dataclass
+class BaselineSummary:
+    """Result of recording a file baseline (``POST …/baseline``)."""
+
+    files: int
+    mode: str
+    paths: List[str]
+
+
+@dataclass
+class ChangeSet:
+    """Files changed since the baseline (``POST …/changes``).
+
+    A rename shows up as one deletion plus one addition. ``mode`` is the
+    fingerprint used (``sha256``, or the ``stat`` size+mtime fallback).
+    """
+
+    added: List[str]
+    modified: List[str]
+    deleted: List[str]
+    unchanged: int
+    mode: str
+    paths: List[str]
+    baseline_taken_at_unix: int
+
+    @property
+    def clean(self) -> bool:
+        return not (self.added or self.modified or self.deleted)
 
 
 @dataclass

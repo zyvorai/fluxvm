@@ -207,6 +207,51 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(sb.snapshot("/var/lib/fluxvm/snap1"), "/var/lib/fluxvm/snap1")
         self.assertEqual(json.loads(self.last()[3]), {"path": "/var/lib/fluxvm/snap1"})
 
+    # ---- change-set
+    def test_baseline_then_changes_reports_added_modified_deleted(self):
+        sb = self.fx.create_sandbox()
+        sb.write_file("/workspace/keep.txt", "same")
+        sb.write_file("/workspace/edit.txt", "v1")
+        sb.write_file("/workspace/gone.txt", "bye")
+        base = sb.baseline(["/workspace"])
+        self.assertEqual((base.files, base.mode, base.paths), (3, "sha256", ["/workspace"]))
+        self.assertEqual(json.loads(self.last()[3]), {"paths": ["/workspace"]})
+        sb.write_file("/workspace/edit.txt", "v2")
+        sb.write_file("/workspace/new.txt", "hi")
+        self.state.files[sb.id].pop("/workspace/gone.txt")
+        ch = sb.changes()
+        self.assertEqual(ch.added, ["/workspace/new.txt"])
+        self.assertEqual(ch.modified, ["/workspace/edit.txt"])
+        self.assertEqual(ch.deleted, ["/workspace/gone.txt"])
+        self.assertEqual(ch.unchanged, 1)
+        self.assertFalse(ch.clean)
+        self.assertEqual(json.loads(self.last()[3]), {})
+
+    def test_changes_can_narrow_to_a_subset_of_paths(self):
+        sb = self.fx.create_sandbox()
+        sb.write_file("/a/x", "1")
+        sb.write_file("/b/y", "1")
+        sb.baseline(["/a", "/b"])
+        sb.write_file("/a/x", "2")
+        sb.write_file("/b/y", "2")
+        ch = sb.changes(paths=["/a"])
+        self.assertEqual(ch.modified, ["/a/x"])
+        self.assertEqual(json.loads(self.last()[3]), {"paths": ["/a"]})
+
+    def test_clean_changeset_and_missing_baseline(self):
+        sb = self.fx.create_sandbox()
+        with self.assertRaises(NotFound):
+            sb.changes()
+        sb.write_file("/w/f", "1")
+        sb.baseline(["/w"])
+        self.assertTrue(sb.changes().clean)
+
+    def test_baseline_rejects_unsafe_paths_with_api_error(self):
+        sb = self.fx.create_sandbox()
+        with self.assertRaises(ApiError) as cm:
+            sb.baseline(["relative/../x"])
+        self.assertEqual(cm.exception.status, 400)
+
     # ---- http proxy
     def test_http_explicit_port_with_query_body_and_headers(self):
         sb = self.fx.create_sandbox()
