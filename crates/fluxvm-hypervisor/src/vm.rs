@@ -985,7 +985,17 @@ fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, stop: &AtomicBool) {
                 }
             }
             ffi::KVM_EXIT_SHUTDOWN => {
-                eprintln!("[kvm] vcpu{idx} shutdown");
+                // Live-observed on an AP that reached real 64-bit kernel
+                // code (valid IDT/GDT/CR0-4/EFER at the time of this exit --
+                // this is not a bad-initial-state fault): the guest's own
+                // reboot=k emergency-restart path, silently, with no serial
+                // panic text -- consistent with a fault too early for the
+                // exception path itself to be usable yet. RIP/CS here are
+                // the last hard evidence available; dumped since AP crashes
+                // are otherwise silent.
+                let rip = kvm.get_regs(idx).map(|r| r.rip);
+                let cs = kvm.get_sregs(idx).map(|s| (s.cs.selector, s.cs.base));
+                eprintln!("[kvm] vcpu{idx} shutdown rip={rip:?} cs={cs:?}");
                 stop.store(true, Ordering::Relaxed);
                 return;
             }
@@ -994,7 +1004,9 @@ fn run_ap(idx: usize, kvm: &KvmVm, bus: &Bus, stop: &AtomicBool) {
                 stop.store(true, Ordering::Relaxed);
                 return;
             }
-            _ => {}
+            // Matches run_until's own BSP-loop handling of an unrecognized
+            // exit reason: log and keep going rather than silently drop it.
+            other => eprintln!("[kvm] vcpu{idx} unhandled exit reason={other}"),
         }
     }
 }

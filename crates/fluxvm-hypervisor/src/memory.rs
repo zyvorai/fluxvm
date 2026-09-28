@@ -35,6 +35,10 @@ pub const PCI_MMCONFIG_START: u64 = IOAPIC_ADDR - PCI_MMCONFIG_SIZE;
 /// Three-page Intel VT-x quirk region (`Firecracker::KVM_TSS_ADDRESS`).
 /// Must sit outside guest RAM / MMIO slots; required with in-kernel irqchip.
 pub const KVM_TSS_ADDRESS: u64 = 0xfffb_d000;
+/// One-page identity-mapped region for `KVM_SET_IDENTITY_MAP_ADDR`, placed
+/// immediately below `KVM_TSS_ADDRESS` (Firecracker's `KVM_IDENTITY_MAP_START`
+/// layout) so the two reserved regions sit contiguously outside guest RAM.
+pub const KVM_IDENTITY_MAP_ADDRESS: u64 = KVM_TSS_ADDRESS - 0x1000;
 
 pub struct GuestMemory {
     ptr: NonNull<u8>,

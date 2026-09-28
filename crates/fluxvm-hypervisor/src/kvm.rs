@@ -170,6 +170,25 @@ impl KvmVm {
             {
                 return Err(FluxError::Hypervisor("KVM_SET_TSS_ADDR".into()));
             }
+            // Required alongside KVM_SET_TSS_ADDR on Intel VMX hosts with an
+            // in-kernel irqchip: a one-page identity-mapped region KVM uses
+            // to run a vCPU in real/unpaged mode. The BSP never needs this
+            // (PVH/long-mode setup goes straight to 32-/64-bit protected
+            // mode), but an AP starts real-mode at the SIPI vector -- found
+            // live: omitting this made KVM_RUN return EAGAIN forever for
+            // any AP that had *already* received a valid INIT-SIPI-SIPI
+            // (KVM_GET_MP_STATE showed RUNNABLE, CS:IP correctly set to the
+            // SIPI vector) -- the vCPU's own state was fine, entry itself
+            // was refused.
+            let mut identity_map_addr = memory::KVM_IDENTITY_MAP_ADDRESS;
+            if ffi::flux_ioctl(
+                vm_fd,
+                ffi::KVM_SET_IDENTITY_MAP_ADDR,
+                &mut identity_map_addr as *mut _ as *mut c_void,
+            ) < 0
+            {
+                return Err(FluxError::Hypervisor("KVM_SET_IDENTITY_MAP_ADDR".into()));
+            }
             // Real in-kernel LAPIC/IOAPIC/PIC. This is what makes real SMP
             // possible without any userspace INIT-SIPI emulation below: a
             // freshly created non-BSP vCPU on a VM with an irqchip starts
@@ -1084,9 +1103,15 @@ impl KvmVm {
             // A signal delivered to force a stuck/looping vCPU out of
             // KVM_RUN (the gdbstub's break-in mechanism: set
             // immediate_exit then signal this thread) surfaces as EINTR.
-            // Treat it the same as KVM_EXIT_INTR -- "nothing to handle,
-            // just re-check state and loop" -- rather than a fatal error.
-            if errno == ffi::EINTR {
+            // EAGAIN is the other harmless case: kvm_vcpu_block() gave up
+            // waiting for the vCPU to become runnable without erroring --
+            // live-observed on a freshly SIPI'd AP, where the vCPU's own
+            // state (MP_STATE, CS:IP at the SIPI vector, control
+            // registers) was already valid; retrying KVM_RUN immediately
+            // succeeds. Treat both the same as KVM_EXIT_INTR -- "nothing
+            // to handle, just re-check state and loop" -- rather than a
+            // fatal error.
+            if errno == ffi::EINTR || errno == ffi::EAGAIN {
                 return Ok(ffi::KVM_EXIT_INTR);
             }
             return Err(FluxError::Hypervisor(format!("KVM_RUN errno {errno}")));

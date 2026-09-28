@@ -103,6 +103,13 @@ pub const KVM_CREATE_VCPU: c_ulong = 0xae41;
 pub const KVM_SET_USER_MEMORY_REGION: c_ulong = 0x4020_ae46;
 /// `_IO(KVMIO, 0x47)` — Intel hosts need a 3-page TSS region with irqchip.
 pub const KVM_SET_TSS_ADDR: c_ulong = 0xae47;
+/// `_IOW(KVMIO, 0x48, __u64)` — required alongside `KVM_SET_TSS_ADDR` on
+/// Intel VMX hosts with an in-kernel irqchip: a one-page identity-mapped
+/// region KVM uses to run a vCPU in real/unpaged mode (exactly the state
+/// an AP starts in immediately after SIPI, real-mode CS:IP at the vector).
+/// Unlike `KVM_SET_TSS_ADDR`, this takes a *pointer* to the address, not
+/// the address itself.
+pub const KVM_SET_IDENTITY_MAP_ADDR: c_ulong = 0x4008_ae48;
 pub const KVM_CREATE_IRQCHIP: c_ulong = 0xae60;
 pub const KVM_IRQ_LINE: c_ulong = 0x4008_ae61;
 /// `sizeof(struct kvm_irqfd)` == 32 — Firecracker wires COM1 via this (GSI 4).
@@ -154,3 +161,12 @@ pub const KVM_EXIT_IO_OUT: u8 = 1;
 
 /// Errno for a syscall interrupted by a delivered signal.
 pub const EINTR: c_int = 4;
+/// `KVM_RUN` returns this when `kvm_vcpu_block()` gave up waiting for the
+/// vCPU to become runnable without erroring -- observed live on a freshly
+/// SIPI'd AP: `kvm_arch_vcpu_runnable()` said not-yet-runnable across a few
+/// blocking/rescheduling passes (~1s total), so the kernel handed control
+/// back to userspace instead of blocking indefinitely. The vCPU's own state
+/// (confirmed via KVM_GET_MP_STATE/KVM_GET_SREGS at the time) was already
+/// valid; retrying `KVM_RUN` immediately succeeds. Not a real failure --
+/// treat it the same as EINTR.
+pub const EAGAIN: c_int = 11;
