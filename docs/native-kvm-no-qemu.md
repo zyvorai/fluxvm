@@ -19,8 +19,14 @@ matching the kernel command line (`root=/dev/vda` by default).
 Create waits for the in-tree VMM to reach its running state and reports
 initialization failures. This readiness check does not wait for the guest OS
 to finish booting; inspect the console or guest agent for that.
+On a Linux host with `/dev/kvm`, run the acceptance gate with
+`sudo KERNEL=/path/to/vmlinux ROOTFS=/path/to/root.raw ./scripts/test-native-kvm-no-qemu.sh`.
+Set `FLUXVM_AGENT=1` when the image includes the enabled guest agent and
+Cloud-init to check the vsock path and offline NoCloud injection too.
 
-`backend: "auto"` can select QEMU; always request `flux-vm` explicitly.
+`backend: "auto"` selects the in-tree VMM only when `fluxvm_engine = "kvm"`,
+a direct kernel is available, and the image is named `.raw` or `.ext4`.
+Use `flux-vm` explicitly for a predictable deployment.
 The default `fluxvm_engine` is Firecracker, so set it to `kvm` explicitly.
 The example disables the guest agent for a first boot. For agent control,
 install and enable `fluxvm-guest-agent` in the guest image and set

@@ -654,7 +654,10 @@ pub async fn clone_for_vm(
 ) -> Result<()> {
     if backend == BackendKind::FluxVm
         && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
-        && !matches!(base.extension().and_then(|e| e.to_str()), Some("raw" | "ext4"))
+        && !matches!(
+            base.extension().and_then(|e| e.to_str()),
+            Some("raw" | "ext4")
+        )
     {
         bail!(
             "native KVM accepts only named .raw or .ext4 images; convert {} to raw before launch",
@@ -777,5 +780,27 @@ mod qemu_free_raw_tests {
             image_format(&Config::default(), &base).await.unwrap(),
             "vmdk"
         );
+    }
+
+    #[tokio::test]
+    async fn native_kvm_rejects_misnamed_vmdk_without_qemu_img() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("vmdk-disguised.raw");
+        fs::write(&base, b"KDMVpayload").unwrap();
+        let cfg = Config {
+            qemu_img_binary: "/definitely/missing/qemu-img".into(),
+            fluxvm_engine: fluxvm_core::config::FluxVmEngine::Kvm,
+            ..Config::default()
+        };
+        let err = clone_for_vm(
+            &cfg,
+            &base,
+            BackendKind::FluxVm,
+            &dir.path().join("out.raw"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("vmdk"));
     }
 }
