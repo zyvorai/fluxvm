@@ -18,7 +18,7 @@ A **lightweight KVM Virtual Machine Monitor** in Rust (Firecracker / cloud-hyper
 - **Devices (virtio-mmio):** net, blk, vsock, balloon, rng + 16550 serial (all on `KVM_IRQFD`)
 - **Host I/O:** TAP userspace net; optional `/dev/vhost-net` open; token-bucket `--net-mbit-limit` / `--blk-mbit-limit`
 - **Firmware extras:** minimal ACPI (RSDP/XSDT/FADT/MADT) + PVH `rsdp_paddr`; optional `--pci` ECAM; `--jailer` / `FLUXVM_JAILER`
-- **Control:** UDS JSON API, pause/resume, seccomp, gdbstub, `FLUXKVM1` v2 snapshots (all vCPUs)
+- **Control:** UDS JSON API, pause/resume, seccomp, gdbstub, `FLUXKVM1` v5 snapshots (all vCPUs, full-fidelity CPU/VM state)
 
 Verified end-to-end through the real control-plane boot path (not just
 the CLI demo): a Linux 5.10 + systemd guest reaches `zbud: loaded`,
@@ -82,7 +82,13 @@ Same shape as Firecracker (`Pause` event + signal kick + `Paused` reply from eve
 2. Each vCPU loop clears `immediate_exit` and *then* re-checks `paused`, so a pause that races the check still forces the next `KVM_RUN` to return instead of sleeping in the guest.
 3. Each AP parks in userspace and acknowledges the current epoch; the BSP publishes the quiesced epoch only once every AP has acknowledged, so a snapshot never sees a vCPU still running. Pausing times out with an error if any vCPU fails to park.
 
-Snapshot format is `FLUXKVM1` v4: v3 plus one `KVM_MP_STATE` per vCPU so restored APs come back runnable. v1-v3 files still load. The pause and snapshot smokes take `VCPUS=N` and verify each AP parked once per pause (`[kvm] vcpuN paused`), 12 back-to-back cycles at 4 vCPUs, and that a restored 2/4-vCPU guest does not crash after resume.
+Snapshot format is `FLUXKVM1` v5: v4 (v3 plus one `KVM_MP_STATE` per vCPU so restored APs come back runnable) followed by tagged, length-prefixed sections (`[tag u32][len u32][payload]`, unknown tags skipped) holding full-fidelity KVM state:
+
+* per vCPU: XSAVE (`KVM_GET_XSAVE2` when `KVM_CAP_XSAVE2` reports more than 4 KiB), XCRS, every MSR in `KVM_GET_MSR_INDEX_LIST` (including `TSC`/`TSC_DEADLINE`), LAPIC, vCPU events, debug registers, TSC kHz;
+* per VM: `kvmclock`, PIC master/slave + IOAPIC (`KVM_GET_IRQCHIP`), PIT2.
+
+Restore applies VM state first, then per vCPU sregs, regs, XSAVE, XCRS, LAPIC, TSC kHz, MSRs (skip-and-continue over MSRs the destination rejects), events and debug registers. The guest clock is restored without `KVM_CLOCK_REALTIME`/`HOST_TSC`, so the guest resumes from the instant it was paused rather than jumping forward by the wall time spent in the snapshot. v1-v4 files still load but restore registers only and print a warning; `preflight_restore` rejects a v5 file whose sections are missing or incomplete. Shutting down a guest (including the old guest during a restore) now kicks every vCPU out of `KVM_RUN` until its thread exits, so an idle vCPU can no longer hang the restore. `scripts/test-kvm-snapshot-progress.sh` (`VCPUS=1|2`, `MODE=v4` for the register-only comparison) proves the restored guest rewinds, keeps its clock and timers, and keeps doing checksummed disk I/O.
+ The pause and snapshot smokes take `VCPUS=N` and verify each AP parked once per pause (`[kvm] vcpuN paused`), 12 back-to-back cycles at 4 vCPUs, and that a restored 2/4-vCPU guest does not crash after resume.
 
 ### Virtio queue servicing
 
@@ -99,7 +105,7 @@ The worker and everything it touches (guest RAM alias, backends, rate limiters, 
 ## Known limitations
 
   * The in-tree virtio-blk backend expects a nonempty, 512-byte-aligned raw disk. It rejects qcow2 and VMDK/VHDX headers; convert a stopped image to raw before selecting `fluxvm_engine = "kvm"`. Requested disk, TAP and vsock devices must initialize successfully or VM creation fails.
-  * In-tree KVM snapshots save and restore registers, special registers and `KVM_MP_STATE` per vCPU plus RAM and virtio queue state. LAPIC, MSR, FPU and TSC state are not captured, so a restored guest is best-effort, not bit-exact; Firecracker remains the production snapshot format.
+  * In-tree KVM snapshots (v5) save and restore registers, special registers, `KVM_MP_STATE`, XSAVE/XCRS, MSRs, LAPIC, vCPU events, debug registers, TSC kHz, kvmclock, PIC/IOAPIC and PIT plus RAM and virtio queue state. Restore is same-host-class only (no CPUID/MSR normalisation across different CPU models), the guest clock resumes from the pause instant, and virtio device state is a queue watermark only, so treat it as high-fidelity rather than bit-exact; Firecracker remains the production snapshot format.
   * The in-tree block device uses split virtqueues with direct raw-sector I/O. It rejects indirect descriptors and malformed or cyclic chains. Guest FLUSH requests call `sync_data` on the backing file.
   * `jailer::apply()` (`--jailer` / `FLUXVM_JAILER`, and implicitly whenever `seccomp` is requested — `guest.rs` pairs them 1:1) calls `unshare()`/`chroot()`/`setuid()`/`setgid()`. These must stay in `seccomp.rs`'s allowlist: they were missing until 2026-09-28, which meant a seccomp-enabled KVM boot through the real control plane was an instant `SIGSYS` the moment the jailer ran, found via `strace` against a real `fluxctl create`. If you extend the jailer with a new syscall, add it to the allowlist in the same change — the two are never exercised together except through the full control-plane path, so `cargo test` alone won't catch a gap here.
 

@@ -40,14 +40,16 @@ enforcing guests need the token file labeled appropriately in the image.
 qcow2 inputs require `qemu-img` conversion before launch.
 Pause and memory snapshots work with any vCPU count: every vCPU (BSP and APs)
 parks before a pause is reported complete, and the snapshot records each
-vCPU's registers and MP state. Restore reloads registers only (no
-LAPIC/MSR/FPU state), so treat a restored guest as best-effort rather than
-bit-exact. A native KVM restore now checks the snapshot before stopping a
+vCPU's registers, MP state and (FLUXKVM1 v5) full-fidelity state: XSAVE/FPU,
+XCRS, MSRs including the TSC, LAPIC, vCPU events, debug registers, TSC kHz,
+kvmclock, PIC/IOAPIC and PIT. Older v1-v4 snapshots still load but restore
+registers only, with a warning. Restore is intended for the same host CPU
+class and the guest clock resumes from the pause instant. A native KVM restore now checks the snapshot before stopping a
 running guest and returns a restore error rather than silently cold-booting
 when the memory restore fails. Snapshot tags must be deleted before reuse.
 
 This is a Linux direct-kernel profile. Windows/UEFI, QEMU device parity,
-full-fidelity snapshots (LAPIC/MSR/FPU/TSC state), broad storage backends, and
+cross-CPU-model snapshot portability, broad storage backends, and
 a fully QEMU-free image build pipeline (partitioned cloud images still need
 `qemu-img` once, to extract the root) are separate work.
 
