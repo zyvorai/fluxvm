@@ -547,6 +547,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/sandboxes/{id}/fs/read", post(sandbox_fs_read))
         .route("/v1/sandboxes/{id}/fs/write", post(sandbox_fs_write))
         .route("/v1/sandboxes/{id}/process", post(sandbox_process))
+        .route("/v1/sandboxes/{id}/baseline", post(sandbox_baseline))
+        .route("/v1/sandboxes/{id}/changes", post(sandbox_changes))
         .route(
             "/v1/sandboxes/{id}/http/{port}/{*path}",
             any(sandbox_http_proxy),
@@ -1047,6 +1049,61 @@ async fn sandbox_process(
     Ok(Json(json!(
         m.exec(id, body.command, body.timeout_seconds).await?
     )))
+}
+
+#[derive(Deserialize)]
+struct BaselineBody {
+    paths: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ChangesBody {
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+/// Maps the typed change-set errors to precise statuses: a missing baseline
+/// is 404, an incomparable one 409; everything else keeps the default 400.
+fn change_error(e: anyhow::Error) -> ApiError {
+    use fluxvm_scheduler::changes::ChangeError;
+    let status = match e.downcast_ref::<ChangeError>() {
+        Some(ChangeError::NoBaseline) => StatusCode::NOT_FOUND,
+        Some(ChangeError::ModeMismatch { .. }) => StatusCode::CONFLICT,
+        None => StatusCode::BAD_REQUEST,
+    };
+    ApiError {
+        status,
+        message: format!("{e:#}"),
+    }
+}
+
+async fn sandbox_baseline(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<BaselineBody>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    let summary = m
+        .sandbox_baseline(id, body.paths)
+        .await
+        .map_err(change_error)?;
+    Ok(Json(json!(summary)))
+}
+
+// `paths` is optional, and the body itself may be omitted entirely.
+async fn sandbox_changes(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<ChangesBody>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.ensure_running_for_request(id).await?;
+    let paths = body.and_then(|Json(b)| b.paths);
+    let report = m.sandbox_changes(id, paths).await.map_err(change_error)?;
+    Ok(Json(json!(report)))
 }
 
 // Admin-only, like every other guest-reaching route (sandbox_fs_read,
@@ -4349,6 +4406,177 @@ mod tests {
                 request(app, "GET", &format!("/sandbox/{id}/x"), Some("ro"), None).await,
                 StatusCode::FORBIDDEN
             );
+        }
+
+        async fn request_with_body(
+            app: Router,
+            method: &str,
+            uri: &str,
+            bearer: Option<&str>,
+            body: Option<&str>,
+        ) -> (StatusCode, String) {
+            let mut builder = Request::builder().method(method).uri(uri);
+            if let Some(t) = bearer {
+                builder = builder.header(header::AUTHORIZATION, format!("Bearer {t}"));
+            }
+            let body = match body {
+                Some(b) => {
+                    builder = builder.header(header::CONTENT_TYPE, "application/json");
+                    Body::from(b.to_string())
+                }
+                None => Body::empty(),
+            };
+            let resp = app.oneshot(builder.body(body).unwrap()).await.unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&bytes).into_owned())
+        }
+
+        #[tokio::test]
+        async fn sandbox_change_routes_are_tenant_scoped() {
+            let m = manager(tenant_tokens());
+            let mut acme_sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            acme_sandbox.request.tenant = Some("acme".into());
+            let id = acme_sandbox.id;
+            m.store.insert(acme_sandbox).await.unwrap();
+            let app = router(m);
+            for route in ["baseline", "changes"] {
+                let uri = format!("/v1/sandboxes/{id}/{route}");
+                let (status, body) = request_with_body(
+                    app.clone(),
+                    "POST",
+                    &uri,
+                    Some("other"),
+                    Some(r#"{"paths":["/w"]}"#),
+                )
+                .await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{route}");
+                assert!(
+                    !body.contains("no baseline"),
+                    "the tenant guard must answer, not the handler: {body}"
+                );
+            }
+            // Owner clears the guard: baseline then fails at the guest (no
+            // agent in this test), never with the guard's 404.
+            assert_ne!(
+                request(
+                    app,
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/baseline"),
+                    Some("acme"),
+                    Some(r#"{"paths":["/w"]}"#),
+                )
+                .await,
+                StatusCode::NOT_FOUND
+            );
+        }
+
+        #[tokio::test]
+        async fn readonly_token_cannot_use_sandbox_change_routes() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "ro".into(),
+                    role: Role::ReadOnly,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            for route in ["baseline", "changes"] {
+                assert_eq!(
+                    request(
+                        app.clone(),
+                        "POST",
+                        &format!("/v1/sandboxes/{id}/{route}"),
+                        Some("ro"),
+                        Some(r#"{"paths":["/w"]}"#),
+                    )
+                    .await,
+                    StatusCode::FORBIDDEN,
+                    "{route}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn changes_without_a_baseline_is_a_clear_404() {
+            let m = manager(AuthConfig::default());
+            let dir = tempfile::tempdir().unwrap();
+            let mut sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            sandbox.workspace = dir.path().to_path_buf();
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            // Both with and without a request body.
+            for body in [None, Some(r#"{"paths":["/w"]}"#)] {
+                let (status, msg) = request_with_body(
+                    app.clone(),
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/changes"),
+                    None,
+                    body,
+                )
+                .await;
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert!(msg.contains("no baseline"), "{msg}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_corrupt_baseline_file_is_reported_not_trusted() {
+            let m = manager(AuthConfig::default());
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("sandbox-baseline.json"), "{not json").unwrap();
+            let mut sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            sandbox.workspace = dir.path().to_path_buf();
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let (status, msg) = request_with_body(
+                router(m),
+                "POST",
+                &format!("/v1/sandboxes/{id}/changes"),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(msg.contains("corrupt"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn baseline_rejects_unsafe_paths_before_touching_the_guest() {
+            let m = manager(AuthConfig::default());
+            let sandbox = fixture(BackendKind::FluxVm, VmStatus::Running, true);
+            let id = sandbox.id;
+            m.store.insert(sandbox).await.unwrap();
+            let app = router(m);
+            for bad in [
+                r#"{"paths":["../etc"]}"#,
+                r#"{"paths":["relative"]}"#,
+                r#"{"paths":["/w/../etc"]}"#,
+                r#"{"paths":[]}"#,
+            ] {
+                let (status, msg) = request_with_body(
+                    app.clone(),
+                    "POST",
+                    &format!("/v1/sandboxes/{id}/baseline"),
+                    None,
+                    Some(bad),
+                )
+                .await;
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {msg}");
+                assert!(
+                    msg.contains("absolute") || msg.contains("..") || msg.contains("empty"),
+                    "{bad}: {msg}"
+                );
+            }
         }
 
         #[tokio::test]
