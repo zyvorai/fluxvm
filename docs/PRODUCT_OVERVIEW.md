@@ -72,7 +72,7 @@ The exhaustive, line-by-line checklist lives in **[FEATURES.md](../FEATURES.md)*
      KVM + TAP/bridge + Linux host
 ```
 
-Full diagrams (image pipeline, Secure Containers request flow, Network Fabric packet-decision and control-plane sequence): [README — Architecture at a glance](../README.md#architecture-at-a-glance) and [docs/network-fabric.md](network-fabric.md#packet-decision-and-control-plane-diagrams).
+Full diagrams (image pipeline, Secure Containers request flow, Network Fabric packet-decision and control-plane sequence): [Architecture at a glance](architecture.md#architecture-at-a-glance) and [docs/network-fabric.md](network-fabric.md#packet-decision-and-control-plane-diagrams).
 
 ---
 

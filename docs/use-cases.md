@@ -7,7 +7,7 @@ virtual machines backed by QEMU/KVM, Cloud Hypervisor, Firecracker, or the
 in-tree FluxVM hypervisor. Short-lived / disposable patterns (optional
 `ttl_seconds`, cheap CoW clones) are supported but not required. This doc
 walks through use cases that map onto what's actually implemented (see the
-main [README](../README.md#feature-highlights) for the full feature list) —
+main [documentation index](index.md#feature-highlights) for the full feature list) —
 nothing here is aspirational.
 
 
@@ -68,7 +68,7 @@ See [`docs/build-image-tutorials.md`](build-image-tutorials.md) for the same
 walkthrough across Debian/Ubuntu, RHEL-family, Arch, and Windows
 (`windows{}` + Zyvor GuestKit agent) base images. Pair it
 with the image catalog (SHA-256 + optional Ed25519 signing, see "Image
-catalog & signing" in the README) to give every VM a provenance guarantee —
+catalog & signing" in [operations.md](operations.md#image-catalog--signing)) to give every VM a provenance guarantee —
 `allowed_image_dirs` and `trusted_signers` mean a tenant can reference an
 image by name and have the daemon refuse anything that isn't a known,
 signed entry.
@@ -105,7 +105,7 @@ actually gone (no leaked QEMU/Firecracker process), and the operator
 self-heals — if the underlying VM disappears out-of-band, it gets replaced
 automatically without touching the CR. This is verified against a real k3s
 cluster, not just unit-tested against a fake API server (see "Kubernetes
-CRD/operator" in the README).
+CRD/operator" in [kubernetes-operator.md](kubernetes-operator.md)).
 
 ## Secure Containers (OCI in a FluxVM)
 
