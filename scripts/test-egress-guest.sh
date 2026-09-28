@@ -10,9 +10,9 @@
 #   stage 2  the golden native-KVM guest (CA installed by cloud-init `ca_certs`)
 #            running the same curl cases through the guest agent
 #
-# Stage 2 needs a guest that can RECEIVE packets. The in-tree KVM engine's
-# virtio-net has no tap->guest path today (see docs/http-acl.md), so stage 2
-# reports BLOCKED (exit 3) after proving boot, agent and CA installation.
+# Stage 2 needs a guest that can RECEIVE packets (virtio-net RX, tap -> guest
+# queue 0). If the guest gets no DHCP lease it reports BLOCKED (exit 3) after
+# proving boot, agent and CA installation.
 #
 #   FLUXVM_EGRESS_GUEST=1 sudo -E scripts/test-egress-guest.sh     # lab host, root
 #
@@ -339,11 +339,11 @@ HV_PID=$!
 
 for _ in $(seq 1 100); do nsx ip link show "$TAP" >/dev/null 2>&1 && break; sleep 0.2; done
 nsx ip link show "$TAP" >/dev/null 2>&1 && pass "hypervisor created ${TAP} inside ${NS}" || { fail "tap ${TAP} never appeared"; tail -20 "$TMP/hv.log" >&2; exit 1; }
-# The hypervisor addresses the tap itself but byte-swaps the address (seen as
-# 1.100.168.192/8); replace it with the intended /24.
-nsx ip addr flush dev "$TAP"
-nsx ip addr add "${HOST_IP}/24" dev "$TAP"
-nsx ip link set "$TAP" up
+# The hypervisor addresses the tap itself; its address and mask must arrive in
+# network byte order (regression: it used to be 1.100.168.192/8).
+nsx ip -4 -o addr show dev "$TAP" | grep -q "inet ${HOST_IP}/24 " \
+  && pass "hypervisor configured ${TAP} as ${HOST_IP}/24" \
+  || fail "tap address is not ${HOST_IP}/24: $(nsx ip -4 -o addr show dev "$TAP" | tr '\n' ' ')"
 
 agent() {   # agent "<shell command>" [timeout] -> prints stdout+stderr
   python3 - "$TMP/vsock.sock" "$1" "${2:-40}" <<'PY'
@@ -399,18 +399,27 @@ done
 if [ "$got_ip" != 1 ]; then
   offers="$(grep -c DHCPOFFER "$TMP/dnsmasq.log")"
   echo "  BLOCKED: the guest sent DHCPDISCOVER ($(grep -c DHCPDISCOVER "$TMP/dnsmasq.log") seen by dnsmasq in ${NS}, ${offers} offers sent) but never received a reply." >&2
-  echo "  Cause: the in-tree KVM virtio-net has no tap->guest receive path (devices/virtio_net.rs only writes TX frames"  >&2
-  echo "  to the tap and synthesises gateway ARP/ICMP replies; Tap::read_frame has no caller) and VHOST_NET_SET_BACKEND" >&2
-  echo "  fails with EFAULT because it runs before the vrings are set. Stage 2 cannot run until RX is implemented." >&2
+  echo "  Cause: no tap->guest frames reached the guest (virtio-net RX); see the hypervisor log below." >&2
+  grep -E "\[net\]" "$TMP/hv.log" | tail -5 >&2
   echo "--- guest link state" >&2
   agent "ip -o link show eth0; networkctl list 2>&1 | tail -4" 15 >&2 2>&1
   BLOCKED=1
   exit 3
 fi
 pass "guest got a DHCP lease (${out})"
+# The golden image ships no resolv.conf (networkd applies the DHCP DNS option
+# only when systemd-resolved runs, and it does not), so point the guest at the
+# DHCP-advertised server itself, exactly as option 6 says.
+agent "rm -f /etc/resolv.conf; printf 'nameserver ${HOST_IP}\\n' > /etc/resolv.conf" 15 >/dev/null 2>&1
 res="$(agent "timeout 10 getent hosts up.test" 20 2>&1)"
 echo "$res" | grep -q "^${HOST_IP}" && pass "guest resolves up.test -> ${HOST_IP} via dnsmasq" \
-  || { fail "guest DNS for up.test: ${res}"; exit 1; }
+  || {
+    fail "guest DNS for up.test: ${res}"
+    echo "--- guest resolver diagnostics" >&2
+    agent "resolvectl status 2>&1 | head -25; echo ---; cat /etc/resolv.conf; echo ---; ip -4 route; echo ---; timeout 8 ping -c2 -W2 ${HOST_IP} 2>&1 | tail -3; echo ---; timeout 8 nslookup up.test ${HOST_IP} 2>&1 | tail -6" 40 >&2 2>&1
+    echo "--- dnsmasq log" >&2; tail -15 "$TMP/dnsmasq.log" >&2
+    exit 1
+  }
 CLIENT_RUN() { agent "$1" 45; }
 CA_FLAG=""
 run_cases guest
