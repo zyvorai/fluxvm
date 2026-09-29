@@ -32,7 +32,7 @@ fluxvm-procbox run \
 | Option | Meaning |
 |---|---|
 | `-r/--read PATH`, `-w/--write PATH` | Filesystem allow rules. Everything not listed is denied, including exec. |
-| `--net-port P`, `--bind-port P`, `--no-net` | TCP connect / bind allowlists, or deny all TCP. Unset = unrestricted. |
+| `--net-port P`, `--bind-port P`, `--no-net` | TCP connect / bind allowlists, or deny all TCP. Unset = deny all TCP; the CLI has no flag for unrestricted TCP (use a [profile](#profiles) with `net_connect = "any"` if you really want that). |
 | `-p/--profile SPEC` | Start from a TOML [profile](#profiles) (path or name). Other flags are applied on top. |
 | `-m`, `-P`, `-t`, `--cpu-seconds` | `RLIMIT_AS`, `RLIMIT_NPROC`, wall-clock timeout, `RLIMIT_CPU`. Core dumps are always off. |
 | `--no-scope` | Do not scope abstract unix sockets and signals (scoping is on by default). |

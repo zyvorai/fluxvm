@@ -301,7 +301,7 @@ impl Profile {
             format!("fs_write: {} path(s)", self.fs_write.len()),
         ];
         let net = |r: &Option<NetRule>| match r {
-            None => "unset (unrestricted)".to_string(),
+            None => "unset (deny)".to_string(),
             Some(NetRule::Keyword(k)) => k.clone(),
             Some(NetRule::Ports(p)) => format!("ports {p:?}"),
         };

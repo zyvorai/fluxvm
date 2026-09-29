@@ -151,6 +151,31 @@ mod imp {
         })
     }
 
+    /// Which socket-creation classes seccomp must deny, given the policy and
+    /// how the network is otherwise being handled. `newnet` is true when a
+    /// private network namespace already isolates all sockets; `hidden` is
+    /// true when a private mount namespace plus Landlock IPC scoping already
+    /// hide pathname `AF_UNIX` sockets, so seccomp does not need to as well.
+    ///
+    /// Deny-by-default: `Policy::default()` sets `tcp_connect`/`tcp_bind` to
+    /// `TcpRule::Deny`, which counts as "the policy restricts the network at
+    /// all" below, so a bare default policy gets these filters too, not just
+    /// a policy that explicitly restricts TCP.
+    pub(super) fn net_deny_for(policy: &Policy, newnet: bool, hidden: bool) -> seccomp::NetDeny {
+        let net_restricted = policy.tcp_connect != TcpRule::Any || policy.tcp_bind != TcpRule::Any;
+        let mut net = seccomp::NetDeny::default();
+        if net_restricted && !newnet {
+            if !policy.allow_udp {
+                net.dgram_raw = true;
+                net.packet_netlink = true;
+            }
+            if !policy.allow_unix && !hidden {
+                net.unix = true;
+            }
+        }
+        net
+    }
+
     pub fn run(
         policy: &Policy,
         overrides: &SyscallOverrides,
@@ -196,22 +221,12 @@ mod imp {
         plan.enforcement.network_isolated = newnet;
 
         // Socket-creation filters cover what Landlock's TCP rules cannot: UDP,
-        // raw/packet/netlink, and pathname unix sockets. They only apply when
-        // the policy restricts the network at all.
-        let net_restricted = policy.tcp_connect != TcpRule::Any || policy.tcp_bind != TcpRule::Any;
-        let mut net = seccomp::NetDeny::default();
-        if net_restricted && !newnet {
-            if !policy.allow_udp {
-                net.dgram_raw = true;
-                net.packet_netlink = true;
-            }
-            // A private mount namespace hides host socket files, and Landlock
-            // scoping covers abstract sockets; otherwise deny AF_UNIX.
-            let hidden = iso.is_some() && plan.enforcement.scope_abstract_unix;
-            if !policy.allow_unix && !hidden {
-                net.unix = true;
-            }
-        }
+        // raw/packet/netlink, and pathname unix sockets. A bare
+        // `Policy::default()` (tcp_connect/tcp_bind = Deny) counts as
+        // "restricts the network at all", so these engage even when nothing
+        // was set explicitly.
+        let hidden = iso.is_some() && plan.enforcement.scope_abstract_unix;
+        let net = net_deny_for(policy, newnet, hidden);
 
         let programs = match policy.seccomp {
             Some(mode) => {
@@ -349,6 +364,8 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::policy::TcpRule;
 
     #[test]
     fn clean_env_keeps_only_a_minimal_path_and_explicit_vars() {
@@ -366,5 +383,42 @@ mod tests {
         let mut p = Policy::default();
         p.env = vec![("A".into(), "1".into())];
         assert_eq!(build_env(&p), vec![("A".to_string(), "1".to_string())]);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn bare_default_policy_denies_udp_and_unix_without_being_asked() {
+        // No field is touched: this is exactly what a caller gets from
+        // `Policy::default()` with no further configuration.
+        let p = Policy::default();
+        let net = imp::net_deny_for(&p, /* newnet */ false, /* hidden */ false);
+        assert!(net.dgram_raw, "UDP/raw must be denied by default");
+        assert!(
+            net.packet_netlink,
+            "AF_PACKET/AF_NETLINK must be denied by default"
+        );
+        assert!(net.unix, "pathname AF_UNIX must be denied by default");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn explicit_any_tcp_still_leaves_udp_and_unix_open() {
+        // An explicit, deliberate "no TCP restriction at all" (TcpRule::Any)
+        // is the one case where these filters are skipped, matching the
+        // long-standing "network is not restricted" semantics.
+        let mut p = Policy::default();
+        p.tcp_connect = TcpRule::Any;
+        p.tcp_bind = TcpRule::Any;
+        let net = imp::net_deny_for(&p, false, false);
+        assert!(!net.any());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn newnet_or_hidden_unix_defer_to_the_namespace() {
+        let p = Policy::default();
+        assert!(!imp::net_deny_for(&p, /* newnet */ true, false).any());
+        let net = imp::net_deny_for(&p, false, /* hidden */ true);
+        assert!(net.dgram_raw && !net.unix);
     }
 }

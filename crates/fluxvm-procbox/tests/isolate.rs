@@ -304,12 +304,31 @@ fn seccomp_denies_udp_raw_netlink_and_unix_sockets_on_a_shared_network() {
 }
 
 #[test]
-fn socket_filters_are_off_when_tcp_is_unrestricted() {
+fn socket_filters_are_off_only_when_tcp_is_explicitly_unrestricted() {
     let f = fixture();
+    // `base()` is `Policy::default()` plus some read paths: tcp_connect and
+    // tcp_bind default to Deny, which counts as "restricts the network", so
+    // the filters must be ON here with no explicit configuration at all.
     let p = base(&f);
     let r = sandbox(&f, &p, "socket", Some("udp"));
+    assert_eq!(out(&r), EPERM, "a bare default policy must deny UDP: {r:?}");
+    assert!(r.enforcement.seccomp_sockets);
+    let r = sandbox(&f, &p, "socket", Some("unix"));
+    assert_eq!(
+        out(&r),
+        EPERM,
+        "a bare default policy must deny AF_UNIX: {r:?}"
+    );
+
+    // Only an explicit, deliberate "no TCP restriction at all" turns the
+    // socket filters off.
+    let mut open = p;
+    open.tcp_connect = TcpRule::Any;
+    open.tcp_bind = TcpRule::Any;
+    let r = sandbox(&f, &open, "socket", Some("udp"));
     assert_eq!(out(&r), "ok", "{r:?}");
     assert!(!r.enforcement.seccomp_sockets);
+    assert_eq!(out(&sandbox(&f, &open, "socket", Some("unix"))), "ok");
 }
 
 #[test]

@@ -6,7 +6,7 @@
 //! unavailable, or when a helper (python3) is missing.
 #![cfg(target_os = "linux")]
 
-use fluxvm_procbox::{landlock, run_with, Policy, Profile, RunOptions, SyscallOverrides};
+use fluxvm_procbox::{landlock, run_with, Policy, Profile, RunOptions, SyscallOverrides, TcpRule};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -355,6 +355,11 @@ fn profile_syscall_overrides_change_the_denylist() {
     need_abi!(3);
     let mut p = Policy::default();
     p.scope_ipc = false;
+    // This test is about the seccomp `syscall_deny`/`syscall_allow`
+    // overrides, not TCP port policy, so leave TCP unrestricted (the
+    // deny-by-default policy would otherwise block `connect` at the
+    // Landlock layer before the syscall-override behaviour is exercised).
+    p.tcp_connect = TcpRule::Any;
     for dir in ["/usr", "/lib", "/lib64", "/bin", "/etc"] {
         if Path::new(dir).exists() {
             p.read.push(dir.into());

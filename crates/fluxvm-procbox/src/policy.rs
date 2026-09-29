@@ -142,8 +142,14 @@ impl Default for Policy {
         Self {
             read: Vec::new(),
             write: Vec::new(),
-            tcp_connect: TcpRule::Any,
-            tcp_bind: TcpRule::Any,
+            // Deny by default: a bare `Policy::default()` must not silently
+            // hand out unrestricted TCP, and (via `net_restricted` in
+            // run.rs) it must not skip the UDP/raw/packet/netlink/AF_UNIX
+            // seccomp filters either — those only engage once the policy
+            // restricts the network at all. Every caller that wants
+            // outbound access sets these fields explicitly.
+            tcp_connect: TcpRule::Deny,
+            tcp_bind: TcpRule::Deny,
             scope_ipc: true,
             seccomp: Some(SeccompMode::Errno),
             allow_namespaces: false,
@@ -245,6 +251,14 @@ mod tests {
         assert!(!p.best_effort);
         assert!(!p.allow_namespaces);
         assert_eq!(p.seccomp, Some(SeccompMode::Errno));
+        // Deny-by-default: a caller who builds a Policy and forgets to set
+        // network fields must not end up with unrestricted TCP, or (since
+        // run.rs's socket filters only engage once the policy restricts the
+        // network at all) with unfiltered UDP/raw/AF_UNIX either.
+        assert_eq!(p.tcp_connect, TcpRule::Deny);
+        assert_eq!(p.tcp_bind, TcpRule::Deny);
+        assert!(!p.allow_unix);
+        assert!(!p.allow_udp);
     }
 
     #[test]
