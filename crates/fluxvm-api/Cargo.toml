@@ -27,7 +27,7 @@ tokio = { version = "1", features = ["fs", "io-util", "time", "net", "sync", "rt
 tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem", "rust_crypto"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # Used only by sandbox_proxy_inner: reqwest has no way to hand it a socket
 # that was connected from inside the sandbox's network namespace (see the
