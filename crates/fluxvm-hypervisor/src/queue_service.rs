@@ -21,6 +21,20 @@ use crate::kvm::KvmVm;
 use crate::memory::GuestMemory;
 use crate::tap::Tap;
 use crate::vhost::VhostNet;
+
+/// Per-notify/per-poll device diagnostics (`[blk] processed ...`, the
+/// periodic `[net]` stats line, ...) are opt-in via this env var. They are
+/// pure noise on a healthy boot, and each is one independent `eprintln!`
+/// call racing the serial device's own per-byte `io::stdout()` lock
+/// (`devices/serial.rs`) from a different thread: printed by default, they
+/// can land mid-line of the guest's own console output and corrupt any test
+/// harness that scrapes the combined stdout+stderr stream (observed:
+/// `scripts/test-kvm-topology.sh` losing/garbling a `TOPO_CPUINFO` line).
+/// Error paths stay unconditional; they are rare and worth seeing.
+fn verbose_io() -> bool {
+    static VERBOSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERBOSE.get_or_init(|| std::env::var_os("FLUXVM_VERBOSE_IO").is_some())
+}
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -207,7 +221,11 @@ impl QueueService {
                     });
                 if ready {
                     match v.program_vrings(self.mem.host_ptr(), self.mem.len(), &qs) {
-                        Ok(()) => eprintln!("[net] vhost VRING GPA programmed (H3)"),
+                        Ok(()) => {
+                            if verbose_io() {
+                                eprintln!("[net] vhost VRING GPA programmed (H3)");
+                            }
+                        }
                         Err(e) => {
                             eprintln!(
                                 "[net] vhost-net cannot program vrings ({e}); falling back to userspace virtio-net"
@@ -262,7 +280,9 @@ impl QueueService {
             Some(self.blk_limiter.as_ref()),
         ) {
             Ok(n) => {
-                eprintln!("[blk] processed q={q} reqs={n}");
+                if verbose_io() {
+                    eprintln!("[blk] processed q={q} reqs={n}");
+                };
                 drop(st);
                 blk.raise_vring_interrupt();
             }
@@ -279,7 +299,9 @@ impl QueueService {
         {
             Ok(n) => {
                 if n > 0 {
-                    eprintln!("[vsock] processed q={q} pkts={n}");
+                    if verbose_io() {
+                        eprintln!("[vsock] processed q={q} pkts={n}");
+                    };
                 }
                 drop(st);
                 vsock.raise_vring_interrupt();
@@ -296,7 +318,9 @@ impl QueueService {
         match virtio_balloon::handle_notify(&mut self.mem, &mut st, q) {
             Ok(n) => {
                 if n > 0 {
-                    eprintln!("[balloon] q={q} bufs={n}");
+                    if verbose_io() {
+                        eprintln!("[balloon] q={q} bufs={n}");
+                    };
                 }
                 drop(st);
                 balloon.raise_vring_interrupt();
@@ -311,7 +335,9 @@ impl QueueService {
         match virtio_rng::handle_notify(&mut self.mem, &mut st, q) {
             Ok(n) => {
                 if n > 0 {
-                    eprintln!("[rng] q={q} bufs={n}");
+                    if verbose_io() {
+                        eprintln!("[rng] q={q} bufs={n}");
+                    };
                 }
                 drop(st);
                 rng.raise_vring_interrupt();
@@ -433,7 +459,9 @@ fn worker(
             last_log = std::time::Instant::now();
             let line = svc.lock().unwrap().net_stats_line();
             if line != last_stats {
-                eprintln!("{line}");
+                if verbose_io() {
+                    eprintln!("{line}");
+                }
                 last_stats = line;
             }
         }
@@ -493,7 +521,9 @@ fn worker(
             }
         }
     }
-    eprintln!("{}", svc.lock().unwrap().net_stats_line());
+    if verbose_io() {
+        eprintln!("{}", svc.lock().unwrap().net_stats_line());
+    }
     for b in &bindings {
         close_eventfd(b.fd);
     }
