@@ -188,6 +188,46 @@ impl VmManager {
         bail!("guest agent did not answer within {AGENT_READY_DEADLINE:?}: {last}")
     }
 
+    /// Restore a running QEMU, Cloud Hypervisor or Firecracker VM from a
+    /// snapshot tag by stopping the VMM process and relaunching it from the
+    /// snapshot (reusing the same well-tested `stop`/`start_from_snapshot`
+    /// paths a stopped-VM restore already takes). Unlike flux-vm's in-place
+    /// restore this gets a new pid and, for network VMs, a fresh tap/netns —
+    /// but the VM id, workspace and vsock socket path are unchanged, so the
+    /// guest agent reconnects once boot completes. This is not literally
+    /// "in-place", but it produces the same observable result restore/dry-run
+    /// need: the guest's disk and memory state revert to the snapshot, and
+    /// the VM ends up running again.
+    ///
+    /// QEMU and Cloud Hypervisor snapshots are self-contained (qcow2
+    /// internal snapshot / CH's own state+memory files respectively) and
+    /// don't need flux-vm's disk-swap step; `start_from_snapshot` already
+    /// handles loading them for a stopped VM, which is exactly the state
+    /// this function puts the VM into first. Unlike flux-vm's tag, these
+    /// backends don't necessarily leave a `workspace/snapshots/<tag>`
+    /// directory behind, so existence is left to `start_from_snapshot`
+    /// (and, beneath it, each backend's own loader) to check.
+    async fn restore_other_backend_by_relaunch(
+        self: &Arc<Self>,
+        id: Uuid,
+        tag: &str,
+    ) -> Result<VmRecord> {
+        self.stop(id)
+            .await
+            .context("stopping the VM before restoring it from a snapshot")?;
+        let vm = self
+            .start_from_snapshot(id, tag)
+            .await
+            .context("relaunching the VM from the snapshot")?;
+        if vm.status != VmStatus::Running {
+            bail!(
+                "VM did not come back up after the snapshot relaunch (status={:?})",
+                vm.status
+            );
+        }
+        Ok(vm)
+    }
+
     async fn restore_fluxvm_in_place(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<VmRecord> {
         let mut vm = self.get(id).await?;
         let dest = vm.workspace.join("snapshots").join(tag);
@@ -275,13 +315,8 @@ impl VmManager {
         paths: Option<Vec<String>>,
     ) -> Result<DryRunReport> {
         let vm = self.get(id).await?;
-        if vm.backend != BackendKind::FluxVm {
-            return Err(RestoreError::Unsupported(format!(
-                "dry-run on a VM sandbox needs in-place snapshot restore, which only the \
-                 flux-vm backend implements (this one is {:?})",
-                vm.backend
-            ))
-            .into());
+        if let Some(e) = crate::snapshot_backend_error(vm.backend) {
+            return Err(RestoreError::Unsupported(e).into());
         }
         if vm.status != VmStatus::Running {
             return Err(RestoreError::Conflict(format!(
@@ -342,7 +377,11 @@ impl VmManager {
         .await;
 
         // Always try to put the guest back, whatever the command did.
-        let restored = self.restore_fluxvm_in_place(id, &tag).await;
+        let restored = if vm.backend == BackendKind::FluxVm {
+            self.restore_fluxvm_in_place(id, &tag).await
+        } else {
+            self.restore_other_backend_by_relaunch(id, &tag).await
+        };
         if restored.is_ok() {
             if let Err(e) = self.wait_for_agent(id).await {
                 tracing::warn!(%id, "guest agent did not return after the dry-run restore: {e:#}");

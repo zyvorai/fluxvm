@@ -91,7 +91,7 @@ POST   /v1/sandboxes/{id}/snapshot
 POST   /v1/sandboxes/{id}/fs/read
 POST   /v1/sandboxes/{id}/fs/write
 POST   /v1/sandboxes/{id}/process
-POST   /v1/sandboxes/{id}/dry-run        # {"command", "paths"}; procbox: workspace copy; flux-vm: snapshot/restore
+POST   /v1/sandboxes/{id}/dry-run        # {"command", "paths"}; procbox: workspace copy; flux-vm/qemu/firecracker: snapshot/restore
 ANY    /v1/sandboxes/{id}/http/{port}/{*path}
 ANY    /sandbox/{id}/{*path}
 GET    /v1/vms/{uuid}/network/policy

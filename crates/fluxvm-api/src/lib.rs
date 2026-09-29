@@ -4422,7 +4422,9 @@ mod tests {
             vm.request.tenant = Some("acme".into());
             let id = vm.id;
             m.store.insert(vm).await.unwrap();
-            // A running non-flux-vm sandbox cannot restore in place: 501.
+            // A running non-flux-vm sandbox can also dry-run (restore-by-relaunch);
+            // it hits the same "no reachable agent" conflict as flux-vm here since
+            // the fixture has no vsock CID, never a fake 501.
             let mut qemu = fixture(BackendKind::Qemu, VmStatus::Running, true);
             qemu.request.tenant = Some("acme".into());
             let qid = qemu.id;
@@ -4469,8 +4471,8 @@ mod tests {
                 Some(r#"{"command":"true","paths":["/work"]}"#),
             )
             .await;
-            assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{msg}");
-            assert!(msg.contains("flux-vm"), "{msg}");
+            assert_eq!(st, StatusCode::CONFLICT, "{msg}");
+            assert!(msg.contains("agent"), "{msg}");
         }
 
         #[tokio::test]

@@ -89,7 +89,9 @@ A rename appears as one deletion plus one addition. Lists are sorted.
 `POST /v1/sandboxes/{id}/dry-run` `{ "command": "...", "paths": ["/work"] }`
 runs the command, reports what it changed under `paths` and puts the guest back
 exactly as it was: memory, running processes and the disk. Native flux-vm
-(`fluxvm_engine = "kvm"`) sandboxes with the guest agent enabled support it;
+(`fluxvm_engine = "kvm"`), QEMU and Firecracker sandboxes with the guest agent
+enabled support it (Cloud Hypervisor is never reachable as a sandbox backend at
+all -- see [Backend coverage](#backend-coverage) below);
 `paths` is required (the guest root is too large to scan). The response is the
 exec result plus `changes`, `discarded: true` and `reverted_via: "snapshot"`
 (procbox sandboxes report `"workspace-copy"`).
@@ -114,13 +116,38 @@ worked. A command that fails or times out still gets the guest restored.
 - Restore waits for the guest agent to answer again (a restored or just-paused
   guest refuses vsock for a moment), up to 60 s.
 
+### Backend coverage
+
+`create_sandbox` always forces flux-vm for a client-supplied `spec`; only an
+operator-authored *template* may opt into QEMU or Firecracker. Cloud
+Hypervisor is never selectable as a sandbox backend at all -- a template
+cannot pick it either -- so `POST /v1/sandboxes/{id}/dry-run` can only ever
+be called on a flux-vm, QEMU or Firecracker sandbox in practice, no matter
+what this section says CloudHypervisor could theoretically do at the plain
+`/v1/vms` level.
+
+For QEMU and Firecracker, "restore" is not literally in-place the way
+flux-vm's is. `restore_other_backend_by_relaunch` stops the VMM process and
+relaunches it via the same `start_from_snapshot` path a stopped VM's restore
+already uses (QEMU: internal qcow2 snapshot + `-loadvm`; Firecracker:
+`/snapshot/load`). The new process gets a new pid and, for networked VMs, a
+fresh tap/netns, but the VM id, workspace and vsock socket path are
+unchanged, so the guest agent reconnects once boot completes and dry-run's
+before/after semantics hold. This is only used internally by dry-run's own
+restore step, on a VM dry-run has already put into a "may be mid-command"
+state; it is not exposed as generic behavior on the explicit restore route
+below.
+
 ### `POST /v1/vms/{id}/restore` `{ "tag": "..." }`
 
 Admin-only, tenant-scoped. A running or paused flux-vm VM is restored in place
-as above; a stopped VM takes the existing start-from-snapshot path. 404 for an
-unknown VM or tag, 400 for a bad tag, 409 if another restore or dry-run is
-already running on the VM or the VM is a running non-flux-vm backend (stop it
-first), 501 if the backend cannot snapshot.
+as above; a stopped VM (any backend) takes the existing start-from-snapshot
+path. A *running* QEMU, Cloud Hypervisor or Firecracker VM is refused with
+409 telling the caller to stop it first -- this route never silently stops
+and relaunches a VM the caller didn't ask to stop, unlike dry-run's internal
+relaunch above. 404 for an unknown VM or tag, 400 for a bad tag, 409 if
+another restore or dry-run is already running on the VM, 501 if the backend
+cannot snapshot at all.
 
 ### Limits
 
@@ -132,7 +159,11 @@ first), 501 if the backend cannot snapshot.
   existed at snapshot time are gone from the host side. Nothing outside the VM
   is reverted: files on shared folders, volumes or remote services the command
   touched stay changed.
-- Only native flux-vm; QEMU, Cloud Hypervisor and Firecracker sandboxes answer 501.
+- Flux-vm, QEMU and Firecracker sandboxes support dry-run (Cloud Hypervisor
+  sandboxes don't exist -- see [Backend coverage](#backend-coverage)). For
+  QEMU/Firecracker the relaunch-based restore costs a full VMM restart (new
+  pid, network re-prepared) each round, on top of the snapshot/restore cost
+  above -- slower than flux-vm's true in-place restore.
 - One restore or dry-run at a time per VM (409 otherwise).
 
 ## Example
@@ -163,3 +194,45 @@ was back, the counter was rewound to the snapshot instant and kept counting, the
 agent answered and the VM was `running`. The explicit `restore` route and its 404
 for an unknown tag were checked in the same run, no `dryrun-*` snapshot was left
 behind and the golden image's checksum was unchanged.
+
+## Verified live (2026-09-29): QEMU and Firecracker sandboxes
+
+Extended the same live pattern to QEMU and Firecracker with
+`scripts/test-vm-dry-run-multi.sh`: an operator-template sandbox (client
+specs can't pick these backends), `network.mode=none`, three consecutive
+dry-runs each creating a file and deleting a marker, plus the explicit
+`POST /v1/vms/{id}/restore` route exercised via an explicit stop first. For
+both backends: every dry-run round reported the correct `changes` with
+`discarded: true, reverted_via: "snapshot"`, the guest reverted, the agent
+kept answering and the VM stayed `running`; a restore attempted on a
+*running* VM through the explicit route correctly got 409; and the
+stop -> snapshot -> mutate -> stop -> restore -> start sequence on the
+explicit route correctly reverted the guest.
+
+This surfaced and fixed three real bugs, none flux-vm-specific:
+
+- `restore_other_backend_by_relaunch` checked for a
+  `workspace/snapshots/<tag>` directory before restoring, which flux-vm
+  snapshots have but QEMU (internal qcow2 snapshot) and Cloud Hypervisor
+  (their own state/memory files) do not -- this made every non-flux-vm
+  dry-run fail immediately with a false "snapshot not found". Removed; the
+  existence check now happens where it belongs, inside each backend's own
+  loader.
+- Firecracker's `/snapshot/load` request body used the `uds_path` field
+  name and shape from an older Firecracker API version. Firecracker 1.17
+  (the version on this lab host) rejects it with a 400 and expects
+  `vsock_override: { uds_path }` instead -- fixed in
+  `fluxvm-firecracker/src/snapshot.rs`. This bug pre-dates this change and
+  would have broken *any* Firecracker snapshot restore with the guest
+  agent enabled, not just dry-run.
+- The same restore path didn't remove the previous process's vsock Unix
+  socket file before the new Firecracker process tried to bind it, so a
+  second restore into the same workspace failed with `EADDRINUSE`. Fixed by
+  unlinking it first, same as the existing API-socket cleanup right above
+  it in the same function.
+
+Not live-tested: Cloud Hypervisor. `create_sandbox` never selects it (see
+[Backend coverage](#backend-coverage)), so there is no sandbox route to test
+it through. A plain-VM probe against `/v1/vms` (create with
+`backend: "cloud-hypervisor"`, not a sandbox) was attempted separately; see
+that result before relying on CloudHypervisor's restore path for anything.
