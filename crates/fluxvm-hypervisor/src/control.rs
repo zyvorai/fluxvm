@@ -370,7 +370,7 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
             }
         }
         ApiRequest::HotplugCpu { add } => {
-            let st = state.lock().await;
+            let mut st = state.lock().await;
             let current = st.boot.as_ref().map(|b| b.vcpus).unwrap_or(0);
             let max = st
                 .boot
@@ -378,15 +378,35 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                 .and_then(|b| b.max_vcpus)
                 .unwrap_or(current);
             match crate::hotplug::plan_add_vcpu(current, max, add) {
-                Ok(plan) => ApiResponse::Ok {
-                    message: format!(
-                        "cpu hotplug planned: +{} ({}→{}), next_id={}",
-                        plan.add,
-                        plan.current,
-                        plan.current + plan.add,
-                        plan.next_id
-                    ),
-                },
+                Ok(plan) => {
+                    // The extra vCPUs already exist: from_boot_config/run_until
+                    // create every vCPU up to max_cpus at boot time (parked,
+                    // correct final CPUID, present in the MP table) and cap
+                    // Linux's auto-onlining at `cpus` via `maxcpus=` on the
+                    // cmdline. So "hotplug" here is bookkeeping plus telling
+                    // the guest which already-present cpuN entries to online
+                    // itself — no new vCPU is created and no host-side
+                    // INIT-SIPI-SIPI is injected.
+                    if let Some(b) = st.boot.as_mut() {
+                        b.vcpus = plan.current + plan.add;
+                    }
+                    st.touch();
+                    let online_cmds: Vec<String> = (plan.current..plan.current + plan.add)
+                        .map(|id| format!("echo 1 > /sys/devices/system/cpu/cpu{id}/online"))
+                        .collect();
+                    ApiResponse::Ok {
+                        message: format!(
+                            "cpu hotplug ready: +{} ({}→{}); vcpu{} already present (booted with maxcpus={}, max_cpus={}) — bring up from inside the guest: {}",
+                            plan.add,
+                            plan.current,
+                            plan.current + plan.add,
+                            if plan.add == 1 { "" } else { "s" },
+                            plan.current,
+                            max,
+                            online_cmds.join(" && ")
+                        ),
+                    }
+                }
                 Err(e) => ApiResponse::Error {
                     message: format!("{e:#}"),
                 },

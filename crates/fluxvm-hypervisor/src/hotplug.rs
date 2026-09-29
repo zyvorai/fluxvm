@@ -3,10 +3,22 @@
 
 //! H4 / P3: CPU and disk hotplug for the in-tree KVM engine.
 //!
-//! CPU hotplug follows the Cloud Hypervisor model: reserve `max_cpus` at
-//! create time, then `KVM_CREATE_VCPU` for additional ids while the VM is
-//! paused (control path). Disk hotplug validates a host image and returns a
-//! slot plan the VMM attaches as another virtio-blk MMIO window.
+//! CPU hotplug: there is no ACPI/firmware layer to hot-add a device to, so
+//! every vCPU up to `max_cpus` is really created at VM boot (see
+//! `vm.rs::from_boot_config`/`run_until`) with correct final-topology CPUID
+//! and an MP-table entry from the start; a `maxcpus=<cpus>` kernel argument
+//! keeps Linux from auto-onlining more than `cpus` of them. "Hotplug" is
+//! then the control plane (`control.rs::ApiRequest::HotplugCpu`) validating
+//! headroom via `plan_add_vcpu` below and telling the guest which
+//! already-present `cpuN` to bring up itself via the standard
+//! `echo 1 > /sys/devices/system/cpu/cpuN/online` path — the same
+//! guest-issued INIT-SIPI-SIPI machinery that already brings up boot-time
+//! APs, so no host-side SIPI injection is needed. `add_vcpu` below (runtime
+//! `KVM_CREATE_VCPU` on a live, already-running KVM instance) is kept as a
+//! lower-level primitive for a possible future non-preallocated design but
+//! is not on the current hotplug path. Disk hotplug validates a host image
+//! and returns a slot plan the VMM attaches as another virtio-blk MMIO
+//! window.
 
 use crate::error::{FluxError, Result};
 use crate::kvm::KvmVm;

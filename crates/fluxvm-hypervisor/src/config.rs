@@ -171,8 +171,13 @@ impl VmConfig {
         if self.cpus == 0 || self.cpus > 32 {
             return Err(FluxError::Unsupported("cpus must be 1..=32".into()));
         }
-        if self.max_cpus < self.cpus || self.max_cpus > 32 {
-            return Err(FluxError::Unsupported("max_cpus must be cpus..=32".into()));
+        // H4: every vCPU up to max_cpus is now really created at boot (see
+        // vm.rs::run_until) and must have a matching mptable.rs MP-table
+        // entry, which is clamped to 8 processors (the proven SMP envelope).
+        // A max_cpus above that would create vCPUs with no MP-table entry —
+        // invisible to the guest and never onlineable.
+        if self.max_cpus < self.cpus || self.max_cpus > 8 {
+            return Err(FluxError::Unsupported("max_cpus must be cpus..=8".into()));
         }
         if self.memory_mib < 64 {
             return Err(FluxError::Unsupported("memory-mib must be >= 64".into()));
@@ -242,5 +247,22 @@ mod tests {
         assert!(cfg.validate().is_err());
         cfg.vsock_uds = Some(PathBuf::from("/tmp/fluxvm-vsock-test.sock"));
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn max_cpus_must_cover_cpus_and_stay_within_mptable_cap() {
+        let mut cfg = VmConfig::default();
+        cfg.cpus = 2;
+        cfg.max_cpus = 4;
+        assert!(cfg.validate().is_ok(), "2..=4 headroom should be valid");
+
+        cfg.max_cpus = 1; // below cpus
+        assert!(cfg.validate().is_err());
+
+        cfg.max_cpus = 9; // above the 8-processor mptable envelope
+        assert!(cfg.validate().is_err());
+
+        cfg.max_cpus = 8;
+        assert!(cfg.validate().is_ok(), "8 is the max supported headroom");
     }
 }
