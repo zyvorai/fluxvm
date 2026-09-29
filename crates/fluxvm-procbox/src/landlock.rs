@@ -495,6 +495,10 @@ mod tests {
     fn unrestricted_net_is_not_reported_as_a_gap() {
         let mut p = strict();
         p.scope_ipc = false;
+        // Deliberately unrestricted (the default is now deny-by-default, so
+        // this must be requested explicitly to exercise the "not a gap" path).
+        p.tcp_connect = TcpRule::Any;
+        p.tcp_bind = TcpRule::Any;
         let plan = plan(&p, 3).unwrap();
         assert!(plan
             .enforcement

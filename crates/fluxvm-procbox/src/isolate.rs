@@ -750,12 +750,14 @@ mod tests {
     #[test]
     fn net_isolation_only_when_no_tcp_is_granted() {
         let mut p = Policy::default();
-        assert!(!wants_net_isolation(&p));
-        p.tcp_connect = TcpRule::Deny;
-        assert!(!wants_net_isolation(&p));
-        p.tcp_bind = TcpRule::Deny;
+        // Deny-by-default: a bare policy denies both connect and bind, so it
+        // gets its own empty network namespace under isolation too.
         assert!(wants_net_isolation(&p));
         p.tcp_connect = TcpRule::Ports(vec![443]);
+        assert!(!wants_net_isolation(&p));
+        p.tcp_connect = TcpRule::Deny;
+        assert!(wants_net_isolation(&p));
+        p.tcp_bind = TcpRule::Ports(vec![8080]);
         assert!(!wants_net_isolation(&p));
     }
 
