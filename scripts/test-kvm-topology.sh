@@ -74,6 +74,7 @@ for d in /sys/devices/system/cpu/cpu[0-9]*; do
   echo "TOPO cpu=$n core=$(cat $t/core_id) pkg=$(cat $t/physical_package_id) tsib=$(cat $t/thread_siblings_list) csib=$(cat $t/core_siblings_list)"
 done
 echo "TOPO_NPROC=$(grep -c '^cpu[0-9]' /proc/stat)"
+echo "TOPO_VENDOR=$(grep -m1 '^vendor_id' /proc/cpuinfo | cut -d: -f2 | tr -d ' ')"
 echo "TOPO_CPUINFO siblings=$(grep -m1 '^siblings' /proc/cpuinfo | cut -d: -f2 | tr -d ' ') cores=$(grep -m1 '^cpu cores' /proc/cpuinfo | cut -d: -f2 | tr -d ' ')"
 echo FLUXVM_TOPO_DONE
 echo FLUXVM_STDIN_OK
@@ -96,6 +97,7 @@ grep -aE '^(TOPO|FLUXVM_)' "$LOG" | sed 's/\r$//' || true
 if [ -n "${TOPO_LOG_COPY:-}" ]; then cp "$LOG" "$TOPO_LOG_COPY"; fi
 
 python3 - "$LOG" "$CPUS" <<'PY'
+import os
 import re
 import sys
 
@@ -122,8 +124,12 @@ def first(pattern):
     return None
 nproc = first(r"^TOPO_NPROC=(\d+)$")
 info = first(r"^TOPO_CPUINFO siblings=(\d*) cores=(\d*)$")
+vendor = first(r"^TOPO_VENDOR=(\S*)$")
+want_vendor = os.environ.get("WANT_VENDOR_ID")
 text = dump + "\n" + live
 errs = []
+if want_vendor and (not vendor or vendor.group(1) != want_vendor):
+    errs.append(f"vendor_id={vendor.group(1) if vendor else None!r}, want {want_vendor!r}")
 if not info:
     errs.append("no /proc/cpuinfo siblings/cpu cores line")
 elif (info.group(1), info.group(2)) != (str(want), str(want)):

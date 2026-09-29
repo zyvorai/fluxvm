@@ -14,8 +14,17 @@
 //! Intel: leaf 1 (logical processor count, HTT), leaf 4 (cores per package and
 //! cache sharing), leaf 0xB and 0x1F (extended topology, x2APIC id in EDX).
 //! AMD: leaf 0xB plus 0x80000008 (core count) and 0x8000001E (extended APIC /
-//! core id). The AMD paths follow the APM and Firecracker but have not been
-//! run on AMD hardware.
+//! core id), with 0x80000001 ECX[22] (TopologyExtensions) forced on so a guest
+//! kernel actually reads 0x8000001E — Firecracker never needs this because it
+//! only supports AMD-on-AMD and passes 0x80000001 through from real hardware,
+//! where the bit is already set; we synthesize AMD identity independently of
+//! the host, so nothing else guarantees it. Bit-for-bit cross-checked against
+//! the AMD64 Architecture Programmer's Manual Volume 3 and against
+//! `arch/x86/kernel/cpu/amd.c` (`amd_get_topology`, `bsp_init_amd`) and
+//! Firecracker's own `src/vmm/src/cpu_config/x86_64/cpuid/amd/normalize.rs`.
+//! Never run on real AMD silicon (this lab host is Intel-only), which would
+//! exercise AMD-specific MSRs, errata and power management this CPUID-only
+//! approach cannot represent.
 
 /// One `kvm_cpuid_entry2` (same layout, `#[repr(C)]`).
 #[repr(C)]
@@ -166,13 +175,24 @@ pub fn apply(
                     | (sharing.min(0xfff) << 14)
                     | ((cores - 1).min(0x3f) << 26);
             }
+            0x8000_0001 if vendor == Vendor::Amd => {
+                // ECX[22] = TopologyExtensions. Firecracker never has to set this:
+                // it only supports AMD guests on real AMD hosts and passes leaf
+                // 0x8000_0001 through untouched, where hardware already reports it.
+                // We synthesize AMD identity ourselves (no real AMD host CPUID to
+                // inherit it from), so without this bit Linux's amd_get_topology()
+                // never even reads leaf 0x8000001e below — the whole leaf would be
+                // silently dead weight. Force it whenever the guest is AMD.
+                e.ecx |= 1 << 22;
+            }
             0x8000_0008 if vendor == Vendor::Amd => {
                 // ECX[7:0] = number of cores - 1, ECX[15:12] = APIC id size.
                 e.ecx = (e.ecx & !0xf0ff) | ((n - 1) & 0xff) | (ceil_log2(n).min(0xf) << 12);
             }
             0x8000_001e if vendor == Vendor::Amd => {
                 // EAX = extended APIC id; EBX[7:0] core id, EBX[15:8] threads
-                // per core - 1; ECX node id / nodes per package - 1 (one node).
+                // per core - 1; ECX[7:0] node id, ECX[10:8] nodes per package - 1
+                // (one node, matches Firecracker's NODES_PER_PROCESSOR = 0).
                 e.eax = t.apic_id;
                 e.ebx = ((t.apic_id / t.threads_per_core) & 0xff) | ((t.threads_per_core - 1) << 8);
                 e.ecx = 0;
@@ -239,6 +259,9 @@ mod tests {
             e(0x1f, 0, 1, 2, 1 << 8, 7),
             e(0x1f, 1, 4, 12, 1 | (2 << 8), 7),
             e(0x1f, 2, 0, 0, 2, 7),
+            // TopologyExtensions (ECX[22]) starts unset, as it would on a
+            // non-AMD host with no real leaf to inherit it from.
+            e(0x8000_0001, 0, 0, 0, 0x2193_fbff, 0),
             e(0x8000_0008, 0, 0x3027, 0, 0x000b, 0),
             e(0x8000_001e, 0, 9, 9, 9, 9),
         ]
@@ -375,6 +398,88 @@ mod tests {
         apply(&mut i, topo(4, 1, 3), 256).unwrap();
         assert_eq!(get(&i, 0x8000_0008, 0).ecx, 0x000b, "Intel leaf untouched");
         assert_eq!(get(&i, 0x8000_001e, 0).eax, 9);
+    }
+
+    #[test]
+    fn amd_topology_extensions_bit_is_forced_on_so_leaf_1e_is_not_dead_weight() {
+        let mut a = host(AUTHENTIC_AMD);
+        assert_eq!(
+            get(&a, 0x8000_0001, 0).ecx & (1 << 22),
+            0,
+            "fixture starts with TopologyExtensions unset, like a non-AMD host"
+        );
+        apply(&mut a, topo(4, 1, 0), 256).unwrap();
+        let ecx = get(&a, 0x8000_0001, 0).ecx;
+        assert_eq!(ecx & (1 << 22), 1 << 22, "TopologyExtensions forced on");
+        // every other feature bit the fixture set is left alone
+        assert_eq!(ecx & !(1 << 22), 0x2193_fbff & !(1 << 22));
+
+        // Intel's leaf 0x8000_0001 (`host()` gives every vendor one, the way a
+        // real CPU does) is never touched: bit 22 has no defined meaning
+        // there, and the match arm above is gated on vendor == Amd.
+        let mut i = host(GENUINE_INTEL);
+        let intel_ecx_before = get(&i, 0x8000_0001, 0).ecx;
+        apply(&mut i, topo(4, 1, 0), 256).unwrap();
+        assert_eq!(get(&i, 0x8000_0001, 0).ecx, intel_ecx_before);
+    }
+
+    /// Independent "oracle": decodes leaf 0x8000_0008 / 0x8000_001E exactly as
+    /// `arch/x86/kernel/cpu/amd.c` does (`bsp_init_amd`'s `x86_coreid_bits`
+    /// selection, `amd_get_topology`'s `smp_num_siblings`/`cpu_core_id`), so
+    /// this test does not just check the implementation against itself.
+    fn kernel_amd_coreid_bits(ecx_8000_0008: u32) -> u32 {
+        let apic_id_size = (ecx_8000_0008 >> 12) & 0xf;
+        if apic_id_size != 0 {
+            apic_id_size
+        } else {
+            // get_count_order(NC + 1)
+            let nc = ecx_8000_0008 & 0xff;
+            ceil_log2(nc + 1)
+        }
+    }
+
+    #[test]
+    fn amd_every_core_count_from_1_to_128_decodes_the_way_the_kernel_would() {
+        for n in 1u32..=128 {
+            let mut v = host(AUTHENTIC_AMD);
+            apply(&mut v, topo(n, 1, 0), 256).unwrap();
+            let l8 = get(&v, 0x8000_0008, 0);
+            assert_eq!(l8.ecx & 0xff, n - 1, "n={n} NC");
+            let bits = kernel_amd_coreid_bits(l8.ecx);
+            // amd_detect_cmp(): cpu_core_id = initial_apicid & ((1<<bits)-1);
+            // phys_proc_id = initial_apicid >> bits. A single package must
+            // decode every apic id 0..n as core ids 0..n with phys_proc_id 0.
+            for apic_id in 0..n {
+                let core_id = apic_id & ((1u32 << bits) - 1);
+                let phys_proc_id = apic_id >> bits;
+                assert_eq!(core_id, apic_id, "n={n} apic_id={apic_id} core_id");
+                assert_eq!(phys_proc_id, 0, "n={n} apic_id={apic_id} single package");
+            }
+        }
+    }
+
+    #[test]
+    fn amd_apic_id_size_bit_width_boundaries() {
+        // ceil_log2 crosses a power-of-two boundary at 7/8/9 cores (3 bits
+        // covers up to 8, 4 bits needed for 9).
+        for (n, want_bits) in [(6u32, 3u32), (7, 3), (8, 3), (9, 4), (16, 4), (17, 5)] {
+            let mut v = host(AUTHENTIC_AMD);
+            apply(&mut v, topo(n, 1, 0), 256).unwrap();
+            let bits = get(&v, 0x8000_0008, 0).ecx >> 12 & 0xf;
+            assert_eq!(bits, want_bits, "n={n}");
+        }
+    }
+
+    #[test]
+    fn amd_smt_threads_per_core_in_extended_apic_id_leaf() {
+        // Matches Firecracker's update_extended_apic_id_entry(): EBX[7:0] is
+        // apic_id / threads_per_core (the core id), EBX[15:8] is
+        // threads_per_core - 1.
+        let mut v = host(AUTHENTIC_AMD);
+        apply(&mut v, topo(8, 2, 5), 256).unwrap();
+        let l1e = get(&v, 0x8000_001e, 0);
+        assert_eq!(l1e.ebx & 0xff, 5 / 2, "core id");
+        assert_eq!(l1e.ebx >> 8 & 0xff, 1, "threads per core - 1");
     }
 
     #[test]

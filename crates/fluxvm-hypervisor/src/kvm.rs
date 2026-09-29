@@ -710,6 +710,40 @@ impl KvmVm {
                     }
                 }
             }
+            // TEMPORARY test-only hook (not for production use): lets
+            // scripts/test-kvm-topology-amd-spoof.sh exercise the guest
+            // kernel's real AMD topology-detection path on this Intel lab
+            // host, which has no AMD silicon to test against otherwise.
+            // Rewrites the host-reported leaves to look like a real AMD
+            // host's KVM_GET_SUPPORTED_CPUID would (vendor string, extended
+            // leaf ceiling, and a placeholder 0x8000001E entry so
+            // cpuid_topology::apply()'s AMD arms -- which only ever mutate
+            // leaves already present, matching how they behave on real
+            // hardware -- have something to fill in). Never enabled by
+            // default; read once, here, nowhere else in the product code.
+            if std::env::var("FLUXVM_TEST_SPOOF_AMD_VENDOR").as_deref() == Ok("1") {
+                for e in leaves.iter_mut() {
+                    if e.function == 0 && e.index == 0 {
+                        (e.ebx, e.ecx, e.edx) = (0x6874_7541, 0x444d_4163, 0x6974_6e65);
+                    }
+                    if e.function == 0x8000_0000 {
+                        e.eax = e.eax.max(0x8000_001e);
+                    }
+                }
+                if !leaves.iter().any(|e| e.function == 0x8000_001e) {
+                    leaves.push(Entry {
+                        function: 0x8000_001e,
+                        index: 0,
+                        flags: 0,
+                        eax: 0,
+                        ebx: 0,
+                        ecx: 0,
+                        edx: 0,
+                        padding: [0; 3],
+                    });
+                }
+                eprintln!("[kvm] FLUXVM_TEST_SPOOF_AMD_VENDOR=1: vcpu{idx} CPUID vendor forced to AuthenticAMD");
+            }
             // Topology: leaves 1, 4, 0xB, 0x1F (and AMD 0x80000008 /
             // 0x8000001E) describe the guest's own package, not the host's.
             crate::cpuid_topology::apply(
