@@ -162,18 +162,35 @@ impl VirtualMachine {
             }
             cfg.cmdline.push_str("pci=off");
         }
+        // H4: reserve `max_cpus` vCPUs at boot (see run_until) but only let
+        // Linux auto-online `cpus` of them; the rest sit present-but-offline
+        // and the guest brings them up itself via the normal
+        // `echo 1 > /sys/devices/system/cpu/cpuN/online` hotplug path —
+        // the same native SIPI machinery already used for boot-time SMP.
+        if cfg.max_cpus > cfg.cpus
+            && !cfg
+                .cmdline
+                .split_whitespace()
+                .any(|t| t.starts_with("maxcpus="))
+        {
+            if !cfg.cmdline.is_empty() && !cfg.cmdline.ends_with(' ') {
+                cfg.cmdline.push(' ');
+            }
+            cfg.cmdline.push_str(&format!("maxcpus={}", cfg.cpus));
+        }
 
         let mut mem = GuestMemory::allocate(cfg.memory_bytes())?;
         let _cr3 = boot::build_identity_page_tables(&mut mem)?;
         let boot_info = boot::prepare(&mut mem, &cfg)?;
         let mut notes = boot_info.notes;
-        if let Err(e) = crate::mptable::write_mptable(&mut mem, cfg.cpus) {
+        if let Err(e) = crate::mptable::write_mptable(&mut mem, cfg.max_cpus) {
             notes.push(format!("mptable write failed: {e}"));
         } else {
             notes.push(format!(
-                "MP table at GPA {:#x} (cpus={})",
+                "MP table at GPA {:#x} (cpus={}, max_cpus={})",
                 crate::mptable::MPFLOAT_GPA,
-                cfg.cpus
+                cfg.cpus,
+                cfg.max_cpus
             ));
         }
 
@@ -382,7 +399,12 @@ impl VirtualMachine {
         pause: Option<PauseHandles>,
     ) -> Result<String> {
         let cr3 = 0x8000u64;
-        let num_cpus = self.cfg.cpus.max(1);
+        // H4: create every vCPU up to max_cpus up front (parked, correct
+        // final-topology CPUID from the start) so a later hotplug is just
+        // the guest onlining an already-registered, already-running AP —
+        // see from_boot_config's `maxcpus=` cmdline arg, which keeps Linux
+        // from auto-onlining more than `cfg.cpus` of them at boot.
+        let num_cpus = self.cfg.max_cpus.max(self.cfg.cpus).max(1);
         let kvm = Arc::new(KvmVm::create(&self.mem, num_cpus)?);
         // Firecracker: register_irq(serial.interrupt_evt(), COM1_GSI=4).
         if let Some(fd) = self.serial.interrupt_evt() {
