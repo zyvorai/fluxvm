@@ -2,6 +2,78 @@
 
 ## 0.4.0 (unreleased)
 
+### Fixed
+- **Multi-vCPU KVM snapshot-restore clock desync.** `apply_vcpu` was missing
+  the `KVM_KVMCLOCK_CTRL` ioctl on restore (Firecracker's own restore order
+  does call it), so a 2+ vCPU FLUXKVM1 restore could resume with sibling
+  vCPUs' kvmclock bookkeeping disagreeing. Fixed and verified 30/30 clean
+  restores at 2 vCPUs (was 24/25 unfixed) — closed the `native-kvm` hosted-CI
+  flake this exposed.
+- **Guest virtio-net had no RX path.** The device could send but not deliver
+  inbound frames to the guest; added the bounds-checked descriptor-chain
+  walk and used-ring publish so DHCP/ping/TCP now work end to end
+  (`scripts/test-kvm-net.sh`). Also fixed a byte-swapped tap address
+  (`Tap::open` used `from_be_bytes` instead of `from_ne_bytes`).
+- **Two sources of `native-kvm` CI log-capture corruption.** A leftover
+  per-exit diagnostic `eprintln!` in `vm.rs` and a routine `[net]`/`[blk]`
+  queue-notify diagnostic could interleave mid-line with guest serial output
+  under hosted-runner load, dropping vCPUs from the topology smoke test's
+  parsed output. Both removed/quieted.
+- **`fluxvm-procbox`'s library `Policy::default()` was insecure** —
+  `tcp_connect`/`tcp_bind` defaulted to `Any`, silently skipping all socket
+  filtering for anyone constructing a bare `Policy` directly (the CLI and
+  scheduler integration already defaulted to `Deny` and were unaffected).
+  Now defaults to `Deny`/`Deny`.
+- **Firecracker snapshot restore used a stale API field.** `/snapshot/load`
+  had moved `uds_path` under `vsock_override: {uds_path}`; restoring a
+  Firecracker sandbox with the agent enabled silently broke. Also cleans up
+  a stale vsock socket file before rebinding.
+- **Dependabot alerts.** `jsonwebtoken` 9→10.4.0 (medium, type confusion in
+  algorithm handling — no call-site changes needed beyond enabling the
+  `rust_crypto` backend feature); website's Docusaurus toolchain pulled
+  vulnerable transitive `image-size`/`qs`/`serialize-javascript`/`uuid` —
+  pinned via `npm` `overrides` to patched versions, `npm audit` now clean.
+  The low-severity `lru` alert remains open: it's pinned by `ratatui 0.28.1`
+  inside the separate `guestkit` repo (a path dependency), not fixable from
+  this repo until `guestkit` bumps `ratatui` to a line that drops `lru`.
+
+### Added
+- **Full guest CPUID topology, AMD included.** Leaves 1/4/0xB/0x1F plus AMD
+  `0x8000_0008`/`0x8000_001E`; a real bug was found and fixed where AMD's
+  `TopologyExtensions` CPUID feature bit was never set, so an AMD guest
+  kernel would never even read the extended topology leaf. Validated with
+  spoofed `AuthenticAMD` vendor strings booting real Linux guests on the
+  (Intel) lab host at 1/2/4 vCPUs, since no AMD hardware is available.
+- **FLUXKVM1 v5 full-fidelity snapshots**, superseding the v4 line below:
+  XSAVE, XCRS, MSRs, LAPIC state, vCPU events, and debugregs per vCPU, plus
+  clock, IRQCHIP, and PIT state per VM. Backward-compatible with older
+  snapshot versions on load.
+- **Real, guest-visible CPU hotplug.** `HotplugCpu` previously only
+  validated a request and returned a fake success message. Every vCPU up to
+  `max_cpus` is now pre-created parked at boot (correct final-topology
+  CPUID, present in the MP table); a `maxcpus=<cpus>` kernel argument caps
+  auto-onlining, and the guest brings the rest online itself via the
+  standard `echo 1 > /sys/devices/system/cpu/cpuN/online` path. Verified
+  live, 2→4 vCPUs, 5/5 clean runs (`scripts/test-kvm-hotplug.sh`).
+- **VM sandbox dry-run beyond flux-vm.** `POST /v1/sandboxes/{id}/dry-run`
+  and `POST /v1/vms/{id}/restore` now also work on QEMU and Firecracker
+  sandboxes (stop + relaunch from the snapshot, since their snapshots are
+  self-contained), not just the in-tree flux-vm engine. Cloud Hypervisor
+  sandboxes don't exist as a create path, so there was nothing to extend
+  there.
+- **Egress proxy: HTTP/2 interception**, a response body cap, and a
+  transparent (non-explicit-proxy) redirect mode.
+- **`fluxvm-procbox` isolation and observability.** Namespace isolation that
+  no longer requires a user namespace in root mode, per-sandbox uid drop,
+  seccomp socket-arg denial, and a `learn` observation-sidecar mode that can
+  merge multiple runs.
+- **CI:** dedicated workflows exercising native KVM, agent-sandbox,
+  `fluxvm-procbox`, and the Python/Go SDKs end to end.
+
+### Changed
+- **README and social preview images redesigned** in an Apple.com-style
+  blue/white/orange-accent system (light + dark hero, OG cards).
+
 ### Added
 - **Native KVM hardening.** Preflight of a KVM snapshot before stopping the
   running guest, no silent cold-boot fallback when a native memory restore
