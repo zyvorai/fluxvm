@@ -19,7 +19,10 @@ No libvirtd. No XML. A REST API and a CLI that do the same thing on every backen
 [![Last commit](https://img.shields.io/github/last-commit/zyvorai/fluxvm/main?style=flat-square&color=0071e3&labelColor=1d1d1f)](https://github.com/zyvorai/fluxvm/commits/main)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-0071e3?style=flat-square&labelColor=1d1d1f&logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-[**Quick start**](#quick-start) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)
+[**Quick start**](#quick-start) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
+
+[![Book a demo](https://img.shields.io/badge/Book_a_demo-0071e3?style=for-the-badge)](https://zyvor.dev/schedule?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
+[![30-day PoC](https://img.shields.io/badge/30--day_PoC-1d1d1f?style=for-the-badge)](https://zyvor.dev/poc?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
 
 </div>
 
@@ -169,6 +172,8 @@ Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Copyright 20
 
 <div align="center">
 
-Part of the Zyvor platform ([Ecosystem](docs/ecosystem.md)). More at **[zyvor.dev](https://zyvor.dev?utm_source=github&utm_medium=fluxvm)**.
+Part of the Zyvor platform ([Ecosystem](docs/ecosystem.md)). More at **[zyvor.dev](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_footer)**.
+
+[Book a demo](https://zyvor.dev/schedule?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_footer) · [30-day PoC](https://zyvor.dev/poc?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_footer) · fallback: [sales@zyvor.dev](mailto:sales@zyvor.dev)
 
 </div>
