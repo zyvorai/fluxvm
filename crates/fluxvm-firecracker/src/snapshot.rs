@@ -141,9 +141,17 @@ pub async fn snapshot_restore(
         "resume_vm": true
     });
     if let Some(uds) = vsock_uds {
-        body.as_object_mut()
-            .unwrap()
-            .insert("uds_path".into(), json!(uds.display().to_string()));
+        // The previous process's vsock listener leaves this Unix socket
+        // file behind on disk (it isn't removed on exit), so the new
+        // process's bind() would otherwise fail with EADDRINUSE.
+        let _ = fs::remove_file(uds);
+        // Firecracker >= 1.x moved this from a top-level `uds_path` string
+        // to a `vsock_override: { uds_path }` struct in the
+        // `/snapshot/load` request body.
+        body.as_object_mut().unwrap().insert(
+            "vsock_override".into(),
+            json!({"uds_path": uds.display().to_string()}),
+        );
     }
     http::request(&api, "PUT", "/snapshot/load", Some(&body), API_TIMEOUT)
         .await
