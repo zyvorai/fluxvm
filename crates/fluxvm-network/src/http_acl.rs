@@ -27,6 +27,32 @@ impl Verdict {
     }
 }
 
+/// How much a [`LintFinding`] matters. Findings never change what the ACL does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LintSeverity {
+    Info,
+    Warn,
+    High,
+}
+
+/// Something in a rule set that is probably not what its author meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintFinding {
+    pub severity: LintSeverity,
+    /// Stable id, e.g. `deny_only`.
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// Hosts that hand out cloud instance credentials.
+const METADATA_HOSTS: &[&str] = &[
+    "169.254.169.254",
+    "169.254.170.2",
+    "100.100.100.200",
+    "fd00:ec2::254",
+    "metadata.google.internal",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Action {
     Allow,
@@ -60,6 +86,30 @@ impl Rule {
         self.path
             .as_deref()
             .is_none_or(|p| path_glob_match(p, path))
+    }
+
+    /// True when this (deny) rule matches every request the literal-host `allow` rule could
+    /// match. Conservative: it says yes only when it can tell, so a no is not a promise.
+    fn covers(&self, allow: &Rule) -> bool {
+        let method_ok = match (&self.method, &allow.method) {
+            (None, _) => true,
+            (Some(d), Some(a)) => d.eq_ignore_ascii_case(a),
+            (Some(_), None) => false,
+        };
+        let path_ok = match (&self.path, &allow.path) {
+            (None, _) => true,
+            (Some(d), _) if d == "/*" => true,
+            (Some(d), Some(a)) if !a.contains('*') => path_glob_match(d, a),
+            _ => false,
+        };
+        method_ok && path_ok && glob_match(&self.host, &allow.host)
+    }
+
+    fn same_as(&self, other: &Rule) -> bool {
+        self.action == other.action
+            && self.method == other.method
+            && self.host == other.host
+            && self.path == other.path
     }
 
     /// True when the rule constrains neither method nor path.
@@ -96,6 +146,86 @@ impl HttpAcl {
 
     fn has_allow(&self) -> bool {
         self.rules.iter().any(|r| r.action == Action::Allow)
+    }
+
+    /// Look for rule-set mistakes: a set that only denies (so everything else is allowed), an
+    /// allow that restricts nothing, an allow for a metadata address, an allow that a deny
+    /// always overrides, and repeated rules. Advisory only: it never changes what the ACL
+    /// decides, and an empty rule set has no findings.
+    pub fn lint(&self) -> Vec<LintFinding> {
+        let mut out = Vec::new();
+        let finding = |severity, code, message: String| LintFinding {
+            severity,
+            code,
+            message,
+        };
+
+        if self.is_active() && !self.has_allow() {
+            out.push(finding(
+                LintSeverity::Warn,
+                "deny_only",
+                "only deny rules: every request they do not match is allowed".into(),
+            ));
+        }
+
+        for (i, r) in self.rules.iter().enumerate() {
+            if r.action != Action::Allow {
+                continue;
+            }
+            let whole_host = r.covers_whole_host() && r.method.is_none();
+            if r.host == "*" && whole_host {
+                out.push(finding(
+                    LintSeverity::High,
+                    "allow_everything",
+                    format!(
+                        "{:?} allows every request; only deny rules restrict anything",
+                        r.source
+                    ),
+                ));
+            } else if r.host == "*" {
+                out.push(finding(
+                    LintSeverity::Warn,
+                    "allow_any_host",
+                    format!("{:?} allows any host for that method and path", r.source),
+                ));
+            }
+            let bare = r.host.trim_start_matches('[').trim_end_matches(']');
+            if METADATA_HOSTS.contains(&bare) {
+                out.push(finding(
+                    LintSeverity::High,
+                    "allow_metadata_host",
+                    format!(
+                        "{:?} allows a cloud metadata address, which can hand out instance credentials",
+                        r.source
+                    ),
+                ));
+            }
+            // A deny always wins, so an allow it fully covers can never match.
+            if !r.host.contains('*')
+                && let Some(d) = self
+                    .rules
+                    .iter()
+                    .find(|d| d.action == Action::Deny && d.covers(r))
+            {
+                out.push(finding(
+                    LintSeverity::Warn,
+                    "allow_never_matches",
+                    format!(
+                        "{:?} can never match: deny rule {:?} always wins",
+                        r.source, d.source
+                    ),
+                ));
+            }
+            if self.rules[..i].iter().any(|e| e.same_as(r)) {
+                out.push(finding(
+                    LintSeverity::Info,
+                    "duplicate_rule",
+                    format!("{:?} repeats an earlier rule", r.source),
+                ));
+            }
+        }
+        out.sort_by_key(|f| std::cmp::Reverse(f.severity));
+        out
     }
 
     /// Check a plain-HTTP request. `host` must already be canonical (see
@@ -758,5 +888,95 @@ mod tests {
         let t = "a".repeat(2000);
         // Must terminate promptly; the answer itself is not the point.
         let _ = glob_match(&p, &t);
+    }
+
+    fn lint(rules: &[&str]) -> Vec<LintFinding> {
+        acl(rules).lint()
+    }
+
+    fn codes(f: &[LintFinding]) -> Vec<&'static str> {
+        f.iter().map(|x| x.code).collect()
+    }
+
+    #[test]
+    fn lint_is_quiet_for_a_sound_rule_set() {
+        assert!(
+            lint(&[
+                "allow GET docs.python.org/*",
+                "allow POST api.openai.com/v1/chat/completions",
+                "deny * */admin/*",
+            ])
+            .is_empty()
+        );
+        assert!(lint(&[]).is_empty());
+    }
+
+    #[test]
+    fn lint_flags_a_deny_only_set() {
+        let f = lint(&["deny * */admin/*"]);
+        assert_eq!(codes(&f), vec!["deny_only"]);
+    }
+
+    #[test]
+    fn lint_flags_allow_everything_and_any_host() {
+        assert_eq!(codes(&lint(&["allow * *"])), vec!["allow_everything"]);
+        assert_eq!(codes(&lint(&["allow * */*"])), vec!["allow_everything"]);
+        assert_eq!(codes(&lint(&["allow GET *"])), vec!["allow_any_host"]);
+        // A partial wildcard is ordinary.
+        assert!(lint(&["allow GET *.python.org/*"]).is_empty());
+    }
+
+    #[test]
+    fn lint_flags_metadata_hosts() {
+        let f = lint(&[
+            "allow GET 169.254.169.254/*",
+            "allow GET metadata.google.internal",
+        ]);
+        assert_eq!(
+            codes(&f),
+            vec!["allow_metadata_host", "allow_metadata_host"]
+        );
+        assert_eq!(f[0].severity, LintSeverity::High);
+    }
+
+    #[test]
+    fn lint_flags_an_allow_that_a_deny_overrides() {
+        let f = lint(&[
+            "allow GET api.example.com/admin/users",
+            "deny * api.example.com/admin/*",
+        ]);
+        assert_eq!(codes(&f), vec!["allow_never_matches"]);
+        // A deny for one method does not shadow an allow for another.
+        assert!(lint(&["allow GET api.example.com/a", "deny POST api.example.com/a"]).is_empty());
+        // A narrower deny does not shadow a broader allow.
+        assert!(
+            lint(&[
+                "allow GET api.example.com/*",
+                "deny GET api.example.com/admin"
+            ])
+            .is_empty()
+        );
+        // A whole-host deny shadows every allow on that host.
+        let f = lint(&["allow GET api.example.com/x", "deny * *.example.com"]);
+        assert_eq!(codes(&f), vec!["allow_never_matches"]);
+    }
+
+    #[test]
+    fn lint_flags_repeats_and_orders_by_severity() {
+        let f = lint(&[
+            "allow GET a.example.com/*",
+            "allow GET a.example.com/*",
+            "allow * *",
+        ]);
+        assert_eq!(f[0].severity, LintSeverity::High);
+        assert!(codes(&f).contains(&"duplicate_rule"));
+    }
+
+    #[test]
+    fn lint_does_not_change_decisions() {
+        let a = acl(&["allow * *", "deny * */admin/*"]);
+        let _ = a.lint();
+        assert!(a.check("GET", "x.example.com", "/ok").is_allow());
+        assert!(!a.check("GET", "x.example.com", "/admin/x").is_allow());
     }
 }

@@ -26,6 +26,10 @@ egress_http_rules = [
 - A path glob must be a literal decoded path: `%`, `?`, `#`, backslash, `//`, `.` and `..` segments are rejected, and a malformed rule stops the proxy from starting.
 - HTTPS is only judged with the opt-in `egress_tls_intercept` (HTTP/1.1, explicit-proxy clients).
 
+## Lint
+
+At startup the proxy logs findings for a rule set that parses but looks wrong: `deny_only`, `allow_everything`, `allow_any_host`, `allow_metadata_host`, `allow_never_matches`, `duplicate_rule` (see `docs/http-acl.md`). They are advisory. Read the proxy log after changing rules, and fix `high` findings before shipping.
+
 ## When reviewing rules
 
 - `deny * */admin/*` does not cover `/x/admin/y`; add `deny * */*/admin/*` if nested paths matter.

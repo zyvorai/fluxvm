@@ -121,6 +121,15 @@ async fn run(listener: TcpListener, state: Arc<ProxyState>) -> anyhow::Result<()
 fn build_state(cfg: SandboxConfig) -> anyhow::Result<ProxyState> {
     // A malformed rule must stop startup: silently dropping a `deny` fails open.
     let acl = HttpAcl::parse(&cfg.egress_http_rules).map_err(|e| anyhow::anyhow!(e))?;
+    // Advisory only: a rule set that parses is loaded as written.
+    for f in acl.lint() {
+        match f.severity {
+            crate::http_acl::LintSeverity::Info => {
+                info!(code = f.code, "egress_http_rules: {}", f.message)
+            }
+            _ => warn!(code = f.code, "egress_http_rules: {}", f.message),
+        }
+    }
     let tls = if cfg.egress_tls_intercept {
         Some(Arc::new(build_tls_state(&cfg)?))
     } else {
