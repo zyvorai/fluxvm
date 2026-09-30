@@ -144,7 +144,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | REST API, auth/RBAC and the VM JSON contract | [docs/api.md](docs/api.md) |
 | Day-2 operations | [docs/operations.md](docs/operations.md) |
 | Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
-| Agent sandboxes, procbox and the SDKs | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [python/](python/README.md) · [go/](go/README.md) |
+| Agent sandboxes, procbox and the SDKs | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [python/](python/README.md) · [go/](go/README.md) · [typescript/](typescript/README.md) |
 | Network Fabric and Service Fabric | [docs/network-fabric.md](docs/network-fabric.md) · [docs/service-fabric.md](docs/service-fabric.md) |
 | Secure Containers and MicroVM | [docs/secure-containers.md](docs/secure-containers.md) · [docs/microvm.md](docs/microvm.md) |
 | Production checklist and DevOps gates | [docs/PRODUCTION.md](docs/PRODUCTION.md) · [docs/DEVOPS.md](docs/DEVOPS.md) |

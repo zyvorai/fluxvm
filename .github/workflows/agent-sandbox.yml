@@ -16,6 +16,7 @@ on:
       - 'crates/fluxvm-procbox/**'
       - 'python/**'
       - 'go/**'
+      - 'typescript/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/agent-sandbox.yml'
@@ -29,6 +30,7 @@ on:
       - 'crates/fluxvm-procbox/**'
       - 'python/**'
       - 'go/**'
+      - 'typescript/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/agent-sandbox.yml'
@@ -196,6 +198,27 @@ jobs:
       - name: go test
         working-directory: go
         run: go test -race ./...
+
+  typescript-sdk:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install
+        working-directory: typescript
+        run: npm ci
+      - name: Build
+        working-directory: typescript
+        run: npm run build
+      - name: Unit tests (mock server)
+        working-directory: typescript
+        run: npm test
 
   # The SDKs against a real daemon: fluxctl serve as the unprivileged runner
   # user with [sandbox.procbox] enabled, then the same flow verified by hand on
