@@ -54,7 +54,7 @@ A pure in-tree KVM engine: SMP verified at 2, 4 and 8 vCPUs, pause and snapshot 
 </td>
 <td valign="top" width="33%">
 <b>Agent sandboxes</b><br>
-An egress ACL on method, host and path (HTTPS via opt-in interception), a file change-set, a rootless procbox tier, and Python and Go SDKs.<br>
+An egress ACL on method, host and path (HTTPS via opt-in interception), a file change-set, a rootless procbox tier, GPUs for QEMU sandboxes (`gpus: N`), and Python, Go and TypeScript SDKs.<br>
 <a href="docs/agent-sandbox-gaps.md">Agent sandboxes</a>
 </td>
 </tr>
