@@ -214,6 +214,9 @@ func (c *Client) CreateSandbox(ctx context.Context, req CreateSandboxRequest) (*
 	if req.Confidential != "" && req.Confidential != "auto" && req.Confidential != "required" {
 		return nil, errors.New(`fluxvm: Confidential must be "auto" or "required"`)
 	}
+	if req.GPUs > 8 {
+		return nil, errors.New("fluxvm: GPUs must be between 0 and 8")
+	}
 	var raw json.RawMessage
 	if err := c.call(ctx, http.MethodPost, "/v1/sandboxes", req, &raw, 0, http.StatusCreated); err != nil {
 		return nil, err

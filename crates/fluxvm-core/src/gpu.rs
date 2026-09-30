@@ -473,6 +473,81 @@ pub fn gpu_preflight(state_dir: &Path) -> Result<GpuPreflight> {
     })
 }
 
+/// Most GPUs one sandbox may ask for.
+pub const MAX_SANDBOX_GPUS: usize = 8;
+
+/// Fewer free GPUs than a sandbox asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuShortage {
+    pub requested: usize,
+    pub free: usize,
+}
+
+impl std::fmt::Display for GpuShortage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} GPU(s) requested but only {} free (a free GPU is bound to vfio-pci and not in use)",
+            self.requested, self.free
+        )
+    }
+}
+
+impl std::error::Error for GpuShortage {}
+
+/// A GPU another VM or process is not using and that is ready for passthrough: its whole IOMMU
+/// group is bound to `vfio-pci` and nothing holds the group.
+fn is_free(g: &HostGpu) -> bool {
+    g.group_bound_to_vfio && !g.group_held && g.iommu_group.is_some()
+}
+
+/// Choose `n` free GPUs from `inventory`, never one in `exclude`. Deterministic: the same
+/// inventory gives the same answer.
+///
+/// A request that fits on one NUMA node gets it, on the node with the fewest free GPUs that
+/// still fits (best fit, so a big request is not starved by small ones scattering across nodes).
+/// Otherwise GPUs are taken in NUMA-node then address order. The result is sorted by address.
+pub fn pick_free_gpus(
+    inventory: &[HostGpu],
+    n: usize,
+    exclude: &HashSet<String>,
+) -> std::result::Result<Vec<String>, GpuShortage> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let mut free: Vec<&HostGpu> = inventory
+        .iter()
+        .filter(|g| is_free(g) && !exclude.contains(&g.bdf.to_ascii_lowercase()))
+        .collect();
+    free.sort_by(|a, b| {
+        (a.numa_node.unwrap_or(u8::MAX), &a.bdf).cmp(&(b.numa_node.unwrap_or(u8::MAX), &b.bdf))
+    });
+    if free.len() < n {
+        return Err(GpuShortage {
+            requested: n,
+            free: free.len(),
+        });
+    }
+    let mut by_node: BTreeMap<u8, Vec<&HostGpu>> = BTreeMap::new();
+    for g in &free {
+        by_node
+            .entry(g.numa_node.unwrap_or(u8::MAX))
+            .or_default()
+            .push(g);
+    }
+    let best_node = by_node
+        .iter()
+        .filter(|(_, gpus)| gpus.len() >= n)
+        .min_by_key(|(node, gpus)| (gpus.len(), **node));
+    let chosen: Vec<&HostGpu> = match best_node {
+        Some((_, gpus)) => gpus.iter().take(n).copied().collect(),
+        None => free.iter().take(n).copied().collect(),
+    };
+    let mut out: Vec<String> = chosen.iter().map(|g| g.bdf.clone()).collect();
+    out.sort();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,5 +585,176 @@ mod tests {
     fn vendor_label_nvidia_amd() {
         assert_eq!(vendor_label(NVIDIA_VENDOR), "nvidia");
         assert_eq!(vendor_label(AMD_VENDOR), "amd");
+    }
+
+    fn gpu(bdf: &str, numa: Option<u8>, bound: bool, held: bool) -> HostGpu {
+        HostGpu {
+            bdf: bdf.into(),
+            vendor_id: NVIDIA_VENDOR,
+            device_id: 0x2330,
+            vendor: "NVIDIA".into(),
+            class_id: DISPLAY_3D_CLASS,
+            driver: Some("vfio-pci".into()),
+            iommu_group: Some(7),
+            iommu_members: vec![bdf.into()],
+            group_bound_to_vfio: bound,
+            group_held: held,
+            numa_node: numa,
+            vram_gib: None,
+            previous_driver: None,
+        }
+    }
+
+    fn free_gpu(bdf: &str, numa: u8) -> HostGpu {
+        gpu(bdf, Some(numa), true, false)
+    }
+
+    fn none() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    #[test]
+    fn picks_the_lowest_addresses_and_is_deterministic() {
+        let inv = [
+            free_gpu("0000:81:00.0", 0),
+            free_gpu("0000:41:00.0", 0),
+            free_gpu("0000:c1:00.0", 0),
+        ];
+        assert_eq!(
+            pick_free_gpus(&inv, 2, &none()).unwrap(),
+            ["0000:41:00.0", "0000:81:00.0"]
+        );
+        assert_eq!(
+            pick_free_gpus(&inv, 2, &none()),
+            pick_free_gpus(&inv, 2, &none())
+        );
+        assert!(pick_free_gpus(&inv, 0, &none()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn skips_gpus_that_are_held_unbound_or_have_no_iommu_group() {
+        let mut nogroup = free_gpu("0000:10:00.0", 0);
+        nogroup.iommu_group = None;
+        let inv = [
+            gpu("0000:01:00.0", Some(0), true, true),   // in use
+            gpu("0000:02:00.0", Some(0), false, false), // still on the host driver
+            nogroup,
+            free_gpu("0000:03:00.0", 0),
+        ];
+        assert_eq!(pick_free_gpus(&inv, 1, &none()).unwrap(), ["0000:03:00.0"]);
+        assert_eq!(
+            pick_free_gpus(&inv, 2, &none()),
+            Err(GpuShortage {
+                requested: 2,
+                free: 1
+            })
+        );
+    }
+
+    #[test]
+    fn never_returns_an_excluded_address_whatever_its_case() {
+        let inv = [free_gpu("0000:aa:00.0", 0), free_gpu("0000:bb:00.0", 0)];
+        let exclude: HashSet<String> = ["0000:aa:00.0".to_string()].into();
+        assert_eq!(pick_free_gpus(&inv, 1, &exclude).unwrap(), ["0000:bb:00.0"]);
+        let upper = [free_gpu("0000:AA:00.0", 0), free_gpu("0000:bb:00.0", 0)];
+        assert_eq!(
+            pick_free_gpus(&upper, 1, &exclude).unwrap(),
+            ["0000:bb:00.0"]
+        );
+    }
+
+    #[test]
+    fn a_request_that_fits_one_numa_node_gets_the_tightest_one() {
+        // node 0 has 3 free, node 1 has 2 free: a request for 2 takes node 1, leaving node 0 whole.
+        let inv = [
+            free_gpu("0000:01:00.0", 0),
+            free_gpu("0000:02:00.0", 0),
+            free_gpu("0000:03:00.0", 0),
+            free_gpu("0000:81:00.0", 1),
+            free_gpu("0000:82:00.0", 1),
+        ];
+        assert_eq!(
+            pick_free_gpus(&inv, 2, &none()).unwrap(),
+            ["0000:81:00.0", "0000:82:00.0"]
+        );
+        assert_eq!(
+            pick_free_gpus(&inv, 3, &none()).unwrap(),
+            ["0000:01:00.0", "0000:02:00.0", "0000:03:00.0"]
+        );
+        // Too big for either node: span nodes, lowest node first.
+        assert_eq!(
+            pick_free_gpus(&inv, 4, &none()).unwrap(),
+            [
+                "0000:01:00.0",
+                "0000:02:00.0",
+                "0000:03:00.0",
+                "0000:81:00.0"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_gpu_with_unknown_numa_is_still_usable() {
+        let inv = [gpu("0000:01:00.0", None, true, false)];
+        assert_eq!(pick_free_gpus(&inv, 1, &none()).unwrap(), ["0000:01:00.0"]);
+    }
+
+    /// Many random allocate and release steps against 4 GPUs: nothing is ever handed out twice and
+    /// the count of free GPUs always agrees with what is outstanding.
+    #[test]
+    fn random_allocation_never_double_assigns() {
+        let all = [
+            "0000:01:00.0",
+            "0000:02:00.0",
+            "0000:81:00.0",
+            "0000:82:00.0",
+        ];
+        let numa = [0u8, 0, 1, 1];
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |m: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % m
+        };
+        let mut leases: Vec<Vec<String>> = Vec::new();
+        for _ in 0..5000 {
+            let held: HashSet<String> = leases.iter().flatten().cloned().collect();
+            if next(3) != 0 || leases.is_empty() {
+                let want = 1 + next(3) as usize;
+                let inv: Vec<HostGpu> = all
+                    .iter()
+                    .zip(numa)
+                    .map(|(b, n)| gpu(b, Some(n), true, held.contains(*b)))
+                    .collect();
+                let free = all.len() - held.len();
+                match pick_free_gpus(&inv, want, &none()) {
+                    Ok(got) => {
+                        assert_eq!(got.len(), want);
+                        assert!(want <= free);
+                        assert!(
+                            got.iter().all(|g| !held.contains(g)),
+                            "handed out a held GPU: {got:?}"
+                        );
+                        let unique: HashSet<&String> = got.iter().collect();
+                        assert_eq!(unique.len(), got.len());
+                        leases.push(got);
+                    }
+                    Err(short) => {
+                        assert!(want > free);
+                        assert_eq!(
+                            short,
+                            GpuShortage {
+                                requested: want,
+                                free
+                            }
+                        );
+                    }
+                }
+            } else {
+                let i = next(leases.len() as u64) as usize;
+                leases.swap_remove(i);
+            }
+        }
     }
 }

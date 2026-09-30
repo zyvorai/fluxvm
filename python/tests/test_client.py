@@ -57,7 +57,7 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(sent["http_proxy_ports"], [8080, 9090])
         self.assertEqual(sent["volumes"][0], {"name": "data", "guest_path": "/data", "read_only": False})
         self.assertEqual(sent["confidential"], "auto")
-        for absent in ("template", "spec", "vcpus", "http_proxy_port"):
+        for absent in ("template", "spec", "vcpus", "http_proxy_port", "gpus"):
             self.assertNotIn(absent, sent)
         self.assertEqual(sb.info.name, "demo")
         self.assertEqual(sb.info.status, "running")
@@ -67,6 +67,15 @@ class ClientTests(unittest.TestCase):
     def test_create_rejects_bad_confidential_mode_locally(self):
         with self.assertRaises(ValueError):
             self.fx.create_sandbox(confidential="yes")
+        self.assertEqual(self.state.requests, [])
+
+    def test_create_sends_gpus_and_rejects_a_bad_count_locally(self):
+        self.fx.create_sandbox(gpus=2)
+        self.assertEqual(json.loads(self.state.requests[0][3])["gpus"], 2)
+        self.state.requests.clear()
+        for bad in (-1, 9):
+            with self.assertRaises(ValueError):
+                self.fx.create_sandbox(gpus=bad)
         self.assertEqual(self.state.requests, [])
 
     def test_server_validation_error_is_api_error_with_status_and_body(self):

@@ -48,6 +48,13 @@ struct ApiError {
 impl<E: Into<anyhow::Error>> From<E> for ApiError {
     fn from(e: E) -> Self {
         let e: anyhow::Error = e.into();
+        // Not enough free GPUs is a capacity condition the caller can retry, not a bad request.
+        if e.downcast_ref::<fluxvm_core::gpu::GpuShortage>().is_some() {
+            return Self {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: format!("{:#}", e),
+            };
+        }
         use fluxvm_scheduler::procbox_sandbox::ProcboxError;
         // Procbox sandboxes fail in ways a plain 400 would hide: a disabled
         // feature, a guest-only route, an unenforceable policy, a too-large

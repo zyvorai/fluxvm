@@ -105,5 +105,7 @@ export interface CreateSandboxOptions {
   confidential?: "auto" | "required";
   /** `{}` for defaults, or limits such as `{ timeout_seconds: 60 }`; needs `[sandbox.procbox] enabled = true`. */
   procbox?: Record<string, unknown>;
+  /** Free GPUs to pass through (VFIO), 0 to 8. Needs a QEMU-backed template; refused with `confidential` or `procbox`. A shortage is a 503 {@link ApiError}. */
+  gpus?: number;
   timeoutMs?: number;
 }

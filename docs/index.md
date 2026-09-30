@@ -69,6 +69,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Using FluxVM through zyvor-fabric | [docs/zyvor-fabric.md](zyvor-fabric.md) |
 | Using FluxVM through Ragnarok | [docs/ragnarok.md](ragnarok.md) |
 | AI-agent sandbox capability gaps | [docs/agent-sandbox-gaps.md](agent-sandbox-gaps.md) |
+| GPUs for sandboxes | [docs/sandbox-gpus.md](sandbox-gpus.md) |
 | Native KVM, no QEMU (golden template, snapshots, SMP) | [docs/native-kvm-no-qemu.md](native-kvm-no-qemu.md) · [crates/fluxvm-hypervisor/README.md](../crates/fluxvm-hypervisor/README.md) |
 | Egress HTTP method/path ACL and HTTPS interception | [docs/http-acl.md](http-acl.md) |
 | Sandbox file change-set (baseline / changes) | [docs/sandbox-changes.md](sandbox-changes.md) |

@@ -29,7 +29,7 @@ await fx.withSandbox({ name: "demo", ttlSeconds: 600, memoryMib: 512 }, async (s
 | Call | Server route |
 |---|---|
 | `new FluxVM({ baseUrl, token?, timeoutMs?, headers?, fetch? })` | – |
-| `fx.createSandbox({ name, template, spec, ttlSeconds, httpProxyPort, httpProxyPorts, volumes, vcpus, memoryMib, confidential, procbox })` → `Sandbox` | `POST /v1/sandboxes` |
+| `fx.createSandbox({ name, template, spec, ttlSeconds, httpProxyPort, httpProxyPorts, volumes, vcpus, memoryMib, confidential, procbox, gpus })` → `Sandbox` | `POST /v1/sandboxes` |
 | `fx.listSandboxes()`, `fx.getSandbox(id)` | `GET /v1/sandboxes`, `GET /v1/vms/{id}` |
 | `fx.withSandbox(opts, fn)` | create, run `fn`, then delete |
 | `fx.health()`, `fx.openapi()`, `fx.hostConfidential()` | `GET /healthz`, `/v1/openapi.json`, `/v1/host/confidential` |

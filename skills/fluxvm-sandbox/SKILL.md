@@ -12,6 +12,10 @@ References: `docs/procbox.md`, `docs/procbox-backend.md`, `docs/sandbox-changes.
 - **microVM** (`backend: "flux-vm"`, Firecracker, Cloud Hypervisor, QEMU): use for hostile code or several tenants.
 - **procbox**: rootless Landlock + seccomp around a process. It shares the host kernel, so it is a weaker boundary. Use it for code you mostly trust.
 
+## GPUs
+
+`gpus: N` on sandbox create passes N free GPUs through (VFIO). Use a QEMU-backed template; it is refused with `confidential` or `procbox`. A shortage is a 503, so retry later rather than loop. After creating, check `request.vfio_devices` in the returned record to be sure GPUs were assigned. See `docs/sandbox-gpus.md`.
+
 ## procbox
 
 ```bash

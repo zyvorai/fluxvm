@@ -2,6 +2,12 @@
 
 ## 0.4.0 (unreleased)
 
+### Added
+- **GPUs for sandboxes.** `gpus: N` on `POST /v1/sandboxes` passes N free VFIO-bound GPUs through to a
+  QEMU-backed sandbox. FluxVM picks them under a lock (NUMA-aware, deterministic), so two callers are never given the
+  same GPU; a shortage is a 503. Refused with `confidential`, `procbox`, or a non-QEMU template. The Python, Go and
+  TypeScript SDKs take `gpus`. See `docs/sandbox-gpus.md`.
+
 ### Fixed
 - **Multi-vCPU KVM snapshot-restore clock desync.** `apply_vcpu` was missing
   the `KVM_KVMCLOCK_CTRL` ioctl on restore (Firecracker's own restore order

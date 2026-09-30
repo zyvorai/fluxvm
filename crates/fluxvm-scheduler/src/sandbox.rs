@@ -52,6 +52,13 @@ pub struct SandboxCreateRequest {
     /// see [`crate::procbox_sandbox`].
     #[serde(default)]
     pub procbox: Option<crate::procbox_sandbox::ProcboxRequest>,
+    /// How many GPUs to pass through with VFIO. FluxVM picks free ones itself, under a lock, so
+    /// two callers cannot be given the same GPU: one that is bound to `vfio-pci` and that no VM or
+    /// process holds. Needs a QEMU-backed `template`. Refused with `confidential` or `procbox`, and
+    /// with a clear error when fewer than this many GPUs are free (HTTP 503). The chosen addresses
+    /// appear in the returned record as `request.vfio_devices`. Absent or 0 means none.
+    #[serde(default)]
+    pub gpus: Option<u8>,
 }
 
 pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
@@ -195,6 +202,23 @@ impl VmManager {
         token_tenant: Option<&str>,
         created_by_token: Option<&str>,
     ) -> Result<VmRecord> {
+        let gpus = usize::from(req.gpus.unwrap_or(0));
+        if gpus > fluxvm_core::gpu::MAX_SANDBOX_GPUS {
+            bail!(
+                "gpus must be at most {}",
+                fluxvm_core::gpu::MAX_SANDBOX_GPUS
+            );
+        }
+        if gpus > 0 && req.procbox.is_some() {
+            bail!(
+                "gpus cannot be combined with procbox: a process sandbox has no device passthrough"
+            );
+        }
+        if gpus > 0 && req.confidential.is_some() {
+            bail!(
+                "gpus cannot be combined with confidential: a passed-through device is outside the encrypted guest"
+            );
+        }
         if let Some(pb) = req.procbox.clone() {
             return self
                 .create_procbox_sandbox(req, pb, token_tenant, created_by_token)
@@ -225,6 +249,11 @@ impl VmManager {
         } else {
             BackendKind::FluxVm
         };
+        // `vfio_devices` is silently ignored by every backend but QEMU, and a caller who asked for a
+        // GPU and got a CPU-only VM has been misled, so this is a hard error.
+        if gpus > 0 && create.backend != BackendKind::Qemu {
+            bail!("gpus need a QEMU-backed template: other backends ignore device passthrough");
+        }
         if let Some(name) = req.name {
             create.name = name;
         } else if create.name.is_empty() {
@@ -250,6 +279,14 @@ impl VmManager {
         } else {
             let guard = self.sandbox_volume_lock.lock().await;
             self.attach_volumes(&mut create, &req.volumes).await?;
+            Some(guard)
+        };
+        // Held from picking the GPUs until the VM record exists, so the next sandbox sees them taken.
+        let _gpu_guard = if gpus == 0 {
+            None
+        } else {
+            let guard = self.sandbox_gpu_lock.lock().await;
+            self.assign_gpus(&mut create, gpus).await?;
             Some(guard)
         };
         let record = self.create(create).await?;
@@ -280,6 +317,30 @@ impl VmManager {
         )
         .await?;
         Ok(record)
+    }
+
+    /// Choose `count` free GPUs and add them to `create.vfio_devices`. The caller holds
+    /// `sandbox_gpu_lock`. A GPU counts as taken when any VM that has not failed lists it, or when a
+    /// process holds its VFIO group.
+    async fn assign_gpus(&self, create: &mut CreateVmRequest, count: usize) -> Result<()> {
+        let taken: std::collections::HashSet<String> = self
+            .list()
+            .await
+            .into_iter()
+            .filter(|vm| vm.status != VmStatus::Failed)
+            .flat_map(|vm| vm.request.vfio_devices)
+            .map(|b| b.trim().to_ascii_lowercase())
+            .collect();
+        let state_dir = self.cfg.state_dir.clone();
+        let for_scan = taken.clone();
+        let inventory = tokio::task::spawn_blocking(move || {
+            fluxvm_core::gpu::list_host_gpus(&state_dir, &for_scan)
+        })
+        .await
+        .context("scanning host GPUs")??;
+        let picked = gpu_assignment(create, count, &inventory)?;
+        create.vfio_devices.extend(picked);
+        Ok(())
     }
 
     /// Resolve `volumes` to host directories and append them to
@@ -759,5 +820,108 @@ mod tests {
         // "_shared" is not a valid tenant name, so a tenant cannot alias the untenanted tree.
         assert!(volume_host_path(root, Some("_shared"), "home").is_err());
         assert!(volume_host_path(root, Some("../x"), "home").is_err());
+    }
+}
+
+/// The GPUs to add to `create` for a request of `count`: free ones from `inventory`, never one the
+/// template already lists. A shortage is a typed error so the API can answer 503.
+fn gpu_assignment(
+    create: &CreateVmRequest,
+    count: usize,
+    inventory: &[fluxvm_core::gpu::HostGpu],
+) -> Result<Vec<String>> {
+    let already: std::collections::HashSet<String> = create
+        .vfio_devices
+        .iter()
+        .map(|b| b.trim().to_ascii_lowercase())
+        .collect();
+    fluxvm_core::gpu::pick_free_gpus(inventory, count, &already).map_err(anyhow::Error::new)
+}
+
+#[cfg(test)]
+mod gpu_tests {
+    use super::*;
+
+    fn manager() -> (tempfile::TempDir, std::sync::Arc<crate::VmManager>) {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = fluxvm_core::config::Config::default();
+        c.state_dir = d.path().join("state");
+        c.run_dir = d.path().join("run");
+        (d, crate::VmManager::new(c).unwrap())
+    }
+
+    /// The smallest spec the API accepts.
+    fn spec() -> serde_json::Value {
+        serde_json::json!({
+            "name": "x", "backend": "flux-vm", "image": "/x", "vcpus": 1,
+            "memory_mib": 128, "network": {"mode": "none"}
+        })
+    }
+
+    fn req(v: serde_json::Value) -> SandboxCreateRequest {
+        serde_json::from_value(v).unwrap()
+    }
+
+    async fn error(m: &std::sync::Arc<crate::VmManager>, v: serde_json::Value) -> String {
+        match m.create_sandbox(req(v), None, None).await {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn gpus_are_refused_where_they_cannot_be_honoured() {
+        let (_d, m) = manager();
+        // A raw spec is always the in-tree backend, which has no device passthrough.
+        let e = error(&m, serde_json::json!({"spec": spec(), "gpus": 1})).await;
+        assert!(e.contains("QEMU-backed template"), "{e}");
+        let e = error(&m, serde_json::json!({"procbox": {}, "gpus": 1})).await;
+        assert!(e.contains("procbox"), "{e}");
+        let e = error(
+            &m,
+            serde_json::json!({"template": "t", "gpus": 1, "confidential": "auto"}),
+        )
+        .await;
+        assert!(e.contains("confidential"), "{e}");
+        let e = error(&m, serde_json::json!({"template": "t", "gpus": 9})).await;
+        assert!(e.contains("at most"), "{e}");
+        // Zero is the same as absent: it reaches the normal path and fails there instead.
+        let e = error(&m, serde_json::json!({"gpus": 0})).await;
+        assert!(e.contains("requires `template` or `spec`"), "{e}");
+    }
+
+    fn gpu(bdf: &str, free: bool) -> fluxvm_core::gpu::HostGpu {
+        fluxvm_core::gpu::HostGpu {
+            bdf: bdf.into(),
+            vendor_id: 0x10de,
+            device_id: 0x2330,
+            vendor: "NVIDIA".into(),
+            class_id: 0x0302,
+            driver: Some("vfio-pci".into()),
+            iommu_group: Some(1),
+            iommu_members: vec![bdf.into()],
+            group_bound_to_vfio: true,
+            group_held: !free,
+            numa_node: Some(0),
+            vram_gib: None,
+            previous_driver: None,
+        }
+    }
+
+    #[test]
+    fn the_assignment_skips_devices_the_template_already_lists_and_reports_a_shortage() {
+        let mut create: CreateVmRequest = serde_json::from_value(spec()).unwrap();
+        create.vfio_devices = vec!["0000:01:00.0".into()];
+        let inv = [
+            gpu("0000:01:00.0", true),
+            gpu("0000:02:00.0", true),
+            gpu("0000:03:00.0", false),
+        ];
+        assert_eq!(gpu_assignment(&create, 1, &inv).unwrap(), ["0000:02:00.0"]);
+        let err = gpu_assignment(&create, 2, &inv).unwrap_err();
+        let short = err
+            .downcast_ref::<fluxvm_core::gpu::GpuShortage>()
+            .expect("a typed shortage");
+        assert_eq!((short.requested, short.free), (2, 1));
     }
 }
