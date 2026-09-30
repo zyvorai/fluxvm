@@ -29,7 +29,7 @@ with fx.create_sandbox(name="demo", ttl_seconds=600, memory_mib=512) as sb:
 | Call | Server route |
 |---|---|
 | `FluxVM(base_url, token=None, timeout=30, headers=None, ssl_context=None)` | – |
-| `fx.create_sandbox(name, template, spec, ttl_seconds, http_proxy_port, http_proxy_ports, volumes, vcpus, memory_mib, confidential)` → `Sandbox` | `POST /v1/sandboxes` |
+| `fx.create_sandbox(name, template, spec, ttl_seconds, http_proxy_port, http_proxy_ports, volumes, vcpus, memory_mib, confidential, gpus)` → `Sandbox` (`gpus`: see [sandbox-gpus.md](../docs/sandbox-gpus.md)) | `POST /v1/sandboxes` |
 | `fx.list_sandboxes()` → `[SandboxInfo]` | `GET /v1/sandboxes` |
 | `fx.get_sandbox(id)` → `Sandbox` | `GET /v1/vms/{id}` |
 | `fx.host_confidential()`, `fx.health()`, `fx.openapi()` | `GET /v1/host/confidential`, `/healthz`, `/v1/openapi.json` |

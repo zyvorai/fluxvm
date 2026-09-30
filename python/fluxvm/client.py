@@ -200,6 +200,7 @@ class FluxVM:
         memory_mib: Optional[int] = None,
         confidential: Optional[str] = None,
         procbox: Optional[Mapping[str, Any]] = None,
+        gpus: Optional[int] = None,
         timeout: Optional[float] = None,
     ) -> "Sandbox":
         """``POST /v1/sandboxes``. Fields left as ``None`` are omitted so the
@@ -208,10 +209,14 @@ class FluxVM:
         ``POST /v1/vms``). ``confidential`` is ``"auto"`` or ``"required"``. ``procbox`` (``{}`` for
         defaults, or limits such as ``{"timeout_seconds": 60, "max_memory_mib": 512}``)
         selects a rootless process sandbox instead of a VM; the server must have
-        ``[sandbox.procbox] enabled = true``.
+        ``[sandbox.procbox] enabled = true``. ``gpus`` asks FluxVM to pass that many free GPUs through
+        (VFIO): it needs a QEMU-backed ``template`` and is refused with ``confidential`` or ``procbox``;
+        when fewer are free the server answers 503 (an :class:`ApiError`).
         """
         if confidential is not None and confidential not in ("auto", "required"):
             raise ValueError('confidential must be "auto" or "required"')
+        if gpus is not None and not 0 <= gpus <= 8:
+            raise ValueError("gpus must be between 0 and 8")
         payload: Dict[str, Any] = {}
         for key, value in (
             ("name", name),
@@ -226,6 +231,7 @@ class FluxVM:
             ("memory_mib", memory_mib),
             ("confidential", confidential),
             ("procbox", dict(procbox) if procbox is not None else None),
+            ("gpus", gpus),
         ):
             if value is not None:
                 payload[key] = value

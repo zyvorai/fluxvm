@@ -663,6 +663,8 @@ pub struct VmManager {
     /// Serializes the "is this volume already attached?" check with the VM
     /// record write in `create_sandbox`, so two creates cannot both claim one volume.
     sandbox_volume_lock: AsyncMutex<()>,
+    /// Serialises GPU selection with the VM create that records it, so no GPU is handed out twice.
+    sandbox_gpu_lock: AsyncMutex<()>,
     /// Last activity timestamps for AutoPause / wake-on-request (sandbox id → UTC).
     activity: AsyncMutex<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>,
     /// A scheduled-snapshot pass can outlast a reaper tick (savevm is slow).
@@ -697,6 +699,7 @@ impl VmManager {
             catalog_lock: AsyncMutex::new(()),
             template_lock: AsyncMutex::new(()),
             sandbox_volume_lock: AsyncMutex::new(()),
+            sandbox_gpu_lock: AsyncMutex::new(()),
             activity: AsyncMutex::new(HashMap::new()),
             scheduled_snapshots_busy: std::sync::atomic::AtomicBool::new(false),
         }))

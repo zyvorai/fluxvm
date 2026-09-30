@@ -215,6 +215,10 @@ export class FluxVM {
     set("memory_mib", o.memoryMib);
     set("confidential", o.confidential);
     set("procbox", o.procbox);
+    if (o.gpus !== undefined && !(Number.isInteger(o.gpus) && o.gpus >= 0 && o.gpus <= 8)) {
+      throw new RangeError("gpus must be an integer between 0 and 8");
+    }
+    set("gpus", o.gpus);
     const record = await this.json<Json>("POST", "/v1/sandboxes", payload, {
       timeoutMs: o.timeoutMs,
       expect: [201],

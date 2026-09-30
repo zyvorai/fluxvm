@@ -64,6 +64,10 @@ type CreateSandboxRequest struct {
 	// non-nil map means defaults, or set limits such as timeout_seconds and
 	// max_memory_mib. The server needs [sandbox.procbox] enabled = true.
 	Procbox map[string]interface{} `json:"procbox,omitempty"`
+	// GPUs asks FluxVM to pass that many free GPUs through (VFIO), 0 to 8. It needs a
+	// QEMU-backed template and is refused with Confidential or Procbox. When fewer are free the
+	// server answers 503.
+	GPUs uint8 `json:"gpus,omitempty"`
 }
 
 // ExecResult is the outcome of a command run through the guest agent.

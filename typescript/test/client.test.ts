@@ -78,6 +78,20 @@ describe("FluxVM client", () => {
     });
   });
 
+  it("sends gpus and rejects a bad count before sending anything", async () => {
+    seen = [];
+    respond = reply(201, rec);
+    await client().createSandbox({ gpus: 2 });
+    assert.equal(JSON.parse(last().body).gpus, 2);
+    await client().createSandbox({});
+    assert.equal("gpus" in JSON.parse(last().body), false);
+    seen = [];
+    for (const bad of [-1, 9, 1.5]) {
+      await assert.rejects(() => client().createSandbox({ gpus: bad }), RangeError);
+    }
+    assert.equal(seen.length, 0);
+  });
+
   it("rejects a bad confidential mode before sending anything", async () => {
     seen = [];
     await assert.rejects(() => client().createSandbox({ confidential: "maybe" as never }), /confidential/);

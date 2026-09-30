@@ -69,7 +69,7 @@ func TestCreateSendsOnlySetFieldsAndBearerToken(t *testing.T) {
 	if vols["name"] != "data" || vols["guest_path"] != "/data" || vols["read_only"] != false {
 		t.Fatalf("volume = %v", vols)
 	}
-	for _, absent := range []string{"template", "spec", "vcpus", "http_proxy_port"} {
+	for _, absent := range []string{"template", "spec", "vcpus", "http_proxy_port", "gpus"} {
 		if _, ok := sent[absent]; ok {
 			t.Errorf("%s should be omitted", absent)
 		}
@@ -97,6 +97,23 @@ func TestCreateRejectsBadConfidentialWithoutContactingServer(t *testing.T) {
 		t.Fatal("expected error")
 	}
 	if st.reqCount() != 0 {
+		t.Fatal("no request should have been sent")
+	}
+}
+
+func TestCreateSendsGPUsAndRejectsABadCountWithoutContactingServer(t *testing.T) {
+	c, st := setup(t)
+	if _, err := c.CreateSandbox(context.Background(), CreateSandboxRequest{GPUs: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if got := bodyMap(t, st.requests[0])["gpus"]; got != float64(2) {
+		t.Fatalf("gpus = %v", got)
+	}
+	before := st.reqCount()
+	if _, err := c.CreateSandbox(context.Background(), CreateSandboxRequest{GPUs: 9}); err == nil {
+		t.Fatal("expected an error for 9 GPUs")
+	}
+	if st.reqCount() != before {
 		t.Fatal("no request should have been sent")
 	}
 }

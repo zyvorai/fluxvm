@@ -25,6 +25,7 @@ The FluxVM hypervisor track (`backend: "flux-vm"`) is the AI-agent sandbox path.
 | **HTTP method/host/path ACL** in the egress proxy (`egress_http_rules`, deny wins, normalized paths); HTTPS via opt-in TLS interception (`egress_tls_intercept`, HTTP/1.1, explicit-proxy clients) — [http-acl.md](http-acl.md) | Yes |
 | **File change-set** (`/v1/sandboxes/{id}/baseline` + `/changes`: added/modified/deleted) — [sandbox-changes.md](sandbox-changes.md) | Yes |
 | **Python and Go SDKs** (`python/`, `go/`, stdlib only) for `/v1/sandboxes` | Yes |
+| **GPUs for sandboxes** (`gpus: N` on `POST /v1/sandboxes`): FluxVM picks free VFIO-bound GPUs under a lock, NUMA-aware, 503 on a shortage; QEMU-backed templates only — [sandbox-gpus.md](sandbox-gpus.md) | Yes (picking logic tested; not run on real GPUs) |
 | **`fluxvm-procbox`** rootless Landlock + seccomp process sandbox with TOML profiles and a ptrace `learn` mode — [procbox.md](procbox.md) | Yes |
 | **procbox sandboxes via `/v1/sandboxes`** (`procbox` create kind, opt-in `[sandbox.procbox]`): confined `/process`, workspace fs, baseline/changes, and a real-discard **dry-run** (`POST /v1/sandboxes/{id}/dry-run`) — [procbox-backend.md](procbox-backend.md) | Yes |
 | **VM sandbox dry-run and `POST /v1/vms/{id}/restore`**: flux-vm, QEMU and Firecracker sandboxes are snapshotted, run, diffed and restored (memory and disk both revert, snapshot stays reusable) — [sandbox-changes.md](sandbox-changes.md#dry-run-on-a-vm-sandbox) | Yes (flux-vm, QEMU, Firecracker; Cloud Hypervisor sandboxes don't exist) |
