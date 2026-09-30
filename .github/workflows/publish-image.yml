@@ -54,7 +54,7 @@ jobs:
           echo "tags=ghcr.io/zyvorai/fluxvm:${TAG},ghcr.io/zyvorai/fluxvm:latest" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: fluxvm
           build-contexts: guestkit=guestkit
