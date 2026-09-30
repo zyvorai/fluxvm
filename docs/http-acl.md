@@ -49,6 +49,23 @@ What `deny * */admin/*` covers. The rule is host glob `*`, path glob
 | `/administrator`, `/superadmin` | no (different segment) |
 | `/x/admin/y` | no (the path glob starts at `/admin`; add `deny * */*/admin/*` to cover nested ones) |
 
+## Rule-set lint
+
+At startup the proxy checks the rule set for mistakes and logs each finding (`WARN`, or `INFO` for repeats). It never
+changes what the ACL decides, and a rule set that parses is loaded as written.
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `deny_only` | warn | Only `deny` rules, so every request they do not match is allowed |
+| `allow_everything` | high | `allow * *`: nothing is restricted except by `deny` rules |
+| `allow_any_host` | warn | An allow whose host is `*` (for one method or path) |
+| `allow_metadata_host` | high | An allow for a cloud metadata address such as `169.254.169.254` |
+| `allow_never_matches` | warn | A `deny` always wins over this allow, so it can never match |
+| `duplicate_rule` | info | Repeats an earlier rule |
+
+The dead-allow check is conservative: it reports only when it can tell, so silence is not a proof that every allow
+matters. The proxy already refuses non-public addresses; `allow_metadata_host` flags a rule that says otherwise.
+
 ## Evasion resistance
 
 Before matching, the path is normalized so the rule engine sees what the
