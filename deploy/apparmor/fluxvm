@@ -44,6 +44,26 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   /proc/sys/net/** rw,
   /usr/sbin/iptables rix,
 
+  # eBPF dataplane. Ubuntu's /usr/sbin/bpftool is a wrapper script that
+  # execs the kernel-versioned binary under /usr/lib/linux-tools*.
+  /usr/sbin/bpftool rix,
+  /usr/bin/bpftool rix,
+  /usr/lib/linux-tools/*/bpftool rix,
+  /usr/lib/linux-tools-*/bpftool rix,
+  /usr/lib/linux-tools/*/lib/** mr,
+  /usr/lib/linux-tools-*/lib/** mr,
+  /usr/bin/{uname,basename} rix,
+  /usr/libexec/fluxvm/fluxvm-tcx rix,
+  /usr/lib/fluxvm/bpf/** r,
+  /sys/fs/bpf/ r,
+  /sys/fs/bpf/** rwk,
+  /sys/class/net/ r,
+  /sys/class/net/** r,
+  /sys/devices/**/net/** r,
+  /sys/kernel/btf/** r,
+  /sys/kernel/debug/tracing/** r,
+  /proc/sys/kernel/** r,
+
   # build-image / guestkit host helpers (inherit fluxctl)
   /usr/bin/kmod rix,
   /usr/bin/modprobe rix,
@@ -161,6 +181,10 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   capability sys_ptrace,
   capability sys_resource,
   capability mknod,
+  capability bpf,
+  capability perfmon,
+  capability net_raw,
+  capability sys_module,
 
   # udevadm settle / guestkit partition probe
   ptrace (read,trace),
@@ -205,6 +229,26 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   /proc/sys/** r,
   /proc/sys/net/** rw,
   /usr/sbin/iptables rix,
+
+  # eBPF dataplane. Ubuntu's /usr/sbin/bpftool is a wrapper script that
+  # execs the kernel-versioned binary under /usr/lib/linux-tools*.
+  /usr/sbin/bpftool rix,
+  /usr/bin/bpftool rix,
+  /usr/lib/linux-tools/*/bpftool rix,
+  /usr/lib/linux-tools-*/bpftool rix,
+  /usr/lib/linux-tools/*/lib/** mr,
+  /usr/lib/linux-tools-*/lib/** mr,
+  /usr/bin/{uname,basename} rix,
+  /usr/libexec/fluxvm/fluxvm-tcx rix,
+  /usr/lib/fluxvm/bpf/** r,
+  /sys/fs/bpf/ r,
+  /sys/fs/bpf/** rwk,
+  /sys/class/net/ r,
+  /sys/class/net/** r,
+  /sys/devices/**/net/** r,
+  /sys/kernel/btf/** r,
+  /sys/kernel/debug/tracing/** r,
+  /proc/sys/kernel/** r,
 
   /usr/bin/kmod rix,
   /usr/bin/modprobe rix,
@@ -321,6 +365,10 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   capability sys_ptrace,
   capability sys_resource,
   capability mknod,
+  capability bpf,
+  capability perfmon,
+  capability net_raw,
+  capability sys_module,
 
   # udevadm settle / guestkit partition probe
   ptrace (read,trace),
