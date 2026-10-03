@@ -2412,7 +2412,7 @@ async fn vm_network_edge(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     m.get(id).await?;
-    let applied = fluxvm_network::edge_contract::apply_edge(id, spec)?;
+    let applied = fluxvm_network::edge_contract::apply_edge(&m.cfg, id, spec)?;
     Ok(Json(json!(applied)))
 }
 
@@ -2424,7 +2424,7 @@ async fn vm_network_conntrack_export(
     require_admin(role)?;
     m.get(id).await?;
     Ok(Json(json!(
-        fluxvm_network::edge_contract::export_conntrack(id)?
+        fluxvm_network::edge_contract::export_conntrack(&m.cfg, id)?
     )))
 }
 
@@ -2437,7 +2437,7 @@ async fn vm_network_conntrack_restore(
     require_admin(role)?;
     m.get(id).await?;
     Ok(Json(json!(
-        fluxvm_network::edge_contract::restore_conntrack(id, snap)?
+        fluxvm_network::edge_contract::restore_conntrack(&m.cfg, id, snap)?
     )))
 }
 
@@ -2445,8 +2445,16 @@ async fn vm_network_learned_ip(
     State(m): State<Arc<VmManager>>,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    m.get(id).await?;
-    Ok(Json(fluxvm_network::edge_contract::learned_ip(id)?))
+    let vm = m.get(id).await?;
+    let source = if vm.dhcp_leasefile.is_some() {
+        "dhcp"
+    } else {
+        "fluxvm"
+    };
+    let fallback = vm.guest_ip.map(|ip| (ip, source));
+    Ok(Json(fluxvm_network::edge_contract::learned_ip(
+        &m.cfg, id, fallback,
+    )?))
 }
 
 async fn vm_network_drops(
@@ -2456,7 +2464,7 @@ async fn vm_network_drops(
 ) -> ApiResult<Json<serde_json::Value>> {
     m.get(id).await?;
     Ok(Json(json!({
-        "items": fluxvm_network::edge_contract::attributed_drops(id, q.limit)
+        "items": fluxvm_network::edge_contract::attributed_drops(&m.cfg, id, q.limit)?
     })))
 }
 
@@ -2469,7 +2477,7 @@ async fn vm_network_capture(
     require_admin(role)?;
     m.get(id).await?;
     Ok(Json(json!(fluxvm_network::edge_contract::start_capture(
-        id, session
+        &m.cfg, id, session
     )?)))
 }
 

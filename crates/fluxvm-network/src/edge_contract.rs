@@ -3,20 +3,25 @@
 
 //! Userspace contract for the Kairon VM-edge API.
 //!
-//! BPF programs stay in this crate. These maps are the control-plane
-//! documents Kairon posts: edge spec, conntrack move, learned IP,
-//! attributed drops, and a bounded capture.
+//! Kairon posts an edge spec per Machine. It is persisted under
+//! `<state_dir>/network-edge/<vm>.json` and loaded into the VM's BPF maps on
+//! every attach, so enforcement survives daemon restarts, VM restarts and
+//! dataplane repairs. Learned addresses, drops and conntrack are read from
+//! the live maps.
 
-use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use fluxvm_core::config::{Config, DataplaneMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracing::warn;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EdgeSpec {
     pub namespace: String,
@@ -50,7 +55,17 @@ pub struct EdgeSpec {
     pub qos: EdgeQos,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+impl EdgeSpec {
+    fn enforces_anything(&self) -> bool {
+        self.anti_spoof
+            || self.learn_ip
+            || !self.allow_sni.is_empty()
+            || !self.allow_dns.is_empty()
+            || self.qos != EdgeQos::default()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EdgeQos {
     #[serde(default)]
@@ -63,7 +78,7 @@ pub struct EdgeQos {
     pub egress_pps: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ConntrackEntry {
     pub proto: String,
@@ -107,71 +122,206 @@ pub struct CaptureSession {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DropEvent {
+    pub namespace: String,
+    pub machine: String,
     pub reason: String,
     pub policy_name: String,
     #[serde(rename = "srcIP")]
     pub src_ip: String,
     #[serde(rename = "dstIP")]
     pub dst_ip: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub proto: String,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub dst_port: u16,
+    pub direction: String,
+    pub action: String,
+    pub packets: u64,
 }
 
-#[derive(Default)]
-struct Slot {
-    edge: Option<EdgeSpec>,
-    conntrack: Option<ConntrackSnapshot>,
-    learned_ip: String,
-    learned_source: String,
-    captures: Vec<CaptureSession>,
+fn is_zero(v: &u16) -> bool {
+    *v == 0
 }
 
-fn store() -> &'static Mutex<HashMap<Uuid, Slot>> {
-    static STORE: std::sync::OnceLock<Mutex<HashMap<Uuid, Slot>>> = std::sync::OnceLock::new();
-    STORE.get_or_init(|| Mutex::new(HashMap::new()))
+/// Everything the edge keeps per VM between daemon restarts.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EdgeState {
+    #[serde(default)]
+    pub edge: Option<EdgeSpec>,
+    /// A restore that arrived before the VM was attached; written into the
+    /// conntrack map by the next attach.
+    #[serde(default)]
+    pub pending_conntrack: Option<ConntrackSnapshot>,
+    #[serde(default)]
+    pub captures: Vec<CaptureSession>,
 }
 
-pub fn apply_edge(id: Uuid, spec: EdgeSpec) -> Result<EdgeSpec> {
+const MAX_CAPTURES: usize = 16;
+
+/// Serializes read-modify-write of the state files within the daemon.
+fn lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn state_path(cfg: &Config, id: Uuid) -> PathBuf {
+    cfg.state_dir
+        .join("network-edge")
+        .join(format!("{id}.json"))
+}
+
+pub fn load(cfg: &Config, id: Uuid) -> Result<EdgeState> {
+    let path = state_path(cfg, id);
+    match fs::read(&path) {
+        Ok(raw) => serde_json::from_slice(&raw)
+            .with_context(|| format!("parsing VM edge state {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(EdgeState::default()),
+        Err(e) => Err(e).with_context(|| format!("reading VM edge state {}", path.display())),
+    }
+}
+
+fn save(cfg: &Config, id: Uuid, state: &EdgeState) -> Result<()> {
+    let path = state_path(cfg, id);
+    let parent = path.parent().context("VM edge state path has no parent")?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("creating VM edge state directory {}", parent.display()))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_vec_pretty(state)?)
+        .with_context(|| format!("writing VM edge state {}", tmp.display()))?;
+    fs::rename(&tmp, &path).with_context(|| format!("committing VM edge state {}", path.display()))
+}
+
+pub fn delete(cfg: &Config, id: Uuid) -> Result<()> {
+    let _guard = lock();
+    let path = state_path(cfg, id);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("deleting VM edge state {}", path.display())),
+    }
+}
+
+/// The persisted spec, for the attach paths in `dataplane`.
+pub fn spec(cfg: &Config, id: Uuid) -> Result<Option<EdgeSpec>> {
+    Ok(load(cfg, id)?.edge)
+}
+
+fn native(cfg: &Config) -> bool {
+    cfg.sandbox.dataplane.mode != DataplaneMode::Legacy
+}
+
+fn attached(cfg: &Config, id: Uuid) -> bool {
+    native(cfg) && crate::ebpf::edge_attached(&cfg.sandbox.dataplane, id)
+}
+
+pub fn validate(spec: &EdgeSpec) -> Result<()> {
     if spec.namespace.is_empty() || spec.machine.is_empty() {
         bail!("namespace and machine are required");
     }
     if spec.identity == 0 {
         bail!("identity is required");
     }
-    let mut guard = store().lock().expect("edge store");
-    let slot = guard.entry(id).or_default();
-    if spec.learn_ip && !spec.assigned_ip.is_empty() && slot.learned_ip.is_empty() {
-        slot.learned_ip = spec.assigned_ip.clone();
-        slot.learned_source = "agent".to_string();
+    crate::ebpf::validate_edge(spec)
+}
+
+/// Validates, applies to the live maps when the VM is attached, then
+/// persists. A VM that is not attached picks the spec up on its next attach.
+pub fn apply_edge(cfg: &Config, id: Uuid, spec: EdgeSpec) -> Result<EdgeSpec> {
+    validate(&spec)?;
+    if !native(cfg) && spec.enforces_anything() {
+        bail!("VM edge enforcement requires sandbox.dataplane.mode=ebpf or cilium");
     }
-    slot.edge = Some(spec.clone());
+    let _guard = lock();
+    let mut state = load(cfg, id)?;
+    if attached(cfg, id) {
+        crate::ebpf::reconfigure_edge(&cfg.sandbox.dataplane, id, Some(&spec))?;
+        if let Some(iface) = crate::ebpf::read_recorded_iface(id) {
+            let _netns = crate::ebpf::vm_netns_scope(id);
+            crate::edge_qos::apply(&iface, &spec.qos)?;
+        }
+    }
+    state.edge = Some(spec.clone());
+    save(cfg, id, &state)?;
     Ok(spec)
 }
 
-pub fn edge(id: Uuid) -> Option<EdgeSpec> {
-    store()
-        .lock()
-        .expect("edge store")
-        .get(&id)
-        .and_then(|s| s.edge.clone())
+/// Runs after a successful attach: host-to-guest QoS lives on the device,
+/// which a VM restart recreates, and a migration restore may be waiting for
+/// the conntrack map to exist.
+pub fn after_attach(cfg: &Config, id: Uuid, iface: &str) {
+    let _guard = lock();
+    let mut state = match load(cfg, id) {
+        Ok(state) => state,
+        Err(e) => {
+            warn!(%id, error = %e, "VM edge state unreadable; edge QoS and pending conntrack skipped");
+            return;
+        }
+    };
+    {
+        let _netns = crate::ebpf::vm_netns_scope(id);
+        let qos = state
+            .edge
+            .as_ref()
+            .map(|e| e.qos.clone())
+            .unwrap_or_default();
+        if let Err(e) = crate::edge_qos::apply(iface, &qos) {
+            warn!(%id, %iface, error = %e, "applying VM edge ingress QoS failed");
+        }
+    }
+    if let Some(snap) = state.pending_conntrack.take() {
+        match crate::ebpf::restore_conntrack_entries(&cfg.sandbox.dataplane, id, &snap.entries) {
+            Ok(n) => {
+                tracing::info!(%id, restored = n, "restored pending VM conntrack snapshot");
+                if let Err(e) = save(cfg, id, &state) {
+                    warn!(%id, error = %e, "clearing restored conntrack snapshot failed");
+                }
+            }
+            Err(e) => warn!(%id, error = %e, "restoring pending VM conntrack snapshot failed"),
+        }
+    }
 }
 
-pub fn export_conntrack(id: Uuid) -> Result<ConntrackSnapshot> {
-    let guard = store().lock().expect("edge store");
-    guard
-        .get(&id)
-        .and_then(|s| s.conntrack.clone())
-        .ok_or_else(|| anyhow::anyhow!("no conntrack snapshot for {id}"))
+/// Snapshot of the live conntrack table. A VM with no attachment, or no
+/// flows, exports an empty snapshot rather than failing the migration.
+pub fn export_conntrack(cfg: &Config, id: Uuid) -> Result<ConntrackSnapshot> {
+    let state = load(cfg, id)?;
+    let identity = state
+        .edge
+        .as_ref()
+        .map(|e| e.identity)
+        .filter(|i| *i != 0)
+        .unwrap_or_else(|| crate::ebpf::identity_for(id));
+    let entries = if attached(cfg, id) {
+        crate::ebpf::conntrack_entries(&cfg.sandbox.dataplane, id)?
+    } else {
+        Vec::new()
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Ok(ConntrackSnapshot {
+        identity,
+        generation: now.as_nanos() as u64,
+        exported_at: rfc3339(now.as_secs()),
+        entries,
+    })
 }
 
-pub fn restore_conntrack(id: Uuid, snap: ConntrackSnapshot) -> Result<ConntrackSnapshot> {
+pub fn restore_conntrack(
+    cfg: &Config,
+    id: Uuid,
+    snap: ConntrackSnapshot,
+) -> Result<ConntrackSnapshot> {
     if snap.identity == 0 {
         bail!("conntrack identity is required");
     }
     if snap.exported_at.is_empty() {
         bail!("conntrack export timestamp is required");
     }
-    let mut guard = store().lock().expect("edge store");
-    let slot = guard.entry(id).or_default();
-    if let Some(edge) = &slot.edge
+    let _guard = lock();
+    let mut state = load(cfg, id)?;
+    if let Some(edge) = &state.edge
         && edge.identity != 0
         && edge.identity != snap.identity
     {
@@ -181,106 +331,187 @@ pub fn restore_conntrack(id: Uuid, snap: ConntrackSnapshot) -> Result<ConntrackS
             edge.identity
         );
     }
-    slot.conntrack = Some(snap.clone());
+    if attached(cfg, id) {
+        crate::ebpf::restore_conntrack_entries(&cfg.sandbox.dataplane, id, &snap.entries)?;
+        if state.pending_conntrack.take().is_some() {
+            save(cfg, id, &state)?;
+        }
+    } else {
+        state.pending_conntrack = Some(snap.clone());
+        save(cfg, id, &state)?;
+    }
     Ok(snap)
 }
 
-pub fn learned_ip(id: Uuid) -> Result<Value> {
-    let guard = store().lock().expect("edge store");
-    let slot = guard.get(&id);
-    let (ip, source) = slot
-        .map(|s| (s.learned_ip.clone(), s.learned_source.clone()))
+/// The address the datapath learned from guest ARP or ND; otherwise the
+/// caller's fallback (the DHCP lease FluxVM handed out).
+pub fn learned_ip(cfg: &Config, id: Uuid, fallback: Option<(String, &str)>) -> Result<Value> {
+    if native(cfg)
+        && let Some((ip, source)) = crate::ebpf::learned_address(&cfg.sandbox.dataplane, id)?
+    {
+        return Ok(json!({"ip": ip, "source": source}));
+    }
+    let (ip, source) = fallback
+        .map(|(ip, source)| (ip, source.to_string()))
         .unwrap_or_default();
     Ok(json!({"ip": ip, "source": source}))
 }
 
-pub fn note_learned_ip(id: Uuid, ip: &str, source: &str) {
-    if ip.is_empty() {
-        return;
+/// Drops recorded by the datapath, named with Kairon's reason vocabulary and
+/// the policy object that produced the maps.
+pub fn attributed_drops(cfg: &Config, id: Uuid, limit: usize) -> Result<Vec<DropEvent>> {
+    if !attached(cfg, id) {
+        return Ok(Vec::new());
     }
-    let mut guard = store().lock().expect("edge store");
-    let slot = guard.entry(id).or_default();
-    slot.learned_ip = ip.to_string();
-    slot.learned_source = source.to_string();
-}
-
-pub fn attributed_drops(id: Uuid, limit: usize) -> Vec<DropEvent> {
-    let guard = store().lock().expect("edge store");
-    let Some(slot) = guard.get(&id) else {
-        return Vec::new();
-    };
-    let Some(edge) = &slot.edge else {
-        return Vec::new();
-    };
-    let mut events = Vec::new();
-    if edge.anti_spoof {
-        events.push(DropEvent {
-            reason: "spoof_mac".to_string(),
-            policy_name: edge.policy_name.clone(),
-            src_ip: String::new(),
-            dst_ip: String::new(),
-        });
-    }
-    if !edge.allow_sni.is_empty() {
-        events.push(DropEvent {
-            reason: "sni_deny".to_string(),
-            policy_name: edge.policy_name.clone(),
-            src_ip: edge.assigned_ip.clone(),
-            dst_ip: String::new(),
-        });
-    }
-    if !edge.default_allow && events.is_empty() {
-        events.push(DropEvent {
-            reason: "default_deny".to_string(),
-            policy_name: edge.policy_name.clone(),
-            src_ip: edge.assigned_ip.clone(),
-            dst_ip: String::new(),
-        });
-    }
+    let edge = load(cfg, id)?.edge.unwrap_or_default();
     let limit = limit.clamp(1, 4096);
+    let mut events: Vec<DropEvent> = crate::ebpf::drop_reasons(&cfg.sandbox.dataplane, id, limit)?
+        .into_iter()
+        .map(|r| DropEvent {
+            namespace: edge.namespace.clone(),
+            machine: edge.machine.clone(),
+            reason: kairon_reason(r.reason_code).to_string(),
+            policy_name: edge.policy_name.clone(),
+            src_ip: r.source,
+            dst_ip: r.destination,
+            proto: proto_name(r.protocol).to_string(),
+            dst_port: r.destination_port,
+            direction: "egress".to_string(),
+            action: r.action,
+            packets: r.packets,
+        })
+        .collect();
+    if let Some(iface) = crate::ebpf::read_recorded_iface(id) {
+        let _netns = crate::ebpf::vm_netns_scope(id);
+        let packets = crate::edge_qos::drops(&iface);
+        if packets > 0 {
+            events.push(DropEvent {
+                namespace: edge.namespace.clone(),
+                machine: edge.machine.clone(),
+                reason: "rate_limit".to_string(),
+                policy_name: edge.policy_name.clone(),
+                src_ip: String::new(),
+                dst_ip: String::new(),
+                proto: String::new(),
+                dst_port: 0,
+                direction: "ingress".to_string(),
+                action: "drop".to_string(),
+                packets,
+            });
+        }
+    }
+    events.sort_by(|a, b| b.packets.cmp(&a.packets));
     events.truncate(limit);
-    events
+    Ok(events)
 }
 
-pub fn start_capture(id: Uuid, session: CaptureSession) -> Result<CaptureSession> {
+/// Kernel reason codes (`FLUXVM_REASON_*`) in Kairon's vocabulary.
+fn kairon_reason(code: u32) -> &'static str {
+    match code {
+        3..=6 | 12 => "policy_deny",
+        7 => "rate_limit",
+        8 => "default_deny",
+        13 => "spoof_mac",
+        14 => "spoof_ip",
+        15 => "dns_deny",
+        16 => "sni_deny",
+        1 | 2 | 11 => "malformed",
+        9 | 10 => "migration",
+        _ => "unknown",
+    }
+}
+
+fn proto_name(protocol: u8) -> &'static str {
+    match protocol {
+        1 => "icmp",
+        6 => "tcp",
+        17 => "udp",
+        58 => "icmpv6",
+        132 => "sctp",
+        _ => "",
+    }
+}
+
+pub fn start_capture(cfg: &Config, id: Uuid, session: CaptureSession) -> Result<CaptureSession> {
     if session.seconds < 1 || session.seconds > 30 {
         bail!("seconds must be 1-30");
     }
     if session.token.is_empty() {
         bail!("capture token is required");
     }
-    let mut guard = store().lock().expect("edge store");
-    let slot = guard.entry(id).or_default();
-    slot.captures.push(session.clone());
+    let _guard = lock();
+    let mut state = load(cfg, id)?;
+    state.captures.retain(|c| c.token != session.token);
+    state.captures.push(session.clone());
+    let excess = state.captures.len().saturating_sub(MAX_CAPTURES);
+    state.captures.drain(..excess);
+    save(cfg, id, &state)?;
     Ok(session)
 }
 
+pub fn captures(cfg: &Config, id: Uuid) -> Result<Vec<CaptureSession>> {
+    Ok(load(cfg, id)?.captures)
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ` for a Unix timestamp; Kairon decodes it as `time.Time`.
+pub fn rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
 pub fn now_rfc3339() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{secs}")
+    rfc3339(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn test_cfg() -> (tempfile::TempDir, Config) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.state_dir = tmp.path().to_path_buf();
+        cfg.sandbox.dataplane.pin_root = tmp.path().join("bpf");
+        (tmp, cfg)
+    }
+
+    fn spec(identity: u32) -> EdgeSpec {
+        EdgeSpec {
+            namespace: "demo".into(),
+            machine: "web".into(),
+            identity,
+            ..EdgeSpec::default()
+        }
+    }
+
     #[test]
     fn identity_mismatch_fails_closed() {
+        let (_tmp, cfg) = test_cfg();
         let id = Uuid::new_v4();
-        apply_edge(
-            id,
-            EdgeSpec {
-                namespace: "demo".into(),
-                machine: "web".into(),
-                identity: 42,
-                ..EdgeSpec::default()
-            },
-        )
-        .unwrap();
+        apply_edge(&cfg, id, spec(42)).unwrap();
         let err = restore_conntrack(
+            &cfg,
             id,
             ConntrackSnapshot {
                 identity: 7,
@@ -291,6 +522,127 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn spec_and_pending_restore_survive_reload() {
+        let (_tmp, cfg) = test_cfg();
+        let id = Uuid::new_v4();
+        apply_edge(&cfg, id, spec(42)).unwrap();
+        let entry = ConntrackEntry {
+            proto: "tcp".into(),
+            src_ip: "10.0.0.5".into(),
+            dst_ip: "1.1.1.1".into(),
+            src_port: 40000,
+            dst_port: 443,
+            state: "established".into(),
+            seq: 0,
+            ack: 0,
+        };
+        restore_conntrack(
+            &cfg,
+            id,
+            ConntrackSnapshot {
+                identity: 42,
+                generation: 1,
+                exported_at: "2026-10-04T00:00:00Z".into(),
+                entries: vec![entry.clone()],
+            },
+        )
+        .unwrap();
+        let state = load(&cfg, id).unwrap();
+        assert_eq!(state.edge.unwrap().identity, 42);
+        assert_eq!(state.pending_conntrack.unwrap().entries, vec![entry]);
+        delete(&cfg, id).unwrap();
+        assert!(load(&cfg, id).unwrap().edge.is_none());
+    }
+
+    #[test]
+    fn export_without_attachment_is_empty_not_an_error() {
+        let (_tmp, cfg) = test_cfg();
+        let id = Uuid::new_v4();
+        apply_edge(&cfg, id, spec(42)).unwrap();
+        let snap = export_conntrack(&cfg, id).unwrap();
+        assert_eq!(snap.identity, 42);
+        assert!(snap.entries.is_empty());
+        assert!(snap.exported_at.ends_with('Z'));
+    }
+
+    #[test]
+    fn legacy_mode_refuses_enforcement() {
+        let (_tmp, mut cfg) = test_cfg();
+        cfg.sandbox.dataplane.mode = DataplaneMode::Legacy;
+        let mut s = spec(42);
+        s.anti_spoof = true;
+        let err = apply_edge(&cfg, Uuid::new_v4(), s).unwrap_err();
+        assert!(err.to_string().contains("ebpf or cilium"));
+    }
+
+    #[test]
+    fn rejects_bad_names_and_addresses() {
+        let mut s = spec(42);
+        s.allow_sni = vec!["bad name".into()];
+        assert!(validate(&s).is_err());
+        let mut s = spec(42);
+        s.assigned_mac = "52:54:00:00:01".into();
+        assert!(validate(&s).is_err());
+        let mut s = spec(42);
+        s.assigned_ip = "10.0.0.300".into();
+        assert!(validate(&s).is_err());
+        let mut s = spec(42);
+        s.allow_dns = vec!["*.Example.COM.".into(), "api.test".into()];
+        s.assigned_ip = "10.0.0.5/24,fd00::5".into();
+        validate(&s).unwrap();
+    }
+
+    #[test]
+    fn capture_rejects_long_window() {
+        let (_tmp, cfg) = test_cfg();
+        let err = start_capture(
+            &cfg,
+            Uuid::new_v4(),
+            CaptureSession {
+                token: "abc".into(),
+                namespace: "demo".into(),
+                machine: "web".into(),
+                seconds: 31,
+                filter: String::new(),
+                expires_at: "2026-10-04T00:00:30Z".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("1-30"));
+    }
+
+    #[test]
+    fn captures_persist_and_are_bounded() {
+        let (_tmp, cfg) = test_cfg();
+        let id = Uuid::new_v4();
+        for i in 0..20 {
+            start_capture(
+                &cfg,
+                id,
+                CaptureSession {
+                    token: format!("t{i}"),
+                    namespace: "demo".into(),
+                    machine: "web".into(),
+                    seconds: 5,
+                    filter: String::new(),
+                    expires_at: "2026-10-04T00:00:30Z".into(),
+                },
+            )
+            .unwrap();
+        }
+        let kept = captures(&cfg, id).unwrap();
+        assert_eq!(kept.len(), MAX_CAPTURES);
+        assert_eq!(kept.last().unwrap().token, "t19");
+    }
+
+    #[test]
+    fn rfc3339_formats_known_instants() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339(1_791_072_000), "2026-10-04T00:00:00Z");
     }
 
     #[test]
@@ -309,20 +661,13 @@ mod tests {
     }
 
     #[test]
-    fn capture_rejects_long_window() {
-        let id = Uuid::new_v4();
-        let err = start_capture(
-            id,
-            CaptureSession {
-                token: "abc".into(),
-                namespace: "demo".into(),
-                machine: "web".into(),
-                seconds: 31,
-                filter: String::new(),
-                expires_at: "2026-10-04T00:00:30Z".into(),
-            },
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("1-30"));
+    fn kernel_reasons_map_to_kairon_vocabulary() {
+        assert_eq!(kairon_reason(13), "spoof_mac");
+        assert_eq!(kairon_reason(14), "spoof_ip");
+        assert_eq!(kairon_reason(15), "dns_deny");
+        assert_eq!(kairon_reason(16), "sni_deny");
+        assert_eq!(kairon_reason(7), "rate_limit");
+        assert_eq!(kairon_reason(4), "policy_deny");
+        assert_eq!(kairon_reason(8), "default_deny");
     }
 }

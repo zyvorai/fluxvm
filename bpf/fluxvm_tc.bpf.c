@@ -51,6 +51,10 @@
 #define FLUXVM_REASON_MIGRATION_RESTORING 10
 #define FLUXVM_REASON_UNSUPPORTED_ETHERTYPE 11
 #define FLUXVM_REASON_UDP_DENY             12
+#define FLUXVM_REASON_SPOOF_MAC            13
+#define FLUXVM_REASON_SPOOF_IP             14
+#define FLUXVM_REASON_DNS_DENY             15
+#define FLUXVM_REASON_SNI_DENY             16
 #define FLUXVM_REASON_ACTION_DROP          0
 #define FLUXVM_REASON_ACTION_AUDIT         1
 #define FLUXVM_MIGRATION_RUNNING           0
@@ -297,6 +301,127 @@ struct {
     __type(key, __u32);
     __type(value, struct group_ids);
 } fluxvm_gid SEC(".maps");
+
+/* Schema v12: Kairon VM-edge contract (anti-spoof, learn-IP, QoS token
+ * bucket, SNI/DNS allow lists). Keyed by ifindex like fluxvm_id; a missing
+ * entry means the edge was never requested and every check is skipped. */
+#define FLUXVM_EDGE_ANTI_SPOOF 1u
+#define FLUXVM_EDGE_LEARN_IP   2u
+#define FLUXVM_EDGE_SNI        4u
+#define FLUXVM_EDGE_DNS        8u
+/* The hook sees a router's output (a netns VM's host veth), not the guest's
+ * own frames: skip MAC and ARP checks and also accept router_ip4 as a source. */
+#define FLUXVM_EDGE_ROUTED     16u
+
+#define FLUXVM_LEARN_ARP 1u
+#define FLUXVM_LEARN_ND  3u
+
+#define FLUXVM_NAME_SNI    1u
+#define FLUXVM_NAME_DNS    2u
+#define FLUXVM_NAME_EXACT  1u
+#define FLUXVM_NAME_SUFFIX 2u
+#define FLUXVM_NAME_MAX    128
+
+struct edge_config {
+    __u32 flags;
+    __u32 ip4;      /* network byte order, 0 = not assigned */
+    __u8 mac[6];    /* all-zero = not assigned */
+    __u8 pad[2];
+    __u8 ip6[16];   /* all-zero = not assigned */
+    __u64 egress_bytes_per_sec;
+    __u64 egress_packets_per_sec;
+    __u32 router_ip4; /* network byte order, FLUXVM_EDGE_ROUTED only */
+    __u32 pad2;
+};
+_Static_assert(sizeof(struct edge_config) == 56, "edge config ABI");
+
+struct edge_learned {
+    __u32 ip4;
+    __u32 source4;
+    __u8 ip6[16];
+    __u32 source6;
+    __u32 pad;
+    __u64 seen_ns;
+};
+_Static_assert(sizeof(struct edge_learned) == 40, "edge learned ABI");
+
+struct edge_rate {
+    struct bpf_spin_lock lock;
+    __u32 pad;
+    __u64 byte_ns;
+    __u64 packet_ns;
+    __u64 byte_tokens;
+    __u64 packet_tokens;
+};
+
+/* hash = FNV-1a 64 over the lower-cased name read right to left, so a
+ * suffix such as "example.com" is a prefix of the hashed stream. */
+struct name_key {
+    __u32 identity;
+    __u32 kind;
+    __u64 hash;
+};
+_Static_assert(sizeof(struct name_key) == 16, "name key ABI");
+
+struct name_scratch {
+    __u8 buf[FLUXVM_NAME_MAX];
+};
+
+/* Per-CPU working set for fluxvm_edge_precheck; keeps its frame small
+ * enough to fit under the 512-byte combined stack with fluxvm_egress. */
+struct edge_scratch {
+    __u8 hdr[40] __attribute__((aligned(8)));
+    __u8 na[24];
+    __u8 src[16];
+    __u8 dst[16];
+    __u8 want6[16];
+    __u8 family;
+    __u8 protocol;
+    __u8 pad[6];
+    struct edge_learned fresh;
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct edge_scratch);
+} fluxvm_edge_scratch SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8);
+    __type(key, __u32);
+    __type(value, struct edge_config);
+} fluxvm_edge SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8);
+    __type(key, __u32);
+    __type(value, struct edge_learned);
+} fluxvm_learn SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 8);
+    __type(key, __u32);
+    __type(value, struct edge_rate);
+} fluxvm_edge_rate SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 2048);
+    __type(key, struct name_key);
+    __type(value, __u32);
+} fluxvm_names SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct name_scratch);
+} fluxvm_name_buf SEC(".maps");
 
 static __always_inline void count(__u32 identity, __u32 verdict, __u32 bytes)
 {
@@ -853,6 +978,430 @@ static __always_inline void record_reason4(
                       iph->protocol, reason, action);
 }
 
+#define FLUXVM_NS_PER_SEC 1000000000ULL
+#define FLUXVM_FNV_OFFSET 0xcbf29ce484222325ULL
+#define FLUXVM_FNV_PRIME  0x100000001b3ULL
+
+/* Token bucket with one second of burst. Each bucket advances its own
+ * clock only when at least one whole token was added, so small packet
+ * gaps do not truncate the refill to zero forever. */
+static __always_inline __u64 edge_refill(__u64 *tokens, __u64 *stamp, __u64 rate, __u64 now)
+{
+    if (*stamp == 0) {
+        *stamp = now;
+        *tokens = rate;
+        return rate;
+    }
+    __u64 dt = now - *stamp;
+    if (dt > FLUXVM_NS_PER_SEC)
+        dt = FLUXVM_NS_PER_SEC;
+    __u64 add = rate * dt / FLUXVM_NS_PER_SEC;
+    if (add > 0) {
+        *stamp = now;
+        *tokens += add;
+        if (*tokens > rate)
+            *tokens = rate;
+    }
+    return *tokens;
+}
+
+static __always_inline int edge_rate_allowed(__u32 ifindex, const struct edge_config *edge, __u32 bytes)
+{
+    __u64 brate = edge->egress_bytes_per_sec;
+    __u64 prate = edge->egress_packets_per_sec;
+    if (brate == 0 && prate == 0)
+        return 1;
+    struct edge_rate *st = bpf_map_lookup_elem(&fluxvm_edge_rate, &ifindex);
+    if (!st) {
+        struct edge_rate initial = {};
+        bpf_map_update_elem(&fluxvm_edge_rate, &ifindex, &initial, BPF_NOEXIST);
+        st = bpf_map_lookup_elem(&fluxvm_edge_rate, &ifindex);
+        if (!st)
+            return 0;
+    }
+    __u64 now = bpf_ktime_get_ns();
+    int ok = 1;
+    bpf_spin_lock(&st->lock);
+    if (brate && edge_refill(&st->byte_tokens, &st->byte_ns, brate, now) < bytes)
+        ok = 0;
+    if (prate && edge_refill(&st->packet_tokens, &st->packet_ns, prate, now) < 1)
+        ok = 0;
+    if (ok) {
+        if (brate)
+            st->byte_tokens -= bytes;
+        if (prate)
+            st->packet_tokens -= 1;
+    }
+    bpf_spin_unlock(&st->lock);
+    return ok;
+}
+
+static __always_inline int mac_is_zero(const __u8 *mac)
+{
+    return (mac[0] | mac[1] | mac[2] | mac[3] | mac[4] | mac[5]) == 0;
+}
+
+static __always_inline int mac_equal(const __u8 *a, const __u8 *b)
+{
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2] &&
+           a[3] == b[3] && a[4] == b[4] && a[5] == b[5];
+}
+
+/* Callers pass 8-byte-aligned addresses (struct offsets 8/16/48/96). */
+static __always_inline int ip6_is_zero(const __u8 *a)
+{
+    const __u64 *p = (const __u64 *)a;
+    return (p[0] | p[1]) == 0;
+}
+
+static __always_inline int ip6_equal(const __u8 *a, const __u8 *b)
+{
+    const __u64 *p = (const __u64 *)a;
+    const __u64 *q = (const __u64 *)b;
+    return p[0] == q[0] && p[1] == q[1];
+}
+
+static __always_inline int ip6_link_local(const __u8 *a)
+{
+    return a[0] == 0xfe && (a[1] & 0xc0) == 0x80;
+}
+
+static __always_inline void edge_learn4(__u32 ifindex, struct edge_scratch *s, __u32 ip4,
+                                        __u32 source)
+{
+    struct edge_learned *cur = bpf_map_lookup_elem(&fluxvm_learn, &ifindex);
+    if (cur) {
+        cur->ip4 = ip4;
+        cur->source4 = source;
+        cur->seen_ns = bpf_ktime_get_ns();
+        return;
+    }
+    __builtin_memset(&s->fresh, 0, sizeof(s->fresh));
+    s->fresh.ip4 = ip4;
+    s->fresh.source4 = source;
+    s->fresh.seen_ns = bpf_ktime_get_ns();
+    bpf_map_update_elem(&fluxvm_learn, &ifindex, &s->fresh, BPF_NOEXIST);
+}
+
+static __always_inline void edge_learn6(__u32 ifindex, struct edge_scratch *s, __u32 source)
+{
+    const __u8 *target = &s->na[8];
+    struct edge_learned *cur = bpf_map_lookup_elem(&fluxvm_learn, &ifindex);
+    if (cur) {
+        __builtin_memcpy(cur->ip6, target, 16);
+        cur->source6 = source;
+        cur->seen_ns = bpf_ktime_get_ns();
+        return;
+    }
+    __builtin_memset(&s->fresh, 0, sizeof(s->fresh));
+    __builtin_memcpy(s->fresh.ip6, target, 16);
+    s->fresh.source6 = source;
+    s->fresh.seen_ns = bpf_ktime_get_ns();
+    bpf_map_update_elem(&fluxvm_learn, &ifindex, &s->fresh, BPF_NOEXIST);
+}
+
+/* Anti-spoof, learn-IP and the egress token bucket for one guest frame.
+ * Global so the verifier checks it once, outside the policy program's
+ * budget. Returns 0 to continue or the drop reason it recorded. */
+__attribute__((noinline)) int fluxvm_edge_precheck(struct __sk_buff *skb, __u32 identity)
+{
+    __u32 ifindex = skb->ifindex;
+    struct edge_config *edge = bpf_map_lookup_elem(&fluxvm_edge, &ifindex);
+    if (!edge)
+        return 0;
+    __u32 zero = 0;
+    struct edge_scratch *s = bpf_map_lookup_elem(&fluxvm_edge_scratch, &zero);
+    if (!s)
+        return 0;
+    __builtin_memset(s->src, 0, sizeof(s->src));
+    __builtin_memset(s->dst, 0, sizeof(s->dst));
+    s->family = 0;
+    s->protocol = 0;
+
+    struct ethhdr eth;
+    if (bpf_skb_load_bytes(skb, 0, &eth, sizeof(eth)) < 0)
+        return 0;
+    __u32 flags = edge->flags;
+    int anti = (flags & FLUXVM_EDGE_ANTI_SPOOF) != 0;
+    int learn = (flags & FLUXVM_EDGE_LEARN_IP) != 0;
+    int routed = (flags & FLUXVM_EDGE_ROUTED) != 0;
+    int has_mac = !routed && !mac_is_zero(edge->mac);
+    __u32 reason = 0;
+    if (anti && has_mac && !mac_equal(eth.h_source, edge->mac)) {
+        reason = FLUXVM_REASON_SPOOF_MAC;
+        goto drop;
+    }
+
+    __u32 want4 = edge->ip4;
+    if (!want4) {
+        struct edge_learned *l4 = bpf_map_lookup_elem(&fluxvm_learn, &ifindex);
+        if (l4)
+            want4 = l4->ip4;
+    }
+    __u16 proto = bpf_ntohs(eth.h_proto);
+
+    if (proto == ETH_P_ARP) {
+        if (routed)
+            return 0;
+        /* htype(2) ptype(2) hlen plen op(2) sha[6] spa[4] tha[6] tpa[4] */
+        if (bpf_skb_load_bytes(skb, sizeof(eth), s->hdr, 28) < 0)
+            return 0;
+        if (s->hdr[2] != 0x08 || s->hdr[3] != 0x00 || s->hdr[4] != 6 || s->hdr[5] != 4)
+            return 0;
+        __u32 spa;
+        __builtin_memcpy(&spa, &s->hdr[14], 4);
+        if (anti && has_mac && !mac_equal(&s->hdr[8], edge->mac)) {
+            reason = FLUXVM_REASON_SPOOF_MAC;
+            goto drop;
+        }
+        if (anti && want4 && spa && spa != want4) {
+            s->family = FLUXVM_AF_INET;
+            __builtin_memcpy(s->src, &spa, 4);
+            reason = FLUXVM_REASON_SPOOF_IP;
+            goto drop;
+        }
+        if (learn && spa && (!edge->ip4 || spa == edge->ip4))
+            edge_learn4(ifindex, s, spa, FLUXVM_LEARN_ARP);
+        return 0;
+    }
+
+    if (proto == ETH_P_IP) {
+        if (bpf_skb_load_bytes(skb, sizeof(eth), s->hdr, sizeof(struct iphdr)) < 0)
+            return 0;
+        struct iphdr *ip = (struct iphdr *)s->hdr;
+        s->family = FLUXVM_AF_INET;
+        s->protocol = ip->protocol;
+        __builtin_memcpy(s->src, &ip->saddr, 4);
+        __builtin_memcpy(s->dst, &ip->daddr, 4);
+        if (anti && want4 && ip->saddr != want4 &&
+            !(routed && edge->router_ip4 && ip->saddr == edge->router_ip4)) {
+            int dhcp = 0;
+            if (ip->saddr == 0 && ip->protocol == IPPROTO_UDP) {
+                struct udphdr udp;
+                if (bpf_skb_load_bytes(skb, sizeof(eth) + ip->ihl * 4, &udp, sizeof(udp)) == 0)
+                    dhcp = bpf_ntohs(udp.source) == 68 && bpf_ntohs(udp.dest) == 67;
+            }
+            if (!dhcp) {
+                reason = FLUXVM_REASON_SPOOF_IP;
+                goto drop;
+            }
+        }
+    } else if (proto == ETH_P_IPV6) {
+        if (bpf_skb_load_bytes(skb, sizeof(eth), s->hdr, sizeof(struct ipv6hdr)) < 0)
+            return 0;
+        struct ipv6hdr *ip6 = (struct ipv6hdr *)s->hdr;
+        const __u8 *saddr = ip6->saddr.in6_u.u6_addr8;
+        s->family = FLUXVM_AF_INET6;
+        s->protocol = ip6->nexthdr;
+        __builtin_memcpy(s->src, saddr, 16);
+        __builtin_memcpy(s->dst, ip6->daddr.in6_u.u6_addr8, 16);
+        if (anti && !ip6_is_zero(saddr) && !ip6_link_local(saddr)) {
+            __builtin_memcpy(s->want6, edge->ip6, 16);
+            if (ip6_is_zero(s->want6)) {
+                struct edge_learned *l6 = bpf_map_lookup_elem(&fluxvm_learn, &ifindex);
+                if (l6)
+                    __builtin_memcpy(s->want6, l6->ip6, 16);
+            }
+            if (!ip6_is_zero(s->want6) && !ip6_equal(saddr, s->want6)) {
+                reason = FLUXVM_REASON_SPOOF_IP;
+                goto drop;
+            }
+        }
+        /* Neighbor Advertisement: type(1) code(1) csum(2) flags(4) target[16]. */
+        if (learn && ip6->nexthdr == IPPROTO_ICMPV6 &&
+            bpf_skb_load_bytes(skb, sizeof(eth) + sizeof(struct ipv6hdr), s->na,
+                               sizeof(s->na)) == 0 &&
+            s->na[0] == 136 && !ip6_is_zero(&s->na[8]) && !ip6_link_local(&s->na[8]) &&
+            (ip6_is_zero(edge->ip6) || ip6_equal(&s->na[8], edge->ip6)))
+            edge_learn6(ifindex, s, FLUXVM_LEARN_ND);
+    } else {
+        return 0;
+    }
+
+    if (!edge_rate_allowed(ifindex, edge, skb->len)) {
+        reason = FLUXVM_REASON_RATE_LIMIT;
+        goto drop;
+    }
+    return 0;
+
+drop:
+    count(identity, FLUXVM_VERDICT_DROP, skb->len);
+    record_reason_raw(skb, identity, s->family, s->src, s->dst, 0, 0, s->protocol, reason,
+                      FLUXVM_REASON_ACTION_DROP);
+    return reason;
+}
+
+static __always_inline int name_hit(__u32 identity, __u32 kind, __u64 hash, __u32 want)
+{
+    struct name_key key = {.identity = identity, .kind = kind, .hash = hash};
+    __u32 *flags = bpf_map_lookup_elem(&fluxvm_names, &key);
+    return flags && (*flags & want);
+}
+
+/* Matches buf[start, end) against the allow list. A '.' boundary checks
+ * "*.suffix" entries; the whole name checks exact entries. */
+static __always_inline int name_allowed(const __u8 *buf, __u32 start, __u32 end,
+                                        __u32 identity, __u32 kind, int exact)
+{
+    __u64 h = FLUXVM_FNV_OFFSET;
+    for (int i = 0; i < FLUXVM_NAME_MAX; i++) {
+        int idx = (int)end - 1 - i;
+        if (idx < (int)start)
+            break;
+        __u8 c = buf[idx & (FLUXVM_NAME_MAX - 1)];
+        if (c == '.' && name_hit(identity, kind, h, FLUXVM_NAME_SUFFIX))
+            return 1;
+        if (c >= 'A' && c <= 'Z')
+            c += 'a' - 'A';
+        h ^= c;
+        h *= FLUXVM_FNV_PRIME;
+    }
+    return exact && name_hit(identity, kind, h, FLUXVM_NAME_EXACT);
+}
+
+static __always_inline __u16 load_be16(struct __sk_buff *skb, __u32 off, int *bad)
+{
+    __be16 v;
+    if (bpf_skb_load_bytes(skb, off, &v, sizeof(v)) < 0) {
+        *bad = 1;
+        return 0;
+    }
+    return bpf_ntohs(v);
+}
+
+static __always_inline __u8 load_u8(struct __sk_buff *skb, __u32 off, int *bad)
+{
+    __u8 v;
+    if (bpf_skb_load_bytes(skb, off, &v, sizeof(v)) < 0) {
+        *bad = 1;
+        return 0;
+    }
+    return v;
+}
+
+static __always_inline int dns_query_allowed(struct __sk_buff *skb, __u32 off, __u32 identity)
+{
+    __u32 zero = 0;
+    struct name_scratch *s = bpf_map_lookup_elem(&fluxvm_name_buf, &zero);
+    if (!s || off >= skb->len)
+        return 0;
+    __u32 n = skb->len - off;
+    if (n > FLUXVM_NAME_MAX)
+        n = FLUXVM_NAME_MAX;
+    if (n < 2)
+        return 0;
+    n = ((n - 1) & (FLUXVM_NAME_MAX - 1)) + 1;
+    if (bpf_skb_load_bytes(skb, off, s->buf, n) < 0)
+        return 0;
+    /* Wire labels to dotted form in place; the leading length byte becomes
+     * an ignored '.' at index 0. */
+    __u32 p = 0;
+    for (int i = 0; i < 64; i++) {
+        if (p >= n)
+            return 0;
+        __u8 l = s->buf[p & (FLUXVM_NAME_MAX - 1)];
+        if (l == 0)
+            break;
+        if (l > 63)
+            return 0;
+        s->buf[p & (FLUXVM_NAME_MAX - 1)] = '.';
+        p += l + 1;
+    }
+    if (p >= n || p < 2)
+        return 0;
+    return name_allowed(s->buf, 1, p, identity, FLUXVM_NAME_DNS, 1);
+}
+
+/* TLS ClientHello SNI. The ClientHello must fit in this segment: a
+ * truncated hello or one without server_name is denied while an SNI list
+ * is enforced. */
+static __always_inline int sni_allowed(struct __sk_buff *skb, __u32 off, __u32 identity)
+{
+    int bad = 0;
+    if (load_u8(skb, off, &bad) != 0x16 || bad)
+        return 1;
+    if (load_u8(skb, off + 5, &bad) != 1 || bad)
+        return 1;
+    __u32 p = off + 5 + 4 + 2 + 32;
+    p += 1 + load_u8(skb, p, &bad);
+    p += 2 + load_be16(skb, p, &bad);
+    p += 1 + load_u8(skb, p, &bad);
+    __u32 end = p + 2 + load_be16(skb, p, &bad);
+    p += 2;
+    if (bad)
+        return 0;
+    for (int i = 0; i < 32; i++) {
+        if (p + 4 > end)
+            return 0;
+        __u16 type = load_be16(skb, p, &bad);
+        __u16 len = load_be16(skb, p + 2, &bad);
+        if (bad)
+            return 0;
+        if (type == 0) {
+            /* list_len(2) name_type(1) name_len(2) name */
+            __u32 name_len = load_be16(skb, p + 4 + 3, &bad);
+            __u32 name_off = p + 4 + 5;
+            if (bad || name_len == 0)
+                return 0;
+            __u32 zero = 0;
+            struct name_scratch *s = bpf_map_lookup_elem(&fluxvm_name_buf, &zero);
+            if (!s)
+                return 0;
+            /* Only the tail is needed to match suffixes; longer names can
+             * never match an exact entry. */
+            __u32 n = name_len;
+            if (n > FLUXVM_NAME_MAX)
+                n = FLUXVM_NAME_MAX;
+            n = ((n - 1) & (FLUXVM_NAME_MAX - 1)) + 1;
+            if (bpf_skb_load_bytes(skb, name_off + name_len - n, s->buf, n) < 0)
+                return 0;
+            return name_allowed(s->buf, 0, n, identity, FLUXVM_NAME_SNI,
+                                name_len <= FLUXVM_NAME_MAX);
+        }
+        p += 4 + len;
+    }
+    return 0;
+}
+
+/* DNS qname and TLS SNI allow lists. proto_port = protocol << 16 | dport.
+ * Returns 0 or the drop reason; the caller records it with the tuple. */
+__attribute__((noinline)) int fluxvm_edge_l7(struct __sk_buff *skb, __u32 identity,
+                                             __u32 l4off, __u32 proto_port)
+{
+    __u32 ifindex = skb->ifindex;
+    struct edge_config *edge = bpf_map_lookup_elem(&fluxvm_edge, &ifindex);
+    if (!edge || !(edge->flags & (FLUXVM_EDGE_SNI | FLUXVM_EDGE_DNS)))
+        return 0;
+    __u8 protocol = proto_port >> 16;
+    __u16 dport = proto_port & 0xffff;
+    int bad = 0;
+    __u32 payload = l4off;
+    if (protocol == IPPROTO_UDP) {
+        payload += 8;
+    } else if (protocol == IPPROTO_TCP) {
+        payload += (load_u8(skb, l4off + 12, &bad) >> 4) * 4;
+        if (bad)
+            return 0;
+    } else {
+        return 0;
+    }
+    if (payload >= skb->len)
+        return 0;
+
+    if ((edge->flags & FLUXVM_EDGE_DNS) && dport == 53) {
+        __u32 hdr = protocol == IPPROTO_TCP ? payload + 2 : payload;
+        /* flags(2) after id(2): QR=0 query; qdcount(2) >= 1 */
+        __u16 dflags = load_be16(skb, hdr + 2, &bad);
+        __u16 qd = load_be16(skb, hdr + 4, &bad);
+        if (bad || (dflags & 0x8000) || qd == 0)
+            return 0;
+        return dns_query_allowed(skb, hdr + 12, identity) ? 0 : FLUXVM_REASON_DNS_DENY;
+    }
+    if ((edge->flags & FLUXVM_EDGE_SNI) && protocol == IPPROTO_TCP && dport == 443)
+        return sni_allowed(skb, payload, identity) ? 0 : FLUXVM_REASON_SNI_DENY;
+    return 0;
+}
+
 static __always_inline int handle_ipv4(
     struct __sk_buff *skb,
     struct iface_config *cfg,
@@ -922,6 +1471,21 @@ static __always_inline int handle_ipv4(
         record_flow4(skb, cfg->identity, iph, sport, dport,
                      FLUXVM_VERDICT_DROP, sample);
         return TC_ACT_SHOT;
+    }
+
+    if (parsed_l4 > 0) {
+        __u32 l7 = fluxvm_edge_l7(skb, cfg->identity, sizeof(struct ethhdr) + iph->ihl * 4,
+                                  ((__u32)iph->protocol << 16) | dport);
+        if (l7) {
+            record_reason4(skb, cfg->identity, iph, sport, dport, l7,
+                           audit ? FLUXVM_REASON_ACTION_AUDIT : FLUXVM_REASON_ACTION_DROP);
+            if (!audit) {
+                count(cfg->identity, FLUXVM_VERDICT_DROP, skb->len);
+                record_flow4(skb, cfg->identity, iph, sport, dport,
+                             FLUXVM_VERDICT_DROP, sample);
+                return TC_ACT_SHOT;
+            }
+        }
     }
 
     __u8 src[16] = {};
@@ -1071,6 +1635,17 @@ static __always_inline int handle_ipv6(
         record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,FLUXVM_VERDICT_DROP,sample);
         return TC_ACT_SHOT;
     }
+    if (li.parsed_ports && !li.fragmented) {
+        __u32 l7=fluxvm_edge_l7(skb,cfg->identity,sizeof(struct ethhdr)+li.offset,((__u32)proto<<16)|dport);
+        if (l7) {
+            record_reason_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,l7,audit?FLUXVM_REASON_ACTION_AUDIT:FLUXVM_REASON_ACTION_DROP);
+            if (!audit) {
+                count(cfg->identity,FLUXVM_VERDICT_DROP,skb->len);
+                record_flow_raw(skb,cfg->identity,FLUXVM_AF_INET6,ip6->saddr.in6_u.u6_addr8,ip6->daddr.in6_u.u6_addr8,sport,dport,proto,FLUXVM_VERDICT_DROP,sample);
+                return TC_ACT_SHOT;
+            }
+        }
+    }
     struct flow_key ctkey={.identity=cfg->identity,.sport=sport,.dport=dport,.protocol=proto,.family=FLUXVM_AF_INET6};
     __builtin_memcpy(ctkey.src,ip6->saddr.in6_u.u6_addr8,16); __builtin_memcpy(ctkey.dst,ip6->daddr.in6_u.u6_addr8,16);
     if (!li.fragmented && !fluxvm_ipv6_new_flow(ip6,data_end,&li) && ct_hit(&ctkey)) {
@@ -1121,6 +1696,8 @@ static __always_inline int fluxvm_egress_verdict(struct __sk_buff *skb)
     // only occur after external map tampering. Fail closed rather than
     // silently turning an enforced interface into allow-all.
     if (!cfg)
+        return TC_ACT_SHOT;
+    if (fluxvm_edge_precheck(skb, cfg->identity))
         return TC_ACT_SHOT;
 
     void *data = (void *)(long)skb->data;

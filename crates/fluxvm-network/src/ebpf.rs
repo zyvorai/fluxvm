@@ -22,6 +22,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::dataplane::{PodNetworkPolicy, PodPolicyProtocol, PodPolicyRule, VmNetworkPolicy};
+use crate::edge_contract::{ConntrackEntry, EdgeSpec};
 use crate::tcx::{self, Preference as TcxPreference};
 
 const TC_PRIORITY: &str = "49152";
@@ -55,7 +56,25 @@ const MAX_POD_RULES: usize = 64;
 /// Schema v11 adds the bridge-less direct attach: the `fluxvm_direct` redirect map and
 /// tail in `fluxvm_tc.bpf.o`, and the separate `fluxvm_direct.bpf.o` inbound program.
 /// Source and destination of a live migration must agree, so the version moves.
-pub const DATAPLANE_SCHEMA_VERSION: u32 = 11;
+/// Schema v12 adds the Kairon VM-edge maps (`fluxvm_edge`, `fluxvm_learn`,
+/// `fluxvm_edge_rate`, `fluxvm_names`): anti-spoof, learn-IP, the DNS/SNI
+/// allow lists and an edge token bucket, plus drop reasons 13-16.
+pub const DATAPLANE_SCHEMA_VERSION: u32 = 12;
+
+/// Keep in lockstep with `FLUXVM_EDGE_*`, `FLUXVM_NAME_*` and `FLUXVM_LEARN_*`
+/// in `bpf/fluxvm_tc.bpf.c`.
+const EDGE_ANTI_SPOOF: u32 = 1;
+const EDGE_LEARN_IP: u32 = 2;
+const EDGE_SNI: u32 = 4;
+const EDGE_DNS: u32 = 8;
+const EDGE_ROUTED: u32 = 16;
+const NAME_KIND_SNI: u32 = 1;
+const NAME_KIND_DNS: u32 = 2;
+const NAME_EXACT: u32 = 1;
+const NAME_SUFFIX: u32 = 2;
+pub const EDGE_NAME_MAX: usize = 128;
+const LEARN_ARP: u32 = 1;
+const LEARN_ND: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Ipv4Cidr {
@@ -157,6 +176,7 @@ pub fn apply(
     iface: &str,
     pod_id: u32,
     pod_policy: Option<&PodNetworkPolicy>,
+    edge: Option<&EdgeSpec>,
 ) -> Result<()> {
     if iface.is_empty() {
         bail!("cannot attach eBPF dataplane without a host-visible interface");
@@ -261,6 +281,10 @@ pub fn apply(
         // reset it to unconfigured. `None` (no persisted policy yet) leaves
         // it as a safe/allow no-op, same as an unconfigured VM-level policy.
         configure_pod_maps(&map_dir, pod_id, pod_policy)?;
+        // The Kairon edge spec persists across restarts; anti-spoof must be
+        // live before the first guest frame reaches the program.
+        let router = edge_router_ip4(id, iface)?;
+        configure_edge(&map_dir, ifindex, identity, edge, router)?;
         // Published before the program is attached, like every other map, so the redirect
         // tail never runs against an empty config.
         if let Some(d) = &direct {
@@ -414,7 +438,7 @@ pub fn apply(
 
 /// Enters the network namespace a direct VM lives in (none for ordinary VMs, which
 /// also restores the daemon's own namespace if a caller had scoped elsewhere).
-fn vm_netns_scope(id: Uuid) -> crate::netns_scope::NetnsScope {
+pub(crate) fn vm_netns_scope(id: Uuid) -> crate::netns_scope::NetnsScope {
     let direct = crate::direct::recorded(id);
     crate::netns_scope::enter(direct.as_ref().and_then(|d| d.spec.netns_path.as_deref()))
 }
@@ -998,7 +1022,7 @@ pub fn ensure(
     // `DataplaneConfig` has no access to the state_dir persisted Pod policy
     // lives under, so this cannot re-apply Pod-scoped policy content on its
     // own -- a real caller should prefer `dataplane::ensure_sandbox_policy`.
-    apply(cfg, policy, id, iface, read_pod_id(id), None)?;
+    apply(cfg, policy, id, iface, read_pod_id(id), None, None)?;
     Ok(true)
 }
 
@@ -1175,7 +1199,7 @@ fn read_owned_program_id(id: Uuid) -> Option<u32> {
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
 
-fn read_recorded_iface(id: Uuid) -> Option<String> {
+pub(crate) fn read_recorded_iface(id: Uuid) -> Option<String> {
     let meta = vm_meta_dir(id).join("iface");
     if let Ok(iface) = fs::read_to_string(&meta) {
         let iface = iface.trim();
@@ -1247,6 +1271,412 @@ pub fn drop_reasons(
     });
     records.truncate(limit.clamp(1, 4096));
     Ok(records)
+}
+
+/// True when this VM's program is pinned with the current schema, so the
+/// VM-edge maps exist and may be written in place.
+pub fn edge_attached(cfg: &DataplaneConfig, id: Uuid) -> bool {
+    vm_pin_dir(&cfg.pin_root, id)
+        .join("maps/fluxvm_edge")
+        .exists()
+        && read_schema_version(&vm_meta_dir(id)) == Some(DATAPLANE_SCHEMA_VERSION)
+}
+
+/// Updates the edge maps of an attached VM without reattaching it.
+pub fn reconfigure_edge(cfg: &DataplaneConfig, id: Uuid, spec: Option<&EdgeSpec>) -> Result<()> {
+    require_bpftool()?;
+    let _netns = vm_netns_scope(id);
+    if !edge_attached(cfg, id) {
+        bail!(
+            "VM {id} has no schema {DATAPLANE_SCHEMA_VERSION} eBPF attachment; reattach before applying the edge"
+        );
+    }
+    let iface = read_recorded_iface(id).context("FluxVM eBPF interface marker is missing")?;
+    let ifindex = read_ifindex(&iface)?;
+    let map_dir = vm_pin_dir(&cfg.pin_root, id).join("maps");
+    let router = edge_router_ip4(id, &iface)?;
+    configure_edge(&map_dir, ifindex, identity_for(id), spec, router)?;
+    info!(%id, %iface, enforced = spec.is_some(), "updated FluxVM VM-edge maps in place");
+    Ok(())
+}
+
+/// Address the program learned from guest ARP or IPv6 neighbor advertisements.
+pub fn learned_address(cfg: &DataplaneConfig, id: Uuid) -> Result<Option<(String, &'static str)>> {
+    let map = vm_pin_dir(&cfg.pin_root, id).join("maps/fluxvm_learn");
+    if !map.exists() {
+        return Ok(None);
+    }
+    Ok(parse_learned_json(&bpftool_json_dump(&map)?))
+}
+
+/// Live TCP/UDP/SCTP entries of the VM's established-flow table.
+pub fn conntrack_entries(cfg: &DataplaneConfig, id: Uuid) -> Result<Vec<ConntrackEntry>> {
+    let map = vm_pin_dir(&cfg.pin_root, id).join("maps/fluxvm_ct");
+    if !map.exists() {
+        return Ok(Vec::new());
+    }
+    parse_conntrack_json(&bpftool_json_dump(&map)?)
+}
+
+/// Seeds the VM's established-flow table from a migration snapshot. Keys are
+/// rewritten to this VM's identity and stamped with this host's monotonic
+/// clock, the one `bpf_ktime_get_ns` reads, so restored flows get a full timeout.
+pub fn restore_conntrack_entries(
+    cfg: &DataplaneConfig,
+    id: Uuid,
+    entries: &[ConntrackEntry],
+) -> Result<usize> {
+    let map = vm_pin_dir(&cfg.pin_root, id).join("maps/fluxvm_ct");
+    if !map.exists() {
+        bail!("FluxVM eBPF conntrack map is not pinned for VM {id}");
+    }
+    let identity = identity_for(id);
+    let now = monotonic_ns()?.to_ne_bytes();
+    let mut restored = 0;
+    for entry in entries {
+        let key = conntrack_key(identity, entry)
+            .with_context(|| format!("invalid conntrack entry {entry:?}"))?;
+        bpftool_map_update(&map, &key, &now)?;
+        restored += 1;
+    }
+    Ok(restored)
+}
+
+fn monotonic_ns() -> Result<u64> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec for the duration of the call.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("reading CLOCK_MONOTONIC");
+    }
+    Ok(ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64)
+}
+
+/// Writes `struct edge_config` and the name allow lists. `None`, or a spec that
+/// enforces nothing, removes the entry so the program skips the edge entirely.
+fn configure_edge(
+    map_dir: &Path,
+    ifindex: u32,
+    identity: u32,
+    spec: Option<&EdgeSpec>,
+    router: Option<Ipv4Addr>,
+) -> Result<()> {
+    let edge_map = map_dir.join("fluxvm_edge");
+    let names_map = map_dir.join("fluxvm_names");
+    let learn_map = map_dir.join("fluxvm_learn");
+    let value = match spec {
+        Some(spec) => edge_config_value(spec, router)?,
+        None => None,
+    };
+    if !edge_map.exists() || !names_map.exists() {
+        if value.is_some() {
+            bail!(
+                "the loaded FluxVM eBPF object has no VM-edge maps; schema {DATAPLANE_SCHEMA_VERSION} is required"
+            );
+        }
+        return Ok(());
+    }
+    let key = ifindex.to_ne_bytes();
+    let (Some(spec), Some(value)) = (spec, value) else {
+        bpftool_map_delete(&edge_map, &key)?;
+        clear_map(&names_map)?;
+        if learn_map.exists() {
+            bpftool_map_delete(&learn_map, &key)?;
+        }
+        return Ok(());
+    };
+    // Lists before the config: a narrowing update over-denies for a moment
+    // instead of matching against a half-written list.
+    clear_map(&names_map)?;
+    for ((kind, hash), flags) in edge_name_entries(spec)? {
+        let mut name_key = Vec::with_capacity(16);
+        name_key.extend_from_slice(&identity.to_ne_bytes());
+        name_key.extend_from_slice(&kind.to_ne_bytes());
+        name_key.extend_from_slice(&hash.to_ne_bytes());
+        bpftool_map_update(&names_map, &name_key, &flags.to_ne_bytes())?;
+    }
+    if !spec.learn_ip && learn_map.exists() {
+        bpftool_map_delete(&learn_map, &key)?;
+    }
+    bpftool_map_update(&edge_map, &key, &value)
+}
+
+/// Rejects a spec the maps cannot represent, before anything is persisted.
+pub fn validate_edge(spec: &EdgeSpec) -> Result<()> {
+    edge_config_value(spec, None)?;
+    edge_name_entries(spec)?;
+    Ok(())
+}
+
+/// A netns VM's hook is the host end of its veth, which carries the
+/// namespace's routed output: guest frames arrive behind the namespace
+/// bridge's MAC, and dnsmasq forwards DNS from the namespace's own address,
+/// one above the host end's (`netns.rs`). Other hooks see guest frames.
+fn edge_router_ip4(id: Uuid, iface: &str) -> Result<Option<Ipv4Addr>> {
+    if iface != crate::netns::host_veth_name(id) {
+        return Ok(None);
+    }
+    let out = crate::netns_scope::command("ip")
+        .args(["-o", "-4", "addr", "show", "dev", iface])
+        .output()
+        .with_context(|| format!("reading the IPv4 address of {iface}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let host = text
+        .split_whitespace()
+        .skip_while(|t| *t != "inet")
+        .nth(1)
+        .and_then(|cidr| cidr.split('/').next()?.parse::<Ipv4Addr>().ok())
+        .with_context(|| format!("{iface} has no IPv4 address"))?;
+    Ok(Some(Ipv4Addr::from(u32::from(host).wrapping_add(1))))
+}
+
+/// `struct edge_config` (56 bytes), or `None` when the spec enforces nothing.
+fn edge_config_value(spec: &EdgeSpec, router: Option<Ipv4Addr>) -> Result<Option<Vec<u8>>> {
+    let mac = parse_mac(&spec.assigned_mac)?;
+    let (ip4, ip6) = parse_assigned_ip(&spec.assigned_ip)?;
+    let mut flags = 0u32;
+    if spec.anti_spoof {
+        flags |= EDGE_ANTI_SPOOF;
+    }
+    if spec.learn_ip {
+        flags |= EDGE_LEARN_IP;
+    }
+    if !spec.allow_sni.is_empty() {
+        flags |= EDGE_SNI;
+    }
+    if !spec.allow_dns.is_empty() {
+        flags |= EDGE_DNS;
+    }
+    let bytes_per_sec = match spec.qos.egress_mbps {
+        0 => 0,
+        mbps => mbps_to_bytes_per_second(mbps)?,
+    };
+    let packets_per_sec = u64::from(spec.qos.egress_pps);
+    if flags == 0 && bytes_per_sec == 0 && packets_per_sec == 0 {
+        return Ok(None);
+    }
+    if router.is_some() {
+        flags |= EDGE_ROUTED;
+    }
+    let mut value = Vec::with_capacity(56);
+    value.extend_from_slice(&flags.to_ne_bytes());
+    value.extend_from_slice(&ip4.map(|ip| ip.octets()).unwrap_or_default());
+    value.extend_from_slice(&mac);
+    value.extend_from_slice(&[0, 0]);
+    value.extend_from_slice(&ip6.map(|ip| ip.octets()).unwrap_or_default());
+    value.extend_from_slice(&bytes_per_sec.to_ne_bytes());
+    value.extend_from_slice(&packets_per_sec.to_ne_bytes());
+    value.extend_from_slice(&router.map(|ip| ip.octets()).unwrap_or_default());
+    value.extend_from_slice(&[0; 4]);
+    Ok(Some(value))
+}
+
+/// `(kind, hash) -> EXACT|SUFFIX` entries; "*.example.com" matches names below
+/// example.com but not the apex, which needs its own exact entry.
+fn edge_name_entries(spec: &EdgeSpec) -> Result<std::collections::BTreeMap<(u32, u64), u32>> {
+    let mut out = std::collections::BTreeMap::new();
+    for (kind, names) in [
+        (NAME_KIND_SNI, &spec.allow_sni),
+        (NAME_KIND_DNS, &spec.allow_dns),
+    ] {
+        for raw in names {
+            let (name, flag) = normalize_edge_name(raw)?;
+            *out.entry((kind, edge_name_hash(&name))).or_insert(0) |= flag;
+        }
+    }
+    Ok(out)
+}
+
+pub fn normalize_edge_name(raw: &str) -> Result<(String, u32)> {
+    let name = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (name, flag) = match name.strip_prefix("*.") {
+        Some(rest) => (rest.to_string(), NAME_SUFFIX),
+        None => (name, NAME_EXACT),
+    };
+    if name.is_empty() || name.len() > EDGE_NAME_MAX {
+        bail!("allow-list name {raw:?} must be 1-{EDGE_NAME_MAX} bytes");
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_'))
+        || name.starts_with('.')
+        || name.contains("..")
+    {
+        bail!("allow-list name {raw:?} is not a DNS name or *.suffix");
+    }
+    Ok((name, flag))
+}
+
+/// FNV-1a 64 over the name read right to left, the order the BPF matcher
+/// walks it so every '.' boundary can test a suffix entry.
+fn edge_name_hash(name: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in name.bytes().rev() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn parse_mac(raw: &str) -> Result<[u8; 6]> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok([0; 6]);
+    }
+    let parts: Vec<&str> = raw.split([':', '-']).collect();
+    if parts.len() != 6 {
+        bail!("invalid MAC address {raw:?}");
+    }
+    let mut mac = [0u8; 6];
+    for (slot, part) in mac.iter_mut().zip(parts) {
+        *slot =
+            u8::from_str_radix(part, 16).with_context(|| format!("invalid MAC address {raw:?}"))?;
+    }
+    Ok(mac)
+}
+
+/// Accepts "", one address, an address with a prefix, or a comma-separated
+/// IPv4/IPv6 pair.
+fn parse_assigned_ip(raw: &str) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>)> {
+    let mut v4 = None;
+    let mut v6 = None;
+    for part in raw.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let addr = part.split('/').next().unwrap_or(part);
+        match addr
+            .parse::<IpAddr>()
+            .with_context(|| format!("invalid assigned IP {part:?}"))?
+        {
+            IpAddr::V4(ip) if v4.is_none() && !ip.is_unspecified() => v4 = Some(ip),
+            IpAddr::V6(ip) if v6.is_none() && !ip.is_unspecified() => v6 = Some(ip),
+            _ => bail!("assigned IP {raw:?} must hold at most one IPv4 and one IPv6 address"),
+        }
+    }
+    Ok((v4, v6))
+}
+
+fn parse_learned_json(root: &Value) -> Option<(String, &'static str)> {
+    for entry in root.as_array()? {
+        let Ok(value) = json_bytes(&entry["value"]) else {
+            continue;
+        };
+        // struct edge_learned: ip4, source4, ip6[16], source6, pad, seen_ns.
+        if value.len() < 32 {
+            continue;
+        }
+        let ip4 = Ipv4Addr::new(value[0], value[1], value[2], value[3]);
+        if !ip4.is_unspecified() {
+            let source = u32::from_ne_bytes(value[4..8].try_into().unwrap());
+            return Some((ip4.to_string(), learn_source_label(source)));
+        }
+        let ip6 = Ipv6Addr::from(<[u8; 16]>::try_from(&value[8..24]).unwrap());
+        if !ip6.is_unspecified() {
+            let source = u32::from_ne_bytes(value[24..28].try_into().unwrap());
+            return Some((ip6.to_string(), learn_source_label(source)));
+        }
+    }
+    None
+}
+
+fn learn_source_label(source: u32) -> &'static str {
+    match source {
+        LEARN_ARP => "arp",
+        LEARN_ND => "nd",
+        _ => "dataplane",
+    }
+}
+
+fn parse_conntrack_json(root: &Value) -> Result<Vec<ConntrackEntry>> {
+    let entries = root
+        .as_array()
+        .context("bpftool conntrack JSON must be an array")?;
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let key = json_bytes(&entry["key"])?;
+        if key.len() < 44 {
+            continue;
+        }
+        let proto = match key[40] {
+            IPPROTO_TCP => "tcp",
+            IPPROTO_UDP => "udp",
+            IPPROTO_SCTP => "sctp",
+            _ => continue,
+        };
+        let family = key[42];
+        out.push(ConntrackEntry {
+            proto: proto.to_string(),
+            src_ip: decode_flow_ip(family, &key[4..20])?,
+            dst_ip: decode_flow_ip(family, &key[20..36])?,
+            src_port: u16::from_ne_bytes(key[36..38].try_into().unwrap()),
+            dst_port: u16::from_ne_bytes(key[38..40].try_into().unwrap()),
+            state: "established".to_string(),
+            seq: 0,
+            ack: 0,
+        });
+    }
+    out.sort_by(|a, b| {
+        (&a.proto, &a.src_ip, a.src_port, &a.dst_ip, a.dst_port)
+            .cmp(&(&b.proto, &b.src_ip, b.src_port, &b.dst_ip, b.dst_port))
+    });
+    Ok(out)
+}
+
+/// `struct flow_key` as `ct_learn` stores it: verdict and pad are zero.
+fn conntrack_key(identity: u32, entry: &ConntrackEntry) -> Result<Vec<u8>> {
+    let protocol = match entry.proto.to_ascii_lowercase().as_str() {
+        "tcp" => IPPROTO_TCP,
+        "udp" => IPPROTO_UDP,
+        "sctp" => IPPROTO_SCTP,
+        other => bail!("unsupported conntrack protocol {other:?}"),
+    };
+    let src: IpAddr = entry.src_ip.parse().context("source address")?;
+    let dst: IpAddr = entry.dst_ip.parse().context("destination address")?;
+    let (family, src, dst) = match (src, dst) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let mut a = [0u8; 16];
+            let mut b = [0u8; 16];
+            a[..4].copy_from_slice(&s.octets());
+            b[..4].copy_from_slice(&d.octets());
+            (4u8, a, b)
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => (6u8, s.octets(), d.octets()),
+        _ => bail!("source and destination address families differ"),
+    };
+    let mut key = Vec::with_capacity(44);
+    key.extend_from_slice(&identity.to_ne_bytes());
+    key.extend_from_slice(&src);
+    key.extend_from_slice(&dst);
+    key.extend_from_slice(&entry.src_port.to_ne_bytes());
+    key.extend_from_slice(&entry.dst_port.to_ne_bytes());
+    key.extend_from_slice(&[protocol, 0, family, 0]);
+    Ok(key)
+}
+
+fn bpftool_map_delete(map: &Path, key: &[u8]) -> Result<()> {
+    let mut args = vec![
+        "map".to_string(),
+        "delete".into(),
+        "pinned".into(),
+        map.display().to_string(),
+        "key".into(),
+        "hex".into(),
+    ];
+    args.extend(hex_args(key));
+    let out = Command::new("bpftool")
+        .args(&args)
+        .stdin(Stdio::null())
+        .output()
+        .context("running bpftool map delete")?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() || stderr.contains("No such file or directory") {
+        return Ok(());
+    }
+    bail!(
+        "bpftool map delete pinned {} failed: {}",
+        map.display(),
+        stderr.trim()
+    )
 }
 
 pub fn validate_policy(policy: &VmNetworkPolicy) -> Result<()> {
@@ -2070,6 +2500,10 @@ fn drop_reason_label(reason: u32) -> &'static str {
         10 => "migration-restoring",
         11 => "unsupported-ethertype",
         12 => "udp-deny",
+        13 => "spoof-mac",
+        14 => "spoof-ip",
+        15 => "dns-deny",
+        16 => "sni-deny",
         _ => "unknown",
     }
 }
@@ -2841,5 +3275,160 @@ filter protocol all pref 49152 bpf chain 0 handle 0x1 direct-action not_in_hw id
             port_end: 1,
         }];
         assert!(pod_rule_index_entries(1, &rules).is_err());
+    }
+
+    fn edge_spec() -> EdgeSpec {
+        EdgeSpec {
+            namespace: "demo".into(),
+            machine: "web".into(),
+            identity: 42,
+            ..EdgeSpec::default()
+        }
+    }
+
+    #[test]
+    fn edge_name_hash_matches_bpf_and_test_harness() {
+        // Same values scripts/test-vm-edge-verdict.py feeds the BPF matcher.
+        assert_eq!(edge_name_hash("example.com"), 0x6632cafb6bf27d1e);
+        assert_eq!(edge_name_hash("allowed.test"), 0x106a54c1a21c4333);
+        assert_eq!(
+            normalize_edge_name("*.Example.COM.").unwrap(),
+            ("example.com".to_string(), NAME_SUFFIX)
+        );
+        assert_eq!(
+            normalize_edge_name("api.test").unwrap(),
+            ("api.test".to_string(), NAME_EXACT)
+        );
+        assert!(normalize_edge_name("*.").is_err());
+        assert!(normalize_edge_name("a..b").is_err());
+        assert!(normalize_edge_name(&"a".repeat(129)).is_err());
+    }
+
+    #[test]
+    fn edge_names_merge_exact_and_suffix_for_one_hash() {
+        let mut spec = edge_spec();
+        spec.allow_sni = vec!["example.com".into(), "*.example.com".into()];
+        spec.allow_dns = vec!["*.example.com".into()];
+        let entries = edge_name_entries(&spec).unwrap();
+        let h = edge_name_hash("example.com");
+        assert_eq!(entries[&(NAME_KIND_SNI, h)], NAME_EXACT | NAME_SUFFIX);
+        assert_eq!(entries[&(NAME_KIND_DNS, h)], NAME_SUFFIX);
+    }
+
+    #[test]
+    fn edge_config_layout_matches_struct_edge_config() {
+        assert!(edge_config_value(&edge_spec(), None).unwrap().is_none());
+        let mut spec = edge_spec();
+        spec.anti_spoof = true;
+        spec.learn_ip = true;
+        spec.allow_dns = vec!["example.com".into()];
+        spec.assigned_mac = "52:54:00:aa:bb:cc".into();
+        spec.assigned_ip = "10.0.0.5/24,fd00::5".into();
+        spec.qos.egress_mbps = 8;
+        spec.qos.egress_pps = 100;
+        let v = edge_config_value(&spec, None).unwrap().unwrap();
+        assert_eq!(v.len(), 56);
+        assert_eq!(
+            u32::from_ne_bytes(v[0..4].try_into().unwrap()),
+            EDGE_ANTI_SPOOF | EDGE_LEARN_IP | EDGE_DNS
+        );
+        assert_eq!(&v[4..8], &[10, 0, 0, 5]);
+        assert_eq!(&v[8..14], &[0x52, 0x54, 0x00, 0xaa, 0xbb, 0xcc]);
+        assert_eq!(&v[16..32], &"fd00::5".parse::<Ipv6Addr>().unwrap().octets());
+        assert_eq!(u64::from_ne_bytes(v[32..40].try_into().unwrap()), 1_000_000);
+        assert_eq!(u64::from_ne_bytes(v[40..48].try_into().unwrap()), 100);
+
+        let mut qos_only = edge_spec();
+        qos_only.qos.egress_pps = 10;
+        let v = edge_config_value(&qos_only, None).unwrap().unwrap();
+        assert_eq!(u32::from_ne_bytes(v[0..4].try_into().unwrap()), 0);
+
+        let routed = edge_config_value(&spec, Some(Ipv4Addr::new(169, 254, 0, 2)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            u32::from_ne_bytes(routed[0..4].try_into().unwrap()),
+            EDGE_ANTI_SPOOF | EDGE_LEARN_IP | EDGE_DNS | EDGE_ROUTED
+        );
+        assert_eq!(&routed[48..52], &[169, 254, 0, 2]);
+        assert!(
+            edge_config_value(&edge_spec(), Some(Ipv4Addr::new(169, 254, 0, 2)))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn conntrack_key_round_trips_through_dump_parser() {
+        let entry = ConntrackEntry {
+            proto: "tcp".into(),
+            src_ip: "10.0.0.5".into(),
+            dst_ip: "1.1.1.1".into(),
+            src_port: 40000,
+            dst_port: 443,
+            state: "established".into(),
+            seq: 0,
+            ack: 0,
+        };
+        let key = conntrack_key(7, &entry).unwrap();
+        assert_eq!(key.len(), 44);
+        assert_eq!(u32::from_ne_bytes(key[0..4].try_into().unwrap()), 7);
+        let dump = json!([
+            {"key": key, "value": [0, 0, 0, 0, 0, 0, 0, 1]},
+            {"key": conntrack_key(7, &ConntrackEntry { proto: "udp".into(),
+                src_ip: "fd00::5".into(), dst_ip: "fd00::1".into(), ..entry.clone() }).unwrap(),
+             "value": [0, 0, 0, 0, 0, 0, 0, 1]}
+        ]);
+        let parsed = parse_conntrack_json(&dump).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0], entry);
+        assert_eq!(parsed[1].src_ip, "fd00::5");
+        assert!(
+            conntrack_key(
+                7,
+                &ConntrackEntry {
+                    proto: "icmp".into(),
+                    ..entry.clone()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            conntrack_key(
+                7,
+                &ConntrackEntry {
+                    dst_ip: "fd00::1".into(),
+                    ..entry
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn learned_dump_prefers_ipv4_then_ipv6() {
+        let mut v4 = vec![0u8; 40];
+        v4[0..4].copy_from_slice(&[10, 98, 0, 7]);
+        v4[4..8].copy_from_slice(&LEARN_ARP.to_ne_bytes());
+        assert_eq!(
+            parse_learned_json(&json!([{"key": [1, 0, 0, 0], "value": v4}])),
+            Some(("10.98.0.7".to_string(), "arp"))
+        );
+        let mut v6 = vec![0u8; 40];
+        v6[8..24].copy_from_slice(&"fd00::7".parse::<Ipv6Addr>().unwrap().octets());
+        v6[24..28].copy_from_slice(&LEARN_ND.to_ne_bytes());
+        assert_eq!(
+            parse_learned_json(&json!([{"key": [1, 0, 0, 0], "value": v6}])),
+            Some(("fd00::7".to_string(), "nd"))
+        );
+        assert_eq!(parse_learned_json(&json!([])), None);
+    }
+
+    #[test]
+    fn edge_drop_reasons_have_labels() {
+        assert_eq!(drop_reason_label(13), "spoof-mac");
+        assert_eq!(drop_reason_label(14), "spoof-ip");
+        assert_eq!(drop_reason_label(15), "dns-deny");
+        assert_eq!(drop_reason_label(16), "sni-deny");
     }
 }

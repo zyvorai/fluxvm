@@ -12,6 +12,7 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-verifier-budget.sh'
       - 'scripts/test-pod-policy-verdict.py'
+      - 'scripts/test-vm-edge-verdict.py'
       - 'scripts/test-direct-datapath.sh'
       - 'scripts/direct-datapath-guest.py'
       - 'scripts/test-direct-uplink.sh'
@@ -46,6 +47,7 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-verifier-budget.sh'
       - 'scripts/test-pod-policy-verdict.py'
+      - 'scripts/test-vm-edge-verdict.py'
       - 'scripts/test-direct-datapath.sh'
       - 'scripts/direct-datapath-guest.py'
       - 'scripts/test-direct-uplink.sh'
@@ -159,7 +161,7 @@ jobs:
           bash -n scripts/test-direct-uplink.sh
           bash -n scripts/evidence-direct-datapath.sh
           bash -n scripts/bench-direct-datapath.sh
-          python3 -m py_compile scripts/test-pod-policy-verdict.py scripts/direct-datapath-guest.py scripts/bpf-map-clear.py
+          python3 -m py_compile scripts/test-pod-policy-verdict.py scripts/test-vm-edge-verdict.py scripts/direct-datapath-guest.py scripts/bpf-map-clear.py
 
       # The VM-edge program's verifier cost is kernel- and compiler-dependent: on Linux 7.0 the
       # unmodified object was rejected (>1,000,000 insns). This fails long before a kernel does.
@@ -172,6 +174,11 @@ jobs:
         if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
         working-directory: fluxvm
         run: sudo -E env FLUXVM_BPF_DIR="$PWD/dist/bpf" ./scripts/test-pod-policy-verdict.py
+
+      - name: VM-edge enforcement (anti-spoof, learn-IP, DNS/SNI, token bucket)
+        if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}
+        working-directory: fluxvm
+        run: sudo -E env FLUXVM_BPF_DIR="$PWD/dist/bpf" ./scripts/test-vm-edge-verdict.py
 
       - name: Bridge-less direct datapath (netns)
         if: ${{ vars.FLUXVM_EBPF_PRIVILEGED_CI == '1' }}

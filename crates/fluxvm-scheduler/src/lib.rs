@@ -3837,6 +3837,7 @@ impl VmManager {
         let vm = self.store.remove(id).await?.context("VM vanished")?;
         let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
         let _ = fluxvm_network::dataplane::delete_policy(&self.cfg, id);
+        let _ = fluxvm_network::edge_contract::delete(&self.cfg, id);
         self.release_pod_identity(&vm).await;
         self.activity.lock().await.remove(&id);
         // These three point at live state outside `workspace` (a

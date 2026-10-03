@@ -415,12 +415,22 @@ pub fn apply_sandbox_policy(
                 if dp.mode == DataplaneMode::Cilium {
                     crate::cilium::validate_host()?;
                 }
-                crate::ebpf::apply(dp, &policy, id, iface, pod_id, pod_policy.as_ref())
+                let edge = crate::edge_contract::spec(cfg, id)?;
+                crate::ebpf::apply(
+                    dp,
+                    &policy,
+                    id,
+                    iface,
+                    pod_id,
+                    pod_policy.as_ref(),
+                    edge.as_ref(),
+                )
             })();
 
             match native {
                 Ok(()) => {
                     crate::ebpf::commit_policy_fingerprint(id, base_fingerprint)?;
+                    crate::edge_contract::after_attach(cfg, id, iface);
                     crate::service::ensure_for_vm(cfg, id, iface)?;
                     Ok(())
                 }
@@ -522,7 +532,17 @@ pub fn reconfigure_sandbox_policy(
                 } else {
                     None
                 };
-                crate::ebpf::apply(dp, &policy, id, iface, pod_id, pod_policy.as_ref())?;
+                let edge = crate::edge_contract::spec(cfg, id)?;
+                crate::ebpf::apply(
+                    dp,
+                    &policy,
+                    id,
+                    iface,
+                    pod_id,
+                    pod_policy.as_ref(),
+                    edge.as_ref(),
+                )?;
+                crate::edge_contract::after_attach(cfg, id, iface);
             }
             crate::ebpf::commit_policy_fingerprint(id, base_fingerprint)?;
             crate::service::ensure_for_vm(cfg, id, iface)?;
@@ -642,6 +662,7 @@ pub fn ensure_sandbox_policy(
     } else {
         None
     };
+    let edge = crate::edge_contract::spec(cfg, id)?;
     crate::ebpf::apply(
         dp,
         &policy,
@@ -649,8 +670,10 @@ pub fn ensure_sandbox_policy(
         iface,
         repair_pod_id,
         repair_pod_policy.as_ref(),
+        edge.as_ref(),
     )?;
     crate::ebpf::commit_policy_fingerprint(id, desired_fingerprint)?;
+    crate::edge_contract::after_attach(cfg, id, iface);
     crate::service::ensure_for_vm(cfg, id, iface)?;
     Ok(true)
 }
@@ -689,6 +712,10 @@ pub fn reconcile_orphan_pins(cfg: &Config, live_ids: &[Uuid]) -> Result<usize> {
 
 pub fn remove_sandbox_policy(cfg: &Config, id: Uuid) -> Result<()> {
     remove_nftables(id);
+    if let Some(iface) = crate::ebpf::read_recorded_iface(id) {
+        let _netns = crate::ebpf::vm_netns_scope(id);
+        crate::edge_qos::clear(&iface);
+    }
     let _ = crate::ipcache::remove_vm(cfg, id);
     let _ = crate::endpoint::remove(cfg, id);
     if let Err(e) = crate::ebpf::remove(&cfg.sandbox.dataplane, id) {
