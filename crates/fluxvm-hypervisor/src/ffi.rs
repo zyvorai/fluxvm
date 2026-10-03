@@ -11,7 +11,7 @@ extern "C" {
     pub fn flux_if_addr(name: *const c_char, addr_be: u32, mask_be: u32) -> c_int;
     pub fn flux_errno() -> c_int;
 
-    pub fn open(path: *const c_char, flags: c_int) -> c_int;
+    pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     pub fn close(fd: c_int) -> c_int;
     pub fn mmap(
         addr: *mut c_void,
