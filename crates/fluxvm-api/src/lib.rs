@@ -411,6 +411,17 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/vms/{id}/network/drop-reasons",
             get(vm_network_drop_reasons),
         )
+        .route("/v1/vms/{id}/network/drops", get(vm_network_drops))
+        .route("/v1/vms/{id}/network/edge", post(vm_network_edge))
+        .route(
+            "/v1/vms/{id}/network/conntrack",
+            get(vm_network_conntrack_export).post(vm_network_conntrack_restore),
+        )
+        .route(
+            "/v1/vms/{id}/network/learned-ip",
+            get(vm_network_learned_ip),
+        )
+        .route("/v1/vms/{id}/network/capture", post(vm_network_capture))
         .route("/v1/vms/{id}/network/status", get(vm_network_status))
         .route(
             "/v1/vms/{id}/network/migration/state",
@@ -2391,6 +2402,75 @@ async fn vm_network_flows(
     Query(q): Query<NetworkFlowsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.network_flows(id, q.limit).await?})))
+}
+
+async fn vm_network_edge(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(spec): Json<fluxvm_network::edge_contract::EdgeSpec>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    let applied = fluxvm_network::edge_contract::apply_edge(id, spec)?;
+    Ok(Json(json!(applied)))
+}
+
+async fn vm_network_conntrack_export(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(
+        fluxvm_network::edge_contract::export_conntrack(id)?
+    )))
+}
+
+async fn vm_network_conntrack_restore(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(snap): Json<fluxvm_network::edge_contract::ConntrackSnapshot>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(
+        fluxvm_network::edge_contract::restore_conntrack(id, snap)?
+    )))
+}
+
+async fn vm_network_learned_ip(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    Ok(Json(fluxvm_network::edge_contract::learned_ip(id)?))
+}
+
+async fn vm_network_drops(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<NetworkFlowsQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    m.get(id).await?;
+    Ok(Json(json!({
+        "items": fluxvm_network::edge_contract::attributed_drops(id, q.limit)
+    })))
+}
+
+async fn vm_network_capture(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(session): Json<fluxvm_network::edge_contract::CaptureSession>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!(fluxvm_network::edge_contract::start_capture(
+        id, session
+    )?)))
 }
 
 async fn vm_network_drop_reasons(

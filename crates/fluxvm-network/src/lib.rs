@@ -6,6 +6,7 @@ pub mod cnp;
 pub mod dataplane;
 pub mod direct;
 pub mod ebpf;
+pub mod edge_contract;
 pub mod egress;
 pub mod egress_proxy;
 pub mod endpoint;
