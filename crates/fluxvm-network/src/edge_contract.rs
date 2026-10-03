@@ -24,11 +24,11 @@ pub struct EdgeSpec {
     pub identity: u32,
     #[serde(default)]
     pub anti_spoof: bool,
-    #[serde(default)]
+    #[serde(default, rename = "learnIP")]
     pub learn_ip: bool,
-    #[serde(default)]
+    #[serde(default, rename = "assignedMAC")]
     pub assigned_mac: String,
-    #[serde(default)]
+    #[serde(default, rename = "assignedIP")]
     pub assigned_ip: String,
     #[serde(default)]
     pub policy_name: String,
@@ -40,10 +40,12 @@ pub struct EdgeSpec {
     pub deny_cidrs: Vec<String>,
     #[serde(default)]
     pub allow_ports: Vec<String>,
-    #[serde(default)]
+    #[serde(default, rename = "allowSNI")]
     pub allow_sni: Vec<String>,
-    #[serde(default)]
+    #[serde(default, rename = "allowDNS")]
     pub allow_dns: Vec<String>,
+    #[serde(default)]
+    pub allow_icmp: bool,
     #[serde(default)]
     pub qos: EdgeQos,
 }
@@ -107,7 +109,9 @@ pub struct CaptureSession {
 pub struct DropEvent {
     pub reason: String,
     pub policy_name: String,
+    #[serde(rename = "srcIP")]
     pub src_ip: String,
+    #[serde(rename = "dstIP")]
     pub dst_ip: String,
 }
 
@@ -287,6 +291,21 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("does not match"));
+    }
+
+    #[test]
+    fn edge_spec_decodes_kairon_field_names() {
+        let spec: EdgeSpec = serde_json::from_str(
+            r#"{"namespace":"demo","machine":"web","identity":42,"antiSpoof":true,
+                "learnIP":true,"assignedMAC":"52:54:00:00:00:01","assignedIP":"10.0.0.5",
+                "allowSNI":["*.example.com"],"allowDNS":["example.com"],"allowIcmp":true}"#,
+        )
+        .unwrap();
+        assert!(spec.learn_ip && spec.allow_icmp);
+        assert_eq!(spec.assigned_mac, "52:54:00:00:00:01");
+        assert_eq!(spec.assigned_ip, "10.0.0.5");
+        assert_eq!(spec.allow_sni, ["*.example.com"]);
+        assert_eq!(spec.allow_dns, ["example.com"]);
     }
 
     #[test]
