@@ -100,6 +100,12 @@ GET    /v1/vms/{uuid}/network/effective
 GET    /v1/vms/{uuid}/network/status
 GET    /v1/vms/{uuid}/network/stats
 GET    /v1/vms/{uuid}/network/flows
+POST   /v1/vms/{uuid}/network/edge          # Kairon VM-edge spec; see vm-edge-contract.md
+GET    /v1/vms/{uuid}/network/conntrack     # export for live migration
+POST   /v1/vms/{uuid}/network/conntrack     # restore; identity mismatch is rejected
+GET    /v1/vms/{uuid}/network/learned-ip
+GET    /v1/vms/{uuid}/network/drops?limit=N
+POST   /v1/vms/{uuid}/network/capture       # bounded, 1-30s
 GET    /v1/network/groups
 POST   /v1/network/groups
 GET    /v1/network/groups/{name}
