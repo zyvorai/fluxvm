@@ -14,10 +14,10 @@ const config: Config = {
   },
 
   url: 'https://zyvorai.github.io',
-  baseUrl: '/fluxvm/',
+  baseUrl: '/zyvor-fluxvm/',
 
   organizationName: 'zyvorai',
-  projectName: 'fluxvm',
+  projectName: 'zyvor-fluxvm',
 
   onBrokenLinks: 'warn',
 
@@ -46,7 +46,7 @@ const config: Config = {
           path: '../docs',
           routeBasePath: 'docs',
           sidebarPath: './sidebars.ts',
-          editUrl: 'https://github.com/zyvorai/fluxvm/tree/main/docs/',
+          editUrl: 'https://github.com/zyvorai/zyvor-fluxvm/tree/main/docs/',
         },
         blog: false,
         theme: {
@@ -58,7 +58,8 @@ const config: Config = {
 
   themeConfig: {
     colorMode: {
-      respectPrefersColorScheme: true,
+      defaultMode: 'dark',
+      respectPrefersColorScheme: false,
     },
     navbar: {
       title: 'FluxVM',
@@ -75,7 +76,7 @@ const config: Config = {
           label: 'Docs',
         },
         {
-          href: 'https://github.com/zyvorai/fluxvm',
+          href: 'https://github.com/zyvorai/zyvor-fluxvm',
           label: 'GitHub',
           position: 'right',
         },
@@ -87,7 +88,7 @@ const config: Config = {
         {
           title: 'Docs',
           items: [
-            {label: 'Quick start', href: 'https://github.com/zyvorai/fluxvm#quick-start'},
+            {label: 'Quick start', href: 'https://github.com/zyvorai/zyvor-fluxvm#quick-start'},
             {label: 'Use cases', to: '/docs/use-cases'},
             {label: 'Product overview', to: '/docs/PRODUCT_OVERVIEW'},
             {label: 'Positioning', to: '/docs/POSITIONING'},
@@ -96,14 +97,14 @@ const config: Config = {
         {
           title: 'Project',
           items: [
-            {label: 'GitHub', href: 'https://github.com/zyvorai/fluxvm'},
+            {label: 'GitHub', href: 'https://github.com/zyvorai/zyvor-fluxvm'},
             {
               label: 'Changelog',
-              href: 'https://github.com/zyvorai/fluxvm/blob/main/CHANGELOG.md',
+              href: 'https://github.com/zyvorai/zyvor-fluxvm/blob/main/CHANGELOG.md',
             },
             {
               label: 'License (Apache-2.0)',
-              href: 'https://github.com/zyvorai/fluxvm/blob/main/LICENSE',
+              href: 'https://github.com/zyvorai/zyvor-fluxvm/blob/main/LICENSE',
             },
           ],
         },
