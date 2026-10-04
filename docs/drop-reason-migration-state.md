@@ -30,6 +30,15 @@ The original `fluxvm_flows`, policy maps and conntrack key/value ABI stay intact
 | 9 | `migration-quiesce` | source rejects a new flow during quiesce |
 | 10 | `migration-restoring` | destination rejects a new flow during restore |
 | 11 | `unsupported-ethertype` | non-ARP/non-IP frame rejected by default policy |
+| 12 | `udp-deny` | `deny_udp` policy rejected a UDP or SCTP packet |
+| 13 | `spoof-mac` | VM edge (schema 12): source or ARP sender MAC is not the assigned MAC |
+| 14 | `spoof-ip` | VM edge (schema 12): source IP is not the assigned or learned address |
+| 15 | `dns-deny` | VM edge (schema 12): DNS query for a name not on `allowDNS` |
+| 16 | `sni-deny` | VM edge (schema 12): TLS ClientHello SNI not on `allowSNI` |
+
+Codes 13-16 come from the Kairon VM edge; see
+[vm-edge-contract.md](vm-edge-contract.md) for how they map to Kairon's
+reason names.
 
 `action=drop` means the packet was rejected. `action=audit` means the same branch would have rejected it, but audit mode allowed it. Schema v6 also preserves Pod-policy audit verdicts with a richer internal verdict API while keeping the existing boolean Pod-policy helpers as compatibility wrappers. This fixes the previous ambiguity around rate-limit and audit-only observations.
 

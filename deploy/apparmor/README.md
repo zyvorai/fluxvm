@@ -19,6 +19,31 @@ FluxVM ships an AppArmor profile at `deploy/apparmor/fluxvm`, installed by
 - Capabilities for guestkit + chrooted package managers: `ipc_lock`,
   `dac_read_search`, `chown`, `fowner`, `sys_resource`, …
 
+## What the profile allows (eBPF dataplane)
+
+The `fluxvm` and `fluxctl` profiles both allow the helpers the eBPF
+dataplane and the Kairon VM edge shell out to:
+
+- Exec of `bpftool` (`/usr/sbin`, `/usr/bin`, `/usr/lib/linux-tools*/`),
+  `/usr/libexec/fluxvm/fluxvm-tcx`, `uname` and `basename` (used by the
+  distro `bpftool` wrapper)
+- `/usr/lib/fluxvm/bpf/` (BPF objects) read, `/sys/fs/bpf/**` read,
+  write and lock (pinned maps)
+- `/sys/class/net/`, `/sys/devices/**/net/`, `/sys/kernel/btf/` and
+  `/proc/sys/kernel/` read
+- Capabilities `bpf`, `perfmon`, `net_raw` and `sys_module`
+
+A profile without these rules denies `bpftool`, and no VM attaches to
+the eBPF dataplane (`GET /v1/vms/{id}/network/status` shows
+`attached: false`; the kernel log shows `apparmor="DENIED"
+operation="exec"` for `bpftool`). After upgrading, reinstall and reload:
+
+```bash
+sudo install -m 0644 deploy/apparmor/fluxvm /etc/apparmor.d/fluxvm
+sudo apparmor_parser -r /etc/apparmor.d/fluxvm
+sudo systemctl restart fluxvm
+```
+
 Smoke under enforce (root, Linux + AppArmor):
 
 ```bash

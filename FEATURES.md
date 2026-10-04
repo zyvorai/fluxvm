@@ -65,6 +65,7 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - nftables is the default fallback when eBPF mode isn't enabled
 - Per-VM eBPF rule cap: 64 (kernel BPF verifier limit)
 - Opt-in enable: `sudo ./scripts/enable-network-fabric-ga.sh --restart` (fail-closed GA) or `--lab` (soft default-allow); host readiness via `./scripts/network-fabric-preflight.sh` — see [docs/network-fabric.md](docs/network-fabric.md)
+- **Kairon VM edge** (schema 12) — per-VM anti-spoof, learn-IP from ARP/ND, DNS and TLS SNI allow lists, egress token bucket and ingress `tbf`/police, attributed drops, live conntrack export/restore for migration; persisted across restarts. See [docs/vm-edge-contract.md](docs/vm-edge-contract.md)
 - **`deny_udp`** on `VmNetworkPolicy` — Keep / strict cells: TC drops UDP+SCTP (DHCP still allowed); drop reason `udp-deny` (code 12). Used with gateway-only `allow_ports` for proxy-or-die. Keep product docs: Fabric `docs/keep/confine.md`.
 
 ### Service Fabric

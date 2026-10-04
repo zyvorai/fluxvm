@@ -58,6 +58,7 @@ Eleven use cases map onto what is implemented today — nothing below is aspirat
 | Cilium CNI (Secure Containers L2) | [docs/cilium-cni.md](cilium-cni.md) |
 | Direct (bridge-less) datapath, with measurements | [docs/direct-datapath.md](direct-datapath.md) |
 | Security groups & CNP network policy | [docs/network-groups.md](network-groups.md) · [docs/network-policy.md](network-policy.md) |
+| Kairon VM edge (anti-spoof, learn-IP, DNS/SNI allow lists, QoS, conntrack move) | [docs/vm-edge-contract.md](vm-edge-contract.md) |
 | REST API reference, auth/RBAC, VM JSON contract | [docs/api.md](api.md) |
 | Day-2 operations (jailer, cgroups, pools, catalog, storage, fleet, state layout) | [docs/operations.md](operations.md) |
 | Building custom images (per-distro + Windows) | [docs/build-image-tutorials.md](build-image-tutorials.md) |

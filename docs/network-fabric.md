@@ -263,6 +263,14 @@ to bytes/sec and `max_egress_pps` is packets/sec. State is protected with
 `bpf_spin_lock`. The BPF program lazily initializes the spin-locked state so
 userspace does not need special spin-lock map update flags.
 
+### Kairon VM edge
+
+On top of the VM policy, a per-VM edge spec posted by Kairon adds
+anti-spoof, learn-IP, DNS and TLS SNI allow lists, a token-bucket egress
+limit (separate from `max_egress_*` above) and host-side ingress
+limits. It needs dataplane schema 12 and is persisted across restarts.
+See [vm-edge-contract.md](vm-edge-contract.md).
+
 ## Live-update safety
 
 Native policy POSTs do **not** detach TC and apply to both running and paused

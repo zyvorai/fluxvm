@@ -7,7 +7,7 @@ policy, see below).
 
 | File | Role |
 |------|------|
-| `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allow/deny, group identities, CT learn/hit, audit forward, ICMP, Mbps/PPS, stats, flows, events, Pod-scoped policy (Set 6S) |
+| `fluxvm_tc.bpf.c` | VM-edge TC classifier: IPv4/IPv6 L3 + L4 allow/deny, group identities, CT learn/hit, audit forward, ICMP, Mbps/PPS, stats, flows, events, Pod-scoped policy (Set 6S), Kairon VM edge (schema 12: anti-spoof, learn-IP, DNS/SNI allow lists, egress token bucket) |
 | `fluxvm_pod_policy.bpf.h` | Sentinel Set 6S: `fluxvm_pspol`/`fluxvm_pid4`/`fluxvm_pid6`/`fluxvm_ppstat` -- identity-aware Pod network policy, independent of Service Fabric's VIP policy maps below despite the similar shape |
 | `fluxvm_qemu_device.bpf.c` | Sentinel Set 7S: per-VM `BPF_CGROUP_DEVICE` allowlist (kvm/vhost-vsock/net-tun/VFIO) attached to `fluxvm.slice/{id}.scope` |
 | `fluxvm_qemu_egress.bpf.c` | Sentinel Set 7S: per-VM `cgroup_skb/egress` loopback-only outbound-IP filter, same cgroup as above |
@@ -36,7 +36,19 @@ flowchart LR
   Id --> Stats[fluxvm_stats]
   Id --> Flows[fluxvm_flows]
   Id --> Ev[fluxvm_events]
+  Pkt --> Edge[fluxvm_edge]
+  Edge --> Learn[fluxvm_learn]
+  Edge --> ERate[fluxvm_edge_rate]
+  Edge --> Names[fluxvm_names]
 ```
+
+The Kairon VM-edge maps (schema 12) are keyed by ifindex and checked
+before the policy maps: `fluxvm_edge` holds the anti-spoof config,
+flags and egress limits, `fluxvm_learn` the address learned from ARP or
+IPv6 neighbor advertisements, `fluxvm_edge_rate` the token bucket, and
+`fluxvm_names` the DNS and SNI allow lists as reversed FNV-1a hashes.
+Layouts are in [docs/vm-edge-contract.md](../docs/vm-edge-contract.md#bpf-abi-dataplane-schema-12).
+Verdict test: `sudo FLUXVM_BPF_DIR=dist/bpf python3 scripts/test-vm-edge-verdict.py`.
 
 Build:
 

@@ -100,12 +100,12 @@ GET    /v1/vms/{uuid}/network/effective
 GET    /v1/vms/{uuid}/network/status
 GET    /v1/vms/{uuid}/network/stats
 GET    /v1/vms/{uuid}/network/flows
-POST   /v1/vms/{uuid}/network/edge          # Kairon VM-edge spec; see vm-edge-contract.md
-GET    /v1/vms/{uuid}/network/conntrack     # export for live migration
-POST   /v1/vms/{uuid}/network/conntrack     # restore; identity mismatch is rejected
-GET    /v1/vms/{uuid}/network/learned-ip
-GET    /v1/vms/{uuid}/network/drops?limit=N
-POST   /v1/vms/{uuid}/network/capture       # bounded, 1-30s
+POST   /v1/vms/{uuid}/network/edge          # Kairon VM-edge spec (admin); enforced and persisted, see vm-edge-contract.md
+GET    /v1/vms/{uuid}/network/conntrack     # live conntrack export (admin); empty entries when not attached
+POST   /v1/vms/{uuid}/network/conntrack     # restore (admin); identity mismatch is rejected, applied on attach if not attached
+GET    /v1/vms/{uuid}/network/learned-ip    # {"ip","source"}: arp|nd from the datapath, else dhcp|fluxvm
+GET    /v1/vms/{uuid}/network/drops?limit=N # attributed drops with Kairon reason names (default 100, max 4096)
+POST   /v1/vms/{uuid}/network/capture       # records a 1-30s capture session (admin); no packets captured yet
 GET    /v1/network/groups
 POST   /v1/network/groups
 GET    /v1/network/groups/{name}

@@ -7,8 +7,25 @@
   QEMU-backed sandbox. FluxVM picks them under a lock (NUMA-aware, deterministic), so two callers are never given the
   same GPU; a shortage is a 503. Refused with `confidential`, `procbox`, or a non-QEMU template. The Python, Go and
   TypeScript SDKs take `gpus`. See `docs/sandbox-gpus.md`.
+- **Kairon VM edge, enforced (dataplane schema 12).** The edge spec Kairon posts to
+  `POST /v1/vms/{id}/network/edge` is now loaded into the VM's TC program instead of only being stored:
+  anti-spoof (`spoof_mac` / `spoof_ip`), learn-IP from guest ARP and IPv6 neighbor advertisements,
+  DNS query-name and TLS SNI allow lists (`dns_deny` / `sni_deny`, exact or `*.suffix`), and an egress
+  token bucket. Ingress bandwidth and packet rate use a `tbf` qdisc and a `matchall` police on the
+  host interface. Netns VMs get a routed mode that skips MAC and ARP checks behind the namespace
+  router. `drops` reads the datapath's per-reason counters, `learned-ip` reads the learned address
+  (falling back to the DHCP lease), and conntrack export dumps the live table and returns an empty
+  snapshot instead of 400 when there is nothing to export. The spec and a pending conntrack restore
+  are persisted under `<state_dir>/network-edge/` and reapplied on every attach, so they survive
+  FluxVM and VM restarts. New drop-reason codes 13-16. `scripts/test-vm-edge-verdict.py` checks the
+  verdicts against the real object in CI. See `docs/vm-edge-contract.md`.
 
 ### Fixed
+- **AppArmor profile blocked the eBPF dataplane.** The `fluxvm` and `fluxctl` profiles did not allow
+  `bpftool` (or the `uname`/`basename` its Ubuntu wrapper runs), `/sys/fs/bpf` or the `bpf` /
+  `perfmon` capabilities, so on an AppArmor host no VM could attach to the eBPF dataplane. Reinstall
+  and reload `deploy/apparmor/fluxvm`.
+- **`--locked` builds failed** because `Cargo.lock` was stale against the guestkit dependency.
 - **Multi-vCPU KVM snapshot-restore clock desync.** `apply_vcpu` was missing
   the `KVM_KVMCLOCK_CTRL` ioctl on restore (Firecracker's own restore order
   does call it), so a 2+ vCPU FLUXKVM1 restore could resume with sibling
