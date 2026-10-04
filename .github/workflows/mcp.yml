@@ -1,0 +1,115 @@
+name: MCP
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxctl/**'
+      - 'scripts/test-mcp-sdk.py'
+      - '.hermes/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/mcp.yml'
+  pull_request:
+    paths:
+      - 'crates/fluxctl/**'
+      - 'scripts/test-mcp-sdk.py'
+      - '.hermes/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/mcp.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: mcp-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev libhivex-dev clang llvm libbpf-dev linux-libc-dev
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fluxvm
+          key: mcp
+
+      - name: rustfmt (fluxctl)
+        working-directory: fluxvm
+        run: rustfmt --edition 2024 --check crates/fluxctl/src/*.rs
+
+      - name: MCP unit tests
+        working-directory: fluxvm
+        run: cargo test -p fluxctl --bin fluxctl mcp
+
+      - name: Build fluxctl
+        working-directory: fluxvm
+        run: cargo build -p fluxctl
+
+      - name: Raw JSON-RPC smoke
+        working-directory: fluxvm
+        run: |
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+            '{"jsonrpc":"2.0","id":3,"method":"bogus/method"}' \
+            | FLUXVM_URL=http://127.0.0.1:9 target/debug/fluxctl mcp serve > out.jsonl
+          python3 - <<'EOF'
+          import json
+          r = {m["id"]: m for m in map(json.loads, open("out.jsonl")) if "id" in m}
+          assert r[1]["result"]["protocolVersion"] == "2025-06-18", r[1]
+          assert r[1]["result"]["serverInfo"]["name"] == "fluxvm", r[1]
+          names = {t["name"] for t in r[2]["result"]["tools"]}
+          assert "list_vms" in names and "vm_power" not in names, names
+          assert r[3]["error"]["code"] == -32601, r[3]
+          print("raw JSON-RPC smoke: PASS")
+          EOF
+
+      - name: Official MCP SDK end-to-end
+        working-directory: fluxvm
+        run: |
+          python3 -m pip install --quiet 'mcp>=1.10,<3'
+          python3 scripts/test-mcp-sdk.py target/debug/fluxctl
+
+      - name: Validate Hermes example config
+        working-directory: fluxvm
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 - <<'EOF'
+          import yaml
+          cfg = yaml.safe_load(open(".hermes/config.example.yaml"))
+          servers = cfg["mcp_servers"]
+          assert servers, "mcp_servers is empty"
+          for name, s in servers.items():
+              assert s.get("command"), f"{name}: missing command"
+              assert "mcp" in s.get("args", []) and "serve" in s.get("args", []), f"{name}: args must run 'mcp serve'"
+          print("hermes example config:", ", ".join(servers))
+          EOF
