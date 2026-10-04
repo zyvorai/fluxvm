@@ -1,9 +1,6 @@
 <div align="center">
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/social-preview-dark.png">
-  <img src="docs/assets/social-preview.png" alt="FluxVM — Run real VMs with a real API. One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the FluxVM hypervisor." width="820">
-</picture>
+<img src="docs/social/fluxvm-hero-dark.jpg" alt="FluxVM - Run real VMs. With a real API." width="100%">
 
 # FluxVM
 
@@ -12,11 +9,11 @@
 One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the in-tree FluxVM hypervisor.<br>
 No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/zyvorai/fluxvm/ci.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=CI)](https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml)
-[![Security profiles](https://img.shields.io/github/actions/workflow/status/zyvorai/fluxvm/security-profiles.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=security%20profiles)](https://github.com/zyvorai/fluxvm/actions/workflows/security-profiles.yml)
-[![DevOps gates](https://img.shields.io/github/actions/workflow/status/zyvorai/fluxvm/devops-gates.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=devops%20gates)](https://github.com/zyvorai/fluxvm/actions/workflows/devops-gates.yml)
-[![License: Apache-2.0](https://img.shields.io/github/license/zyvorai/fluxvm?style=flat-square&color=0071e3&labelColor=1d1d1f)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/zyvorai/fluxvm/main?style=flat-square&color=0071e3&labelColor=1d1d1f)](https://github.com/zyvorai/fluxvm/commits/main)
+[![CI](https://img.shields.io/github/actions/workflow/status/zyvorai/zyvor-fluxvm/ci.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=CI)](https://github.com/zyvorai/zyvor-fluxvm/actions/workflows/ci.yml)
+[![Security profiles](https://img.shields.io/github/actions/workflow/status/zyvorai/zyvor-fluxvm/security-profiles.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=security%20profiles)](https://github.com/zyvorai/zyvor-fluxvm/actions/workflows/security-profiles.yml)
+[![DevOps gates](https://img.shields.io/github/actions/workflow/status/zyvorai/zyvor-fluxvm/devops-gates.yml?branch=main&style=flat-square&labelColor=1d1d1f&label=devops%20gates)](https://github.com/zyvorai/zyvor-fluxvm/actions/workflows/devops-gates.yml)
+[![License: Apache-2.0](https://img.shields.io/github/license/zyvorai/zyvor-fluxvm?style=flat-square&color=0071e3&labelColor=1d1d1f)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/zyvorai/zyvor-fluxvm/main?style=flat-square&color=0071e3&labelColor=1d1d1f)](https://github.com/zyvorai/zyvor-fluxvm/commits/main)
 [![Rust: stable](https://img.shields.io/badge/rust-stable-0071e3?style=flat-square&labelColor=1d1d1f&logo=rust&logoColor=white)](https://www.rust-lang.org)
 
 [**Quick start**](#quick-start) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
@@ -97,7 +94,7 @@ We only claim what has been run. Every line links to how it was verified.
 ## Quick start
 
 ```bash
-git clone https://github.com/zyvorai/fluxvm.git && cd fluxvm   # needs a sibling guestkit checkout
+git clone https://github.com/zyvorai/zyvor-fluxvm.git && cd fluxvm   # needs a sibling guestkit checkout
 sudo ./scripts/bootstrap-host.sh vmbr0 && ./scripts/preflight.sh
 cargo build --release
 sudo install -m 0755 target/release/fluxctl /usr/local/bin/fluxctl
