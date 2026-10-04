@@ -3340,10 +3340,25 @@ impl VmManager {
     ) -> Result<serde_json::Value> {
         let fluxvm_core::model::BackupOptions {
             dest,
+            name,
             compress,
             all_disks,
             quiesce,
         } = opts;
+        let dest = match (dest, name) {
+            (Some(d), _) => Some(d),
+            (None, Some(n)) => {
+                let n = n.strip_suffix(".qcow2").unwrap_or(&n);
+                backup::validate_backup_name(n)?;
+                let base = self.backups_dir().join(n);
+                Some(if all_disks {
+                    base
+                } else {
+                    base.with_extension("qcow2")
+                })
+            }
+            (None, None) => None,
+        };
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu
             || vm.request.storage != StorageBackend::Default
@@ -3352,8 +3367,13 @@ impl VmManager {
             bail!("backup supports QEMU VMs on the default qcow2 storage backend only");
         }
         let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        // Linked images and block devices belong to someone else, the same
+        // reason restore skips them.
         let data = if all_disks {
             fluxvm_qemu::disks::data_disks(&vm.workspace)
+                .into_iter()
+                .filter(|(_, p)| !fluxvm_qemu::disks::is_external(p))
+                .collect()
         } else {
             vec![]
         };

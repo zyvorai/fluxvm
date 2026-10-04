@@ -111,7 +111,7 @@ pub fn backup_disks(path: &Path) -> Result<Vec<(String, PathBuf)>> {
 }
 
 impl VmManager {
-    fn backups_dir(&self) -> PathBuf {
+    pub(crate) fn backups_dir(&self) -> PathBuf {
         self.cfg.state_dir.join("backups")
     }
 

@@ -1225,6 +1225,9 @@ pub enum BackupQuiesce {
 pub struct BackupOptions {
     /// Local CLI only; the REST API always writes under `state_dir/backups`.
     pub dest: Option<PathBuf>,
+    /// Backup name under `state_dir/backups` instead of `<vm>-<utc>`;
+    /// ignored when `dest` is set.
+    pub name: Option<String>,
     pub compress: bool,
     pub all_disks: bool,
     pub quiesce: BackupQuiesce,

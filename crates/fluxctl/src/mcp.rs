@@ -598,6 +598,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             object(
                 json!({
                     "vm": vm_prop,
+                    "name": {"type": "string", "description": "backup name, default <vm>-<utc>"},
                     "all_disks": {"type": "boolean", "description": "include data disks (a directory backup), default false"},
                     "compress": {"type": "boolean", "description": "qcow2 compression, default false"},
                     "quiesce": {"type": "string", "enum": ["auto", "required", "never"], "description": "guest fsfreeze, default auto"},
@@ -610,6 +611,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                 timed(Duration::from_secs(1800), async {
                     let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
                     let body = json!({
+                        "name": str_arg(&args, "name"),
                         "all_disks": args.get("all_disks").and_then(Value::as_bool).unwrap_or(false),
                         "compress": args.get("compress").and_then(Value::as_bool).unwrap_or(false),
                         "quiesce": str_arg(&args, "quiesce").unwrap_or("auto"),

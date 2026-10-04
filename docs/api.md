@@ -30,7 +30,7 @@ POST   /v1/vms/{uuid}/start
 POST   /v1/vms/{uuid}/restart
 POST   /v1/vms/{uuid}/clone              # {"name": "..."}; source must be stopped
 POST   /v1/vms/{uuid}/fork               # {"count": 1-32, "namePrefix": "..."}; admin; running flux-vm source; 201 {"items": [...], "elapsed_ms": n}
-POST   /v1/vms/{uuid}/backup             # {"compress": bool, "all_disks": bool, "quiesce": "auto"|"required"|"never"}
+POST   /v1/vms/{uuid}/backup             # {"name": "...", "compress": bool, "all_disks": bool, "quiesce": "auto"|"required"|"never"}
 POST   /v1/vms/{uuid}/restore-backup     # {"name": "..."}; VM must be stopped
 GET    /v1/backups                       # newest first
 DELETE /v1/backups/{name}
@@ -162,7 +162,10 @@ Highlights:
   as binary frames. One client at a time; no guest agent needed.
 - `POST /v1/vms/{uuid}/backup` always writes under `state_dir/backups/` (the
   API never takes a destination path) and returns `{name, path, size_bytes,
-  live, quiesced, disks[]}`. `quiesce` (default `auto`) freezes the guest's
+  live, quiesced, disks[]}`. An optional `name` replaces the default
+  `<vm>-<utc>` so callers can find their backup again after a timeout.
+  `all_disks` skips linked images and block devices, which FluxVM doesn't
+  own. `quiesce` (default `auto`) freezes the guest's
   filesystems through QGA around the snapshot when the agent answers;
   `required` fails without it. `GET /v1/backups` lists backups with that
   metadata; `POST /v1/vms/{uuid}/restore-backup` copies one back into a

@@ -257,6 +257,7 @@ fn schemas() -> Value {
         "CloneVmRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
         "ForkVmRequest": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1}, "namePrefix": {"type": "string"}}},
         "BackupVmRequest": {"type": "object", "properties": {
+            "name": {"type": "string", "description": "Backup name under state_dir/backups; default <vm>-<utc>"},
             "compress": {"type": "boolean"},
             "all_disks": {"type": "boolean", "description": "Also back up data disks into a directory"},
             "quiesce": {"type": "string", "enum": ["auto", "required", "never"], "default": "auto",

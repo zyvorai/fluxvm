@@ -328,6 +328,9 @@ enum Command {
         id: Uuid,
         #[arg(long)]
         dest: Option<PathBuf>,
+        /// Name under `<state_dir>/backups` instead of `<name>-<utc>`.
+        #[arg(long, conflicts_with = "dest")]
+        name: Option<String>,
         #[arg(long, default_value_t = false)]
         compress: bool,
         /// Also back up data disks: `dest` becomes a directory of
@@ -2121,6 +2124,7 @@ async fn run_remote(
         Command::Backup {
             id,
             dest,
+            name,
             compress,
             all_disks,
             quiesce,
@@ -2134,7 +2138,9 @@ async fn run_remote(
                 &r.call(
                     Method::POST,
                     &format!("/v1/vms/{id}/backup"),
-                    Some(json!({"compress": compress, "all_disks": all_disks, "quiesce": quiesce})),
+                    Some(
+                        json!({"name": name, "compress": compress, "all_disks": all_disks, "quiesce": quiesce}),
+                    ),
                 )
                 .await?,
             )?
@@ -2725,12 +2731,14 @@ async fn main() -> Result<()> {
         Command::Backup {
             id,
             dest,
+            name,
             compress,
             all_disks,
             quiesce,
         } => {
             let opts = fluxvm_core::model::BackupOptions {
                 dest,
+                name,
                 compress,
                 all_disks,
                 quiesce,
@@ -5682,6 +5690,11 @@ mod tier2_cli_tests {
             }
         ));
         assert!(cli(&["backup", &id, "--quiesce", "maybe"]).is_err());
+        assert!(matches!(
+            cli(&["backup", &id, "--name", "db-1"]).unwrap().command,
+            Command::Backup { name: Some(n), .. } if n == "db-1"
+        ));
+        assert!(cli(&["backup", &id, "--name", "a", "--dest", "/tmp/a"]).is_err());
         assert!(matches!(
             cli(&["restore-backup", &id, "db-1"]).unwrap().command,
             Command::RestoreBackup { name, .. } if name == "db-1"

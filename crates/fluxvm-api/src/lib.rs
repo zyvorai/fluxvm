@@ -2145,6 +2145,8 @@ async fn delete_vm_snapshot(
 #[derive(Deserialize, Default)]
 struct BackupVmRequest {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     compress: bool,
     #[serde(default)]
     all_disks: bool,
@@ -2163,6 +2165,7 @@ async fn backup_vm(
     let req = body.map(|b| b.0).unwrap_or_default();
     let opts = fluxvm_core::model::BackupOptions {
         dest: None,
+        name: req.name,
         compress: req.compress,
         all_disks: req.all_disks,
         quiesce: req.quiesce,
@@ -2184,6 +2187,14 @@ async fn delete_backup(
     Path(name): Path<String>,
 ) -> ApiResult<StatusCode> {
     require_admin(role)?;
+    if fluxvm_scheduler::backup::validate_backup_name(&name).is_ok()
+        && !m.list_backups().iter().any(|b| b["name"] == name.as_str())
+    {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("backup {name:?} not found"),
+        });
+    }
     m.delete_backup(&name)?;
     Ok(StatusCode::NO_CONTENT)
 }
