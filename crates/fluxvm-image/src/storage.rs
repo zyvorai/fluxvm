@@ -96,6 +96,9 @@ pub async fn provision(
             provision_nbd(cfg, base, vmm, workspace, disk_out, agent_token).await
         }
         StorageBackend::CephRbd => provision_ceph_rbd(cfg, base, vmm, id, agent_token).await,
+        StorageBackend::CephRbdInPlace => {
+            provision_ceph_rbd_in_place(cfg, base, vmm, agent_token).await
+        }
     }
 }
 
@@ -310,12 +313,7 @@ async fn provision_ceph_rbd(
             "storage=ceph-rbd does not support automatic guest-agent token injection (guestkit needs a local file or block device, not a rbd: URI) — bake the token into the base RBD image yourself, or use storage=default/lvm-thin/nbd with an agent-enabled VM"
         );
     }
-    let base_ref = base
-        .to_str()
-        .context("ceph-rbd image reference must be valid UTF-8 'pool/image'")?;
-    let (pool, image) = base_ref.split_once('/').with_context(|| {
-        format!("storage=ceph-rbd requires image to be a 'pool/image' reference, got {base_ref}")
-    })?;
+    let (pool, image) = parse_rbd_ref(base, "ceph-rbd")?;
     let clone_name = format!("eph-{}", short_id(id));
 
     let mut clone_args = vec![
@@ -331,17 +329,85 @@ async fn provision_ceph_rbd(
         format!("cloning Ceph RBD image {pool}/{image}@fluxvm-base -> {pool}/{clone_name}")
     })?;
 
-    let mut uri = format!("rbd:{pool}/{clone_name}");
-    uri.push_str(&format!(":id={}", cfg.storage.ceph_user));
-    if let Some(conf) = &cfg.storage.ceph_conf {
-        uri.push_str(&format!(":conf={}", conf.display()));
-    }
     Ok(ProvisionedDisk {
-        disk: PathBuf::from(uri),
+        disk: rbd_uri(cfg, pool, &clone_name),
         lvm_lv: None,
         nbd_export: None,
         nbd_pid: None,
     })
+}
+
+/// Opens an existing RBD image as the VM's disk, unchanged. The image must
+/// already exist (`rbd info` is checked up front for a clear error rather
+/// than a QEMU boot failure) and is never removed by FluxVM.
+async fn provision_ceph_rbd_in_place(
+    cfg: &Config,
+    base: &Path,
+    vmm: BackendKind,
+    agent_token: Option<&str>,
+) -> Result<ProvisionedDisk> {
+    if vmm != BackendKind::Qemu {
+        bail!("storage=ceph-rbd-in-place is only implemented for the QEMU backend");
+    }
+    if agent_token.is_some() {
+        bail!(
+            "storage=ceph-rbd-in-place does not support automatic guest-agent token injection — bake the token into the image or set agent.token"
+        );
+    }
+    let (pool, image) = parse_rbd_ref(base, "ceph-rbd-in-place")?;
+    run_checked(
+        "rbd",
+        &rbd_args(cfg, &["info".into(), format!("{pool}/{image}")]),
+    )
+    .await
+    .with_context(|| format!("Ceph RBD image {pool}/{image} is not accessible"))?;
+    Ok(ProvisionedDisk {
+        disk: rbd_uri(cfg, pool, image),
+        lvm_lv: None,
+        nbd_export: None,
+        nbd_pid: None,
+    })
+}
+
+/// Splits `pool/image` and restricts both to Ceph's safe name characters.
+/// `:` and `@` in particular would inject options or snapshot selectors
+/// into QEMU's `rbd:` URI.
+pub fn parse_rbd_ref<'a>(base: &'a Path, storage: &str) -> Result<(&'a str, &'a str)> {
+    let s = base
+        .to_str()
+        .with_context(|| format!("storage={storage} image must be valid UTF-8 'pool/image'"))?;
+    let (pool, image) = s.split_once('/').with_context(|| {
+        format!("storage={storage} requires image to be a 'pool/image' reference, got {s}")
+    })?;
+    let ok = |p: &str| {
+        !p.is_empty()
+            && !p.starts_with('-')
+            && p.chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !ok(pool) || !ok(image) {
+        bail!(
+            "storage={storage}: invalid RBD reference {s:?} (pool and image may contain only [A-Za-z0-9._-])"
+        );
+    }
+    Ok((pool, image))
+}
+
+fn rbd_args(cfg: &Config, head: &[String]) -> Vec<String> {
+    let mut args = head.to_vec();
+    args.push(format!("--id={}", cfg.storage.ceph_user));
+    if let Some(conf) = &cfg.storage.ceph_conf {
+        args.push(format!("--conf={}", conf.display()));
+    }
+    args
+}
+
+fn rbd_uri(cfg: &Config, pool: &str, image: &str) -> PathBuf {
+    let mut uri = format!("rbd:{pool}/{image}:id={}", cfg.storage.ceph_user);
+    if let Some(conf) = &cfg.storage.ceph_conf {
+        uri.push_str(&format!(":conf={}", conf.display()));
+    }
+    PathBuf::from(uri)
 }
 
 /// Verified end to end alongside `provision_ceph_rbd` — `delete` reaping a
@@ -391,6 +457,44 @@ mod tests {
         assert_eq!(
             disk_format(BackendKind::Qemu, StorageBackend::CephRbd),
             "raw"
+        );
+    }
+
+    #[test]
+    fn parse_rbd_ref_rejects_uri_injection() {
+        assert_eq!(
+            parse_rbd_ref(Path::new("rbd-nvme-prod/kairon-default-web-root"), "x").unwrap(),
+            ("rbd-nvme-prod", "kairon-default-web-root")
+        );
+        for bad in [
+            "noslash",
+            "pool/img:id=admin",
+            "pool/img@snap",
+            "pool/a/b",
+            "/img",
+            "pool/",
+            "-pool/img",
+            "pool/img:conf=/tmp/evil.conf",
+        ] {
+            assert!(
+                parse_rbd_ref(Path::new(bad), "x").is_err(),
+                "{bad} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rbd_uri_uses_node_credentials_only() {
+        let mut cfg = Config::default();
+        cfg.storage.ceph_user = "kairon".into();
+        cfg.storage.ceph_conf = Some(PathBuf::from("/etc/ceph/ceph.conf"));
+        assert_eq!(
+            rbd_uri(&cfg, "rbd", "img"),
+            PathBuf::from("rbd:rbd/img:id=kairon:conf=/etc/ceph/ceph.conf")
+        );
+        assert_eq!(
+            ceph_rbd_ref(&rbd_uri(&cfg, "rbd", "img")).as_deref(),
+            Some("rbd/img")
         );
     }
 

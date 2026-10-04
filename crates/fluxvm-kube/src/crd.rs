@@ -65,7 +65,7 @@ pub struct DisposableVmSpec {
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub macvtap_mode: Option<String>,
-    /// One of "default", "lvm-thin", "nbd", "ceph-rbd" — see README's
+    /// One of "default", "lvm-thin", "nbd", "ceph-rbd", "ceph-rbd-in-place" — see README's
     /// "Storage backends".
     #[serde(default = "default_storage")]
     pub storage: String,

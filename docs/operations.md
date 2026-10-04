@@ -969,6 +969,17 @@ to one of three alternative provisioning backends instead —
   needs a local file or block device to mount, not an arbitrary `rbd:`
   URI) — that combination fails fast with a clear error rather than
   attempting it.
+- **`ceph-rbd-in-place`** — QEMU opens an existing `<pool>/<image>` as-is,
+  with no clone and no `fluxvm-base` snapshot. The image is owned by
+  whoever created it (typically the Atlas storage control plane, via
+  Kairon's `spec.volumes[].atlas.mode: rbd`); FluxVM checks it with
+  `rbd info` before boot and never deletes it. Because every node opens the
+  same image, live migration of these VMs is shared-storage migration with
+  no block copy. Credentials come only from node config
+  (`[storage] ceph_user` / `ceph_conf`); pool and image names are limited to
+  `[A-Za-z0-9._-]`, so a request can't smuggle `:id=`/`:conf=` options or an
+  `@snapshot` into the `rbd:` URI. QEMU only, and no automatic guest-agent
+  token injection (same reason as `ceph-rbd`).
 
 `storage` defaults to unset (`Default`) on every create request — nothing
 above changes any existing behavior unless a caller opts in.

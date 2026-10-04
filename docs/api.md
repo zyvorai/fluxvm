@@ -302,7 +302,7 @@ have `fluxvm-guest-agent` installed and enabled (see the
 and rarely needs changing, since each VM already gets its own host-unique vsock CID.
 
 `storage` is one of `"default"` (the implicit default when the field is omitted entirely — qcow2/raw,
-exactly as before this existed), `"lvm-thin"`, `"nbd"`, or `"ceph-rbd"` — see
+exactly as before this existed), `"lvm-thin"`, `"nbd"`, `"ceph-rbd"`, or `"ceph-rbd-in-place"` — see
 [Storage backends](operations.md#storage-backends).
 
 ### Networking modes

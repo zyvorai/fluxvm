@@ -1887,7 +1887,7 @@ impl VmManager {
         // filesystem entry (a file for Default/Nbd, a block device for
         // LvmThin) — CephRbd's `image` is a `pool/image` reference with no
         // local path to check at all.
-        if req.storage != StorageBackend::CephRbd && !req.image.exists() {
+        if !req.storage.is_ceph_rbd() && !req.image.exists() {
             bail!("base image does not exist: {}", req.image.display());
         }
         let id = Uuid::new_v4();
@@ -2882,7 +2882,7 @@ impl VmManager {
         // filesystem path — there's nothing on the local filesystem to
         // check `exists()` against. LvmThin (a block device) and Nbd (the
         // local qcow2 file the export serves) both really do live on disk.
-        if vm.request.storage != StorageBackend::CephRbd && !vm.disk.exists() {
+        if !vm.request.storage.is_ceph_rbd() && !vm.disk.exists() {
             bail!(
                 "cannot start {id}: disk no longer exists at {}",
                 vm.disk.display()
@@ -3855,6 +3855,7 @@ impl VmManager {
                 tracing::warn!(vm = %id, error = %e, "failed to stop qemu-nbd export");
             }
         }
+        // CephRbdInPlace images belong to whoever created them; never removed here.
         if vm.request.storage == StorageBackend::CephRbd {
             if let Some(pool_image) = fluxvm_image::storage::ceph_rbd_ref(&vm.disk) {
                 if let Err(e) =

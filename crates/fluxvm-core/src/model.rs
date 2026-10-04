@@ -283,6 +283,24 @@ pub enum StorageBackend {
     /// `fluxvm_image::storage::provision_ceph_rbd`. Does not support
     /// automatic guest-agent token injection (see that function).
     CephRbd,
+    /// QEMU only. `request.image` is a `pool/image` reference to an RBD
+    /// image owned by an external control plane (e.g. Atlas); QEMU opens it
+    /// as-is, with no clone. FluxVM never deletes it, and because every node
+    /// opens the same image, live migration needs no block copy. Ceph
+    /// credentials come from node config (`storage.ceph_user`/`ceph_conf`),
+    /// never from the request.
+    CephRbdInPlace,
+}
+
+impl StorageBackend {
+    /// True for both RBD variants: `request.image` is a `pool/image`
+    /// reference, not a local path.
+    pub fn is_ceph_rbd(self) -> bool {
+        matches!(
+            self,
+            StorageBackend::CephRbd | StorageBackend::CephRbdInPlace
+        )
+    }
 }
 
 /// Enables the in-guest vsock agent (ping/exec/shutdown, no SSH needed).
