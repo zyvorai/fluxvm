@@ -1,7 +1,9 @@
 # Kairon VM-edge contract
 
 Kairon (`kairon-node`) posts a per-VM edge document to FluxVM when a
-Machine sets `dataplaneMode: ebpf`, `antiSpoof`, `learnIP`, or `qos`.
+Machine sets `dataplaneMode: ebpf`, `antiSpoof`, `learnIP`, or `qos`, or
+when a tap Machine is selected by a policy with `allowSNI`, `allowDNS` or
+`maxIngress*`.
 FluxVM loads the document into the VM's TC/TCX program
 (`fluxvm_tc.bpf.o`) and into qdiscs on the VM's host-side interface.
 
