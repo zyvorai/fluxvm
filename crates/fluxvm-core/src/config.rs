@@ -46,6 +46,10 @@ pub struct Config {
     /// with a clear error instead of guessing. See
     /// docs/secure-boot-tpm.md.
     pub qemu_ovmf_vars_template: Option<PathBuf>,
+    /// Extracted virtio-win tree (the virtio-win ISO's contents). When set,
+    /// `POST /v1/images/import` injects viostor, vioscsi, NetKVM and
+    /// vioserial into Windows guests offline. See docs/import-vmware.md.
+    pub virtio_win_dir: Option<PathBuf>,
     /// QEMU only, consulted when `req.tpm` is set: the `swtpm` binary,
     /// resolved via $PATH like `virtiofsd_binary`/`qemu_binary`.
     pub swtpm_binary: String,
@@ -98,6 +102,7 @@ impl Default for Config {
             cloud_hypervisor_firmware: None,
             qemu_ovmf_code: None,
             qemu_ovmf_vars_template: None,
+            virtio_win_dir: None,
             swtpm_binary: "swtpm".into(),
             default_bridge: Some("vmbr0".into()),
             reaper_interval_secs: 5,

@@ -399,6 +399,15 @@ pub struct SharedFolder {
     pub read_only: bool,
 }
 
+/// One `CreateVmRequest::data_disks` entry: data disk `name` (`[a-z0-9-]`,
+/// up to 32) as a qcow2 overlay on `backing`, which is never written.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DataDiskSpec {
+    pub name: String,
+    pub backing: PathBuf,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateVmRequest {
     pub name: String,
@@ -487,6 +496,10 @@ pub struct CreateVmRequest {
     pub storage: StorageBackend,
     #[serde(default)]
     pub shared_folders: Vec<SharedFolder>,
+    /// QEMU only: data disks present from the first boot, each a qcow2
+    /// overlay on a shared image (an imported OVA's extra disks).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_disks: Vec<DataDiskSpec>,
     /// QEMU only: bind vCPU threads to host NUMA node(s).
     #[serde(default)]
     pub numa_node: Option<u8>,

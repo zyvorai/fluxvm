@@ -2226,8 +2226,9 @@ struct DiskSizeRequest {
     size_gib: u64,
 }
 
-/// Exactly one of `size_gib` (create a new qcow2) or `path` (attach an
-/// existing image file or block device).
+/// Exactly one of `size_gib` (create a new qcow2), `path` (attach an
+/// existing image file or block device) or `backing` (a new qcow2 overlay
+/// on a shared image).
 #[derive(Deserialize)]
 struct AttachDiskRequest {
     name: String,
@@ -2235,6 +2236,8 @@ struct AttachDiskRequest {
     size_gib: Option<u64>,
     #[serde(default)]
     path: Option<std::path::PathBuf>,
+    #[serde(default)]
+    backing: Option<std::path::PathBuf>,
 }
 
 async fn attach_vm_disk(
@@ -2244,10 +2247,13 @@ async fn attach_vm_disk(
     Json(req): Json<AttachDiskRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
-    let info = match (req.size_gib, req.path) {
-        (Some(size), None) => m.attach_vm_disk(id, &req.name, size).await?,
-        (None, Some(path)) => m.attach_existing_vm_disk(id, &req.name, &path).await?,
-        _ => return Err(anyhow::anyhow!("set exactly one of size_gib or path").into()),
+    let info = match (req.size_gib, req.path, req.backing) {
+        (Some(size), None, None) => m.attach_vm_disk(id, &req.name, size).await?,
+        (None, Some(path), None) => m.attach_existing_vm_disk(id, &req.name, &path).await?,
+        (None, None, Some(backing)) => m.attach_overlay_vm_disk(id, &req.name, &backing).await?,
+        _ => {
+            return Err(anyhow::anyhow!("set exactly one of size_gib, path or backing").into());
+        }
     };
     Ok((StatusCode::CREATED, Json(info)))
 }
@@ -4077,6 +4083,7 @@ mod tests {
                 hyperv: false,
                 storage: Default::default(),
                 shared_folders: vec![],
+                data_disks: vec![],
                 numa_node: None,
                 cpuset: None,
                 hugepages: None,

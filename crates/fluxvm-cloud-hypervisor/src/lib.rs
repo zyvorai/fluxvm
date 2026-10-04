@@ -762,6 +762,7 @@ mod tests {
             hyperv: false,
             storage: fluxvm_core::model::StorageBackend::Default,
             shared_folders: vec![],
+            data_disks: vec![],
             numa_node: None,
             cpuset: None,
             hugepages: None,

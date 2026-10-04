@@ -2096,6 +2096,9 @@ impl VmManager {
         if let Some(msg) = secure_boot_or_tpm_backend_error(&req) {
             anyhow::bail!(msg);
         }
+        if !req.data_disks.is_empty() && req.backend != BackendKind::Qemu {
+            anyhow::bail!("data_disks requires backend qemu");
+        }
 
         let result: Result<()> = async {
             let agent_token = req.agent.as_ref().and_then(|a| a.token.as_deref());
@@ -2115,6 +2118,12 @@ impl VmManager {
             record.disk = provisioned.disk.clone();
             record.lvm_lv = provisioned.lvm_lv.clone();
             record.nbd_pid = provisioned.nbd_pid;
+            for d in &req.data_disks {
+                let backing = self.check_disk_source(&d.backing)?;
+                fluxvm_qemu::disks::create_overlay(&self.cfg, &workspace, &d.name, &backing)
+                    .await
+                    .with_context(|| format!("creating data disk {:?}", d.name))?;
+            }
             // Network prep runs before the cloud-init seed: a static
             // network-config (CloudInitSpec.static_network) needs the
             // guest's reserved address, which only exists once
@@ -3627,6 +3636,44 @@ impl VmManager {
         source: &std::path::Path,
     ) -> Result<fluxvm_core::model::VmDiskInfo> {
         let vm = self.qemu_vm_for_disks(id).await?;
+        let real = self.check_disk_source(source)?;
+        let info = fluxvm_qemu::disks::attach_existing(&self.cfg, &vm, name, &real).await?;
+        audit_event(
+            "vm.disk.attach",
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", name),
+                ("source", &real.to_string_lossy()),
+            ],
+        );
+        Ok(info)
+    }
+
+    /// Create data disk `name` as a qcow2 overlay on `backing`, which is
+    /// checked like an `attach_existing_vm_disk` source and never written.
+    pub async fn attach_overlay_vm_disk(
+        &self,
+        id: Uuid,
+        name: &str,
+        backing: &std::path::Path,
+    ) -> Result<fluxvm_core::model::VmDiskInfo> {
+        let vm = self.qemu_vm_for_disks(id).await?;
+        let real = self.check_disk_source(backing)?;
+        let info = fluxvm_qemu::disks::attach_overlay(&self.cfg, &vm, name, &real).await?;
+        audit_event(
+            "vm.disk.attach",
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", name),
+                ("backing", &real.to_string_lossy()),
+            ],
+        );
+        Ok(info)
+    }
+
+    /// Canonical path of a disk source: a block device under `/dev`, or a
+    /// file under `policy.allowed_image_dirs` when that is set.
+    fn check_disk_source(&self, source: &std::path::Path) -> Result<std::path::PathBuf> {
         let real = fs::canonicalize(source)
             .with_context(|| format!("resolving disk source {}", source.display()))?;
         let block = {
@@ -3647,16 +3694,7 @@ impl VmManager {
                 source.display()
             );
         }
-        let info = fluxvm_qemu::disks::attach_existing(&self.cfg, &vm, name, &real).await?;
-        audit_event(
-            "vm.disk.attach",
-            &[
-                ("vm_id", &id.to_string()),
-                ("disk", name),
-                ("source", &real.to_string_lossy()),
-            ],
-        );
-        Ok(info)
+        Ok(real)
     }
 
     pub async fn detach_vm_disk(&self, id: Uuid, name: &str) -> Result<()> {
@@ -4788,6 +4826,7 @@ mod tests {
             hyperv: false,
             storage: StorageBackend::Default,
             shared_folders: vec![],
+            data_disks: vec![],
             numa_node: None,
             cpuset: None,
             hugepages: None,

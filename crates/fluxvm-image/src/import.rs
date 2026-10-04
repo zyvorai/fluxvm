@@ -6,7 +6,8 @@
 //! the boot disk is fixed offline through guestkit so it boots on virtio:
 //! VMware tools disabled or removed, virtio modules forced into the
 //! initramfs, `/dev/sdX` references moved to `/dev/vdX`, stale persistent
-//! NIC names dropped and a DHCP fallback added.
+//! NIC names dropped and a DHCP fallback added. Windows guests get the
+//! virtio-win drivers injected offline when `virtio_win_dir` is configured.
 
 use crate::ova::{OvfSummary, extract_ova, parse_ovf};
 use anyhow::{Context, Result, bail};
@@ -148,10 +149,13 @@ async fn import_into(cfg: &Config, req: &ImportRequest, out_dir: &Path) -> Resul
     let repair = if req.repair {
         let disk = outputs[0].clone();
         let remove = req.remove_vmware_tools;
+        let virtio_win = cfg.virtio_win_dir.clone();
         Some(
-            tokio::task::spawn_blocking(move || repair_blocking(&disk, remove))
-                .await
-                .context("guestkit worker thread panicked")??,
+            tokio::task::spawn_blocking(move || {
+                repair_blocking(&disk, remove, virtio_win.as_deref())
+            })
+            .await
+            .context("guestkit worker thread panicked")??,
         )
     } else {
         None
@@ -246,11 +250,13 @@ fn suggested_request(
             }
         }
     }
-    for p in &disks[1..] {
-        notes.push(format!(
-            "attach {} after create with POST /v1/vms/{{id}}/disks",
-            p.display()
-        ));
+    if disks.len() > 1 {
+        req["data_disks"] = disks
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(i, p)| serde_json::json!({"name": format!("disk{i}"), "backing": p}))
+            .collect();
     }
     if ovf.is_some_and(|o| o.nics > 1) {
         notes.push(format!(
@@ -294,7 +300,11 @@ pub(crate) fn rewrite_scsi_devices(text: &str) -> (String, usize) {
     (out, count)
 }
 
-fn repair_blocking(disk: &Path, remove_tools: bool) -> Result<RepairReport> {
+fn repair_blocking(
+    disk: &Path,
+    remove_tools: bool,
+    virtio_win: Option<&Path>,
+) -> Result<RepairReport> {
     use guestkit::Guestfs;
 
     let mut g = Guestfs::new().context("creating guestkit handle")?;
@@ -312,12 +322,16 @@ fn repair_blocking(disk: &Path, remove_tools: bool) -> Result<RepairReport> {
         ..Default::default()
     };
     if report.os_type == "windows" {
-        report.warnings.push(
-            "Windows guest: install the virtio-win drivers (viostor, vioscsi, netkvm) inside the VM before the \
-             switch, or boot it once with an IDE/e1000 machine and add them; offline driver injection is not done"
-                .into(),
-        );
-        let _ = g.shutdown();
+        match virtio_win {
+            Some(tree) => repair_windows(&mut g, &root, tree, &mut report)?,
+            None => report.warnings.push(
+                "Windows guest: no virtio_win_dir configured, so no drivers were injected; set it to an \
+                 extracted virtio-win ISO, or install viostor, vioscsi and netkvm inside the VM before exporting it"
+                    .into(),
+            ),
+        }
+        let _ = g.umount_all();
+        g.shutdown().context("shutting down guestfs")?;
         return Ok(report);
     }
     if report.os_type != "linux" {
@@ -344,6 +358,119 @@ fn repair_blocking(disk: &Path, remove_tools: bool) -> Result<RepairReport> {
     let _ = g.umount_all();
     g.shutdown().context("shutting down guestfs")?;
     Ok(report)
+}
+
+/// virtio-win driver directories injected into Windows guests. viostor is
+/// the boot disk driver for FluxVM's default virtio-blk bus.
+const WINDOWS_DRIVERS: &[&str] = &["viostor", "vioscsi", "NetKVM", "vioserial"];
+
+/// Guest directory every injected driver is copied into. One shared
+/// directory, because each injection sets the SOFTWARE-hive `DevicePath` to
+/// `%SystemRoot%\inf` plus its own directory.
+const WINDOWS_DRIVER_DEST: &str = "VirtIO";
+
+fn repair_windows(
+    g: &mut guestkit::Guestfs,
+    root: &str,
+    tree: &Path,
+    report: &mut RepairReport,
+) -> Result<()> {
+    let mounts = g
+        .inspect_get_mountpoints(root)
+        .context("getting mountpoints")?;
+    for (mountpoint, device) in &crate::depth_ordered_mounts(mounts) {
+        g.mount(device, mountpoint)
+            .with_context(|| format!("mounting {device} at {mountpoint}"))?;
+    }
+    let major = g.inspect_get_major_version(root).unwrap_or(0);
+    let minor = g.inspect_get_minor_version(root).unwrap_or(0);
+    let product = g.inspect_get_product_name(root).unwrap_or_default();
+    let os_dirs = windows_os_dirs(major, minor, &product);
+    for driver in WINDOWS_DRIVERS {
+        let Some(dir) = find_driver_dir(tree, driver, os_dirs) else {
+            report.warnings.push(format!(
+                "{driver} not found under {} for {product:?}",
+                tree.display()
+            ));
+            continue;
+        };
+        match guestkit::agent::inject::inject_windows_driver_dir(
+            g,
+            root,
+            &dir,
+            WINDOWS_DRIVER_DEST,
+            false,
+        ) {
+            Ok(()) => report
+                .actions
+                .push(format!("injected {driver} from {}", dir.display())),
+            Err(e) => report
+                .warnings
+                .push(format!("injecting {driver} failed: {e:#}")),
+        }
+    }
+    if !report
+        .actions
+        .iter()
+        .any(|a| a.starts_with("injected viostor"))
+    {
+        report.warnings.push(
+            "viostor was not injected: the guest will not find its boot disk on virtio-blk; \
+             boot it on IDE/SATA and install the driver inside"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+/// virtio-win per-OS directory names to try for a guest, best match first.
+pub(crate) fn windows_os_dirs(major: i32, minor: i32, product: &str) -> &'static [&'static str] {
+    let p = product.to_ascii_lowercase();
+    if p.contains("server") {
+        return if p.contains("2025") {
+            &["2k25", "2k22"]
+        } else if p.contains("2022") {
+            &["2k22", "2k19"]
+        } else if p.contains("2019") {
+            &["2k19", "2k16"]
+        } else if p.contains("2016") {
+            &["2k16"]
+        } else if p.contains("2012 r2") {
+            &["2k12R2"]
+        } else {
+            &["2k22", "2k19", "2k16"]
+        };
+    }
+    match (major, minor) {
+        (10, _) if p.contains("windows 11") => &["w11", "w10"],
+        (10, _) => &["w10", "w11"],
+        (6, 3) => &["w8.1"],
+        (6, 2) => &["w8"],
+        (6, 1) => &["w7"],
+        _ => &["w10", "w11"],
+    }
+}
+
+/// `<tree>/<driver>/<os>/amd64` for the first OS directory holding an INF,
+/// else guestkit's generic virtio-win layout search.
+pub(crate) fn find_driver_dir(tree: &Path, driver: &str, os_dirs: &[&str]) -> Option<PathBuf> {
+    for os in os_dirs {
+        let dir = tree.join(driver).join(os).join("amd64");
+        if has_inf(&dir) {
+            return Some(dir);
+        }
+    }
+    guestkit::cli::virtio_win::resolve_driver_dir(tree, driver).filter(|d| has_inf(d))
+}
+
+fn has_inf(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|rd| {
+        rd.flatten().any(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("inf"))
+        })
+    })
 }
 
 fn unit_exists(g: &mut guestkit::Guestfs, unit: &str) -> bool {
@@ -530,12 +657,21 @@ fn repair_initramfs(g: &mut guestkit::Guestfs, report: &mut RepairReport) {
          {rebuild} >/dev/null; rc=$?; umount /tmp /dev /sys /proc 2>/dev/null; echo \"$K\"; exit $rc"
     );
     match g.sh_raw(&script) {
-        Ok(out) => report
-            .actions
-            .push(format!("rebuilt initramfs for kernel {}", out.trim().lines().last().unwrap_or("?"))),
+        Ok(out) => report.actions.push(format!(
+            "rebuilt initramfs for kernel {}",
+            out.trim().lines().last().unwrap_or("?")
+        )),
         Err(e) => {
             let detail = e.to_string();
-            let tail: String = detail.lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | ");
+            let tail: String = detail
+                .lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" | ");
             report.warnings.push(format!(
                 "initramfs rebuild failed ({tail}); the virtio config is in place, rebuild the initramfs from a rescue shell if the disk is not found at boot"
             ))
@@ -546,6 +682,33 @@ fn repair_initramfs(g: &mut guestkit::Guestfs, report: &mut RepairReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_driver_dir_selection() {
+        assert_eq!(
+            windows_os_dirs(10, 0, "Windows Server 2022 Datacenter"),
+            &["2k22", "2k19"]
+        );
+        assert_eq!(windows_os_dirs(10, 0, "Windows 10 Pro"), &["w10", "w11"]);
+        assert_eq!(windows_os_dirs(6, 3, "Windows 8.1 Pro"), &["w8.1"]);
+
+        let tree = tempfile::tempdir().unwrap();
+        let w11 = tree.path().join("viostor/w11/amd64");
+        let k22 = tree.path().join("viostor/2k22/amd64");
+        for d in [&w11, &k22] {
+            fs::create_dir_all(d).unwrap();
+            fs::write(d.join("viostor.inf"), "").unwrap();
+        }
+        assert_eq!(
+            find_driver_dir(tree.path(), "viostor", &["w10", "w11"]),
+            Some(w11)
+        );
+        assert_eq!(
+            find_driver_dir(tree.path(), "viostor", &["2k22"]),
+            Some(k22)
+        );
+        assert_eq!(find_driver_dir(tree.path(), "NetKVM", &["w10"]), None);
+    }
 
     #[test]
     fn rewrites_only_scsi_device_paths() {
@@ -589,7 +752,9 @@ mod tests {
         assert_eq!(s["memory_mib"], 8192);
         assert_eq!(s["firmware"], "/ovmf/CODE.fd");
         assert_eq!(s["name"], "web-01");
-        assert!(s["notes"][0].as_str().unwrap().contains("/a/disk1.raw"));
+        assert_eq!(s["data_disks"][0]["name"], "disk1");
+        assert_eq!(s["data_disks"][0]["backing"], "/a/disk1.raw");
+        assert!(s["notes"].is_null());
         let s = suggested_request("w", &disks[..1], Some(&ovf), None);
         assert!(s["firmware"].is_null() && s["notes"][0].as_str().unwrap().contains("UEFI"));
     }

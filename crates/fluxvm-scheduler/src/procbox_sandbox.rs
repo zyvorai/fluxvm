@@ -1317,6 +1317,7 @@ fn minimal_request(name: Option<String>, spec: &ProcboxSpec) -> CreateVmRequest 
         hyperv: false,
         storage: Default::default(),
         shared_folders: Vec::new(),
+        data_disks: vec![],
         numa_node: None,
         cpuset: None,
         hugepages: None,

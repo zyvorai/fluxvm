@@ -5,6 +5,10 @@
 //! An existing image or block device (a PVC's volume, an RBD map) is attached
 //! as a symlink `<name>.qcow2` / `<name>.raw` pointing at it. Detach removes
 //! the link only; the source belongs to whoever created it.
+//!
+//! A disk attached with a backing image is a qcow2 overlay in `disks/`, so
+//! several VMs can start from one shared image (an imported OVA's data
+//! disks) without writing to it.
 
 use crate::{QMP_TIMEOUT, qmp};
 use anyhow::{Context, Result, bail};
@@ -264,6 +268,79 @@ pub async fn attach_existing(
         return Err(e);
     }
     disk_info(cfg, name, &link, "scsi").await
+}
+
+/// Create data disk `name` as a qcow2 overlay on top of `backing` (a qcow2
+/// or raw file or block device, never written to) and, when the VM is
+/// live, hot-add it. Detach deletes the overlay only.
+pub async fn attach_overlay(
+    cfg: &Config,
+    vm: &VmRecord,
+    name: &str,
+    backing: &Path,
+) -> Result<VmDiskInfo> {
+    let path = create_overlay(cfg, &vm.workspace, name, backing).await?;
+    if is_live(vm)
+        && let Err(e) = hot_add(vm, name, &path).await
+    {
+        let _ = std::fs::remove_file(&path);
+        return Err(e);
+    }
+    disk_info(cfg, name, &path, "scsi").await
+}
+
+/// Create `disks/<name>.qcow2` in `workspace` as an overlay on `backing`.
+/// Picked up as a data disk at the next boot.
+pub async fn create_overlay(
+    cfg: &Config,
+    workspace: &Path,
+    name: &str,
+    backing: &Path,
+) -> Result<PathBuf> {
+    validate_disk_name(name)?;
+    if !backing.is_absolute() {
+        bail!(
+            "backing image {} must be an absolute path",
+            backing.display()
+        );
+    }
+    let format = if is_block_device(backing) {
+        "raw".to_string()
+    } else if std::fs::metadata(backing)
+        .with_context(|| format!("backing image {}", backing.display()))?
+        .is_file()
+    {
+        virtual_size(cfg, backing).await?.1
+    } else {
+        bail!(
+            "backing image {} is neither a file nor a block device",
+            backing.display()
+        );
+    };
+    if format != "raw" && format != "qcow2" {
+        bail!("backing image format {format:?} is not supported (raw or qcow2)");
+    }
+    if find_disk(workspace, name).is_some() {
+        bail!("disk {name:?} already exists");
+    }
+    let dir = disks_dir(workspace);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join(format!("{name}.qcow2"));
+    let out = tokio::process::Command::new(&cfg.qemu_img_binary)
+        .args(["create", "-q", "-f", "qcow2", "-F", &format, "-b"])
+        .arg(backing)
+        .arg(&path)
+        .output()
+        .await
+        .with_context(|| format!("running {}", cfg.qemu_img_binary))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&path);
+        bail!(
+            "qemu-img create failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(path)
 }
 
 async fn hot_add(vm: &VmRecord, name: &str, path: &Path) -> Result<()> {

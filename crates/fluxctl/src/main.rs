@@ -1163,17 +1163,21 @@ enum DiskCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
-    /// Create a qcow2 data disk, or attach an existing image file or block
-    /// device with --path; hot-added when the VM is running.
+    /// Create a qcow2 data disk, attach an existing image file or block
+    /// device with --path, or overlay a shared image with --backing;
+    /// hot-added when the VM is running.
     Attach {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         name: String,
-        #[arg(long, required_unless_present = "path", conflicts_with = "path")]
+        #[arg(long, required_unless_present_any = ["path", "backing"], conflicts_with_all = ["path", "backing"])]
         size_gib: Option<u64>,
         /// Existing qcow2/raw file or block device; detach leaves it in place.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "backing")]
         path: Option<PathBuf>,
+        /// qcow2/raw image to put a new qcow2 overlay on; never written.
+        #[arg(long)]
+        backing: Option<PathBuf>,
     },
     /// Grow `root` or a data disk (live or stopped).
     Resize {
@@ -2171,11 +2175,12 @@ async fn run_remote(
                 name,
                 size_gib,
                 path,
+                backing,
             } => pretty(
                 &r.call(
                     Method::POST,
                     &format!("/v1/vms/{id}/disks"),
-                    Some(json!({"name": name, "size_gib": size_gib, "path": path})),
+                    Some(json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing})),
                 )
                 .await?,
             )?,
@@ -2766,11 +2771,15 @@ async fn main() -> Result<()> {
                 name,
                 size_gib,
                 path,
+                backing,
             } => {
-                let info = match (size_gib, path) {
-                    (_, Some(path)) => m.attach_existing_vm_disk(id, &name, &path).await?,
-                    (Some(size), None) => m.attach_vm_disk(id, &name, size).await?,
-                    (None, None) => anyhow::bail!("set --size-gib or --path"),
+                let info = match (size_gib, path, backing) {
+                    (_, Some(path), _) => m.attach_existing_vm_disk(id, &name, &path).await?,
+                    (_, None, Some(backing)) => {
+                        m.attach_overlay_vm_disk(id, &name, &backing).await?
+                    }
+                    (Some(size), None, None) => m.attach_vm_disk(id, &name, size).await?,
+                    (None, None, None) => anyhow::bail!("set --size-gib, --path or --backing"),
                 };
                 println!("{}", serde_json::to_string_pretty(&info)?)
             }

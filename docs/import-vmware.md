@@ -36,6 +36,7 @@ the source must be under one of those directories. The route is admin-only.
    - removes `70-persistent-net.rules` and adds a DHCP fallback for any
      `en*` interface (netplan, or a NetworkManager keyfile on RHEL-family
      guests).
+   Windows guests get the virtio-win drivers instead (see below).
 4. Returns the disk paths, the OVF summary, a repair report and a
    suggested `POST /v1/vms` body.
 
@@ -51,11 +52,15 @@ the source must be under one of those directories. The route is admin-only.
   },
   "suggested": {"name": "web01", "image": ".../disk0.raw", "backend": "qemu", "vcpus": 4, "memory_mib": 8192,
                 "firmware": "/usr/share/OVMF/OVMF_CODE.fd",
-                "notes": ["attach .../disk1.raw after create with POST /v1/vms/{id}/disks"]}
+                "data_disks": [{"name": "disk1", "backing": ".../disk1.raw"}]}
 }
 ```
 
-Drop `notes` from `suggested` and send it to `POST /v1/vms`. For a UEFI
+Drop `notes` (if any) from `suggested` and send it to `POST /v1/vms`. Every
+disk after the boot disk is in `data_disks`: each VM gets its own qcow2
+overlay on the imported file, created before the first boot and attached as
+a SCSI disk (serial `diskN`), so several VMs can be created from one import
+without sharing writes. For a UEFI
 source, `firmware` is filled from `qemu_ovmf_code` when it is configured;
 otherwise a note asks for it.
 
@@ -66,8 +71,35 @@ otherwise a note asks for it.
   the DHCP fallback.
 - **Initramfs rebuild failed:** the virtio config is still written. Boot
   with a rescue kernel or run the printed command on first boot.
-- **Windows:** no offline driver injection. Install the virtio-win drivers
-  (viostor, vioscsi, netkvm) in the VM before exporting it.
+- **Windows without `virtio_win_dir`:** nothing is injected. Configure it,
+  or install the virtio-win drivers (viostor, vioscsi, netkvm) in the VM
+  before exporting it.
+
+## Windows guests
+
+Set `virtio_win_dir` in the FluxVM config to an extracted virtio-win ISO:
+
+```toml
+virtio_win_dir = "/usr/share/virtio-win"
+```
+
+With `repair` on, the import mounts the Windows system volume and, for
+`viostor` (virtio-blk boot disk), `vioscsi`, `NetKVM` and `vioserial`
+(guest agent channel):
+
+- picks the driver build for the guest: `2k25`/`2k22`/`2k19`/`2k16`/`2k12R2`
+  for Windows Server by product name, `w11`/`w10`/`w8.1`/`w8`/`w7` by
+  version, always `amd64`;
+- copies the `.inf`, `.sys`, `.cat` and `.dll` files to
+  `C:\Windows\Drivers\VirtIO` and each `.sys` to `System32\drivers`;
+- appends that directory to the SOFTWARE hive `DevicePath`;
+- registers the driver service from the INF and binds its PCI hardware IDs
+  in the SYSTEM hive `CriticalDeviceDatabase`, so Windows loads it at the
+  first boot without a PnP install.
+
+Each driver shows up in `repair.actions` as `injected <driver> from <dir>`.
+A missing driver is a warning. A missing `viostor` gets its own warning,
+because the guest can't find its boot disk on virtio-blk without it.
 
 ## MCP
 

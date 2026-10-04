@@ -315,10 +315,11 @@ fn schemas() -> Value {
             "allocated_bytes": {"type": "integer"}
         }},
         "DiskList": list("VmDiskInfo"),
-        "AttachDiskRequest": {"type": "object", "required": ["name"], "description": "Exactly one of size_gib or path", "properties": {
+        "AttachDiskRequest": {"type": "object", "required": ["name"], "description": "Exactly one of size_gib, path or backing", "properties": {
             "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
             "size_gib": {"type": "integer", "minimum": 1, "description": "Create a new qcow2 disk of this size"},
-            "path": {"type": "string", "description": "Attach this existing qcow2/raw file or block device; detach leaves it in place"}
+            "path": {"type": "string", "description": "Attach this existing qcow2/raw file or block device; detach leaves it in place"},
+            "backing": {"type": "string", "description": "Create a qcow2 overlay on this qcow2/raw image, which is never written; detach deletes the overlay"}
         }},
         "ResizeDiskRequest": {"type": "object", "required": ["size_gib"], "properties": {
             "size_gib": {"type": "integer", "minimum": 1}

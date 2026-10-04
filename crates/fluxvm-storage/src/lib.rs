@@ -663,6 +663,7 @@ mod tests {
                 hyperv: false,
                 storage: Default::default(),
                 shared_folders: vec![],
+                data_disks: vec![],
                 numa_node: None,
                 cpuset: None,
                 hugepages: None,

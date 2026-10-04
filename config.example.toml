@@ -27,6 +27,9 @@ fluxvm_hypervisor_binary = "fluxvm-hypervisor"
 # separate OVMF_CODE.secboot.fd, with keys enrolled at first boot instead.
 # qemu_ovmf_code = "/usr/share/OVMF/OVMF_CODE_4M.ms.fd"
 # qemu_ovmf_vars_template = "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"
+# Extracted virtio-win ISO; Windows imports get viostor/vioscsi/NetKVM/vioserial
+# injected offline (see docs/import-vmware.md).
+# virtio_win_dir = "/usr/share/virtio-win"
 swtpm_binary = "swtpm"
 default_bridge = "vmbr0"
 reaper_interval_secs = 5

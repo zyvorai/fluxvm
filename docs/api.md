@@ -40,9 +40,9 @@ POST   /v1/vms/{uuid}/restore            # {"tag": "..."}; admin; running flux-v
 GET    /v1/vms/{uuid}/snapshots
 DELETE /v1/vms/{uuid}/snapshots/{tag}
 GET    /v1/vms/{uuid}/disks
-POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10} or {"name": "pvc", "path": "/dev/rbd0"}
+POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}, {"name": "pvc", "path": "/dev/rbd0"} or {"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"} (qcow2 overlay)
 PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
-DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file; only unlinks a path-attached disk
+DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file (or overlay); only unlinks a path-attached disk
 GET    /v1/vms/{uuid}/serial             # websocket, raw serial bytes (QEMU)
 POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
@@ -314,6 +314,11 @@ always shows the resolved concrete backend, never `"auto"`).
 
 Optional `tenant` is a first-class string for multi-team hosts (`GET /v1/vms?tenant=`). See
 `examples/create-vm-prod.json`.
+
+Optional `data_disks` (QEMU only), e.g. `[{"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"}]`,
+creates each disk as a per-VM qcow2 overlay on `backing` before the first boot. `backing` is
+checked like a `POST /v1/vms/{uuid}/disks` `path` and never written to. An image import's
+`suggested` body fills it for every disk after the boot disk.
 
 `agent.enabled` turns on the vsock guest agent (`fluxctl exec`) for this VM — the guest image must
 have `fluxvm-guest-agent` installed and enabled (see the
