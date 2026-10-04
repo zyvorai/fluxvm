@@ -190,6 +190,17 @@ enum Command {
         id: Uuid,
         new_name: String,
     },
+    /// Fork a running flux-vm VM into N running copies sharing one memory
+    /// snapshot. REST: `POST /v1/vms/{id}/fork` `{"count": N}`.
+    ForkVm {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(short = 'n', long, default_value_t = 1)]
+        count: u32,
+        /// Child names are `<prefix>-<n>` (default `<vm>-fork`).
+        #[arg(long)]
+        prefix: Option<String>,
+    },
     /// Block until a VM reaches a state: `running`, `stopped`, `paused`,
     /// `failed`, or `agent` (guest agent answers a ping).
     Wait {
@@ -2007,6 +2018,16 @@ async fn run_remote(
             )
             .await?,
         )?,
+        Command::ForkVm { id, count, prefix } => {
+            let mut body = json!({"count": count});
+            if let Some(p) = prefix {
+                body["namePrefix"] = json!(p);
+            }
+            pretty(
+                &r.call(Method::POST, &format!("/v1/vms/{id}/fork"), Some(body))
+                    .await?,
+            )?
+        }
         Command::Snapshot { id, tag } => pretty(
             &r.call(
                 Method::POST,
@@ -2201,7 +2222,7 @@ async fn run_remote(
         }
         _ => anyhow::bail!(
             "this command is not available with --server; supported: create, vm-template, list, get, \
-             status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, snapshot, \
+             status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
         ),
@@ -2539,6 +2560,13 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&m.clone_vm(id, new_name, None).await?)?
+            );
+        }
+        Command::ForkVm { id, count, prefix } => {
+            let items = m.fork_vm(id, count, prefix, None).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({"items": items}))?
             );
         }
         Command::SnapshotList { id } => {

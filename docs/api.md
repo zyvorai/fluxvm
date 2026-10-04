@@ -29,6 +29,7 @@ PATCH  /v1/vms/{uuid}                    # {"name": "...", "labels": {"k": "v", 
 POST   /v1/vms/{uuid}/start
 POST   /v1/vms/{uuid}/restart
 POST   /v1/vms/{uuid}/clone              # {"name": "..."}; source must be stopped
+POST   /v1/vms/{uuid}/fork               # {"count": 1-32, "namePrefix": "..."}; admin; running flux-vm source; 201 {"items": [...], "elapsed_ms": n}
 POST   /v1/vms/{uuid}/backup             # {"compress": bool, "all_disks": bool}
 POST   /v1/vms/{uuid}/start-from-snapshot
 POST   /v1/vms/{uuid}/snapshot
@@ -160,6 +161,13 @@ Highlights:
 - `POST /v1/vm-templates/{name}/instantiate` goes through the same tenant,
   `created_by_token` and token-quota handling as `POST /v1/vms`. VM templates
   are separate from the sandbox `/v1/templates` routes.
+- `POST /v1/vms/{uuid}/fork` snapshots a running flux-vm VM once and starts
+  `count` children from that snapshot. Children share the read-only memory
+  file and get a copy-on-write copy of the disk, a new CID, vsock socket and
+  tap. They keep the parent's MAC and guest IP, so the source must use
+  `network = none`, `user`, or `tap` with a per-VM netns, and no extra NICs.
+  Either all children start or none are left behind. Token quotas are
+  charged per child. `scripts/bench-fork.sh` times it.
 - `GET /v1/events/stream` emits `event: <name>` / `data: <json>` frames;
   tenant-scoped tokens only see their tenant's VMs.
 - `GET /v1/openapi.json` is exempt from auth, like `/healthz` and `/readyz`.

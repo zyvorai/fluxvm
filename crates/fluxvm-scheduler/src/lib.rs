@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub mod changes;
 pub mod confidential;
 pub mod events;
+pub mod fork;
 pub mod procbox_sandbox;
 mod sandbox;
 pub mod templates;

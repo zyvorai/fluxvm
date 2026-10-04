@@ -345,6 +345,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/vms/{id}/restart", post(restart_vm))
         .route("/v1/vms/{id}/clone", post(clone_vm))
+        .route("/v1/vms/{id}/fork", post(fork_vm))
         .route(
             "/v1/vm-templates",
             get(list_vm_templates).post(save_vm_template),
@@ -2043,6 +2044,46 @@ async fn restart_vm(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(m.restart(id).await?)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ForkVmRequest {
+    #[serde(default = "default_fork_count")]
+    count: u32,
+    #[serde(default, rename = "namePrefix", alias = "name_prefix")]
+    name_prefix: Option<String>,
+}
+
+fn default_fork_count() -> u32 {
+    1
+}
+
+/// Fork a running flux-vm VM into `count` running children from one memory
+/// snapshot (see `fluxvm_scheduler::fork`).
+async fn fork_vm(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    actor: Option<Extension<AuditActor>>,
+    Json(req): Json<ForkVmRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    let actor_name = actor.as_ref().map(|a| a.0.0.as_str());
+    let src = m.get(id).await?;
+    for _ in 0..req.count.min(fluxvm_scheduler::fork::MAX_FORK_COUNT) {
+        m.enforce_token_quotas(actor_name, &src.request)
+            .await
+            .map_err(|e| ApiError::forbidden(e.to_string()))?;
+    }
+    let started = std::time::Instant::now();
+    let items = m
+        .fork_vm(id, req.count, req.name_prefix, actor_name)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"items": items, "elapsed_ms": started.elapsed().as_millis() as u64})),
+    ))
 }
 
 #[derive(Deserialize)]

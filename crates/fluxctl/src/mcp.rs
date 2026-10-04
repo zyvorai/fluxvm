@@ -529,6 +529,202 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                 timed(Duration::from_secs(seconds + 45), capture(r, args, seconds)).await
             },
         ),
+        tool(
+            "vm_fork",
+            "Fork a running flux-vm VM into count (1-32) running copies that share its memory snapshot; each child gets a copy-on-write disk. Returns the children.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "count": {"type": "integer", "minimum": 1, "maximum": 32, "description": "children to create, default 1"},
+                    "name_prefix": {"type": "string", "description": "child names are <prefix>-<n>; default <vm>-fork"},
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let count = int_arg(&args, "count")?.unwrap_or(1);
+                    if !(1..=32).contains(&count) {
+                        bail!("count must be 1-32");
+                    }
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let mut body = json!({"count": count});
+                    if let Some(p) = str_arg(&args, "name_prefix") {
+                        body["namePrefix"] = json!(p);
+                    }
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/fork"), Some(body))
+                        .await?;
+                    let items: Vec<Value> = v["items"]
+                        .as_array()
+                        .map(|a| a.iter().map(summarize).collect())
+                        .unwrap_or_default();
+                    pretty(&json!({"children": items, "elapsed_ms": v["elapsed_ms"]}))
+                })
+                .await
+            },
+        ),
+        tool(
+            "pool_claim",
+            "Claim an already-booted VM from a warm pool (milliseconds instead of a cold boot). The pool refills in the background.",
+            object(
+                json!({
+                    "pool": {"type": "string", "description": "warm pool name"},
+                    "name": {"type": "string", "description": "optional new VM name"},
+                    "ttl_seconds": {"type": "integer", "minimum": 1, "description": "optional lifetime"},
+                }),
+                &["pool"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let pool = str_arg(&args, "pool").unwrap_or_default();
+                    let mut body = json!({});
+                    if let Some(n) = str_arg(&args, "name") {
+                        body["name"] = json!(n);
+                    }
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    let v = r
+                        .call(
+                            Method::POST,
+                            &format!("/v1/pools/{}/claim", encode_query(pool)),
+                            Some(body),
+                        )
+                        .await?;
+                    pretty(&summarize(&v)).or_else(|_| pretty(&v))
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_create",
+            "Create an agent sandbox VM from a named template (or the host default) with an optional TTL.",
+            object(
+                json!({
+                    "template": {"type": "string", "description": "sandbox template name"},
+                    "name": {"type": "string"},
+                    "ttl_seconds": {"type": "integer", "minimum": 1},
+                }),
+                &[],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(180), async {
+                    let mut body = json!({});
+                    for key in ["template", "name"] {
+                        if let Some(v) = str_arg(&args, key) {
+                            body[key] = json!(v);
+                        }
+                    }
+                    if let Some(t) = int_arg(&args, "ttl_seconds")? {
+                        body["ttl_seconds"] = json!(t);
+                    }
+                    pretty(&r.call(Method::POST, "/v1/sandboxes", Some(body)).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_exec",
+            "Run a shell command inside a sandbox VM through the guest agent; returns exit code, stdout and stderr.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "command": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600, "description": "default 60"},
+                }),
+                &["vm", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let timeout = int_arg(&args, "timeout_seconds")?.unwrap_or(60).min(600);
+                timed(Duration::from_secs(timeout + 30), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({
+                        "command": str_arg(&args, "command").unwrap_or_default(),
+                        "timeout_seconds": timeout,
+                    });
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/process"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_read_file",
+            "Read a file from inside a sandbox VM (returned base64-encoded with its size).",
+            object(
+                json!({"vm": vm_prop, "path": {"type": "string", "description": "absolute guest path"}}),
+                &["vm", "path"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"path": str_arg(&args, "path").unwrap_or_default()});
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/fs/read"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_write_file",
+            "Write a UTF-8 text file inside a sandbox VM.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "path": {"type": "string", "description": "absolute guest path"},
+                    "content": {"type": "string"},
+                    "mode": {"type": "integer", "description": "octal permission bits as a number, e.g. 420 for 0644"},
+                }),
+                &["vm", "path", "content"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                use base64::Engine as _;
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let content = str_arg(&args, "content").unwrap_or_default();
+                    let mut body = json!({
+                        "path": str_arg(&args, "path").unwrap_or_default(),
+                        "content_base64": base64::engine::general_purpose::STANDARD.encode(content),
+                    });
+                    if let Some(m) = int_arg(&args, "mode")? {
+                        body["mode"] = json!(m);
+                    }
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/sandboxes/{id}/fs/write"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
     ]
 }
 
@@ -750,6 +946,16 @@ mod tests {
             .route(
                 "/v1/vms/{id}/stop",
                 post(move || async move { Json(json!({"id": id, "name": "web", "status": "stopped"})) }),
+            )
+            .route(
+                "/v1/vms/{id}/fork",
+                post(|Json(body): Json<Value>| async move {
+                    let n = body["count"].as_u64().unwrap_or(0);
+                    let items: Vec<Value> = (1..=n)
+                        .map(|i| json!({"id": Uuid::new_v4(), "name": format!("{}-{i}", body["namePrefix"].as_str().unwrap_or("web-fork")), "status": "running"}))
+                        .collect();
+                    Json(json!({"items": items, "elapsed_ms": 42}))
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -765,6 +971,8 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"vm_network","arguments":{"vm":"web","kind":"bogus"}}}"#,
                 r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"vm_power","arguments":{"vm":"web","op":"stop"}}}"#,
                 r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_vm","arguments":{"vm":"missing"}}}"#,
+                r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"vm_fork","arguments":{"vm":"web","count":3,"name_prefix":"kid"}}}"#,
+                r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"vm_fork","arguments":{"vm":"web","count":99}}}"#,
             ],
         )
         .await;
@@ -778,5 +986,12 @@ mod tests {
         assert!(text(&got["4"]).0.contains("stopped"));
         let (t, err) = text(&got["5"]);
         assert!(err && t.contains("no VM named"), "{t}");
+        let (t, err) = text(&got["6"]);
+        assert!(
+            !err && t.contains("kid-3") && t.contains("\"elapsed_ms\": 42"),
+            "{t}"
+        );
+        let (t, err) = text(&got["7"]);
+        assert!(err && t.contains("1-32"), "{t}");
     }
 }

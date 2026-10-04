@@ -99,6 +99,15 @@ fn ops() -> Vec<Op> {
             .status("201"),
         op(
             "post",
+            "/v1/vms/{id}/fork",
+            "Fork a running flux-vm VM into N running copies",
+            VMS,
+        )
+        .body("ForkVmRequest")
+        .returns("VmList")
+        .status("201"),
+        op(
+            "post",
             "/v1/vms/{id}/backup",
             "Export the root disk to state_dir/backups",
             VMS,
@@ -230,6 +239,7 @@ fn schemas() -> Value {
             "labels": {"type": "object", "additionalProperties": {"type": ["string", "null"]}}
         }},
         "CloneVmRequest": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
+        "ForkVmRequest": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1}, "namePrefix": {"type": "string"}}},
         "BackupVmRequest": {"type": "object", "properties": {
             "compress": {"type": "boolean"},
             "all_disks": {"type": "boolean", "description": "Also back up data disks into a directory"}

@@ -39,8 +39,15 @@ Write tools are offered only with `--allow-write`:
 | --- | --- | --- |
 | `vm_power` | `op` = `start`, `stop`, `pause`, `resume` or `restart` | `POST /v1/vms/{id}/{op}` |
 | `vm_capture` | A 1-30 s tcpdump capture (optional `filter`). With `output`, waits and writes the pcap to that path on the machine running fluxctl; otherwise returns the token | `POST` / `GET /v1/vms/{id}/network/capture[/{token}]` |
+| `vm_fork` | Fork a running flux-vm VM into `count` (1-32) running children sharing its memory snapshot | `POST /v1/vms/{id}/fork` |
+| `pool_claim` | Claim a booted VM from a warm `pool` (optional `name`, `ttl_seconds`) | `POST /v1/pools/{name}/claim` |
+| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`) | `POST /v1/sandboxes` |
+| `sandbox_exec` | Run `command` in a sandbox through the guest agent | `POST /v1/sandboxes/{id}/process` |
+| `sandbox_write_file` | Write UTF-8 `content` to `path` in a sandbox | `POST /v1/sandboxes/{id}/fs/write` |
 
-Create, delete, migrate, exec, and edge or policy changes are not exposed.
+`sandbox_read_file` (`POST /v1/sandboxes/{id}/fs/read`) is read-only and always offered.
+
+Delete, migrate, and edge or policy changes are not exposed.
 
 `vm` accepts a VM name, a UUID or a unique UUID prefix. Unknown or missing
 required arguments are rejected with an error the model can read.
