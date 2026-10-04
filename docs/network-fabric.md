@@ -269,6 +269,8 @@ On top of the VM policy, a per-VM edge spec posted by Kairon adds
 anti-spoof, learn-IP, DNS and TLS SNI allow lists, a token-bucket egress
 limit (separate from `max_egress_*` above) and host-side ingress
 limits. It needs dataplane schema 12 and is persisted across restarts.
+An admin can also run a bounded `tcpdump` capture on the VM's interface
+and download the pcap (`/v1/vms/{id}/network/capture`).
 See [vm-edge-contract.md](vm-edge-contract.md).
 
 ## Live-update safety
