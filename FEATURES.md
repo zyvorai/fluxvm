@@ -77,6 +77,10 @@ Exhaustive checklist. For the pitch, see [README.md](README.md); for who this is
 - Per-service EDT (Earliest Departure Time pacing)
 - Flow export
 
+## AI agents
+
+- **MCP server** — `fluxctl mcp serve` exposes VM, host, network and log tools over the Model Context Protocol (stdio) for Hermes Agent and other MCP clients; power and capture only with `--allow-write`. See [docs/mcp.md](docs/mcp.md)
+
 ## Images
 
 - `build-image` — virt-builder-style pipeline, guestkit-based (never libguestfs)

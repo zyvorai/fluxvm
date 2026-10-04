@@ -91,6 +91,20 @@ impl Remote {
         serde_json::from_str(&text).with_context(|| format!("decoding {path} response"))
     }
 
+    /// `GET path` returning the status and raw body, for non-JSON routes
+    /// (logs, pcap downloads) and callers that handle error statuses.
+    pub async fn get_raw(&self, path: &str) -> Result<(reqwest::StatusCode, Vec<u8>)> {
+        let url = format!("{}{path}", self.base);
+        let mut req = self.http.get(&url);
+        if let Some(t) = &self.token {
+            req = req.bearer_auth(t);
+        }
+        let resp = req.send().await.with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        let body = resp.bytes().await.context("reading response body")?;
+        Ok((status, body.to_vec()))
+    }
+
     pub async fn list_vms(&self, selector: Option<&str>) -> Result<Vec<Value>> {
         let path = match selector {
             Some(s) => format!("/v1/vms?label={}", encode_query(s)),

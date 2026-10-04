@@ -89,6 +89,7 @@ pub fn after_help() -> String {
                 ("serve", "Start the FluxVM control-plane daemon"),
                 ("status", "Host panel, or VM status with an id"),
                 ("completions", "Print a bash/zsh/fish completion script"),
+                ("mcp serve", "MCP stdio server for AI agents (Hermes, ...)"),
             ],
         ),
         (

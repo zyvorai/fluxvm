@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **MCP server for AI agents.** `fluxctl mcp serve` speaks the Model Context Protocol over stdio, so
+  Hermes Agent and other MCP clients can list and inspect VMs, host readiness, VM-edge network data
+  and console logs through the REST API. `--allow-write` adds `vm_power` and `vm_capture`; without it
+  they are neither listed nor callable. No new dependencies. See `docs/mcp.md`.
 - **GPUs for sandboxes.** `gpus: N` on `POST /v1/sandboxes` passes N free VFIO-bound GPUs through to a
   QEMU-backed sandbox. FluxVM picks them under a lock (NUMA-aware, deterministic), so two callers are never given the
   same GPU; a shortage is a 503. Refused with `confidential`, `procbox`, or a non-QEMU template. The Python, Go and

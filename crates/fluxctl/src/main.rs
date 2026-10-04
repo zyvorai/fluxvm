@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 mod contexts;
 mod fleet_client;
+mod mcp;
 mod output;
 mod remote;
 mod status;
@@ -82,6 +83,18 @@ struct Cli {
     context: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Subcommand)]
+enum McpCommand {
+    /// Serve FluxVM tools over MCP stdio. Talks to the daemon over REST
+    /// (`--server`/`FLUXVM_URL`, the current context, else `listen` from
+    /// the config). Read tools only, unless `--allow-write`.
+    Serve {
+        /// Also offer tools that change state (VM power, packet capture).
+        #[arg(long)]
+        allow_write: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -648,6 +661,11 @@ enum Command {
     },
     /// Print a shell completion script: `fluxctl completions zsh > _fluxctl`.
     Completions { shell: clap_complete::Shell },
+    /// Model Context Protocol server for AI agents (Hermes Agent, ...).
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Hubble-lite flows and CiliumEndpoint views.
     Hubble {
         #[command(subcommand)]
@@ -2386,6 +2404,23 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     let format = cli.output;
+    if let Command::Mcp {
+        command: McpCommand::Serve { allow_write },
+    } = &cli.command
+    {
+        let remote = match remote::endpoint(
+            cli.server.clone(),
+            cli.server_token.clone(),
+            cli.context.as_deref(),
+        )? {
+            Some(r) => r,
+            None => {
+                let cfg = Config::load(cli.config.as_deref())?;
+                remote::Remote::new(&cfg.listen, cli.server_token.clone())
+            }
+        };
+        return mcp::serve(remote, *allow_write).await;
+    }
     if let Command::Context { command } = cli.command {
         return run_context(command, format);
     }
@@ -2464,6 +2499,7 @@ async fn main() -> Result<()> {
         | Command::Readyz
         | Command::Metrics { .. }
         | Command::Completions { .. }
+        | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
         | Command::Quota { token: Some(_), .. } => unreachable!("handled above"),
