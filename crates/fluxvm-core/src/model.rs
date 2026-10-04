@@ -1208,6 +1208,28 @@ impl HotplugNicRequest {
     }
 }
 
+/// Whether a backup freezes guest filesystems (QGA `guest-fsfreeze-freeze`)
+/// around its snapshot. `auto` freezes when the guest agent answers and
+/// otherwise takes a crash-consistent copy; `required` fails without it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackupQuiesce {
+    #[default]
+    Auto,
+    Required,
+    Never,
+}
+
+/// Options for `VmManager::backup_vm`.
+#[derive(Debug, Clone, Default)]
+pub struct BackupOptions {
+    /// Local CLI only; the REST API always writes under `state_dir/backups`.
+    pub dest: Option<PathBuf>,
+    pub compress: bool,
+    pub all_disks: bool,
+    pub quiesce: BackupQuiesce,
+}
+
 /// Request body for `POST /v1/vms/{id}/hotplug/nic/unplug`: the extra NIC to
 /// remove, by exactly one of `mac` or host `tap` name. The primary NIC sits on
 /// the root bus and can't be hot-removed.

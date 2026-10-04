@@ -540,6 +540,21 @@ With `--all-disks` the destination is a directory holding `root.qcow2` and one
 `<disk>.qcow2` per data disk; a live VM's disks all come from the same
 temporary snapshot, so they are consistent with each other.
 
+With the guest agent enabled (`qga.enabled`) and answering, a running VM's
+filesystems are frozen (`guest-fsfreeze-freeze`) just for the snapshot and
+thawed right after, so the backup is application-consistent (databases see a
+clean fsync point). `--quiesce auto` (default) falls back to crash-consistent
+when the agent doesn't answer, `required` fails instead, `never` skips it. The
+result and a sidecar (`<file>.json`, or `backup.json` in a directory backup)
+record `quiesced`, the source VM and the disks.
+
+`backups` lists them, `backup-delete <name>` removes one, and
+`restore-backup <vm> <name>` copies one back into a **stopped** VM in place:
+root disk plus every data disk the backup holds (recreated if the VM no
+longer has it). Disks attached from an existing image are skipped, and data
+disks the backup doesn't hold are left alone. Each disk goes through a temp
+file, so a failed copy leaves it untouched.
+
 **VM templates** are named `CreateVmRequest` specs in
 `state_dir/vm-templates.json` (separate from sandbox templates at
 `/v1/templates`). Save from a spec file (its `name` may be omitted) or from an

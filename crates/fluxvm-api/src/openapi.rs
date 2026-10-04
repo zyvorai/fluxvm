@@ -116,6 +116,22 @@ fn ops() -> Vec<Op> {
         .returns("BackupResult")
         .status("201"),
         op(
+            "post",
+            "/v1/vms/{id}/restore-backup",
+            "Restore a backup into the stopped VM in place",
+            VMS,
+        )
+        .body("RestoreBackupRequest")
+        .returns("RestoreBackupResult"),
+        op(
+            "get",
+            "/v1/backups",
+            "Backups under state_dir/backups, newest first",
+            VMS,
+        )
+        .returns("BackupList"),
+        op("delete", "/v1/backups/{name}", "Delete a backup", VMS).status("204"),
+        op(
             "get",
             "/v1/vms/{id}/logs",
             "Console log (text; ?follow=true streams)",
@@ -242,8 +258,20 @@ fn schemas() -> Value {
         "ForkVmRequest": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 32, "default": 1}, "namePrefix": {"type": "string"}}},
         "BackupVmRequest": {"type": "object", "properties": {
             "compress": {"type": "boolean"},
-            "all_disks": {"type": "boolean", "description": "Also back up data disks into a directory"}
+            "all_disks": {"type": "boolean", "description": "Also back up data disks into a directory"},
+            "quiesce": {"type": "string", "enum": ["auto", "required", "never"], "default": "auto",
+                "description": "Freeze guest filesystems through the guest agent around the snapshot; auto falls back to crash-consistent"}
         }},
+        "RestoreBackupRequest": {"type": "object", "required": ["name"], "properties": {
+            "name": {"type": "string", "description": "Backup name from GET /v1/backups"}
+        }},
+        "RestoreBackupResult": {"type": "object", "properties": {
+            "vm_id": {"type": "string", "format": "uuid"},
+            "backup": {"type": "string"},
+            "restored": {"type": "array", "items": {"type": "string"}},
+            "skipped": {"type": "array", "items": {"type": "object"}}
+        }},
+        "BackupList": list("BackupResult"),
         "BackupResult": {"type": "object", "properties": {
             "vm_id": {"type": "string", "format": "uuid"},
             "path": {"type": "string"},

@@ -22,6 +22,7 @@ use std::{collections::HashMap, fs, sync::Arc};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+pub mod backup;
 pub mod changes;
 pub mod confidential;
 pub mod events;
@@ -3328,14 +3329,21 @@ impl VmManager {
     /// (default `state_dir/backups/<name>-<utc>.qcow2`), or with `all_disks`
     /// the root and every data disk into a directory. A running VM is
     /// captured through one short-lived internal snapshot (savevm covers all
-    /// its qcow2 disks), so the copies are crash-consistent with each other.
+    /// its qcow2 disks), so the copies are crash-consistent with each other;
+    /// with the guest agent answering, filesystems are frozen around that
+    /// snapshot (see [`fluxvm_core::model::BackupQuiesce`]). A metadata
+    /// sidecar (`<file>.json` or `<dir>/backup.json`) records the source VM.
     pub async fn backup_vm(
         self: &Arc<Self>,
         id: Uuid,
-        dest: Option<std::path::PathBuf>,
-        compress: bool,
-        all_disks: bool,
+        opts: fluxvm_core::model::BackupOptions,
     ) -> Result<serde_json::Value> {
+        let fluxvm_core::model::BackupOptions {
+            dest,
+            compress,
+            all_disks,
+            quiesce,
+        } = opts;
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu
             || vm.request.storage != StorageBackend::Default
@@ -3394,8 +3402,20 @@ impl VmManager {
         }
         let live = matches!(vm.status, VmStatus::Running | VmStatus::Paused);
         let tag = format!("backup-{stamp}");
+        let mut quiesced = false;
         if live {
-            self.create_vm_snapshot_inner(id, &tag).await?;
+            quiesced = self.backup_freeze(&vm, quiesce).await?;
+            let snap = self.create_vm_snapshot_inner(id, &tag).await;
+            if quiesced {
+                let sock = Self::qga_socket_for(&vm)?;
+                let thawed =
+                    tokio::task::spawn_blocking(move || fluxvm_image::qga::fsfreeze_thaw(&sock))
+                        .await;
+                if !matches!(thawed, Ok(Ok(_))) {
+                    tracing::error!(vm=%id, "thawing guest filesystems after backup snapshot failed: {thawed:?}");
+                }
+            }
+            snap?;
         }
         let mut result: Result<Vec<serde_json::Value>> = Ok(Vec::new());
         for (name, src, dst) in &targets {
@@ -3456,13 +3476,22 @@ impl VmManager {
             "vm.backup",
             &[("vm_id", &id.to_string()), ("path", &dest_s)],
         );
-        Ok(serde_json::json!({
+        let out = serde_json::json!({
+            "name": dest.file_name().map(|n| n.to_string_lossy().into_owned()),
             "vm_id": id,
+            "vm_name": vm.request.name,
+            "created_at": Utc::now(),
             "path": dest,
             "size_bytes": size_bytes,
             "live": live,
+            "quiesced": quiesced,
             "disks": disks,
-        }))
+        });
+        let sidecar = backup::sidecar_path(&dest, all_disks);
+        if let Err(e) = fs::write(&sidecar, serde_json::to_vec_pretty(&out)?) {
+            tracing::warn!(vm=%id, path=%sidecar.display(), "writing backup metadata failed: {e}");
+        }
+        Ok(out)
     }
 
     /// One pass of label-driven scheduled snapshots (see

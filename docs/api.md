@@ -30,7 +30,10 @@ POST   /v1/vms/{uuid}/start
 POST   /v1/vms/{uuid}/restart
 POST   /v1/vms/{uuid}/clone              # {"name": "..."}; source must be stopped
 POST   /v1/vms/{uuid}/fork               # {"count": 1-32, "namePrefix": "..."}; admin; running flux-vm source; 201 {"items": [...], "elapsed_ms": n}
-POST   /v1/vms/{uuid}/backup             # {"compress": bool, "all_disks": bool}
+POST   /v1/vms/{uuid}/backup             # {"compress": bool, "all_disks": bool, "quiesce": "auto"|"required"|"never"}
+POST   /v1/vms/{uuid}/restore-backup     # {"name": "..."}; VM must be stopped
+GET    /v1/backups                       # newest first
+DELETE /v1/backups/{name}
 POST   /v1/vms/{uuid}/start-from-snapshot
 POST   /v1/vms/{uuid}/snapshot
 POST   /v1/vms/{uuid}/restore            # {"tag": "..."}; admin; running flux-vm restores in place (memory + disk)
@@ -158,8 +161,12 @@ Highlights:
   and text frames are written to the guest verbatim, guest output comes back
   as binary frames. One client at a time; no guest agent needed.
 - `POST /v1/vms/{uuid}/backup` always writes under `state_dir/backups/` (the
-  API never takes a destination path) and returns `{path, size_bytes, live,
-  disks[]}`.
+  API never takes a destination path) and returns `{name, path, size_bytes,
+  live, quiesced, disks[]}`. `quiesce` (default `auto`) freezes the guest's
+  filesystems through QGA around the snapshot when the agent answers;
+  `required` fails without it. `GET /v1/backups` lists backups with that
+  metadata; `POST /v1/vms/{uuid}/restore-backup` copies one back into a
+  stopped VM.
 - `POST /v1/vm-templates/{name}/instantiate` goes through the same tenant,
   `created_by_token` and token-quota handling as `POST /v1/vms`. VM templates
   are separate from the sandbox `/v1/templates` routes.

@@ -359,6 +359,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             post(instantiate_vm_template),
         )
         .route("/v1/vms/{id}/backup", post(backup_vm))
+        .route("/v1/vms/{id}/restore-backup", post(restore_vm_backup))
+        .route("/v1/backups", get(list_backups))
+        .route("/v1/backups/{name}", delete(delete_backup))
         .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
         .route("/v1/vms/{id}/snapshots/{tag}", delete(delete_vm_snapshot))
         .route(
@@ -2145,6 +2148,8 @@ struct BackupVmRequest {
     compress: bool,
     #[serde(default)]
     all_disks: bool,
+    #[serde(default)]
+    quiesce: fluxvm_core::model::BackupQuiesce,
 }
 
 /// Writes under `state_dir/backups/`; the API never takes a destination path.
@@ -2156,10 +2161,46 @@ async fn backup_vm(
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
     let req = body.map(|b| b.0).unwrap_or_default();
-    Ok((
-        StatusCode::CREATED,
-        Json(m.backup_vm(id, None, req.compress, req.all_disks).await?),
-    ))
+    let opts = fluxvm_core::model::BackupOptions {
+        dest: None,
+        compress: req.compress,
+        all_disks: req.all_disks,
+        quiesce: req.quiesce,
+    };
+    Ok((StatusCode::CREATED, Json(m.backup_vm(id, opts).await?)))
+}
+
+async fn list_backups(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"items": m.list_backups()})))
+}
+
+async fn delete_backup(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    m.delete_backup(&name)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct RestoreBackupRequest {
+    name: String,
+}
+
+async fn restore_vm_backup(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<RestoreBackupRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(m.restore_backup(id, &req.name).await?))
 }
 
 async fn list_vm_disks(

@@ -334,6 +334,21 @@ enum Command {
         /// `root.qcow2` + `<disk>.qcow2`, consistent with each other.
         #[arg(long, default_value_t = false)]
         all_disks: bool,
+        /// Freeze guest filesystems via the guest agent: auto (when it
+        /// answers), required, or never.
+        #[arg(long, default_value = "auto", value_parser = parse_quiesce)]
+        quiesce: fluxvm_core::model::BackupQuiesce,
+    },
+    /// Backups under `<state_dir>/backups`, newest first. REST: `GET /v1/backups`.
+    Backups,
+    /// Delete a backup by name. REST: `DELETE /v1/backups/{name}`.
+    BackupDelete { name: String },
+    /// Restore a backup into a stopped VM in place (root and data disks).
+    /// REST: `POST /v1/vms/{id}/restore-backup`.
+    RestoreBackup {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        name: String,
     },
     /// Named VM specs: save once, create many. REST: `/v1/vm-templates[/{name}]`,
     /// `POST /v1/vm-templates/{name}/instantiate`.
@@ -1131,6 +1146,11 @@ enum ContextCommand {
     Delete {
         name: String,
     },
+}
+
+fn parse_quiesce(s: &str) -> Result<fluxvm_core::model::BackupQuiesce, String> {
+    serde_json::from_value(serde_json::Value::String(s.to_string()))
+        .map_err(|_| format!("{s:?}: use auto, required or never"))
 }
 
 #[derive(Subcommand)]
@@ -2103,6 +2123,7 @@ async fn run_remote(
             dest,
             compress,
             all_disks,
+            quiesce,
         } => {
             if dest.is_some() {
                 anyhow::bail!(
@@ -2113,11 +2134,25 @@ async fn run_remote(
                 &r.call(
                     Method::POST,
                     &format!("/v1/vms/{id}/backup"),
-                    Some(json!({"compress": compress, "all_disks": all_disks})),
+                    Some(json!({"compress": compress, "all_disks": all_disks, "quiesce": quiesce})),
                 )
                 .await?,
             )?
         }
+        Command::Backups => pretty(&r.call(Method::GET, "/v1/backups", None).await?)?,
+        Command::BackupDelete { name } => {
+            r.call(Method::DELETE, &format!("/v1/backups/{name}"), None)
+                .await?;
+            println!("{}", json!({"ok": true, "deleted": name}));
+        }
+        Command::RestoreBackup { id, name } => pretty(
+            &r.call(
+                Method::POST,
+                &format!("/v1/vms/{id}/restore-backup"),
+                Some(json!({"name": name})),
+            )
+            .await?,
+        )?,
         Command::Disk { command } => match command {
             DiskCommand::List { id } => {
                 let v = r
@@ -2692,9 +2727,27 @@ async fn main() -> Result<()> {
             dest,
             compress,
             all_disks,
-        } => println!(
+            quiesce,
+        } => {
+            let opts = fluxvm_core::model::BackupOptions {
+                dest,
+                compress,
+                all_disks,
+                quiesce,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.backup_vm(id, opts).await?)?
+            )
+        }
+        Command::Backups => println!("{}", serde_json::to_string_pretty(&m.list_backups())?),
+        Command::BackupDelete { name } => {
+            m.delete_backup(&name)?;
+            println!("{}", serde_json::json!({"ok": true, "deleted": name}));
+        }
+        Command::RestoreBackup { id, name } => println!(
             "{}",
-            serde_json::to_string_pretty(&m.backup_vm(id, dest, compress, all_disks).await?)?
+            serde_json::to_string_pretty(&m.restore_backup(id, &name).await?)?
         ),
         Command::Disk { command } => match command {
             DiskCommand::List { id } => {
@@ -5615,8 +5668,23 @@ mod tier2_cli_tests {
             Command::Backup {
                 compress: true,
                 dest: None,
+                quiesce: fluxvm_core::model::BackupQuiesce::Auto,
                 ..
             }
+        ));
+        assert!(matches!(
+            cli(&["backup", &id, "--quiesce", "required"])
+                .unwrap()
+                .command,
+            Command::Backup {
+                quiesce: fluxvm_core::model::BackupQuiesce::Required,
+                ..
+            }
+        ));
+        assert!(cli(&["backup", &id, "--quiesce", "maybe"]).is_err());
+        assert!(matches!(
+            cli(&["restore-backup", &id, "db-1"]).unwrap().command,
+            Command::RestoreBackup { name, .. } if name == "db-1"
         ));
     }
 

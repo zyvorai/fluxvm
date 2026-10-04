@@ -593,6 +593,69 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "vm_backup",
+            "Back up a QEMU VM's disks to standalone qcow2 files on the server. A running VM is snapshotted briefly; with quiesce auto (default) its filesystems are frozen through the guest agent when it answers. Returns the backup name, size and whether it was quiesced.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "all_disks": {"type": "boolean", "description": "include data disks (a directory backup), default false"},
+                    "compress": {"type": "boolean", "description": "qcow2 compression, default false"},
+                    "quiesce": {"type": "string", "enum": ["auto", "required", "never"], "description": "guest fsfreeze, default auto"},
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({
+                        "all_disks": args.get("all_disks").and_then(Value::as_bool).unwrap_or(false),
+                        "compress": args.get("compress").and_then(Value::as_bool).unwrap_or(false),
+                        "quiesce": str_arg(&args, "quiesce").unwrap_or("auto"),
+                    });
+                    pretty(&r.call(Method::POST, &format!("/v1/vms/{id}/backup"), Some(body)).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "backup_list",
+            "Backups on the server, newest first: name, source VM, size, whether live and quiesced.",
+            object(json!({}), &[]),
+            false,
+            &remote,
+            |r, _args| async move { pretty(&r.call(Method::GET, "/v1/backups", None).await?) },
+        ),
+        tool(
+            "backup_restore",
+            "Restore a backup (name from backup_list) into a stopped VM in place, replacing its root and backed-up data disks.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "name": {"type": "string", "description": "backup name"},
+                }),
+                &["vm", "name"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"name": str_arg(&args, "name").unwrap_or_default()});
+                    pretty(
+                        &r.call(
+                            Method::POST,
+                            &format!("/v1/vms/{id}/restore-backup"),
+                            Some(body),
+                        )
+                        .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
             "pool_claim",
             "Claim an already-booted VM from a warm pool (milliseconds instead of a cold boot). The pool refills in the background.",
             object(
@@ -983,6 +1046,12 @@ mod tests {
                         .collect();
                     Json(json!({"items": items, "elapsed_ms": 42}))
                 }),
+            )
+            .route(
+                "/v1/vms/{id}/backup",
+                post(|Json(body): Json<Value>| async move {
+                    Json(json!({"name": "web-1", "quiesced": body["quiesce"] != "never", "all": body["all_disks"]}))
+                }),
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1000,6 +1069,7 @@ mod tests {
                 r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"get_vm","arguments":{"vm":"missing"}}}"#,
                 r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"vm_fork","arguments":{"vm":"web","count":3,"name_prefix":"kid"}}}"#,
                 r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"vm_fork","arguments":{"vm":"web","count":99}}}"#,
+                r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"vm_backup","arguments":{"vm":"web","all_disks":true}}}"#,
             ],
         )
         .await;
@@ -1020,5 +1090,10 @@ mod tests {
         );
         let (t, err) = text(&got["7"]);
         assert!(err && t.contains("1-32"), "{t}");
+        let (t, err) = text(&got["8"]);
+        assert!(
+            !err && t.contains("\"quiesced\": true") && t.contains("\"all\": true"),
+            "{t}"
+        );
     }
 }
