@@ -72,6 +72,7 @@ GET    /v1/events                        # ?vm=&event=<prefix>&since=<rfc3339>&l
 GET    /v1/events/stream                 # Server-Sent Events, same filters
 GET    /v1/quotas/me
 POST   /v1/images/build
+POST   /v1/images/import                 # {"source": "/path/vm.ova", "name": "...", "repair": true, "remove_vmware_tools": false}; admin; 201; see import-vmware.md
 GET    /v1/images/catalog
 POST   /v1/images/catalog
 DELETE /v1/images/catalog/{name}

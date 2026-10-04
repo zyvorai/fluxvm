@@ -3,7 +3,9 @@
 
 pub mod catalog;
 pub mod cloudinit;
+pub mod import;
 pub mod oci;
+pub mod ova;
 pub mod qga;
 pub mod raw_ext4;
 pub mod storage;

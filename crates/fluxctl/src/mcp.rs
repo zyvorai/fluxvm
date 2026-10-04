@@ -566,6 +566,33 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "image_import",
+            "Import a VM disk from a host path (OVA, OVF, VMDK, VHD(X), qcow2) as raw disks, repairing the boot disk for virtio (VMware tools off, virtio initramfs, /dev/sdX to /dev/vdX, DHCP fallback). Returns the disk paths, OVF hardware, repair report and a suggested create request.",
+            object(
+                json!({
+                    "source": {"type": "string", "description": "host path on the FluxVM server"},
+                    "name": {"type": "string", "description": "import name, [A-Za-z0-9_-]"},
+                    "repair": {"type": "boolean", "description": "offline guest repair, default true"},
+                    "remove_vmware_tools": {"type": "boolean", "description": "uninstall VMware tools packages, default false"},
+                }),
+                &["source", "name"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(1800), async {
+                    let body = json!({
+                        "source": str_arg(&args, "source").unwrap_or_default(),
+                        "name": str_arg(&args, "name").unwrap_or_default(),
+                        "repair": args.get("repair").and_then(Value::as_bool).unwrap_or(true),
+                        "remove_vmware_tools": args.get("remove_vmware_tools").and_then(Value::as_bool).unwrap_or(false),
+                    });
+                    pretty(&r.call(Method::POST, "/v1/images/import", Some(body)).await?)
+                })
+                .await
+            },
+        ),
+        tool(
             "pool_claim",
             "Claim an already-booted VM from a warm pool (milliseconds instead of a cold boot). The pool refills in the background.",
             object(

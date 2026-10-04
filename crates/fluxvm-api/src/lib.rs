@@ -607,6 +607,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/console", get(console_ui))
         .route("/console/", get(console_ui))
         .route("/v1/images/build", post(build_image))
+        .route("/v1/images/import", post(import_image))
         .route("/v1/images/catalog", post(add_catalog_entry))
         .route("/v1/images/catalog/{name}", delete(remove_catalog_entry))
         .route(
@@ -3612,6 +3613,20 @@ async fn build_image(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     Ok(Json(json!(image::build_image(&m.cfg, &req).await?)))
+}
+
+/// Convert an OVA/OVF/VMDK on the host to raw disks under
+/// `state_dir/images/imported/<name>/`, repairing the boot disk for virtio.
+async fn import_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<image::import::ImportRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!(image::import::import_image(&m.cfg, &req).await?)),
+    ))
 }
 
 /// Read-only (no role check beyond a valid token, like other GET routes) —

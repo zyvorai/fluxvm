@@ -505,6 +505,21 @@ enum Command {
         #[arg(long)]
         spec: PathBuf,
     },
+    /// Import a VMware/other VM (OVA, OVF, VMDK, VHD(X), qcow2) as raw disks
+    /// under state_dir/images/imported/NAME, repairing the boot disk for
+    /// virtio. REST: `POST /v1/images/import`.
+    ImportImage {
+        /// Host path of the .ova/.ovf/disk (on the server with --server).
+        source: PathBuf,
+        #[arg(long)]
+        name: String,
+        /// Skip the offline guest repair.
+        #[arg(long)]
+        no_repair: bool,
+        /// Uninstall open-vm-tools/vmware-tools packages, not only disable them.
+        #[arg(long)]
+        remove_vmware_tools: bool,
+    },
     /// Manage the named/checksummed/optionally-signed image catalog (see
     /// config.catalog). Referencing a catalog name in a VM spec's `image`
     /// field (instead of a raw path) is handled automatically by `create` —
@@ -2018,6 +2033,24 @@ async fn run_remote(
             )
             .await?,
         )?,
+        Command::ImportImage {
+            source,
+            name,
+            no_repair,
+            remove_vmware_tools,
+        } => pretty(
+            &r.call(
+                Method::POST,
+                "/v1/images/import",
+                Some(json!({
+                    "source": source,
+                    "name": name,
+                    "repair": !no_repair,
+                    "remove_vmware_tools": remove_vmware_tools,
+                })),
+            )
+            .await?,
+        )?,
         Command::ForkVm { id, count, prefix } => {
             let mut body = json!({"count": count});
             if let Some(p) = prefix {
@@ -2222,7 +2255,7 @@ async fn run_remote(
         }
         _ => anyhow::bail!(
             "this command is not available with --server; supported: create, vm-template, list, get, \
-             status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, snapshot, \
+             status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, import-image, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
         ),
@@ -3263,6 +3296,23 @@ async fn main() -> Result<()> {
         },
         Command::Delete { target } => run_bulk(&m, target, BulkOp::Delete).await?,
         Command::Terminate { id } => m.delete(id).await?,
+        Command::ImportImage {
+            source,
+            name,
+            no_repair,
+            remove_vmware_tools,
+        } => {
+            let req = image::import::ImportRequest {
+                source,
+                name,
+                repair: !no_repair,
+                remove_vmware_tools,
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&image::import::import_image(&cfg, &req).await?)?
+            );
+        }
         Command::BuildImage { spec } => {
             let req: BuildImageRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
             println!(
