@@ -107,7 +107,7 @@ pub struct ConntrackSnapshot {
     pub entries: Vec<ConntrackEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureSession {
     pub token: String,
@@ -117,6 +117,19 @@ pub struct CaptureSession {
     #[serde(default)]
     pub filter: String,
     pub expires_at: String,
+    /// `running`, `done`, `failed` or `interrupted`; set by FluxVM.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub started_unix: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub packets: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,9 +184,19 @@ fn state_path(cfg: &Config, id: Uuid) -> PathBuf {
         .join(format!("{id}.json"))
 }
 
+fn captures_dir(cfg: &Config, id: Uuid) -> PathBuf {
+    cfg.state_dir
+        .join("network-edge")
+        .join("captures")
+        .join(id.to_string())
+}
+
 pub fn load(cfg: &Config, id: Uuid) -> Result<EdgeState> {
-    let path = state_path(cfg, id);
-    match fs::read(&path) {
+    load_at(&state_path(cfg, id))
+}
+
+fn load_at(path: &std::path::Path) -> Result<EdgeState> {
+    match fs::read(path) {
         Ok(raw) => serde_json::from_slice(&raw)
             .with_context(|| format!("parsing VM edge state {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(EdgeState::default()),
@@ -182,18 +205,22 @@ pub fn load(cfg: &Config, id: Uuid) -> Result<EdgeState> {
 }
 
 fn save(cfg: &Config, id: Uuid, state: &EdgeState) -> Result<()> {
-    let path = state_path(cfg, id);
+    save_at(&state_path(cfg, id), state)
+}
+
+fn save_at(path: &std::path::Path, state: &EdgeState) -> Result<()> {
     let parent = path.parent().context("VM edge state path has no parent")?;
     fs::create_dir_all(parent)
         .with_context(|| format!("creating VM edge state directory {}", parent.display()))?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(state)?)
         .with_context(|| format!("writing VM edge state {}", tmp.display()))?;
-    fs::rename(&tmp, &path).with_context(|| format!("committing VM edge state {}", path.display()))
+    fs::rename(&tmp, path).with_context(|| format!("committing VM edge state {}", path.display()))
 }
 
 pub fn delete(cfg: &Config, id: Uuid) -> Result<()> {
     let _guard = lock();
+    let _ = fs::remove_dir_all(captures_dir(cfg, id));
     let path = state_path(cfg, id);
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -432,25 +459,130 @@ fn proto_name(protocol: u8) -> &'static str {
     }
 }
 
-pub fn start_capture(cfg: &Config, id: Uuid, session: CaptureSession) -> Result<CaptureSession> {
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// A `running` session whose capture cannot still be alive: the daemon
+/// restarted (killing tcpdump) before it could record the outcome.
+fn effective_state(c: &CaptureSession, now: u64) -> &str {
+    if c.state == crate::edge_capture::STATE_RUNNING
+        && now > c.started_unix + u64::from(c.seconds) + 30
+    {
+        crate::edge_capture::STATE_INTERRUPTED
+    } else {
+        &c.state
+    }
+}
+
+/// Starts `tcpdump` on the VM's dataplane interface for `seconds` and records
+/// the session; a background thread records the outcome when it stops. One
+/// capture runs per VM at a time.
+pub fn start_capture(
+    cfg: &Config,
+    id: Uuid,
+    mut session: CaptureSession,
+) -> Result<CaptureSession> {
     if session.seconds < 1 || session.seconds > 30 {
         bail!("seconds must be 1-30");
     }
     if session.token.is_empty() {
         bail!("capture token is required");
     }
-    let _guard = lock();
+    crate::edge_capture::validate(&session.token, &session.filter)?;
+    if !attached(cfg, id) {
+        bail!("VM is not attached to the eBPF dataplane; there is no interface to capture on");
+    }
+    let iface =
+        crate::ebpf::read_recorded_iface(id).context("VM has no recorded dataplane interface")?;
+    let guard = lock();
     let mut state = load(cfg, id)?;
+    let now = unix_now();
+    if state
+        .captures
+        .iter()
+        .any(|c| effective_state(c, now) == crate::edge_capture::STATE_RUNNING)
+    {
+        bail!("a capture is already running for this VM");
+    }
+    let dir = captures_dir(cfg, id);
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("creating capture directory {}", dir.display()))?;
+    let file = dir.join(format!("{}.pcap", session.token));
+    let child = {
+        let _netns = crate::ebpf::vm_netns_scope(id);
+        crate::edge_capture::spawn(&iface, &file, &session.filter)?
+    };
+    session.state = crate::edge_capture::STATE_RUNNING.to_string();
+    session.started_unix = now;
+    session.packets = 0;
+    session.error.clear();
     state.captures.retain(|c| c.token != session.token);
     state.captures.push(session.clone());
     let excess = state.captures.len().saturating_sub(MAX_CAPTURES);
-    state.captures.drain(..excess);
+    for old in state.captures.drain(..excess) {
+        let _ = fs::remove_file(dir.join(format!("{}.pcap", old.token)));
+    }
     save(cfg, id, &state)?;
+    drop(guard);
+
+    let path = state_path(cfg, id);
+    let token = session.token.clone();
+    let seconds = session.seconds;
+    std::thread::spawn(move || {
+        let outcome = crate::edge_capture::wait(child, seconds);
+        let _guard = lock();
+        let result = load_at(&path).and_then(|mut state| {
+            if let Some(c) = state.captures.iter_mut().find(|c| c.token == token) {
+                c.state = outcome.state.to_string();
+                c.packets = outcome.packets;
+                c.error = outcome.error;
+            }
+            save_at(&path, &state)
+        });
+        if let Err(e) = result {
+            warn!(%id, %token, error = %e, "recording capture outcome failed");
+        }
+    });
     Ok(session)
 }
 
 pub fn captures(cfg: &Config, id: Uuid) -> Result<Vec<CaptureSession>> {
-    Ok(load(cfg, id)?.captures)
+    let now = unix_now();
+    Ok(load(cfg, id)?
+        .captures
+        .into_iter()
+        .map(|mut c| {
+            c.state = effective_state(&c, now).to_string();
+            c
+        })
+        .collect())
+}
+
+pub enum CaptureFile {
+    Ready(PathBuf),
+    Running,
+    Missing,
+}
+
+/// The pcap for `token`, once its capture has stopped.
+pub fn capture_file(cfg: &Config, id: Uuid, token: &str) -> Result<CaptureFile> {
+    crate::edge_capture::validate(token, "")?;
+    let Some(session) = captures(cfg, id)?.into_iter().find(|c| c.token == token) else {
+        return Ok(CaptureFile::Missing);
+    };
+    if session.state == crate::edge_capture::STATE_RUNNING {
+        return Ok(CaptureFile::Running);
+    }
+    let file = captures_dir(cfg, id).join(format!("{token}.pcap"));
+    Ok(if file.is_file() {
+        CaptureFile::Ready(file)
+    } else {
+        CaptureFile::Missing
+    })
 }
 
 /// `YYYY-MM-DDTHH:MM:SSZ` for a Unix timestamp; Kairon decodes it as `time.Time`.
@@ -606,36 +738,80 @@ mod tests {
                 namespace: "demo".into(),
                 machine: "web".into(),
                 seconds: 31,
-                filter: String::new(),
                 expires_at: "2026-10-04T00:00:30Z".into(),
+                ..Default::default()
             },
         )
         .unwrap_err();
         assert!(err.to_string().contains("1-30"));
     }
 
+    fn session(token: &str) -> CaptureSession {
+        CaptureSession {
+            token: token.into(),
+            namespace: "demo".into(),
+            machine: "web".into(),
+            seconds: 5,
+            expires_at: "2026-10-04T00:00:30Z".into(),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn captures_persist_and_are_bounded() {
+    fn capture_rejects_unsafe_token_and_detached_vm() {
+        let (_tmp, cfg) = test_cfg();
+        let err = start_capture(&cfg, Uuid::new_v4(), session("../x")).unwrap_err();
+        assert!(err.to_string().contains("token"));
+        let err = start_capture(&cfg, Uuid::new_v4(), session("ok")).unwrap_err();
+        assert!(err.to_string().contains("not attached"));
+    }
+
+    #[test]
+    fn stale_running_capture_reads_interrupted() {
         let (_tmp, cfg) = test_cfg();
         let id = Uuid::new_v4();
-        for i in 0..20 {
-            start_capture(
-                &cfg,
-                id,
-                CaptureSession {
-                    token: format!("t{i}"),
-                    namespace: "demo".into(),
-                    machine: "web".into(),
-                    seconds: 5,
-                    filter: String::new(),
-                    expires_at: "2026-10-04T00:00:30Z".into(),
-                },
-            )
-            .unwrap();
-        }
-        let kept = captures(&cfg, id).unwrap();
-        assert_eq!(kept.len(), MAX_CAPTURES);
-        assert_eq!(kept.last().unwrap().token, "t19");
+        let now = unix_now();
+        let mut fresh = session("fresh");
+        fresh.state = crate::edge_capture::STATE_RUNNING.into();
+        fresh.started_unix = now;
+        let mut stale = session("stale");
+        stale.state = crate::edge_capture::STATE_RUNNING.into();
+        stale.started_unix = now - 120;
+        let mut done = session("done");
+        done.state = crate::edge_capture::STATE_DONE.into();
+        done.started_unix = now - 120;
+        save(
+            &cfg,
+            id,
+            &EdgeState {
+                captures: vec![fresh, stale, done],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let states: Vec<String> = captures(&cfg, id)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.state)
+            .collect();
+        assert_eq!(states, ["running", "interrupted", "done"]);
+        assert!(matches!(
+            capture_file(&cfg, id, "fresh").unwrap(),
+            CaptureFile::Running
+        ));
+        assert!(matches!(
+            capture_file(&cfg, id, "done").unwrap(),
+            CaptureFile::Missing
+        ));
+        let dir = captures_dir(&cfg, id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("done.pcap"), b"pcap").unwrap();
+        assert!(matches!(
+            capture_file(&cfg, id, "done").unwrap(),
+            CaptureFile::Ready(_)
+        ));
+        delete(&cfg, id).unwrap();
+        assert!(!dir.exists());
     }
 
     #[test]

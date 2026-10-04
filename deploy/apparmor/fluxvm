@@ -54,6 +54,9 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   /usr/lib/linux-tools-*/lib/** mr,
   /usr/bin/{uname,basename} rix,
   /usr/libexec/fluxvm/fluxvm-tcx rix,
+  /usr/bin/nsenter rix,
+  # VM-edge packet capture
+  /usr/{bin,sbin}/tcpdump rix,
   /usr/lib/fluxvm/bpf/** r,
   /sys/fs/bpf/ r,
   /sys/fs/bpf/** rwk,
@@ -193,6 +196,7 @@ profile fluxctl /usr/local/bin/fluxctl flags=(attach_disconnected) {
   network inet,
   network inet6,
   network netlink raw,
+  network packet raw,
   network unix,
   network vsock,
 }
@@ -240,6 +244,9 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   /usr/lib/linux-tools-*/lib/** mr,
   /usr/bin/{uname,basename} rix,
   /usr/libexec/fluxvm/fluxvm-tcx rix,
+  /usr/bin/nsenter rix,
+  # VM-edge packet capture
+  /usr/{bin,sbin}/tcpdump rix,
   /usr/lib/fluxvm/bpf/** r,
   /sys/fs/bpf/ r,
   /sys/fs/bpf/** rwk,
@@ -377,6 +384,7 @@ profile fluxvm /usr/local/bin/fluxvm flags=(attach_disconnected) {
   network inet,
   network inet6,
   network netlink raw,
+  network packet raw,
   network unix,
   network vsock,
 }

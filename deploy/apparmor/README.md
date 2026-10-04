@@ -27,6 +27,9 @@ dataplane and the Kairon VM edge shell out to:
 - Exec of `bpftool` (`/usr/sbin`, `/usr/bin`, `/usr/lib/linux-tools*/`),
   `/usr/libexec/fluxvm/fluxvm-tcx`, `uname` and `basename` (used by the
   distro `bpftool` wrapper)
+- Exec of `nsenter` (commands run inside a VM's network namespace) and
+  `tcpdump` (VM-edge packet capture), plus `network packet raw` so
+  tcpdump can open its capture socket
 - `/usr/lib/fluxvm/bpf/` (BPF objects) read, `/sys/fs/bpf/**` read,
   write and lock (pinned maps)
 - `/sys/class/net/`, `/sys/devices/**/net/`, `/sys/kernel/btf/` and
@@ -36,7 +39,8 @@ dataplane and the Kairon VM edge shell out to:
 A profile without these rules denies `bpftool`, and no VM attaches to
 the eBPF dataplane (`GET /v1/vms/{id}/network/status` shows
 `attached: false`; the kernel log shows `apparmor="DENIED"
-operation="exec"` for `bpftool`). After upgrading, reinstall and reload:
+operation="exec"` for `bpftool`). Without the packet rule, a capture
+fails with `operation="bind" family="packet"`. After upgrading, reinstall and reload:
 
 ```bash
 sudo install -m 0644 deploy/apparmor/fluxvm /etc/apparmor.d/fluxvm

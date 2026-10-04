@@ -421,7 +421,14 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/vms/{id}/network/learned-ip",
             get(vm_network_learned_ip),
         )
-        .route("/v1/vms/{id}/network/capture", post(vm_network_capture))
+        .route(
+            "/v1/vms/{id}/network/capture",
+            get(vm_network_captures).post(vm_network_capture),
+        )
+        .route(
+            "/v1/vms/{id}/network/capture/{token}",
+            get(vm_network_capture_file),
+        )
         .route("/v1/vms/{id}/network/status", get(vm_network_status))
         .route(
             "/v1/vms/{id}/network/migration/state",
@@ -2479,6 +2486,57 @@ async fn vm_network_capture(
     Ok(Json(json!(fluxvm_network::edge_contract::start_capture(
         &m.cfg, id, session
     )?)))
+}
+
+async fn vm_network_captures(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!({
+        "items": fluxvm_network::edge_contract::captures(&m.cfg, id)?
+    })))
+}
+
+async fn vm_network_capture_file(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, token)): Path<(Uuid, String)>,
+) -> ApiResult<Response> {
+    use fluxvm_network::edge_contract::CaptureFile;
+    require_admin(role)?;
+    m.get(id).await?;
+    match fluxvm_network::edge_contract::capture_file(&m.cfg, id, &token)? {
+        CaptureFile::Ready(path) => {
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
+            Ok((
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "application/vnd.tcpdump.pcap".to_string(),
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{token}.pcap\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response())
+        }
+        CaptureFile::Running => Err(ApiError {
+            status: StatusCode::CONFLICT,
+            message: "capture is still running".into(),
+        }),
+        CaptureFile::Missing => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("capture '{token}' not found"),
+        }),
+    }
 }
 
 async fn vm_network_drop_reasons(

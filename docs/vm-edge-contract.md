@@ -43,7 +43,9 @@ applied on attach.
 | `POST /v1/vms/{id}/network/conntrack` | admin | `ConntrackSnapshot` | the accepted snapshot |
 | `GET /v1/vms/{id}/network/learned-ip` | read | — | `{"ip": "...", "source": "..."}` |
 | `GET /v1/vms/{id}/network/drops?limit=N` | read | — | `{"items": [DropEvent]}` |
-| `POST /v1/vms/{id}/network/capture` | admin | `CaptureSession` | the stored session |
+| `POST /v1/vms/{id}/network/capture` | admin | `CaptureSession` | the session, `state: running` |
+| `GET /v1/vms/{id}/network/capture` | admin | — | `{"items": [CaptureSession]}` |
+| `GET /v1/vms/{id}/network/capture/{token}` | admin | — | the pcap file |
 
 Every route returns 400 `VM not found` for an unknown VM, and 400 with
 the reason for a spec or snapshot that fails validation.
@@ -190,10 +192,49 @@ the packet was let through.
  "seconds": 15, "filter": "tcp port 443", "expiresAt": "2026-10-04T01:00:00Z"}
 ```
 
-`seconds` must be 1-30 and `token` non-empty. The session is persisted
-with the VM (the newest 16 are kept, a repeated token replaces the old
-session). FluxVM does not start a packet capture for it yet; use
-`GET /network/flows` or `fluxctl diagnose` for packet-level detail.
+FluxVM runs `tcpdump` on the VM's recorded dataplane interface (the
+`vh<8hex>` veth for a netns VM, the tap otherwise), inside the VM's
+network namespace, and writes a pcap under
+`<state_dir>/network-edge/captures/<uuid>/<token>.pcap`. The capture
+stops after `seconds` (SIGINT, then a kill after 5 s), or at 20,000
+packets. Frames are cut at 1,600 bytes.
+
+| Rule | Value |
+| --- | --- |
+| `seconds` | 1-30 |
+| `token` | 1-128 characters from `[A-Za-z0-9_-]` (it names the file) |
+| `filter` | a tcpdump expression, at most 512 bytes, no control characters; passed as one argument after `--` |
+| Concurrency | one running capture per VM; a second request returns 400 |
+| VM state | must be attached to the eBPF dataplane |
+| Kept | the newest 16 sessions per VM; older pcaps are deleted |
+
+A bad filter, or a host without `tcpdump`, fails the `POST` with 400 and
+tcpdump's message, because FluxVM checks that tcpdump is still running
+300 ms after it starts.
+
+Each session carries `state`, `startedUnix`, `packets` and `error`:
+
+| `state` | Meaning |
+| --- | --- |
+| `running` | tcpdump is running. |
+| `done` | Finished; `packets` is tcpdump's count. |
+| `failed` | tcpdump exited with an error; see `error`. |
+| `interrupted` | Still marked running 30 s after it should have ended, usually because FluxVM restarted mid-capture. |
+
+`GET /network/capture/{token}` returns the file as
+`application/vnd.tcpdump.pcap` with a `Content-Disposition` filename,
+409 `capture is still running` while tcpdump runs, and 404 for an
+unknown token or a capture that wrote no file.
+
+```bash
+curl -s -X POST localhost:7788/v1/vms/$ID/network/capture \
+  -H 'content-type: application/json' \
+  -d '{"token":"dns1","namespace":"default","machine":"web","seconds":10,"filter":"udp port 53","expiresAt":"2026-10-04T01:00:00Z"}'
+sleep 11
+curl -s localhost:7788/v1/vms/$ID/network/capture | jq '.items[] | {token,state,packets}'
+curl -s -o dns.pcap localhost:7788/v1/vms/$ID/network/capture/dns1
+tcpdump -nr dns.pcap
+```
 
 ## Enforcement
 
@@ -332,17 +373,19 @@ suffix entry at every `.` while it walks the name once.
 ```
 
 The file is written atomically (temporary file and rename) under a
-process-wide lock. It is read on every attach and deleted with the VM.
+process-wide lock. It is read on every attach and deleted with the VM,
+together with the `captures/<uuid>/` pcap directory.
 The live datapath is the source of truth for learned addresses, drop
 counters and conntrack; those are not copied into the file.
 
 ## Host requirements
 
-FluxVM shells out to `bpftool`, `tc`, `ip` and `/usr/libexec/fluxvm/fluxvm-tcx`.
+FluxVM shells out to `bpftool`, `tc`, `ip`, `nsenter`, `tcpdump` (capture only) and
+`/usr/libexec/fluxvm/fluxvm-tcx`.
 Under AppArmor, the `fluxvm` and `fluxctl` profiles in
 `deploy/apparmor/fluxvm` must allow them, along with `/sys/fs/bpf`,
 `/usr/lib/fluxvm/bpf` and the `bpf`, `perfmon`, `net_admin`, `net_raw`
-and `sys_module` capabilities. An older profile denies `bpftool`, and then no
+and `sys_module` capabilities, and `network packet raw` for tcpdump. An older profile denies `bpftool`, and then no
 VM attaches to the eBPF dataplane at all (`network/status` shows
 `attached: false`). Reload after upgrading:
 
@@ -388,6 +431,8 @@ instead: `sudo nsenter --net=/proc/<qemu pid>/ns/net ip addr`.
 | Guest traffic drops as `spoof_ip` after an address change | `assignedIP` is stale. | Wait for Kairon's next tick, or post the new address. |
 | `spoof_mac` drops on a netns VM | Not possible: MAC checks are off on routed hooks. Check that the hook is `vh…`. | — |
 | Allowed name still denied | Apex not listed, or ClientHello split across segments. | Add the exact name; check the client's TLS record size. |
+| Capture `POST` returns 400 `spawn tcpdump` or exits at once | tcpdump missing, or AppArmor denies it (`operation="bind" family="packet"`). | Install tcpdump; reload the current profile. |
+| Capture `POST` returns 400 `a capture is already running` | One capture per VM. | Wait for it to finish. |
 | Drops list is empty | VM not attached, or nothing dropped yet. | Check `network/status`. |
 | Conntrack restore rejected with an identity mismatch | The snapshot came from another Machine. | Expected: restores fail closed. |
 
@@ -395,13 +440,12 @@ instead: `sudo nsenter --net=/proc/<qemu pid>/ns/net ip addr`.
 
 | Test | What it covers |
 | --- | --- |
-| `cargo test -p fluxvm-network --lib` | Spec validation, map encoding, name hashing, conntrack round trip, learned-address parsing, QoS statistics, persistence. |
+| `cargo test -p fluxvm-network --lib` | Spec validation, map encoding, name hashing, conntrack round trip, learned-address parsing, QoS statistics, persistence, capture validation, tcpdump arguments and capture states. |
 | `scripts/test-vm-edge-verdict.py` | Loads the real `fluxvm_tc.bpf.o` with `BPF_PROG_TEST_RUN` and checks every verdict: MAC and IP spoofing, ARP, learning, DNS and SNI allow and deny, the token bucket, and the routed flag. Needs root and `FLUXVM_BPF_DIR`. Runs in the `network-fabric` workflow. |
 | `scripts/test-drop-reason-migration-static.sh` | Checks the schema number and drop-reason contract. |
 
 ## Current limits
 
-- Capture sessions are recorded, but no packets are captured yet.
 - On a netns VM, the namespace bridges the tap and the guest uses the
   same MAC, so the guest may report IPv6 duplicate-address detection
   failures. IPv4 is unaffected.

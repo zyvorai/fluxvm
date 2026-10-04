@@ -19,6 +19,12 @@
   are persisted under `<state_dir>/network-edge/` and reapplied on every attach, so they survive
   FluxVM and VM restarts. New drop-reason codes 13-16. `scripts/test-vm-edge-verdict.py` checks the
   verdicts against the real object in CI. See `docs/vm-edge-contract.md`.
+- **VM-edge packet capture.** `POST /v1/vms/{id}/network/capture` now runs a bounded `tcpdump`
+  (1-30 s, 20,000 packets, 1,600-byte snaplen, optional filter) on the VM's dataplane interface inside
+  its network namespace. `GET .../network/capture` lists sessions with `state`
+  (`running`/`done`/`failed`/`interrupted`) and packet counts; `GET .../network/capture/{token}`
+  downloads the pcap (409 while running). One capture per VM at a time; the newest 16 are kept.
+  Needs `tcpdump` on the host; the AppArmor profiles now allow it, `nsenter` and `network packet raw`.
 
 ### Fixed
 - **AppArmor profile blocked the eBPF dataplane.** The `fluxvm` and `fluxctl` profiles did not allow
