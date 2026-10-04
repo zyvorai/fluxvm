@@ -513,6 +513,20 @@ hot-added with `disk attach` comes back on every boot. `resize` only grows
 (`block_resize` live, `qemu-img resize` stopped); the guest still has to grow
 its partition/filesystem. `detach` unplugs and deletes the file.
 
+`disk attach <vm> <name> --path <file-or-device>` (REST: `{"name", "path"}`
+instead of `size_gib`) attaches an **existing** qcow2/raw image or block device
+(a CSI volume, an RBD map) as a symlink `disks/<name>.{qcow2,raw}`; block
+devices boot with `host_device`. Files must sit under `policy.allowed_image_dirs`
+when that is set, block devices under `/dev`. Detach removes only the link and
+resize is refused; QEMU's image locking stops two VMs opening the same source.
+
+**NIC unplug (QEMU).** `hotplug nic-unplug <vm> --mac <mac>|--tap <tap>` (REST:
+`POST /v1/vms/{id}/hotplug/nic/unplug`) removes an **extra** NIC from a running
+VM and deletes its TAP. The guest must acknowledge PCIe unplug (10 s timeout).
+The primary NIC lives on the root bus and can't be removed; direct (Pod-owned)
+NICs go with their sandbox. A NIC removed from the middle leaves an empty slot
+that the next hotplug reuses, so the remaining NICs keep their PCIe ports.
+
 **Serial.** QEMU's first serial port is a UNIX socket
 (`instances/<uuid>/serial.sock`) that also tees into `console.log`, so
 `/logs` keeps working. It needs no guest agent; one client at a time. VMs

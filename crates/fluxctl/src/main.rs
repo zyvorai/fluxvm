@@ -995,6 +995,16 @@ enum HotplugCommand {
         #[arg(long)]
         guest_ip: Vec<String>,
     },
+    /// Hot-remove an extra NIC by MAC or tap name and delete its TAP. REST:
+    /// `POST /v1/vms/{id}/hotplug/nic/unplug`.
+    NicUnplug {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long, required_unless_present = "tap", conflicts_with = "tap")]
+        mac: Option<String>,
+        #[arg(long)]
+        tap: Option<String>,
+    },
     /// Hot-add a virtiofs share. REST: `POST /v1/vms/{id}/hotplug/share`.
     Share {
         #[arg(value_parser = output::parse_vm_ref)]
@@ -1130,13 +1140,17 @@ enum DiskCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
-    /// Create a qcow2 data disk; hot-added when the VM is running.
+    /// Create a qcow2 data disk, or attach an existing image file or block
+    /// device with --path; hot-added when the VM is running.
     Attach {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         name: String,
+        #[arg(long, required_unless_present = "path", conflicts_with = "path")]
+        size_gib: Option<u64>,
+        /// Existing qcow2/raw file or block device; detach leaves it in place.
         #[arg(long)]
-        size_gib: u64,
+        path: Option<PathBuf>,
     },
     /// Grow `root` or a data disk (live or stopped).
     Resize {
@@ -2111,11 +2125,16 @@ async fn run_remote(
                     .await?;
                 output::print_list(format, &v["items"], output::DISK_COLUMNS)?
             }
-            DiskCommand::Attach { id, name, size_gib } => pretty(
+            DiskCommand::Attach {
+                id,
+                name,
+                size_gib,
+                path,
+            } => pretty(
                 &r.call(
                     Method::POST,
                     &format!("/v1/vms/{id}/disks"),
-                    Some(json!({"name": name, "size_gib": size_gib})),
+                    Some(json!({"name": name, "size_gib": size_gib, "path": path})),
                 )
                 .await?,
             )?,
@@ -2681,10 +2700,19 @@ async fn main() -> Result<()> {
             DiskCommand::List { id } => {
                 output::print_list(format, &m.list_vm_disks(id).await?, output::DISK_COLUMNS)?;
             }
-            DiskCommand::Attach { id, name, size_gib } => println!(
-                "{}",
-                serde_json::to_string_pretty(&m.attach_vm_disk(id, &name, size_gib).await?)?
-            ),
+            DiskCommand::Attach {
+                id,
+                name,
+                size_gib,
+                path,
+            } => {
+                let info = match (size_gib, path) {
+                    (_, Some(path)) => m.attach_existing_vm_disk(id, &name, &path).await?,
+                    (Some(size), None) => m.attach_vm_disk(id, &name, size).await?,
+                    (None, None) => anyhow::bail!("set --size-gib or --path"),
+                };
+                println!("{}", serde_json::to_string_pretty(&info)?)
+            }
             DiskCommand::Resize { id, name, size_gib } => println!(
                 "{}",
                 serde_json::to_string_pretty(&m.resize_vm_disk(id, &name, size_gib).await?)?
@@ -2972,6 +3000,12 @@ async fn main() -> Result<()> {
                         m.hotplug_direct_nic(id, direct, mac).await?;
                     }
                 }
+                println!("{{\"ok\":true}}");
+            }
+            HotplugCommand::NicUnplug { id, mac, tap } => {
+                let req = fluxvm_core::model::UnplugNicRequest { mac, tap };
+                req.validate().map_err(|e| anyhow::anyhow!(e))?;
+                m.unplug_nic(id, &req).await?;
                 println!("{{\"ok\":true}}");
             }
             HotplugCommand::Share {
@@ -4944,6 +4978,30 @@ mod hotplug_snapshot_cli_tests {
     }
 
     #[test]
+    fn hotplug_nic_unplug_parse() {
+        let id = Uuid::nil().to_string();
+        let Command::Hotplug {
+            command: HotplugCommand::NicUnplug { mac, tap, .. },
+        } = parse(&["hotplug", "nic-unplug", &id, "--mac", "02:00:00:00:00:01"])
+        else {
+            panic!("expected HotplugCommand::NicUnplug");
+        };
+        assert_eq!(mac.as_deref(), Some("02:00:00:00:00:01"));
+        assert!(tap.is_none());
+        let fails = |a: &[&str]| Cli::try_parse_from([&["fluxvm"], a].concat()).is_err();
+        assert!(fails(&["hotplug", "nic-unplug", &id]));
+        assert!(fails(&[
+            "hotplug",
+            "nic-unplug",
+            &id,
+            "--mac",
+            "m",
+            "--tap",
+            "t"
+        ]));
+    }
+
+    #[test]
     fn hotplug_nic_bridge_and_direct_parse() {
         let id = Uuid::nil();
         let Command::Hotplug {
@@ -5502,9 +5560,37 @@ mod tier2_cli_tests {
                 .unwrap()
                 .command,
             Command::Disk {
-                command: DiskCommand::Attach { size_gib: 10, .. }
+                command: DiskCommand::Attach {
+                    size_gib: Some(10),
+                    ..
+                }
             }
         ));
+        assert!(matches!(
+            cli(&["disk", "attach", &id, "pvc", "--path", "/dev/rbd0"])
+                .unwrap()
+                .command,
+            Command::Disk {
+                command: DiskCommand::Attach {
+                    size_gib: None,
+                    path: Some(_),
+                    ..
+                }
+            }
+        ));
+        assert!(
+            cli(&[
+                "disk",
+                "attach",
+                &id,
+                "x",
+                "--size-gib",
+                "1",
+                "--path",
+                "/a"
+            ])
+            .is_err()
+        );
         assert!(matches!(
             cli(&["disk", "resize", &id, "root", "--size-gib", "20"])
                 .unwrap()

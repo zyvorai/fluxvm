@@ -317,7 +317,8 @@ pub fn build_args(
                     continue;
                 };
                 let id = i + 1;
-                let mut dev = format!("virtio-net-pci,netdev=net{id},bus=hotplug-pcie-{id}");
+                let mut dev =
+                    format!("virtio-net-pci,netdev=net{id},id=nic{id},bus=hotplug-pcie-{id}");
                 if let Some(m) = &nic.mac {
                     dev.push_str(&format!(",mac={m}"));
                 }
@@ -643,6 +644,11 @@ pub async fn hotplug_nic(vm: &VmRecord, tap: &str, mac: Option<&str>, index: u8)
     qmp::hotplug_nic(&vm.workspace.join("qmp.sock"), tap, mac, index, QMP_TIMEOUT).await
 }
 
+/// Hot-remove the extra NIC on `hotplug-pcie-{index}`. The caller removes the TAP.
+pub async fn unplug_nic(vm: &VmRecord, index: u8) -> Result<()> {
+    qmp::unplug_nic(&vm.workspace.join("qmp.sock"), index, QMP_TIMEOUT).await
+}
+
 /// [`hotplug_nic`] for a TAP the daemon already opened, passed as a descriptor because it lives in
 /// another network namespace (a bridge-less direct tap inside a Pod netns). The caller keeps
 /// ownership of `tap_fd` and closes its own copy afterwards.
@@ -933,6 +939,7 @@ mod tests {
         );
         assert!(args.iter().any(|a| {
             a.contains("netdev=net1")
+                && a.contains("id=nic1")
                 && a.contains("bus=hotplug-pcie-1")
                 && a.contains("mac=02:00:00:00:00:02")
         }));

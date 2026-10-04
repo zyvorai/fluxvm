@@ -117,6 +117,11 @@ fn nic_hotplug_index(spec: &NetworkSpec) -> u8 {
         NetworkSpec::Tap {
             tap_name, extra, ..
         } => {
+            if tap_name.is_some()
+                && let Some(free) = extra.iter().position(is_free_nic_slot)
+            {
+                return (free + 1) as u8;
+            }
             let primary = u8::from(tap_name.is_some());
             let extras = extra.iter().filter(|n| n.tap_name.is_some()).count() as u8;
             primary.saturating_add(extras)
@@ -125,15 +130,48 @@ fn nic_hotplug_index(spec: &NetworkSpec) -> u8 {
     }
 }
 
+/// [`nic_hotplug_index`] for `vm`, counting a primary tap the daemon created
+/// at boot: its name lives on the record (`vm.tap_name`), not the request.
+fn vm_nic_hotplug_index(vm: &VmRecord) -> u8 {
+    match (&vm.request.network, &vm.tap_name) {
+        (
+            NetworkSpec::Tap {
+                tap_name: None,
+                extra,
+                ..
+            },
+            Some(primary),
+        ) => {
+            let spec = NetworkSpec::Tap {
+                tap_name: Some(primary.clone()),
+                bridge: None,
+                mac: None,
+                netns: false,
+                extra: extra.clone(),
+                direct: None,
+            };
+            nic_hotplug_index(&spec)
+        }
+        (spec, _) => nic_hotplug_index(spec),
+    }
+}
+
+/// An extra NIC slot left behind by an unplug: extra `i` is pinned to
+/// `hotplug-pcie-{i+1}`, so removing one in the middle keeps its place.
+fn is_free_nic_slot(n: &ExtraNic) -> bool {
+    n.tap_name.is_none() && n.direct.is_none() && n.bridge.is_empty()
+}
+
 fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Option<String>) {
     let spec = std::mem::replace(&mut vm.request.network, NetworkSpec::None);
+    let boot_primary = vm.tap_name.is_some();
     vm.request.network = match spec {
         NetworkSpec::Tap {
             tap_name: None,
             netns,
             extra,
             ..
-        } if extra.is_empty() => NetworkSpec::Tap {
+        } if extra.is_empty() && !boot_primary => NetworkSpec::Tap {
             tap_name: Some(tap),
             bridge: Some(bridge),
             mac,
@@ -149,12 +187,16 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
             mut extra,
             direct,
         } => {
-            extra.push(ExtraNic {
+            let nic = ExtraNic {
                 bridge,
                 mac,
                 tap_name: Some(tap),
                 direct: None,
-            });
+            };
+            match extra.iter_mut().find(|n| is_free_nic_slot(n)) {
+                Some(slot) => *slot = nic,
+                None => extra.push(nic),
+            }
             NetworkSpec::Tap {
                 tap_name,
                 bridge: existing_bridge,
@@ -183,6 +225,18 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
         } = &vm.request.network
         {
             vm.tap_name = Some(primary.clone());
+        }
+    }
+}
+
+/// Empties extra NIC `pos`, then drops trailing empty slots.
+fn free_nic_slot(vm: &mut VmRecord, pos: usize) {
+    if let NetworkSpec::Tap { extra, .. } = &mut vm.request.network {
+        if let Some(n) = extra.get_mut(pos) {
+            *n = ExtraNic::default();
+        }
+        while extra.last().is_some_and(is_free_nic_slot) {
+            extra.pop();
         }
     }
 }
@@ -1052,7 +1106,7 @@ impl VmManager {
                  user/macvtap already occupies the primary NIC"
             );
         }
-        let index = nic_hotplug_index(&vm.request.network);
+        let index = vm_nic_hotplug_index(&vm);
         if index >= 4 {
             bail!("NIC hotplug headroom exhausted (4 PCIe root ports reserved at boot)");
         }
@@ -1087,6 +1141,65 @@ impl VmManager {
         }
         record_hotplugged_nic(&mut vm, tap, bridge, mac);
         self.store.update(vm).await?;
+        Ok(())
+    }
+
+    /// Hot-removes an extra bridged NIC (by MAC or tap name) from a running
+    /// QEMU VM and deletes its TAP. Its slot stays reserved as an empty
+    /// entry unless it was the last one, so the other NICs keep their PCIe
+    /// ports across restarts.
+    pub async fn unplug_nic(
+        &self,
+        id: Uuid,
+        req: &fluxvm_core::model::UnplugNicRequest,
+    ) -> Result<()> {
+        let mut vm = self.get(id).await?;
+        fluxvm_core::security::check_operation(
+            vm.requested_security_profile,
+            fluxvm_core::security::VmOperation::HotplugNic,
+        )?;
+        if vm.backend != BackendKind::Qemu {
+            bail!("NIC unplug is supported for the QEMU backend only");
+        }
+        if vm.status != VmStatus::Running {
+            bail!("NIC unplug needs a running VM (status is {:?})", vm.status);
+        }
+        let NetworkSpec::Tap {
+            tap_name,
+            mac,
+            extra,
+            ..
+        } = &mut vm.request.network
+        else {
+            bail!("VM has no tap NICs to unplug");
+        };
+        let Some(pos) = extra
+            .iter()
+            .position(|n| req.matches(n.mac.as_deref(), n.tap_name.as_deref()))
+        else {
+            if req.matches(
+                mac.as_deref(),
+                tap_name.as_deref().or(vm.tap_name.as_deref()),
+            ) {
+                bail!("the primary NIC can't be hot-removed; only extra NICs can");
+            }
+            bail!("no extra NIC matches {req:?}");
+        };
+        if extra[pos].direct.is_some() {
+            bail!("direct (Pod-owned) NICs are removed with their sandbox, not unplugged");
+        }
+        let tap = extra[pos].tap_name.clone().unwrap_or_default();
+        let index = u8::try_from(pos + 1).context("NIC index overflow")?;
+        fluxvm_qemu::unplug_nic(&vm, index).await?;
+        if let Err(e) = fluxvm_network::cleanup_tap(&tap).await {
+            tracing::warn!(vm = %id, tap, "removing unplugged TAP failed: {e:#}");
+        }
+        free_nic_slot(&mut vm, pos);
+        self.store.update(vm).await?;
+        audit_event(
+            "vm.nic.unplug",
+            &[("vm_id", &id.to_string()), ("tap", &tap)],
+        );
         Ok(())
     }
 
@@ -3455,6 +3568,48 @@ impl VmManager {
         Ok(info)
     }
 
+    /// Attach an existing image file or block device as a data disk. Files
+    /// must sit under `policy.allowed_image_dirs` when that is set; block
+    /// devices must resolve under `/dev`.
+    pub async fn attach_existing_vm_disk(
+        &self,
+        id: Uuid,
+        name: &str,
+        source: &std::path::Path,
+    ) -> Result<fluxvm_core::model::VmDiskInfo> {
+        let vm = self.qemu_vm_for_disks(id).await?;
+        let real = fs::canonicalize(source)
+            .with_context(|| format!("resolving disk source {}", source.display()))?;
+        let block = {
+            use std::os::unix::fs::FileTypeExt;
+            fs::metadata(&real)?.file_type().is_block_device()
+        };
+        if block {
+            if !real.starts_with("/dev") {
+                bail!("block device source {} is not under /dev", real.display());
+            }
+        } else if let Some(dirs) = &self.cfg.policy.allowed_image_dirs
+            && !dirs
+                .iter()
+                .any(|d| fs::canonicalize(d).is_ok_and(|d| real.starts_with(d)))
+        {
+            bail!(
+                "disk source {} is not under any policy allowed_image_dirs {dirs:?}",
+                source.display()
+            );
+        }
+        let info = fluxvm_qemu::disks::attach_existing(&self.cfg, &vm, name, &real).await?;
+        audit_event(
+            "vm.disk.attach",
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", name),
+                ("source", &real.to_string_lossy()),
+            ],
+        );
+        Ok(info)
+    }
+
     pub async fn detach_vm_disk(&self, id: Uuid, name: &str) -> Result<()> {
         let vm = self.qemu_vm_for_disks(id).await?;
         fluxvm_qemu::disks::detach(&vm, name).await?;
@@ -5266,7 +5421,9 @@ mod tests {
 
 #[cfg(test)]
 mod nic_hotplug_tests {
-    use super::{is_direct, nic_hotplug_index, record_hotplugged_nic};
+    use super::{
+        free_nic_slot, is_direct, nic_hotplug_index, record_hotplugged_nic, vm_nic_hotplug_index,
+    };
     use fluxvm_core::model::{ExtraNic, NetworkSpec, VmRecord};
 
     fn vm(network: serde_json::Value) -> VmRecord {
@@ -5346,6 +5503,55 @@ mod nic_hotplug_tests {
         assert!(!is_direct(&bridged));
         assert!(!is_direct(&NetworkSpec::None));
         assert!(!is_direct(&NetworkSpec::User { forwards: vec![] }));
+    }
+
+    #[test]
+    fn a_boot_created_primary_tap_takes_slot_zero() {
+        let mut record = vm(serde_json::json!({"mode": "tap", "bridge": "br"}));
+        record.tap_name = Some("eph00000000".into());
+        assert_eq!(vm_nic_hotplug_index(&record), 1);
+        record_hotplugged_nic(&mut record, "hn1abcdef".into(), "br".into(), None);
+        let NetworkSpec::Tap {
+            tap_name, extra, ..
+        } = &record.request.network
+        else {
+            panic!("expected tap");
+        };
+        assert!(tap_name.is_none(), "the boot primary stays daemon-named");
+        assert_eq!(extra.len(), 1);
+        assert_eq!(extra[0].tap_name.as_deref(), Some("hn1abcdef"));
+        assert_eq!(vm_nic_hotplug_index(&record), 2);
+    }
+
+    #[test]
+    fn unplugged_middle_nic_keeps_its_slot_for_the_next_hotplug() {
+        let nic = |n: u8| serde_json::json!({"bridge": "br", "mac": format!("02:00:00:00:00:0{n}"), "tap_name": format!("hn{n}abcdef")});
+        let mut record = vm(serde_json::json!({
+            "mode": "tap", "tap_name": "hn0abcdef", "bridge": "br",
+            "extra": [nic(1), nic(2)]
+        }));
+        assert_eq!(nic_hotplug_index(&record.request.network), 3);
+        free_nic_slot(&mut record, 0);
+        assert_eq!(
+            nic_hotplug_index(&record.request.network),
+            1,
+            "the freed hotplug-pcie-1 is reused"
+        );
+        record_hotplugged_nic(&mut record, "hn1abcdef".into(), "br2".into(), None);
+        let NetworkSpec::Tap { extra, .. } = &record.request.network else {
+            panic!("expected tap");
+        };
+        assert_eq!(extra.len(), 2);
+        assert_eq!(extra[0].bridge, "br2");
+        assert_eq!(extra[1].tap_name.as_deref(), Some("hn2abcdef"));
+
+        free_nic_slot(&mut record, 1);
+        free_nic_slot(&mut record, 0);
+        let NetworkSpec::Tap { extra, .. } = &record.request.network else {
+            panic!("expected tap");
+        };
+        assert!(extra.is_empty(), "trailing empty slots are dropped");
+        assert_eq!(nic_hotplug_index(&record.request.network), 1);
     }
 
     #[test]

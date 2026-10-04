@@ -160,7 +160,7 @@ fn ops() -> Vec<Op> {
         op(
             "post",
             "/v1/vms/{id}/disks",
-            "Create a data disk (hot-added if running)",
+            "Create a data disk, or attach an existing image/block device (hot-added if running)",
             DISKS,
         )
         .body("AttachDiskRequest")
@@ -177,7 +177,7 @@ fn ops() -> Vec<Op> {
         op(
             "delete",
             "/v1/vms/{id}/disks/{name}",
-            "Detach and delete a data disk",
+            "Detach a data disk (deletes it unless attached from an existing image)",
             DISKS,
         )
         .status("204"),
@@ -286,9 +286,10 @@ fn schemas() -> Value {
             "allocated_bytes": {"type": "integer"}
         }},
         "DiskList": list("VmDiskInfo"),
-        "AttachDiskRequest": {"type": "object", "required": ["name", "size_gib"], "properties": {
+        "AttachDiskRequest": {"type": "object", "required": ["name"], "description": "Exactly one of size_gib or path", "properties": {
             "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"},
-            "size_gib": {"type": "integer", "minimum": 1}
+            "size_gib": {"type": "integer", "minimum": 1, "description": "Create a new qcow2 disk of this size"},
+            "path": {"type": "string", "description": "Attach this existing qcow2/raw file or block device; detach leaves it in place"}
         }},
         "ResizeDiskRequest": {"type": "object", "required": ["size_gib"], "properties": {
             "size_gib": {"type": "integer", "minimum": 1}

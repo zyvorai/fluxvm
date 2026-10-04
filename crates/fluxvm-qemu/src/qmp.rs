@@ -509,6 +509,45 @@ pub async fn hotplug_nic(
     Ok(())
 }
 
+/// Hot-remove the NIC [`hotplug_nic`] added as `nic{index}`/`net{index}`.
+/// PCIe unplug needs the guest to acknowledge, so this polls until the
+/// device is gone before dropping the netdev.
+pub async fn unplug_nic(socket: &Path, index: u8, timeout: Duration) -> Result<()> {
+    let nic_id = format!("nic{index}");
+    execute(socket, "device_del", Some(json!({"id": nic_id})), timeout)
+        .await
+        .context("device_del virtio-net-pci")?;
+    let path = format!("/machine/peripheral/{nic_id}");
+    let mut gone = false;
+    for _ in 0..100 {
+        if execute(
+            socket,
+            "qom-get",
+            Some(json!({"path": path, "property": "type"})),
+            timeout,
+        )
+        .await
+        .is_err()
+        {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !gone {
+        bail!("guest did not release {nic_id} within 10s (does it handle PCIe hot-unplug?)");
+    }
+    execute(
+        socket,
+        "netdev_del",
+        Some(json!({"id": format!("net{index}")})),
+        timeout,
+    )
+    .await
+    .context("netdev_del")?;
+    Ok(())
+}
+
 /// One command of a [`execute_session`]. `fd` is attached to that command's request as
 /// `SCM_RIGHTS` ancillary data (what QMP's `getfd` requires).
 pub struct Step {

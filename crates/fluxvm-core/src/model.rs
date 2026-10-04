@@ -1208,6 +1208,35 @@ impl HotplugNicRequest {
     }
 }
 
+/// Request body for `POST /v1/vms/{id}/hotplug/nic/unplug`: the extra NIC to
+/// remove, by exactly one of `mac` or host `tap` name. The primary NIC sits on
+/// the root bus and can't be hot-removed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UnplugNicRequest {
+    #[serde(default)]
+    pub mac: Option<String>,
+    #[serde(default)]
+    pub tap: Option<String>,
+}
+
+impl UnplugNicRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        match (&self.mac, &self.tap) {
+            (Some(_), None) | (None, Some(_)) => Ok(()),
+            _ => Err("hotplug/nic/unplug needs exactly one of `mac` or `tap`".into()),
+        }
+    }
+
+    /// True when `nic` is the one this request names.
+    pub fn matches(&self, mac: Option<&str>, tap: Option<&str>) -> bool {
+        match (&self.mac, &self.tap) {
+            (Some(want), _) => mac.is_some_and(|m| m.eq_ignore_ascii_case(want)),
+            (_, Some(want)) => tap == Some(want.as_str()),
+            _ => false,
+        }
+    }
+}
+
 /// Point-in-time resource usage for a VM, read from its cgroup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VmMetrics {

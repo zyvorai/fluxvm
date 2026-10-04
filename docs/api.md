@@ -37,9 +37,9 @@ POST   /v1/vms/{uuid}/restore            # {"tag": "..."}; admin; running flux-v
 GET    /v1/vms/{uuid}/snapshots
 DELETE /v1/vms/{uuid}/snapshots/{tag}
 GET    /v1/vms/{uuid}/disks
-POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}
+POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10} or {"name": "pvc", "path": "/dev/rbd0"}
 PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
-DELETE /v1/vms/{uuid}/disks/{name}
+DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file; only unlinks a path-attached disk
 GET    /v1/vms/{uuid}/serial             # websocket, raw serial bytes (QEMU)
 POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
@@ -48,6 +48,7 @@ POST   /v1/vms/{uuid}/resources
 POST   /v1/vms/{uuid}/hotplug/cpu
 POST   /v1/vms/{uuid}/hotplug/memory
 POST   /v1/vms/{uuid}/hotplug/nic
+POST   /v1/vms/{uuid}/hotplug/nic/unplug # {"mac": ...} or {"tap": ...}; extra NICs only
 POST   /v1/vms/{uuid}/hotplug/share
 GET    /v1/vms/{uuid}/cpuset
 POST   /v1/vms/{uuid}/freeze
@@ -401,6 +402,10 @@ over QMP with `getfd` + `netdev_add fd=` on one session):
 
 `bridge` and `direct` are mutually exclusive (400 otherwise). A direct hotplug needs a VM booted with
 `network.mode=none`; on any failure the daemon removes the tap and dataplane it created.
+
+`POST /v1/vms/{uuid}/hotplug/nic/unplug` (admin) removes an extra bridged NIC from a running VM, named
+by `{"mac": "..."}` or `{"tap": "..."}`, and deletes its tap. The guest has 10 s to release the device.
+The primary NIC can't be hot-removed.
 
 ### Share hotplug (QEMU)
 

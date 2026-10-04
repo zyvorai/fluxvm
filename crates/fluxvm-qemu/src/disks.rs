@@ -1,6 +1,10 @@
 //! Data disks: qcow2 files under `<workspace>/disks/<name>.qcow2`, attached
 //! as `scsi-hd` on the boot-time `scsi0` controller. The directory is the
 //! source of truth, so a disk attached live is re-attached on every boot.
+//!
+//! An existing image or block device (a PVC's volume, an RBD map) is attached
+//! as a symlink `<name>.qcow2` / `<name>.raw` pointing at it. Detach removes
+//! the link only; the source belongs to whoever created it.
 
 use crate::{QMP_TIMEOUT, qmp};
 use anyhow::{Context, Result, bail};
@@ -40,7 +44,7 @@ pub fn data_disks(workspace: &Path) -> Vec<(String, PathBuf)> {
     let mut out: Vec<(String, PathBuf)> = rd
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "qcow2"))
+        .filter(|p| p.extension().is_some_and(|x| x == "qcow2" || x == "raw"))
         .filter_map(|p| {
             let name = p.file_stem()?.to_str()?.to_string();
             validate_disk_name(&name).ok()?;
@@ -49,6 +53,42 @@ pub fn data_disks(workspace: &Path) -> Vec<(String, PathBuf)> {
         .collect();
     out.sort();
     out
+}
+
+/// The data disk named `name`, whichever format it was attached as.
+fn find_disk(workspace: &Path, name: &str) -> Option<PathBuf> {
+    data_disks(workspace)
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, p)| p)
+}
+
+/// `qcow2` or `raw`, from the file extension.
+fn disk_format(path: &Path) -> &'static str {
+    if path.extension().is_some_and(|x| x == "raw") {
+        "raw"
+    } else {
+        "qcow2"
+    }
+}
+
+/// True for a disk attached from an existing image (a symlink in `disks/`).
+pub fn is_external(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn is_block_device(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path).is_ok_and(|m| m.file_type().is_block_device())
+}
+
+/// The `file` protocol driver for `path`: `host_device` for a block device.
+fn file_driver(path: &Path) -> &'static str {
+    if is_block_device(path) {
+        "host_device"
+    } else {
+        "file"
+    }
 }
 
 fn node_name(name: &str) -> String {
@@ -66,8 +106,10 @@ pub fn boot_args(workspace: &Path) -> Vec<String> {
         a.extend([
             "-blockdev".into(),
             format!(
-                "driver=qcow2,node-name={},cache.direct=off,file.driver=file,file.filename={}",
+                "driver={},node-name={},cache.direct=off,file.driver={},file.filename={}",
+                disk_format(&path),
                 node_name(&name),
+                file_driver(&path),
                 path_arg(&path)
             ),
             "-device".into(),
@@ -148,10 +190,10 @@ pub async fn attach(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
     }
     let dir = disks_dir(&vm.workspace);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join(format!("{name}.qcow2"));
-    if path.exists() {
+    if find_disk(&vm.workspace, name).is_some() {
         bail!("disk {name:?} already exists");
     }
+    let path = dir.join(format!("{name}.qcow2"));
     let out = tokio::process::Command::new(&cfg.qemu_img_binary)
         .args(["create", "-q", "-f", "qcow2"])
         .arg(&path)
@@ -175,15 +217,64 @@ pub async fn attach(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
     disk_info(cfg, name, &path, "scsi").await
 }
 
+/// Attach an existing qcow2/raw image or block device as data disk `name`
+/// (hot-adding it when the VM is live). The source is never modified by
+/// detach; QEMU's image locking refuses a source another VM has open.
+pub async fn attach_existing(
+    cfg: &Config,
+    vm: &VmRecord,
+    name: &str,
+    source: &Path,
+) -> Result<VmDiskInfo> {
+    validate_disk_name(name)?;
+    if !source.is_absolute() {
+        bail!("disk source {} must be an absolute path", source.display());
+    }
+    let meta =
+        std::fs::metadata(source).with_context(|| format!("disk source {}", source.display()))?;
+    let format = if is_block_device(source) {
+        "raw".to_string()
+    } else if meta.is_file() {
+        virtual_size(cfg, source).await?.1
+    } else {
+        bail!(
+            "disk source {} is neither a file nor a block device",
+            source.display()
+        );
+    };
+    if format != "raw" && format != "qcow2" {
+        bail!("disk source format {format:?} is not supported (raw or qcow2)");
+    }
+    let real = std::fs::canonicalize(source)?;
+    if real.starts_with(std::fs::canonicalize(&vm.workspace)?) {
+        bail!("disk source must live outside the VM workspace");
+    }
+    if find_disk(&vm.workspace, name).is_some() {
+        bail!("disk {name:?} already exists");
+    }
+    let dir = disks_dir(&vm.workspace);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let link = dir.join(format!("{name}.{format}"));
+    std::os::unix::fs::symlink(&real, &link)
+        .with_context(|| format!("linking {} -> {}", link.display(), real.display()))?;
+    if is_live(vm)
+        && let Err(e) = hot_add(vm, name, &link).await
+    {
+        let _ = std::fs::remove_file(&link);
+        return Err(e);
+    }
+    disk_info(cfg, name, &link, "scsi").await
+}
+
 async fn hot_add(vm: &VmRecord, name: &str, path: &Path) -> Result<()> {
     let sock = vm.workspace.join("qmp.sock");
     qmp::execute(
         &sock,
         "blockdev-add",
         Some(json!({
-            "driver": "qcow2",
+            "driver": disk_format(path),
             "node-name": node_name(name),
-            "file": {"driver": "file", "filename": path.to_string_lossy()},
+            "file": {"driver": file_driver(path), "filename": path.to_string_lossy()},
         })),
         QMP_TIMEOUT,
     )
@@ -215,13 +306,13 @@ async fn hot_add(vm: &VmRecord, name: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Detach (hot-unplug when live) and delete a data disk's file.
+/// Detach (hot-unplug when live) and delete a data disk's file, or only the
+/// link for a disk attached from an existing image.
 pub async fn detach(vm: &VmRecord, name: &str) -> Result<()> {
     validate_disk_name(name)?;
-    let path = disks_dir(&vm.workspace).join(format!("{name}.qcow2"));
-    if !path.is_file() {
+    let Some(path) = find_disk(&vm.workspace, name) else {
         bail!("disk {name:?} not found");
-    }
+    };
     if is_live(vm) {
         let sock = vm.workspace.join("qmp.sock");
         qmp::execute(
@@ -265,10 +356,13 @@ pub async fn resize(cfg: &Config, vm: &VmRecord, name: &str, size_gib: u64) -> R
         (vm.disk.clone(), "virtio")
     } else {
         validate_disk_name(name)?;
-        (
-            disks_dir(&vm.workspace).join(format!("{name}.qcow2")),
-            "scsi",
-        )
+        let Some(path) = find_disk(&vm.workspace, name) else {
+            bail!("disk {name:?} not found");
+        };
+        if is_external(&path) {
+            bail!("disk {name:?} is attached from an existing image; resize its source");
+        }
+        (path, "scsi")
     };
     if !path.is_file() {
         bail!("disk {name:?} not found");
@@ -332,11 +426,30 @@ mod tests {
         for n in ["b", "a", "bad.name"] {
             std::fs::write(disks_dir(&tmp).join(format!("{n}.qcow2")), b"").unwrap();
         }
-        std::fs::write(disks_dir(&tmp).join("c.raw"), b"").unwrap();
+        std::fs::write(disks_dir(&tmp).join("c.img"), b"").unwrap();
         let args = boot_args(&tmp).join(" ");
         assert!(args.find("node-name=data-a").unwrap() < args.find("node-name=data-b").unwrap());
         assert!(args.contains("scsi-hd,bus=scsi0.0,drive=data-a,id=disk-a,serial=a"));
         assert!(!args.contains("bad") && !args.contains("data-c"));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn linked_disks_boot_with_their_format_and_stay_external() {
+        let tmp = std::env::temp_dir().join(format!("fluxvm-disks-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(disks_dir(&tmp)).unwrap();
+        let src = tmp.join("pvc.img");
+        std::fs::write(&src, b"").unwrap();
+        let link = disks_dir(&tmp).join("pvc.raw");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        std::fs::write(disks_dir(&tmp).join("own.qcow2"), b"").unwrap();
+        let args = boot_args(&tmp).join(" ");
+        assert!(args.contains("driver=raw,node-name=data-pvc,cache.direct=off,file.driver=file"));
+        assert!(args.contains("driver=qcow2,node-name=data-own"));
+        assert!(is_external(&link));
+        assert!(!is_external(&disks_dir(&tmp).join("own.qcow2")));
+        assert_eq!(find_disk(&tmp, "pvc"), Some(link));
+        assert_eq!(find_disk(&tmp, "nope"), None);
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

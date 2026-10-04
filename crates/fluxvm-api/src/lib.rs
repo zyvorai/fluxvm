@@ -400,6 +400,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/hotplug/cpu", post(hotplug_vm_cpu))
         .route("/v1/vms/{id}/hotplug/memory", post(hotplug_vm_memory))
         .route("/v1/vms/{id}/hotplug/nic", post(hotplug_vm_nic))
+        .route("/v1/vms/{id}/hotplug/nic/unplug", post(unplug_vm_nic))
         .route("/v1/vms/{id}/hotplug/share", post(hotplug_vm_share))
         .route("/v1/vms/{id}/cpuset", get(vm_cpuset))
         .route("/v1/vms/{id}/freeze", post(freeze_vm))
@@ -2173,10 +2174,15 @@ struct DiskSizeRequest {
     size_gib: u64,
 }
 
+/// Exactly one of `size_gib` (create a new qcow2) or `path` (attach an
+/// existing image file or block device).
 #[derive(Deserialize)]
 struct AttachDiskRequest {
     name: String,
-    size_gib: u64,
+    #[serde(default)]
+    size_gib: Option<u64>,
+    #[serde(default)]
+    path: Option<std::path::PathBuf>,
 }
 
 async fn attach_vm_disk(
@@ -2186,10 +2192,12 @@ async fn attach_vm_disk(
     Json(req): Json<AttachDiskRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(m.attach_vm_disk(id, &req.name, req.size_gib).await?),
-    ))
+    let info = match (req.size_gib, req.path) {
+        (Some(size), None) => m.attach_vm_disk(id, &req.name, size).await?,
+        (None, Some(path)) => m.attach_existing_vm_disk(id, &req.name, &path).await?,
+        _ => return Err(anyhow::anyhow!("set exactly one of size_gib or path").into()),
+    };
+    Ok((StatusCode::CREATED, Json(info)))
 }
 
 async fn resize_vm_disk(
@@ -2366,6 +2374,18 @@ async fn hotplug_vm_nic(
         Some(direct) => m.hotplug_direct_nic(id, direct, req.mac).await?,
         None => m.hotplug_nic(id, req.bridge, req.mac).await?,
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unplug_vm_nic(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::UnplugNicRequest>,
+) -> ApiResult<StatusCode> {
+    require_admin(role)?;
+    req.validate().map_err(|e| anyhow::anyhow!(e))?;
+    m.unplug_nic(id, &req).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
