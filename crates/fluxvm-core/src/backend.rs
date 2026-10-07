@@ -45,6 +45,23 @@ pub struct PreparedNetwork {
     /// The namespace's gateway address -- what a static guest
     /// network-config's route needs.
     pub gateway: Option<String>,
+    /// Exec-inheritable fds for `spec`'s extra NICs, index-aligned, when the
+    /// VMM runs in a private netns and can't open their host-bridge taps by
+    /// name (QEMU only). Empty otherwise.
+    pub extra_tap_fds: Vec<Option<i32>>,
+}
+
+impl PreparedNetwork {
+    /// Closes the parent's copies of the fds handed to the VMM (after spawn,
+    /// or on a launch error before it).
+    pub fn close_launch_fds(&self) {
+        if let Some(fd) = self.tap_fd {
+            crate::process::close_fd(fd);
+        }
+        for fd in self.extra_tap_fds.iter().flatten() {
+            crate::process::close_fd(*fd);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

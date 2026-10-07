@@ -233,7 +233,10 @@ fn record_hotplugged_nic(vm: &mut VmRecord, tap: String, bridge: String, mac: Op
     }
 }
 
-/// Empties extra NIC `pos`, then drops trailing empty slots.
+/// Empties extra NIC `pos`, then drops trailing empty slots. With none left,
+/// a fresh launch would put the primary NIC on a different PCIe bus than the
+/// running VM has, so it is marked hot-plugged (no live migration until it
+/// restarts).
 fn free_nic_slot(vm: &mut VmRecord, pos: usize) {
     if let NetworkSpec::Tap { extra, .. } = &mut vm.request.network {
         if let Some(n) = extra.get_mut(pos) {
@@ -241,6 +244,10 @@ fn free_nic_slot(vm: &mut VmRecord, pos: usize) {
         }
         while extra.last().is_some_and(is_free_nic_slot) {
             extra.pop();
+        }
+        if extra.is_empty() {
+            vm.labels
+                .insert(live_migration::HOTPLUGGED_LABEL.into(), "true".into());
         }
     }
 }
@@ -521,6 +528,20 @@ fn validate_migration_receiver_request(
     }
     if let Some(tls) = &req.tls {
         validate_migration_tls_spec(tls, cfg)?;
+    }
+    Ok(())
+}
+
+/// Extra NICs next to a netns primary reach the VMM as inherited tap fds,
+/// which only the QEMU backend accepts.
+fn validate_netns_extras(req: &CreateVmRequest) -> Result<()> {
+    if let NetworkSpec::Tap {
+        netns: true, extra, ..
+    } = &req.network
+        && extra.iter().any(|n| !is_free_nic_slot(n))
+        && req.backend != BackendKind::Qemu
+    {
+        bail!("extra NICs on a netns VM (network.netns=true) need backend qemu");
     }
     Ok(())
 }
@@ -1139,12 +1160,7 @@ impl VmManager {
                  user/macvtap already occupies the primary NIC"
             );
         }
-        if matches!(vm.request.network, NetworkSpec::Tap { netns: true, .. }) {
-            bail!(
-                "NIC hotplug needs host-bridge taps (network.netns=false): a netns VM can't \
-                 relaunch with extra NICs"
-            );
-        }
+        let in_netns = matches!(vm.request.network, NetworkSpec::Tap { netns: true, .. });
         let index = vm_nic_hotplug_index(&vm);
         if index >= 4 {
             bail!("NIC hotplug headroom exhausted (4 PCIe root ports reserved at boot)");
@@ -1174,7 +1190,20 @@ impl VmManager {
                 return Err(e).context("applying the VM dataplane for the hotplugged NIC");
             }
         }
-        if let Err(e) = fluxvm_qemu::hotplug_nic(&vm, &tap, mac.as_deref(), index).await {
+        // QEMU runs inside the VM's netns there and can't open a host tap by name.
+        let plugged = if in_netns {
+            match fluxvm_network::direct::open_host_tap(&tap) {
+                Ok(fd) => {
+                    let r = fluxvm_qemu::hotplug_nic_fd(&vm, fd, mac.as_deref(), index).await;
+                    fluxvm_core::process::close_fd(fd);
+                    r
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            fluxvm_qemu::hotplug_nic(&vm, &tap, mac.as_deref(), index).await
+        };
+        if let Err(e) = plugged {
             let _ = fluxvm_network::cleanup_tap(&tap).await;
             return Err(e);
         }
@@ -2010,6 +2039,7 @@ impl VmManager {
         req.image = resolved.path;
         validate_policy(&req, &self.cfg)?;
         validate_native_kvm_profile(&req, &self.cfg)?;
+        validate_netns_extras(&req)?;
         if !req.cdroms.is_empty() {
             if req.backend != BackendKind::Qemu {
                 anyhow::bail!("cdroms requires backend qemu");
@@ -3442,9 +3472,10 @@ impl VmManager {
         Ok(())
     }
 
-    /// Flatten a QEMU VM's root disk into a standalone qcow2 at `dest`
+    /// Flatten a VM's root disk into a standalone qcow2 at `dest`
     /// (default `state_dir/backups/<name>-<utc>.qcow2`), or with `all_disks`
-    /// the root and every data disk into a directory. A running VM is
+    /// the root and every data disk into a directory. A stopped VM on any
+    /// engine is read straight off its disk files; a running QEMU VM is
     /// captured through one short-lived internal snapshot (savevm covers all
     /// its qcow2 disks), so the copies are crash-consistent with each other;
     /// with the guest agent answering, filesystems are frozen around that
@@ -3477,12 +3508,16 @@ impl VmManager {
             (None, None) => None,
         };
         let vm = self.get(id).await?;
-        if vm.backend != BackendKind::Qemu
-            || vm.request.storage != StorageBackend::Default
-            || !vm.disk.is_file()
-        {
-            bail!("backup supports QEMU VMs on the default qcow2 storage backend only");
+        if let Some(why) = backup::backup_refusal(
+            vm.backend,
+            vm.request.storage,
+            vm.disk.is_file(),
+            vm.status,
+            false,
+        ) {
+            bail!(why);
         }
+        let root_format = backup::root_disk_format(&vm);
         let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
         // Linked images and block devices belong to someone else, the same
         // reason restore skips them.
@@ -3556,8 +3591,13 @@ impl VmManager {
         }
         let mut result: Result<Vec<serde_json::Value>> = Ok(Vec::new());
         for (name, src, dst) in &targets {
+            let src_format = if name == fluxvm_qemu::disks::ROOT_DISK {
+                root_format.as_str()
+            } else {
+                backup::data_disk_format(src)
+            };
             let mut cmd = tokio::process::Command::new(&self.cfg.qemu_img_binary);
-            cmd.args(["convert", "-U", "-O", "qcow2"]);
+            cmd.args(["convert", "-U", "-f", src_format, "-O", "qcow2"]);
             if compress {
                 cmd.arg("-c");
             }
@@ -5233,6 +5273,30 @@ mod tests {
     }
 
     #[test]
+    fn netns_extra_nics_need_qemu() {
+        let mut r = req_with(1, 512, None, None, BackendKind::Qemu, "/x.qcow2");
+        r.network = NetworkSpec::Tap {
+            tap_name: None,
+            bridge: None,
+            mac: None,
+            netns: true,
+            direct: None,
+            extra: vec![fluxvm_core::model::ExtraNic {
+                bridge: "br0".into(),
+                mac: None,
+                tap_name: None,
+                direct: None,
+            }],
+        };
+        r.backend = BackendKind::Qemu;
+        assert!(validate_netns_extras(&r).is_ok());
+        r.backend = BackendKind::Firecracker;
+        assert!(validate_netns_extras(&r).is_err());
+        r.backend = BackendKind::CloudHypervisor;
+        assert!(validate_netns_extras(&r).is_err());
+    }
+
+    #[test]
     fn empty_policy_allows_anything() {
         let cfg = Config::default();
         let r = req_with(
@@ -5623,7 +5687,8 @@ mod tests {
 #[cfg(test)]
 mod nic_hotplug_tests {
     use super::{
-        free_nic_slot, is_direct, nic_hotplug_index, record_hotplugged_nic, vm_nic_hotplug_index,
+        free_nic_slot, is_direct, live_migration, nic_hotplug_index, record_hotplugged_nic,
+        vm_nic_hotplug_index,
     };
     use fluxvm_core::model::{ExtraNic, NetworkSpec, VmRecord};
 
@@ -5722,6 +5787,19 @@ mod nic_hotplug_tests {
         assert_eq!(extra.len(), 1);
         assert_eq!(extra[0].tap_name.as_deref(), Some("hn1abcdef"));
         assert_eq!(vm_nic_hotplug_index(&record), 2);
+    }
+
+    #[test]
+    fn unplugging_the_last_extra_nic_blocks_migration_until_restart() {
+        let nic = |n: u8| serde_json::json!({"bridge": "br", "mac": format!("02:00:00:00:00:0{n}"), "tap_name": format!("hn{n}abcdef")});
+        let mut record = vm(serde_json::json!({
+            "mode": "tap", "tap_name": "hn0abcdef", "bridge": "br",
+            "extra": [nic(1), nic(2)]
+        }));
+        free_nic_slot(&mut record, 0);
+        assert!(!record.labels.contains_key(live_migration::HOTPLUGGED_LABEL));
+        free_nic_slot(&mut record, 1);
+        assert!(record.labels.contains_key(live_migration::HOTPLUGGED_LABEL));
     }
 
     #[test]

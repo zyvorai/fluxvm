@@ -532,9 +532,10 @@ that the next hotplug reuses, so the remaining NICs keep their PCIe ports.
 `/logs` keeps working. It needs no guest agent; one client at a time. VMs
 started before this change need a restart to get the socket.
 
-**Backup** writes a standalone (no backing file) qcow2. Running VMs are
-captured via a temporary internal snapshot (`backup-<utc>`, deleted
-afterwards), so the copy is crash-consistent. REST backups always land in
+**Backup** writes a standalone (no backing file) qcow2, for any engine on
+default storage or a `shared` disk file. Running VMs (QEMU on default storage
+only; stop the others first) are captured via a temporary internal snapshot
+(`backup-<utc>`, deleted afterwards), so the copy is crash-consistent. REST backups always land in
 `state_dir/backups/<name>-<utc>.qcow2`; only the local CLI accepts `--dest`.
 With `--all-disks` the destination is a directory holding `root.qcow2` and one
 `<disk>.qcow2` per data disk; a live VM's disks all come from the same
@@ -552,8 +553,9 @@ record `quiesced`, the source VM and the disks.
 `restore-backup <vm> <name>` copies one back into a **stopped** VM in place:
 root disk plus every data disk the backup holds (recreated if the VM no
 longer has it). Disks attached from an existing image are skipped, and data
-disks the backup doesn't hold are left alone. Each disk goes through a temp
-file, so a failed copy leaves it untouched.
+disks the backup doesn't hold are left alone. Each disk is converted back to
+its own format (raw stays raw) through a temp file, so a failed copy leaves it
+untouched.
 
 **VM templates** are named `CreateVmRequest` specs in
 `state_dir/vm-templates.json` (separate from sandbox templates at

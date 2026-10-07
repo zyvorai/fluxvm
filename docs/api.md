@@ -170,7 +170,9 @@ Highlights:
   filesystems through QGA around the snapshot when the agent answers;
   `required` fails without it. `GET /v1/backups` lists backups with that
   metadata; `POST /v1/vms/{uuid}/restore-backup` copies one back into a
-  stopped VM.
+  stopped VM, in the disk's own format. Any engine, on default storage or a
+  `shared` disk file; a running VM can be backed up only on QEMU with default
+  storage.
 - `POST /v1/vm-templates/{name}/instantiate` goes through the same tenant,
   `created_by_token` and token-quota handling as `POST /v1/vms`. VM templates
   are separate from the sandbox `/v1/templates` routes.
@@ -410,8 +412,9 @@ native hypervisor accept only the host-namespace form** because they cannot take
 ### NIC hotplug (QEMU)
 
 `POST /v1/vms/{uuid}/hotplug/nic` (admin) attaches a NIC to a running VM, used by Secure Containers after
-a warm-pool claim (the pool template boots with `network.mode=none`). A VM on a `netns: true` tap is
-refused: it can't relaunch with extra NICs. Send **either** a bridged NIC:
+a warm-pool claim (the pool template boots with `network.mode=none`). On a `netns: true` VM, QEMU runs
+inside the namespace, so the daemon opens the new bridge tap and passes it over QMP (`getfd`); on
+relaunch every extra NIC's tap is inherited as `-netdev tap,fd=`. Send **either** a bridged NIC:
 
 ```json
 {"bridge": "fvbhab12cd", "mac": "02:00:00:00:00:01"}

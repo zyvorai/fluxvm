@@ -3,6 +3,10 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Backups on every engine.** `POST /v1/vms/{id}/backup` and `restore-backup` work for Cloud Hypervisor,
+  Firecracker and flux-vm VMs that are stopped, and for `storage: shared` disk files. A running VM still needs
+  QEMU on default storage (internal snapshot); others get "stop the VM first". A restore converts back to the
+  disk's own format (raw for everything but QEMU on default storage) instead of always writing qcow2.
 - **Live size after hotplug.** A CPU or memory hot-add records `fluxvm.dev/live-vcpus` /
   `fluxvm.dev/live-memory-mib` and `fluxvm.dev/hotplugged` on the VM (cleared on the next start). Hot-added
   VMs are refused as migration sources until restarted.
@@ -44,9 +48,18 @@
   Needs `tcpdump` on the host; the AppArmor profiles now allow it, `nsenter` and `network packet raw`.
 
 ### Fixed
-- **NIC hotplug on a netns VM is refused.** The hot-added NIC was recorded in `network.extra`, which a
-  `netns: true` VM can't relaunch with, so the next start or snapshot restore failed. Hot-add NICs to VMs on
-  host-bridge taps (`netns: false`).
+- **A NIC hot-added to a netns VM broke its next start.** The NIC was recorded in `network.extra`, which a
+  `netns: true` VM couldn't relaunch with, so the next start or snapshot restore failed. Extra NICs on a netns
+  QEMU VM are now host-bridge taps handed to QEMU as inherited file descriptors (QMP `getfd` at hot-add,
+  `-netdev tap,fd=` on every launch), so they also work at create. Other engines refuse netns + extra NICs at
+  create.
+- **Migrating after unplugging the last extra NIC failed** (receiver exited, "Broken pipe"): a VM launched
+  with extra NICs has its primary NIC on `hotplug-pcie-0`, which a receiver built from the NIC-less record
+  doesn't. Removing the last extra NIC now sets `fluxvm.dev/hotplugged`, so migration is refused until a restart.
+- **Descriptor hot-add right after create failed** with "connecting to QMP socket: No such file or directory":
+  the fd-passing QMP session now waits for QEMU's socket like every other QMP call.
+- **Relaunch after unplugging a middle NIC failed** with "extra NIC N is missing a bridge": the free slot an
+  unplug leaves (to keep later NICs on their PCIe ports) is now carried through instead of rejected.
 - **AppArmor profile blocked the eBPF dataplane.** The `fluxvm` and `fluxctl` profiles did not allow
   `bpftool` (or the `uname`/`basename` its Ubuntu wrapper runs), `/sys/fs/bpf` or the `bpf` /
   `perfmon` capabilities, so on an AppArmor host no VM could attach to the eBPF dataplane. Reinstall

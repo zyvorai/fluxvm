@@ -577,6 +577,7 @@ mod tests {
                 guest_ip: None,
                 guest_cidr: None,
                 gateway: None,
+                extra_tap_fds: Vec::new(),
             },
             guest_cid: None,
             vsock_socket: None,

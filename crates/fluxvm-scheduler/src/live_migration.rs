@@ -38,7 +38,8 @@ use uuid::Uuid;
 pub const MIGRATING_FROM_LABEL: &str = "fluxvm.dev/migrating-from";
 /// Label on an adopted VM: the source VM id it was migrated from.
 pub const MIGRATED_FROM_LABEL: &str = "fluxvm.dev/migrated-from";
-/// Set on a VM after a CPU/memory hot-add, cleared on the next start.
+/// Set on a VM after a CPU/memory hot-add or removing its last extra NIC,
+/// cleared on the next start.
 pub const HOTPLUGGED_LABEL: &str = "fluxvm.dev/hotplugged";
 /// Live vCPU / memory (MiB) after a hot-add, cleared on the next start.
 pub const LIVE_VCPUS_LABEL: &str = "fluxvm.dev/live-vcpus";
@@ -59,7 +60,7 @@ pub fn adopt_unsupported(record: &VmRecord) -> Option<String> {
     let req = &record.request;
     if record.labels.contains_key(HOTPLUGGED_LABEL) {
         return Some(
-            "VM has hot-added CPUs or memory; restart it before migrating (a fresh boot matches the receiver's device model)".into(),
+            "VM has hot-plugged CPUs, memory or NICs since it started; restart it before migrating (a fresh boot matches the receiver's device model)".into(),
         );
     }
     if record.backend != BackendKind::Qemu {

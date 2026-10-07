@@ -7,7 +7,8 @@
 //! A backup is either `<name>.qcow2` (root disk only) with a `<name>.qcow2.json`
 //! sidecar, or a directory `<name>/` holding `root.qcow2`, one `<disk>.qcow2`
 //! per data disk and `backup.json`. Every qcow2 is standalone (no backing
-//! file), so a restore is a plain copy.
+//! file), so a restore is a plain copy (converted back to the disk's own
+//! format: raw for every engine but QEMU on the default storage backend).
 
 use crate::{VmManager, audit_event};
 use anyhow::{Context, Result, bail};
@@ -86,6 +87,54 @@ fn dir_qcow2_bytes(dir: &Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+/// The format FluxVM opens the VM's root disk as.
+pub fn root_disk_format(vm: &VmRecord) -> String {
+    fluxvm_image::storage::disk_format(vm.backend, vm.request.storage)
+}
+
+/// A data disk's format, from its file name.
+pub fn data_disk_format(path: &Path) -> &'static str {
+    if path.extension().is_some_and(|x| x == "qcow2") {
+        "qcow2"
+    } else {
+        "raw"
+    }
+}
+
+/// Why a backup (or, with `restore`, a restore) of this VM can't run, if it
+/// can't. Backups read the disk file itself, so any engine works once the VM
+/// is stopped; a running VM is captured through an internal snapshot, which
+/// needs QEMU's qcow2 overlay. A restore always needs the VM stopped.
+pub fn backup_refusal(
+    backend: BackendKind,
+    storage: StorageBackend,
+    disk_is_file: bool,
+    status: VmStatus,
+    restore: bool,
+) -> Option<String> {
+    let what = if restore { "backup restore" } else { "backup" };
+    if !matches!(storage, StorageBackend::Default | StorageBackend::Shared) {
+        return Some(format!(
+            "{what} supports the default and shared storage backends only (this VM uses {storage:?})"
+        ));
+    }
+    if !disk_is_file {
+        return Some(format!("{what} needs the VM's disk to be a file"));
+    }
+    let live = matches!(status, VmStatus::Running | VmStatus::Paused);
+    if restore && !matches!(status, VmStatus::Stopped | VmStatus::Failed) {
+        return Some(format!(
+            "stop the VM before restoring a backup (status is {status:?})"
+        ));
+    }
+    if live && fluxvm_image::storage::disk_format(backend, storage) != "qcow2" {
+        return Some(format!(
+            "a live backup needs a QEMU VM on the default qcow2 storage; stop the VM first (status is {status:?})"
+        ));
+    }
+    None
 }
 
 /// The `(disk name, qcow2)` pairs a backup holds; `root` is the boot disk.
@@ -204,21 +253,24 @@ impl VmManager {
     /// image are skipped; their source is not the VM's to overwrite.
     pub async fn restore_backup(&self, id: Uuid, name: &str) -> Result<serde_json::Value> {
         let vm = self.get(id).await?;
-        if vm.backend != BackendKind::Qemu || vm.request.storage != StorageBackend::Default {
-            bail!("backup restore supports QEMU VMs on the default qcow2 storage backend only");
-        }
-        if !matches!(vm.status, VmStatus::Stopped | VmStatus::Failed) {
-            bail!(
-                "stop the VM before restoring a backup (status is {:?})",
-                vm.status
-            );
+        if let Some(why) = backup_refusal(
+            vm.backend,
+            vm.request.storage,
+            vm.disk.is_file(),
+            vm.status,
+            true,
+        ) {
+            bail!(why);
         }
         let path = self.backup_path(name)?;
         let mut restored = Vec::new();
         let mut skipped = Vec::new();
         for (disk, src) in backup_disks(&path)? {
             let dst = if disk == fluxvm_qemu::disks::ROOT_DISK {
-                vm.disk.clone()
+                self.copy_backup_disk(&src, &vm.disk, &root_disk_format(&vm))
+                    .await?;
+                restored.push(disk);
+                continue;
             } else {
                 if fluxvm_qemu::disks::validate_disk_name(&disk).is_err() {
                     skipped.push(serde_json::json!({"name": disk, "reason": "invalid disk name"}));
@@ -232,9 +284,9 @@ impl VmManager {
                         skipped.push(serde_json::json!({"name": disk, "reason": "attached from an existing image"}));
                         continue;
                     }
-                    Some((_, p)) if p.extension().is_some_and(|x| x == "qcow2") => p,
+                    Some((_, p)) if p.is_file() => p,
                     Some((_, p)) => {
-                        skipped.push(serde_json::json!({"name": disk, "reason": format!("not a qcow2 disk: {}", p.display())}));
+                        skipped.push(serde_json::json!({"name": disk, "reason": format!("not a disk file: {}", p.display())}));
                         continue;
                     }
                     None => {
@@ -244,7 +296,8 @@ impl VmManager {
                     }
                 }
             };
-            self.copy_backup_disk(&src, &dst).await?;
+            self.copy_backup_disk(&src, &dst, data_disk_format(&dst))
+                .await?;
             restored.push(disk);
         }
         audit_event(
@@ -259,14 +312,14 @@ impl VmManager {
         }))
     }
 
-    /// Copies a standalone backup qcow2 over `dst` via a temp file in the
-    /// same directory, so a failed copy leaves `dst` untouched.
-    async fn copy_backup_disk(&self, src: &Path, dst: &Path) -> Result<()> {
+    /// Copies a standalone backup qcow2 over `dst` as `format` via a temp
+    /// file in the same directory, so a failed copy leaves `dst` untouched.
+    async fn copy_backup_disk(&self, src: &Path, dst: &Path, format: &str) -> Result<()> {
         let mut tmp = dst.as_os_str().to_owned();
         tmp.push(".restore");
         let tmp = PathBuf::from(tmp);
         let out = tokio::process::Command::new(&self.cfg.qemu_img_binary)
-            .args(["convert", "-O", "qcow2"])
+            .args(["convert", "-f", "qcow2", "-O", format])
             .arg(src)
             .arg(&tmp)
             .output()
@@ -294,6 +347,33 @@ mod tests {
         for bad in ["", "..", ".hidden", "a/b", "x.qcow2.json", "a\\b"] {
             assert!(validate_backup_name(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn stopped_vms_back_up_on_every_engine_live_ones_only_on_qemu_qcow2() {
+        use BackendKind::*;
+        use StorageBackend::{Default, LvmThin, Shared};
+        for engine in [Qemu, CloudHypervisor, Firecracker, FluxVm] {
+            for storage in [Default, Shared] {
+                assert!(
+                    backup_refusal(engine, storage, true, VmStatus::Stopped, false).is_none(),
+                    "{engine:?} {storage:?}"
+                );
+                assert!(backup_refusal(engine, storage, true, VmStatus::Stopped, true).is_none());
+                assert!(backup_refusal(engine, storage, true, VmStatus::Running, true).is_some());
+            }
+        }
+        assert!(backup_refusal(Qemu, Default, true, VmStatus::Running, false).is_none());
+        for (engine, storage) in [
+            (Qemu, Shared),
+            (Firecracker, Default),
+            (CloudHypervisor, Default),
+        ] {
+            let why = backup_refusal(engine, storage, true, VmStatus::Running, false).unwrap();
+            assert!(why.contains("stop the VM first"), "{why}");
+        }
+        assert!(backup_refusal(Qemu, LvmThin, true, VmStatus::Stopped, false).is_some());
+        assert!(backup_refusal(Qemu, Shared, false, VmStatus::Stopped, false).is_some());
     }
 
     #[test]

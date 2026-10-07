@@ -56,6 +56,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             guest_ip: None,
             guest_cidr: None,
             gateway: None,
+            extra_tap_fds: Vec::new(),
         }),
         NetworkSpec::Tap {
             tap_name,
@@ -65,19 +66,23 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             netns: use_netns,
             ..
         } if *use_netns => {
-            if !extra.is_empty() {
-                bail!("Multus extra NICs require network.netns=false (host-bridge taps)");
-            }
-            let handle = netns::prepare(&cfg.state_dir, id, mac.as_deref())
-                .await
-                .context("preparing network namespace")?;
+            // Extra NICs are host-bridge taps; the VMM runs inside the netns and
+            // takes them as inherited fds (QEMU only; the scheduler refuses the rest).
+            let (prepared_extra, extra_fds) = prepare_netns_extras(id, extra).await?;
+            let handle = match netns::prepare(&cfg.state_dir, id, mac.as_deref()).await {
+                Ok(h) => h,
+                Err(e) => {
+                    release_extras(&prepared_extra, &extra_fds).await;
+                    return Err(e).context("preparing network namespace");
+                }
+            };
             Ok(PreparedNetwork {
                 spec: NetworkSpec::Tap {
                     tap_name: Some(handle.tap_name.clone()),
                     bridge: bridge.clone(),
                     mac: mac.clone(),
                     netns: true,
-                    extra: vec![],
+                    extra: prepared_extra,
                     direct: None,
                 },
                 tap_name: Some(handle.tap_name),
@@ -87,6 +92,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                 guest_ip: Some(handle.guest_ip),
                 guest_cidr: Some(handle.guest_cidr),
                 gateway: Some(handle.gateway),
+                extra_tap_fds: extra_fds,
             })
         }
         NetworkSpec::Tap {
@@ -244,6 +250,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                 guest_ip: None,
                 guest_cidr: None,
                 gateway: None,
+                extra_tap_fds: Vec::new(),
             })
         }
         NetworkSpec::Tap {
@@ -272,6 +279,10 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             }
             let mut prepared_extra: Vec<ExtraNic> = Vec::with_capacity(extra.len());
             for (i, nic) in extra.iter().enumerate() {
+                if is_free_slot(nic) {
+                    prepared_extra.push(nic.clone());
+                    continue;
+                }
                 if nic.bridge.is_empty() {
                     let _ = cleanup_tap(&tap).await;
                     for prev in &prepared_extra {
@@ -321,6 +332,7 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                 guest_ip: None,
                 guest_cidr: None,
                 gateway: None,
+                extra_tap_fds: Vec::new(),
             })
         }
         NetworkSpec::Macvtap {
@@ -390,12 +402,91 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
                     guest_ip: None,
                     guest_cidr: None,
                     gateway: None,
+                    extra_tap_fds: Vec::new(),
                 }),
                 Err(e) => {
                     let _ = cleanup_macvtap(&name).await;
                     Err(e)
                 }
             }
+        }
+    }
+}
+
+/// Host-bridge taps for a netns VM's extra NICs, each with an fd the VMM
+/// inherits. Direct (bridge-less) extras aren't supported next to a netns NIC.
+async fn prepare_netns_extras(
+    id: Uuid,
+    extra: &[ExtraNic],
+) -> Result<(Vec<ExtraNic>, Vec<Option<i32>>)> {
+    let mut prepared: Vec<ExtraNic> = Vec::with_capacity(extra.len());
+    let mut fds: Vec<Option<i32>> = Vec::with_capacity(extra.len());
+    for (i, nic) in extra.iter().enumerate() {
+        if is_free_slot(nic) {
+            prepared.push(nic.clone());
+            fds.push(None);
+            continue;
+        }
+        match prepare_netns_extra(id, i, nic).await {
+            Ok((etap, fd)) => {
+                prepared.push(ExtraNic {
+                    bridge: nic.bridge.clone(),
+                    mac: nic.mac.clone(),
+                    tap_name: Some(etap),
+                    direct: None,
+                });
+                fds.push(Some(fd));
+            }
+            Err(e) => {
+                release_extras(&prepared, &fds).await;
+                return Err(e);
+            }
+        }
+    }
+    Ok((prepared, fds))
+}
+
+/// A slot left by an unplug: keeps later NICs on their PCIe ports.
+fn is_free_slot(n: &ExtraNic) -> bool {
+    n.tap_name.is_none() && n.direct.is_none() && n.bridge.is_empty()
+}
+
+fn netns_extra_tap_name(id: Uuid, i: usize, nic: &ExtraNic) -> String {
+    nic.tap_name
+        .clone()
+        .unwrap_or_else(|| format!("x{i}{}", &id.simple().to_string()[..7]))
+}
+
+async fn prepare_netns_extra(id: Uuid, i: usize, nic: &ExtraNic) -> Result<(String, i32)> {
+    if nic.direct.is_some() {
+        bail!("extra NIC {i}: direct NICs need network.netns=false");
+    }
+    if nic.bridge.is_empty() {
+        bail!("extra NIC {i} is missing a bridge");
+    }
+    let etap = netns_extra_tap_name(id, i, nic);
+    if etap.len() > 15 {
+        bail!("extra tap interface name must be <= 15 characters");
+    }
+    add_bridge_tap(&etap, &nic.bridge)
+        .await
+        .with_context(|| format!("preparing extra NIC {i}"))?;
+    match direct::open_host_tap(&etap) {
+        Ok(fd) => Ok((etap, fd)),
+        Err(e) => {
+            let _ = cleanup_tap(&etap).await;
+            Err(e)
+        }
+    }
+}
+
+async fn release_extras(extra: &[ExtraNic], fds: &[Option<i32>]) {
+    for fd in fds.iter().flatten() {
+        fluxvm_core::process::close_fd(*fd);
+    }
+    for nic in extra {
+        if let Some(name) = &nic.tap_name {
+            let _ = cleanup_tap(name).await;
         }
     }
 }
@@ -460,6 +551,15 @@ pub async fn cleanup(
     // cleanup_tap/cleanup_macvtap for a namespaced tap would fail anyway
     // (it doesn't exist in the host's own namespace to delete).
     if let Some(ns) = netns_name {
+        // Extra NICs of a netns VM are host-bridge taps outside the namespace.
+        if let NetworkSpec::Tap { extra, .. } = spec {
+            for (i, nic) in extra.iter().enumerate().filter(|(_, n)| !is_free_slot(n)) {
+                let name = netns_extra_tap_name(id, i, nic);
+                if let Err(e) = cleanup_tap(&name).await {
+                    tracing::warn!(tap = name, "removing extra NIC tap failed: {e:#}");
+                }
+            }
+        }
         return netns::cleanup(state_dir, id, ns).await;
     }
     match spec {

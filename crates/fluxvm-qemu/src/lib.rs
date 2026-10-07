@@ -323,12 +323,12 @@ pub fn build_args(
                 if let Some(m) = &nic.mac {
                     dev.push_str(&format!(",mac={m}"));
                 }
-                a.extend([
-                    "-netdev".into(),
-                    format!("tap,id=net{id},ifname={tap},script=no,downscript=no"),
-                    "-device".into(),
-                    dev,
-                ]);
+                // A netns VMM can't see host-bridge taps; it inherits an fd for each.
+                let netdev = match ctx.network.extra_tap_fds.get(i).copied().flatten() {
+                    Some(fd) => format!("tap,id=net{id},fd={fd}"),
+                    None => format!("tap,id=net{id},ifname={tap},script=no,downscript=no"),
+                };
+                a.extend(["-netdev".into(), netdev, "-device".into(), dev]);
             }
         }
         NetworkSpec::Macvtap { mac, .. } => {
@@ -471,9 +471,7 @@ impl VmBackend for QemuBackend {
             match spawn_virtiofsd_instances(cfg, req, ctx).await {
                 Ok(v) => v,
                 Err(e) => {
-                    if let Some(fd) = ctx.network.tap_fd {
-                        fluxvm_core::process::close_fd(fd);
-                    }
+                    ctx.network.close_launch_fds();
                     return Err(e);
                 }
             };
@@ -482,18 +480,14 @@ impl VmBackend for QemuBackend {
         if req.secure_boot.unwrap_or(false) {
             if effective_firmware.is_none() {
                 kill_pids(&virtiofsd_pids);
-                if let Some(fd) = ctx.network.tap_fd {
-                    fluxvm_core::process::close_fd(fd);
-                }
+                ctx.network.close_launch_fds();
                 anyhow::bail!(
                     "secure_boot requires UEFI firmware (req.firmware, or Config::qemu_ovmf_code as a host default)"
                 );
             }
             if cfg.qemu_ovmf_vars_template.is_none() {
                 kill_pids(&virtiofsd_pids);
-                if let Some(fd) = ctx.network.tap_fd {
-                    fluxvm_core::process::close_fd(fd);
-                }
+                ctx.network.close_launch_fds();
                 anyhow::bail!(
                     "secure_boot requires Config::qemu_ovmf_vars_template (a vars store with enrolled UEFI CA keys) to be configured"
                 );
@@ -509,9 +503,7 @@ impl VmBackend for QemuBackend {
             if !vars_path.exists() {
                 let Some(template) = &cfg.qemu_ovmf_vars_template else {
                     kill_pids(&virtiofsd_pids);
-                    if let Some(fd) = ctx.network.tap_fd {
-                        fluxvm_core::process::close_fd(fd);
-                    }
+                    ctx.network.close_launch_fds();
                     anyhow::bail!(
                         "firmware is set but Config::qemu_ovmf_vars_template is not configured -- see docs/secure-boot-tpm.md"
                     );
@@ -521,9 +513,7 @@ impl VmBackend for QemuBackend {
                     .context("copying OVMF vars template")
                 {
                     kill_pids(&virtiofsd_pids);
-                    if let Some(fd) = ctx.network.tap_fd {
-                        fluxvm_core::process::close_fd(fd);
-                    }
+                    ctx.network.close_launch_fds();
                     return Err(e);
                 }
             }
@@ -534,9 +524,7 @@ impl VmBackend for QemuBackend {
                 Ok(pid) => Some(pid),
                 Err(e) => {
                     kill_pids(&virtiofsd_pids);
-                    if let Some(fd) = ctx.network.tap_fd {
-                        fluxvm_core::process::close_fd(fd);
-                    }
+                    ctx.network.close_launch_fds();
                     return Err(e);
                 }
             }
@@ -553,11 +541,9 @@ impl VmBackend for QemuBackend {
             ctx.network.netns.as_deref(),
         )
         .await;
-        // The child inherits the macvtap fd across exec (or spawn failed and
-        // there's nothing to inherit); either way the parent's copy is done.
-        if let Some(fd) = ctx.network.tap_fd {
-            fluxvm_core::process::close_fd(fd);
-        }
+        // The child inherits the tap fds across exec (or spawn failed and
+        // there's nothing to inherit); either way the parent's copies are done.
+        ctx.network.close_launch_fds();
         let child = match spawned {
             Ok(c) => c,
             Err(e) => {
@@ -860,6 +846,7 @@ mod tests {
                 guest_ip: None,
                 guest_cidr: None,
                 gateway: None,
+                extra_tap_fds: Vec::new(),
             },
             guest_cid: None,
             vsock_socket: None,
@@ -1170,6 +1157,35 @@ mod tests {
         assert!(!args.iter().any(|a| a.contains("ifname=")), "{args:?}");
         assert!(args.iter().any(|a| {
             a.starts_with("virtio-net-pci,netdev=net0") && a.contains("mac=02:00:00:00:00:01")
+        }));
+    }
+
+    #[test]
+    fn netns_extra_nics_are_attached_by_inherited_fd() {
+        let mut c = ctx();
+        c.network.spec = NetworkSpec::Tap {
+            tap_name: Some("tap0".into()),
+            bridge: None,
+            mac: None,
+            netns: true,
+            direct: None,
+            extra: vec![fluxvm_core::model::ExtraNic {
+                bridge: "br0".into(),
+                mac: Some("02:00:00:00:00:02".into()),
+                tap_name: Some("hn1abcdef".into()),
+                direct: None,
+            }],
+        };
+        c.network.extra_tap_fds = vec![Some(11)];
+        let args = build_args(&cfg(), &req(2048), &c, &[]).unwrap();
+        assert!(args.iter().any(|a| a == "tap,id=net1,fd=11"), "{args:?}");
+        assert!(
+            !args.iter().any(|a| a.contains("ifname=hn1abcdef")),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|a| {
+            a.starts_with("virtio-net-pci,netdev=net1,id=nic1,bus=hotplug-pcie-1")
+                && a.contains("mac=02:00:00:00:00:02")
         }));
     }
 

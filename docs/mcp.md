@@ -41,7 +41,7 @@ Write tools are offered only with `--allow-write`:
 | `vm_capture` | A 1-30 s tcpdump capture (optional `filter`). With `output`, waits and writes the pcap to that path on the machine running fluxctl; otherwise returns the token | `POST` / `GET /v1/vms/{id}/network/capture[/{token}]` |
 | `vm_fork` | Fork a running flux-vm VM into `count` (1-32) running children sharing its memory snapshot | `POST /v1/vms/{id}/fork` |
 | `image_import` | Import an OVA/OVF/VMDK from a server path as raw disks with offline virtio repair | `POST /v1/images/import` |
-| `vm_backup` | Back up a QEMU VM (guest fsfreeze when the agent answers) | `POST /v1/vms/{id}/backup` |
+| `vm_backup` | Back up a VM (running: QEMU only; guest fsfreeze when the agent answers) | `POST /v1/vms/{id}/backup` |
 | `backup_list` | Backups with source VM, size and quiesced flag | `GET /v1/backups` |
 | `backup_restore` | Restore a backup into a stopped VM in place | `POST /v1/vms/{id}/restore-backup` |
 | `pool_claim` | Claim a booted VM from a warm `pool` (optional `name`, `ttl_seconds`) | `POST /v1/pools/{name}/claim` |

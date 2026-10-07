@@ -108,6 +108,27 @@ fn open_tap_in_netns_blocking(netns_path: &str, name: &str) -> Result<i32> {
     Ok(fd)
 }
 
+/// Opens an exec-inheritable (no `O_CLOEXEC`) fd bound to the existing
+/// host-namespace tap `name`, for a VMM that runs in a private netns and so
+/// can't open it by name.
+pub fn open_host_tap(name: &str) -> Result<i32> {
+    let mut ifr = ifreq_for(name)?;
+    let tun = CString::new("/dev/net/tun").expect("static path has no NUL");
+    // SAFETY: valid NUL-terminated path; no O_CLOEXEC so the fd survives exec.
+    let fd = unsafe { libc::open(tun.as_ptr(), libc::O_RDWR) };
+    if fd < 0 {
+        bail!("opening /dev/net/tun: {}", std::io::Error::last_os_error());
+    }
+    // SAFETY: `ifr` is a live, correctly sized `struct ifreq`; `fd` is a tun fd.
+    if unsafe { libc::ioctl(fd, TUNSETIFF, &mut ifr as *mut IfReqFlags) } != 0 {
+        let err = std::io::Error::last_os_error();
+        // SAFETY: `fd` was opened above and not yet handed to anyone.
+        unsafe { libc::close(fd) };
+        bail!("TUNSETIFF {name}: {err}");
+    }
+    Ok(fd)
+}
+
 /// Async wrapper: runs the `setns` work on its own OS thread.
 async fn open_tap_in_netns(netns_path: &str, name: &str) -> Result<i32> {
     let (p, n) = (netns_path.to_string(), name.to_string());

@@ -647,8 +647,25 @@ fn send_with_fd(
 fn session_blocking(socket: &Path, steps: Vec<Step>, timeout: Duration) -> Result<Vec<Value>> {
     use std::io::{BufRead, BufReader as StdBufReader, Write};
     use std::os::fd::AsRawFd;
-    let stream = std::os::unix::net::UnixStream::connect(socket)
-        .with_context(|| format!("connecting to QMP socket {}", socket.display()))?;
+    // Like `handshake_retrying`: right after a launch QEMU may not have created the socket yet.
+    let deadline = std::time::Instant::now() + timeout;
+    let mut delay = Duration::from_millis(20);
+    let stream = loop {
+        match std::os::unix::net::UnixStream::connect(socket) {
+            Ok(s) => break s,
+            Err(e)
+                if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused)
+                    && std::time::Instant::now() + delay < deadline =>
+            {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_millis(500));
+            }
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("connecting to QMP socket {}", socket.display()));
+            }
+        }
+    };
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let mut writer = stream.try_clone()?;
@@ -1561,6 +1578,24 @@ mod fd_session_tests {
             seen[1].1["fd"], "fluxvm-tap1",
             "the port index is part of the names"
         );
+    }
+
+    #[tokio::test]
+    async fn a_session_waits_for_a_socket_that_appears_after_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("qmp.sock");
+        let path = sock.clone();
+        let server = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            serve(StdListener::bind(&path).unwrap(), false)
+                .join()
+                .unwrap()
+        });
+        let file = std::fs::File::open("/dev/null").unwrap();
+        hotplug_nic_fd(&sock, file.as_raw_fd(), None, 1, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(server.join().unwrap().len(), 3);
     }
 
     #[tokio::test]
