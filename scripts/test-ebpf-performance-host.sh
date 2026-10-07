@@ -13,3 +13,19 @@ if [[ "${SANITIZE:-0}" == 1 ]]; then
 fi
 "$CC" "${FLAGS[@]}" "$ROOT/tests/ebpf-host/policy.c" -o "$WORK/policy"
 "$WORK/policy"
+
+# Copy authoritative production struct declarations into the host fixture.
+python3 - "$ROOT" "$WORK" <<'PYFIXTURE'
+from pathlib import Path
+import sys
+root, work = map(Path, sys.argv[1:])
+source = (root / "bpf/fluxvm_tc.bpf.c").read_text()
+blocks = []
+for name in ("flow_key", "flow_value", "flow_event"):
+    start = source.index("struct " + name + " {")
+    end = source.index("\n};", start) + 3
+    blocks.append(source[start:end])
+(work / "flow-fixture.h").write_text("\n".join(blocks) + "\n")
+PYFIXTURE
+"$CC" "${FLAGS[@]}" -I"$WORK" "$ROOT/tests/ebpf-host/telemetry.c" -o "$WORK/telemetry"
+"$WORK/telemetry"

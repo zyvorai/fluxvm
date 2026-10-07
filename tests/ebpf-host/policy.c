@@ -21,7 +21,7 @@ static struct fluxvm_pod_rule_hit_key last_hit;
 static __u64 exact_mask, wildcard_mask;
 static __u8 packet_proto;
 static unsigned index_lookups, rule_lookups;
-static int policy_present = 1;
+static int policy_present = 1, exact_present = 1, wildcard_present = 1;
 
 static void *bpf_map_lookup_elem(const void *map, const void *key)
 {
@@ -35,8 +35,8 @@ static void *bpf_map_lookup_elem(const void *map, const void *key)
     if (map == &fluxvm_pridx) {
         index_lookups++;
         const struct fluxvm_pod_rule_index_key *k = key;
-        if (k->protocol == 0) return &wildcard_mask;
-        return k->protocol == packet_proto ? &exact_mask : NULL;
+        if (k->protocol == 0) return wildcard_present ? &wildcard_mask : NULL;
+        return exact_present && k->protocol == packet_proto ? &exact_mask : NULL;
     }
     if (map == &fluxvm_ppstat) return &stats;
     if (map == &fluxvm_prhit) {
@@ -117,6 +117,8 @@ static void scan_equivalence(void)
             FLUXVM_PSPOL_EGRESS_ISOLATED | FLUXVM_PSPOL_INGRESS_ISOLATED;
         if (trial & 16) policy.flags |= FLUXVM_PSPOL_AUDIT;
         policy.reserved0 = count;
+        exact_present = trial % 17 != 0;
+        wildcard_present = trial % 19 != 0;
         exact_mask = ((__u64)random32() << 32) | random32();
         wildcard_mask = ((__u64)random32() << 32) | random32();
         if (trial % 10 == 0) exact_mask = wildcard_mask = 0;
@@ -125,7 +127,8 @@ static void scan_equivalence(void)
         int audit = !!(policy.flags & FLUXVM_PSPOL_AUDIT);
         int expected = audit ? FLUXVM_POD_VERDICT_AUDIT : FLUXVM_POD_VERDICT_DENY;
         __u32 expected_slot = FLUXVM_POD_RULE_MISS;
-        __u64 mask = wildcard_mask | (packet_proto ? exact_mask : 0);
+        __u64 mask = (wildcard_present ? wildcard_mask : 0) |
+            (packet_proto && exact_present ? exact_mask : 0);
         for (unsigned i = 0; i < 64; i++) {
             rules[i] = (struct fluxvm_pod_rule){.pod_id=7, .direction=direction,
                 .family=family, .protocol=i % 4 == 0 ? 0 : 6,
