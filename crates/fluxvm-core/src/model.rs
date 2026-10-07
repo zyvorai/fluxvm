@@ -290,6 +290,13 @@ pub enum StorageBackend {
     /// credentials come from node config (`storage.ceph_user`/`ceph_conf`),
     /// never from the request.
     CephRbdInPlace,
+    /// `request.image` is a raw disk (file or block device) on storage every
+    /// node can open, such as NFS, a clustered filesystem or a multipath LUN,
+    /// used in place with no clone. FluxVM never deletes it. A lock file next
+    /// to the disk (`<disk>.fluxvm-lock`) names the VM that has it open, so a
+    /// second VM cannot start on it while the first runs. This is what HA
+    /// re-create and live migration use: the disk outlives any one node.
+    Shared,
 }
 
 impl StorageBackend {
@@ -652,9 +659,13 @@ pub struct MigrationStatus {
 
 /// Target-side QEMU incoming receiver. The caller picks the node; this
 /// record is only the runtime reservation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MigrationReceiverRequest {
+    /// Required unless `record` is set.
+    #[serde(default)]
     pub vcpus: u8,
+    /// Required unless `record` is set.
+    #[serde(default)]
     pub memory_mib: u64,
     /// Empty or `host`. Other CPU models are rejected.
     #[serde(default)]
@@ -663,6 +674,8 @@ pub struct MigrationReceiverRequest {
     #[serde(default)]
     pub machine: String,
     /// Shared disk both hosts already open. The receiver does not copy it.
+    /// Required unless `record` is set.
+    #[serde(default)]
     pub disk: PathBuf,
     #[serde(default = "default_disk_format")]
     pub disk_format: String,
@@ -680,6 +693,14 @@ pub struct MigrationReceiverRequest {
     /// (server endpoint) instead of a plain socket.
     #[serde(default)]
     pub tls: Option<MigrationTlsSpec>,
+    /// The source VM's record (`GET /v1/vms/{id}` on the source node). When
+    /// set, the receiver is launched from that record's own device model
+    /// (network, seed, agent vsock, firmware) instead of a bare disk-only
+    /// QEMU, so a real FluxVM VM can migrate into it, and it can later be
+    /// adopted as a first-class VM. `vcpus`, `memory_mib`, `disk` and
+    /// `disk_format` are then taken from the record.
+    #[serde(default)]
+    pub record: Option<Box<VmRecord>>,
 }
 
 fn default_disk_format() -> String {
@@ -713,6 +734,11 @@ pub struct MigrationReceiver {
     /// TLS material supplied at create time; applied on activate.
     #[serde(default)]
     pub tls: Option<MigrationTlsSpec>,
+    /// Set for receivers created with a source `record`: the source VM's id.
+    /// Such a receiver is also a `Creating` VM record with the receiver's id,
+    /// which `adopt` turns into a running VM.
+    #[serde(default)]
+    pub source_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1688,6 +1714,7 @@ mod migration_tls_model_tests {
             cgroup_path: None,
             vcpus: 1,
             memory_mib: 512,
+            source_id: None,
             tls: Some(MigrationTlsSpec {
                 ca_path: "a".into(),
                 cert_path: "b".into(),

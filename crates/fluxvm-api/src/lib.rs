@@ -387,10 +387,15 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/migration/start", post(start_migration))
         .route("/v1/vms/{id}/migration/status", get(migration_status))
         .route("/v1/vms/{id}/migration/cancel", post(cancel_migration))
+        .route("/v1/vms/{id}/migration/finish", post(finish_migration))
         .route("/v1/migration/receivers", post(create_migration_receiver))
         .route(
             "/v1/migration/receivers/{id}/activate",
             post(activate_migration_receiver),
+        )
+        .route(
+            "/v1/migration/receivers/{id}/adopt",
+            post(adopt_migration_receiver),
         )
         .route(
             "/v1/migration/receivers/{id}",
@@ -842,14 +847,29 @@ fn backend_label(b: BackendKind) -> &'static str {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct CreateVmQuery {
+    /// `storage: shared` only: break the disk's lock first. For a caller that
+    /// has fenced the previous holder's node (HA re-create).
+    #[serde(default)]
+    shared_takeover: bool,
+}
+
 async fn create_vm(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,
     actor: Option<Extension<AuditActor>>,
     token_tenant: Option<Extension<TokenTenant>>,
+    Query(q): Query<CreateVmQuery>,
     Json(req): Json<CreateVmRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
+    if q.shared_takeover {
+        if req.storage != fluxvm_core::model::StorageBackend::Shared {
+            return Err(anyhow::anyhow!("shared_takeover applies to storage=shared only").into());
+        }
+        m.break_shared_disk_lock(&req.image)?;
+    }
     Ok((
         StatusCode::CREATED,
         Json(create_vm_as(&m, actor, token_tenant, req).await?),
@@ -1903,6 +1923,45 @@ async fn activate_migration_receiver(
 ) -> ApiResult<Json<fluxvm_core::model::MigrationReceiver>> {
     require_admin(role)?;
     Ok(Json(m.activate_migration_receiver(id, &req.token).await?))
+}
+
+/// Source side of a completed migration: removes the paused source VM (the
+/// shared disk stays). 409 while the migration is still in flight.
+async fn finish_migration(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.finish_migration(id).await.map_err(|e| {
+        let mut err = ApiError::from(e);
+        if err.message.contains("has not completed") {
+            err.status = StatusCode::CONFLICT;
+        }
+        err
+    })?;
+    Ok(Json(json!({"finished": id})))
+}
+
+/// Target side: turns a completed adopt-mode receiver into a VM (same id as
+/// the receiver, the source's name). 409 until the incoming migration is done.
+async fn adopt_migration_receiver(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<fluxvm_core::model::MigrationReceiverActivate>,
+) -> ApiResult<Json<VmRecord>> {
+    require_admin(role)?;
+    m.adopt_migration_receiver(id, &req.token)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            let mut err = ApiError::from(e);
+            if err.message.contains("has not completed") {
+                err.status = StatusCode::CONFLICT;
+            }
+            err
+        })
 }
 
 async fn delete_migration_receiver(
@@ -3628,8 +3687,72 @@ async fn serial_console(
     ws: axum::extract::ws::WebSocketUpgrade,
 ) -> ApiResult<Response> {
     require_admin(role)?;
+    let record = m.get(id).await?;
+    if record.backend != BackendKind::Qemu {
+        // Only QEMU has an interactive serial socket; every other backend's
+        // console output is captured into `log_path`, so stream that read-only.
+        if record.jail_path.is_some() {
+            return Err(anyhow::anyhow!(
+                "VM {id} runs under the Firecracker jailer, which disables the serial UART"
+            )
+            .into());
+        }
+        let file = tokio::fs::File::open(&record.log_path).await.map_err(|e| {
+            anyhow::anyhow!("opening console log {}: {e}", record.log_path.display())
+        })?;
+        return Ok(ws.on_upgrade(move |socket| relay_log_tail(socket, file)));
+    }
     let stream = m.open_serial(id).await?;
     Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
+/// Bytes of existing console output replayed before following new output.
+const SERIAL_LOG_REPLAY_BYTES: u64 = 64 * 1024;
+
+/// Read-only serial for non-QEMU backends: replay the tail of the console log,
+/// then follow it. Raw byte chunks (not lines) keep ANSI escapes and bare CRs
+/// intact. Inbound frames are discarded; Close ends the session.
+async fn relay_log_tail(socket: axum::extract::ws::WebSocket, mut file: tokio::fs::File) {
+    use axum::extract::ws::Message;
+    use futures::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let drain = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    };
+    let follow = async {
+        if let Ok(meta) = file.metadata().await {
+            let start = meta.len().saturating_sub(SERIAL_LOG_REPLAY_BYTES);
+            if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                return;
+            }
+        }
+        let mut buf = vec![0u8; 8192];
+        loop {
+            match file.read(&mut buf).await {
+                Ok(0) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
+                Ok(n) => {
+                    if ws_tx
+                        .send(Message::Binary(buf[..n].to_vec().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    };
+    tokio::select! {
+        _ = drain => {}
+        _ = follow => {}
+    }
 }
 
 async fn relay_serial(socket: axum::extract::ws::WebSocket, stream: tokio::net::UnixStream) {
@@ -4761,6 +4884,64 @@ mod tests {
             .await;
             assert_eq!(st, StatusCode::CONFLICT, "{msg}");
             assert!(msg.contains("agent"), "{msg}");
+        }
+
+        #[tokio::test]
+        async fn non_qemu_serial_streams_the_console_log_read_only() {
+            use futures::{SinkExt, StreamExt};
+            use tokio::io::AsyncWriteExt;
+            use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+            let m = manager(AuthConfig::default());
+            let logdir = tempfile::tempdir().unwrap();
+            let log = logdir.path().join("console.log");
+            std::fs::write(&log, b"boot: hello\r\n").unwrap();
+            let mut vm = fixture(BackendKind::CloudHypervisor, VmStatus::Running, false);
+            vm.log_path = log.clone();
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let mut jailed = fixture(BackendKind::Firecracker, VmStatus::Running, false);
+            jailed.jail_path = Some(PathBuf::from("/srv/jailer/x"));
+            jailed.log_path = log.clone();
+            let jid = jailed.id;
+            m.store.insert(jailed).await.unwrap();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let app = router(m);
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+            let (mut ws, _) =
+                tokio_tungstenite::connect_async(format!("ws://{addr}/v1/vms/{id}/serial"))
+                    .await
+                    .unwrap();
+            async fn next_text<S>(ws: &mut S) -> String
+            where
+                S: futures::Stream<Item = Result<WsMessage, tokio_tungstenite::tungstenite::Error>>
+                    + Unpin,
+            {
+                match tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await {
+                    Ok(Some(Ok(WsMessage::Binary(b)))) => String::from_utf8_lossy(&b).to_string(),
+                    other => panic!("expected a binary frame, got {other:?}"),
+                }
+            }
+            assert_eq!(next_text(&mut ws).await, "boot: hello\r\n");
+            // Input is ignored rather than written anywhere.
+            ws.send(WsMessage::Text("ls\n".into())).await.unwrap();
+            let mut f = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&log)
+                .await
+                .unwrap();
+            f.write_all(b"login: ").await.unwrap();
+            f.flush().await.unwrap();
+            assert_eq!(next_text(&mut ws).await, "login: ");
+            assert_eq!(std::fs::read(&log).unwrap(), b"boot: hello\r\nlogin: ");
+
+            let err = tokio_tungstenite::connect_async(format!("ws://{addr}/v1/vms/{jid}/serial"))
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("400"), "{err}");
         }
 
         #[tokio::test]

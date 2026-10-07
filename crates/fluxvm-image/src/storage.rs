@@ -65,24 +65,7 @@ pub async fn provision(
         StorageBackend::Default => {
             clone_for_vm(cfg, base, vmm, disk_out, size_gib).await?;
             if let Some(token) = agent_token {
-                if vmm == BackendKind::FluxVm
-                    && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
-                {
-                    let disk = disk_out.to_path_buf();
-                    let token = token.to_owned();
-                    tokio::task::spawn_blocking(move || {
-                        crate::raw_ext4::write_file(
-                            &disk,
-                            fluxvm_guest_protocol::TOKEN_FILE_PATH,
-                            token.as_bytes(),
-                            0o600,
-                        )
-                    })
-                    .await
-                    .context("native KVM token injection worker panicked")??;
-                } else {
-                    crate::inject_guest_agent_token(disk_out, token).await?;
-                }
+                inject_token(cfg, vmm, disk_out, token).await?;
             }
             Ok(ProvisionedDisk {
                 disk: disk_out.to_path_buf(),
@@ -99,7 +82,91 @@ pub async fn provision(
         StorageBackend::CephRbdInPlace => {
             provision_ceph_rbd_in_place(cfg, base, vmm, agent_token).await
         }
+        StorageBackend::Shared => provision_shared(cfg, base, vmm, agent_token).await,
     }
+}
+
+async fn inject_token(cfg: &Config, vmm: BackendKind, disk: &Path, token: &str) -> Result<()> {
+    if vmm == BackendKind::FluxVm && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm {
+        let disk = disk.to_path_buf();
+        let token = token.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::raw_ext4::write_file(
+                &disk,
+                fluxvm_guest_protocol::TOKEN_FILE_PATH,
+                token.as_bytes(),
+                0o600,
+            )
+        })
+        .await
+        .context("native KVM token injection worker panicked")??;
+        Ok(())
+    } else {
+        crate::inject_guest_agent_token(disk, token).await
+    }
+}
+
+/// qcow2 header magic; `storage=shared` opens the disk as raw.
+const QCOW2_MAGIC: &[u8; 4] = b"QFI\xfb";
+
+/// Checks a `StorageBackend::Shared` disk without touching it: an absolute
+/// path to an existing raw file or block device.
+pub fn validate_shared_disk(disk: &Path) -> Result<()> {
+    use std::os::unix::fs::FileTypeExt;
+    if !disk.is_absolute() {
+        bail!(
+            "storage=shared needs an absolute disk path (got {})",
+            disk.display()
+        );
+    }
+    let meta = std::fs::metadata(disk)
+        .with_context(|| format!("storage=shared disk {} is not reachable", disk.display()))?;
+    let ft = meta.file_type();
+    if ft.is_block_device() {
+        return Ok(());
+    }
+    if !ft.is_file() {
+        bail!(
+            "storage=shared disk {} must be a regular file or a block device",
+            disk.display()
+        );
+    }
+    let mut magic = [0u8; 4];
+    if let Ok(mut f) = std::fs::File::open(disk) {
+        use std::io::Read;
+        if f.read_exact(&mut magic).is_ok() && &magic == QCOW2_MAGIC {
+            bail!(
+                "storage=shared opens the disk as raw; {} is qcow2 (convert it with qemu-img convert -O raw)",
+                disk.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `StorageBackend::Shared`: the disk is `base` itself. Nothing is cloned and
+/// nothing here is ever deleted; only the guest-agent token is written into it.
+async fn provision_shared(
+    cfg: &Config,
+    base: &Path,
+    vmm: BackendKind,
+    agent_token: Option<&str>,
+) -> Result<ProvisionedDisk> {
+    if vmm == BackendKind::Firecracker && cfg.jailer.enabled {
+        bail!(
+            "storage=shared is not supported under the Firecracker jailer (it hardlinks the disk into a per-VM chroot); use direct Firecracker, QEMU, or Cloud Hypervisor"
+        );
+    }
+    validate_shared_disk(base)?;
+    if let Some(token) = agent_token {
+        inject_token(cfg, vmm, base, token).await?;
+    }
+    Ok(ProvisionedDisk {
+        disk: base.to_path_buf(),
+        lvm_lv: None,
+        nbd_export: None,
+        nbd_pid: None,
+    })
 }
 
 async fn provision_lvm_thin(

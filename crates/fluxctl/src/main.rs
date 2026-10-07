@@ -3274,6 +3274,7 @@ async fn main() -> Result<()> {
                         listen_port,
                         expires_in_seconds,
                         tls: None,
+                        record: None,
                     };
                     println!(
                         "{}",

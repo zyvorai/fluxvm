@@ -198,6 +198,15 @@ pub async fn activate(qmp_socket: &Path, uri: &str, tls: Option<&MigrationTlsSpe
     Ok(())
 }
 
+/// QMP `query-status` run state (`inmigrate`, `running`, `paused`, ...).
+pub async fn run_state(qmp_socket: &Path) -> Result<String> {
+    let v = qmp::execute(qmp_socket, "query-status", None, ACTIVATE_TIMEOUT).await?;
+    v.get("status")
+        .and_then(|s| s.as_str())
+        .map(String::from)
+        .context("query-status returned no status")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,6 +3,16 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Adoptable migration receivers.** `POST /v1/migration/receivers` takes the source VM's `record` and
+  launches the receiver from that record's own device model (network, seed, vsock, firmware), with its own
+  workspace, tap/netns and CID, so it works host-to-host or on one node. `POST
+  /v1/migration/receivers/{id}/adopt` turns it into a running VM once the incoming side finishes, and
+  `POST /v1/vms/{id}/migration/finish` removes the paused source. See `docs/runtime-boundary.md`.
+- **`storage: shared`.** A raw file or block device on shared storage used in place, never deleted,
+  guarded by `<disk>.fluxvm-lock` so two VMs cannot run on it at once. `POST /v1/vms?shared_takeover=true`
+  breaks the lock after fencing the previous node (HA re-create).
+- **Read-only serial for every backend.** `GET /v1/vms/{id}/serial` on Cloud Hypervisor, Firecracker and
+  flux-vm streams `console.log` (last 64 KiB, then follow); QEMU keeps the interactive socket.
 - **MCP server for AI agents.** `fluxctl mcp serve` speaks the Model Context Protocol over stdio, so
   Hermes Agent and other MCP clients can list and inspect VMs, host readiness, VM-edge network data
   and console logs through the REST API. `--allow-write` adds `vm_power` and `vm_capture`; without it

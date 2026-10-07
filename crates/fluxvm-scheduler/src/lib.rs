@@ -27,8 +27,11 @@ pub mod changes;
 pub mod confidential;
 pub mod events;
 pub mod fork;
+pub mod live_migration;
+mod migration_relay;
 pub mod procbox_sandbox;
 mod sandbox;
+pub mod shared_disk;
 pub mod templates;
 pub mod vm_restore;
 pub use events::{EventFilter, VmEvent};
@@ -2101,6 +2104,13 @@ impl VmManager {
         }
 
         let result: Result<()> = async {
+            if req.storage == StorageBackend::Shared {
+                if req.image.starts_with(self.clone_base_dir()) {
+                    bail!("storage=shared cannot use a disk under the managed clone directory");
+                }
+                // Claimed before provisioning writes the agent token into it.
+                self.claim_shared_disk(&req.image, id, &[]).await?;
+            }
             let agent_token = req.agent.as_ref().and_then(|a| a.token.as_deref());
             let provisioned = fluxvm_image::storage::provision(
                 &self.cfg,
@@ -2289,6 +2299,9 @@ impl VmManager {
             }
             if let Some(pid) = record.nbd_pid {
                 let _ = fluxvm_image::storage::cleanup_nbd(pid).await;
+            }
+            if req.storage == StorageBackend::Shared {
+                self.release_shared_disk(&req.image, id);
             }
             record.status = VmStatus::Failed;
             record.error = Some(format!("{e:#}"));
@@ -2638,6 +2651,25 @@ impl VmManager {
                 return Err(e);
             }
         }
+        // A netns VM's QEMU cannot reach host-namespace addresses; hand it a
+        // workspace socket that FluxVM relays to the TCP destination.
+        let mut request = request.clone();
+        if vm.backend == BackendKind::Qemu
+            && vm.netns.is_some()
+            && let Some(dest) = migration_relay::tcp_target(&request.destination)
+        {
+            let sock = vm.workspace.join(live_migration::OUTGOING_SOCKET);
+            let ws = vm.workspace.clone();
+            migration_relay::spawn_unix_to_tcp(
+                sock.clone(),
+                dest.to_string(),
+                std::time::Duration::from_secs(3600),
+                move || ws.exists(),
+            )
+            .context("starting the migration relay")?;
+            request.destination = migration_relay::unix_uri(&sock);
+        }
+        let request = &request;
         let started = match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::migration_start(&self.cfg, &vm, request).await,
             BackendKind::CloudHypervisor => {
@@ -2726,8 +2758,14 @@ impl VmManager {
     /// hypervisor stay unsupported. The receiver does not choose a node.
     pub async fn create_migration_receiver(
         &self,
-        req: fluxvm_core::model::MigrationReceiverRequest,
+        mut req: fluxvm_core::model::MigrationReceiverRequest,
     ) -> Result<fluxvm_core::model::MigrationReceiver> {
+        if let Some(source) = req.record.take() {
+            return self.launch_adopt_receiver(req, *source).await;
+        }
+        if req.vcpus == 0 || req.memory_mib == 0 {
+            bail!("migration receiver needs vcpus and memory_mib (or a source record)");
+        }
         let cpu = if req.cpu_model.is_empty() {
             "host"
         } else {
@@ -2813,6 +2851,7 @@ impl VmManager {
             vcpus: req.vcpus,
             memory_mib: req.memory_mib,
             tls: req.tls,
+            source_id: None,
         };
         if let Err(e) = self.write_receiver(&rec) {
             if let Err(stop) = process::terminate_pid(launched.pid).await {
@@ -2861,6 +2900,11 @@ impl VmManager {
         if let Ok(rec) = self.read_receiver(id) {
             if let Err(e) = process::terminate_pid(rec.pid).await {
                 tracing::warn!(receiver = %id, error = %e, "stopping migration receiver");
+            }
+            if rec.source_id.is_some()
+                && let Some(vm) = self.store.get(id).await
+            {
+                self.discard_receiver_record(&vm).await;
             }
             if let Some(path) = rec.cgroup_path {
                 if let Ok(mgr) = fluxvm_cgroup::CgroupManager::from_path(path) {
@@ -3014,6 +3058,9 @@ impl VmManager {
         }
 
         let result: Result<()> = async {
+            if vm.request.storage == StorageBackend::Shared {
+                self.claim_shared_disk(&vm.disk, id, &[]).await?;
+            }
             let network = fluxvm_network::prepare(&self.cfg, id, &vm.request.network).await?;
             let dataplane_if = fluxvm_network::dataplane_interface(id, &network);
             let network_spec_for_dataplane = network.spec.clone();
@@ -3128,6 +3175,9 @@ impl VmManager {
                 )
                 .await;
             }
+            if vm.request.storage == StorageBackend::Shared {
+                self.release_shared_disk(&vm.disk, id);
+            }
             vm.status = VmStatus::Failed;
             vm.error = Some(format!("{e:#}"));
             self.store.update(vm.clone()).await?;
@@ -3205,6 +3255,9 @@ impl VmManager {
                     tracing::warn!(vm = %id, error = %e, "failed to remove VM cgroup");
                 }
             }
+        }
+        if vm.request.storage == StorageBackend::Shared {
+            self.release_shared_disk(&vm.disk, id);
         }
         vm.status = VmStatus::Stopped;
         vm.pid = None;
@@ -4098,7 +4151,11 @@ impl VmManager {
                 tracing::warn!(vm = %id, error = %e, "failed to stop qemu-nbd export");
             }
         }
-        // CephRbdInPlace images belong to whoever created them; never removed here.
+        // CephRbdInPlace and Shared disks belong to whoever created them;
+        // never removed here (a Shared disk is outside `workspace`).
+        if vm.request.storage == StorageBackend::Shared {
+            self.release_shared_disk(&vm.disk, id);
+        }
         if vm.request.storage == StorageBackend::CephRbd {
             if let Some(pool_image) = fluxvm_image::storage::ceph_rbd_ref(&vm.disk) {
                 if let Err(e) =
@@ -6041,6 +6098,7 @@ mod migration_tls_validation_tests {
             listen_port: 0,
             expires_in_seconds: None,
             tls: None,
+            record: None,
         };
         assert!(validate_migration_receiver_request(&req, &cfg).is_err());
         req.listen_host = "10.0.0.5".into();
