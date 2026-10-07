@@ -99,6 +99,11 @@ pub fn adopt_unsupported(record: &VmRecord) -> Option<String> {
     if !req.data_disks.is_empty() {
         return Some("VMs with data disks are not migratable yet".into());
     }
+    if !req.cdroms.is_empty() {
+        return Some(
+            "VMs with install media (cdroms) attached are not migratable; detach them first".into(),
+        );
+    }
     if req.security_profile.is_confidential() {
         return Some("confidential VMs cannot be live-migrated".into());
     }
@@ -507,5 +512,11 @@ mod tests {
         assert!(adopt_unsupported(&hot).unwrap().contains("restart"));
         clear_hotplug_labels(&mut hot.labels);
         assert!(adopt_unsupported(&hot).is_none());
+        let mut iso = record(StorageBackend::Shared);
+        iso.request.cdroms = vec![fluxvm_core::model::CdromSpec {
+            name: "install".into(),
+            path: "/srv/iso/win.iso".into(),
+        }];
+        assert!(adopt_unsupported(&iso).unwrap().contains("cdroms"));
     }
 }

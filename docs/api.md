@@ -320,6 +320,14 @@ creates each disk as a per-VM qcow2 overlay on `backing` before the first boot. 
 checked like a `POST /v1/vms/{uuid}/disks` `path` and never written to. An image import's
 `suggested` body fills it for every disk after the boot disk.
 
+Optional `cdroms` (QEMU only, at most 4), e.g.
+`[{"name": "install", "path": "/var/lib/fluxvm/images/win2022.iso"}, {"name": "virtio", "path": "/var/lib/fluxvm/images/virtio-win.iso"}]`,
+attaches each ISO read-only as a SATA CD-ROM on the q35 AHCI controller (`ide.0`, `ide.1`, …), so
+Windows Setup sees it with no extra drivers. `path` is checked like a data disk `backing`. No boot
+order is forced: firmware skips a blank root disk and boots the first CD-ROM, and once an OS is
+installed it boots from the disk. To install onto a blank disk, point `image` at an empty raw or
+qcow2 file and set `disk_size_gib`. VMs with cdroms attached can't be live-migrated.
+
 `agent.enabled` turns on the vsock guest agent (`fluxctl exec`) for this VM — the guest image must
 have `fluxvm-guest-agent` installed and enabled (see the
 [Quick start](getting-started.md#quick-start) section and [build-image-tutorials.md](build-image-tutorials.md)).

@@ -664,6 +664,7 @@ mod tests {
                 storage: Default::default(),
                 shared_folders: vec![],
                 data_disks: vec![],
+                cdroms: vec![],
                 numa_node: None,
                 cpuset: None,
                 hugepages: None,
