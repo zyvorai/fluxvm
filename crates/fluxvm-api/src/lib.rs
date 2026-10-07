@@ -362,6 +362,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/restore-backup", post(restore_vm_backup))
         .route("/v1/backups", get(list_backups))
         .route("/v1/backups/{name}", delete(delete_backup))
+        .route("/v1/backups/{name}/root", get(download_backup_root))
         .route("/v1/vms/{id}/snapshots", get(list_vm_snapshots))
         .route("/v1/vms/{id}/snapshots/{tag}", delete(delete_vm_snapshot))
         .route(
@@ -2256,6 +2257,40 @@ async fn delete_backup(
     }
     m.delete_backup(&name)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Streams a backup's standalone root qcow2, e.g. so Veyron can publish an
+/// installed VM as a golden image.
+async fn download_backup_root(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(name): Path<String>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let path = m.backup_root_disk(&name).map_err(|e| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: e.to_string(),
+    })?;
+    let mut file = tokio::fs::File::open(&path).await?;
+    let len = file.metadata().await?.len();
+    let stream = async_stream::stream! {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            match file.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => yield Ok::<_, std::io::Error>(bytes::Bytes::copy_from_slice(&buf[..n])),
+                Err(e) => {
+                    yield Err(e);
+                    break;
+                }
+            }
+        }
+    };
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, len)
+        .body(Body::from_stream(stream))?)
 }
 
 #[derive(Deserialize)]
@@ -4326,6 +4361,68 @@ mod tests {
             };
             let req = builder.body(body).unwrap();
             app.oneshot(req).await.unwrap().status()
+        }
+
+        #[tokio::test]
+        async fn backup_root_download_streams_the_root_qcow2() {
+            let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+            let backups = dir.path().join("state/backups");
+            std::fs::create_dir_all(backups.join("db-1")).unwrap();
+            std::fs::write(backups.join("web-1.qcow2"), b"web-root").unwrap();
+            std::fs::write(backups.join("db-1/root.qcow2"), b"db-root").unwrap();
+            std::fs::write(backups.join("db-1/data.qcow2"), b"db-data").unwrap();
+            let auth = AuthConfig {
+                tokens: vec![
+                    ApiToken {
+                        token: "admin".into(),
+                        role: Role::Admin,
+                        name: None,
+                        tenant: None,
+                    },
+                    ApiToken {
+                        token: "ro".into(),
+                        role: Role::ReadOnly,
+                        name: None,
+                        tenant: None,
+                    },
+                ],
+                ..Default::default()
+            };
+            let m = VmManager::new(Config {
+                state_dir: dir.path().join("state"),
+                run_dir: dir.path().join("run"),
+                auth,
+                ..Config::default()
+            })
+            .unwrap();
+            let get = |uri: &str, token: &str| {
+                Request::builder()
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap()
+            };
+            for (name, want) in [("web-1.qcow2", "web-root"), ("db-1", "db-root")] {
+                let resp = router(m.clone())
+                    .oneshot(get(&format!("/v1/backups/{name}/root"), "admin"))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{name}");
+                let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+                    .await
+                    .unwrap();
+                assert_eq!(&body[..], want.as_bytes());
+            }
+            let resp = router(m.clone())
+                .oneshot(get("/v1/backups/nope.qcow2/root", "admin"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+            let resp = router(m)
+                .oneshot(get("/v1/backups/web-1.qcow2/root", "ro"))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::FORBIDDEN);
         }
 
         #[tokio::test]
