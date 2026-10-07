@@ -174,6 +174,17 @@ impl VmManager {
         Ok(path)
     }
 
+    /// The standalone root-disk qcow2 of backup `name` (the file itself, or
+    /// `root.qcow2` inside a directory backup).
+    pub fn backup_root_disk(&self, name: &str) -> Result<PathBuf> {
+        let path = self.backup_path(name)?;
+        backup_disks(&path)?
+            .into_iter()
+            .find(|(d, _)| d == fluxvm_qemu::disks::ROOT_DISK)
+            .map(|(_, p)| p)
+            .with_context(|| format!("backup {name:?} has no root disk"))
+    }
+
     /// Removes backup `name` and its metadata.
     pub fn delete_backup(&self, name: &str) -> Result<()> {
         let path = self.backup_path(name)?;

@@ -133,6 +133,12 @@ fn ops() -> Vec<Op> {
         op("delete", "/v1/backups/{name}", "Delete a backup", VMS).status("204"),
         op(
             "get",
+            "/v1/backups/{name}/root",
+            "Download a backup's root qcow2",
+            VMS,
+        ),
+        op(
+            "get",
             "/v1/vms/{id}/logs",
             "Console log (text; ?follow=true streams)",
             VMS,

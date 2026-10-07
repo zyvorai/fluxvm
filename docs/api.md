@@ -34,6 +34,7 @@ POST   /v1/vms/{uuid}/backup             # {"name": "...", "compress": bool, "al
 POST   /v1/vms/{uuid}/restore-backup     # {"name": "..."}; VM must be stopped
 GET    /v1/backups                       # newest first
 DELETE /v1/backups/{name}
+GET    /v1/backups/{name}/root           # the backup's standalone root qcow2 (download)
 POST   /v1/vms/{uuid}/start-from-snapshot
 POST   /v1/vms/{uuid}/snapshot
 POST   /v1/vms/{uuid}/restore            # {"tag": "..."}; admin; running flux-vm restores in place (memory + disk)
