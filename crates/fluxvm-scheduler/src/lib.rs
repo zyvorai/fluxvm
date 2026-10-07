@@ -1139,6 +1139,12 @@ impl VmManager {
                  user/macvtap already occupies the primary NIC"
             );
         }
+        if matches!(vm.request.network, NetworkSpec::Tap { netns: true, .. }) {
+            bail!(
+                "NIC hotplug needs host-bridge taps (network.netns=false): a netns VM can't \
+                 relaunch with extra NICs"
+            );
+        }
         let index = vm_nic_hotplug_index(&vm);
         if index >= 4 {
             bail!("NIC hotplug headroom exhausted (4 PCIe root ports reserved at boot)");

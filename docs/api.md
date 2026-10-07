@@ -409,7 +409,8 @@ native hypervisor accept only the host-namespace form** because they cannot take
 ### NIC hotplug (QEMU)
 
 `POST /v1/vms/{uuid}/hotplug/nic` (admin) attaches a NIC to a running VM, used by Secure Containers after
-a warm-pool claim (the pool template boots with `network.mode=none`). Send **either** a bridged NIC:
+a warm-pool claim (the pool template boots with `network.mode=none`). A VM on a `netns: true` tap is
+refused: it can't relaunch with extra NICs. Send **either** a bridged NIC:
 
 ```json
 {"bridge": "fvbhab12cd", "mac": "02:00:00:00:00:01"}

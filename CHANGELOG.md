@@ -44,6 +44,9 @@
   Needs `tcpdump` on the host; the AppArmor profiles now allow it, `nsenter` and `network packet raw`.
 
 ### Fixed
+- **NIC hotplug on a netns VM is refused.** The hot-added NIC was recorded in `network.extra`, which a
+  `netns: true` VM can't relaunch with, so the next start or snapshot restore failed. Hot-add NICs to VMs on
+  host-bridge taps (`netns: false`).
 - **AppArmor profile blocked the eBPF dataplane.** The `fluxvm` and `fluxctl` profiles did not allow
   `bpftool` (or the `uname`/`basename` its Ubuntu wrapper runs), `/sys/fs/bpf` or the `bpf` /
   `perfmon` capabilities, so on an AppArmor host no VM could attach to the eBPF dataplane. Reinstall
