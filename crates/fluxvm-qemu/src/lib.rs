@@ -209,6 +209,7 @@ pub fn build_args(
     ]);
 
     a.extend(disks::boot_args(&ctx.workspace));
+    a.extend(disks::cdrom_args(&req.cdroms));
 
     if let Some(seed) = &ctx.seed_disk {
         a.extend([
@@ -821,6 +822,7 @@ mod tests {
             storage: fluxvm_core::model::StorageBackend::Default,
             shared_folders: vec![],
             data_disks: vec![],
+            cdroms: vec![],
             numa_node: None,
             cpuset: None,
             hugepages: None,
@@ -1242,6 +1244,7 @@ mod snapshot_save_tests {
                 storage: StorageBackend::Default,
                 shared_folders: vec![],
                 data_disks: vec![],
+                cdroms: vec![],
                 numa_node: None,
                 cpuset: None,
                 hugepages: None,

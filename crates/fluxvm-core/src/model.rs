@@ -415,6 +415,20 @@ pub struct DataDiskSpec {
     pub backing: PathBuf,
 }
 
+/// One `CreateVmRequest::cdroms` entry: a read-only ISO attached as a SATA
+/// CD-ROM on q35's built-in AHCI controller, so installers (Windows Setup
+/// included) see it without extra drivers. `name` follows the data-disk
+/// rules; `path` is fenced like any other disk source.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CdromSpec {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// AHCI ports available for `CreateVmRequest::cdroms` (q35's ich9-ahci has six).
+pub const MAX_CDROMS: usize = 4;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateVmRequest {
     pub name: String,
@@ -507,6 +521,11 @@ pub struct CreateVmRequest {
     /// overlay on a shared image (an imported OVA's extra disks).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub data_disks: Vec<DataDiskSpec>,
+    /// QEMU only: install media (ISO) attached read-only as CD-ROMs. Boot
+    /// order is left to the firmware, so a blank root disk falls through to
+    /// the first CD-ROM and an installed one boots itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cdroms: Vec<CdromSpec>,
     /// QEMU only: bind vCPU threads to host NUMA node(s).
     #[serde(default)]
     pub numa_node: Option<u8>,

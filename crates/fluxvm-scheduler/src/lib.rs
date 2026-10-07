@@ -2004,6 +2004,25 @@ impl VmManager {
         req.image = resolved.path;
         validate_policy(&req, &self.cfg)?;
         validate_native_kvm_profile(&req, &self.cfg)?;
+        if !req.cdroms.is_empty() {
+            if req.backend != BackendKind::Qemu {
+                anyhow::bail!("cdroms requires backend qemu");
+            }
+            if req.cdroms.len() > fluxvm_core::model::MAX_CDROMS {
+                anyhow::bail!("at most {} cdroms", fluxvm_core::model::MAX_CDROMS);
+            }
+            let mut seen = std::collections::HashSet::new();
+            for c in &mut req.cdroms {
+                fluxvm_qemu::disks::validate_disk_name(&c.name)
+                    .with_context(|| format!("cdrom {:?}", c.name))?;
+                if !seen.insert(c.name.clone()) {
+                    anyhow::bail!("duplicate cdrom name {:?}", c.name);
+                }
+                c.path = self
+                    .check_disk_source(&c.path)
+                    .with_context(|| format!("cdrom {:?}", c.name))?;
+            }
+        }
         let ledger = self.store.quota_ledger().await?;
         if let Some(tenant) = req.tenant.as_deref()
             && !self.cfg.policy.tenants.is_empty()
@@ -4914,6 +4933,7 @@ mod tests {
             storage: StorageBackend::Default,
             shared_folders: vec![],
             data_disks: vec![],
+            cdroms: vec![],
             numa_node: None,
             cpuset: None,
             hugepages: None,

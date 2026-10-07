@@ -103,6 +103,27 @@ fn device_id(name: &str) -> String {
     format!("disk-{name}")
 }
 
+/// Boot-time `-blockdev`/`-device` pairs for install media: `ide-cd` on the
+/// q35 AHCI ports `ide.0..`, read-only raw. No `bootindex`, so firmware tries
+/// the (blank) root disk, falls through to the CD, and later honors the boot
+/// entry the installed OS wrote.
+pub fn cdrom_args(cdroms: &[fluxvm_core::model::CdromSpec]) -> Vec<String> {
+    let mut a = Vec::new();
+    for (i, c) in cdroms.iter().enumerate() {
+        a.extend([
+            "-blockdev".into(),
+            format!(
+                "driver=raw,node-name=cd-{},read-only=on,file.driver=file,file.filename={},file.read-only=on",
+                c.name,
+                path_arg(&c.path)
+            ),
+            "-device".into(),
+            format!("ide-cd,bus=ide.{i},drive=cd-{},id=cdrom-{}", c.name, c.name),
+        ]);
+    }
+    a
+}
+
 /// Boot-time `-blockdev`/`-device` pairs for every data disk.
 pub fn boot_args(workspace: &Path) -> Vec<String> {
     let mut a = Vec::new();
@@ -493,6 +514,28 @@ mod tests {
         for bad in ["", "root", "-x", "Upper", "a/b", "a.b", &"x".repeat(33)] {
             assert!(validate_disk_name(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn cdrom_args_use_ahci_ports_read_only_without_bootindex() {
+        use fluxvm_core::model::CdromSpec;
+        assert!(cdrom_args(&[]).is_empty());
+        let args = cdrom_args(&[
+            CdromSpec {
+                name: "install".into(),
+                path: "/iso/win.iso".into(),
+            },
+            CdromSpec {
+                name: "virtio".into(),
+                path: "/iso/virtio-win.iso".into(),
+            },
+        ])
+        .join(" ");
+        assert!(args.contains("node-name=cd-install,read-only=on"));
+        assert!(args.contains("file.filename=/iso/win.iso,file.read-only=on"));
+        assert!(args.contains("ide-cd,bus=ide.0,drive=cd-install,id=cdrom-install"));
+        assert!(args.contains("ide-cd,bus=ide.1,drive=cd-virtio,id=cdrom-virtio"));
+        assert!(!args.contains("bootindex"));
     }
 
     #[test]
