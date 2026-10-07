@@ -3,7 +3,7 @@
 
 use crate::devices::rate_limiter::RateLimiter;
 use crate::devices::virtio_mmio::{QueueState, VirtioState};
-use crate::error::Result;
+use crate::error::{FluxError, Result};
 use crate::memory::GuestMemory;
 use crate::tap::Tap;
 use std::sync::atomic::{fence, Ordering};
@@ -20,25 +20,58 @@ pub const NET_HDR_LEN: usize = 12;
 /// Largest frame read from the tap in one go.
 pub const RX_FRAME_MAX: usize = 65536;
 
-fn gather(mem: &GuestMemory, desc_base: u64, head: u16) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
+// Reuse one bounded TX buffer across all packets in a notification batch.
+fn gather(
+    mem: &GuestMemory,
+    desc_base: u64,
+    head: u16,
+    qnum: u32,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    out.clear();
     let mut idx = head;
-    for _ in 0..16 {
+    let mut seen = [0u16; 16];
+    for hop in 0..16 {
+        if u32::from(idx) >= qnum || seen[..hop].contains(&idx) {
+            return Err(FluxError::Network(
+                "invalid TX descriptor index or cycle".into(),
+            ));
+        }
+        seen[hop] = idx;
         let mut raw = [0u8; 16];
-        mem.read_at(desc_base + idx as u64 * 16, &mut raw)?;
+        let desc = desc_base
+            .checked_add(u64::from(idx) * 16)
+            .ok_or_else(|| FluxError::Memory("TX descriptor GPA overflow".into()))?;
+        mem.read_at(desc, &mut raw)?;
         let addr = u64::from_le_bytes(raw[0..8].try_into().unwrap());
-        let len = u32::from_le_bytes(raw[8..12].try_into().unwrap());
+        let len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
         let flags = u16::from_le_bytes(raw[12..14].try_into().unwrap());
         let next = u16::from_le_bytes(raw[14..16].try_into().unwrap());
-        let mut buf = vec![0u8; len as usize];
-        mem.read_at(addr, &mut buf)?;
-        out.extend_from_slice(&buf);
+        if flags & (VRING_DESC_F_WRITE | VRING_DESC_F_INDIRECT) != 0 {
+            return Err(FluxError::Network("invalid TX descriptor flags".into()));
+        }
+        let start = out.len();
+        let end = start
+            .checked_add(len)
+            .filter(|end| *end <= NET_HDR_LEN + RX_FRAME_MAX)
+            .ok_or_else(|| FluxError::Network("TX frame exceeds maximum size".into()))?;
+        // Validate guest range before growing the host buffer.
+        if !matches!(addr.checked_add(len as u64), Some(end) if end <= mem.len() as u64) {
+            return Err(FluxError::Memory("TX data outside guest RAM".into()));
+        }
+        if end > out.capacity() {
+            out.reserve_exact(end - start);
+        }
+        out.resize(end, 0);
+        mem.read_at(addr, &mut out[start..end])?;
         if flags & VRING_DESC_F_NEXT == 0 {
-            break;
+            return Ok(());
         }
         idx = next;
     }
-    Ok(out)
+    Err(FluxError::Network(
+        "unterminated TX descriptor chain".into(),
+    ))
 }
 
 fn used_push(
@@ -339,6 +372,7 @@ pub fn handle_notify(
         used = q.used;
     }
     let mut frames = 0u32;
+    let mut buf = Vec::new();
     loop {
         let avail_idx = mem.read_u16(avail + 2)?;
         if st.queues[1].last_avail == avail_idx {
@@ -346,7 +380,7 @@ pub fn handle_notify(
         }
         let slot = (st.queues[1].last_avail as u32) % qnum;
         let head = mem.read_u16(avail + 4 + slot as u64 * 2)?;
-        let buf = gather(mem, desc, head)?;
+        gather(mem, desc, head, qnum, &mut buf)?;
         if let Some(lim) = limiter {
             if !lim.consume(buf.len() as u64) {
                 break;
@@ -697,5 +731,66 @@ mod tests {
             rx_deliver(&mut mem, &mut q, &f).unwrap(),
             RxDelivery::Delivered { written: 65547, .. }
         ));
+    }
+    #[test]
+    fn tx_gather_reuses_buffer_and_preserves_fragment_order() {
+        let (mut mem, _) = setup();
+        mem.write_at(0x4000, &[1; 12]).unwrap();
+        mem.write_at(0x5000, &[2; 100]).unwrap();
+        set_desc(&mut mem, 0, 0x4000, 12, VRING_DESC_F_NEXT, 1);
+        set_desc(&mut mem, 1, 0x5000, 100, 0, 0);
+        let mut out = Vec::new();
+        gather(&mem, DESC, 0, NUM, &mut out).unwrap();
+        assert_eq!(&out[..12], &[1; 12]);
+        assert_eq!(&out[12..], &[2; 100]);
+        let ptr = out.as_ptr();
+        let capacity = out.capacity();
+        gather(&mem, DESC, 0, NUM, &mut out).unwrap();
+        assert_eq!(out.as_ptr(), ptr);
+        assert_eq!(out.capacity(), capacity);
+        assert_eq!(out.len(), 112);
+    }
+
+    #[test]
+    fn tx_gather_rejects_bad_descriptors_before_allocation() {
+        let (mut mem, _) = setup();
+        let mut out = Vec::new();
+        for (addr, len, flags, next) in [
+            (0x4000, u32::MAX, 0, 0),
+            (u64::MAX, 12, 0, 0),
+            (0x4000, 12, VRING_DESC_F_WRITE, 0),
+            (0x4000, 12, VRING_DESC_F_INDIRECT, 0),
+        ] {
+            set_desc(&mut mem, 0, addr, len, flags, next);
+            assert!(gather(&mem, DESC, 0, NUM, &mut out).is_err());
+            assert_eq!(out.capacity(), 0);
+        }
+        set_desc(&mut mem, 0, 0x4000, 12, VRING_DESC_F_NEXT, 0);
+        assert!(gather(&mem, DESC, 0, NUM, &mut out).is_err());
+        assert!(gather(&mem, DESC, NUM as u16, NUM, &mut out).is_err());
+    }
+    /// Host-only descriptor-copy benchmark; excludes TAP and guest execution.
+    #[test]
+    #[ignore]
+    fn bench_network_tx_batch() {
+        let (mut mem, mut q) = setup();
+        q.num = 128;
+        let mut st = VirtioState::default();
+        st.queues[1] = q;
+        set_desc(&mut mem, 0, 0x4000, 12, VRING_DESC_F_NEXT, 1);
+        set_desc(&mut mem, 1, 0x5000, 500, VRING_DESC_F_NEXT, 2);
+        set_desc(&mut mem, 2, 0x6000, 500, VRING_DESC_F_NEXT, 3);
+        set_desc(&mut mem, 3, 0x7000, 500, 0, 0);
+        // Zero-filled synthetic frames produce no user-network response.
+        mem.write_u16(AVAIL + 2, 64).unwrap();
+        let start = std::time::Instant::now();
+        for _ in 0..10_000 {
+            st.queues[1].last_avail = 0;
+            assert_eq!(handle_notify(&mut mem, &mut st, None, 1, None).unwrap(), 64);
+        }
+        eprintln!(
+            "network-tx packets/s={:.0}",
+            640_000.0 / start.elapsed().as_secs_f64()
+        );
     }
 }
