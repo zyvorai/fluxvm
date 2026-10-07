@@ -12,6 +12,8 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-verifier-budget.sh'
       - 'scripts/test-pod-policy-verdict.py'
+      - 'scripts/test-ebpf-performance-host.sh'
+      - 'tests/ebpf-host/**'
       - 'scripts/test-vm-edge-verdict.py'
       - 'scripts/test-direct-datapath.sh'
       - 'scripts/direct-datapath-guest.py'
@@ -47,6 +49,8 @@ name: Network Fabric
       - 'scripts/test-ebpf-smoke.sh'
       - 'scripts/test-verifier-budget.sh'
       - 'scripts/test-pod-policy-verdict.py'
+      - 'scripts/test-ebpf-performance-host.sh'
+      - 'tests/ebpf-host/**'
       - 'scripts/test-vm-edge-verdict.py'
       - 'scripts/test-direct-datapath.sh'
       - 'scripts/direct-datapath-guest.py'
@@ -102,6 +106,12 @@ jobs:
       - name: Flow exporter unit tests
         working-directory: fluxvm
         run: python3 scripts/test_flow_exporter.py
+
+      - name: eBPF performance behavior tests
+        working-directory: fluxvm
+        run: |
+          scripts/test-ebpf-performance-host.sh
+          SANITIZE=1 scripts/test-ebpf-performance-host.sh
 
       - name: Build eBPF objects
         working-directory: fluxvm

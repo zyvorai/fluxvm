@@ -323,15 +323,16 @@ fluxvm_rule_matches(
     if (!r || r->pod_id != pod_id || r->direction != direction ||
         r->family != family)
         return 0;
-    if (!fluxvm_prefix_match(peer, r->address, r->prefix_len, family))
-        return 0;
-    if (r->protocol == 0)
-        return 1;
-    if (r->protocol != protocol)
-        return 0;
-    if (r->port_start == 0 && r->port_end == 0)
-        return 1;
-    return dport >= r->port_start && dport <= r->port_end;
+    /* Cheap tuple rejection first: a port miss must not copy/compare a
+     * 16-byte prefix. Wildcard protocol still ignores the port fields. */
+    if (r->protocol != 0) {
+        if (r->protocol != protocol)
+            return 0;
+        if ((r->port_start != 0 || r->port_end != 0) &&
+            (dport < r->port_start || dport > r->port_end))
+            return 0;
+    }
+    return fluxvm_prefix_match(peer, r->address, r->prefix_len, family);
 }
 
 /* A fixed-size peer address, so it can cross a BPF-to-BPF call as a typed
@@ -400,15 +401,22 @@ fluxvm_pod_policy_rich_verdict(
     __u64 candidates = 0;
     __u64 *mask = bpf_map_lookup_elem(&fluxvm_pridx, &ikey);
     if (mask) candidates |= *mask;
-    ikey.protocol = 0;
-    mask = bpf_map_lookup_elem(&fluxvm_pridx, &ikey);
-    if (mask) candidates |= *mask;
+    /* For protocol zero the first lookup already is the wildcard bucket. */
+    if (protocol != 0) {
+        ikey.protocol = 0;
+        mask = bpf_map_lookup_elem(&fluxvm_pridx, &ikey);
+        if (mask) candidates |= *mask;
+    }
 
 #pragma clang loop unroll(disable)
     for (__u32 i = 0; i < FLUXVM_MAX_POD_RULE; i++) {
-        if (i >= count)
+        /* Consume the bitmap in slot order. Stop once no candidate remains;
+         * the original slot index is retained for rule-attributed telemetry. */
+        if (i >= count || candidates == 0)
             break;
-        if (!(candidates & (1ULL << i)))
+        __u64 selected = candidates & 1;
+        candidates >>= 1;
+        if (!selected)
             continue;
         if (fluxvm_rule_match_idx(
                 i, pod_id,
