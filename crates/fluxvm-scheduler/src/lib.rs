@@ -1061,13 +1061,38 @@ impl VmManager {
             vm.requested_security_profile,
             fluxvm_core::security::VmOperation::HotplugCpu,
         )?;
-        match vm.backend {
-            BackendKind::Qemu => fluxvm_qemu::hotplug_cpu(&self.cfg, &vm, add_vcpus).await,
+        let vcpus = match vm.backend {
+            BackendKind::Qemu => fluxvm_qemu::hotplug_cpu(&self.cfg, &vm, add_vcpus).await?,
             BackendKind::CloudHypervisor => {
-                fluxvm_cloud_hypervisor::hotplug_cpu(&self.cfg, &vm, add_vcpus).await
+                fluxvm_cloud_hypervisor::hotplug_cpu(&self.cfg, &vm, add_vcpus).await?
             }
             other => bail!("CPU hotplug is not supported for backend {other:?}"),
+        };
+        self.record_hotplugged_size(id, Some(vcpus), None).await?;
+        Ok(vcpus)
+    }
+
+    /// Record a hot-added size as live-only labels (the next boot uses the
+    /// requested size again). The hot-added devices differ from a cold boot,
+    /// so the VM is not live-migratable until it is restarted.
+    async fn record_hotplugged_size(
+        &self,
+        id: Uuid,
+        vcpus: Option<u8>,
+        memory_mib: Option<u64>,
+    ) -> Result<()> {
+        let mut vm = self.get(id).await?;
+        if let Some(v) = vcpus.filter(|v| *v > 0) {
+            vm.labels
+                .insert(live_migration::LIVE_VCPUS_LABEL.into(), v.to_string());
         }
+        if let Some(m) = memory_mib.filter(|m| *m > 0) {
+            vm.labels
+                .insert(live_migration::LIVE_MEMORY_LABEL.into(), m.to_string());
+        }
+        vm.labels
+            .insert(live_migration::HOTPLUGGED_LABEL.into(), "true".into());
+        self.store.update(vm).await
     }
 
     /// Hot-add `add_memory_mib` MiB of RAM to a running VM without a
@@ -1079,13 +1104,17 @@ impl VmManager {
             vm.requested_security_profile,
             fluxvm_core::security::VmOperation::HotplugMemory,
         )?;
-        match vm.backend {
-            BackendKind::Qemu => fluxvm_qemu::hotplug_memory(&self.cfg, &vm, add_memory_mib).await,
+        let total = match vm.backend {
+            BackendKind::Qemu => {
+                fluxvm_qemu::hotplug_memory(&self.cfg, &vm, add_memory_mib).await?
+            }
             BackendKind::CloudHypervisor => {
-                fluxvm_cloud_hypervisor::hotplug_memory(&self.cfg, &vm, add_memory_mib).await
+                fluxvm_cloud_hypervisor::hotplug_memory(&self.cfg, &vm, add_memory_mib).await?
             }
             other => bail!("memory hotplug is not supported for backend {other:?}"),
-        }
+        };
+        self.record_hotplugged_size(id, None, Some(total)).await?;
+        Ok(total)
     }
 
     /// Hot-add a virtio-net NIC on `bridge`. QEMU only. The TAP is recorded
@@ -3149,6 +3178,7 @@ impl VmManager {
             self.attach_cgroup(id, launch.pid, &mut vm, &vfio_devices);
             vm.status = VmStatus::Running;
             vm.error = None;
+            live_migration::clear_hotplug_labels(&mut vm.labels);
             if let Some(ref ns) = vm.netns {
                 if let Err(e) = fluxvm_network::netns::repair_named_netns(ns, launch.pid).await {
                     tracing::warn!(

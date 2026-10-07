@@ -38,6 +38,17 @@ use uuid::Uuid;
 pub const MIGRATING_FROM_LABEL: &str = "fluxvm.dev/migrating-from";
 /// Label on an adopted VM: the source VM id it was migrated from.
 pub const MIGRATED_FROM_LABEL: &str = "fluxvm.dev/migrated-from";
+/// Set on a VM after a CPU/memory hot-add, cleared on the next start.
+pub const HOTPLUGGED_LABEL: &str = "fluxvm.dev/hotplugged";
+/// Live vCPU / memory (MiB) after a hot-add, cleared on the next start.
+pub const LIVE_VCPUS_LABEL: &str = "fluxvm.dev/live-vcpus";
+pub const LIVE_MEMORY_LABEL: &str = "fluxvm.dev/live-memory-mib";
+
+pub fn clear_hotplug_labels(labels: &mut std::collections::BTreeMap<String, String>) {
+    for k in [HOTPLUGGED_LABEL, LIVE_VCPUS_LABEL, LIVE_MEMORY_LABEL] {
+        labels.remove(k);
+    }
+}
 /// Workspace socket an adopt-mode receiver's QEMU accepts the stream on.
 const INCOMING_SOCKET: &str = "migrate-in.sock";
 /// Workspace socket a netns source's QEMU sends the stream to.
@@ -46,6 +57,11 @@ pub(crate) const OUTGOING_SOCKET: &str = "migrate-out.sock";
 /// Why `record` cannot be live-migrated by contract v1, if it cannot.
 pub fn adopt_unsupported(record: &VmRecord) -> Option<String> {
     let req = &record.request;
+    if record.labels.contains_key(HOTPLUGGED_LABEL) {
+        return Some(
+            "VM has hot-added CPUs or memory; restart it before migrating (a fresh boot matches the receiver's device model)".into(),
+        );
+    }
     if record.backend != BackendKind::Qemu {
         return Some(format!(
             "adopt-mode receivers support qemu only (source backend={:?})",
@@ -117,6 +133,7 @@ impl VmManager {
         let log_path = workspace.join("console.log");
         let mut labels = source.labels.clone();
         labels.remove(MIGRATED_FROM_LABEL);
+        clear_hotplug_labels(&mut labels);
         labels.insert(MIGRATING_FROM_LABEL.into(), source.id.to_string());
         let placeholder = VmRecord {
             id,
@@ -485,5 +502,10 @@ mod tests {
         let mut user = record(StorageBackend::Shared);
         user.request.network = NetworkSpec::User { forwards: vec![] };
         assert!(adopt_unsupported(&user).is_none());
+        let mut hot = record(StorageBackend::Shared);
+        hot.labels.insert(HOTPLUGGED_LABEL.into(), "true".into());
+        assert!(adopt_unsupported(&hot).unwrap().contains("restart"));
+        clear_hotplug_labels(&mut hot.labels);
+        assert!(adopt_unsupported(&hot).is_none());
     }
 }

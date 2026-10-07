@@ -3,6 +3,9 @@
 ## 0.4.0 (unreleased)
 
 ### Added
+- **Live size after hotplug.** A CPU or memory hot-add records `fluxvm.dev/live-vcpus` /
+  `fluxvm.dev/live-memory-mib` and `fluxvm.dev/hotplugged` on the VM (cleared on the next start). Hot-added
+  VMs are refused as migration sources until restarted.
 - **Adoptable migration receivers.** `POST /v1/migration/receivers` takes the source VM's `record` and
   launches the receiver from that record's own device model (network, seed, vsock, firmware), with its own
   workspace, tap/netns and CID, so it works host-to-host or on one node. `POST
