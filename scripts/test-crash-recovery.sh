@@ -107,7 +107,9 @@ TOML
 cleanup() {
     [ -n "$DAEMON_PID" ] && kill -9 "$DAEMON_PID" 2>/dev/null || true
     pkill -9 -f "${STATE}/instances" 2>/dev/null || true
-    for ns in $(ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^eph-[0-9a-f]{8}$' || true); do
+    # Only namespaces this run created: anything that existed at start-up
+    # (BASE_NETNS) belongs to someone else's VM and must never be deleted.
+    for ns in $(type new_netns >/dev/null 2>&1 && new_netns || true); do
         ip netns del "$ns" 2>/dev/null || true
     done
     if [ "$KEEP" -eq 0 ]; then rm -rf "$TMP"; else echo "kept ${TMP}"; fi
@@ -151,8 +153,17 @@ vm_ids()   { api "${API}/v1/vms" | python3 -c "import json,sys;d=json.load(sys.s
 
 journal_clear()   { [ "$(journal_pending)" -eq 0 ]; }
 journal_pending() { find "${STATE}/journal" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l; }
-stray_netns()     { ip netns list 2>/dev/null | awk '{print $1}' | grep -cE '^eph-[0-9a-f]{8}$' || true; }
-stray_taps()      { ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -cE '^(eph|tap)[0-9a-f]{8}$' || true; }
+# Resources that already existed before this run (e.g. a real VM's eph-xxxxxxxx
+# namespace and tapxxxxxxxx) are recorded once and excluded from every count and
+# from cleanup; only what appears afterwards counts as ours.
+all_netns() { ip netns list 2>/dev/null | awk '{print $1}' | grep -E '^eph-[0-9a-f]{8}$' | sort || true; }
+all_taps()  { ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -E '^(eph|tap)[0-9a-f]{8}$' | sort || true; }
+BASE_NETNS="$(all_netns)"
+BASE_TAPS="$(all_taps)"
+new_netns() { comm -13 <(printf '%s\n' "$BASE_NETNS") <(all_netns); }
+new_taps()  { comm -13 <(printf '%s\n' "$BASE_TAPS") <(all_taps); }
+stray_netns()     { new_netns | grep -c . || true; }
+stray_taps()      { new_taps | grep -c . || true; }
 stray_vmm()       { pgrep -f "${STATE}/instances" 2>/dev/null | wc -l; }
 workspace_dirs()  { find "${STATE}/instances" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l; }
 
