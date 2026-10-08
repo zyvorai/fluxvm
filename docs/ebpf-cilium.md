@@ -1,8 +1,8 @@
 # FluxVM eBPF dataplane and Cilium coexistence
 
 FluxVM ships a real TC/eBPF VM-edge dataplane (**Network Fabric GA;
-dataplane schema v4**) while keeping the existing nftables path as the
-**backwards-compatible default**.
+dataplane schema v4**) as the **primary default**. The existing nftables
+path remains an explicit compatibility mode.
 
 Operator reference with full safety properties:
 [network-fabric.md](network-fabric.md).
@@ -15,8 +15,8 @@ Diagrams:
 
 | Mode | Behavior |
 |------|----------|
-| `legacy` (default) | Existing per-sandbox nftables SNAT + optional destination allowlist (CIDR + ports). Stats/flows API unavailable. |
-| `ebpf` | Load FluxVM’s TC classifier (`bpf/fluxvm_tc.bpf.c`), pin programs/maps under `pin_root`, attach to the host-visible VM interface. |
+| `legacy` | Existing per-sandbox nftables SNAT + optional destination allowlist (CIDR + ports). Stats/flows API unavailable. |
+| `ebpf` (default) | Load FluxVM’s TC classifier (`bpf/fluxvm_tc.bpf.c`), pin programs/maps under `pin_root`, attach to the host-visible VM interface. |
 | `cilium` | Same FluxVM VM-edge eBPF path, but only after verifying the Cilium agent socket and bpffs are visible. **Never** writes Cilium private BPF maps. |
 
 For **Secure Containers Pod CNI** on Cilium (L2 handoff of `eth0` into the
@@ -25,8 +25,11 @@ is separate from this VM-edge Fabric mode.
 An opt-in bridge-less alternative to that bridge chain (a TC redirect between the Pod veth and the guest
 tap, with Cilium's `lxc*` hooks untouched) is described in [direct-datapath.md](direct-datapath.md).
 
-Default remains `sandbox.dataplane.mode = "legacy"`. Existing configs that omit
-`[sandbox.dataplane]` keep using nftables.
+The default is `sandbox.dataplane.mode = "ebpf"` with `required = true`.
+Configs omitting the table now require native attachment when a VM edge exists.
+Before upgrading, install BPF objects and run the host preflight. To preserve
+nftables behavior, explicitly configure `mode = "legacy"`. See
+[primary-ebpf.md](primary-ebpf.md) for the upgrade procedure.
 
 Dataplane attach / teardown / reconfigure / reconcile runs for **all** backends
 (QEMU, Cloud Hypervisor, Firecracker, FluxVm) when a host-visible interface

@@ -89,7 +89,7 @@ reaper_interval_secs = 5
 # http_proxy_default_port = 8080
 #
 # Native VM-edge networking — Network Fabric GA (dataplane schema v4).
-# Absent / commented = upgrade-safe legacy nftables (do not uncomment casually).
+# Absent / commented = native eBPF with required=true. Run host preflight before upgrading.
 # Prefer one-command enable over hand-editing:
 #   ./scripts/network-fabric-preflight.sh
 #   sudo ./scripts/enable-network-fabric-ga.sh --restart          # fail-closed GA
@@ -101,6 +101,9 @@ reaper_interval_secs = 5
 # See docs/network-fabric.md, docs/production-dataplane.md, docs/ebpf-cilium.md.
 #
 # --- Lab (soft; safe to try attach/status without deny-by-default) ---
+# Native eBPF is the default; required=true fails VM-edge attach errors.
+# Explicit mode="legacy" preserves nftables compatibility.
+# This lab example deliberately opts into fallback:
 # [sandbox.dataplane]
 # mode = "ebpf"
 # bpf_object = "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o"

@@ -289,9 +289,9 @@ impl Default for SandboxConfig {
 #[serde(rename_all = "kebab-case")]
 pub enum DataplaneMode {
     /// Existing nftables implementation.
-    #[default]
     Legacy,
-    /// FluxVM-owned TC/eBPF program pinned under `pin_root`.
+    /// Primary FluxVM-owned TC/eBPF program pinned under `pin_root`.
+    #[default]
     Ebpf,
     /// Verify Cilium is present, then attach FluxVM's VM-edge TC/eBPF
     /// program without modifying Cilium's private BPF maps.
@@ -330,10 +330,10 @@ pub struct DataplaneConfig {
 impl Default for DataplaneConfig {
     fn default() -> Self {
         Self {
-            mode: DataplaneMode::Legacy,
+            mode: DataplaneMode::Ebpf,
             bpf_object: "/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o".into(),
             pin_root: "/sys/fs/bpf/fluxvm".into(),
-            required: false,
+            required: true,
             default_allow: true,
             allow_cidrs: Vec::new(),
             allow_ports: Vec::new(),
@@ -986,5 +986,38 @@ allowed_migration_tls_dirs = ["/etc/fluxvm/tls"]
         let config: Config = toml::from_str(raw).unwrap();
         assert!(config.policy.allowed_migration_bind_addresses.is_none());
         assert!(config.policy.allowed_migration_tls_dirs.is_none());
+    }
+}
+
+#[cfg(test)]
+mod primary_dataplane_tests {
+    use super::*;
+
+    #[test]
+    fn omitted_dataplane_requires_native_ebpf() {
+        for raw in [
+            "",
+            "[sandbox]",
+            "[sandbox.dataplane]",
+            "[sandbox.dataplane]\nsample_rate = 100",
+        ] {
+            let cfg: Config = toml::from_str(raw).unwrap();
+            assert_eq!(cfg.sandbox.dataplane.mode, DataplaneMode::Ebpf);
+            assert!(cfg.sandbox.dataplane.required);
+            assert!(cfg.sandbox.dataplane.default_allow);
+        }
+        assert_eq!(DataplaneMode::default(), DataplaneMode::Ebpf);
+    }
+
+    #[test]
+    fn compatibility_and_lab_modes_remain_explicit() {
+        let legacy: Config = toml::from_str("[sandbox.dataplane]\nmode = \"legacy\"").unwrap();
+        assert_eq!(legacy.sandbox.dataplane.mode, DataplaneMode::Legacy);
+        let lab: Config = toml::from_str("[sandbox.dataplane]\nrequired = false").unwrap();
+        assert_eq!(lab.sandbox.dataplane.mode, DataplaneMode::Ebpf);
+        assert!(!lab.sandbox.dataplane.required);
+        let cilium: Config = toml::from_str("[sandbox.dataplane]\nmode = \"cilium\"").unwrap();
+        assert_eq!(cilium.sandbox.dataplane.mode, DataplaneMode::Cilium);
+        assert!(cilium.sandbox.dataplane.required);
     }
 }

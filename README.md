@@ -17,6 +17,10 @@
 
 ### Run real VMs with a real API.
 
+**Primary networking: native eBPF.** VM edges require successful attachment by
+default; nftables is an explicit compatibility mode. Before upgrading configs
+that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.md).
+
 **One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the in-tree FluxVM hypervisor.** No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend, with a vsock guest agent instead of SSH.
 
 **4 VM backends, one API** · **No libvirtd, no XML** · **Native KVM, no QEMU** · **SDKs: Python, Go, TypeScript** · **Operator verified on real k3s**

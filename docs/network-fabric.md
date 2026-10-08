@@ -8,8 +8,9 @@ policy — pinned under `/sys/fs/bpf/fluxvm`. Not a foreign CNI rewrite.
 **Status: GA.** The Network Fabric **v3 GA path** freezes the core VM-edge
 dataplane ABI (TC/eBPF policy, status/stats/flows, schema fingerprints,
 ownership, reconcile). The live BPF schema is **v4** (groups, deny CIDRs,
-conntrack, CNP-shaped policy). Upgrade-safe installs keep `mode = "legacy"`
-until you opt into the GA profile:
+conntrack, CNP-shaped policy). Native eBPF is now the default with
+`required = true`. Run host preflight before upgrading omitted-mode configs;
+explicit `mode = "legacy"` retains nftables. The GA profile adds deny-by-default:
 
 ```bash
 # Host readiness (bpffs, bpftool/tc, BPF object, systemd MEMLOCK/paths):
@@ -116,10 +117,12 @@ flowchart LR
 
 ```toml
 [sandbox.dataplane]
-mode = "legacy" # legacy | ebpf | cilium
+mode = "ebpf" # primary default; legacy | ebpf | cilium
+required = true
 ```
 
-`legacy` remains the default, so an upgrade does not unexpectedly load BPF.
+`legacy` is an explicit compatibility option. Omitted-mode configs select eBPF
+and require successful attachment. See [primary-ebpf.md](primary-ebpf.md).
 `ebpf` uses FluxVM-owned TC programs/maps. `cilium` keeps Cilium as the
 Kubernetes/node dataplane while FluxVM owns only its VM-edge TC program and
 private pin tree. FluxVM never writes Cilium's private maps.

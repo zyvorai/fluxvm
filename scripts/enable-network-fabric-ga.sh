@@ -4,7 +4,7 @@
 #
 # Enable Network Fabric (GA; dataplane schema v4) on this host: ensure BPF
 # objects, merge a dataplane profile into /etc/fluxvm.toml, restart when
-# requested. Does not change the upgrade-safe code default (mode=legacy).
+# requested. Code defaults are mode=ebpf, required=true; profiles add policy.
 #
 # Usage:
 #   sudo ./scripts/enable-network-fabric-ga.sh

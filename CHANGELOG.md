@@ -2,6 +2,16 @@
 
 ## 0.4.0 (unreleased)
 
+### Changed
+- **Native eBPF is the primary dataplane.** Omitted dataplane configuration now
+  selects `mode = "ebpf"`, `required = true`. A failed attachment on a host-visible
+  VM interface fails creation/start instead of falling back to nftables. Existing
+  explicit `legacy`, `cilium`, or lab `required = false` selections remain honored.
+  This changes upgrades with omitted mode: install BPF objects and run host
+  preflight first, or set `mode = "legacy"` explicitly. Default policy remains
+  allow-all; use the production profile for deny-by-default. See
+  [primary-ebpf.md](docs/primary-ebpf.md).
+
 ### Added
 - **Backups on every engine.** `POST /v1/vms/{id}/backup` and `restore-backup` work for Cloud Hypervisor,
   Firecracker and flux-vm VMs that are stopped, and for `storage: shared` disk files. A running VM still needs
