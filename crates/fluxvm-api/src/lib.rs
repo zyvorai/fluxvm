@@ -373,6 +373,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             "/v1/vms/{id}/disks/{name}",
             delete(detach_vm_disk).patch(resize_vm_disk),
         )
+        .route("/v1/vms/{id}/cdroms/{name}/eject", post(eject_vm_cdrom))
         .route("/v1/events", get(list_events))
         .route("/v1/events/stream", get(stream_events))
         .route("/v1/quotas/me", get(my_quota))
@@ -2360,6 +2361,15 @@ async fn resize_vm_disk(
 ) -> ApiResult<Json<fluxvm_core::model::VmDiskInfo>> {
     require_admin(role)?;
     Ok(Json(m.resize_vm_disk(id, &name, req.size_gib).await?))
+}
+
+async fn eject_vm_cdrom(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+) -> ApiResult<Json<VmRecord>> {
+    require_admin(role)?;
+    Ok(Json(m.eject_vm_cdrom(id, &name).await?))
 }
 
 async fn detach_vm_disk(
@@ -4922,6 +4932,37 @@ mod tests {
             .await;
             assert_eq!(st, StatusCode::FORBIDDEN, "{body}");
             assert!(body.contains("disabled"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn cdrom_eject_records_an_empty_drive() {
+            let m = procbox_manager(tenant_tokens(), false);
+            let mut vm = fixture(BackendKind::Qemu, VmStatus::Stopped, false);
+            vm.request.tenant = Some("acme".into());
+            vm.request.cdroms = vec![fluxvm_core::model::CdromSpec {
+                name: "install".into(),
+                path: "/srv/iso/win.iso".into(),
+            }];
+            let id = vm.id;
+            m.store.insert(vm).await.unwrap();
+            let app = router(m.clone());
+            let uri = format!("/v1/vms/{id}/cdroms/install/eject");
+            for _ in 0..2 {
+                let (st, body) = call(app.clone(), "POST", &uri, "acme", None).await;
+                assert_eq!(st, StatusCode::OK, "{body}");
+                assert!(body.contains(r#""path":"""#), "{body}");
+            }
+            assert!(m.get(id).await.unwrap().request.cdroms[0].is_ejected());
+            let (st, body) = call(
+                app.clone(),
+                "POST",
+                &format!("/v1/vms/{id}/cdroms/nope/eject"),
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+            assert!(body.contains("not found"), "{body}");
         }
 
         #[tokio::test]

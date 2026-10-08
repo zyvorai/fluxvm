@@ -418,12 +418,20 @@ pub struct DataDiskSpec {
 /// One `CreateVmRequest::cdroms` entry: a read-only ISO attached as a SATA
 /// CD-ROM on q35's built-in AHCI controller, so installers (Windows Setup
 /// included) see it without extra drivers. `name` follows the data-disk
-/// rules; `path` is fenced like any other disk source.
+/// rules; `path` is fenced like any other disk source. An empty `path` is a
+/// drive with no medium (ejected): the device stays so the guest's device
+/// layout is unchanged across restarts and migrations.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CdromSpec {
     pub name: String,
     pub path: PathBuf,
+}
+
+impl CdromSpec {
+    pub fn is_ejected(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
 }
 
 /// AHCI ports available for `CreateVmRequest::cdroms` (q35's ich9-ahci has six).
