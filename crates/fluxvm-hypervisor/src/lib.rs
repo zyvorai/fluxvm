@@ -9,6 +9,7 @@
 pub mod acpi;
 pub mod api;
 pub mod backend;
+pub mod balloon_ctl;
 pub mod boot;
 pub mod bus;
 pub mod config;

@@ -140,6 +140,12 @@ pub struct SandboxConfig {
     pub autopause_idle_secs: u64,
     /// How often the AutoPause scanner runs.
     pub autopause_scan_secs: u64,
+    /// Idle seconds before a Running KVM-engine sandbox's balloon is inflated
+    /// to give memory back to the host (0 = disabled). Should be shorter than
+    /// `autopause_idle_secs`; the balloon is deflated again on activity.
+    pub idle_balloon_secs: u64,
+    /// Share of guest memory (percent, 1-90) an idle balloon reclaims.
+    pub idle_balloon_percent: u8,
     /// Domain allowlist for L7 egress (empty = no L7 filter).
     pub egress_allow_domains: Vec<String>,
     /// HTTP method/host/path rules for the L7 egress proxy, e.g.
@@ -264,6 +270,8 @@ impl Default for SandboxConfig {
         Self {
             autopause_idle_secs: 0,
             autopause_scan_secs: 10,
+            idle_balloon_secs: 0,
+            idle_balloon_percent: 50,
             egress_allow_domains: Vec::new(),
             egress_http_rules: Vec::new(),
             egress_tls_intercept: false,
@@ -854,6 +862,21 @@ pub struct Policy {
     /// directories (same path-prefix semantics as `allowed_image_dirs`).
     #[serde(default)]
     pub allowed_migration_tls_dirs: Option<Vec<PathBuf>>,
+    /// Pressure-aware admission (all default off). Refuse a create when the
+    /// host would be left with less than this much `MemAvailable` (MiB) after
+    /// the new VM's memory is counted. See `pressure_admission`.
+    #[serde(default)]
+    pub min_host_mem_available_mib: Option<u64>,
+    /// Refuse a create while memory PSI `some avg10` (percent) is above this.
+    #[serde(default)]
+    pub max_host_mem_psi_some_avg10: Option<f64>,
+    /// Refuse a create while memory PSI `full avg10` (percent) is above this.
+    #[serde(default)]
+    pub max_host_mem_psi_full_avg10: Option<f64>,
+    /// How long a create may wait for pressure to clear before it is refused.
+    /// 0 (default) refuses immediately.
+    #[serde(default)]
+    pub pressure_defer_secs: u64,
 }
 
 /// One tenant's aggregate admission caps -- see `Policy::tenants`.

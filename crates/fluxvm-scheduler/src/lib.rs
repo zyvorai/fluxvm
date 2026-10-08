@@ -25,6 +25,7 @@ use uuid::Uuid;
 pub mod backup;
 pub mod changes;
 pub mod confidential;
+pub mod density;
 pub mod events;
 pub mod fork;
 pub mod idempotency;
@@ -37,6 +38,7 @@ pub mod procbox_sandbox;
 mod recovery;
 mod sandbox;
 pub mod shared_disk;
+pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
 pub use events::{EventFilter, VmEvent};
@@ -2093,6 +2095,7 @@ impl VmManager {
             audit_event("quota.deny", &[("scope", "host"), ("reason", &reason)]);
             return Err(e);
         }
+        self.admit_under_pressure(req.memory_mib).await?;
         // Every storage backend except CephRbd points `image` at a real
         // filesystem entry (a file for Default/Nbd, a block device for
         // LvmThin) — CephRbd's `image` is a `pool/image` reference with no

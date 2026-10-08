@@ -6,6 +6,7 @@
 //! in-tree KVM demo path remains available for freestanding netboot.
 
 use crate::api::BootConfig;
+use crate::balloon_ctl::BalloonSlot;
 use crate::config::{GuestKind, VmConfig};
 use crate::kvm_snap::{self, SnapCmd};
 use crate::pause::{PauseHandles, VcpuKick};
@@ -46,6 +47,8 @@ enum GuestEngine {
         thread: Option<std::thread::JoinHandle<()>>,
         /// Which virtio-net datapath (vhost-net or userspace pump) is live.
         net_datapath: Arc<NetDatapath>,
+        /// Balloon device handle, published by the VMM thread once built.
+        balloon: Arc<BalloonSlot>,
     },
 }
 
@@ -91,6 +94,14 @@ impl Drop for GuestHandle {
 }
 
 impl GuestHandle {
+    /// Balloon control for the in-tree KVM engine; `None` for Firecracker.
+    pub fn balloon(&self) -> Option<Arc<BalloonSlot>> {
+        match &self.engine {
+            GuestEngine::Kvm { balloon, .. } => Some(Arc::clone(balloon)),
+            GuestEngine::Firecracker { .. } => None,
+        }
+    }
+
     pub async fn pause(&self) -> Result<()> {
         match &self.engine {
             GuestEngine::Firecracker { api_sock, .. } => pause(api_sock).await,
@@ -332,6 +343,8 @@ async fn spawn_kvm(
         kick: Arc::clone(&kick),
     };
     let (snap_tx, snap_rx) = mpsc::channel::<SnapCmd>();
+    let balloon = Arc::new(BalloonSlot::default());
+    let balloon_thread = Arc::clone(&balloon);
     let (ready_tx, ready_rx) = mpsc::sync_channel::<std::result::Result<(), String>>(1);
     let thread = std::thread::Builder::new()
         .name("fluxvm-kvm".into())
@@ -342,6 +355,7 @@ async fn spawn_kvm(
                 // Share the status the VM publishes with the engine handle.
                 net_datapath_thread.copy_from(&vm.net_datapath);
                 vm.net_datapath = net_datapath_thread;
+                balloon_thread.publish(vm.balloon.clone(), vm.cfg.memory_mib as u64);
                 let cpu = if let Some((cpu, mem_file)) = restore {
                     kvm_snap::load_memory_into(&mut vm.mem, &mem_file)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -379,6 +393,7 @@ async fn spawn_kvm(
             snap_tx,
             thread: Some(thread),
             net_datapath,
+            balloon,
         },
     };
     let ready = tokio::task::spawn_blocking(move || ready_rx.recv_timeout(KVM_START_TIMEOUT))
@@ -783,6 +798,7 @@ mod tests {
                 snap_tx,
                 thread: None,
                 net_datapath: Arc::new(NetDatapath::default()),
+                balloon: Arc::new(BalloonSlot::default()),
             },
         };
         let worker = tokio::spawn(async move {

@@ -9,6 +9,7 @@ pub mod grants;
 pub mod metrics;
 pub mod model;
 pub mod policy;
+pub mod pressure_admission;
 pub mod process;
 pub mod security;
 pub mod virtiofs;

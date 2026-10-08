@@ -328,7 +328,7 @@ async fn reset_child_identity(vm: &VmRecord, hostname: &str) {
     }
 }
 
-fn check_forkable(src: &VmRecord, count: u32) -> Result<()> {
+pub(crate) fn check_forkable(src: &VmRecord, count: u32) -> Result<()> {
     if count == 0 || count > MAX_FORK_COUNT {
         bail!("count must be between 1 and {MAX_FORK_COUNT}");
     }

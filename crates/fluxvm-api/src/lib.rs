@@ -35,6 +35,7 @@ mod grants;
 mod oidc;
 mod openapi;
 mod rate_limit;
+mod speculate_api;
 
 #[derive(Clone)]
 struct AuthState {
@@ -658,6 +659,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             manager.clone(),
             idempotency::middleware,
         ))
+        .merge(speculate_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,

@@ -47,6 +47,7 @@ fn request_kind(req: &ApiRequest) -> &'static str {
         ApiRequest::MigrateImport { .. } => "migrate_import",
         ApiRequest::HotplugCpu { .. } => "hotplug_cpu",
         ApiRequest::HotplugDisk { .. } => "hotplug_disk",
+        ApiRequest::Balloon { .. } => "balloon",
         ApiRequest::Metrics => "metrics",
         ApiRequest::Ping => "ping",
     }
@@ -424,6 +425,28 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                 message: format!("{e:#}"),
             },
         },
+        ApiRequest::Balloon { balloon_mib } => {
+            let st = state.lock().await;
+            let Some(slot) = st.guest.as_ref().and_then(|g| g.balloon()) else {
+                return ApiResponse::Error {
+                    message: "balloon control needs the in-tree KVM engine".into(),
+                };
+            };
+            drop(st);
+            let status = match balloon_mib {
+                Some(mib) => slot.set_target(mib),
+                None => slot.status(),
+            };
+            match status.map(|s| serde_json::to_string(&s)) {
+                Ok(Ok(message)) => ApiResponse::Ok { message },
+                Ok(Err(e)) => ApiResponse::Error {
+                    message: format!("{e}"),
+                },
+                Err(e) => ApiResponse::Error {
+                    message: format!("{e}"),
+                },
+            }
+        }
         ApiRequest::Metrics => {
             let st = state.lock().await;
             if let Some(message) = &st.boot_error {

@@ -175,7 +175,7 @@ impl VmManager {
     }
 
     /// Wait until the guest agent answers again; returns how long that took.
-    async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
+    pub(crate) async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
         let started = std::time::Instant::now();
         let mut last = String::from("no attempt");
         while started.elapsed() < AGENT_READY_DEADLINE {
@@ -329,6 +329,20 @@ impl VmManager {
         timeout: Option<u64>,
         paths: Option<Vec<String>>,
     ) -> Result<DryRunReport> {
+        self.vm_sandbox_dry_run_capture(id, command, timeout, paths, None)
+            .await
+    }
+
+    /// [`Self::vm_sandbox_dry_run`] that can also copy out the changed files
+    /// before the guest is restored (used by speculative execution).
+    pub(crate) async fn vm_sandbox_dry_run_capture(
+        self: &Arc<Self>,
+        id: Uuid,
+        command: String,
+        timeout: Option<u64>,
+        paths: Option<Vec<String>>,
+        capture: Option<&mut crate::speculate::Captured>,
+    ) -> Result<DryRunReport> {
         let vm = self.get(id).await?;
         if let Some(e) = crate::snapshot_backend_error(vm.backend) {
             return Err(RestoreError::Unsupported(e).into());
@@ -380,6 +394,10 @@ impl VmManager {
             };
             let after = self.take_manifest(id, &paths).await?;
             let changes = diff_manifests(&before, &after)?;
+            if let Some(c) = capture {
+                c.before = Some(before.clone());
+                c.staged = Some(crate::speculate::stage_files(self, id, &changes).await?);
+            }
             Ok(DryRunReport {
                 changes,
                 exit_code,
