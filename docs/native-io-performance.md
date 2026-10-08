@@ -184,12 +184,54 @@ column on the workloads that matter.
 Keep these in the "Host measurements" table above. They compare device code only
 and are not a substitute for the end-to-end table.
 
+### vhost-net bring-up order
+
+The kernel accepts the vhost-net setup in one order only. `VhostNet::program_vrings`
+runs it, and a small `BindOrder` state machine refuses any out-of-order step
+(a unit test checks that `SET_BACKEND` before the rings is rejected):
+
+1. `VHOST_SET_OWNER`
+2. `VHOST_SET_FEATURES` with `vhost_feature_mask(driver_features)`
+3. `VHOST_SET_MEM_TABLE`: one region mapping guest RAM, GPA 0 to the host address
+4. per queue: `VHOST_SET_VRING_NUM`, `_BASE`, `_ADDR`, `_KICK`, `_CALL`
+5. start the IRQ relay (an epoll thread, `vhost-irq-relay`) over every call eventfd
+6. `VHOST_NET_SET_BACKEND` per queue, attaching the TAP
+
+Earlier code bound the backend before the rings were programmed (the kernel
+answers `EFAULT`), never called `SET_FEATURES`, and never turned the call eventfd
+into a guest interrupt, so the guest would not have seen used-ring updates. The
+order above fixes all three. The relay must be running before the backend is
+attached because vhost can complete a buffer the moment the backend is set.
+`kernel_datapath()` is true only when the backend is bound, the rings are
+programmed and the relay exists.
+
+Feature mask (`vhost_feature_mask`): of what the guest driver negotiated, only
+`VIRTIO_NET_F_MRG_RXBUF`, `VIRTIO_RING_F_INDIRECT_DESC`, `VIRTIO_RING_F_EVENT_IDX`
+and `VIRTIO_F_VERSION_1` are passed on, plus `VHOST_NET_F_VIRTIO_NET_HDR` (the TAP
+is opened without `IFF_VNET_HDR`, so vhost must handle the virtio-net header
+itself). MAC, STATUS, MQ and CTRL_VQ are device-model bits that vhost-net
+rejects, so they are masked out.
+
+Toggles: `FLUXVM_VHOST_NET=0` (also `off`, `false`, `no`) forces the userspace pump
+even when the config asks for vhost-net; the default config has vhost-net on and
+`--no-vhost-net` also turns it off. `FLUXVM_NET_QUEUE_PAIRS=N` overrides
+`--net-queue-pairs N` (the engine path has no flag, so the variable is what an A/B
+run uses). The value is clamped to 1..=4 (`NET_MAX_QUEUE_PAIRS`); the command-line
+flag is rejected outside that range.
+
 ### Not verified yet
 
-- The vhost-net bind sequence (SET_BACKEND before the rings are programmed, no
-  SET_FEATURES, the call eventfd not yet relayed to a guest interrupt) has not been
-  exercised on a lab host in this change. The `datapath` fields exist so that a
-  fallback to the userspace pump is visible; confirm `vhost-net` is reported
-  before trusting any `vhost` or `mq` number.
-- Multiqueue, the control queue and the restore re-bind are unit-tested only for
-  the control-queue command parsing; the rest needs a lab run.
+Nothing in this section has been run against a guest. The bring-up order above is
+type-checked and the feature mask, bind-order state machine and control-queue
+command parsing have unit tests. Still needed on a lab host:
+
+- Confirm `net_datapath` reports `vhost-net` (not `userspace-pump`) after boot, and
+  that guest traffic actually flows with the IRQ relay (DHCP, ping, a TCP transfer).
+  `scripts/test-kvm-net.sh` is the first check.
+- Confirm the restore re-bind: after a snapshot restore the rings are live, so
+  vhost-net is bound immediately and every queue kicked.
+- Multiqueue: N `/dev/vhost-net` instances, one multi_queue TAP queue each, the
+  control queue and `max_virtqueue_pairs` negotiation with a real guest driver.
+- Every number in the end-to-end table above (all currently empty) and any claim
+  that vhost-net or multiqueue is faster. The previous userspace pump has been
+  verified live (see NEXT-FEATURES H3); the kernel datapath has not.

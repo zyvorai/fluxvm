@@ -163,3 +163,54 @@ Portable CI maps each code-side use case to a test target in
 `FLUXVM_SECURE_CONTAINERS_LIVE_CI=1`.
 
 Hypervisor work should stay Firecracker/CH-matched (no novel device models).
+
+## Update 2026-10-08: crash safety, fork efficiency, vhost-net, speculation
+
+Written from the code on `main` after merging `feat/crash-safe-lifecycle`.
+Every item below is **implemented and type-checked with unit tests passing; none
+has been verified end to end on real VMs.** "Done" in the tables above still means
+what those rows say; nothing in this section earns that word yet.
+
+### Shipped in code (unverified on hardware)
+
+| Area | What | Where |
+|---|---|---|
+| Crash safety | fsynced `write_durable` for VM state, quota ledger, journal and idempotency records; operation journal (create/delete/snapshot/fork/restore) with `OpGuard` and pid + start-time owner liveness; `replay_pending_ops`; `sweep_orphans` (1 h workspace grace, 120 s netns/tap grace, ownership validation) | [crash-recovery.md](crash-recovery.md) |
+| Idempotency | `Idempotency-Key` on create, delete, snapshot, fork; 24 h durable replay with `Idempotent-Replayed`; 400/409/422 semantics | [crash-recovery.md](crash-recovery.md) |
+| Fault test | `scripts/test-crash-recovery.sh` (SIGKILL at create/delete/snapshot/fork stages; baseline-aware cleanup) | [crash-recovery.md](crash-recovery.md) |
+| Fork | `MAP_PRIVATE` snapshot restore with eager fallback, `ResetIdentity` (hostname, machine-id, entropy, neighbour flush), `?ready=exec` / `first_command_ms` | [fork-and-restore.md](fork-and-restore.md) |
+| Networking | vhost-net bring-up in the kernel's order (owner, features, mem table, rings, IRQ relay, backend), `net_datapath` reporting, `FLUXVM_VHOST_NET` toggle, opt-in multiqueue (`--net-queue-pairs`, max 4) | [native-io-performance.md](native-io-performance.md) |
+| Density | balloon API, per-VM PSS report, idle reclaim, pressure-aware admission, `bench-density-count.sh` | [ROADMAP-DENSITY.md](ROADMAP-DENSITY.md) |
+| Speculation | `POST /v1/sandboxes/{id}/speculate`, changesets list/get/approve/reject/apply; apply refuses unless approved and the real files still match the base manifest; network effects are reported, never replayed | `fluxvm-scheduler/src/speculate.rs` |
+| Guest hardening | `ExecPolicy` (Landlock + seccomp via procbox) on exec with enforcement reported back; the guest agent now **fails closed** with no token file (override: `FLUXVM_AGENT_ALLOW_INSECURE=1`) | `fluxvm-guest-agent/src/exec_policy.rs` |
+| Credentials | per-sandbox credential grants (`/v1/sandboxes/{id}/grants`): in-memory, TTL up to 24 h, max 32 per sandbox, secret never returned or logged, injected by the egress proxy | `fluxvm-core/src/grants.rs` |
+
+The fail-closed agent is a behaviour change: a guest image without a provisioned
+token now refuses every request.
+
+### Unverified on hardware (what to run, in order)
+
+1. `scripts/test-crash-recovery.sh` on a host you control (see its warning about
+   network namespaces), with a bootable image and `--fork-spec`.
+2. `scripts/test-kvm-net.sh`, then `FLUXVM_KVM_BENCH=1 scripts/bench-kvm-vhost.sh`:
+   confirm `net_datapath` says `vhost-net`, then fill the empty table.
+3. `scripts/bench-fork.sh` with and without `FLUXVM_KVM_EAGER_RESTORE=1`, and
+   `scripts/bench-first-command.sh`.
+4. Speculate, grants and exec policy against a live sandbox.
+
+Known gaps in crash recovery (IPAM lease not released by the orphan sweep, QEMU
+internal `savevm` not rolled back, extra-NIC and user-named taps and jailer trees
+not journaled, delete intent omits nbd and Ceph) are listed in
+[crash-recovery.md](crash-recovery.md).
+
+### Remaining
+
+- **userfaultfd** demand-paged restore (design in ROADMAP-DENSITY; only worth it
+  if `MAP_PRIVATE` falls short).
+- **Dirty-log incremental snapshots** (design in ROADMAP-DENSITY).
+- **Fork-backed warm pools**: `backfill_pool` still boots members cold.
+- **SEV-SNP / confidential**: the `confidential-snp` profile stays gated; nothing
+  in this batch touches it, and `sev-snp` remains claimable only after a verified
+  hardware run ([security-profiles.md](security-profiles.md)).
+- **LiteBox spike**: not started. There is no code or design document for it in
+  the tree.

@@ -73,3 +73,55 @@ Open issues: forked children keep the parent's MAC and IP, so the pool needs
 per-VM netns (the same restriction `check_forkable` enforces), and the template
 must be quiesced after the agent is ready so children do not inherit in-flight
 requests.
+
+## Update 2026-10-08: what the latest batch changed
+
+Honest status. Everything below is **implemented and type-checked, with unit
+tests passing. Nothing here has been run end to end on real VMs.** No density,
+latency or throughput number has been measured, and none is claimed.
+
+### Shipped in code (unverified on hardware)
+
+- Fork and restore, described from the code in
+  [fork-and-restore.md](fork-and-restore.md): journaled all-or-nothing fork,
+  `MAP_PRIVATE` restore with an eager fallback, `ResetIdentity` for each child,
+  `?ready=exec` first-command timing on create, fork and pool claim.
+- Crash-safe lifecycle ([crash-recovery.md](crash-recovery.md)): fsynced writes,
+  an operation journal for create/delete/snapshot/fork/restore, orphan sweep with
+  grace periods, `Idempotency-Key`. Fork's cleanup now rides on it.
+- Memory density, in `fluxvm-scheduler/src/density.rs`:
+  - balloon control for the KVM engine: `GET|POST /v1/vms/{id}/balloon`;
+  - per-VM memory report (PSS from `/proc/<pid>/smaps_rollup`, split private and
+    shared): `GET /v1/vms/{id}/memory`;
+  - idle reclaim: `[sandbox] idle_balloon_secs` (0 = off) and
+    `idle_balloon_percent` (default 50) inflate an idle Running KVM sandbox's
+    balloon and deflate it on activity;
+  - pressure-aware admission, all off by default: `[policy]`
+    `min_host_mem_available_mib`, `max_host_mem_psi_some_avg10`,
+    `max_host_mem_psi_full_avg10`, `pressure_defer_secs`.
+- Bench scripts: `bench-fork.sh` (per-child ready time, PSS, disk),
+  `bench-first-command.sh`, `bench-density-count.sh` (consumes host memory; needs
+  `FLUXVM_BENCH_CONFIRM=1`), and `bench-kvm-vhost.sh` for the network datapath
+  ([native-io-performance.md](native-io-performance.md)).
+- Speculative execution (changesets) uses fork for flux-vm sandboxes when
+  `check_forkable` passes; see NEXT-FEATURES for the API.
+
+### Not verified on hardware
+
+- Whether `MAP_PRIVATE` restore actually shares pages between children, and how
+  many. The bench scripts are the way to find out; run them once with
+  `FLUXVM_KVM_EAGER_RESTORE=1` and once without.
+- That `ResetIdentity` succeeds against the real golden guest agent image, and
+  what happens to a child's open connections (they are not reset).
+- The idle balloon's effect on host memory and on guest latency after deflate.
+- Any fork-time or first-command figure. The previous density archive
+  ([benchmarks/evidence/density-20260918-80.79.5.173.txt](benchmarks/evidence/density-20260918-80.79.5.173.txt))
+  predates all of this and must not be quoted for it.
+
+### Still to do
+
+The three TODO sections above are unchanged and still unimplemented:
+userfaultfd demand paging, dirty-log incremental snapshots, and a warm pool
+backfilled by fork. They remain designs. `MAP_PRIVATE` is the only lazy restore
+that exists, and the dirty-log design is the riskiest because host-side device
+writes through `host_ptr()` are not tracked by KVM.
