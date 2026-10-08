@@ -91,7 +91,7 @@ An egress ACL on method, host and path (HTTPS via opt-in interception), a file c
 <tr>
 <td valign="top" width="33%">
 <b>Network Fabric <sub>GA</sub></b><br>
-A TC/eBPF VM-edge dataplane with L3/L4 policy, rate limits, security groups and live reconfigure. nftables stays the default.<br>
+A TC/eBPF VM-edge dataplane with L3/L4 policy, rate limits, security groups and live reconfigure. Native eBPF is the default dataplane; nftables is an explicit compatibility mode.<br>
 <a href="docs/network-fabric.md">Network Fabric</a>
 </td>
 <td valign="top" width="33%">
@@ -214,7 +214,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 
 | Status | Areas |
 |---|---|
-| **GA** | Network Fabric (TC/eBPF; nftables stays the default) · Secure Containers (containerd runtime-v2, not a Kata-equivalence claim) |
+| **GA** | Network Fabric (TC/eBPF, the default dataplane; nftables via explicit `mode = "legacy"`) · Secure Containers (containerd runtime-v2, not a Kata-equivalence claim) |
 | **Unreleased (0.4.0)** | MCP server, sandbox GPUs, enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups |
 | **Not by design** | KubeVirt compatibility |
 

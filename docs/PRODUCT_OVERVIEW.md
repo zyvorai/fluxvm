@@ -36,7 +36,7 @@ The exhaustive, line-by-line checklist lives in **[FEATURES.md](../FEATURES.md)*
 
 **VM lifecycle** — create, list, get, pause, resume, delete across all 4 backends; `"backend":"auto"` resolution; vsock-based `exec`/console/file-transfer with no SSH required.
 
-**Networking** — QEMU user-mode NAT, TAP+bridge, per-VM network namespaces, macvtap; **Network Fabric is GA (schema v4)** — a TC/eBPF or Cilium-coexistence dataplane with IPv4/IPv6 L3+L4 policy, rate limits, security groups, CNP, live reconfigure, and REST observability (nftables is the default fallback).
+**Networking** — QEMU user-mode NAT, TAP+bridge, per-VM network namespaces, macvtap; **Network Fabric is GA (schema v4)** — a TC/eBPF or Cilium-coexistence dataplane with IPv4/IPv6 L3+L4 policy, rate limits, security groups, CNP, live reconfigure, and REST observability (native eBPF is the default dataplane; nftables is an explicit `mode = "legacy"` compatibility mode).
 
 **Service Fabric** — node-local Maglev VIP load balancing: dual-stack NAT/DSR/SNAT, health-aware routing, incremental reconcile, per-service EDT, flow export.
 

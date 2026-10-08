@@ -20,3 +20,8 @@ data:
     firecracker_binary = "firecracker"
     default_bridge = "vmbr0"
     reaper_interval_secs = 5
+
+    # Omitted => native eBPF, required = true (BPF objects ship in the image;
+    # the pod mounts /sys/fs/bpf). Nodes that cannot load BPF:
+    # [sandbox.dataplane]
+    # mode = "legacy"
