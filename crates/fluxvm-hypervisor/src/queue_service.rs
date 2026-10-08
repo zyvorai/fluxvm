@@ -20,7 +20,7 @@ use crate::error::Result;
 use crate::kvm::KvmVm;
 use crate::memory::GuestMemory;
 use crate::tap::Tap;
-use crate::vhost::VhostNet;
+use crate::vhost::{NetDatapath, VhostNet, VhostPair};
 
 /// Per-notify/per-poll device diagnostics (`[blk] processed ...`, the
 /// periodic `[net]` stats line, ...) are opt-in via this env var. They are
@@ -68,6 +68,12 @@ pub struct QueueService {
     pub blk_limiter: Arc<RateLimiter>,
     pub tap: Option<Tap>,
     pub vhost: Option<VhostNet>,
+    /// vhost-net instances + TAP queues for queue pairs 1.. (multiqueue).
+    pub vhost_pairs: Vec<VhostPair>,
+    /// Published datapath status (read by the control API).
+    pub datapath: Arc<NetDatapath>,
+    /// Configured virtio-net queue pairs (1 unless multiqueue is on).
+    net_max_pairs: u32,
     pub net_stats: virtio_net::NetStats,
     rx_scratch: Vec<u8>,
 }
@@ -92,7 +98,13 @@ impl QueueService {
         blk_limiter: Arc<RateLimiter>,
         tap: Option<Tap>,
         vhost: Option<VhostNet>,
+        vhost_pairs: Vec<VhostPair>,
+        datapath: Arc<NetDatapath>,
     ) -> Self {
+        let net_max_pairs = net
+            .as_ref()
+            .map(|n| u32::from(n.state.lock().unwrap().net_max_pairs).max(1))
+            .unwrap_or(1);
         Self {
             mem: ManuallyDrop::new(mem.clone()),
             net,
@@ -106,6 +118,9 @@ impl QueueService {
             blk_limiter,
             tap,
             vhost,
+            vhost_pairs,
+            datapath,
+            net_max_pairs,
             net_stats: virtio_net::NetStats::default(),
             rx_scratch: vec![0u8; virtio_net::RX_FRAME_MAX],
         }
@@ -125,6 +140,121 @@ impl QueueService {
             .as_ref()
             .map(|v| v.kernel_datapath())
             .unwrap_or(false)
+    }
+
+    fn pair_vhost(&self, pair: usize) -> Option<&VhostNet> {
+        if pair == 0 {
+            self.vhost.as_ref()
+        } else {
+            self.vhost_pairs.get(pair - 1).map(|p| &p.vhost)
+        }
+    }
+
+    fn pair_kernel(&self, pair: usize) -> bool {
+        self.pair_vhost(pair)
+            .map(|v| v.kernel_datapath())
+            .unwrap_or(false)
+    }
+
+    /// vhost-net owns every configured queue pair.
+    fn vhost_all_kernel(&self) -> bool {
+        self.vhost.is_some()
+            && self.vhost_pairs.len() + 1 == self.net_max_pairs as usize
+            && (0..self.net_max_pairs as usize).all(|p| self.pair_kernel(p))
+    }
+
+    /// Record and log which datapath is live. A silent fallback to the
+    /// userspace pump is the thing this makes visible.
+    fn publish_datapath(&self, detail: impl Into<String>) {
+        let kernel = self.vhost_all_kernel();
+        let pairs = if kernel { self.net_max_pairs } else { 1 };
+        self.datapath.set(kernel, pairs, detail);
+        eprintln!("[net] datapath {}", self.datapath.summary());
+    }
+
+    /// Late-bind the vring GPAs of queue pair `pair` once the guest has marked
+    /// both of its queues ready (desc/avail/used set). On failure the whole
+    /// device falls back to the userspace pump.
+    fn try_program_pair(&mut self, net: &Arc<VirtioMmio>, pair: usize) {
+        let lo = pair * 2;
+        let qs = {
+            let st = net.state.lock().unwrap();
+            if (st.num_queues as usize) < lo + 2 {
+                return;
+            }
+            st.queues[lo..lo + 2].to_vec()
+        };
+        let ready = qs
+            .iter()
+            .all(|qq| qq.ready != 0 && qq.num > 0 && qq.desc != 0 && qq.avail != 0 && qq.used != 0);
+        let v = if pair == 0 {
+            self.vhost.as_mut()
+        } else {
+            self.vhost_pairs.get_mut(pair - 1).map(|p| &mut p.vhost)
+        };
+        let Some(v) = v else { return };
+        if !v.bound || v.rings_programmed || !ready {
+            return;
+        }
+        match v.program_vrings(self.mem.host_ptr(), self.mem.len(), &qs) {
+            Ok(()) => {
+                if verbose_io() {
+                    eprintln!("[net] vhost VRING GPA programmed (H3) pair={pair}");
+                }
+                let detail = if self.vhost_all_kernel() {
+                    "vhost-net rings programmed".to_string()
+                } else {
+                    format!("vhost-net pair {pair} programmed; waiting for the other pairs")
+                };
+                self.publish_datapath(detail);
+            }
+            Err(e) => {
+                eprintln!(
+                    "[net] vhost-net cannot program vrings pair={pair} ({e}); falling back to userspace virtio-net"
+                );
+                self.vhost = None;
+                self.vhost_pairs.clear();
+                self.publish_datapath(format!("vhost-net cannot program vrings: {e}"));
+            }
+        }
+    }
+
+    /// Program every queue pair whose rings the guest has set up.
+    fn program_pending_vhost(&mut self, net: &Arc<VirtioMmio>) {
+        for pair in 0..self.net_max_pairs as usize {
+            if self.vhost.is_none() {
+                break;
+            }
+            self.try_program_pair(net, pair);
+        }
+    }
+
+    /// After a snapshot restore the guest's rings (and `last_avail`) are
+    /// already live and the driver will not run setup again, so the late
+    /// bind on the first notify may never come for an idle RX queue. Bind
+    /// now and kick every queue so vhost picks up buffers posted before the
+    /// snapshot. Falls back to the userspace pump exactly like a cold boot.
+    pub fn rebind_vhost_after_restore(&mut self) {
+        let Some(net) = self.net.clone() else { return };
+        if self.vhost.is_none() {
+            eprintln!("[net] restore: no vhost-net to re-bind; userspace pump");
+            return;
+        }
+        self.program_pending_vhost(&net);
+        if self.vhost_all_kernel() {
+            for pair in 0..self.net_max_pairs as usize {
+                for qi in 0..2 {
+                    if let Some(v) = self.pair_vhost(pair) {
+                        let _ = v.signal_kick(qi);
+                    }
+                }
+            }
+            self.publish_datapath("vhost-net re-bound after snapshot restore");
+        } else if self.vhost.is_some() {
+            self.publish_datapath(
+                "snapshot restored; vhost-net binds once the guest rings are ready",
+            );
+        }
     }
 
     /// Deliver pending tap frames into guest RX buffers (queue 0).
@@ -192,60 +322,28 @@ impl QueueService {
 
     fn notify_net(&mut self, q: u32) {
         let Some(net) = self.net.clone() else { return };
-        // H3: when vhost rings are programmed, kick the kernel datapath
-        // instead of the userspace pump.
-        if self
-            .vhost
-            .as_ref()
-            .map(|v| v.kernel_datapath())
-            .unwrap_or(false)
-        {
-            if let Some(v) = self.vhost.as_ref() {
-                if let Err(e) = v.signal_kick(q as usize) {
-                    eprintln!("[net] vhost kick q={q}: {e}");
-                }
-            }
+        // Multiqueue: the control queue follows the data queues.
+        if self.net_max_pairs > 1 && q == 2 * self.net_max_pairs {
+            self.notify_net_ctrl(&net, q);
             return;
         }
-        // Late-bind VRING GPA once the guest marks both net queues ready
-        // (desc/avail/used set).
-        if let Some(v) = self.vhost.as_mut() {
-            if v.bound && !v.rings_programmed {
-                let qs = {
-                    let st = net.state.lock().unwrap();
-                    st.queues[..st.num_queues.min(2) as usize].to_vec()
-                };
-                let ready = qs.len() >= 2
-                    && qs.iter().all(|qq| {
-                        qq.ready != 0 && qq.num > 0 && qq.desc != 0 && qq.avail != 0 && qq.used != 0
-                    });
-                if ready {
-                    match v.program_vrings(self.mem.host_ptr(), self.mem.len(), &qs) {
-                        Ok(()) => {
-                            if verbose_io() {
-                                eprintln!("[net] vhost VRING GPA programmed (H3)");
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[net] vhost-net cannot program vrings ({e}); falling back to userspace virtio-net"
-                            );
-                            self.vhost = None;
-                        }
-                    }
-                }
-            }
+        let pair = (q / 2) as usize;
+        // H3: when vhost rings are programmed, kick the kernel datapath
+        // instead of the userspace pump.
+        if self.pair_kernel(pair) {
+            self.kick_vhost(pair, q);
+            return;
         }
+        // Late-bind VRING GPA once the guest marks the net queues ready
+        // (desc/avail/used set).
+        self.program_pending_vhost(&net);
         // If programming just succeeded, kick instead of pump.
-        if self
-            .vhost
-            .as_ref()
-            .map(|v| v.kernel_datapath())
-            .unwrap_or(false)
-        {
-            if let Some(v) = self.vhost.as_ref() {
-                let _ = v.signal_kick(q as usize);
-            }
+        if self.pair_kernel(pair) {
+            self.kick_vhost(pair, q);
+            return;
+        }
+        // The userspace pump only serves the first queue pair.
+        if pair > 0 {
             return;
         }
         let mut st = net.state.lock().unwrap();
@@ -264,6 +362,38 @@ impl QueueService {
                 }
             }
             Err(e) => eprintln!("[net] notify err {e}"),
+        }
+    }
+
+    fn kick_vhost(&self, pair: usize, q: u32) {
+        if let Some(v) = self.pair_vhost(pair) {
+            if let Err(e) = v.signal_kick((q % 2) as usize) {
+                eprintln!("[net] vhost kick q={q}: {e}");
+            }
+        }
+    }
+
+    /// virtio-net control queue (multiqueue only): honour
+    /// `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET`.
+    fn notify_net_ctrl(&mut self, net: &Arc<VirtioMmio>, q: u32) {
+        // The guest sets its pair count right after probe, usually before any
+        // data-queue kick: bind the pairs first so the request can be judged
+        // against the real datapath.
+        self.program_pending_vhost(net);
+        let allow_multi = self.vhost_all_kernel();
+        let mut st = net.state.lock().unwrap();
+        match virtio_net::handle_ctrl(&mut self.mem, &mut st, q as usize, allow_multi) {
+            Ok(n) => {
+                let active = st.net_active_pairs;
+                drop(st);
+                if n > 0 {
+                    if verbose_io() {
+                        eprintln!("[net] ctrl cmds={n} active_pairs={active}");
+                    }
+                    net.raise_vring_interrupt();
+                }
+            }
+            Err(e) => eprintln!("[net] ctrl err {e}"),
         }
     }
 
@@ -386,7 +516,12 @@ pub fn start(
         let s = svc.lock().unwrap();
         for dev in [Dev::Net, Dev::Blk, Dev::Vsock, Dev::Balloon, Dev::Rng] {
             let Some(d) = s.device(dev) else { continue };
-            let queues = d.state.lock().unwrap().num_queues.min(4);
+            let queues = d
+                .state
+                .lock()
+                .unwrap()
+                .num_queues
+                .min(crate::devices::virtio_mmio::MAX_QUEUES as u32);
             for queue in 0..queues {
                 let fd = create_eventfd();
                 if fd < 0 {

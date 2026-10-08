@@ -118,6 +118,10 @@ pub enum ApiResponse {
         memory_mib: u64,
         vcpus: u8,
         lifecycle: String,
+        /// In-tree KVM guests: the live virtio-net datapath, e.g.
+        /// `vhost-net pairs=1 (...)` or `userspace-pump pairs=1 (reason)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net_datapath: Option<String>,
     },
     Error {
         message: String,

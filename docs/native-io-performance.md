@@ -79,3 +79,117 @@ reuse and malformed descriptors rejected before allocation. When a PR is opened,
 native-kvm and workspace CI workflows cover these changed paths. Their
 results must be checked before merging; keep the PR in draft until full build
 and native guest checks succeed.
+
+## Network datapath: vhost-net, userspace pump and multiqueue
+
+The sections above are host microbenchmarks of the device code. This section
+is about end-to-end guest networking on the in-tree KVM engine, and its numbers
+must never be mixed with those: the microbenchmarks have no TAP, no guest and no
+kernel networking stack, so they say nothing about guest throughput or host CPU.
+Report the two kinds in separate tables.
+
+### Datapaths
+
+| Mode | Selected by | Who moves packets |
+|---|---|---|
+| `vhost` | default (`vhost_net` on) | kernel vhost-net, one queue pair |
+| `userspace` | `FLUXVM_VHOST_NET=0` (or `--no-vhost-net`) | the queue-service thread reads and writes the TAP |
+| `mq` | `FLUXVM_NET_QUEUE_PAIRS=N` or `--net-queue-pairs N`, with vhost-net | kernel vhost-net, N queue pairs, one multi_queue TAP queue per pair |
+
+Multiqueue is off by default (one pair). With one pair the device model, feature
+bits and queue layout are the same as before; the new bits
+(`VIRTIO_NET_F_MQ`, `VIRTIO_NET_F_CTRL_VQ`, `max_virtqueue_pairs` and the control
+queue) exist only when more than one pair is requested. Multiqueue needs vhost-net
+and a TAP; if either is missing the VM is built with one pair. It also needs a TAP
+that can be opened multi_queue (`ip tuntap add ... multi_queue`, or let the first
+open create it), and the userspace pump serves only the first pair, so a guest that
+asks for more pairs is refused (`VIRTIO_NET_ERR`) unless vhost-net owns all of them.
+
+A vhost-net file descriptor serves exactly one RX/TX pair, so N pairs means N
+`/dev/vhost-net` instances, each bound to its own TAP queue.
+
+### Which datapath is live
+
+Do not assume the requested mode is the active one. The hypervisor reports it:
+
+- log line `[net] datapath <label> pairs=<n> (<reason>)` at boot, when the rings are
+  bound, on a fallback and after a snapshot restore;
+- the control API `Metrics` response field `net_datapath` (in-tree KVM guests only),
+  with the same text;
+- `scripts/test-kvm-net.sh` and `scripts/bench-kvm-vhost.sh` print it per run, and the
+  benchmark JSON stores it per mode.
+
+`<label>` is `vhost-net` only when the kernel datapath owns every queue pair;
+otherwise it is `userspace-pump` and the reason says why (disabled by config or
+`FLUXVM_VHOST_NET`, open or bind failure, waiting for the guest rings). A result
+for mode `vhost` whose reported datapath is `userspace-pump` is a measurement of
+the fallback and must not be published as a vhost result.
+
+After a snapshot restore the restored rings are already live, so vhost-net is
+re-bound immediately (and every queue kicked) instead of waiting for a guest notify.
+
+### Method
+
+Run on a lab host as root (`/dev/kvm`, netns, dnsmasq, the golden agent image):
+
+```sh
+FLUXVM_KVM_BENCH=1 sudo -E scripts/bench-kvm-vhost.sh
+# MODES="vhost userspace mq" RUNS=3 VCPUS=4 DURATION=15 STREAMS=4 MQ_PAIRS=4 \
+#   OUT=bench-kvm-vhost.json
+```
+
+Per mode and run it boots a fresh guest on a TAP in a throwaway namespace and
+measures, with `STREAMS` parallel streams for `DURATION` seconds each:
+
+- guest to host and host to guest TCP throughput;
+- guest to host and host to guest UDP throughput and loss (needs iperf3 on both
+  ends; without it TCP falls back to an HTTP transfer and UDP is skipped, which the
+  JSON records);
+- host CPU while each case runs: hypervisor process cores, `vhost-<pid>` kernel
+  thread cores, whole-host busy percentage, from `/proc` deltas, plus raw
+  `mpstat`/`pidstat` output beside the JSON when those tools are installed;
+- throughput per datapath core (hypervisor plus vhost threads), the figure that
+  shows CPU saved at equal throughput.
+
+Output is one JSON document (`bench-kvm-vhost.json`, raw samples in
+`bench-kvm-vhost.raw/`). Use medians over the runs, keep the host otherwise idle,
+pin nothing differently between modes, and record host kernel, CPU model, vCPUs
+and guest kernel next to the table. Guest-to-guest runs use two guests on the same
+bridge and are not covered by this script yet.
+
+### End-to-end results
+
+No results have been recorded yet. Fill this table from `bench-kvm-vhost.json` on
+the lab host; leave a cell empty rather than estimating it.
+
+Host: `<cpu model, cores>`, kernel `<host kernel>`; guest: `<vcpus>` vCPU,
+`<guest kernel>`; `<streams>` streams, `<duration>` s, `<runs>` runs, medians.
+
+| Case | `userspace` | `vhost` | `mq` (`<N>` pairs) |
+|---|---:|---:|---:|
+| Reported datapath | `<from Metrics>` | `<from Metrics>` | `<from Metrics>` |
+| TCP guest to host, Mbit/s | `<tbd>` | `<tbd>` | `<tbd>` |
+| TCP host to guest, Mbit/s | `<tbd>` | `<tbd>` | `<tbd>` |
+| UDP guest to host, Mbit/s / loss % | `<tbd>` | `<tbd>` | `<tbd>` |
+| UDP host to guest, Mbit/s / loss % | `<tbd>` | `<tbd>` | `<tbd>` |
+| Hypervisor cores (TCP g2h) | `<tbd>` | `<tbd>` | `<tbd>` |
+| vhost thread cores (TCP g2h) | n/a | `<tbd>` | `<tbd>` |
+| Mbit/s per datapath core (TCP g2h) | `<tbd>` | `<tbd>` | `<tbd>` |
+
+Multiqueue stays opt-in until this table shows a win over the single-pair vhost
+column on the workloads that matter.
+
+### Host microbenchmarks
+
+Keep these in the "Host measurements" table above. They compare device code only
+and are not a substitute for the end-to-end table.
+
+### Not verified yet
+
+- The vhost-net bind sequence (SET_BACKEND before the rings are programmed, no
+  SET_FEATURES, the call eventfd not yet relayed to a guest interrupt) has not been
+  exercised on a lab host in this change. The `datapath` fields exist so that a
+  fallback to the userspace pump is visible; confirm `vhost-net` is reported
+  before trusting any `vhost` or `mq` number.
+- Multiqueue, the control queue and the restore re-bind are unit-tested only for
+  the control-queue command parsing; the rest needs a lab run.

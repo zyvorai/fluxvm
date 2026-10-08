@@ -28,7 +28,7 @@ pub const VERSION: u32 = 5;
 const V2_WATERMARK: usize = 256;
 const MAX_SNAPSHOT_VCPUS: usize = 256;
 const MAX_SNAPSHOT_DEVICES: usize = 64;
-const MAX_VIRTIO_QUEUES: u32 = 4;
+const MAX_VIRTIO_QUEUES: u32 = crate::devices::virtio_mmio::MAX_QUEUES as u32;
 
 pub struct SnapCmd {
     pub vmstate: std::path::PathBuf,
@@ -396,6 +396,12 @@ pub fn restore_vcpus(kvm: &KvmVm, snap: &CpuSnapshot) -> Result<()> {
 
 /// Overlay packed virtio live-state onto live device backends (matched by
 /// `device_id`). Backends (disk path, TAP) stay from boot config.
+///
+/// vhost-net holds no state of its own across a restore: the restored
+/// queue rings and `last_avail` are what it is programmed from, so the caller
+/// (`vm.rs`, once the queue service exists) re-binds it with
+/// `QueueService::rebind_vhost_after_restore` rather than waiting for a guest
+/// notify that an idle RX queue may never send.
 pub fn restore_virtio(
     targets: &[&std::sync::Arc<crate::devices::virtio_mmio::VirtioMmio>],
     snap: &[VirtioState],
@@ -413,7 +419,7 @@ pub fn restore_virtio(
             live.status = packed.status;
             live.interrupt_status = packed.interrupt_status;
             live.num_queues = packed.num_queues;
-            let nq = packed.num_queues.min(4) as usize;
+            let nq = packed.num_queues.min(MAX_VIRTIO_QUEUES) as usize;
             for i in 0..nq {
                 live.queues[i] = packed.queues[i].clone();
             }

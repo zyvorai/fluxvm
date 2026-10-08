@@ -7,6 +7,7 @@ use std::os::raw::{c_char, c_int, c_ulong, c_void};
 extern "C" {
     pub fn flux_ioctl(fd: c_int, req: c_ulong, arg: *mut c_void) -> c_int;
     pub fn flux_tap_open(name: *const c_char) -> c_int;
+    pub fn flux_tap_open_mq(name: *const c_char, multi_queue: c_int) -> c_int;
     pub fn flux_if_up(name: *const c_char) -> c_int;
     pub fn flux_if_addr(name: *const c_char, addr_be: u32, mask_be: u32) -> c_int;
     pub fn flux_errno() -> c_int;
@@ -34,6 +35,9 @@ mod stubs {
         -1
     }
     pub unsafe fn flux_tap_open(_: *const c_char) -> c_int {
+        -1
+    }
+    pub unsafe fn flux_tap_open_mq(_: *const c_char, _: c_int) -> c_int {
         -1
     }
     pub unsafe fn flux_if_up(_: *const c_char) -> c_int {

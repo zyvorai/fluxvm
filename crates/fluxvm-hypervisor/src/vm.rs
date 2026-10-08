@@ -22,7 +22,7 @@ use crate::pause::{ApAcks, KickGuard, PauseHandles, VcpuKick};
 use crate::pci::{MsixBar, PciEcam};
 use crate::queue_service::{self, QueueService};
 use crate::tap::Tap;
-use crate::vhost::VhostNet;
+use crate::vhost::{NetDatapath, VhostNet, VhostPair};
 use std::io;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -53,6 +53,11 @@ pub struct VirtualMachine {
     pub blk_limiter: Arc<RateLimiter>,
     pub tap: Option<Tap>,
     pub vhost: Option<VhostNet>,
+    /// Extra vhost-net instances (+ TAP queues) for queue pairs 1.. when
+    /// multiqueue is on; empty with the default single pair.
+    pub vhost_pairs: Vec<VhostPair>,
+    /// Which virtio-net datapath is live (reported via the control API).
+    pub net_datapath: Arc<NetDatapath>,
     pub boot_rip: u64,
     pub boot_params_gpa: Option<u64>,
     pub pvh_start_info_gpa: Option<u64>,
@@ -117,6 +122,8 @@ impl VirtualMachine {
             blk_limiter: Arc::new(RateLimiter::unlimited()),
             tap,
             vhost: None,
+            vhost_pairs: Vec::new(),
+            net_datapath: Arc::new(NetDatapath::default()),
             boot_rip: KERNEL_LOAD_ADDR,
             boot_params_gpa: None,
             pvh_start_info_gpa: None,
@@ -210,7 +217,16 @@ impl VirtualMachine {
         }
 
         let mac = VirtioNetConfig::parse_mac(&cfg.mac).unwrap_or([0x02, 0, 0, 0, 0, 2]);
-        let net = Arc::new(VirtioMmio::net(MMIO_WINDOW, mac));
+        // Multiqueue is opt-in and only meaningful with vhost-net serving the
+        // extra pairs; without both, build the plain single-pair device.
+        let mut net_pairs = cfg.effective_net_queue_pairs() as u16;
+        if net_pairs > 1 && !(cfg.vhost_net_enabled() && cfg.tap.is_some()) {
+            notes.push(format!(
+                "net-queue-pairs={net_pairs} needs vhost-net and a TAP; using 1 queue pair"
+            ));
+            net_pairs = 1;
+        }
+        let net = Arc::new(VirtioMmio::net_mq(MMIO_WINDOW, mac, net_pairs));
         bus.add_mmio(net.clone());
 
         let (blk, blk_backend) = if let Some(disk) = &cfg.disk {
@@ -269,17 +285,19 @@ impl VirtualMachine {
         };
 
         let tap = if let Some(tap_name) = &cfg.tap {
-            let tap = Tap::open(tap_name, [192, 168, 100, 1])?;
+            let tap = Tap::open_with(tap_name, [192, 168, 100, 1], net_pairs > 1)?;
             notes.push(format!("TAP {} attached", tap.name));
             Some(tap)
         } else {
             None
         };
 
-        let vhost = if cfg.vhost_net {
+        let net_datapath = Arc::new(NetDatapath::default());
+        let mut vhost_pairs: Vec<VhostPair> = Vec::new();
+        let vhost = if cfg.vhost_net_enabled() {
             match VhostNet::open() {
                 Ok(mut v) => {
-                    let mut bind_failed = false;
+                    let mut why_not: Option<String> = None;
                     if let Some(ref tap) = tap {
                         match v.bind_tap(tap.fd, 2) {
                             Ok(()) => {
@@ -292,7 +310,31 @@ impl VirtualMachine {
                                 notes.push(format!(
                                     "vhost-net cannot bind before the guest sets up its rings ({e}); using userspace virtio-net"
                                 ));
-                                bind_failed = true;
+                                why_not = Some(format!("vhost-net bind failed: {e}"));
+                            }
+                        }
+                        // One vhost-net instance + TAP queue per extra pair.
+                        for pair in 1..net_pairs {
+                            if why_not.is_some() {
+                                break;
+                            }
+                            let bound = tap.attach_queue().and_then(|qtap| {
+                                let mut pv = VhostNet::open()?;
+                                pv.bind_tap(qtap.fd, 2)?;
+                                Ok(VhostPair {
+                                    vhost: pv,
+                                    tap: qtap,
+                                })
+                            });
+                            match bound {
+                                Ok(p) => vhost_pairs.push(p),
+                                Err(e) => {
+                                    notes.push(format!(
+                                        "vhost-net queue pair {pair} cannot bind ({e}); using userspace virtio-net"
+                                    ));
+                                    why_not =
+                                        Some(format!("vhost-net pair {pair} bind failed: {e}"));
+                                }
                             }
                         }
                     } else {
@@ -300,21 +342,41 @@ impl VirtualMachine {
                             "vhost-net opened (/dev/vhost-net); no TAP to bind — userspace path"
                                 .into(),
                         );
+                        why_not = Some("no TAP to bind vhost-net to".into());
                     }
-                    if bind_failed {
-                        None
-                    } else {
-                        Some(v)
+                    match why_not {
+                        Some(why) => {
+                            vhost_pairs.clear();
+                            net_datapath.set(false, 1, why);
+                            None
+                        }
+                        None => {
+                            net_datapath.set(
+                                false,
+                                net_pairs as u32,
+                                "vhost-net bound; kernel datapath starts once the guest sets up its rings",
+                            );
+                            Some(v)
+                        }
                     }
                 }
                 Err(e) => {
                     notes.push(format!("vhost-net fallback to userspace TAP: {e}"));
+                    net_datapath.set(false, 1, format!("vhost-net unavailable: {e}"));
                     None
                 }
             }
         } else {
+            let why = if cfg.vhost_net {
+                "vhost-net disabled by FLUXVM_VHOST_NET"
+            } else {
+                "vhost-net disabled by config"
+            };
+            notes.push(why.into());
+            net_datapath.set(false, 1, why);
             None
         };
+        eprintln!("[net] datapath {}", net_datapath.summary());
 
         let net_limiter = Arc::new(RateLimiter::from_mbit(cfg.net_mbit_limit));
         let blk_limiter = Arc::new(RateLimiter::from_mbit(cfg.blk_mbit_limit));
@@ -335,6 +397,8 @@ impl VirtualMachine {
             blk_limiter,
             tap,
             vhost,
+            vhost_pairs,
+            net_datapath,
             boot_rip: boot_info.entry_rip,
             boot_params_gpa: boot_info.boot_params_gpa,
             pvh_start_info_gpa: boot_info.pvh_start_info_gpa,
@@ -424,6 +488,7 @@ impl VirtualMachine {
             jail.enabled = true;
         }
         jailer::apply(&jail)?;
+        let was_restored = restore.is_some();
         if let Some(cpu) = restore {
             kvm_snap::restore_vcpus(&kvm, &cpu)?;
             let targets: Vec<_> = [&self.net, &self.blk, &self.vsock, &self.balloon, &self.rng]
@@ -523,7 +588,14 @@ impl VirtualMachine {
             self.blk_limiter.clone(),
             self.tap.take(),
             self.vhost.take(),
+            std::mem::take(&mut self.vhost_pairs),
+            self.net_datapath.clone(),
         )));
+        if was_restored {
+            // The restored guest's rings are already live and it will not
+            // re-run driver setup: bind vhost-net to them now.
+            queue_svc.lock().unwrap().rebind_vhost_after_restore();
+        }
         queue_service::start(&kvm, queue_svc.clone(), stop.clone(), paused.clone())?;
 
         let mut gdb_cmd_rx: Option<Receiver<GdbCmd>> = None;
