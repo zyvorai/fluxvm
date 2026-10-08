@@ -100,10 +100,11 @@ pub fn adopt_unsupported(record: &VmRecord) -> Option<String> {
     if !req.data_disks.is_empty() {
         return Some("VMs with data disks are not migratable yet".into());
     }
-    if !req.cdroms.is_empty() {
-        return Some(
-            "VMs with install media (cdroms) attached are not migratable; detach them first".into(),
-        );
+    if let Some(c) = req.cdroms.iter().find(|c| !c.is_ejected()) {
+        return Some(format!(
+            "VMs with install media attached are not migratable; eject cdrom {:?} first (POST /v1/vms/{{id}}/cdroms/{{name}}/eject)",
+            c.name
+        ));
     }
     if req.security_profile.is_confidential() {
         return Some("confidential VMs cannot be live-migrated".into());
@@ -518,6 +519,12 @@ mod tests {
             name: "install".into(),
             path: "/srv/iso/win.iso".into(),
         }];
-        assert!(adopt_unsupported(&iso).unwrap().contains("cdroms"));
+        assert!(
+            adopt_unsupported(&iso)
+                .unwrap()
+                .contains("eject cdrom \"install\"")
+        );
+        iso.request.cdroms[0].path = std::path::PathBuf::new();
+        assert!(adopt_unsupported(&iso).is_none());
     }
 }

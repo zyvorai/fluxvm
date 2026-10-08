@@ -106,10 +106,17 @@ fn device_id(name: &str) -> String {
 /// Boot-time `-blockdev`/`-device` pairs for install media: `ide-cd` on the
 /// q35 AHCI ports `ide.0..`, read-only raw. No `bootindex`, so firmware tries
 /// the (blank) root disk, falls through to the CD, and later honors the boot
-/// entry the installed OS wrote.
+/// entry the installed OS wrote. An ejected entry keeps an empty drive.
 pub fn cdrom_args(cdroms: &[fluxvm_core::model::CdromSpec]) -> Vec<String> {
     let mut a = Vec::new();
     for (i, c) in cdroms.iter().enumerate() {
+        if c.is_ejected() {
+            a.extend([
+                "-device".into(),
+                format!("ide-cd,bus=ide.{i},id=cdrom-{}", c.name),
+            ]);
+            continue;
+        }
         a.extend([
             "-blockdev".into(),
             format!(
@@ -122,6 +129,51 @@ pub fn cdrom_args(cdroms: &[fluxvm_core::model::CdromSpec]) -> Vec<String> {
         ]);
     }
     a
+}
+
+/// Eject a live VM's install medium: open the tray (`force`, so a guest
+/// lock can't block it), drop the medium, close the tray, then free the
+/// ISO's node. The empty `ide-cd` device stays.
+pub async fn eject_cdrom(vm: &VmRecord, name: &str) -> Result<()> {
+    let sock = vm.workspace.join("qmp.sock");
+    let id = format!("cdrom-{name}");
+    qmp::execute(
+        &sock,
+        "blockdev-open-tray",
+        Some(json!({"id": id, "force": true})),
+        QMP_TIMEOUT,
+    )
+    .await
+    .context("blockdev-open-tray")?;
+    qmp::execute(
+        &sock,
+        "blockdev-remove-medium",
+        Some(json!({"id": id})),
+        QMP_TIMEOUT,
+    )
+    .await
+    .context("blockdev-remove-medium")?;
+    qmp::execute(
+        &sock,
+        "blockdev-close-tray",
+        Some(json!({"id": id})),
+        QMP_TIMEOUT,
+    )
+    .await
+    .context("blockdev-close-tray")?;
+    // A node left behind only keeps the ISO open until the next restart.
+    let _ = qmp::execute(
+        &sock,
+        "blockdev-del",
+        Some(json!({"node-name": format!("cd-{name}")})),
+        QMP_TIMEOUT,
+    )
+    .await;
+    Ok(())
+}
+
+pub fn is_live_vm(vm: &VmRecord) -> bool {
+    is_live(vm)
 }
 
 /// Boot-time `-blockdev`/`-device` pairs for every data disk.
@@ -535,6 +587,20 @@ mod tests {
         assert!(args.contains("file.filename=/iso/win.iso,file.read-only=on"));
         assert!(args.contains("ide-cd,bus=ide.0,drive=cd-install,id=cdrom-install"));
         assert!(args.contains("ide-cd,bus=ide.1,drive=cd-virtio,id=cdrom-virtio"));
+        let ejected = cdrom_args(&[
+            CdromSpec {
+                name: "install".into(),
+                path: std::path::PathBuf::new(),
+            },
+            CdromSpec {
+                name: "virtio".into(),
+                path: "/srv/iso/virtio-win.iso".into(),
+            },
+        ])
+        .join(" ");
+        assert!(ejected.starts_with("-device ide-cd,bus=ide.0,id=cdrom-install -blockdev"));
+        assert!(!ejected.contains("node-name=cd-install"));
+        assert!(ejected.contains("ide-cd,bus=ide.1,drive=cd-virtio,id=cdrom-virtio"));
         assert!(!args.contains("bootindex"));
     }
 

@@ -203,6 +203,13 @@ fn ops() -> Vec<Op> {
             DISKS,
         )
         .status("204"),
+        op(
+            "post",
+            "/v1/vms/{id}/cdroms/{name}/eject",
+            "Eject install media (live when running); the empty drive stays",
+            DISKS,
+        )
+        .returns("VmRecord"),
         op("get", "/v1/vm-templates", "List VM templates", TEMPLATES).returns("TemplateList"),
         op("post", "/v1/vm-templates", "Save a VM template", TEMPLATES)
             .body("SaveTemplateRequest")

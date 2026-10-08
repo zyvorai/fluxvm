@@ -2054,6 +2054,9 @@ impl VmManager {
                 if !seen.insert(c.name.clone()) {
                     anyhow::bail!("duplicate cdrom name {:?}", c.name);
                 }
+                if c.is_ejected() {
+                    anyhow::bail!("cdrom {:?} needs a path", c.name);
+                }
                 c.path = self
                     .check_disk_source(&c.path)
                     .with_context(|| format!("cdrom {:?}", c.name))?;
@@ -3843,6 +3846,29 @@ impl VmManager {
             );
         }
         Ok(real)
+    }
+
+    /// Eject install medium `name` (live when running). The empty drive is
+    /// kept and recorded, so restarts and migrations come up without it.
+    /// Ejecting an already-empty drive is a no-op.
+    pub async fn eject_vm_cdrom(&self, id: Uuid, name: &str) -> Result<VmRecord> {
+        let mut vm = self.qemu_vm_for_disks(id).await?;
+        let Some(idx) = vm.request.cdroms.iter().position(|c| c.name == name) else {
+            bail!("cdrom {name:?} not found");
+        };
+        if vm.request.cdroms[idx].is_ejected() {
+            return Ok(vm);
+        }
+        if fluxvm_qemu::disks::is_live_vm(&vm) {
+            fluxvm_qemu::disks::eject_cdrom(&vm, name).await?;
+        }
+        vm.request.cdroms[idx].path = std::path::PathBuf::new();
+        self.store.update(vm.clone()).await?;
+        audit_event(
+            "vm.cdrom.eject",
+            &[("vm_id", &id.to_string()), ("cdrom", name)],
+        );
+        Ok(vm)
     }
 
     pub async fn detach_vm_disk(&self, id: Uuid, name: &str) -> Result<()> {

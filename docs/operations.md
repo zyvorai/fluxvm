@@ -368,7 +368,9 @@ sudo /usr/local/bin/fluxctl --config /etc/fluxvm.toml migrate cancel <id>
 `start` requires the VM to already be `Running` and refuses anything but a `tcp:`/`unix:` destination —
 the same shared allowlist the REST route validates against, `exec:` included, so a migration can't be
 turned into an arbitrary shell invocation on the source host. Direct-datapath VMs are refused until a
-two-host test exists. When the Network Fabric dataplane is attached, `start` quiesces the VM edge first;
+two-host test exists. VMs whose CD-ROM still holds install media are refused (the ISO path is
+host-local). Eject it first with `POST /v1/vms/{id}/cdroms/{name}/eject`, which works live and leaves an
+empty drive (see [api.md](api.md)). When the Network Fabric dataplane is attached, `start` quiesces the VM edge first;
 the gate is **resumed automatically** if start returns an error, if QEMU reports `Failed`/`Cancelled`,
 when `migrate status` later sees those terminal phases, or on `migrate cancel` — so a failed or abandoned
 migration does not leave new flows blocked by reason `migration-quiesce`. `--mode` takes `pre-copy`

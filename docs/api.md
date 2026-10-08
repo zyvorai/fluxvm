@@ -44,6 +44,7 @@ GET    /v1/vms/{uuid}/disks
 POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}, {"name": "pvc", "path": "/dev/rbd0"} or {"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"} (qcow2 overlay)
 PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
 DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file (or overlay); only unlinks a path-attached disk
+POST   /v1/vms/{uuid}/cdroms/{name}/eject # remove install media (live when running); the empty drive stays
 GET    /v1/vms/{uuid}/serial             # websocket, raw serial bytes (QEMU)
 POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
@@ -329,7 +330,33 @@ attaches each ISO read-only as a SATA CD-ROM on the q35 AHCI controller (`ide.0`
 Windows Setup sees it with no extra drivers. `path` is checked like a data disk `backing`. No boot
 order is forced: firmware skips a blank root disk and boots the first CD-ROM, and once an OS is
 installed it boots from the disk. To install onto a blank disk, point `image` at an empty raw or
-qcow2 file and set `disk_size_gib`. VMs with cdroms attached can't be live-migrated.
+qcow2 file and set `disk_size_gib`.
+
+**Ejecting install media.** A VM with media in a CD-ROM can't be live-migrated, because the ISO
+path is host-local. Once the OS is installed, eject the medium:
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:7788/v1/vms/$ID/cdroms/install/eject
+```
+
+- Needs an admin-role token and is tenant-scoped like every `/v1/vms/{uuid}` route (a tenant token
+  can eject only its own tenant's VMs).
+- If the VM is running on QEMU, the medium is removed live over QMP: `blockdev-open-tray` (forced,
+  so a guest lock doesn't block it), `blockdev-remove-medium`, `blockdev-close-tray`, then the
+  read-only `cd-<name>` block node is deleted. The guest sees an empty drive. Nothing is hot-unplugged.
+- The drive is recorded as empty (`"path": ""` in `cdroms[]`). Later starts, restarts and migration
+  receivers create a bare `ide-cd` device with no medium, so the guest's device layout (and Windows
+  drive letters) stays the same.
+- Ejecting an already-empty drive succeeds and changes nothing. An unknown name returns 400
+  `cdrom "<name>" not found`.
+- The response is the updated VM record. The action is audited as `vm.cdrom.eject`.
+- Creating a VM with an empty `path` is still rejected (`cdrom "<name>" needs a path`). An empty
+  drive comes only from an eject.
+
+Live migration rejects only CD-ROMs that still hold media, with
+`eject cdrom "<name>" first (POST /v1/vms/{id}/cdroms/{name}/eject)`. Inserting new media into an
+empty drive isn't supported yet; recreate the VM with the ISO instead.
 
 `agent.enabled` turns on the vsock guest agent (`fluxctl exec`) for this VM — the guest image must
 have `fluxvm-guest-agent` installed and enabled (see the

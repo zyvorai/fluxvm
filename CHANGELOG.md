@@ -13,6 +13,11 @@
   [primary-ebpf.md](docs/primary-ebpf.md).
 
 ### Added
+- **Eject install media.** `POST /v1/vms/{id}/cdroms/{name}/eject` (admin) removes a CD-ROM's medium,
+  live over QMP when the QEMU VM is running, and records the drive as empty (`path: ""`). Later starts and
+  migration receivers create a bare `ide-cd` device, so the guest's device layout stays the same. Ejecting is
+  idempotent, and live migration now rejects only CD-ROMs that still hold media, so an installed Windows VM
+  can migrate after ejecting its ISO. See [api.md](docs/api.md).
 - **Backups on every engine.** `POST /v1/vms/{id}/backup` and `restore-backup` work for Cloud Hypervisor,
   Firecracker and flux-vm VMs that are stopped, and for `storage: shared` disk files. A running VM still needs
   QEMU on default storage (internal snapshot); others get "stop the VM first". A restore converts back to the
