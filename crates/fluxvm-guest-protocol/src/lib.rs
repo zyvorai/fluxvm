@@ -70,6 +70,25 @@ pub enum AgentRequest {
         rows: u16,
     },
     Shutdown,
+    /// Give a freshly forked/restored guest its own identity: the snapshot
+    /// carries the parent's hostname, `/etc/machine-id` and RNG state, so
+    /// every child must reset them. Each step is best-effort and reported in
+    /// [`AgentResponse::IdentityReset`]; none aborts the others.
+    ResetIdentity {
+        /// New hostname (kernel + `/etc/hostname`); `None` leaves it alone.
+        #[serde(default)]
+        hostname: Option<String>,
+        /// Replace `/etc/machine-id` with a fresh random id.
+        #[serde(default)]
+        regenerate_machine_id: bool,
+        /// Credit fresh host-supplied entropy to the guest RNG.
+        #[serde(default)]
+        reseed_entropy: bool,
+        /// Base64 of entropy bytes from the host; if empty the agent mixes in
+        /// what it can gather itself (weaker: same snapshot, same pool).
+        #[serde(default)]
+        entropy_base64: Option<String>,
+    },
 }
 fn default_pty_cols() -> u16 {
     80
@@ -139,6 +158,12 @@ pub enum AgentResponse {
     /// client reads back is raw PTY output (not JSON, not framed).
     ShellOpened,
     ShuttingDown,
+    /// Result of [`AgentRequest::ResetIdentity`]: the steps that were
+    /// applied, and a human-readable note for each that failed.
+    IdentityReset {
+        applied: Vec<String>,
+        failures: Vec<String>,
+    },
     Error {
         message: String,
     },

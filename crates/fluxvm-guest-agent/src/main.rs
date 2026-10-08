@@ -177,6 +177,17 @@ fn handle_connection(
             let _ = Command::new("shutdown").args(["-h", "now"]).spawn();
             return Ok(());
         }
+        AgentRequest::ResetIdentity {
+            hostname,
+            regenerate_machine_id,
+            reseed_entropy,
+            entropy_base64,
+        } => reset_identity(
+            hostname.as_deref(),
+            regenerate_machine_id,
+            reseed_entropy,
+            entropy_base64.as_deref(),
+        ),
     };
 
     writer.write_all(encode_line(&response)?.as_bytes())?;
@@ -630,9 +641,140 @@ fn get_file(path: &str) -> AgentResponse {
     }
 }
 
+/// Valid hostname: 1..=63 chars of `[A-Za-z0-9-]`, no leading/trailing `-`.
+#[cfg(target_os = "linux")]
+fn valid_hostname(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// 16 random bytes as 32 lowercase hex chars, the `/etc/machine-id` format.
+#[cfg(target_os = "linux")]
+fn fresh_machine_id() -> std::io::Result<String> {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
+    // Mark as a version-4 UUID like systemd-id128 does.
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    Ok(b.iter().map(|x| format!("{x:02x}")).collect())
+}
+
+/// Credit `data` to the kernel entropy pool (RNDADDENTROPY, needs root).
+#[cfg(target_os = "linux")]
+fn add_entropy(data: &[u8]) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    // _IOW('R', 0x03, int[2])
+    const RNDADDENTROPY: u32 = 0x4008_5203;
+    // struct rand_pool_info { int entropy_count; int buf_size; u32 buf[]; }
+    let mut buf = Vec::with_capacity(8 + data.len());
+    buf.extend_from_slice(&((data.len() * 8) as i32).to_ne_bytes());
+    buf.extend_from_slice(&(data.len() as i32).to_ne_bytes());
+    buf.extend_from_slice(data);
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/urandom")?;
+    let rc = unsafe { libc::ioctl(f.as_raw_fd(), RNDADDENTROPY as _, buf.as_ptr()) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Reset the per-VM identity a forked/restored guest inherited from its
+/// parent snapshot. Every step is independent and best-effort; the response
+/// lists what was applied and what failed.
+#[cfg(target_os = "linux")]
+fn reset_identity(
+    hostname: Option<&str>,
+    regenerate_machine_id: bool,
+    reseed_entropy: bool,
+    entropy_base64: Option<&str>,
+) -> AgentResponse {
+    let mut applied = Vec::new();
+    let mut failures = Vec::new();
+
+    // Entropy first, so the machine-id below is drawn from the fresh pool.
+    if reseed_entropy {
+        let host_bytes = entropy_base64
+            .filter(|s| !s.is_empty())
+            .map(|s| B64.decode(s));
+        match host_bytes {
+            Some(Ok(bytes)) if !bytes.is_empty() => {
+                match add_entropy(&bytes[..bytes.len().min(512)]) {
+                    Ok(()) => applied.push("entropy".to_string()),
+                    Err(e) => failures.push(format!("RNDADDENTROPY: {e}")),
+                }
+            }
+            Some(Err(e)) => failures.push(format!("entropy_base64: {e}")),
+            _ => failures.push("no host entropy supplied; pool not reseeded".to_string()),
+        }
+    }
+
+    if let Some(name) = hostname {
+        if !valid_hostname(name) {
+            failures.push(format!("invalid hostname {name:?}"));
+        } else {
+            let rc = unsafe { libc::sethostname(name.as_ptr() as *const libc::c_char, name.len()) };
+            if rc != 0 {
+                failures.push(format!("sethostname: {}", std::io::Error::last_os_error()));
+            } else {
+                applied.push("hostname".to_string());
+            }
+            if let Err(e) = std::fs::write("/etc/hostname", format!("{name}\n")) {
+                failures.push(format!("/etc/hostname: {e}"));
+            }
+        }
+    }
+
+    if regenerate_machine_id {
+        match fresh_machine_id() {
+            Ok(id) => {
+                match std::fs::write("/etc/machine-id", format!("{id}\n")) {
+                    Ok(()) => applied.push("machine-id".to_string()),
+                    Err(e) => failures.push(format!("/etc/machine-id: {e}")),
+                }
+                // Debian-style copy; leave a symlink (-> /etc/machine-id) alone.
+                let dbus = "/var/lib/dbus/machine-id";
+                if std::fs::symlink_metadata(dbus).is_ok_and(|m| m.file_type().is_file())
+                    && let Err(e) = std::fs::write(dbus, format!("{id}\n"))
+                {
+                    failures.push(format!("{dbus}: {e}"));
+                }
+            }
+            Err(e) => failures.push(format!("generating machine-id: {e}")),
+        }
+    }
+
+    // Stale L2/L3 state from the parent: neighbour cache entries.
+    if Command::new("ip")
+        .args(["neigh", "flush", "all"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        applied.push("neigh-flush".to_string());
+    }
+
+    AgentResponse::IdentityReset { applied, failures }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostname_validation() {
+        assert!(valid_hostname("vm-fork-1"));
+        assert!(!valid_hostname(""));
+        assert!(!valid_hostname("-x"));
+        assert!(!valid_hostname("a.b"));
+        assert!(!valid_hostname(&"a".repeat(64)));
+    }
 
     #[test]
     fn put_file_creates_parent_dirs_and_sets_mode() {

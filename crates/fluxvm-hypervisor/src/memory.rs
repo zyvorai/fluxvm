@@ -90,6 +90,68 @@ impl GuestMemory {
         })
     }
 
+    /// Restore path: replace the guest RAM mapping, in place, with a
+    /// `MAP_PRIVATE` mapping of `file` (a snapshot's `snap.mem`). Pages are
+    /// faulted from the page cache on first touch, so N children restored
+    /// from one snapshot share every page none of them has written and only
+    /// copy-on-write the ones they dirty. The host address does not change,
+    /// so the KVM memslot and every `host_ptr()` copy stay valid.
+    ///
+    /// Must run before any vCPU or device thread touches RAM. Errors (and
+    /// leaves the anonymous mapping untouched) when the file size differs or
+    /// when mlock/hugepage backing was requested, since a file mapping can
+    /// honour neither; callers fall back to an eager copy.
+    ///
+    /// The snapshot file must not be truncated or rewritten in place while a
+    /// child runs (that would SIGBUS the guest). Unlinking it is fine.
+    #[cfg(target_os = "linux")]
+    pub fn remap_private_file(&mut self, file: &std::fs::File) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        let flag = |name: &str| std::env::var(name).ok().as_deref() == Some("1");
+        if flag("FLUXVM_KVM_LOCK_MEM") || flag("FLUXVM_HUGEPAGES") {
+            return Err(FluxError::Memory(
+                "file-backed restore is incompatible with mlock/hugepage guest RAM".into(),
+            ));
+        }
+        if flag("FLUXVM_KVM_EAGER_RESTORE") {
+            return Err(FluxError::Memory(
+                "FLUXVM_KVM_EAGER_RESTORE=1 forces the eager copy".into(),
+            ));
+        }
+        let size = file
+            .metadata()
+            .map_err(|e| FluxError::Memory(e.to_string()))?
+            .len();
+        if size != self.len as u64 {
+            return Err(FluxError::Memory(format!(
+                "snapshot RAM size {size} does not match guest RAM {}",
+                self.len
+            )));
+        }
+        let p = unsafe {
+            libc::mmap(
+                self.ptr.as_ptr() as *mut libc::c_void,
+                self.len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_FIXED | libc::MAP_NORESERVE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED || p as usize != self.ptr.as_ptr() as usize {
+            return Err(FluxError::Memory(format!(
+                "mmap snapshot RAM failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn remap_private_file(&mut self, _file: &std::fs::File) -> Result<()> {
+        Err(FluxError::Memory("file-backed restore needs Linux".into()))
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

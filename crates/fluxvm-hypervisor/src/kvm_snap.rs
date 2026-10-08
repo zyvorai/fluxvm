@@ -346,6 +346,12 @@ pub fn load_memory_into(mem: &mut GuestMemory, mem_path: &Path) -> Result<()> {
             mem.len()
         )));
     }
+    // Preferred: map the snapshot privately so children share clean pages and
+    // only copy what they write. Any failure falls back to the eager copy.
+    match mem.remap_private_file(&file) {
+        Ok(()) => return Ok(()),
+        Err(e) => eprintln!("[kvm-engine] file-backed restore unavailable, copying RAM: {e}"),
+    }
     let mut reader = std::io::BufReader::new(file);
     reader
         .read_exact(mem.as_slice_mut())
