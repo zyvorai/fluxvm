@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FluxVM: eBPF numbers</title>
+<!-- README card, 1600 wide at 2x. Build: ./docs/ux/build-readme-cards.sh
+     Figures: docs/benchmarks/evidence/direct-datapath-interleaved-20260919T191854Z.txt -->
+<link rel="stylesheet" href="ebpf-card.css">
+<style>
+  .grid { margin-top:26px; display:grid; grid-template-columns:1fr 1fr; gap:24px; }
+  .panel { padding:22px 26px; }
+  .panel h2 { margin:14px 0 4px; font-size:26px; letter-spacing:-.02em; }
+  .panel .u { font-family:var(--mono); font-size:13px; color:#8e8e93; letter-spacing:.06em; }
+  .bar { margin-top:14px; }
+  .bar .lbl { display:flex; justify-content:space-between; font-size:16px; color:#d1d1d6; }
+  .bar .lbl b { font-family:var(--mono); color:#f5f5f7; }
+  .bar .trk { margin-top:6px; height:22px; border-radius:11px; background:rgba(255,255,255,.06); overflow:hidden; }
+  .bar .fill { height:100%; border-radius:11px; background:var(--c); }
+  .delta { margin-top:16px; font-size:20px; font-weight:700; color:var(--green); }
+  .delta span { font-weight:400; font-size:15px; color:#a1a1a6; }
+</style>
+</head>
+<body>
+<div class="glow"></div><div class="rail"></div>
+<div class="wrap">
+  <div class="top"><div class="brand"><svg viewBox="0 0 64 64" width="30" height="30" aria-hidden="true"><defs><linearGradient id="zb" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ff5a15"/><stop offset="1" stop-color="#cc420a"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#zb)"/><path d="M18.5,20.5 45.5,20.5 18.5,43.5 45.5,43.5" fill="none" stroke="#fff" stroke-width="8.3" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Zyvor</b><span>&middot;</span><span>FluxVM</span></div><div class="kicker">Measured, not promised</div></div>
+  <h1>Fewer hops. <em>More packets.</em></h1>
+  <p class="sub">Direct datapath vs the bridge chain on the Pod path, both running the same eBPF policy program. Median of 6 interleaved rounds.</p>
+  <div class="grid">
+    <div class="card panel">
+      <span class="tag" style="color:var(--blue)">Latency &middot; ping p50</span>
+      <h2>Lower is better</h2><div class="u">MILLISECONDS</div>
+      <div class="bar" style="--c:#636366"><div class="lbl"><span>Bridge chain + policy (8 devices)</span><b>0.062 ms</b></div><div class="trk"><div class="fill" style="width:100%"></div></div></div>
+      <div class="bar" style="--c:var(--acc)"><div class="lbl"><span>Direct + policy (4 devices)</span><b>0.0425 ms</b></div><div class="trk"><div class="fill" style="width:68.5%"></div></div></div>
+      <div class="delta">&minus;31% latency <span>&middot; floor (no bridge, no policy) 0.0365 ms</span></div>
+    </div>
+    <div class="card panel">
+      <span class="tag" style="color:var(--green)">Small packets &middot; 64 B UDP</span>
+      <h2>Higher is better</h2><div class="u">MILLION PACKETS / SECOND</div>
+      <div class="bar" style="--c:#636366"><div class="lbl"><span>Bridge chain + policy (8 devices)</span><b>0.222 Mpps</b></div><div class="trk"><div class="fill" style="width:51.9%"></div></div></div>
+      <div class="bar" style="--c:var(--green)"><div class="lbl"><span>Direct + policy (4 devices)</span><b>0.355 Mpps</b></div><div class="trk"><div class="fill" style="width:82.9%"></div></div></div>
+      <div class="delta">+60% packet rate <span>&middot; floor 0.428 Mpps (full bar)</span></div>
+    </div>
+  </div>
+  <div class="foot"><span>Host forwarding cost only (veth stands in for the tap; no virtio/QEMU). Bulk TCP was within noise, so no TCP claim.</span><span>docs/direct-datapath.md</span></div>
+</div>
+<script>document.body.setAttribute('data-h', Math.ceil(document.querySelector('.wrap').getBoundingClientRect().height));</script>
+</body>
+</html>

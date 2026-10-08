@@ -242,7 +242,7 @@ Privileged integration smoke (FluxVm + `NetworkSpec::Tap { netns: true }`):
    `/run/fluxvm/ebpf/vms/<uuid-simple>/`.
 5. Exercise `GET …/network/status` (`schema_version=4`, `policy_synced`).
 6. Delete the VM; pins, meta, and the TC filter should be gone.
-7. With `required = false` and a missing `.o`, create should warn and fall back
+7. With an explicit lab `required = false` and a missing `.o`, create should warn and fall back
    to nftables when fallback is safe.
 
 Netns NAT tables (`fluxvm_netns_*`) remain independent of sandbox dataplane mode

@@ -91,8 +91,8 @@ An egress ACL on method, host and path (HTTPS via opt-in interception), a file c
 <tr>
 <td valign="top" width="33%">
 <b>Network Fabric <sub>GA</sub></b><br>
-A TC/eBPF VM-edge dataplane with L3/L4 policy, rate limits, security groups and live reconfigure. nftables stays the default.<br>
-<a href="docs/network-fabric.md">Network Fabric</a>
+A TC/eBPF VM-edge dataplane with L3/L4 policy, rate limits, security groups and live reconfigure. Native eBPF is the default dataplane; nftables is an explicit compatibility mode.<br>
+<a href="docs/ebpf.md">eBPF dataplane</a> · <a href="docs/network-fabric.md">Network Fabric</a>
 </td>
 <td valign="top" width="33%">
 <b>Secure Containers <sub>GA</sub></b><br>
@@ -130,6 +130,22 @@ FluxVM is the Zyvor **host-local** replacement for libvirt/virsh VM lifecycle an
 | **Choose libvirt when** | Your tooling is built on its XML, language bindings and ecosystem (virt-manager, virt-install), or you need hypervisors beyond FluxVM's four |
 
 The [full command mapping](docs/vs-libvirt.md) covers disks, snapshots, backups, clone and events.
+
+---
+
+## eBPF: the VM network, rewritten inside the kernel
+
+[![The VM network, rewritten inside the kernel](docs/ux/ebpf-hero.jpg)](docs/ebpf.md)
+
+Every VM's packets are decided by a kernel-verified eBPF program on its own interface, using per-VM maps.
+That's the default dataplane.
+
+- **Policy is a map write.** Live changes take about 100-120 ms p50, cost the same for the first VM and the hundredth, and never open an allow-all window.
+- **Fewer hops.** The direct datapath cuts the Pod path from 8 devices to 4: -31% latency and +60% small-packet rate in host-forwarding benchmarks.
+- **Connections survive live migration.** Conntrack moves with the VM and is checked against the destination policy.
+- **See why packets died.** Attributed drop reasons, flows, stats and on-demand pcaps over REST. It coexists with Cilium and never writes Cilium's maps.
+
+[The eBPF dataplane →](docs/ebpf.md)
 
 ---
 
@@ -214,7 +230,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 
 | Status | Areas |
 |---|---|
-| **GA** | Network Fabric (TC/eBPF; nftables stays the default) · Secure Containers (containerd runtime-v2, not a Kata-equivalence claim) |
+| **GA** | Network Fabric (TC/eBPF, the default dataplane; nftables via explicit `mode = "legacy"`) · Secure Containers (containerd runtime-v2, not a Kata-equivalence claim) |
 | **Unreleased (0.4.0)** | MCP server, sandbox GPUs, enforced Kairon VM edge, VM-edge capture, VM fork, VM import, quiesced backups |
 | **Not by design** | KubeVirt compatibility |
 

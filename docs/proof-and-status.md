@@ -16,7 +16,7 @@ We only claim what has been run. Every row links to how it was verified.
 | **Multi-host fleet**: central registry with load-aware placement | Two real, physically separate hosts — [docs/operations.md](operations.md#distributed-node-agent) |
 | **Storage**: qcow2/raw, LVM thin, NBD, Ceph RBD | RBD verified against a real Rook Ceph cluster |
 | **Networking**: user-mode NAT, TAP+bridge, netns+DHCP, macvtap | All four SSH-verified end to end in the regression tests |
-| **Network Fabric** (TC/eBPF, schema v4) | **GA.** Default stays nftables; enable with `sudo ./scripts/enable-network-fabric-ga.sh --restart` — [docs/network-fabric.md](network-fabric.md) |
+| **Network Fabric** (TC/eBPF, schema v4) | **GA, primary default** (`mode = "ebpf"`, `required = true`; nftables via explicit `mode = "legacy"`). Deny-by-default policy: `sudo ./scripts/enable-network-fabric-ga.sh --restart` — [docs/primary-ebpf.md](primary-ebpf.md), — [docs/network-fabric.md](network-fabric.md) |
 | **Bridge-less direct datapath** cuts the forwarding path | Measured host forwarding cost vs the bridge chain with the same policy program: **−31% latency, +60% 64 B packet rate** (Pod case). A veth stand-in on a shared node, TCP deltas within noise, no real guest — [method and raw data](direct-datapath.md#-measured-forwarding-cost) |
 
 **Know before you commit.** These are the boundaries, stated up front so you can size the fit:

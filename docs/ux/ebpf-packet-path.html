@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>FluxVM: eBPF packet path</title>
+<!-- README card, 1600 wide at 2x. Build: ./docs/ux/build-readme-cards.sh -->
+<link rel="stylesheet" href="ebpf-card.css">
+<style>
+  .lane { margin-top:26px; padding:20px 24px; }
+  .lane .hd { display:flex; justify-content:space-between; align-items:center; }
+  .lane .hd i { font-style:normal; font-family:var(--mono); font-size:16px; font-weight:700; }
+  .hops { margin-top:16px; display:flex; align-items:center; gap:10px; flex-wrap:nowrap; }
+  .hop { padding:10px 14px; border-radius:12px; font-family:var(--mono); font-size:16px; background:#1c1c1e; border:1px solid rgba(255,255,255,.14); white-space:nowrap; }
+  .hop.dim { color:#8e8e93; }
+  .arrow { color:#636366; font-size:20px; }
+  .prog { flex:1; padding:12px 14px; border-radius:14px; border:1px solid color-mix(in srgb, var(--acc) 70%, transparent);
+    background:linear-gradient(90deg, color-mix(in srgb, var(--acc) 18%, transparent), rgba(41,151,255,.12)); }
+  .prog .t { font-family:var(--mono); font-size:13px; letter-spacing:.14em; text-transform:uppercase; color:var(--acc); }
+  .steps { margin-top:8px; display:flex; gap:8px; }
+  .step { flex:1; text-align:center; padding:8px 4px; border-radius:10px; background:rgba(0,0,0,.45); font-size:15px; font-weight:600; }
+  .step small { display:block; font-family:var(--mono); font-size:11px; font-weight:400; color:#a1a1a6; margin-top:2px; }
+  .note { margin-top:12px; font-size:16px; color:#a1a1a6; }
+  .note b { color:#f5f5f7; }
+</style>
+</head>
+<body>
+<div class="glow"></div><div class="rail"></div>
+<div class="wrap">
+  <div class="top"><div class="brand"><svg viewBox="0 0 64 64" width="30" height="30" aria-hidden="true"><defs><linearGradient id="zb" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ff5a15"/><stop offset="1" stop-color="#cc420a"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#zb)"/><path d="M18.5,20.5 45.5,20.5 18.5,43.5 45.5,43.5" fill="none" stroke="#fff" stroke-width="8.3" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Zyvor</b><span>&middot;</span><span>FluxVM</span></div><div class="kicker">The packet path</div></div>
+  <h1>Decide at the edge. <em>Skip the chain.</em></h1>
+
+  <div class="card lane">
+    <div class="hd"><span class="tag" style="color:#8e8e93">Before &middot; bridge chain</span><i style="color:#8e8e93">8 devices on the Pod path</i></div>
+    <div class="hops">
+      <span class="hop">guest</span><span class="arrow">&rarr;</span><span class="hop dim">tap</span><span class="arrow">&rarr;</span><span class="hop dim">bridge</span><span class="arrow">&rarr;</span><span class="hop dim">veth pair</span><span class="arrow">&rarr;</span><span class="hop dim">&hellip; more bridges and veths &hellip;</span><span class="arrow">&rarr;</span><span class="hop dim">nftables chains</span><span class="arrow">&rarr;</span><span class="hop">network</span>
+    </div>
+    <div class="note">Rules are walked as chains; a policy edit is a flush-and-reload with one host-wide blast radius.</div>
+  </div>
+
+  <div class="card lane" style="border-color:color-mix(in srgb, var(--acc) 45%, transparent)">
+    <div class="hd"><span class="tag" style="color:var(--acc)">FluxVM &middot; eBPF on the VM edge</span><i style="color:var(--acc)">4 devices with the direct datapath</i></div>
+    <div class="hops">
+      <span class="hop">guest</span><span class="arrow">&rarr;</span><span class="hop">TAP</span><span class="arrow">&rarr;</span>
+      <div class="prog"><div class="t">fluxvm TC program &middot; per-VM pinned maps</div>
+        <div class="steps">
+          <div class="step">identity<small>fluxvm_id</small></div>
+          <div class="step">CIDR allow<small>LPM v4 / v6</small></div>
+          <div class="step">L4 ports<small>proto + port</small></div>
+          <div class="step">rate limit<small>Mbps / PPS</small></div>
+          <div class="step">conntrack<small>LRU flows</small></div>
+          <div class="step" style="color:var(--green)">verdict<small>+ drop reason</small></div>
+        </div>
+      </div>
+      <span class="arrow">&rarr;</span><span class="hop">network</span>
+    </div>
+    <div class="note"><b>Policy change = map write.</b> The program stays attached; maps flip deny-first, so there is never an allow-all window.</div>
+  </div>
+
+  <div class="foot"><span>Device counts from the interleaved direct-datapath benchmark (Pod path: bridge chain 8, direct 4)</span><span>docs/direct-datapath.md</span></div>
+</div>
+<script>document.body.setAttribute('data-h', Math.ceil(document.querySelector('.wrap').getBoundingClientRect().height));</script>
+</body>
+</html>

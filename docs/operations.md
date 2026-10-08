@@ -18,11 +18,35 @@ qemu-img
 cloud-localds
 ip
 cp
-nft                 # netns NAT + legacy sandbox dataplane
-# Optional native eBPF dataplane (sandbox.dataplane.mode = ebpf|cilium):
+nft                 # netns NAT + explicit mode = "legacy" sandbox dataplane
+# Native eBPF dataplane — the default (sandbox.dataplane.mode = ebpf, required = true):
 clang llvm libbpf-dev bpftool   # build + load bpf/fluxvm_tc.bpf.c (+ optional fluxvm_xdp.bpf.c)
 tc                              # iproute2 TC attach
 ```
+
+The native dataplane is the default: a config that omits `[sandbox.dataplane]` selects
+`mode = "ebpf"` with `required = true`. On such a host, VMs with a host-visible edge (TAP,
+bridge, macvtap, per-VM netns) **fail create/start** unless `/usr/lib/fluxvm/bpf/fluxvm_tc.bpf.o`
+is installed, bpffs is mounted at `/sys/fs/bpf`, and the service can load BPF (`CAP_BPF` /
+`CAP_SYS_ADMIN`, sufficient `LimitMEMLOCK`). User-mode NAT and `none` networking have no host
+edge and are unaffected. Check readiness with `./scripts/network-fabric-preflight.sh --require-bpf`.
+Hosts that cannot load BPF must set `mode = "legacy"` explicitly. See
+[primary-ebpf.md](primary-ebpf.md).
+
+### Upgrading a host to the eBPF-default release
+
+Releases before native eBPF became primary treated an omitted dataplane table as legacy nftables
+with optional attachment. Before restarting an upgraded daemon:
+
+1. Check the config: `grep -A3 '^\[sandbox.dataplane\]' /etc/fluxvm.toml`. Hosts that already
+   set `mode` (`legacy`, `ebpf` or `cilium`) and `required` explicitly keep their behavior.
+2. If the mode is omitted, either install the BPF objects and pass
+   `./scripts/network-fabric-preflight.sh --require-bpf`, or pin `mode = "legacy"`.
+3. Optionally adopt the deny-by-default GA policy with
+   `sudo ./scripts/enable-network-fabric-ga.sh --dry-run`, then `--restart`. This is a separate
+   policy decision: the new default keeps `default_allow = true`.
+4. After the restart, `curl -sf http://127.0.0.1:7788/readyz` and `fluxvm dataplane health`
+   should report `"ok": true`; start one VM with a TAP/bridge network to confirm attachment.
 
 Neither Cloud Hypervisor nor Firecracker is packaged by `apt`/`dnf`, so this repo ships installer
 scripts that fetch the upstream release binary for your CPU architecture (x86_64 or aarch64) and

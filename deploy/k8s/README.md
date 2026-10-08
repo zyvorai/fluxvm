@@ -142,7 +142,10 @@ Regenerate it whenever `crates/fluxvm-kube/src/crd.rs` changes.
   `spec.node` yourself (e.g. from Ragnarok's capable-nodes picker).
 - Tap/macvtap with `hostNetwork: true` interact with your CNI — stage
   bridges/parents on the host the same way a bare-metal FluxVM deploy does.
-- **eBPF dataplane** is opt-in (`legacy` nftables remains default). Cilium mode
+- **eBPF dataplane** is the default (`mode = "ebpf"`, `required = true`). The
+  shipped image carries the BPF objects, `bpftool` and `iproute2`, and the pod has
+  `SYS_ADMIN` plus a `/sys/fs/bpf` mount, so the default ConfigMap attaches natively;
+  set `mode = "legacy"` in the ConfigMap for nodes that cannot load BPF. Cilium mode
   only verifies agent presence; it does not turn FluxVM VMs into Cilium
   endpoints. L4 policy / stats / flows / optional XDP (schema v4):
   [docs/network-fabric.md](../../docs/network-fabric.md),
