@@ -25,13 +25,20 @@ use uuid::Uuid;
 pub mod backup;
 pub mod changes;
 pub mod confidential;
+pub mod density;
 pub mod events;
 pub mod fork;
+pub mod idempotency;
+pub mod grants;
+pub mod guest_exec;
+pub mod journal;
 pub mod live_migration;
 mod migration_relay;
 pub mod procbox_sandbox;
+mod recovery;
 mod sandbox;
 pub mod shared_disk;
+pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
 pub use events::{EventFilter, VmEvent};
@@ -2088,6 +2095,7 @@ impl VmManager {
             audit_event("quota.deny", &[("scope", "host"), ("reason", &reason)]);
             return Err(e);
         }
+        self.admit_under_pressure(req.memory_mib).await?;
         // Every storage backend except CephRbd points `image` at a real
         // filesystem entry (a file for Default/Nbd, a block device for
         // LvmThin) — CephRbd's `image` is a `pool/image` reference with no
@@ -2097,6 +2105,16 @@ impl VmManager {
         }
         let id = Uuid::new_v4();
         let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
+        // Names everything this create may allocate before it allocates any
+        // of it; `reconcile()` rolls it back if this process dies mid-way.
+        let op = journal::OpGuard::begin(
+            &self.cfg.state_dir,
+            journal::OpKind::Create,
+            id,
+            id,
+            recovery::planned_create_resources(&self.cfg.state_dir, id, &req),
+        )
+        .context("journaling create intent")?;
         fs::create_dir_all(&workspace)?;
         let disk = workspace.join(if req.backend == BackendKind::Qemu {
             "root.qcow2"
@@ -2215,6 +2233,10 @@ impl VmManager {
             record.disk = provisioned.disk.clone();
             record.lvm_lv = provisioned.lvm_lv.clone();
             record.nbd_pid = provisioned.nbd_pid;
+            if let Some(pid) = provisioned.nbd_pid {
+                let start_time = journal::proc_start_time(pid);
+                let _ = op.record(journal::Resource::NbdPid { pid, start_time });
+            }
             for d in &req.data_disks {
                 let backing = self.check_disk_source(&d.backing)?;
                 fluxvm_qemu::disks::create_overlay(&self.cfg, &workspace, &d.name, &backing)
@@ -2393,10 +2415,12 @@ impl VmManager {
             record.status = VmStatus::Failed;
             record.error = Some(format!("{e:#}"));
             self.store.update(record.clone()).await?;
+            op.finish();
             return Err(e);
         }
         self.touch_activity(id).await;
         self.store.update(record.clone()).await?;
+        op.finish();
         metrics::record_vm_create(started.elapsed().as_millis() as u64);
         let vm_id = record.id.to_string();
         let tenant = record.request.tenant.clone().unwrap_or_default();
@@ -3074,7 +3098,9 @@ impl VmManager {
     /// hypervisor control SnapshotSave path (same layout as sandbox snaps).
     pub async fn create_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
         validate_snapshot_tag(tag)?;
+        let op = self.begin_snapshot_op(id, tag).await?;
         self.create_vm_snapshot_inner(id, tag).await?;
+        op.finish();
         audit_event("vm.snapshot", &[("vm_id", &id.to_string()), ("tag", tag)]);
         Ok(())
     }
@@ -3937,22 +3963,8 @@ impl VmManager {
         command: String,
         timeout_seconds: Option<u64>,
     ) -> Result<fluxvm_guest_protocol::AgentResponse> {
-        let vm = self.get(id).await?;
-        if let Some(spec) = procbox_sandbox::load_spec(&vm)? {
-            return self.procbox_exec(&vm, spec, command, timeout_seconds).await;
-        }
-        let wait = std::time::Duration::from_secs(
-            timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS) + 5,
-        );
-        fluxvm_vsock_client::call(
-            &vm,
-            AgentRequest::Exec {
-                command,
-                timeout_seconds,
-            },
-            wait,
-        )
-        .await
+        self.exec_with_policy(id, command, timeout_seconds, None)
+            .await
     }
 
     /// Health-checks the vsock guest agent (`AgentRequest::Ping`) — proves
@@ -4251,6 +4263,18 @@ impl VmManager {
                 bail!("refusing to delete {id}: pid {pid} is still alive after stop");
             }
         }
+        // Record what must be reclaimed *before* the record that names it is
+        // removed; `reconcile()` rolls a leftover intent forward after a crash.
+        journal::begin_delete(
+            &self.cfg.state_dir,
+            &journal::DeleteIntent {
+                vm_id: id,
+                workspace: vm.workspace.clone(),
+                jail_path: vm.jail_path.clone(),
+                lvm_lv: vm.lvm_lv.clone(),
+            },
+        )
+        .context("journaling delete intent")?;
         let vm = self.store.remove(id).await?.context("VM vanished")?;
         let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
         let _ = fluxvm_network::dataplane::delete_policy(&self.cfg, id);
@@ -4298,7 +4322,9 @@ impl VmManager {
             }
         }
         self.remove_unreferenced_clone_base(&vm.request.image).await;
+        journal::finish_delete(&self.cfg.state_dir, id)?;
         let vm_id = id.to_string();
+        fluxvm_core::grants::global().remove_sandbox(&vm_id);
         let tenant = vm.request.tenant.clone().unwrap_or_default();
         audit_event("vm.delete", &[("vm_id", &vm_id), ("tenant", &tenant)]);
         Ok(())
@@ -4503,8 +4529,35 @@ impl VmManager {
         Ok(vm)
     }
 
+    /// Rolls forward deletes that crashed after the record was removed.
+    async fn replay_pending_deletes(&self) {
+        for intent in journal::pending_deletes(&self.cfg.state_dir) {
+            // A record that is back in the store means the delete never got
+            // past the journal write; the intent is stale, not pending.
+            if self.store.get(intent.vm_id).await.is_some() {
+                let _ = journal::finish_delete(&self.cfg.state_dir, intent.vm_id);
+                continue;
+            }
+            tracing::warn!(vm = %intent.vm_id, "completing a delete interrupted by a crash");
+            if let Some(lv) = &intent.lvm_lv {
+                if let Err(e) = fluxvm_image::storage::cleanup_lvm_lv(lv).await {
+                    tracing::warn!(vm = %intent.vm_id, error = %e, "failed to remove LVM thin snapshot");
+                }
+            }
+            let mut ok = journal::remove_tree(&intent.workspace).is_ok();
+            if let Some(jail) = &intent.jail_path {
+                ok &= journal::remove_tree(jail).is_ok();
+            }
+            if ok {
+                let _ = journal::finish_delete(&self.cfg.state_dir, intent.vm_id);
+            }
+        }
+    }
+
     pub async fn reconcile(&self) -> Result<()> {
         let now = Utc::now();
+        self.replay_pending_deletes().await;
+        self.replay_pending_ops().await;
         for vm in self.store.list().await {
             if vm.status == VmStatus::Running || vm.status == VmStatus::Paused {
                 if let Some(pid) = vm.pid {
@@ -4606,6 +4659,7 @@ impl VmManager {
         if let Err(e) = fluxvm_network::dataplane::reconcile_orphan_pins(&self.cfg, &live_ids) {
             tracing::warn!(error = %e, "failed to reconcile orphan FluxVM eBPF pins");
         }
+        self.sweep_orphans().await;
         Ok(())
     }
 

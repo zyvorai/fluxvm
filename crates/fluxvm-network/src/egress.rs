@@ -8,11 +8,26 @@ use fluxvm_core::config::{CredentialInject, SandboxConfig};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EgressDecision {
     pub allow: bool,
+    /// Secret: never serialised (API responses) and never printed.
+    #[serde(default, skip_serializing)]
     pub inject_authorization: Option<String>,
     pub reason: String,
+}
+
+impl std::fmt::Debug for EgressDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EgressDecision")
+            .field("allow", &self.allow)
+            .field(
+                "inject_authorization",
+                &self.inject_authorization.as_ref().map(|_| "[redacted]"),
+            )
+            .field("reason", &self.reason)
+            .finish()
+    }
 }
 
 /// Decide whether an outbound HTTP(S) request to `host` is allowed and whether
@@ -160,6 +175,27 @@ pub fn vault_hosts(cfg: &SandboxConfig) -> Vec<&CredentialInject> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_secret_is_never_serialised_or_printed() {
+        let cfg = SandboxConfig {
+            credential_vault: vec![CredentialInject {
+                host: "api.example.com".into(),
+                authorization: "Bearer s3cr3t-token".into(),
+            }],
+            ..SandboxConfig::default()
+        };
+        let d = decide(&cfg, "api.example.com");
+        // The proxy still gets the value...
+        assert_eq!(
+            d.inject_authorization.as_deref(),
+            Some("Bearer s3cr3t-token")
+        );
+        // ...but it cannot leak through an API response or a log line.
+        assert!(!serde_json::to_string(&d).unwrap().contains("s3cr3t"));
+        assert!(!format!("{d:?}").contains("s3cr3t"));
+        assert!(!format!("{cfg:?}").contains("s3cr3t"));
+    }
 
     #[test]
     fn host_matches_suffix_and_exact() {

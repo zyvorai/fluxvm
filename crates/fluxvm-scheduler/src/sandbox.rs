@@ -552,6 +552,10 @@ impl VmManager {
 
     /// AutoPause: pause Running FluxVm sandboxes idle longer than configured.
     pub async fn autopause_tick(self: &std::sync::Arc<Self>) -> Result<usize> {
+        // Idle reclaim (balloon inflate) runs on the same scan, before pausing.
+        if let Err(e) = self.idle_reclaim_tick().await {
+            tracing::warn!(error = %e, "idle reclaim tick failed");
+        }
         let idle = self.cfg.sandbox.autopause_idle_secs;
         if idle == 0 {
             return Ok(0);
@@ -591,7 +595,7 @@ impl VmManager {
 
     pub fn spawn_autopause_loop(self: &std::sync::Arc<Self>) {
         let idle = self.cfg.sandbox.autopause_idle_secs;
-        if idle == 0 {
+        if idle == 0 && self.cfg.sandbox.idle_balloon_secs == 0 {
             return;
         }
         let scan = std::cmp::max(1, self.cfg.sandbox.autopause_scan_secs);

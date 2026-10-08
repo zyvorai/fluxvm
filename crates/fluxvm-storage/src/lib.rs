@@ -26,6 +26,22 @@ use std::{
 };
 use uuid::Uuid;
 
+/// Writes `bytes` to `tmp`, fsyncs it, renames it over `dest`, then fsyncs the
+/// parent directory, so the new contents survive power loss or a kernel crash
+/// and never appear half-written.
+pub fn write_durable(tmp: &Path, dest: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = fs::File::create(tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    fs::rename(tmp, dest)?;
+    if let Some(dir) = dest.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
 pub struct Store {
     path: PathBuf,
     lock_path: PathBuf,
@@ -72,8 +88,8 @@ impl Store {
             let len_before = map.len() as u64;
             let (result, delta) = f(&mut map);
             let tmp = path.with_extension("json.tmp");
-            fs::write(&tmp, serde_json::to_vec_pretty(&map)?).context("writing VM state")?;
-            fs::rename(&tmp, &path).context("renaming VM state")?;
+            write_durable(&tmp, &path, &serde_json::to_vec_pretty(&map)?)
+                .context("writing VM state")?;
             apply_ledger_delta(&path, &map, len_before, delta)?;
             Ok(result)
         })
@@ -398,8 +414,7 @@ fn quota_ledger_from(map: &HashMap<Uuid, VmRecord>) -> QuotaLedger {
 fn write_quota_bytes(vms_path: &Path, bytes: &[u8]) -> Result<()> {
     let quota_path = vms_path.with_file_name("quotas.json");
     let tmp = quota_path.with_extension("json.tmp");
-    fs::write(&tmp, bytes).context("writing quota ledger")?;
-    fs::rename(&tmp, &quota_path).context("renaming quota ledger")?;
+    write_durable(&tmp, &quota_path, bytes).context("writing quota ledger")?;
     Ok(())
 }
 
@@ -491,8 +506,8 @@ impl PoolStore {
             let mut map = Self::read_map(&path)?;
             let result = f(&mut map);
             let tmp = path.with_extension("json.tmp");
-            fs::write(&tmp, serde_json::to_vec_pretty(&map)?).context("writing pool state")?;
-            fs::rename(&tmp, &path).context("renaming pool state")?;
+            write_durable(&tmp, &path, &serde_json::to_vec_pretty(&map)?)
+                .context("writing pool state")?;
             Ok(result)
         })
         .await

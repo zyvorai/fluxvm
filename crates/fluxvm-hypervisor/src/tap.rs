@@ -21,9 +21,20 @@ pub struct Tap {
 
 impl Tap {
     pub fn open(name: &str, host_ip: [u8; 4]) -> Result<Self> {
+        Self::open_with(name, host_ip, false)
+    }
+
+    /// Like [`Self::open`], but with `multi_queue` the first queue of a
+    /// multi_queue TAP (`IFF_MULTI_QUEUE`); take the others with
+    /// [`Self::attach_queue`]. `multi_queue == false` is exactly `open`.
+    pub fn open_with(name: &str, host_ip: [u8; 4], multi_queue: bool) -> Result<Self> {
         let c = CString::new(name)
             .map_err(|_| FluxError::Network("TAP name contains a NUL byte".into()))?;
-        let fd = unsafe { ffi::flux_tap_open(c.as_ptr()) };
+        let fd = if multi_queue {
+            unsafe { ffi::flux_tap_open_mq(c.as_ptr(), 1) }
+        } else {
+            unsafe { ffi::flux_tap_open(c.as_ptr()) }
+        };
         if fd < 0 {
             return Err(FluxError::Network(format!(
                 "tap open {name} errno {}",
@@ -49,6 +60,26 @@ impl Tap {
         Ok(Self {
             fd,
             name: name.into(),
+        })
+    }
+
+    /// Open another queue (a new fd) of this multi_queue TAP. The device is
+    /// already up and addressed, so only the fd is created.
+    pub fn attach_queue(&self) -> Result<Tap> {
+        let c = CString::new(self.name.as_str())
+            .map_err(|_| FluxError::Network("TAP name contains a NUL byte".into()))?;
+        let fd = unsafe { ffi::flux_tap_open_mq(c.as_ptr(), 1) };
+        if fd < 0 {
+            return Err(FluxError::Network(format!(
+                "tap queue attach {} errno {}",
+                self.name,
+                unsafe { ffi::flux_errno() }
+            )));
+        }
+        eprintln!("[tap] {} queue fd={fd} attached", self.name);
+        Ok(Self {
+            fd,
+            name: self.name.clone(),
         })
     }
 

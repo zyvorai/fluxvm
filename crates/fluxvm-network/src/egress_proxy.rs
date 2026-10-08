@@ -19,7 +19,7 @@ use crate::tls_intercept::{FilteringResolver, TlsIntercept, is_public_ip};
 use axum::{
     Router,
     body::Body,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, HeaderName, Method, Request, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::any,
@@ -114,7 +114,11 @@ pub async fn serve_transparent_on(
 async fn run(listener: TcpListener, state: Arc<ProxyState>) -> anyhow::Result<()> {
     let app = Router::new().fallback(any(proxy)).with_state(state);
     info!(listen = ?listener.local_addr().ok(), "FluxVM egress proxy listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -290,6 +294,8 @@ struct Tunnel {
     host: String,
     /// `host:port` exactly as the upstream will be contacted.
     authority: String,
+    /// Guest address the tunnel came from, when known (credential grants).
+    peer: Option<IpAddr>,
 }
 
 /// Judge a `CONNECT` before any TLS: host allowlist and ACL reachability,
@@ -345,6 +351,7 @@ fn vet_target(
     Ok(Tunnel {
         authority: format!("{authority_host}:{port}"),
         host,
+        peer: None,
     })
 }
 
@@ -615,6 +622,32 @@ async fn forward(
     }
 }
 
+/// Peer address recorded by `axum::serve` (or inserted by the transparent
+/// listener) on a request.
+fn peer_ip<B>(req: &Request<B>) -> Option<IpAddr> {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip())
+}
+
+/// The `Authorization` value to inject for `host`: a live per-sandbox grant of
+/// the sandbox behind `peer` wins; otherwise the global vault decision
+/// (`fallback`) applies. Every grant use is audited (destination and sandbox
+/// id, never the secret).
+fn broker_authorization(
+    peer: Option<IpAddr>,
+    host: &str,
+    fallback: Option<String>,
+) -> Option<String> {
+    if let Some(ip) = peer {
+        if let Some(inj) = fluxvm_core::grants::global().resolve(ip, host, chrono::Utc::now()) {
+            fluxvm_core::grants::audit_use(&inj, host);
+            return Some(inj.authorization.expose().to_string());
+        }
+    }
+    fallback
+}
+
 fn count_denied(status: StatusCode, method: &Method, target: &dyn std::fmt::Display, reason: &str) {
     if status == StatusCode::FORBIDDEN {
         fluxvm_core::metrics::inc_egress_deny();
@@ -679,6 +712,7 @@ async fn handle_plain(
     };
 
     let headers = req.headers().clone();
+    let inject = broker_authorization(peer_ip(&req), &host, decision.inject_authorization);
     let body = has_body(&headers).then(|| req.into_body());
     let client = if transparent_port.is_some() {
         &state.transparent_client
@@ -691,7 +725,7 @@ async fn handle_plain(
         &headers,
         body,
         url,
-        decision.inject_authorization,
+        inject,
         state.cfg.egress_max_body_bytes,
     )
     .await
@@ -721,7 +755,7 @@ fn with_port(url: &str, port: u16) -> String {
 /// Accept a vetted `CONNECT`: answer 200 and serve the tunnel in the
 /// background once hyper hands over the upgraded connection.
 async fn connect(state: Arc<ProxyState>, tls: Arc<TlsState>, req: &mut Request<Body>) -> Response {
-    let tunnel = match vet_connect(
+    let mut tunnel = match vet_connect(
         &state.cfg,
         &state.acl,
         &tls.ports,
@@ -735,6 +769,7 @@ async fn connect(state: Arc<ProxyState>, tls: Arc<TlsState>, req: &mut Request<B
             return (status, reason).into_response();
         }
     };
+    tunnel.peer = peer_ip(&*req);
     let on_upgrade = hyper::upgrade::on(&mut *req);
     tokio::spawn(async move {
         match on_upgrade.await {
@@ -844,13 +879,18 @@ async fn tunnel_request(
         }
     };
     let body = has_body(&parts.headers).then(|| request_body(body));
+    let inject = broker_authorization(
+        tunnel.peer,
+        &tunnel.host,
+        vetted.decision.inject_authorization,
+    );
     forward(
         &tls.client,
         parts.method,
         &parts.headers,
         body,
         url,
-        vetted.decision.inject_authorization,
+        inject,
         state.cfg.egress_max_body_bytes,
     )
     .await

@@ -142,7 +142,22 @@ impl VmManager {
             .into());
         }
         let _guard = BusyGuard::acquire(id)?;
+        // The only file a crashed restore can leave is the disk copy it was
+        // about to rename into place; `reconcile()` removes it.
+        let op = crate::journal::OpGuard::begin(
+            &self.cfg.state_dir,
+            crate::journal::OpKind::Restore,
+            Uuid::new_v4(),
+            id,
+            vec![crate::journal::Resource::TempFile {
+                path: vm.disk.with_extension("restore.tmp"),
+            }],
+        )
+        .context("journaling restore intent")?;
         let out = self.restore_fluxvm_in_place(id, tag).await;
+        if out.is_ok() {
+            op.finish();
+        }
         if let Ok(vm) = &out {
             if vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
                 if let Err(e) = self.wait_for_agent(id).await {
@@ -159,8 +174,41 @@ impl VmManager {
         out
     }
 
+    /// First-command latency: wait for a trivial guest-agent exec to succeed
+    /// and report timings measured from `started` (the API request start).
+    /// `create_done_ms` is when the create/fork/claim returned; `agent_wait_ms`
+    /// is the extra wait until the first `true` exec succeeded. Records a
+    /// `vm.first_command` event. `source` is "create", "fork" or "claim".
+    pub async fn measure_first_command(
+        self: &Arc<Self>,
+        id: Uuid,
+        source: &str,
+        started: std::time::Instant,
+    ) -> Result<serde_json::Value> {
+        let create_done_ms = started.elapsed().as_millis() as u64;
+        let waited = self.wait_for_agent(id).await?;
+        let first_command_ms = started.elapsed().as_millis() as u64;
+        crate::events::record(
+            "vm.first_command",
+            &[
+                ("vm_id", &id.to_string()),
+                ("source", source),
+                ("first_command_ms", &first_command_ms.to_string()),
+                ("create_done_ms", &create_done_ms.to_string()),
+            ],
+        );
+        Ok(serde_json::json!({
+            "first_command_ms": first_command_ms,
+            "phases": {
+                "create_done_ms": create_done_ms,
+                "agent_wait_ms": waited.as_millis() as u64,
+                "first_exec_ms": first_command_ms,
+            },
+        }))
+    }
+
     /// Wait until the guest agent answers again; returns how long that took.
-    async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
+    pub(crate) async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
         let started = std::time::Instant::now();
         let mut last = String::from("no attempt");
         while started.elapsed() < AGENT_READY_DEADLINE {
@@ -314,6 +362,20 @@ impl VmManager {
         timeout: Option<u64>,
         paths: Option<Vec<String>>,
     ) -> Result<DryRunReport> {
+        self.vm_sandbox_dry_run_capture(id, command, timeout, paths, None)
+            .await
+    }
+
+    /// [`Self::vm_sandbox_dry_run`] that can also copy out the changed files
+    /// before the guest is restored (used by speculative execution).
+    pub(crate) async fn vm_sandbox_dry_run_capture(
+        self: &Arc<Self>,
+        id: Uuid,
+        command: String,
+        timeout: Option<u64>,
+        paths: Option<Vec<String>>,
+        capture: Option<&mut crate::speculate::Captured>,
+    ) -> Result<DryRunReport> {
         let vm = self.get(id).await?;
         if let Some(e) = crate::snapshot_backend_error(vm.backend) {
             return Err(RestoreError::Unsupported(e).into());
@@ -358,12 +420,17 @@ impl VmManager {
                     exit_code,
                     stdout,
                     stderr,
+                    ..
                 } => (exit_code, stdout, stderr),
                 AgentResponse::Error { message } => bail!("guest agent error: {message}"),
                 other => bail!("unexpected guest response: {other:?}"),
             };
             let after = self.take_manifest(id, &paths).await?;
             let changes = diff_manifests(&before, &after)?;
+            if let Some(c) = capture {
+                c.before = Some(before.clone());
+                c.staged = Some(crate::speculate::stage_files(self, id, &changes).await?);
+            }
             Ok(DryRunReport {
                 changes,
                 exit_code,

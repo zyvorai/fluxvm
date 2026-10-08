@@ -96,7 +96,7 @@ pub struct Manifest {
 
 /// Result of comparing a current manifest to a baseline. Paths are sorted.
 /// A rename shows up as one deletion plus one addition.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeSet {
     pub added: Vec<String>,
     pub modified: Vec<String>,

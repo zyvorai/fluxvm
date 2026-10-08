@@ -9,6 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
+mod exec_policy;
+pub use exec_policy::{
+    ExecEnforcement, ExecIsolation, ExecPolicy, ExecRunAs, ExecSeccompMode, ExecTcpRule,
+};
+
 /// Default AF_VSOCK port the guest agent listens on.
 pub const DEFAULT_PORT: u32 = 17777;
 
@@ -38,6 +43,10 @@ pub enum AgentRequest {
         command: String,
         #[serde(default)]
         timeout_seconds: Option<u64>,
+        /// Confine the command with Landlock + seccomp (via procbox) inside
+        /// the guest. Absent = run unconfined, as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy: Option<ExecPolicy>,
     },
     /// Write `content_base64` (decoded) to `path` inside the guest,
     /// creating parent directories as needed. Replaces machinectl's
@@ -70,6 +79,25 @@ pub enum AgentRequest {
         rows: u16,
     },
     Shutdown,
+    /// Give a freshly forked/restored guest its own identity: the snapshot
+    /// carries the parent's hostname, `/etc/machine-id` and RNG state, so
+    /// every child must reset them. Each step is best-effort and reported in
+    /// [`AgentResponse::IdentityReset`]; none aborts the others.
+    ResetIdentity {
+        /// New hostname (kernel + `/etc/hostname`); `None` leaves it alone.
+        #[serde(default)]
+        hostname: Option<String>,
+        /// Replace `/etc/machine-id` with a fresh random id.
+        #[serde(default)]
+        regenerate_machine_id: bool,
+        /// Credit fresh host-supplied entropy to the guest RNG.
+        #[serde(default)]
+        reseed_entropy: bool,
+        /// Base64 of entropy bytes from the host; if empty the agent mixes in
+        /// what it can gather itself (weaker: same snapshot, same pool).
+        #[serde(default)]
+        entropy_base64: Option<String>,
+    },
 }
 fn default_pty_cols() -> u16 {
     80
@@ -126,6 +154,10 @@ pub enum AgentResponse {
         exit_code: i32,
         stdout: String,
         stderr: String,
+        /// What was actually enforced; present only when the request carried
+        /// a `policy`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enforcement: Option<ExecEnforcement>,
     },
     FileWritten,
     FileContent {
@@ -139,6 +171,12 @@ pub enum AgentResponse {
     /// client reads back is raw PTY output (not JSON, not framed).
     ShellOpened,
     ShuttingDown,
+    /// Result of [`AgentRequest::ResetIdentity`]: the steps that were
+    /// applied, and a human-readable note for each that failed.
+    IdentityReset {
+        applied: Vec<String>,
+        failures: Vec<String>,
+    },
     Error {
         message: String,
     },
@@ -296,6 +334,7 @@ mod tests {
             AgentRequest::Exec {
                 command: "echo hi".into(),
                 timeout_seconds: Some(5),
+                policy: None,
             },
         );
         let line = encode_line(&env).unwrap();
@@ -307,6 +346,7 @@ mod tests {
             AgentRequest::Exec {
                 command,
                 timeout_seconds,
+                ..
             } => {
                 assert_eq!(command, "echo hi");
                 assert_eq!(timeout_seconds, Some(5));

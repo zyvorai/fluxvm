@@ -410,6 +410,110 @@ pub fn handle_notify(
     Ok(frames)
 }
 
+/// virtio-net control class for multiqueue.
+pub const VIRTIO_NET_CTRL_MQ: u8 = 4;
+/// `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET`: payload is the le16 pair count.
+pub const VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET: u8 = 0;
+pub const VIRTIO_NET_OK: u8 = 0;
+pub const VIRTIO_NET_ERR: u8 = 1;
+
+/// Drain the control virtqueue `qidx` (the last queue of a multiqueue
+/// device). Only `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET` is implemented; every other
+/// command is acknowledged with `VIRTIO_NET_ERR`. Activating more than one
+/// pair needs a datapath that serves them all, so it is refused unless
+/// `allow_multi` (the kernel vhost-net datapath owns every pair). Returns the
+/// number of commands completed.
+pub fn handle_ctrl(
+    mem: &mut GuestMemory,
+    st: &mut VirtioState,
+    qidx: usize,
+    allow_multi: bool,
+) -> Result<u32> {
+    let (qnum, desc, avail, used, ready) = {
+        let q = &st.queues[qidx];
+        (q.num, q.desc, q.avail, q.used, q.ready)
+    };
+    if ready == 0 || qnum == 0 {
+        return Ok(0);
+    }
+    let mut done = 0u32;
+    loop {
+        let avail_idx = mem.read_u16(avail + 2)?;
+        if st.queues[qidx].last_avail == avail_idx {
+            break;
+        }
+        let slot = (st.queues[qidx].last_avail as u32) % qnum;
+        let head = mem.read_u16(avail + 4 + slot as u64 * 2)?;
+
+        // Device-readable descriptors carry class, command and payload; the
+        // device-writable one carries the one-byte ack.
+        let mut req = [0u8; 16];
+        let mut req_len = 0usize;
+        let mut ack_addr: Option<u64> = None;
+        let mut chain_ok = true;
+        let mut idx = head;
+        for _ in 0..16 {
+            if u32::from(idx) >= qnum {
+                chain_ok = false;
+                break;
+            }
+            let mut raw = [0u8; 16];
+            if mem.read_at(desc + u64::from(idx) * 16, &mut raw).is_err() {
+                chain_ok = false;
+                break;
+            }
+            let addr = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+            let len = u32::from_le_bytes(raw[8..12].try_into().unwrap()) as usize;
+            let flags = u16::from_le_bytes(raw[12..14].try_into().unwrap());
+            let next = u16::from_le_bytes(raw[14..16].try_into().unwrap());
+            if flags & VRING_DESC_F_INDIRECT != 0 {
+                chain_ok = false;
+                break;
+            }
+            if flags & VRING_DESC_F_WRITE != 0 {
+                if len >= 1 {
+                    ack_addr = Some(addr);
+                }
+            } else if ack_addr.is_none() {
+                let take = len.min(req.len() - req_len);
+                if mem
+                    .read_at(addr, &mut req[req_len..req_len + take])
+                    .is_err()
+                {
+                    chain_ok = false;
+                    break;
+                }
+                req_len += take;
+            }
+            if flags & VRING_DESC_F_NEXT == 0 {
+                break;
+            }
+            idx = next;
+        }
+
+        let mut ack = VIRTIO_NET_ERR;
+        if chain_ok
+            && req_len >= 4
+            && req[0] == VIRTIO_NET_CTRL_MQ
+            && req[1] == VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET
+        {
+            let pairs = u16::from_le_bytes([req[2], req[3]]);
+            if pairs >= 1 && pairs <= st.net_max_pairs && (pairs == 1 || allow_multi) {
+                st.net_active_pairs = pairs;
+                ack = VIRTIO_NET_OK;
+            }
+        }
+        let written = match ack_addr {
+            Some(a) if mem.write_at(a, &[ack]).is_ok() => 1,
+            _ => 0,
+        };
+        used_push(mem, used, qnum, head, written)?;
+        st.queues[qidx].last_avail = st.queues[qidx].last_avail.wrapping_add(1);
+        done += 1;
+    }
+    Ok(done)
+}
+
 // Keep parse_mac used by config.
 pub struct VirtioNetConfig {
     pub tap: String,
@@ -792,5 +896,45 @@ mod tests {
             "network-tx packets/s={:.0}",
             640_000.0 / start.elapsed().as_secs_f64()
         );
+    }
+
+    #[test]
+    fn ctrl_queue_sets_pairs_and_refuses_what_it_cannot_serve() {
+        let (mut mem, q) = setup();
+        let mut st = VirtioState::default();
+        st.net_max_pairs = 4;
+        st.num_queues = 9;
+        st.queues[8] = q;
+        // Command in descriptor 0 (class, cmd, le16 pairs), ack byte in 1.
+        let cmd = |pairs: u16| {
+            let mut c = [VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 0, 0];
+            c[2..4].copy_from_slice(&pairs.to_le_bytes());
+            c
+        };
+        set_desc(&mut mem, 0, 0x8000, 4, VRING_DESC_F_NEXT, 1);
+        set_desc(&mut mem, 1, 0x9000, 1, VRING_DESC_F_WRITE, 0);
+
+        mem.write_at(0x8000, &cmd(3)).unwrap();
+        post(&mut mem, 0, 0);
+        assert_eq!(handle_ctrl(&mut mem, &mut st, 8, false).unwrap(), 1);
+        let mut ack = [0xffu8];
+        mem.read_at(0x9000, &mut ack).unwrap();
+        assert_eq!(ack[0], VIRTIO_NET_ERR, "multi-pair refused without vhost");
+        assert_eq!(st.net_active_pairs, 1);
+
+        mem.write_at(0x8000, &cmd(3)).unwrap();
+        post(&mut mem, 1, 0);
+        assert_eq!(handle_ctrl(&mut mem, &mut st, 8, true).unwrap(), 1);
+        mem.read_at(0x9000, &mut ack).unwrap();
+        assert_eq!(ack[0], VIRTIO_NET_OK);
+        assert_eq!(st.net_active_pairs, 3);
+
+        mem.write_at(0x8000, &cmd(5)).unwrap();
+        post(&mut mem, 2, 0);
+        assert_eq!(handle_ctrl(&mut mem, &mut st, 8, true).unwrap(), 1);
+        mem.read_at(0x9000, &mut ack).unwrap();
+        assert_eq!(ack[0], VIRTIO_NET_ERR, "above max_virtqueue_pairs");
+        assert_eq!(st.net_active_pairs, 3);
+        assert_eq!(used_idx(&mem), 3);
     }
 }

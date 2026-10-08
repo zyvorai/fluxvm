@@ -33,6 +33,13 @@ pub enum ApiRequest {
     HotplugDisk {
         path: PathBuf,
     },
+    /// Set (`Some`) or read (`None`) the virtio-balloon size in MiB: memory
+    /// taken away from the guest. In-tree KVM engine only. The response is
+    /// `Ok` with a JSON `balloon_ctl::BalloonStatus` as its message.
+    Balloon {
+        #[serde(default)]
+        balloon_mib: Option<u64>,
+    },
     Metrics,
     Ping,
 }
@@ -118,6 +125,10 @@ pub enum ApiResponse {
         memory_mib: u64,
         vcpus: u8,
         lifecycle: String,
+        /// In-tree KVM guests: the live virtio-net datapath, e.g.
+        /// `vhost-net pairs=1 (...)` or `userspace-pump pairs=1 (reason)`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net_datapath: Option<String>,
     },
     Error {
         message: String,

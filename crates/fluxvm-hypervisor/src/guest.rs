@@ -6,9 +6,11 @@
 //! in-tree KVM demo path remains available for freestanding netboot.
 
 use crate::api::BootConfig;
+use crate::balloon_ctl::BalloonSlot;
 use crate::config::{GuestKind, VmConfig};
 use crate::kvm_snap::{self, SnapCmd};
 use crate::pause::{PauseHandles, VcpuKick};
+use crate::vhost::NetDatapath;
 use crate::VirtualMachine;
 use anyhow::{bail, Context, Result};
 use serde_json::json;
@@ -43,6 +45,10 @@ enum GuestEngine {
         kick: Arc<VcpuKick>,
         snap_tx: mpsc::Sender<SnapCmd>,
         thread: Option<std::thread::JoinHandle<()>>,
+        /// Which virtio-net datapath (vhost-net or userspace pump) is live.
+        net_datapath: Arc<NetDatapath>,
+        /// Balloon device handle, published by the VMM thread once built.
+        balloon: Arc<BalloonSlot>,
     },
 }
 
@@ -88,6 +94,14 @@ impl Drop for GuestHandle {
 }
 
 impl GuestHandle {
+    /// Balloon control for the in-tree KVM engine; `None` for Firecracker.
+    pub fn balloon(&self) -> Option<Arc<BalloonSlot>> {
+        match &self.engine {
+            GuestEngine::Kvm { balloon, .. } => Some(Arc::clone(balloon)),
+            GuestEngine::Firecracker { .. } => None,
+        }
+    }
+
     pub async fn pause(&self) -> Result<()> {
         match &self.engine {
             GuestEngine::Firecracker { api_sock, .. } => pause(api_sock).await,
@@ -178,6 +192,16 @@ impl GuestHandle {
                 .context("snapshot join")??;
                 Ok(())
             }
+        }
+    }
+
+    /// Active virtio-net datapath of an in-tree KVM guest, e.g.
+    /// `vhost-net pairs=1 (...)` or `userspace-pump pairs=1 (reason)`.
+    /// `None` for Firecracker, which owns its own network path.
+    pub fn net_datapath(&self) -> Option<String> {
+        match &self.engine {
+            GuestEngine::Firecracker { .. } => None,
+            GuestEngine::Kvm { net_datapath, .. } => Some(net_datapath.summary()),
         }
     }
 
@@ -309,6 +333,8 @@ async fn spawn_kvm(
     let paused = Arc::new(AtomicBool::new(false));
     let pause_epoch = Arc::new(AtomicU64::new(0));
     let quiesced_epoch = Arc::new(AtomicU64::new(0));
+    let net_datapath = Arc::new(NetDatapath::default());
+    let net_datapath_thread = Arc::clone(&net_datapath);
     let stop_thread = Arc::clone(&stop);
     let paused_thread = Arc::clone(&paused);
     let pause_thread = PauseHandles {
@@ -317,6 +343,8 @@ async fn spawn_kvm(
         kick: Arc::clone(&kick),
     };
     let (snap_tx, snap_rx) = mpsc::channel::<SnapCmd>();
+    let balloon = Arc::new(BalloonSlot::default());
+    let balloon_thread = Arc::clone(&balloon);
     let (ready_tx, ready_rx) = mpsc::sync_channel::<std::result::Result<(), String>>(1);
     let thread = std::thread::Builder::new()
         .name("fluxvm-kvm".into())
@@ -324,6 +352,10 @@ async fn spawn_kvm(
             let result = (|| -> Result<()> {
                 let mut vm =
                     VirtualMachine::from_boot_config(vm_cfg).map_err(|e| anyhow::anyhow!("{e}"))?;
+                // Share the status the VM publishes with the engine handle.
+                net_datapath_thread.copy_from(&vm.net_datapath);
+                vm.net_datapath = net_datapath_thread;
+                balloon_thread.publish(vm.balloon.clone(), vm.cfg.memory_mib as u64);
                 let cpu = if let Some((cpu, mem_file)) = restore {
                     kvm_snap::load_memory_into(&mut vm.mem, &mem_file)
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -360,6 +392,8 @@ async fn spawn_kvm(
             kick,
             snap_tx,
             thread: Some(thread),
+            net_datapath,
+            balloon,
         },
     };
     let ready = tokio::task::spawn_blocking(move || ready_rx.recv_timeout(KVM_START_TIMEOUT))
@@ -401,6 +435,7 @@ fn boot_to_vm_config(cfg: &BootConfig) -> Result<VmConfig> {
             .unwrap_or_else(|| "02:00:AC:10:00:02".into()),
         vhost_net: true,
         net_queues: 1,
+        net_queue_pairs: 1,
         cmdline: cfg.kernel_args.clone().unwrap_or_else(|| {
             "console=ttyS0 earlyprintk=serial,ttyS0,115200 ignore_loglevel reboot=k panic=1 pci=off root=/dev/vda rw"
                 .into()
@@ -762,6 +797,8 @@ mod tests {
                 kick: VcpuKick::new(1),
                 snap_tx,
                 thread: None,
+                net_datapath: Arc::new(NetDatapath::default()),
+                balloon: Arc::new(BalloonSlot::default()),
             },
         };
         let worker = tokio::spawn(async move {

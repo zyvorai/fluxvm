@@ -2368,6 +2368,7 @@ dependencies = [
  "base64",
  "clap",
  "fluxvm-guest-protocol",
+ "fluxvm-procbox",
  "libc",
  "tempfile",
 ]

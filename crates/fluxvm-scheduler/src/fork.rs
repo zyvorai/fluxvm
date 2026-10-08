@@ -7,8 +7,9 @@
 //! reflink of its rootfs), then every child is restored from it:
 //!
 //! * `snap.mem` and `snap.vmstate` are shared read-only. The in-tree KVM
-//!   engine copies snapshot RAM into guest memory at restore, so the files
-//!   are only read and can be deleted once every child runs.
+//!   engine maps `snap.mem` `MAP_PRIVATE` (clean pages shared between
+//!   children, written pages copied on write) and falls back to an eager copy;
+//!   either way the files can be unlinked once every child runs.
 //! * each child gets its own reflink of `snap.rootfs` as its `root.raw`, its
 //!   own workspace, vsock socket and CID, and its own tap from
 //!   `fluxvm_network::prepare`.
@@ -17,9 +18,11 @@
 //! drive and tap by absolute host path, so a restored child would open the
 //! parent's disk. The guest keeps the parent's MAC and IP, which is why fork
 //! requires per-VM network namespaces (or no tap at all): two VMs with one
-//! MAC never share an L2 segment. Hostname and machine-id are the parent's
-//! until the caller resets them through the guest agent.
+//! MAC never share an L2 segment. After resume, `fork_child` calls the guest
+//! agent's `ResetIdentity` so each child gets its own hostname, machine-id and
+//! fresh entropy (best effort: a failure is logged loudly and audited).
 
+use crate::journal::{OpGuard, OpKind, Resource};
 use crate::{FIRST_GUEST_CID, VmManager, audit_event, validate_vm_name};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
@@ -55,12 +58,28 @@ impl VmManager {
         }
 
         let tag = format!("fork-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        // Journaled so a crash rolls back the parent's fork snapshot and every
+        // child recorded below (fork is all-or-nothing).
+        let op = OpGuard::begin(
+            &self.cfg.state_dir,
+            OpKind::Fork,
+            Uuid::new_v4(),
+            id,
+            vec![Resource::SnapshotDir {
+                path: src.workspace.join("snapshots").join(&tag),
+            }],
+        )
+        .context("journaling fork intent")?;
         self.create_vm_snapshot(id, &tag).await?;
         let meta = src.workspace.join("snapshots").join(&tag).join("snap");
-        let result = self.fork_children(&src, &meta, &tag, &names, actor).await;
+        let result = self
+            .fork_children(&src, &meta, &tag, &names, actor, &op)
+            .await;
         if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
             tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
         }
+        // Children are either all running or already deleted by now.
+        op.finish();
         let children = result?;
         let ids: Vec<String> = children.iter().map(|c| c.id.to_string()).collect();
         audit_event(
@@ -81,6 +100,7 @@ impl VmManager {
         tag: &str,
         names: &[String],
         actor: Option<&str>,
+        op: &OpGuard,
     ) -> Result<Vec<VmRecord>> {
         let spec = fluxvm_hypervisor::snapshot::load_spec(meta)?;
         if spec.boot.engine != fluxvm_hypervisor::api::FluxVmEngine::Kvm {
@@ -91,7 +111,7 @@ impl VmManager {
         }
         let mut children = Vec::with_capacity(names.len());
         for name in names {
-            match self.fork_child(src, &spec, tag, name, actor).await {
+            match self.fork_child(src, &spec, tag, name, actor, op).await {
                 Ok(child) => children.push(child),
                 Err(e) => {
                     for child in &children {
@@ -111,6 +131,7 @@ impl VmManager {
         tag: &str,
         name: &str,
         actor: Option<&str>,
+        op: &OpGuard,
     ) -> Result<VmRecord> {
         let ledger = self.store.quota_ledger().await?;
         if let Some(tenant) = src.request.tenant.as_deref()
@@ -132,6 +153,8 @@ impl VmManager {
         )?;
 
         let id = Uuid::new_v4();
+        op.record(Resource::ForkChild { vm_id: id })
+            .context("journaling fork child")?;
         let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
         std::fs::create_dir_all(&workspace)?;
         let disk = workspace.join("root.raw");
@@ -221,7 +244,10 @@ impl VmManager {
         let started = self.start_from_snapshot(id, tag).await;
         let _ = std::fs::remove_dir_all(workspace.join("snapshots").join(tag));
         match started {
-            Ok(vm) => Ok(vm),
+            Ok(vm) => {
+                reset_child_identity(&vm, name).await;
+                Ok(vm)
+            }
             Err(e) => {
                 let _ = self.delete(id).await;
                 Err(e)
@@ -230,7 +256,79 @@ impl VmManager {
     }
 }
 
-fn check_forkable(src: &VmRecord, count: u32) -> Result<()> {
+/// How long to keep retrying the identity reset while the resumed guest's
+/// agent starts answering again.
+const IDENTITY_RESET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Give a resumed child its own hostname, machine-id and RNG state through
+/// the guest agent. A fork resumes the parent's memory, so without this every
+/// child shares the parent's identity and entropy pool. Failure is not fatal
+/// (the child still runs) but is logged at error level and audited, because a
+/// child with a duplicate identity or RNG state is a correctness problem.
+async fn reset_child_identity(vm: &VmRecord, hostname: &str) {
+    use base64::Engine;
+    use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
+
+    if !vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
+        tracing::warn!(vm = %vm.id, "fork child has no guest agent; identity not reset");
+        return;
+    }
+    // 32 bytes of host entropy; two v4 UUIDs avoid a direct rand dependency.
+    let mut entropy = Vec::with_capacity(32);
+    entropy.extend_from_slice(Uuid::new_v4().as_bytes());
+    entropy.extend_from_slice(Uuid::new_v4().as_bytes());
+    let request = AgentRequest::ResetIdentity {
+        hostname: Some(hostname.to_string()),
+        regenerate_machine_id: true,
+        reseed_entropy: true,
+        entropy_base64: Some(base64::engine::general_purpose::STANDARD.encode(&entropy)),
+    };
+    let deadline = tokio::time::Instant::now() + IDENTITY_RESET_TIMEOUT;
+    let outcome: Result<String> = loop {
+        let attempt =
+            fluxvm_vsock_client::call(vm, request.clone(), std::time::Duration::from_secs(5)).await;
+        match attempt {
+            Ok(AgentResponse::IdentityReset { applied, failures }) if failures.is_empty() => {
+                break Ok(format!("applied: {}", applied.join(",")));
+            }
+            Ok(AgentResponse::IdentityReset { applied, failures }) => {
+                break Err(anyhow::anyhow!(
+                    "partial reset (applied: {}); failed: {}",
+                    applied.join(","),
+                    failures.join("; ")
+                ));
+            }
+            Ok(AgentResponse::Error { message }) => {
+                break Err(anyhow::anyhow!("guest agent error: {message}"));
+            }
+            Ok(other) => break Err(anyhow::anyhow!("unexpected response: {other:?}")),
+            Err(e) if tokio::time::Instant::now() >= deadline => break Err(e),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
+        }
+    };
+    match outcome {
+        Ok(detail) => {
+            audit_event(
+                "vm.fork.identity-reset",
+                &[("vm_id", &vm.id.to_string()), ("detail", &detail)],
+            );
+        }
+        Err(e) => {
+            tracing::error!(
+                vm = %vm.id,
+                error = %format!("{e:#}"),
+                "fork child identity reset FAILED: child shares the parent's hostname, \
+                 machine-id and/or RNG state"
+            );
+            audit_event(
+                "vm.fork.identity-reset-failed",
+                &[("vm_id", &vm.id.to_string()), ("error", &format!("{e:#}"))],
+            );
+        }
+    }
+}
+
+pub(crate) fn check_forkable(src: &VmRecord, count: u32) -> Result<()> {
     if count == 0 || count > MAX_FORK_COUNT {
         bail!("count must be between 1 and {MAX_FORK_COUNT}");
     }

@@ -292,6 +292,21 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Read or set the virtio-balloon of a running KVM-engine VM: memory the
+    /// guest gives back to the host. REST: `GET|POST /v1/vms/{id}/balloon`.
+    Balloon {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Balloon size in MiB to request (0 deflates). Omit to read it.
+        #[arg(long)]
+        set_mib: Option<u64>,
+    },
+    /// Memory use of a VM's VMM process: PSS, private and shared pages, and
+    /// balloon state. REST: `GET /v1/vms/{id}/memory`.
+    Memory {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
     /// Day-2 hotplug of CPU, memory, NIC, or a virtiofs share onto a running
     /// VM. REST equivalents: `POST /v1/vms/{id}/hotplug/{cpu,memory,nic,share}`.
     Hotplug {
@@ -476,6 +491,11 @@ enum Command {
         id: Uuid,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+        /// JSON confinement policy (fluxvm-procbox policy shape) applied
+        /// inside the guest with Landlock + seccomp; the response reports
+        /// what was enforced.
+        #[arg(long)]
+        policy: Option<PathBuf>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
@@ -1084,6 +1104,54 @@ enum SandboxCommand {
         timeout_seconds: Option<u64>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
+    },
+    /// Run a command in an isolated copy of the sandbox and keep the result
+    /// as a pending changeset; the sandbox itself is not touched. REST:
+    /// `POST /v1/sandboxes/{id}/speculate`.
+    Speculate {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
+        /// Directory to diff (repeatable). Required for VM sandboxes.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// Seconds the changeset stays decidable (default 3600, max 86400).
+        #[arg(long)]
+        ttl_seconds: Option<u64>,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        command: Vec<String>,
+    },
+    /// List a sandbox's changesets. REST: `GET /v1/sandboxes/{id}/changesets`.
+    Changesets {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Show one changeset. REST: `GET /v1/sandboxes/{id}/changesets/{cs}`.
+    Changeset {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        cs: Uuid,
+    },
+    /// Approve a pending changeset. REST: `POST .../changesets/{cs}/approve`.
+    Approve {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        cs: Uuid,
+    },
+    /// Reject a changeset and drop its staged files. REST:
+    /// `POST .../changesets/{cs}/reject`.
+    Reject {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        cs: Uuid,
+    },
+    /// Apply an approved changeset to the real sandbox (refuses on conflict).
+    /// REST: `POST .../changesets/{cs}/apply`.
+    Apply {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        cs: Uuid,
     },
 }
 
@@ -2318,6 +2386,85 @@ async fn run_remote(
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
+        Command::Balloon { id, set_mib } => match set_mib {
+            Some(mib) => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/balloon"),
+                    Some(json!({"balloon_mib": mib})),
+                )
+                .await?,
+            )?,
+            None => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/balloon"), None)
+                    .await?,
+            )?,
+        },
+        Command::Memory { id } => pretty(
+            &r.call(Method::GET, &format!("/v1/vms/{id}/memory"), None)
+                .await?,
+        )?,
+        Command::Sandbox { command } => {
+            let base = |id: Uuid| format!("/v1/sandboxes/{id}");
+            match command {
+                SandboxCommand::Speculate {
+                    id,
+                    timeout_seconds,
+                    paths,
+                    ttl_seconds,
+                    command,
+                } => {
+                    let mut body = json!({
+                        "command": command.join(" "),
+                        "timeout_seconds": timeout_seconds,
+                        "ttl_seconds": ttl_seconds,
+                    });
+                    if !paths.is_empty() {
+                        body["paths"] = json!(paths);
+                    }
+                    pretty(
+                        &r.call(Method::POST, &format!("{}/speculate", base(id)), Some(body))
+                            .await?,
+                    )?
+                }
+                SandboxCommand::Changesets { id } => pretty(
+                    &r.call(Method::GET, &format!("{}/changesets", base(id)), None)
+                        .await?,
+                )?,
+                SandboxCommand::Changeset { id, cs } => pretty(
+                    &r.call(Method::GET, &format!("{}/changesets/{cs}", base(id)), None)
+                        .await?,
+                )?,
+                SandboxCommand::Approve { id, cs } => pretty(
+                    &r.call(
+                        Method::POST,
+                        &format!("{}/changesets/{cs}/approve", base(id)),
+                        None,
+                    )
+                    .await?,
+                )?,
+                SandboxCommand::Reject { id, cs } => pretty(
+                    &r.call(
+                        Method::POST,
+                        &format!("{}/changesets/{cs}/reject", base(id)),
+                        None,
+                    )
+                    .await?,
+                )?,
+                SandboxCommand::Apply { id, cs } => pretty(
+                    &r.call(
+                        Method::POST,
+                        &format!("{}/changesets/{cs}/apply", base(id)),
+                        None,
+                    )
+                    .await?,
+                )?,
+                _ => anyhow::bail!(
+                    "this sandbox command is not available with --server; supported: speculate, \
+                     changesets, changeset, approve, reject, apply"
+                ),
+            }
+        }
         _ => anyhow::bail!(
             "this command is not available with --server; supported: create, vm-template, list, get, \
              status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, import-image, snapshot, \
@@ -3013,6 +3160,18 @@ async fn main() -> Result<()> {
         Command::Pressure { id } => {
             println!("{}", serde_json::to_string_pretty(&m.pressure(id).await?)?);
         }
+        Command::Balloon { id, set_mib } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.balloon_control(id, set_mib).await?)?
+            );
+        }
+        Command::Memory { id } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&m.vm_memory_report(id).await?)?
+            );
+        }
         Command::Hotplug { command } => match command {
             HotplugCommand::Cpu { id, add_vcpus } => {
                 let vcpus = m.hotplug_cpu(id, add_vcpus).await?;
@@ -3185,9 +3344,23 @@ async fn main() -> Result<()> {
         Command::Exec {
             id,
             timeout_seconds,
+            policy,
             command,
         } => {
-            let response = m.exec(id, command.join(" "), timeout_seconds).await?;
+            let policy = match policy {
+                Some(path) => {
+                    let text = std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading policy {}", path.display()))?;
+                    Some(
+                        fluxvm_scheduler::guest_exec::parse_exec_policy(&text)
+                            .with_context(|| format!("parsing policy {}", path.display()))?,
+                    )
+                }
+                None => None,
+            };
+            let response = m
+                .exec_with_policy(id, command.join(" "), timeout_seconds, policy)
+                .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Command::Ping { id } => {
@@ -3351,6 +3524,57 @@ async fn main() -> Result<()> {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&m.exec(id, cmd, timeout_seconds).await?)?
+                );
+            }
+            SandboxCommand::Speculate {
+                id,
+                timeout_seconds,
+                paths,
+                ttl_seconds,
+                command,
+            } => {
+                let paths = (!paths.is_empty()).then_some(paths);
+                let cs = m
+                    .speculate(id, command.join(" "), timeout_seconds, paths, ttl_seconds)
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&cs)?);
+            }
+            SandboxCommand::Changesets { id } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.changeset_list(id).await?)?
+                );
+            }
+            SandboxCommand::Changeset { id, cs } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.changeset_get(id, cs).await?)?
+                );
+            }
+            SandboxCommand::Approve { id, cs } => {
+                let out = m
+                    .changeset_decide(
+                        id,
+                        cs,
+                        fluxvm_scheduler::speculate::ChangesetState::Approved,
+                    )
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            SandboxCommand::Reject { id, cs } => {
+                let out = m
+                    .changeset_decide(
+                        id,
+                        cs,
+                        fluxvm_scheduler::speculate::ChangesetState::Rejected,
+                    )
+                    .await?;
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            SandboxCommand::Apply { id, cs } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.changeset_apply(id, cs).await?)?
                 );
             }
         },
@@ -5787,5 +6011,74 @@ mod tier2_cli_tests {
             cli(&["context", "use", "lab"]).unwrap().command,
             Command::Context { command: ContextCommand::Use { name } } if name == "lab"
         ));
+    }
+}
+
+#[cfg(test)]
+mod speculate_density_cli_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Command {
+        let mut full = vec!["fluxvm"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn sandbox_speculate_and_changeset_commands_parse() {
+        let id = Uuid::nil();
+        let cs = Uuid::new_v4();
+        let Command::Sandbox {
+            command:
+                SandboxCommand::Speculate {
+                    id: parsed,
+                    paths,
+                    ttl_seconds,
+                    command,
+                    ..
+                },
+        } = parse(&[
+            "sandbox",
+            "speculate",
+            &id.to_string(),
+            "--path",
+            "/work",
+            "--ttl-seconds",
+            "120",
+            "make",
+            "build",
+        ])
+        else {
+            panic!("expected SandboxCommand::Speculate");
+        };
+        assert_eq!(parsed, id);
+        assert_eq!(paths, vec!["/work".to_string()]);
+        assert_eq!(ttl_seconds, Some(120));
+        assert_eq!(command, vec!["make".to_string(), "build".to_string()]);
+
+        let Command::Sandbox {
+            command: SandboxCommand::Apply { id: parsed, cs: c },
+        } = parse(&["sandbox", "apply", &id.to_string(), &cs.to_string()])
+        else {
+            panic!("expected SandboxCommand::Apply");
+        };
+        assert_eq!((parsed, c), (id, cs));
+    }
+
+    #[test]
+    fn balloon_and_memory_parse() {
+        let id = Uuid::nil();
+        let Command::Balloon {
+            id: parsed,
+            set_mib,
+        } = parse(&["balloon", &id.to_string(), "--set-mib", "256"])
+        else {
+            panic!("expected Command::Balloon");
+        };
+        assert_eq!((parsed, set_mib), (id, Some(256)));
+        let Command::Memory { id: parsed } = parse(&["memory", &id.to_string()]) else {
+            panic!("expected Command::Memory");
+        };
+        assert_eq!(parsed, id);
     }
 }

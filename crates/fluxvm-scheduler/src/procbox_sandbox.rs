@@ -419,15 +419,15 @@ pub fn build_policy(
     }
 }
 
-struct Confined {
-    exit_code: i32,
-    stdout: String,
-    stderr: String,
+pub(crate) struct Confined {
+    pub(crate) exit_code: i32,
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
 }
 
 /// Run `command` under [`build_policy`] with `workdir` as the only writable
 /// directory. Blocking; call from `spawn_blocking`.
-fn run_confined(
+pub(crate) fn run_confined(
     cfg: &ProcboxConfig,
     spec: &ProcboxSpec,
     workdir: &Path,
@@ -928,7 +928,7 @@ fn force_remove(path: &Path) {
 }
 
 /// Deletes the directory on drop, so a dry-run copy never outlives its request.
-struct TempTree(PathBuf);
+pub(crate) struct TempTree(pub(crate) PathBuf);
 
 impl Drop for TempTree {
     fn drop(&mut self) {
@@ -1118,6 +1118,7 @@ impl VmManager {
             exit_code: out.exit_code,
             stdout: out.stdout,
             stderr: out.stderr,
+            enforcement: None,
         })
     }
 

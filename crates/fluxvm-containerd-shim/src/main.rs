@@ -1695,6 +1695,7 @@ impl Service {
             AgentRequest::Exec {
                 command,
                 timeout_seconds: Some(15),
+                policy: None,
             },
             Duration::from_secs(20),
         )
@@ -1705,6 +1706,7 @@ impl Service {
                 exit_code,
                 stdout,
                 stderr,
+                ..
             } => bail!(
                 "configuring guest CNI network failed exit={exit_code}: stdout={stdout:?} stderr={stderr:?}"
             ),
@@ -1760,6 +1762,7 @@ impl Service {
                 AgentRequest::Exec {
                     command: probe.clone(),
                     timeout_seconds: Some(10),
+                    policy: None,
                 },
                 Duration::from_secs(15),
             )
@@ -1770,6 +1773,7 @@ impl Service {
                     exit_code,
                     stdout,
                     stderr,
+                    ..
                 } => {
                     if tokio::time::Instant::now() >= deadline {
                         bail!(
@@ -1831,6 +1835,7 @@ impl Service {
                     }
                 ),
                 timeout_seconds: Some(5),
+                policy: None,
             },
             Duration::from_secs(10),
         ).await? {

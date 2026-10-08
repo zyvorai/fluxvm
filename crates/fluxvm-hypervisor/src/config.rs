@@ -24,6 +24,11 @@ pub struct VmConfig {
     pub mac: String,
     pub vhost_net: bool,
     pub net_queues: u8,
+    /// virtio-net RX/TX queue pairs. 1 (default) keeps the single-pair device
+    /// byte-identical; more enables `VIRTIO_NET_F_MQ` with one vhost-net
+    /// instance and one multi_queue TAP queue per pair (needs vhost-net).
+    /// `FLUXVM_NET_QUEUE_PAIRS` overrides it (see [`Self::effective_net_queue_pairs`]).
+    pub net_queue_pairs: u8,
     pub cmdline: String,
     pub firmware: Option<PathBuf>,
     pub net_mbit_limit: u32,
@@ -64,6 +69,7 @@ impl Default for VmConfig {
             mac: "02:00:00:00:00:01".into(),
             vhost_net: true,
             net_queues: 1,
+            net_queue_pairs: 1,
             cmdline: "console=ttyS0 reboot=k panic=1 pci=off".into(),
             firmware: None,
             net_mbit_limit: 0,
@@ -135,6 +141,9 @@ impl VmConfig {
                 "--vhost-net" => c.vhost_net = true,
                 "--no-vhost-net" => c.vhost_net = false,
                 "--net-queues" => c.net_queues = parse_next(&mut args, "--net-queues")?,
+                "--net-queue-pairs" => {
+                    c.net_queue_pairs = parse_next(&mut args, "--net-queue-pairs")?
+                }
                 "--cmdline" => c.cmdline = req(&mut args, "--cmdline")?,
                 "--firmware" => c.firmware = Some(PathBuf::from(req(&mut args, "--firmware")?)),
                 "--net-mbit-limit" => c.net_mbit_limit = parse_next(&mut args, "--net-mbit-limit")?,
@@ -162,6 +171,24 @@ impl VmConfig {
         (self.memory_mib as usize) * 1024 * 1024
     }
 
+    /// Queue pairs to build the virtio-net device with: the
+    /// `FLUXVM_NET_QUEUE_PAIRS` env var when set and numeric (so the engine
+    /// path, which has no flag, can be A/B benchmarked), else the configured
+    /// value, clamped to `1..=NET_MAX_QUEUE_PAIRS`.
+    pub fn effective_net_queue_pairs(&self) -> u8 {
+        let raw = std::env::var("FLUXVM_NET_QUEUE_PAIRS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u8>().ok())
+            .unwrap_or(self.net_queue_pairs);
+        raw.clamp(1, crate::devices::virtio_mmio::NET_MAX_QUEUE_PAIRS as u8)
+    }
+
+    /// vhost-net is requested by the config and not forced off with
+    /// `FLUXVM_VHOST_NET=0` (userspace-pump A/B toggle).
+    pub fn vhost_net_enabled(&self) -> bool {
+        self.vhost_net && crate::vhost::env_enabled()
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.vsock_cid.is_some() != self.vsock_uds.is_some() {
             return Err(FluxError::Unsupported(
@@ -178,6 +205,14 @@ impl VmConfig {
         // invisible to the guest and never onlineable.
         if self.max_cpus < self.cpus || self.max_cpus > 8 {
             return Err(FluxError::Unsupported("max_cpus must be cpus..=8".into()));
+        }
+        if self.net_queue_pairs == 0
+            || self.net_queue_pairs > crate::devices::virtio_mmio::NET_MAX_QUEUE_PAIRS as u8
+        {
+            return Err(FluxError::Unsupported(format!(
+                "net-queue-pairs must be 1..={}",
+                crate::devices::virtio_mmio::NET_MAX_QUEUE_PAIRS
+            )));
         }
         if self.memory_mib < 64 {
             return Err(FluxError::Unsupported("memory-mib must be >= 64".into()));
@@ -225,6 +260,7 @@ OPTIONS:
   --mac <AA:BB:...>
   --vhost-net / --no-vhost-net
   --net-queues <N>
+  --net-queue-pairs <N>     virtio-net multiqueue pairs (default 1; needs vhost-net)
   --net-mbit-limit <N>
   --cmdline <STR>
   --firmware <OVMF.fd>      Windows / UEFI

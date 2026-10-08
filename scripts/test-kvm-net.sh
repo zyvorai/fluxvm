@@ -18,6 +18,13 @@
 # hypervisor / server of the run is left, and (at the end) that `ip netns list`
 # and the host nft ruleset are unchanged.
 #
+# Each run also prints which virtio-net datapath the hypervisor reports
+# (vhost-net vs userspace pump, with the reason) so a silent fallback is visible.
+# FLUXVM_VHOST_NET=0 forces the userspace pump and FLUXVM_NET_QUEUE_PAIRS=N
+# (needs vhost-net) builds a multiqueue device; both are inherited by the
+# hypervisor, so the same checks run against each datapath. Throughput and CPU
+# comparisons live in scripts/bench-kvm-vhost.sh.
+#
 # Env: RUNS (5), VCPUS_LIST ("1 2"), SIZE_MIB (8), FLUXVM_HYPERVISOR, KERNEL, GOLDEN.
 set -uo pipefail
 
@@ -145,6 +152,19 @@ PY
 
 nsx() { ip netns exec "$NS" "$@"; }
 
+api_datapath() {   # datapath the hypervisor reports via Metrics `net_datapath`
+  python3 - "$TMP/api.sock" <<'PY'
+import json, socket, sys
+try:
+    s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1])
+    s.sendall(b'{"action":"metrics"}\n')
+    r = json.loads(s.makefile().readline())
+    print(r.get("net_datapath") or "unreported")
+except Exception as exc:
+    print(f"unreported ({type(exc).__name__})")
+PY
+}
+
 one_run() {  # one_run <vcpus> <index>
   local vcpus="$1" idx="$2"
   NS="fvnet${vcpus}x${idx}"
@@ -233,7 +253,8 @@ JSON
     fail "upload mismatch: guest ${up_sha} host ${recv_sha}; ${out}"
   fi
 
-  grep -E "^\[net\]" "$TMP/hv.log" | tail -2 | sed 's/^/  hv: /'
+  echo "  net datapath: $(api_datapath)"
+  grep -E "^\[net\]" "$TMP/hv.log" | tail -4 | sed 's/^/  hv: /'
   grep -Eq "Kernel panic|panicked at|Oops:|BUG:" "$TMP/hv.log" >/dev/null && fail "hypervisor log contains a panic/oops" || pass "no panic/oops in the hypervisor log"
 }
 
