@@ -374,6 +374,24 @@ impl QueueService {
         }
     }
 
+    /// RX queue 0 kick from the worker. Once vhost-net owns the RX ring the
+    /// kick must reach the kernel: vhost stops reading the tap when the guest
+    /// runs out of buffers and only resumes on this kick. Returns `false`
+    /// when the userspace pump should refill instead.
+    pub fn kick_rx_vhost(&mut self) -> bool {
+        let Some(net) = self.net.clone() else {
+            return false;
+        };
+        if !self.pair_kernel(0) {
+            self.program_pending_vhost(&net);
+        }
+        if !self.pair_kernel(0) {
+            return false;
+        }
+        self.kick_vhost(0, 0);
+        true
+    }
+
     fn kick_vhost(&self, pair: usize, q: u32) {
         if let Some(v) = self.pair_vhost(pair) {
             if let Err(e) = v.signal_kick((q % 2) as usize) {
@@ -588,12 +606,15 @@ fn worker(
     // (or the VM is paused) so a backlog cannot spin this thread; a queue 0
     // kick or the 100 ms tick turns it back on.
     let mut rx_armed = tap_fd.is_some();
+    // The tap fd was taken before vhost-net bound; once the kernel owns RX,
+    // stop polling it here.
+    let mut kernel_rx = false;
     let mut last_stats = String::new();
     let mut last_log = std::time::Instant::now();
     while !stop.load(Ordering::Relaxed) {
         let is_paused = paused.load(Ordering::Relaxed);
         if tap_fd.is_some() {
-            pfds[tap_idx].events = if rx_armed && !is_paused {
+            pfds[tap_idx].events = if rx_armed && !is_paused && !kernel_rx {
                 libc::POLLIN
             } else {
                 0
@@ -633,13 +654,17 @@ fn worker(
             };
             if n == std::mem::size_of::<u64>() as isize {
                 if b.dev == Dev::Net && b.queue == 0 && tap_fd.is_some() {
-                    rx_kick = true;
+                    if svc.lock().unwrap().kick_rx_vhost() {
+                        kernel_rx = true;
+                    } else {
+                        rx_kick = true;
+                    }
                 } else {
                     svc.lock().unwrap().notify(b.dev, b.queue);
                 }
             }
         }
-        if tap_fd.is_some() {
+        if tap_fd.is_some() && !kernel_rx {
             let tap_ready = pfds[tap_idx].revents & (libc::POLLIN | libc::POLLERR) != 0;
             pfds[tap_idx].revents = 0;
             if rx_kick {

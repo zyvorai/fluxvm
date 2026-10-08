@@ -128,7 +128,7 @@ for ((i = 1; i <= MAX; i++)); do
   name="${PREFIX}-${i}"
   if ! body=$(curl -sf -X POST "${API}/v1/vms" "${AUTH_HDR[@]}" \
     -H 'Content-Type: application/json' \
-    -d "{\"name\":\"${name}\",\"backend\":\"flux-vm\",\"image\":\"${IMAGE}\",\"kernel\":${KERNEL_JSON},\"vcpus\":1,\"memory_mib\":${MEM_MIB}}"); then
+    -d "{\"name\":\"${name}\",\"backend\":\"flux-vm\",\"image\":\"${IMAGE}\",\"kernel\":${KERNEL_JSON},\"vcpus\":1,\"memory_mib\":${MEM_MIB},\"network\":{\"mode\":\"none\"},\"agent\":{\"enabled\":true}}"); then
     stop_reason="create_refused"
     break
   fi

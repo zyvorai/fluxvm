@@ -924,10 +924,25 @@ async fn create_vm(
     if want_exec {
         merge_first_command(
             &mut body,
-            m.measure_first_command(rec.id, "create", started).await?,
+            first_command_or_error(&m, rec.id, "create", started).await,
         );
     }
     Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// The VM already exists when the measurement runs, so a failure must not
+/// replace the response (the caller would never learn the id): it is reported
+/// as `first_command_error` next to the record instead.
+async fn first_command_or_error(
+    m: &Arc<VmManager>,
+    id: Uuid,
+    source: &str,
+    started: std::time::Instant,
+) -> serde_json::Value {
+    match m.measure_first_command(id, source, started).await {
+        Ok(v) => v,
+        Err(e) => json!({ "first_command_error": format!("{e:#}") }),
+    }
 }
 
 /// Copy `first_command_ms` and `phases` from `extra` into the JSON object `body`.
@@ -2218,19 +2233,27 @@ async fn fork_vm(
             let m = Arc::clone(&m);
             let id = item.id;
             tasks.push(tokio::spawn(async move {
-                m.measure_first_command(id, "fork", started).await
+                first_command_or_error(&m, id, "fork", started).await
             }));
         }
         let mut per_child = Vec::new();
-        let mut worst = 0u64;
+        let mut worst: Option<u64> = None;
         for t in tasks {
-            let r = t
-                .await
-                .map_err(|e| anyhow::anyhow!("first-command task failed: {e}"))??;
-            worst = worst.max(r["first_command_ms"].as_u64().unwrap_or(0));
+            let r = t.await.unwrap_or_else(
+                |e| json!({ "first_command_error": format!("first-command task failed: {e}") }),
+            );
+            if let Some(ms) = r["first_command_ms"].as_u64() {
+                worst = Some(worst.map_or(ms, |w| w.max(ms)));
+            }
             per_child.push(r);
         }
-        body["first_command_ms"] = json!(worst);
+        // Only set when every child answered; a partial max would understate.
+        if per_child
+            .iter()
+            .all(|r| r.get("first_command_error").is_none())
+        {
+            body["first_command_ms"] = json!(worst);
+        }
         body["first_command"] = json!(per_child);
     }
     Ok((StatusCode::CREATED, Json(body)))
@@ -4200,7 +4223,7 @@ async fn claim_pool(
     if rq.wants_exec() {
         merge_first_command(
             &mut body,
-            m.measure_first_command(rec.id, "claim", started).await?,
+            first_command_or_error(&m, rec.id, "claim", started).await,
         );
     }
     Ok(Json(body))

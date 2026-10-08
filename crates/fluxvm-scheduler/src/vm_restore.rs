@@ -37,6 +37,9 @@ use uuid::Uuid;
 /// After a pause/resume or a restore the guest agent is briefly unreachable
 /// (the vsock proxy refuses the connection); wait this long for it to return.
 const AGENT_READY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+/// Retry gap while the agent is unreachable. It bounds the resolution of
+/// `first_command_ms`, so keep it well under a warm claim or fork.
+const AGENT_RETRY_GAP: std::time::Duration = std::time::Duration::from_millis(25);
 const RESTORE_META: &str = "snap.restore.json";
 
 /// Typed failures so the API can answer with precise statuses.
@@ -231,7 +234,7 @@ impl VmManager {
                     }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(AGENT_RETRY_GAP).await;
         }
         bail!("guest agent did not answer within {AGENT_READY_DEADLINE:?}: {last}")
     }
