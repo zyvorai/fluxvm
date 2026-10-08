@@ -435,6 +435,7 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
                 memory_mib: st.boot.as_ref().map(|b| b.memory_mib).unwrap_or(0),
                 vcpus: st.boot.as_ref().map(|b| b.vcpus).unwrap_or(0),
                 lifecycle: st.lifecycle.as_str().into(),
+                net_datapath: st.guest.as_ref().and_then(|g| g.net_datapath()),
             }
         }
     }

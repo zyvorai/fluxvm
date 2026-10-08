@@ -17,6 +17,15 @@ pub const VIRTIO_ID_VSOCK: u32 = 19;
 pub const VIRTIO_ID_FS: u32 = 26;
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 pub const VIRTIO_BLK_F_RO: u64 = 1 << 5;
+/// virtio-net control virtqueue (needed to switch the active queue-pair count).
+pub const VIRTIO_NET_F_CTRL_VQ: u64 = 1 << 17;
+/// virtio-net multiqueue: `max_virtqueue_pairs` in config space.
+pub const VIRTIO_NET_F_MQ: u64 = 1 << 22;
+/// Largest virtio-net queue-pair count the device model accepts.
+pub const NET_MAX_QUEUE_PAIRS: u16 = 4;
+/// Queue slots per device: `2 * NET_MAX_QUEUE_PAIRS` data queues plus the
+/// control queue. Every non-net device uses at most 3.
+pub const MAX_QUEUES: usize = 2 * NET_MAX_QUEUE_PAIRS as usize + 1;
 
 pub const VIRTIO_MMIO_INT_VRING: u32 = 1 << 0;
 pub const VIRTIO_MMIO_INT_CONFIG: u32 = 1 << 1;
@@ -48,12 +57,16 @@ pub struct VirtioState {
     pub balloon_actual: u32,
     /// virtio-fs tag (NUL-padded, 36 bytes).
     pub fs_tag: [u8; 36],
-    pub queues: [QueueState; 4],
+    pub queues: [QueueState; MAX_QUEUES],
     pub num_queues: u32,
     pub sel: u32,
     pub notify: Option<u32>,
     pub interrupt_status: u32,
     pub irq: u32,
+    /// virtio-net `max_virtqueue_pairs` (1 unless multiqueue is configured).
+    pub net_max_pairs: u16,
+    /// Queue pairs the guest enabled via `VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET`.
+    pub net_active_pairs: u16,
 }
 
 impl Default for VirtioState {
@@ -75,6 +88,8 @@ impl Default for VirtioState {
             notify: None,
             interrupt_status: 0,
             irq: 5,
+            net_max_pairs: 1,
+            net_active_pairs: 1,
         }
     }
 }
@@ -106,6 +121,23 @@ impl VirtioMmio {
         st.mac = mac;
         st.irq = 5;
         st.num_queues = 2;
+        Self::new(base, st)
+    }
+
+    /// virtio-net with `pairs` RX/TX queue pairs. `pairs <= 1` is exactly
+    /// [`Self::net`]; more advertises `VIRTIO_NET_F_MQ` + `VIRTIO_NET_F_CTRL_VQ`
+    /// and lays the queues out as rx0 tx0 rx1 tx1 ... ctrl.
+    pub fn net_mq(base: u64, mac: [u8; 6], pairs: u16) -> Self {
+        let pairs = pairs.min(NET_MAX_QUEUE_PAIRS);
+        if pairs <= 1 {
+            return Self::net(base, mac);
+        }
+        let mut st = VirtioState::default();
+        st.mac = mac;
+        st.irq = 5;
+        st.features |= VIRTIO_NET_F_CTRL_VQ | VIRTIO_NET_F_MQ;
+        st.net_max_pairs = pairs;
+        st.num_queues = 2 * pairs as u32 + 1;
         Self::new(base, st)
     }
 
@@ -206,7 +238,7 @@ impl VirtioMmio {
     }
 
     fn q(st: &mut VirtioState) -> &mut QueueState {
-        let max = st.num_queues.saturating_sub(1).min(3);
+        let max = st.num_queues.saturating_sub(1).min(MAX_QUEUES as u32 - 1);
         let i = st.sel.min(max) as usize;
         &mut st.queues[i]
     }
@@ -272,6 +304,7 @@ impl MmioDevice for VirtioMmio {
                 if val == 0 {
                     st.driver_features = 0;
                     st.status = 0;
+                    st.net_active_pairs = 1;
                     st.sel = 0;
                     st.notify = None;
                     st.interrupt_status = 0;
@@ -367,6 +400,17 @@ impl MmioDevice for VirtioMmio {
                 }
             }
             _ => {
+                if (0x108..0x10a).contains(&off)
+                    && st.features & VIRTIO_NET_F_MQ != 0
+                    && !data.is_empty()
+                {
+                    // virtio_net_config.max_virtqueue_pairs (le16) at 0x108.
+                    let bytes = st.net_max_pairs.to_le_bytes();
+                    let i = (off - 0x108) as usize;
+                    let n = data.len().min(2 - i);
+                    data[..n].copy_from_slice(&bytes[i..i + n]);
+                    return Ok(());
+                }
                 if (0x100..0x106).contains(&off) {
                     let i = (off - 0x100) as usize;
                     if !data.is_empty() {
@@ -380,7 +424,7 @@ impl MmioDevice for VirtioMmio {
                 }
             }
         }
-        let max_q = st.num_queues.saturating_sub(1).min(3);
+        let max_q = st.num_queues.saturating_sub(1).min(MAX_QUEUES as u32 - 1);
         let val = match off {
             0x000 => VIRTIO_MMIO_MAGIC,
             0x004 => VIRTIO_MMIO_VERSION,

@@ -14,19 +14,28 @@ int flux_ioctl(int fd, unsigned long req, void *arg) {
     return ioctl(fd, req, arg);
 }
 
-int flux_tap_open(const char *name) {
+/* multi_queue != 0 opens one queue of a multi-queue TAP (IFF_MULTI_QUEUE);
+ * call it once per queue pair with the same name. The TAP device must have
+ * been created multi_queue (or be created by the first call). */
+int flux_tap_open_mq(const char *name, int multi_queue) {
     int fd = open("/dev/net/tun", O_RDWR | O_NONBLOCK);
     if (fd < 0)
         return -1;
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     ifr.ifr_flags = IFF_TAP | IFF_NO_PI;
+    if (multi_queue)
+        ifr.ifr_flags |= IFF_MULTI_QUEUE;
     strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
     if (ioctl(fd, TUNSETIFF, &ifr) < 0) {
         close(fd);
         return -1;
     }
     return fd;
+}
+
+int flux_tap_open(const char *name) {
+    return flux_tap_open_mq(name, 0);
 }
 
 int flux_if_up(const char *name) {

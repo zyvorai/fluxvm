@@ -10,9 +10,101 @@
 //! 4. `VHOST_NET_SET_BACKEND` — attach TAP
 //!
 //! Callers that fail any step keep the userspace TAP datapath.
+//!
+//! One [`VhostNet`] (one `/dev/vhost-net` fd) serves exactly one RX/TX queue
+//! pair, so multiqueue is one instance per pair, each bound to its own
+//! multi_queue TAP queue fd ([`VhostPair`]). Which datapath is actually live is
+//! published through [`NetDatapath`] so a silent fallback is visible.
 
 use crate::devices::virtio_mmio::QueueState;
 use crate::error::{FluxError, Result};
+use crate::tap::Tap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
+
+/// `FLUXVM_VHOST_NET=0` (or `off`/`false`/`no`) forces the userspace pump even
+/// when the config asks for vhost-net, for A/B benchmarking. Unset or any
+/// other value leaves the config in charge.
+pub fn env_enabled() -> bool {
+    !matches!(
+        std::env::var("FLUXVM_VHOST_NET")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("0") | Some("off") | Some("false") | Some("no")
+    )
+}
+
+/// Which virtio-net datapath is live, and why. Shared (`Arc`) between the VM,
+/// the queue service that decides it and the control API that reports it.
+pub struct NetDatapath {
+    kernel: AtomicBool,
+    pairs: AtomicU32,
+    detail: Mutex<String>,
+}
+
+impl Default for NetDatapath {
+    fn default() -> Self {
+        Self {
+            kernel: AtomicBool::new(false),
+            pairs: AtomicU32::new(1),
+            detail: Mutex::new("not initialised".into()),
+        }
+    }
+}
+
+impl NetDatapath {
+    /// Record the current datapath. `kernel` is true only when vhost-net owns
+    /// every queue pair; `detail` says why (or why not).
+    pub fn set(&self, kernel: bool, pairs: u32, detail: impl Into<String>) {
+        self.kernel.store(kernel, Ordering::SeqCst);
+        self.pairs.store(pairs, Ordering::SeqCst);
+        if let Ok(mut d) = self.detail.lock() {
+            *d = detail.into();
+        }
+    }
+
+    /// Adopt another status wholesale (used to hand the status computed while
+    /// building a VM to the handle that reports it).
+    pub fn copy_from(&self, other: &NetDatapath) {
+        let detail = other.detail.lock().map(|d| d.clone()).unwrap_or_default();
+        self.set(
+            other.kernel.load(Ordering::SeqCst),
+            other.pairs.load(Ordering::SeqCst),
+            detail,
+        );
+    }
+
+    pub fn is_kernel(&self) -> bool {
+        self.kernel.load(Ordering::SeqCst)
+    }
+
+    /// `vhost-net` or `userspace-pump`.
+    pub fn label(&self) -> &'static str {
+        if self.is_kernel() {
+            "vhost-net"
+        } else {
+            "userspace-pump"
+        }
+    }
+
+    /// One-line status: `<label> pairs=<n> (<detail>)`.
+    pub fn summary(&self) -> String {
+        let detail = self.detail.lock().map(|d| d.clone()).unwrap_or_default();
+        format!(
+            "{} pairs={} ({detail})",
+            self.label(),
+            self.pairs.load(Ordering::SeqCst)
+        )
+    }
+}
+
+/// An extra queue pair (index >= 1) of a multiqueue device: its own vhost-net
+/// instance and the TAP queue fd it is bound to. Field order drops vhost first.
+pub struct VhostPair {
+    pub vhost: VhostNet,
+    pub tap: Tap,
+}
 
 #[cfg(target_os = "linux")]
 mod linux_ioctl {
@@ -146,7 +238,9 @@ impl VhostNet {
         Ok(())
     }
 
-    /// Bind TAP as vhost-net backend for queue index 0 (RX) and 1 (TX).
+    /// Bind TAP as vhost-net backend for queue index 0 (RX) and 1 (TX) of this
+    /// instance. A vhost-net fd has exactly these two vrings, so `queues` is
+    /// clamped to 2 here; further queue pairs use further instances.
     pub fn bind_tap(&mut self, tap_fd: i32, queues: u32) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
