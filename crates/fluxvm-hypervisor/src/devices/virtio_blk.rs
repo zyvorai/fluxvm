@@ -20,6 +20,8 @@ pub const VIRTIO_BLK_S_OK: u8 = 0;
 pub const VIRTIO_BLK_S_IOERR: u8 = 1;
 pub const VIRTIO_BLK_S_UNSUPP: u8 = 2;
 
+// Bound bounce-buffer memory independently of guest descriptor lengths.
+const IO_CHUNK_SIZE: usize = 1024 * 1024;
 const VRING_DESC_F_NEXT: u16 = 1;
 const VRING_DESC_F_WRITE: u16 = 2;
 
@@ -123,14 +125,15 @@ struct DescChain {
 fn walk_chain(mem: &GuestMemory, desc_base: u64, head: u16, qnum: u32) -> Result<DescChain> {
     let mut parts = Vec::new();
     let mut idx = head;
-    let mut seen = std::collections::HashSet::new();
-    for _ in 0..qnum.min(64) {
-        if u32::from(idx) >= qnum || !seen.insert(idx) {
+    let mut seen = [0u16; 64];
+    for hop in 0..qnum.min(64) as usize {
+        if u32::from(idx) >= qnum || seen[..hop].contains(&idx) {
             return Err(FluxError::Device {
                 device: "virtio-blk",
                 msg: "descriptor index out of range or chain cycle".into(),
             });
         }
+        seen[hop] = idx;
         let mut raw = [0u8; 16];
         let addr = desc_base
             .checked_add(u64::from(idx) * 16)
@@ -176,7 +179,7 @@ fn valid_io_request(
         };
         total = next;
     }
-    if total % SECTOR_SIZE != 0 {
+    if total % SECTOR_SIZE != 0 || total > u64::from(u32::MAX - 1) {
         return false;
     }
     matches!(
@@ -190,6 +193,7 @@ fn process_request(
     mem: &mut GuestMemory,
     backend: &BlockBackend,
     chain: &DescChain,
+    scratch: &mut Vec<u8>,
 ) -> Result<u32> {
     if chain.parts.len() < 2 {
         return Ok(0);
@@ -228,46 +232,50 @@ fn process_request(
     }
 
     match req_type {
-        VIRTIO_BLK_T_IN => {
-            let mut offset = sector * SECTOR_SIZE;
-            let mut file = backend.file.lock().unwrap();
-            for &(gpa, len, device_write) in data_parts {
-                if !device_write {
-                    status = VIRTIO_BLK_S_IOERR;
-                    break;
-                }
-                let mut buf = vec![0u8; len as usize];
-                if file.seek(SeekFrom::Start(offset)).is_err() || file.read_exact(&mut buf).is_err()
-                {
-                    // Short read at EOF: zero-fill remainder.
-                    let _ = file.seek(SeekFrom::Start(offset));
-                    let n = file.read(&mut buf).unwrap_or(0);
-                    buf[n..].fill(0);
-                }
-                mem.write_at(gpa, &buf)?;
-                offset += len as u64;
-                bytes_written_to_guest += len;
-            }
-        }
-        VIRTIO_BLK_T_OUT => {
-            if backend.read_only {
+        VIRTIO_BLK_T_IN | VIRTIO_BLK_T_OUT => {
+            let reading = req_type == VIRTIO_BLK_T_IN;
+            if !reading && backend.read_only {
                 status = VIRTIO_BLK_S_IOERR;
             } else {
-                let mut offset = sector * SECTOR_SIZE;
+                // One seek per request and no guest-sized heap allocation.
+                // Keep a bounce buffer: guest RAM may change while vCPUs run.
+                let chunk = data_parts
+                    .iter()
+                    .map(|(_, len, _)| *len as usize)
+                    .max()
+                    .unwrap_or(0)
+                    .min(IO_CHUNK_SIZE);
+                if chunk > scratch.len() {
+                    scratch.reserve_exact(chunk - scratch.len());
+                    scratch.resize(chunk, 0);
+                }
                 let mut file = backend.file.lock().unwrap();
-                for &(gpa, len, device_write) in data_parts {
-                    if device_write {
-                        status = VIRTIO_BLK_S_IOERR;
-                        break;
+                if file.seek(SeekFrom::Start(sector * SECTOR_SIZE)).is_err() {
+                    status = VIRTIO_BLK_S_IOERR;
+                } else {
+                    'parts: for &(gpa, len, _) in data_parts {
+                        let mut done = 0usize;
+                        while done < len as usize {
+                            let n = (len as usize - done).min(scratch.len());
+                            let buf = &mut scratch[..n];
+                            let addr = gpa + done as u64;
+                            if reading {
+                                if file.read_exact(buf).is_err() {
+                                    status = VIRTIO_BLK_S_IOERR;
+                                    break 'parts;
+                                }
+                                mem.write_at(addr, buf)?;
+                                bytes_written_to_guest += n as u32;
+                            } else {
+                                mem.read_at(addr, buf)?;
+                                if file.write_all(buf).is_err() {
+                                    status = VIRTIO_BLK_S_IOERR;
+                                    break 'parts;
+                                }
+                            }
+                            done += n;
+                        }
                     }
-                    let mut buf = vec![0u8; len as usize];
-                    mem.read_at(gpa, &mut buf)?;
-                    if file.seek(SeekFrom::Start(offset)).is_err() || file.write_all(&buf).is_err()
-                    {
-                        status = VIRTIO_BLK_S_IOERR;
-                        break;
-                    }
-                    offset += len as u64;
                 }
             }
         }
@@ -307,6 +315,7 @@ pub fn handle_notify(
         return Ok(0);
     }
     let mut n = 0u32;
+    let mut scratch = Vec::new();
     loop {
         let avail_idx = mem.read_u16(q.avail + 2)?;
         if q.last_avail == avail_idx {
@@ -322,7 +331,7 @@ pub fn handle_notify(
                 break;
             }
         }
-        let written = process_request(mem, backend, &chain).unwrap_or(1);
+        let written = process_request(mem, backend, &chain, &mut scratch).unwrap_or(1);
         used_push(mem, q.used, q.num, chain.head, written)?;
         q.last_avail = q.last_avail.wrapping_add(1);
         n += 1;
@@ -338,6 +347,14 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn process_request(
+        mem: &mut GuestMemory,
+        backend: &BlockBackend,
+        chain: &DescChain,
+    ) -> Result<u32> {
+        super::process_request(mem, backend, chain, &mut Vec::new())
+    }
 
     #[test]
     fn open_raw_image_reports_sectors() {
@@ -435,5 +452,102 @@ mod tests {
         mem.write_at(256, &desc).unwrap();
         let err = walk_chain(&mem, 256, 0, 1).err().unwrap();
         assert!(format!("{err}").contains("chain"));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn chunked_io_roundtrip_across_descriptors() {
+        let f = NamedTempFile::new().unwrap();
+        let size = IO_CHUNK_SIZE * 2 + 512;
+        f.as_file().set_len((size + 512) as u64).unwrap();
+        let backend = BlockBackend::open(f.path(), false).unwrap();
+        let mut mem = GuestMemory::allocate(size + 8192 - 512).unwrap();
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        mem.write_at(4096, &data).unwrap();
+        let chain = DescChain {
+            head: 0,
+            // Deliberately split on a non-sector boundary.
+            parts: vec![
+                (0, 16, false),
+                (4096, 513, false),
+                (4609, (size - 513) as u32, false),
+                (128, 1, true),
+            ],
+        };
+        let mut header = [0u8; 16];
+        header[..4].copy_from_slice(&VIRTIO_BLK_T_OUT.to_le_bytes());
+        header[8..].copy_from_slice(&1u64.to_le_bytes());
+        mem.write_at(0, &header).unwrap();
+        let mut scratch = Vec::new();
+        assert_eq!(
+            super::process_request(&mut mem, &backend, &chain, &mut scratch).unwrap(),
+            1
+        );
+        assert_eq!(scratch.len(), IO_CHUNK_SIZE);
+        assert!(scratch.capacity() <= IO_CHUNK_SIZE);
+        let scratch_ptr = scratch.as_ptr();
+        assert_eq!(mem.as_slice()[128], VIRTIO_BLK_S_OK);
+        mem.as_slice_mut()[4096..4096 + size].fill(0);
+        header[..4].copy_from_slice(&VIRTIO_BLK_T_IN.to_le_bytes());
+        mem.write_at(0, &header).unwrap();
+        let read_chain = DescChain {
+            head: 0,
+            parts: chain
+                .parts
+                .iter()
+                .enumerate()
+                .map(|(i, &(gpa, len, w))| (gpa, len, if i == 1 || i == 2 { true } else { w }))
+                .collect(),
+        };
+        assert_eq!(
+            super::process_request(&mut mem, &backend, &read_chain, &mut scratch).unwrap(),
+            size as u32 + 1
+        );
+        assert_eq!(scratch.as_ptr(), scratch_ptr);
+        assert_eq!(&mem.as_slice()[4096..4096 + size], data.as_slice());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn truncated_backing_file_reports_io_error() {
+        let f = NamedTempFile::new().unwrap();
+        f.as_file().set_len(4096).unwrap();
+        let backend = BlockBackend::open(f.path(), false).unwrap();
+        f.as_file().set_len(0).unwrap();
+        let mut mem = GuestMemory::allocate(4096).unwrap();
+        let chain = DescChain {
+            head: 0,
+            parts: vec![(0, 16, false), (512, 512, true), (128, 1, true)],
+        };
+        assert_eq!(process_request(&mut mem, &backend, &chain).unwrap(), 1);
+        assert_eq!(mem.as_slice()[128], VIRTIO_BLK_S_IOERR);
+    }
+
+    /// Host-only microbenchmark; excludes VM boot, KVM and durability flushes.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn bench_block_bounce_buffer() {
+        let size = 16 * 1024 * 1024;
+        let f = NamedTempFile::new().unwrap();
+        f.as_file().set_len(size as u64).unwrap();
+        let backend = BlockBackend::open(f.path(), false).unwrap();
+        let mut mem = GuestMemory::allocate(size + 4096).unwrap();
+        mem.as_slice_mut()[4096..].fill(0xa5);
+        let chain = DescChain {
+            head: 0,
+            parts: vec![(0, 16, false), (4096, size as u32, true), (128, 1, true)],
+        };
+        let mut scratch = Vec::new();
+        for _ in 0..4 {
+            super::process_request(&mut mem, &backend, &chain, &mut scratch).unwrap();
+        }
+        let start = std::time::Instant::now();
+        for _ in 0..64 {
+            super::process_request(&mut mem, &backend, &chain, &mut scratch).unwrap();
+        }
+        eprintln!(
+            "block-read MiB/s={:.1}",
+            1024.0 / start.elapsed().as_secs_f64()
+        );
     }
 }
