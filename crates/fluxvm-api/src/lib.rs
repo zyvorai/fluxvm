@@ -33,6 +33,7 @@ use uuid::Uuid;
 mod oidc;
 mod openapi;
 mod rate_limit;
+mod speculate_api;
 
 #[derive(Clone)]
 struct AuthState {
@@ -640,6 +641,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/pools/{name}", get(get_pool).delete(delete_pool))
         .route("/v1/pools/{name}/claim", post(claim_pool))
         .route("/v1/pools/{name}/resize", post(resize_pool))
+        .merge(speculate_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,

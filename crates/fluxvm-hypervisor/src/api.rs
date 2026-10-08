@@ -33,6 +33,13 @@ pub enum ApiRequest {
     HotplugDisk {
         path: PathBuf,
     },
+    /// Set (`Some`) or read (`None`) the virtio-balloon size in MiB: memory
+    /// taken away from the guest. In-tree KVM engine only. The response is
+    /// `Ok` with a JSON `balloon_ctl::BalloonStatus` as its message.
+    Balloon {
+        #[serde(default)]
+        balloon_mib: Option<u64>,
+    },
     Metrics,
     Ping,
 }
