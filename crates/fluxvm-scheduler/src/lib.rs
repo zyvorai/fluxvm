@@ -27,6 +27,7 @@ pub mod changes;
 pub mod confidential;
 pub mod events;
 pub mod fork;
+pub mod journal;
 pub mod live_migration;
 mod migration_relay;
 pub mod procbox_sandbox;
@@ -4251,6 +4252,18 @@ impl VmManager {
                 bail!("refusing to delete {id}: pid {pid} is still alive after stop");
             }
         }
+        // Record what must be reclaimed *before* the record that names it is
+        // removed; `reconcile()` rolls a leftover intent forward after a crash.
+        journal::begin_delete(
+            &self.cfg.state_dir,
+            &journal::DeleteIntent {
+                vm_id: id,
+                workspace: vm.workspace.clone(),
+                jail_path: vm.jail_path.clone(),
+                lvm_lv: vm.lvm_lv.clone(),
+            },
+        )
+        .context("journaling delete intent")?;
         let vm = self.store.remove(id).await?.context("VM vanished")?;
         let _ = fluxvm_network::dataplane::remove_sandbox_policy(&self.cfg, id);
         let _ = fluxvm_network::dataplane::delete_policy(&self.cfg, id);
@@ -4298,6 +4311,7 @@ impl VmManager {
             }
         }
         self.remove_unreferenced_clone_base(&vm.request.image).await;
+        journal::finish_delete(&self.cfg.state_dir, id)?;
         let vm_id = id.to_string();
         let tenant = vm.request.tenant.clone().unwrap_or_default();
         audit_event("vm.delete", &[("vm_id", &vm_id), ("tenant", &tenant)]);
@@ -4503,8 +4517,34 @@ impl VmManager {
         Ok(vm)
     }
 
+    /// Rolls forward deletes that crashed after the record was removed.
+    async fn replay_pending_deletes(&self) {
+        for intent in journal::pending_deletes(&self.cfg.state_dir) {
+            // A record that is back in the store means the delete never got
+            // past the journal write; the intent is stale, not pending.
+            if self.store.get(intent.vm_id).await.is_some() {
+                let _ = journal::finish_delete(&self.cfg.state_dir, intent.vm_id);
+                continue;
+            }
+            tracing::warn!(vm = %intent.vm_id, "completing a delete interrupted by a crash");
+            if let Some(lv) = &intent.lvm_lv {
+                if let Err(e) = fluxvm_image::storage::cleanup_lvm_lv(lv).await {
+                    tracing::warn!(vm = %intent.vm_id, error = %e, "failed to remove LVM thin snapshot");
+                }
+            }
+            let mut ok = journal::remove_tree(&intent.workspace).is_ok();
+            if let Some(jail) = &intent.jail_path {
+                ok &= journal::remove_tree(jail).is_ok();
+            }
+            if ok {
+                let _ = journal::finish_delete(&self.cfg.state_dir, intent.vm_id);
+            }
+        }
+    }
+
     pub async fn reconcile(&self) -> Result<()> {
         let now = Utc::now();
+        self.replay_pending_deletes().await;
         for vm in self.store.list().await {
             if vm.status == VmStatus::Running || vm.status == VmStatus::Paused {
                 if let Some(pid) = vm.pid {
