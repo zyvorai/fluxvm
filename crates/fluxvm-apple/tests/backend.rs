@@ -77,11 +77,20 @@ async fn backend_supervises_a_runner_over_its_control_socket() {
 
     // Launch: the backend waits for `running` and returns the runner's pid and control socket.
     let ctx = context(dir.path());
-    let launched = AppleBackend.launch(&Config::default(), &request(), &ctx).await.expect("launch");
+    let launched = AppleBackend
+        .launch(&Config::default(), &request(), &ctx)
+        .await
+        .expect("launch");
     assert!(launched.pid > 1);
     let sock = launched.control_socket.clone().expect("control socket");
-    assert!(sock.to_string_lossy().len() < 100, "socket path must fit sockaddr_un");
-    assert_eq!(read_guest_ip(&ctx.workspace).as_deref(), Some("192.168.64.77"));
+    assert!(
+        sock.to_string_lossy().len() < 100,
+        "socket path must fit sockaddr_un"
+    );
+    assert_eq!(
+        read_guest_ip(&ctx.workspace).as_deref(),
+        Some("192.168.64.77")
+    );
 
     // Pause and resume go through the control socket.
     let r = control_call(&sock, "pause").await.unwrap();
@@ -91,7 +100,8 @@ async fn backend_supervises_a_runner_over_its_control_socket() {
     assert_eq!(r.ip(), Some("192.168.64.77"));
 
     // The runner config handed over is complete and the MAC is stable across relaunches.
-    let conf: serde_json::Value = serde_json::from_slice(&fs::read(ctx.workspace.join("vz-config.json")).unwrap()).unwrap();
+    let conf: serde_json::Value =
+        serde_json::from_slice(&fs::read(ctx.workspace.join("vz-config.json")).unwrap()).unwrap();
     assert_eq!(conf["guest_os"], "linux");
     assert_eq!(conf["cpus"], 2);
     let mac = fs::read_to_string(ctx.workspace.join("vz-mac")).unwrap();
@@ -111,14 +121,26 @@ async fn backend_supervises_a_runner_over_its_control_socket() {
     // A runner that fails is reported with its own error text, not a timeout.
     unsafe { std::env::set_var("FAKE_RUNNER_FAIL", "1") };
     let ctx2 = context(&dir.path().join("second"));
-    let err = AppleBackend.launch(&Config::default(), &request(), &ctx2).await.expect_err("must fail").to_string();
+    let err = AppleBackend
+        .launch(&Config::default(), &request(), &ctx2)
+        .await
+        .expect_err("must fail")
+        .to_string();
     assert!(err.contains("fake runner failure"), "{err}");
     unsafe { std::env::remove_var("FAKE_RUNNER_FAIL") };
 
     // Unsupported requests are refused before any process starts.
     let mut bad = request();
     bad.network = serde_json::from_str(r#"{"mode":"tap"}"#).unwrap();
-    let err = AppleBackend.launch(&Config::default(), &bad, &context(&dir.path().join("third"))).await.expect_err("tap").to_string();
+    let err = AppleBackend
+        .launch(
+            &Config::default(),
+            &bad,
+            &context(&dir.path().join("third")),
+        )
+        .await
+        .expect_err("tap")
+        .to_string();
     assert!(err.contains("user"), "{err}");
 
     // A missing runner explains how to build it.

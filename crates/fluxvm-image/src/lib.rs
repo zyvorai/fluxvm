@@ -764,7 +764,8 @@ pub async fn clone_for_vm(
 fn apple_raw_image_format(base: &Path) -> Result<String> {
     use std::io::Read;
     let mut magic = [0u8; 4];
-    let mut f = std::fs::File::open(base).with_context(|| format!("opening image {}", base.display()))?;
+    let mut f =
+        std::fs::File::open(base).with_context(|| format!("opening image {}", base.display()))?;
     if f.read_exact(&mut magic).is_ok() && &magic == b"QFI\xfb" {
         bail!(
             "{} is qcow2; the vz backend needs a raw disk image (convert with `qemu-img convert -O raw`)",
@@ -778,18 +779,35 @@ fn apple_raw_image_format(base: &Path) -> Result<String> {
 async fn clone_raw_for_apple(base: &Path, out: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let clone = run_checked("cp", &["-c".into(), base.display().to_string(), out.display().to_string()]).await;
+        let clone = run_checked(
+            "cp",
+            &[
+                "-c".into(),
+                base.display().to_string(),
+                out.display().to_string(),
+            ],
+        )
+        .await;
         if clone.is_ok() {
             return Ok(());
         }
-        run_checked("cp", &[base.display().to_string(), out.display().to_string()]).await?;
+        run_checked(
+            "cp",
+            &[base.display().to_string(), out.display().to_string()],
+        )
+        .await?;
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
         run_checked(
             "cp",
-            &["--reflink=auto".into(), "--sparse=always".into(), base.display().to_string(), out.display().to_string()],
+            &[
+                "--reflink=auto".into(),
+                "--sparse=always".into(),
+                base.display().to_string(),
+                out.display().to_string(),
+            ],
         )
         .await?;
         Ok(())

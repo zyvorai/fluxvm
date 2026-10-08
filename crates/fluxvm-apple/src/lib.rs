@@ -35,11 +35,18 @@ impl VmBackend for AppleBackend {
         BackendKind::Vz
     }
 
-    async fn launch(&self, _cfg: &Config, req: &CreateVmRequest, ctx: &LaunchContext) -> Result<LaunchResult> {
+    async fn launch(
+        &self,
+        _cfg: &Config,
+        req: &CreateVmRequest,
+        ctx: &LaunchContext,
+    ) -> Result<LaunchResult> {
         validate_request(req)?;
         let guest = req.apple.as_ref().map(|a| a.guest_os).unwrap_or_default();
         if guest == AppleGuest::Macos && !ctx.workspace.join("hardware.bin").exists() {
-            bail!("macOS guests must be installed from an IPSW before their first boot (`fluxvm-apple` install step); this VM has no hardware identity yet");
+            bail!(
+                "macOS guests must be installed from an IPSW before their first boot (`fluxvm-apple` install step); this VM has no hardware identity yet"
+            );
         }
         let runner = find_runner()?;
         let conf = RunnerConfig::for_launch(req, ctx)?;
@@ -53,23 +60,32 @@ impl VmBackend for AppleBackend {
             .stdout(log.try_clone().context("cloning the runner log")?)
             .stderr(log)
             .process_group(0);
-        let mut child = cmd.spawn().with_context(|| format!("starting {}", runner.display()))?;
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("starting {}", runner.display()))?;
         let pid = child.id().context("runner exited immediately")?;
 
         // Ready = the control socket answers `status` with a running guest. A runner that exits first has failed.
         let deadline = tokio::time::Instant::now() + START_TIMEOUT;
         loop {
             if let Ok(Some(status)) = child.try_wait() {
-                bail!("the Apple runner exited ({status}): {}", runner::tail_runner_log(&ctx.workspace));
+                bail!(
+                    "the Apple runner exited ({status}): {}",
+                    runner::tail_runner_log(&ctx.workspace)
+                );
             }
-            if let Ok(reply) = control_call(&conf.control_socket, "status").await {
-                if reply.state() == Some("running") {
-                    break;
-                }
+            if let Ok(reply) = control_call(&conf.control_socket, "status").await
+                && reply.state() == Some("running")
+            {
+                break;
             }
             if tokio::time::Instant::now() >= deadline {
                 let _ = child.start_kill();
-                bail!("the Apple runner did not report a running guest within {}s: {}", START_TIMEOUT.as_secs(), runner::tail_runner_log(&ctx.workspace));
+                bail!(
+                    "the Apple runner did not report a running guest within {}s: {}",
+                    START_TIMEOUT.as_secs(),
+                    runner::tail_runner_log(&ctx.workspace)
+                );
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -101,11 +117,19 @@ impl VmBackend for AppleBackend {
 }
 
 async fn send(vm: &VmRecord, cmd: &str) -> Result<()> {
-    let sock = vm.control_socket.as_deref().context("VM has no runner control socket recorded")?;
-    let reply = control_call(sock, cmd).await.with_context(|| format!("runner `{cmd}`"))?;
+    let sock = vm
+        .control_socket
+        .as_deref()
+        .context("VM has no runner control socket recorded")?;
+    let reply = control_call(sock, cmd)
+        .await
+        .with_context(|| format!("runner `{cmd}`"))?;
     if reply.ok() {
         Ok(())
     } else {
-        bail!("runner refused `{cmd}`: {}", reply.error().unwrap_or("unknown error"))
+        bail!(
+            "runner refused `{cmd}`: {}",
+            reply.error().unwrap_or("unknown error")
+        )
     }
 }
