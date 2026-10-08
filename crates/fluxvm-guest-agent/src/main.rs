@@ -5,6 +5,8 @@
 //! a thread per connection), reads one newline-delimited JSON request, acts
 //! on it, and writes one newline-delimited JSON response.
 
+mod exec_policy;
+
 #[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::Result;
@@ -57,9 +59,16 @@ fn run_server(port: u32) -> Result<()> {
         eprintln!(
             "fluxvm-guest-agent: token found at {TOKEN_FILE_PATH}, requests must authenticate"
         );
+    } else if exec_policy::insecure_opt_in(std::env::var(exec_policy::INSECURE_ENV).ok().as_deref())
+    {
+        eprintln!(
+            "fluxvm-guest-agent: WARNING no token at {TOKEN_FILE_PATH} and {} is set — running unauthenticated, any vsock caller can run commands as root",
+            exec_policy::INSECURE_ENV
+        );
     } else {
         eprintln!(
-            "fluxvm-guest-agent: WARNING no token at {TOKEN_FILE_PATH} — running unauthenticated, any vsock caller can run commands as root"
+            "fluxvm-guest-agent: ERROR no token at {TOKEN_FILE_PATH} — refusing every request (fail closed); provision the token, or set {}=1 to run unauthenticated",
+            exec_policy::INSECURE_ENV
         );
     }
 
@@ -131,6 +140,22 @@ fn handle_connection(
     }
     let envelope: Envelope = decode_line(&line).context("parsing request")?;
 
+    if expected_token.is_none()
+        && !exec_policy::insecure_opt_in(std::env::var(exec_policy::INSECURE_ENV).ok().as_deref())
+    {
+        writer.write_all(
+            encode_line(&AgentResponse::Error {
+                message: format!(
+                    "unauthorized: guest agent has no token provisioned at {TOKEN_FILE_PATH} (set {}=1 to allow unauthenticated use)",
+                    exec_policy::INSECURE_ENV
+                ),
+            })?
+            .as_bytes(),
+        )?;
+        writer.flush()?;
+        return Ok(());
+    }
+
     if let Some(expected) = expected_token {
         let authorized = envelope
             .token
@@ -153,10 +178,14 @@ fn handle_connection(
         AgentRequest::Exec {
             command,
             timeout_seconds,
-        } => exec_with_timeout(
-            &command,
-            Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS)),
-        ),
+            policy,
+        } => {
+            let timeout = Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS));
+            match policy {
+                Some(policy) => exec_policy::exec_confined(&command, timeout, &policy),
+                None => exec_with_timeout(&command, timeout),
+            }
+        }
         AgentRequest::PutFile {
             path,
             content_base64,
@@ -544,6 +573,7 @@ fn exec_with_timeout(command: &str, timeout: Duration) -> AgentResponse {
             exit_code: status.code().unwrap_or(-1),
             stdout,
             stderr,
+            enforcement: None,
         },
         None => AgentResponse::Error {
             message: format!(

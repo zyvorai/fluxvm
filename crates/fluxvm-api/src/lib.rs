@@ -30,6 +30,7 @@ use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod grants;
 mod oidc;
 mod openapi;
 mod rate_limit;
@@ -601,6 +602,16 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/sandboxes/{id}/changes", post(sandbox_changes))
         .route("/v1/sandboxes/{id}/dry-run", post(sandbox_dry_run))
         .route(
+            "/v1/sandboxes/{id}/grants",
+            post(grants::create_grant)
+                .get(grants::list_grants)
+                .delete(grants::delete_grants),
+        )
+        .route(
+            "/v1/sandboxes/{id}/grants/{grant_id}",
+            delete(grants::delete_grant),
+        )
+        .route(
             "/v1/sandboxes/{id}/http/{port}/{*path}",
             any(sandbox_http_proxy),
         )
@@ -1103,6 +1114,8 @@ struct ProcessBody {
     command: String,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default)]
+    policy: Option<fluxvm_guest_protocol::ExecPolicy>,
 }
 
 async fn sandbox_process(
@@ -1114,7 +1127,8 @@ async fn sandbox_process(
     require_admin(role)?;
     m.ensure_running_for_request(id).await?;
     Ok(Json(json!(
-        m.exec(id, body.command, body.timeout_seconds).await?
+        m.exec_with_policy(id, body.command, body.timeout_seconds, body.policy)
+            .await?
     )))
 }
 
@@ -3401,6 +3415,8 @@ struct ExecRequest {
     command: String,
     #[serde(default)]
     timeout_seconds: Option<u64>,
+    #[serde(default)]
+    policy: Option<fluxvm_guest_protocol::ExecPolicy>,
 }
 async fn agent_exec(
     State(m): State<Arc<VmManager>>,
@@ -3409,7 +3425,9 @@ async fn agent_exec(
     Json(req): Json<ExecRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    let response = m.exec(id, req.command, req.timeout_seconds).await?;
+    let response = m
+        .exec_with_policy(id, req.command, req.timeout_seconds, req.policy)
+        .await?;
     Ok(Json(json!(response)))
 }
 

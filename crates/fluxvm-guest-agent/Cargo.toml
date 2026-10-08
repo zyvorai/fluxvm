@@ -10,6 +10,7 @@ description = "In-guest AF_VSOCK agent for Zyvor FluxVM (ping/exec/put-file/get-
 
 [dependencies]
 fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
+fluxvm-procbox = { path = "../fluxvm-procbox" }
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }

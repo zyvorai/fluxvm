@@ -19,12 +19,13 @@ use super::{
     request_body, serve_intercepted, vet_target,
 };
 use crate::http_acl;
+use axum::extract::ConnectInfo;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::convert::Infallible;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
@@ -73,14 +74,19 @@ pub(super) async fn run(listener: TcpListener, state: Arc<ProxyState>, dst: Dst)
         };
         let state = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle(state, tcp, dst).await {
+            if let Err(e) = handle(state, tcp, dst, peer.ip()).await {
                 debug!(%peer, error = %e, "transparent connection ended");
             }
         });
     }
 }
 
-async fn handle(state: Arc<ProxyState>, tcp: TcpStream, dst: Dst) -> anyhow::Result<()> {
+async fn handle(
+    state: Arc<ProxyState>,
+    tcp: TcpStream,
+    dst: Dst,
+    peer: IpAddr,
+) -> anyhow::Result<()> {
     let dst_addr = match dst {
         Dst::Fixed(a) => a,
         Dst::Original => original_dst(&tcp)
@@ -98,13 +104,18 @@ async fn handle(state: Arc<ProxyState>, tcp: TcpStream, dst: Dst) -> anyhow::Res
     })
     .await??;
     match classify(&first[..n]) {
-        Kind::Tls => serve_tls(state, tcp, dst_addr.port()).await,
-        Kind::Http => serve_http(state, tcp, dst_addr.port()).await,
+        Kind::Tls => serve_tls(state, tcp, dst_addr.port(), peer).await,
+        Kind::Http => serve_http(state, tcp, dst_addr.port(), peer).await,
         Kind::Unknown => anyhow::bail!("not TLS and not HTTP"),
     }
 }
 
-async fn serve_tls(state: Arc<ProxyState>, tcp: TcpStream, port: u16) -> anyhow::Result<()> {
+async fn serve_tls(
+    state: Arc<ProxyState>,
+    tcp: TcpStream,
+    port: u16,
+    peer: IpAddr,
+) -> anyhow::Result<()> {
     let Some(tls) = state.tls.clone() else {
         anyhow::bail!("TLS interception is off: refusing redirected HTTPS");
     };
@@ -116,7 +127,7 @@ async fn serve_tls(state: Arc<ProxyState>, tcp: TcpStream, port: u16) -> anyhow:
         .map(str::to_string)
         .ok_or_else(|| anyhow::anyhow!("redirected TLS without SNI cannot be judged"))?;
     let host = http_acl::canon_host(&sni).map_err(|e| anyhow::anyhow!("SNI {sni:?}: {e}"))?;
-    let tunnel = match vet_target(
+    let mut tunnel = match vet_target(
         &state.cfg,
         &state.acl,
         &tls.ports,
@@ -131,6 +142,7 @@ async fn serve_tls(state: Arc<ProxyState>, tcp: TcpStream, port: u16) -> anyhow:
             anyhow::bail!("redirected TLS to {host}:{port} refused: {reason}");
         }
     };
+    tunnel.peer = Some(peer);
     let server_cfg = tls
         .intercept
         .server_config_for(host.trim_start_matches('[').trim_end_matches(']'))?;
@@ -139,11 +151,18 @@ async fn serve_tls(state: Arc<ProxyState>, tcp: TcpStream, port: u16) -> anyhow:
     serve_intercepted(state, stream, tunnel).await
 }
 
-async fn serve_http(state: Arc<ProxyState>, tcp: TcpStream, port: u16) -> anyhow::Result<()> {
+async fn serve_http(
+    state: Arc<ProxyState>,
+    tcp: TcpStream,
+    port: u16,
+    peer: IpAddr,
+) -> anyhow::Result<()> {
     let service = service_fn(move |req: Request<Incoming>| {
         let state = state.clone();
         async move {
-            let req = req.map(request_body);
+            let mut req = req.map(request_body);
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(peer, 0)));
             Ok::<_, Infallible>(handle_plain(&state, req, Some(port)).await)
         }
     });

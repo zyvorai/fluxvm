@@ -428,12 +428,22 @@ impl Default for XdpConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialInject {
     /// Match request Host / SNI (exact or suffix with leading `.`).
     pub host: String,
     /// Header value injected by the egress proxy (e.g. `Bearer …`).
     pub authorization: String,
+}
+
+// Hand-written so a `{:?}` of the config can never print the secret.
+impl std::fmt::Debug for CredentialInject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CredentialInject")
+            .field("host", &self.host)
+            .field("authorization", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Settings for `StorageBackend::CephRbd` (see `model::StorageBackend`) —

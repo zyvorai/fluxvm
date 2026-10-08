@@ -1118,6 +1118,7 @@ impl VmManager {
             exit_code: out.exit_code,
             stdout: out.stdout,
             stderr: out.stderr,
+            enforcement: None,
         })
     }
 
