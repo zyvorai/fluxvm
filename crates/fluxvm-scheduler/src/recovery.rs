@@ -527,7 +527,14 @@ impl VmManager {
             let _ = journal::remove_tree(&ws);
         }
 
-        let netns_dir = if Path::new("/run/netns").is_dir() {
+        // The netns and tap sweeps match host-wide names (`eph-<8hex>`,
+        // `eph<8hex>`) against this daemon's own records, so on a host where
+        // another daemon (or another state dir) owns VMs they would look like
+        // orphans and be removed. Opt in only on a host this daemon owns.
+        let host_sweep = std::env::var("FLUXVM_ORPHAN_NET_SWEEP").is_ok_and(|v| v == "1");
+        let netns_dir = if !host_sweep {
+            None
+        } else if Path::new("/run/netns").is_dir() {
             Some(Path::new("/run/netns"))
         } else if Path::new("/var/run/netns").is_dir() {
             Some(Path::new("/var/run/netns"))
@@ -547,6 +554,7 @@ impl VmManager {
 
         let current: Vec<String> = unclaimed_names(Path::new("/sys/class/net"), tap_short, &shorts)
             .into_iter()
+            .filter(|_| host_sweep)
             // Only tuntap devices: a bridge or veth that happens to match is not ours.
             .filter(|n| {
                 Path::new("/sys/class/net")
