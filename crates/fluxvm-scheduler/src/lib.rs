@@ -27,10 +27,12 @@ pub mod changes;
 pub mod confidential;
 pub mod events;
 pub mod fork;
+pub mod idempotency;
 pub mod journal;
 pub mod live_migration;
 mod migration_relay;
 pub mod procbox_sandbox;
+mod recovery;
 mod sandbox;
 pub mod shared_disk;
 pub mod templates;
@@ -2098,6 +2100,16 @@ impl VmManager {
         }
         let id = Uuid::new_v4();
         let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
+        // Names everything this create may allocate before it allocates any
+        // of it; `reconcile()` rolls it back if this process dies mid-way.
+        let op = journal::OpGuard::begin(
+            &self.cfg.state_dir,
+            journal::OpKind::Create,
+            id,
+            id,
+            recovery::planned_create_resources(&self.cfg.state_dir, id, &req),
+        )
+        .context("journaling create intent")?;
         fs::create_dir_all(&workspace)?;
         let disk = workspace.join(if req.backend == BackendKind::Qemu {
             "root.qcow2"
@@ -2216,6 +2228,10 @@ impl VmManager {
             record.disk = provisioned.disk.clone();
             record.lvm_lv = provisioned.lvm_lv.clone();
             record.nbd_pid = provisioned.nbd_pid;
+            if let Some(pid) = provisioned.nbd_pid {
+                let start_time = journal::proc_start_time(pid);
+                let _ = op.record(journal::Resource::NbdPid { pid, start_time });
+            }
             for d in &req.data_disks {
                 let backing = self.check_disk_source(&d.backing)?;
                 fluxvm_qemu::disks::create_overlay(&self.cfg, &workspace, &d.name, &backing)
@@ -2394,10 +2410,12 @@ impl VmManager {
             record.status = VmStatus::Failed;
             record.error = Some(format!("{e:#}"));
             self.store.update(record.clone()).await?;
+            op.finish();
             return Err(e);
         }
         self.touch_activity(id).await;
         self.store.update(record.clone()).await?;
+        op.finish();
         metrics::record_vm_create(started.elapsed().as_millis() as u64);
         let vm_id = record.id.to_string();
         let tenant = record.request.tenant.clone().unwrap_or_default();
@@ -3075,7 +3093,9 @@ impl VmManager {
     /// hypervisor control SnapshotSave path (same layout as sandbox snaps).
     pub async fn create_vm_snapshot(self: &Arc<Self>, id: Uuid, tag: &str) -> Result<()> {
         validate_snapshot_tag(tag)?;
+        let op = self.begin_snapshot_op(id, tag).await?;
         self.create_vm_snapshot_inner(id, tag).await?;
+        op.finish();
         audit_event("vm.snapshot", &[("vm_id", &id.to_string()), ("tag", tag)]);
         Ok(())
     }
@@ -4545,6 +4565,7 @@ impl VmManager {
     pub async fn reconcile(&self) -> Result<()> {
         let now = Utc::now();
         self.replay_pending_deletes().await;
+        self.replay_pending_ops().await;
         for vm in self.store.list().await {
             if vm.status == VmStatus::Running || vm.status == VmStatus::Paused {
                 if let Some(pid) = vm.pid {
@@ -4646,6 +4667,7 @@ impl VmManager {
         if let Err(e) = fluxvm_network::dataplane::reconcile_orphan_pins(&self.cfg, &live_ids) {
             tracing::warn!(error = %e, "failed to reconcile orphan FluxVM eBPF pins");
         }
+        self.sweep_orphans().await;
         Ok(())
     }
 

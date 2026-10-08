@@ -30,6 +30,7 @@ use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
+mod idempotency;
 mod oidc;
 mod openapi;
 mod rate_limit;
@@ -640,6 +641,12 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/pools/{name}", get(get_pool).delete(delete_pool))
         .route("/v1/pools/{name}/claim", post(claim_pool))
         .route("/v1/pools/{name}/resize", post(resize_pool))
+        // Innermost, so the tenant guard still runs before a stored response
+        // is replayed; see idempotency.rs.
+        .layer(middleware::from_fn_with_state(
+            manager.clone(),
+            idempotency::middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,

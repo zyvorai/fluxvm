@@ -20,6 +20,7 @@
 //! MAC never share an L2 segment. Hostname and machine-id are the parent's
 //! until the caller resets them through the guest agent.
 
+use crate::journal::{OpGuard, OpKind, Resource};
 use crate::{FIRST_GUEST_CID, VmManager, audit_event, validate_vm_name};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
@@ -55,12 +56,28 @@ impl VmManager {
         }
 
         let tag = format!("fork-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        // Journaled so a crash rolls back the parent's fork snapshot and every
+        // child recorded below (fork is all-or-nothing).
+        let op = OpGuard::begin(
+            &self.cfg.state_dir,
+            OpKind::Fork,
+            Uuid::new_v4(),
+            id,
+            vec![Resource::SnapshotDir {
+                path: src.workspace.join("snapshots").join(&tag),
+            }],
+        )
+        .context("journaling fork intent")?;
         self.create_vm_snapshot(id, &tag).await?;
         let meta = src.workspace.join("snapshots").join(&tag).join("snap");
-        let result = self.fork_children(&src, &meta, &tag, &names, actor).await;
+        let result = self
+            .fork_children(&src, &meta, &tag, &names, actor, &op)
+            .await;
         if let Err(e) = self.delete_vm_snapshot(id, &tag).await {
             tracing::warn!(vm = %id, tag, error = %e, "removing fork snapshot failed");
         }
+        // Children are either all running or already deleted by now.
+        op.finish();
         let children = result?;
         let ids: Vec<String> = children.iter().map(|c| c.id.to_string()).collect();
         audit_event(
@@ -81,6 +98,7 @@ impl VmManager {
         tag: &str,
         names: &[String],
         actor: Option<&str>,
+        op: &OpGuard,
     ) -> Result<Vec<VmRecord>> {
         let spec = fluxvm_hypervisor::snapshot::load_spec(meta)?;
         if spec.boot.engine != fluxvm_hypervisor::api::FluxVmEngine::Kvm {
@@ -91,7 +109,7 @@ impl VmManager {
         }
         let mut children = Vec::with_capacity(names.len());
         for name in names {
-            match self.fork_child(src, &spec, tag, name, actor).await {
+            match self.fork_child(src, &spec, tag, name, actor, op).await {
                 Ok(child) => children.push(child),
                 Err(e) => {
                     for child in &children {
@@ -111,6 +129,7 @@ impl VmManager {
         tag: &str,
         name: &str,
         actor: Option<&str>,
+        op: &OpGuard,
     ) -> Result<VmRecord> {
         let ledger = self.store.quota_ledger().await?;
         if let Some(tenant) = src.request.tenant.as_deref()
@@ -132,6 +151,8 @@ impl VmManager {
         )?;
 
         let id = Uuid::new_v4();
+        op.record(Resource::ForkChild { vm_id: id })
+            .context("journaling fork child")?;
         let workspace = self.cfg.state_dir.join("instances").join(id.to_string());
         std::fs::create_dir_all(&workspace)?;
         let disk = workspace.join("root.raw");

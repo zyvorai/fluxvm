@@ -142,7 +142,22 @@ impl VmManager {
             .into());
         }
         let _guard = BusyGuard::acquire(id)?;
+        // The only file a crashed restore can leave is the disk copy it was
+        // about to rename into place; `reconcile()` removes it.
+        let op = crate::journal::OpGuard::begin(
+            &self.cfg.state_dir,
+            crate::journal::OpKind::Restore,
+            Uuid::new_v4(),
+            id,
+            vec![crate::journal::Resource::TempFile {
+                path: vm.disk.with_extension("restore.tmp"),
+            }],
+        )
+        .context("journaling restore intent")?;
         let out = self.restore_fluxvm_in_place(id, tag).await;
+        if out.is_ok() {
+            op.finish();
+        }
         if let Ok(vm) = &out {
             if vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
                 if let Err(e) = self.wait_for_agent(id).await {

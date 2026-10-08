@@ -29,7 +29,7 @@ use uuid::Uuid;
 /// Writes `bytes` to `tmp`, fsyncs it, renames it over `dest`, then fsyncs the
 /// parent directory, so the new contents survive power loss or a kernel crash
 /// and never appear half-written.
-fn write_durable(tmp: &Path, dest: &Path, bytes: &[u8]) -> Result<()> {
+pub fn write_durable(tmp: &Path, dest: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(tmp)?;
     f.write_all(bytes)?;
