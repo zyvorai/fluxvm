@@ -174,6 +174,39 @@ impl VmManager {
         out
     }
 
+    /// First-command latency: wait for a trivial guest-agent exec to succeed
+    /// and report timings measured from `started` (the API request start).
+    /// `create_done_ms` is when the create/fork/claim returned; `agent_wait_ms`
+    /// is the extra wait until the first `true` exec succeeded. Records a
+    /// `vm.first_command` event. `source` is "create", "fork" or "claim".
+    pub async fn measure_first_command(
+        self: &Arc<Self>,
+        id: Uuid,
+        source: &str,
+        started: std::time::Instant,
+    ) -> Result<serde_json::Value> {
+        let create_done_ms = started.elapsed().as_millis() as u64;
+        let waited = self.wait_for_agent(id).await?;
+        let first_command_ms = started.elapsed().as_millis() as u64;
+        crate::events::record(
+            "vm.first_command",
+            &[
+                ("vm_id", &id.to_string()),
+                ("source", source),
+                ("first_command_ms", &first_command_ms.to_string()),
+                ("create_done_ms", &create_done_ms.to_string()),
+            ],
+        );
+        Ok(serde_json::json!({
+            "first_command_ms": first_command_ms,
+            "phases": {
+                "create_done_ms": create_done_ms,
+                "agent_wait_ms": waited.as_millis() as u64,
+                "first_exec_ms": first_command_ms,
+            },
+        }))
+    }
+
     /// Wait until the guest agent answers again; returns how long that took.
     pub(crate) async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
         let started = std::time::Instant::now();
