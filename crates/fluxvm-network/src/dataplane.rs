@@ -980,8 +980,10 @@ mod tests {
     #[test]
     fn primary_dataplane_skips_networks_without_a_host_edge() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let mut cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
         cfg.sandbox.dataplane.bpf_object = tmp.path().join("missing.bpf.o");
         apply_sandbox_policy(&cfg, Uuid::new_v4(), None, None, &[], None).unwrap();
     }
@@ -989,8 +991,10 @@ mod tests {
     #[test]
     fn primary_dataplane_rejects_missing_object_without_fallback() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let mut cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
         cfg.sandbox.dataplane.bpf_object = tmp.path().join("missing.bpf.o");
         let err =
             apply_sandbox_policy(&cfg, Uuid::new_v4(), Some("test0"), None, &[], None).unwrap_err();
