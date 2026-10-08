@@ -676,6 +676,7 @@ fn exec_parts(resp: AgentResponse) -> Result<(i32, String, String)> {
             exit_code,
             stdout,
             stderr,
+            ..
         } => Ok((exit_code, stdout, stderr)),
         AgentResponse::Error { message } => bail!("guest agent error: {message}"),
         other => bail!("unexpected guest response: {other:?}"),
