@@ -2,6 +2,8 @@
 
 **Policy at the VM edge. GA.** · dataplane schema **v4**
 
+> New here? Start with the overview, numbers and diagrams in [ebpf.md](ebpf.md).
+
 One TC/eBPF dataplane for identities, groups, deny lists, and CNP-shaped
 policy — pinned under `/sys/fs/bpf/fluxvm`. Not a foreign CNI rewrite.
 
