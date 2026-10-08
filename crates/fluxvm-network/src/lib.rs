@@ -1,6 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+mod bpf_map;
 pub mod cilium;
 pub mod cnp;
 pub mod dataplane;

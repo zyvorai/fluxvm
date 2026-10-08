@@ -6,7 +6,8 @@
 //! The kernel programs live in `bpf/`.  The daemon intentionally uses
 //! `bpftool` + `tc` rather than linking libbpf into every FluxVM binary: the
 //! normal Rust dependency graph stays small and distro packages provide the
-//! privileged kernel plumbing.  Each VM gets its own pin directory.
+//! privileged kernel plumbing. Conntrack restore uses native map syscalls to
+//! avoid per-entry process creation. Each VM gets its own pin directory.
 
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::DataplaneConfig;
@@ -1326,20 +1327,43 @@ pub fn restore_conntrack_entries(
     id: Uuid,
     entries: &[ConntrackEntry],
 ) -> Result<usize> {
+    validate_conntrack_entries(entries)?;
     let map = vm_pin_dir(&cfg.pin_root, id).join("maps/fluxvm_ct");
     if !map.exists() {
         bail!("FluxVM eBPF conntrack map is not pinned for VM {id}");
     }
+    let map = crate::bpf_map::PinnedHashMap::open(&map)
+        .context("opening pinned conntrack map for native restore")?;
+    if map.layout.key_size != 44 || map.layout.value_size != 8 {
+        bail!("conntrack map ABI differs; reattach the VM before restoring");
+    }
+    map.layout.check_capacity(entries.len())?;
     let identity = identity_for(id);
     let now = monotonic_ns()?.to_ne_bytes();
     let mut restored = 0;
     for entry in entries {
         let key = conntrack_key(identity, entry)
             .with_context(|| format!("invalid conntrack entry {entry:?}"))?;
-        bpftool_map_update(&map, &key, &now)?;
+        map.update(&key, &now)
+            .with_context(|| format!("native conntrack restore failed after {restored} entries"))?;
         restored += 1;
     }
     Ok(restored)
+}
+
+/// Validate before touching live maps or persisting a deferred restore. The
+/// fixed ceiling matches fluxvm_ct in both TC objects (dataplane schema 12).
+pub(crate) fn validate_conntrack_entries(entries: &[ConntrackEntry]) -> Result<()> {
+    if entries.len() > 32768 {
+        bail!("conntrack snapshot exceeds 32768-entry limit");
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.state.len() > 64 {
+            bail!("conntrack entry {index} state exceeds 64 bytes");
+        }
+        conntrack_key(1, entry).with_context(|| format!("invalid conntrack entry {index}"))?;
+    }
+    Ok(())
 }
 
 fn monotonic_ns() -> Result<u64> {
@@ -3430,5 +3454,31 @@ filter protocol all pref 49152 bpf chain 0 handle 0x1 direct-action not_in_hw id
         assert_eq!(drop_reason_label(14), "spoof-ip");
         assert_eq!(drop_reason_label(15), "dns-deny");
         assert_eq!(drop_reason_label(16), "sni-deny");
+    }
+    #[test]
+    fn validates_entire_conntrack_snapshot_before_restore() {
+        let valid = ConntrackEntry {
+            proto: "tcp".into(),
+            src_ip: "10.0.0.1".into(),
+            dst_ip: "10.0.0.2".into(),
+            src_port: 1234,
+            dst_port: 443,
+            state: "established".into(),
+            seq: 0,
+            ack: 0,
+        };
+        assert!(validate_conntrack_entries(&[]).is_ok());
+        assert!(validate_conntrack_entries(std::slice::from_ref(&valid)).is_ok());
+        let mut bad = valid.clone();
+        bad.dst_ip = "::1".into();
+        assert!(validate_conntrack_entries(&[valid.clone(), bad]).is_err());
+        let mut bad = valid.clone();
+        bad.proto = "icmp".into();
+        assert!(validate_conntrack_entries(&[bad]).is_err());
+        let mut bad = valid.clone();
+        bad.state = "x".repeat(65);
+        assert!(validate_conntrack_entries(&[bad]).is_err());
+        assert!(validate_conntrack_entries(&vec![valid.clone(); 32768]).is_ok());
+        assert!(validate_conntrack_entries(&vec![valid; 32769]).is_err());
     }
 }

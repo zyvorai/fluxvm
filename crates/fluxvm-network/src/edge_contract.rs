@@ -340,6 +340,9 @@ pub fn restore_conntrack(
     id: Uuid,
     snap: ConntrackSnapshot,
 ) -> Result<ConntrackSnapshot> {
+    // Check malformed and oversized input even when this restore is deferred
+    // until attach. Do not persist a snapshot the dataplane cannot represent.
+    crate::ebpf::validate_conntrack_entries(&snap.entries)?;
     if snap.identity == 0 {
         bail!("conntrack identity is required");
     }
@@ -698,6 +701,29 @@ mod tests {
         assert_eq!(snap.identity, 42);
         assert!(snap.entries.is_empty());
         assert!(snap.exported_at.ends_with('Z'));
+    }
+
+    #[test]
+    fn invalid_deferred_restore_is_not_persisted() {
+        let (_tmp, cfg) = test_cfg();
+        let id = Uuid::new_v4();
+        let snap = ConntrackSnapshot {
+            identity: 42,
+            generation: 1,
+            exported_at: "2026-10-04T00:00:00Z".into(),
+            entries: vec![ConntrackEntry {
+                proto: "tcp".into(),
+                src_ip: "10.0.0.1".into(),
+                dst_ip: "::1".into(),
+                src_port: 1234,
+                dst_port: 443,
+                state: "established".into(),
+                seq: 0,
+                ack: 0,
+            }],
+        };
+        assert!(restore_conntrack(&cfg, id, snap).is_err());
+        assert!(load(&cfg, id).unwrap().pending_conntrack.is_none());
     }
 
     #[test]
