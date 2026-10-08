@@ -90,7 +90,7 @@ if ms is not None:
 if [[ -f "$IMAGE" ]]; then
   for ((i = 1; i <= N; i++)); do
     name="${PREFIX}-cold-${i}"
-    body=$(post "/v1/vms?ready=exec" "{\"name\":\"${name}\",\"backend\":\"flux-vm\",\"image\":\"${IMAGE}\",\"kernel\":${KERNEL_JSON},\"vcpus\":1,\"memory_mib\":${MEM_MIB}}")
+    body=$(post "/v1/vms?ready=exec" "{\"name\":\"${name}\",\"backend\":\"flux-vm\",\"image\":\"${IMAGE}\",\"kernel\":${KERNEL_JSON},\"vcpus\":1,\"memory_mib\":${MEM_MIB},\"network\":{\"mode\":\"none\"},\"agent\":{\"enabled\":true}}")
     record "$WORKDIR/cold.txt" "$body"
   done
 else

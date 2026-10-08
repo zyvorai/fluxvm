@@ -105,7 +105,7 @@ impl VmManager {
         let spec = fluxvm_hypervisor::snapshot::load_spec(meta)?;
         if spec.boot.engine != fluxvm_hypervisor::api::FluxVmEngine::Kvm {
             bail!(
-                "fork needs the in-tree KVM engine ([fluxvm] engine = \"kvm\"): a Firecracker \
+                "fork needs the in-tree KVM engine (fluxvm_engine = \"kvm\"): a Firecracker \
                  snapshot names the parent's disk and tap by path, so a child would share them"
             );
         }
