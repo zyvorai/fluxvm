@@ -434,7 +434,12 @@ pub fn apply_sandbox_policy(
                     crate::service::ensure_for_vm(cfg, id, iface)?;
                     Ok(())
                 }
-                Err(e) if dp.required || policy_uses_native_only_features(&policy) => Err(e),
+                Err(e) if dp.required => Err(e).context(
+                    "required native dataplane attachment failed; install BPF objects and run \
+                     scripts/network-fabric-preflight.sh --require-bpf (explicit mode=legacy \
+                     selects nftables compatibility)",
+                ),
+                Err(e) if policy_uses_native_only_features(&policy) => Err(e),
                 Err(e) => {
                     tracing::debug!(
                         %id,
@@ -971,6 +976,32 @@ pub fn run_nft(args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_dataplane_skips_networks_without_a_host_edge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
+        cfg.sandbox.dataplane.bpf_object = tmp.path().join("missing.bpf.o");
+        apply_sandbox_policy(&cfg, Uuid::new_v4(), None, None, &[], None).unwrap();
+    }
+
+    #[test]
+    fn primary_dataplane_rejects_missing_object_without_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Config::default()
+        };
+        cfg.sandbox.dataplane.bpf_object = tmp.path().join("missing.bpf.o");
+        let err =
+            apply_sandbox_policy(&cfg, Uuid::new_v4(), Some("test0"), None, &[], None).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("required native dataplane attachment failed"));
+        assert!(message.contains("eBPF object does not exist"));
+    }
 
     #[test]
     fn default_policy_is_permissive() {

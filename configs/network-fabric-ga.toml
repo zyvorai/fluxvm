@@ -8,7 +8,7 @@
 # Host readiness: ./scripts/network-fabric-preflight.sh
 # Lab (soft, default-allow): configs/network-fabric-lab.toml or --lab
 #
-# Upgrade-safe default remains mode=legacy when this fragment is absent.
+# Code defaults are mode=ebpf, required=true; this profile adds deny-by-default.
 # Dataplane knobs here match network-fabric-prod.toml; "prod" adds the operator
 # loop (health / ipcache / refresh-dns / CNP), not a different mode — see
 # docs/production-dataplane.md.

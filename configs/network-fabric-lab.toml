@@ -7,7 +7,7 @@
 #
 # Prefer:
 #   sudo ./scripts/enable-network-fabric-ga.sh --lab --restart
-# Upgrade-safe default remains mode=legacy when this fragment is absent.
+# Code defaults are mode=ebpf, required=true; this lab profile opts into fallback.
 #
 # For production fail-closed policy use configs/network-fabric-ga.toml
 # (or --restart without --lab). Operator loop (health/ipcache/refresh-dns):
