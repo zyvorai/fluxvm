@@ -277,6 +277,8 @@ fn detach_inner(pin_dir: &Path, cgroup_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    // LANANA numbers are a Linux convention; macOS encodes device numbers differently.
+    #[cfg(target_os = "linux")]
     #[test]
     fn major_minor_matches_known_devices() {
         // /dev/null and /dev/zero are LANANA-fixed at 1:3 and 1:5.

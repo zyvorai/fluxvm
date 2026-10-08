@@ -865,6 +865,7 @@ fn backend_label(b: BackendKind) -> &'static str {
         BackendKind::CloudHypervisor => "cloud-hypervisor",
         BackendKind::Firecracker => "firecracker",
         BackendKind::FluxVm => "fluxvm",
+        BackendKind::Vz => "vz",
         BackendKind::Auto => "auto",
     }
 }
@@ -1348,11 +1349,23 @@ async fn connect_in_netns(
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let result = (|| -> std::io::Result<std::net::TcpStream> {
-            let ns_file = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
-            if unsafe { libc::setns(ns_file.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
-                return Err(std::io::Error::last_os_error());
+            #[cfg(target_os = "linux")]
+            {
+                let ns_file = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
+                if unsafe { libc::setns(ns_file.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
             }
-            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+            // Network namespaces are a Linux kernel feature; a netns sandbox cannot exist elsewhere.
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (pid, addr);
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "network namespaces are only available on Linux",
+                ))
+            }
         })();
         // The receiver only drops early if the whole proxy request was
         // itself abandoned (e.g. the client disconnected) -- nothing to do.
@@ -4342,6 +4355,7 @@ mod tests {
             log_path: PathBuf::from("/tmp/x/console.log"),
             error: None,
             request: CreateVmRequest {
+                apple: None,
                 name: "fixture".into(),
                 tenant: None,
                 created_by_token: None,

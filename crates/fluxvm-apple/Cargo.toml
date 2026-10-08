@@ -1,0 +1,24 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-apple"
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Apple Virtualization.framework backend (macOS on Apple silicon) for Zyvor FluxVM"
+build = "build.rs"
+
+[dependencies]
+fluxvm-core = { path = "../fluxvm-core" }
+anyhow = "1"
+async-trait = "0.1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

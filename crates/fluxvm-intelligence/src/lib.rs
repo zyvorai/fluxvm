@@ -1101,6 +1101,7 @@ fn backend_label(v: BackendKind) -> &'static str {
         BackendKind::CloudHypervisor => "cloud-hypervisor",
         BackendKind::Firecracker => "firecracker",
         BackendKind::FluxVm => "flux-vm",
+        BackendKind::Vz => "vz",
         BackendKind::Auto => "auto",
     }
 }

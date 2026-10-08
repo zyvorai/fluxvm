@@ -706,8 +706,7 @@ rejection cases). Verified building, `cargo test -p fluxctl` (50/50 passing, inc
 `cargo clippy -p fluxctl --no-deps` (clean against this change; the two pre-existing warnings it
 reports belong to `CatalogCommand`'s enum size and an unrelated `PrivateKeyDer` conversion), and
 `cargo fmt -p fluxctl -- --check` on the Linux remote, the same way prior CLI-parity work in this
-section was verified — `fluxctl` doesn't build on macOS (it pulls in `fluxvm-network`, which uses
-Linux-only syscalls). Not verified against a real running VM's cgroup in this pass — `set_resources`
+section was verified — at the time `fluxctl` did not build on macOS; it now does (see [macos.md](macos.md)). Not verified against a real running VM's cgroup in this pass — `set_resources`
 itself (the code this command calls) was already proven against real `memory.max`/`cgroup.procs` files
 by `scripts/test-cgroup-resources.sh` when `resources` first landed as a REST route; this change adds
 no new behavior to that path, only a CLI front end for it.

@@ -105,7 +105,7 @@ pub async fn build_seed(
     let (user_data, meta_data, network_config) = write_seed_files(dir, ci, static_net)?;
     let seed = dir.join("seed.img");
     let mut args = vec!["--disk-format".to_string(), "raw".to_string()];
-    if let Some(network_config) = network_config {
+    if let Some(network_config) = network_config.as_ref() {
         args.push("--network-config".into());
         args.push(network_config.display().to_string());
     }
@@ -113,7 +113,59 @@ pub async fn build_seed(
     args.push(user_data.display().to_string());
     args.push(meta_data.display().to_string());
 
-    run_checked(&cfg.cloud_localds_binary, &args).await?;
+    #[cfg(target_os = "macos")]
+    {
+        // `cloud-localds` is a Linux package; macOS builds the same NoCloud ("cidata") ISO with hdiutil.
+        let _ = &args;
+        return build_seed_hdiutil(dir, &user_data, &meta_data, network_config.as_deref()).await;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_checked(&cfg.cloud_localds_binary, &args).await?;
+        Ok(seed)
+    }
+}
+
+/// NoCloud seed as an ISO9660/Joliet image labelled `cidata`.
+#[cfg(target_os = "macos")]
+pub async fn build_seed_hdiutil(
+    dir: &Path,
+    user_data: &Path,
+    meta_data: &Path,
+    network_config: Option<&Path>,
+) -> Result<PathBuf> {
+    let staging = dir.join("seed-src");
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)?;
+    fs::copy(user_data, staging.join("user-data"))?;
+    fs::copy(meta_data, staging.join("meta-data"))?;
+    match network_config {
+        Some(nc) => {
+            fs::copy(nc, staging.join("network-config"))?;
+        }
+        // A MAC-based DHCP identity keeps the guest's address stable across network restarts on first boot.
+        None => fs::write(
+            staging.join("network-config"),
+            "version: 2\nethernets:\n  vz-nic:\n    match:\n      name: \"e*\"\n    dhcp4: true\n    dhcp-identifier: mac\n",
+        )?,
+    }
+    let seed = dir.join("seed.img");
+    let _ = fs::remove_file(&seed);
+    run_checked(
+        "hdiutil",
+        &[
+            "makehybrid".into(), "-quiet".into(), "-iso".into(), "-joliet".into(),
+            "-default-volume-name".into(), "cidata".into(),
+            "-o".into(), seed.display().to_string(), staging.display().to_string(),
+        ],
+    )
+    .await?;
+    // hdiutil may append `.iso`; keep a stable name for the backend.
+    let iso = dir.join("seed.img.iso");
+    if iso.exists() {
+        fs::rename(&iso, &seed)?;
+    }
+    let _ = fs::remove_dir_all(&staging);
     Ok(seed)
 }
 

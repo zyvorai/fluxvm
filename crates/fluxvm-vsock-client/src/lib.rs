@@ -42,7 +42,7 @@ pub async fn call(
     tokio::time::timeout(timeout, async {
         match vm.backend {
             BackendKind::Qemu => native_vsock_call(cid, port, &envelope).await,
-            BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm => {
+            BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm | BackendKind::Vz => {
                 let socket = vm.vsock_socket.as_deref().context("VM has no vsock proxy socket recorded")?;
                 uds_proxy_call(socket, port, &envelope).await
             }
@@ -281,7 +281,7 @@ pub async fn open_shell(
                 let cid = vm.guest_cid.context("VM has no vsock CID assigned")?;
                 open_shell_native(cid, port, &envelope).await
             }
-            BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm => {
+            BackendKind::CloudHypervisor | BackendKind::Firecracker | BackendKind::FluxVm | BackendKind::Vz => {
                 let socket = vm.vsock_socket.as_deref().context("VM has no vsock proxy socket recorded")?;
                 open_shell_proxy(socket, port, &envelope).await
             }

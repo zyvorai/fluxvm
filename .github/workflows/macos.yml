@@ -1,0 +1,47 @@
+name: macOS (Apple silicon)
+
+on:
+  pull_request:
+    paths:
+      - "crates/fluxvm-apple/**"
+      - "crates/fluxvm-core/**"
+      - "crates/fluxvm-scheduler/**"
+      - "crates/fluxvm-network/**"
+      - "crates/fluxvm-api/**"
+      - "crates/fluxctl/**"
+      - "scripts/macos-live-test.sh"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - run: brew install hivex
+      - name: Build the buildable subset (Linux-only crates are not built on macOS)
+        working-directory: fluxvm
+        run: cargo build -p fluxctl -p fluxvm-apple
+      - name: Unit tests that do not need KVM or root
+        working-directory: fluxvm
+        run: |
+          cargo test -p fluxvm-core --lib
+          cargo test -p fluxvm-scheduler --lib
+          cargo test -p fluxvm-api --lib
+          cargo test -p fluxvm-network --lib
+          cargo test -p fluxvm-storage --lib
+          cargo test -p fluxvm-guest-protocol --lib
+          cargo test -p fluxvm-apple
+      # Booting a real VM needs Virtualization.framework, which hosted runners do not provide (no nested virtualization).
+      # Run scripts/macos-live-test.sh on a physical Mac instead.

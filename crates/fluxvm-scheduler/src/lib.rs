@@ -279,6 +279,7 @@ pub fn backend(kind: BackendKind) -> Result<Box<dyn VmBackend>> {
         BackendKind::CloudHypervisor => Box::new(fluxvm_cloud_hypervisor::CloudHypervisorBackend),
         BackendKind::Firecracker => Box::new(fluxvm_firecracker::FirecrackerBackend),
         BackendKind::FluxVm => Box::new(fluxvm_hypervisor::FluxVmBackend),
+        BackendKind::Vz => Box::new(fluxvm_apple::AppleBackend),
         BackendKind::Auto => bail!(
             "VM has an unresolved BackendKind::Auto — this is a bug, backend selection must happen before dispatch"
         ),
@@ -296,6 +297,10 @@ pub fn backend(kind: BackendKind) -> Result<Box<dyn VmBackend>> {
 pub fn resolve_backend(req: &CreateVmRequest, cfg: &Config) -> BackendKind {
     if req.backend != BackendKind::Auto {
         return req.backend;
+    }
+    // On a Mac the Apple Virtualization.framework backend is the only one that can run a VM.
+    if cfg!(target_os = "macos") {
+        return BackendKind::Vz;
     }
     let native_kernel =
         req.kernel.is_some() || cfg.fluxvm_kernel.is_some() || cfg.firecracker_kernel.is_some();
@@ -952,6 +957,10 @@ impl VmManager {
     /// `pressure` all report a clear "no cgroup" error rather than a
     /// confusing failure deeper in the cgroupfs).
     fn attach_cgroup(&self, id: Uuid, pid: u32, record: &mut VmRecord, vfio_devices: &[String]) {
+        // cgroups are a Linux feature; the Apple backend's runner is an ordinary macOS process.
+        if record.backend == BackendKind::Vz {
+            return;
+        }
         match fluxvm_cgroup::CgroupManager::create_and_migrate(&id.to_string(), pid) {
             Ok(mgr) => {
                 let cgroup_path = mgr.path().to_path_buf();
@@ -1002,6 +1011,9 @@ impl VmManager {
     /// there's at least one share to mount — otherwise the share would be
     /// attached to the guest but never actually reachable inside it.
     fn effective_cloud_init(req: &CreateVmRequest) -> Option<CloudInitSpec> {
+        if req.backend == BackendKind::Vz {
+            return req.cloud_init.clone().map(fluxvm_apple::with_guest_reporting);
+        }
         if req.shared_folders.is_empty() {
             return req.cloud_init.clone();
         }
@@ -2007,6 +2019,9 @@ impl VmManager {
         // (the disk filename, the persisted record, the launch dispatch)
         // assumes a concrete backend and must never see Auto.
         req.backend = resolve_backend(&req, &self.cfg);
+        if req.backend == BackendKind::Vz {
+            fluxvm_apple::validate_request(&req)?;
+        }
         let requested_profile = req.security_profile;
         let catalog_signed = fluxvm_image::catalog::is_approved_signed_image(&self.cfg, &req.image);
         let caps = fluxvm_core::security::HostCapabilities::discover(&self.cfg);
@@ -2305,7 +2320,8 @@ impl VmManager {
 
             // Fabric and most production drivers use QEMU/CH/FC with TAP+netns;
             // attach the VM-edge dataplane for every backend (not only flux-vm).
-            {
+            // The Apple backend uses VZ NAT, which has no host-side interface to attach to.
+            if req.backend != BackendKind::Vz {
                 let allow_cidrs = if self.cfg.sandbox.egress_allow_domains.is_empty() {
                     vec![]
                 } else {
@@ -2528,6 +2544,13 @@ impl VmManager {
     /// (stable) and leaves `guest_ip` for the caller to fill in, same as
     /// this method does for every API response.
     fn with_guest_ip(mut record: VmRecord) -> VmRecord {
+        // Apple backend: the guest reports its NAT address on the serial console and the runner records it.
+        if record.backend == BackendKind::Vz {
+            if let Some(ip) = fluxvm_apple::read_guest_ip(&record.workspace) {
+                record.guest_ip = Some(ip);
+            }
+            return record;
+        }
         let mac = match &record.request.network {
             NetworkSpec::Tap { mac: Some(m), .. } => m.as_str(),
             _ => return record,
@@ -3198,8 +3221,8 @@ impl VmManager {
             let nbd_export =
                 (vm.request.storage == StorageBackend::Nbd).then(|| vm.workspace.join("nbd.sock"));
 
-            // Same as create: attach for QEMU/CH/FC as well as flux-vm.
-            {
+            // Same as create: attach for QEMU/CH/FC as well as flux-vm (not for the Apple backend).
+            if vm.backend != BackendKind::Vz {
                 let allow_cidrs = if self.cfg.sandbox.egress_allow_domains.is_empty() {
                     vec![]
                 } else {
@@ -4594,6 +4617,7 @@ impl VmManager {
                     // Daemon restart / package upgrades can leave a live VMM
                     // while TC pins/filters are missing or on an older schema.
                     if self.cfg.sandbox.dataplane.mode != fluxvm_core::config::DataplaneMode::Legacy
+                        && vm.backend != BackendKind::Vz
                     {
                         let needs_repair = fluxvm_network::dataplane::status(&self.cfg, vm.id)
                             .map(|s| !s.attached || !s.schema_compatible || !s.policy_synced)
@@ -5033,6 +5057,7 @@ mod tests {
 
     fn req(backend: BackendKind, kernel: Option<&str>, firmware: Option<&str>) -> CreateVmRequest {
         CreateVmRequest {
+            apple: None,
             name: "fixture".into(),
             tenant: None,
             created_by_token: None,

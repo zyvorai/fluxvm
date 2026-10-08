@@ -653,6 +653,7 @@ mod tests {
             log_path: PathBuf::from("/tmp/does-not-matter/console.log"),
             error: None,
             request: CreateVmRequest {
+                apple: None,
                 name: name.to_string(),
                 tenant: None,
                 created_by_token: None,

@@ -16,6 +16,7 @@ members = [
     "crates/fluxvm-cloud-hypervisor",
     "crates/fluxvm-firecracker",
     "crates/fluxvm-hypervisor",
+    "crates/fluxvm-apple",
     "crates/fluxvm-scheduler",
     "crates/fluxvm-api",
     "crates/fluxctl",

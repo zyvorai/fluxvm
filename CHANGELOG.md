@@ -2,6 +2,17 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: native macOS support (Apple silicon)
+- **`vz` backend** (`crates/fluxvm-apple`): runs ARM64 Linux guests on Apple's Virtualization.framework through a signed
+  Swift helper (`fluxvm-vz-runner`) supervised over a unix control socket. REST lifecycle (create, start, stop, pause,
+  resume, delete) works through the existing API; `backend: "auto"` resolves to `vz` on macOS. See [docs/macos.md](docs/macos.md).
+- The daemon, REST API, scheduler and `fluxctl` now **build and test on macOS**: the few Linux-only syscalls (`setns`, the `bpf`
+  syscall, `CLOCK_BOOTTIME`) are cfg-gated with `Unsupported` stubs; no behaviour change on Linux.
+- macOS defaults for the state and run directories, a `cp -c` raw-disk clone, and a `hdiutil` NoCloud seed builder.
+- `scripts/macos-live-test.sh`: boots a real VM through the API and exercises the lifecycle (**PASS** on an Apple M4).
+- Verified on macOS: core 70, scheduler 171, api 56, network, storage 17, guest-protocol 14, fluxvm-apple 7 unit tests.
+  Not verified: macOS guests, the vsock proxy, Linux-only crates.
+
 ### Changed
 - **Native eBPF is the primary dataplane.** Omitted dataplane configuration now
   selects `mode = "ebpf"`, `required = true`. A failed attachment on a host-visible

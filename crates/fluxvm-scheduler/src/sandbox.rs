@@ -474,6 +474,7 @@ impl VmManager {
             .or_else(|| self.cfg.firecracker_kernel.clone())
             .context("OCI template build needs config.fluxvm_kernel or firecracker_kernel")?;
         let spec = CreateVmRequest {
+            apple: None,
             name: name.into(),
             tenant: None,
             created_by_token: None,
@@ -637,6 +638,7 @@ mod tests {
 
     fn req() -> CreateVmRequest {
         CreateVmRequest {
+            apple: None,
             name: String::new(),
             tenant: None,
             created_by_token: None,
