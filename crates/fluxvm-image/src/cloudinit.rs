@@ -154,9 +154,15 @@ pub async fn build_seed_hdiutil(
     run_checked(
         "hdiutil",
         &[
-            "makehybrid".into(), "-quiet".into(), "-iso".into(), "-joliet".into(),
-            "-default-volume-name".into(), "cidata".into(),
-            "-o".into(), seed.display().to_string(), staging.display().to_string(),
+            "makehybrid".into(),
+            "-quiet".into(),
+            "-iso".into(),
+            "-joliet".into(),
+            "-default-volume-name".into(),
+            "cidata".into(),
+            "-o".into(),
+            seed.display().to_string(),
+            staging.display().to_string(),
         ],
     )
     .await?;

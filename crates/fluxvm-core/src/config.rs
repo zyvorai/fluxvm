@@ -94,12 +94,12 @@ fn default_state_dir() -> PathBuf {
 
 /// `/run/fluxvm` on Linux; a short per-user directory on macOS (unix socket paths are limited to ~104 bytes).
 fn default_run_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        return PathBuf::from(format!("/tmp/fluxvm-run-{}", unsafe { libc::getuid() }));
+    if cfg!(target_os = "macos") {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        PathBuf::from(format!("/tmp/fluxvm-run-{}", unsafe { libc::getuid() }))
+    } else {
+        "/run/fluxvm".into()
     }
-    #[cfg(not(target_os = "macos"))]
-    "/run/fluxvm".into()
 }
 
 impl Default for Config {

@@ -10,13 +10,26 @@ fn main() {
     println!("cargo:rerun-if-changed=runner/Runner.swift");
     println!("cargo:rerun-if-changed=runner/Entitlements.plist");
     println!("cargo:rerun-if-env-changed=FLUXVM_SKIP_VZ_RUNNER");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") || env::var_os("FLUXVM_SKIP_VZ_RUNNER").is_some() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+        || env::var_os("FLUXVM_SKIP_VZ_RUNNER").is_some()
+    {
         return;
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("fluxvm-vz-runner");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let swiftc = Command::new("xcrun")
-        .args(["swiftc", "-swift-version", "5", "-O", "-target", "arm64-apple-macosx14.0", "-framework", "AppKit", "-framework", "Virtualization"])
+        .args([
+            "swiftc",
+            "-swift-version",
+            "5",
+            "-O",
+            "-target",
+            "arm64-apple-macosx14.0",
+            "-framework",
+            "AppKit",
+            "-framework",
+            "Virtualization",
+        ])
         .arg(manifest.join("runner/Runner.swift"))
         .arg("-o")
         .arg(&out)
@@ -24,7 +37,9 @@ fn main() {
     match swiftc {
         Ok(s) if s.success() => {}
         _ => {
-            println!("cargo:warning=could not compile the Swift runner (install the Xcode command line tools); the vz backend will not launch VMs");
+            println!(
+                "cargo:warning=could not compile the Swift runner (install the Xcode command line tools); the vz backend will not launch VMs"
+            );
             return;
         }
     }
@@ -34,7 +49,9 @@ fn main() {
         .arg(&out)
         .status();
     if !matches!(sign, Ok(s) if s.success()) {
-        println!("cargo:warning=could not sign the Swift runner; Virtualization.framework will refuse to start VMs");
+        println!(
+            "cargo:warning=could not sign the Swift runner; Virtualization.framework will refuse to start VMs"
+        );
         return;
     }
     println!("cargo:rustc-env=FLUXVM_VZ_RUNNER_BUILT={}", out.display());

@@ -50,7 +50,10 @@ impl RunnerConfig {
             mac: stable_mac(&ctx.workspace)?,
             control_socket: control_socket_path(&id8)?,
             serial_log: ctx.log_path.clone(),
-            vsock_socket: ctx.vsock_socket.clone().map(|p| short_socket(&id8, "vsock", p)),
+            vsock_socket: ctx
+                .vsock_socket
+                .clone()
+                .map(|p| short_socket(&id8, "vsock", p)),
             ip_file: ip_file(&ctx.workspace),
             window: apple.window,
         })
@@ -58,7 +61,8 @@ impl RunnerConfig {
 
     pub fn write(&self, workspace: &Path) -> Result<PathBuf> {
         let p = workspace.join("vz-config.json");
-        fs::write(&p, serde_json::to_vec_pretty(self)?).with_context(|| format!("writing {}", p.display()))?;
+        fs::write(&p, serde_json::to_vec_pretty(self)?)
+            .with_context(|| format!("writing {}", p.display()))?;
         Ok(p)
     }
 }
@@ -85,7 +89,9 @@ fn short_socket(id8: &str, kind: &str, requested: PathBuf) -> PathBuf {
     if requested.as_os_str().len() < 100 {
         return requested;
     }
-    socket_dir().map(|d| d.join(format!("{id8}.{kind}"))).unwrap_or(requested)
+    socket_dir()
+        .map(|d| d.join(format!("{id8}.{kind}")))
+        .unwrap_or(requested)
 }
 
 /// A locally-administered MAC kept in the workspace so a VM keeps its identity (and DHCP lease) across restarts.
@@ -99,7 +105,10 @@ fn stable_mac(workspace: &Path) -> Result<String> {
     }
     let u = uuid::Uuid::new_v4();
     let b = u.as_bytes();
-    let mac = format!("02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", b[0], b[1], b[2], b[3], b[4]);
+    let mac = format!(
+        "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+        b[0], b[1], b[2], b[3], b[4]
+    );
     fs::write(&f, &mac)?;
     Ok(mac)
 }
@@ -116,7 +125,11 @@ pub fn read_guest_ip(workspace: &Path) -> Option<String> {
 }
 
 pub(crate) fn open_runner_log(workspace: &Path) -> Result<fs::File> {
-    fs::OpenOptions::new().create(true).append(true).open(workspace.join("vz-runner.log")).context("opening the runner log")
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(workspace.join("vz-runner.log"))
+        .context("opening the runner log")
 }
 
 pub(crate) fn tail_runner_log(workspace: &Path) -> String {
@@ -124,7 +137,11 @@ pub(crate) fn tail_runner_log(workspace: &Path) -> String {
     let lines: Vec<&str> = s.lines().rev().take(6).collect();
     let mut v = lines;
     v.reverse();
-    if v.is_empty() { "(no runner output)".into() } else { v.join(" | ") }
+    if v.is_empty() {
+        "(no runner output)".into()
+    } else {
+        v.join(" | ")
+    }
 }
 
 /// Locates the signed runner: `FLUXVM_VZ_RUNNER`, then next to the daemon binary, then the copy built by this crate.
@@ -137,14 +154,14 @@ pub fn find_runner() -> Result<PathBuf> {
         }
         tried.push(p);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("fluxvm-vz-runner");
-            if p.is_file() {
-                return Ok(p);
-            }
-            tried.push(p);
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let p = dir.join("fluxvm-vz-runner");
+        if p.is_file() {
+            return Ok(p);
         }
+        tried.push(p);
     }
     if let Some(p) = option_env!("FLUXVM_VZ_RUNNER_BUILT") {
         let p = PathBuf::from(p);
@@ -155,6 +172,10 @@ pub fn find_runner() -> Result<PathBuf> {
     }
     bail!(
         "the Apple runner `fluxvm-vz-runner` was not found (looked at: {}). Build it with `cargo build -p fluxvm-apple` on macOS or set FLUXVM_VZ_RUNNER.",
-        tried.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+        tried
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
