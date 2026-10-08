@@ -19,7 +19,7 @@ GET    /healthz
 GET    /readyz
 GET    /metrics
 GET    /v1/openapi.json                  # OpenAPI 3.1, VM surface (no auth)
-POST   /v1/vms
+POST   /v1/vms                           # ?ready=exec adds first_command_ms + phases; Idempotency-Key honored
 GET    /v1/vms
 GET    /v1/vms?name=<name>
 GET    /v1/vms?tenant=<tenant>
@@ -29,14 +29,14 @@ PATCH  /v1/vms/{uuid}                    # {"name": "...", "labels": {"k": "v", 
 POST   /v1/vms/{uuid}/start
 POST   /v1/vms/{uuid}/restart
 POST   /v1/vms/{uuid}/clone              # {"name": "..."}; source must be stopped
-POST   /v1/vms/{uuid}/fork               # {"count": 1-32, "namePrefix": "..."}; admin; running flux-vm source; 201 {"items": [...], "elapsed_ms": n}
+POST   /v1/vms/{uuid}/fork               # {"count": 1-32, "namePrefix": "..."}; admin; running flux-vm source; 201 {"items": [...], "elapsed_ms": n}; ?ready=exec; Idempotency-Key honored
 POST   /v1/vms/{uuid}/backup             # {"name": "...", "compress": bool, "all_disks": bool, "quiesce": "auto"|"required"|"never"}
 POST   /v1/vms/{uuid}/restore-backup     # {"name": "..."}; VM must be stopped
 GET    /v1/backups                       # newest first
 DELETE /v1/backups/{name}
 GET    /v1/backups/{name}/root           # the backup's standalone root qcow2 (download)
 POST   /v1/vms/{uuid}/start-from-snapshot
-POST   /v1/vms/{uuid}/snapshot
+POST   /v1/vms/{uuid}/snapshot           # Idempotency-Key honored
 POST   /v1/vms/{uuid}/restore            # {"tag": "..."}; admin; running flux-vm restores in place (memory + disk)
 GET    /v1/vms/{uuid}/snapshots
 DELETE /v1/vms/{uuid}/snapshots/{tag}
@@ -61,14 +61,17 @@ POST   /v1/vms/{uuid}/thaw
 GET    /v1/vms/{uuid}/frozen
 GET    /v1/vms/{uuid}/stats
 GET    /v1/vms/{uuid}/pressure
+GET    /v1/vms/{uuid}/balloon            # flux-vm KVM engine; {memory_mib, target_mib, actual_mib}
+POST   /v1/vms/{uuid}/balloon            # {"balloon_mib": N}; admin; 0 deflates
+GET    /v1/vms/{uuid}/memory             # VMM-process PSS/private/shared + balloon; see memory-density.md
 GET    /v1/vms/{uuid}/logs
 GET    /v1/vms/{uuid}/console
-POST   /v1/vms/{uuid}/agent
+POST   /v1/vms/{uuid}/agent              # {"command", "timeout_seconds"?, "policy"?}; see guest-exec-policy.md
 POST   /v1/vms/{uuid}/agent/ping
 POST   /v1/vms/{uuid}/agent/put-file
 POST   /v1/vms/{uuid}/agent/get-file
 GET    /v1/vms/{uuid}/qga/network-interfaces
-DELETE /v1/vms/{uuid}
+DELETE /v1/vms/{uuid}                    # Idempotency-Key honored
 GET    /v1/vm-templates
 POST   /v1/vm-templates                  # {"name", "description"?, "spec", "replace"?}
 GET    /v1/vm-templates/{name}
@@ -91,15 +94,25 @@ POST   /v1/pools
 GET    /v1/pools
 GET    /v1/pools/{name}
 DELETE /v1/pools/{name}
-POST   /v1/pools/{name}/claim
+POST   /v1/pools/{name}/claim            # ?ready=exec adds first_command_ms + phases
 POST   /v1/pools/{name}/resize
 POST   /v1/sandboxes                     # optional volumes: [{name, guest_path, read_only}] (QEMU template)
 GET    /v1/sandboxes
 POST   /v1/sandboxes/{id}/snapshot
 POST   /v1/sandboxes/{id}/fs/read
 POST   /v1/sandboxes/{id}/fs/write
-POST   /v1/sandboxes/{id}/process
+POST   /v1/sandboxes/{id}/process        # {"command", "timeout_seconds"?, "policy"?}; see guest-exec-policy.md
 POST   /v1/sandboxes/{id}/dry-run        # {"command", "paths"}; procbox: workspace copy; flux-vm/qemu/firecracker: snapshot/restore
+POST   /v1/sandboxes/{id}/speculate      # {"command", "timeout_seconds"?, "paths"?, "ttl_seconds"?}; admin; returns a pending changeset
+GET    /v1/sandboxes/{id}/changesets     # {"items": [...]}, newest first
+GET    /v1/sandboxes/{id}/changesets/{cs}
+POST   /v1/sandboxes/{id}/changesets/{cs}/approve
+POST   /v1/sandboxes/{id}/changesets/{cs}/reject
+POST   /v1/sandboxes/{id}/changesets/{cs}/apply   # approved only; 409 on conflict
+POST   /v1/sandboxes/{id}/grants         # credential broker grant; admin; 201 GrantInfo
+GET    /v1/sandboxes/{id}/grants         # {"grants": [...]}, no secrets
+DELETE /v1/sandboxes/{id}/grants         # revoke all; {"revoked": bool}
+DELETE /v1/sandboxes/{id}/grants/{grant_id}   # revoke one; 404 if unknown
 ANY    /v1/sandboxes/{id}/http/{port}/{*path}
 ANY    /sandbox/{id}/{*path}
 GET    /v1/vms/{uuid}/network/policy
@@ -199,10 +212,13 @@ route except `GET /healthz`, `GET /readyz` (liveness vs readiness) and `GET /v1/
 - `read-only` — any `GET` route (`/v1/vms`, `/v1/vms/{uuid}`, `/metrics`, `/frozen`, `/stats`,
   `/pressure`, pool list/get) only; any mutating route (including `resources`/`hotplug`/`freeze`/`thaw`) returns 403.
 
-`POST /v1/egress/check` is admin-only despite looking like a read-only diagnostic: a host that
-matches a configured `[sandbox] credential_vault` entry gets its `inject_authorization` secret
-echoed back in the response, so a `read-only` token must not be able to call it (it previously
-could — see CHANGELOG).
+`POST /v1/egress/check` is admin-only despite looking like a read-only diagnostic. It returns
+`{"allow": bool, "reason": "..."}` for a host. A matching `[sandbox] credential_vault`
+`inject_authorization` secret is **not** echoed back: the field is `skip_serializing`, and its
+`Debug` output is `[redacted]`, so the response cannot leak it. The route stays admin-only because
+it reveals the egress allowlist decision for arbitrary hosts, and an earlier version had no role check
+at all (see CHANGELOG). Per-sandbox credentials use a separate mechanism, see
+[credential-broker.md](credential-broker.md).
 
 Optional per-token `tenant` is authoritative on create (inherited when the body omits it;
 mismatch → 403) and scopes list/get/mutate to that tenant.
@@ -476,3 +492,202 @@ guest with `mount -t virtiofs fs<N> <dir>`. The path must be absolute, without `
 **daemon** can see (a sandboxed daemon with `PrivateTmp` does not see `/tmp`). The VM must have been created with
 `"shared_memory": true` (vhost-user-fs needs shareable guest memory); up to four shares can be hot-added
 (reserved root ports). On failure the `virtiofsd` is killed and nothing is recorded.
+
+## Speculation, grants, exec policy and memory density
+
+These routes came with the crash-safe lifecycle work. They are implemented and unit tested; none has
+been run end-to-end on real VMs yet (each guide has a status table). The OpenAPI document served at
+`GET /v1/openapi.json` is generated by `openapi::spec()` in `crates/fluxvm-api/src/openapi.rs`; it
+has **not** been updated for these routes, headers or query parameters, and there is no
+hand-maintained spec file. Until it is, this page is the contract.
+
+Every route here needs an `admin` token except `GET /v1/vms/{uuid}/balloon` and
+`GET /v1/vms/{uuid}/memory`. They are tenant-scoped like the rest of `/v1/vms/{uuid}` and
+`/v1/sandboxes/{id}`.
+
+### Speculation and changesets
+
+Guide: [speculative-execution.md](speculative-execution.md).
+
+`POST /v1/sandboxes/{id}/speculate` runs a command in an isolated copy and returns a pending
+changeset. The sandbox is started on demand like other sandbox routes.
+
+```json
+{"command": "make build", "timeout_seconds": 120, "paths": ["/work"], "ttl_seconds": 600}
+```
+
+- `command` (required).
+- `timeout_seconds` (optional) bounds the command.
+- `paths` (optional for procbox sandboxes, default `["/"]`; **required** for VM sandboxes, 400
+  otherwise) limits the diff to those directories.
+- `ttl_seconds` (optional) is how long the changeset stays decidable: default 3600, clamped to 1..=86400.
+
+The response is a changeset. The same shape is returned by `GET .../changesets/{cs}` and by approve,
+reject and apply:
+
+```json
+{
+  "id": "5b0f6c1e-0f0e-4a63-9f58-0b2f1e0f7a11",
+  "sandbox_id": "0c1d2e3f-0000-4000-8000-000000000001",
+  "state": "pending",
+  "created_at": 1790000000,
+  "updated_at": 1790000000,
+  "expires_at": 1790000600,
+  "command": "make build",
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "",
+  "paths": ["/work"],
+  "run_via": "fork",
+  "changes": {"added": ["/work/out.bin"], "modified": [], "deleted": [], "unchanged": 41},
+  "side_effects": {
+    "egress": "blocked",
+    "destinations": [],
+    "replayable": ["1 file change(s) under /work"],
+    "non_replayable": []
+  },
+  "base_files": 42,
+  "staged": {"/work/out.bin": {"blob": "000000", "mode": 33188, "size": 1048576}},
+  "unstaged": [],
+  "apply_started_at": null,
+  "error": null
+}
+```
+
+Timestamps are Unix seconds. `run_via` is `workspace-copy` (procbox), `fork` or `snapshot` (VM
+sandboxes). `side_effects.egress` is `blocked`, `allow_listed` or `unrestricted`, and is **declared,
+not enforced** (see the guide). `stdout` and `stderr` are capped at 64 KiB each, with a
+`[truncated N bytes]` marker.
+
+- `GET /v1/sandboxes/{id}/changesets` returns `{"items": [changeset, ...]}`, newest first.
+- `POST .../changesets/{cs}/approve` and `.../reject` decide a `pending` changeset; no body.
+- `POST .../changesets/{cs}/apply` writes an `approved` changeset's file changes into the real sandbox.
+
+Status codes: 404 unknown changeset (or one that belongs to another sandbox); 409 invalid state
+transition, conflict (the real files changed since the changeset's base; nothing is written), expired,
+or another request is already working on that changeset; 422 the changeset cannot be applied (for
+example files that could not be staged); 403 a non-admin token.
+
+### Credential grants
+
+Guide: [credential-broker.md](credential-broker.md).
+
+`POST /v1/sandboxes/{id}/grants` returns 201:
+
+```json
+{"secret_ref": "github-token", "hosts": ["api.github.com"], "ttl_seconds": 900}
+```
+
+- `secret_ref` (required, 1-128 chars). Without `value`, the daemon reads
+  `FLUXVM_SECRET_GITHUB_TOKEN` from its own environment.
+- `value` (optional, write-only): the full header value, for example `"Bearer abc"`. Never returned.
+- `hosts` (required, at least one): bare host names, exact or domain suffix. `*`, `/`, `:`, `@`, `?`
+  and whitespace are rejected.
+- `ttl_seconds` (1..=86400, default 3600) or `expires_at` (RFC 3339, at most 24 h ahead). If both are
+  sent, `expires_at` wins.
+- At most 32 live grants per sandbox.
+
+Response (`GrantInfo`, which has no secret field):
+
+```json
+{
+  "id": "7e0f0c52-5d57-4b35-8d3f-6a1a3d2b9c10",
+  "sandbox_id": "0c1d2e3f-0000-4000-8000-000000000001",
+  "secret_ref": "github-token",
+  "hosts": ["api.github.com"],
+  "created_at": "2026-10-08T12:00:00Z",
+  "expires_at": "2026-10-08T12:15:00Z",
+  "bound": true
+}
+```
+
+`bound: false` means the sandbox has no known guest IP, so the grant cannot match any traffic.
+
+- `GET /v1/sandboxes/{id}/grants` returns `{"grants": [GrantInfo, ...]}` (live grants only).
+- `DELETE /v1/sandboxes/{id}/grants` revokes all and returns `{"revoked": true|false}`.
+- `DELETE /v1/sandboxes/{id}/grants/{grant_id}` revokes one and returns `{"revoked": true}`, or 404.
+
+Every verb is admin-only, `GET` included. Validation failures (bad host, bad TTL, unresolvable
+`secret_ref`, more than 32 grants) return 400.
+
+### Balloon and memory
+
+Guide: [memory-density.md](memory-density.md).
+
+`GET /v1/vms/{uuid}/balloon`, and `POST /v1/vms/{uuid}/balloon` (admin) with `{"balloon_mib": 256}`
+(`0` deflates), both return:
+
+```json
+{"memory_mib": 1024, "target_mib": 256, "actual_mib": 192}
+```
+
+`target_mib` is what was requested; `actual_mib` is what the guest driver has reached so far. Only a
+running VM on the flux-vm backend's KVM engine has a balloon; anything else returns 400, as does a
+balloon that would leave the guest under 64 MiB.
+
+`GET /v1/vms/{uuid}/memory`:
+
+```json
+{
+  "vm_id": "0c1d2e3f-0000-4000-8000-000000000001",
+  "configured_mib": 1024,
+  "usage": {"rss_kib": 310000, "pss_kib": 180000, "private_kib": 120000, "shared_kib": 190000, "swap_kib": 0},
+  "balloon": {"memory_mib": 1024, "target_mib": 0, "actual_mib": 0}
+}
+```
+
+`usage` is `null` when the VM has no VMM process or `/proc/<pid>/smaps_rollup` is unreadable;
+`balloon` is `null` when the VM has no balloon.
+
+### First-command latency: `?ready=exec`
+
+`POST /v1/vms`, `POST /v1/vms/{uuid}/fork` and `POST /v1/pools/{name}/claim` accept `?ready=exec` (or
+`?wait_first_command=true`). The call then blocks until a trivial guest-agent exec (`true`) succeeds,
+which needs the guest agent enabled, and adds timings measured from the start of the request. For
+create and claim they are merged into the VM record:
+
+```json
+{"id": "...", "first_command_ms": 412, "phases": {"create_done_ms": 180, "agent_wait_ms": 231, "first_exec_ms": 412}}
+```
+
+`create_done_ms` is when create or claim returned, `agent_wait_ms` the extra wait for the first
+successful exec, and `first_exec_ms` the total. For fork, the body keeps `items` and `elapsed_ms` and
+adds `first_command_ms` (the slowest child) and `first_command` (one
+`{first_command_ms, phases}` object per child). A `vm.first_command` event is recorded for each VM.
+`scripts/bench-first-command.sh` uses it.
+
+### Idempotency-Key
+
+`POST /v1/vms`, `DELETE /v1/vms/{uuid}`, `POST /v1/vms/{uuid}/snapshot` and
+`POST /v1/vms/{uuid}/fork` honor an `Idempotency-Key` request header (1-255 visible ASCII characters,
+else 400). Other routes ignore it, and requests without it behave as before.
+
+- The key is scoped by token tenant (or caller) and by method plus path.
+- The first 2xx response is fsynced under `<state_dir>/idempotency` before it is returned. A retry
+  with the same key and an identical method, path and body gets the stored status and body back with
+  the response header `Idempotent-Replayed: true`, and nothing runs again.
+- Same key with a different method, path or body: 422.
+- Same key while the first request is still running: 409.
+- Only 2xx responses are stored, so a failed attempt can be retried under the same key.
+- Records expire after 24 hours. Request bodies over 16 MiB get 413. A response over 8 MiB returns
+  500 and is not stored.
+- The tenant guard runs before a stored response is replayed.
+
+### Exec `policy` and `enforcement`
+
+Guide: [guest-exec-policy.md](guest-exec-policy.md). `POST /v1/vms/{uuid}/agent` and
+`POST /v1/sandboxes/{id}/process` accept an optional `policy` object (the procbox policy shape) next
+to `command` and `timeout_seconds`. With a policy, the guest confines the command with Landlock and
+seccomp, and the exec response carries `enforcement`:
+
+```json
+{"command": "ls /usr", "policy": {"read": ["/bin", "/usr", "/lib", "/lib64"]}}
+```
+
+```json
+{"result": "exec", "exit_code": 0, "stdout": "...", "stderr": "", "enforcement": {"landlock_abi": 3, "filesystem": true, "not_enforced": []}}
+```
+
+If the policy cannot be enforced, the command is not run and the response is an error. Procbox
+sandboxes reject a per-exec `policy` (400). Without `policy`, the response is unchanged and has no
+`enforcement` key.
