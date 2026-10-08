@@ -12,6 +12,8 @@
 - `scripts/macos-live-test.sh`: boots a real VM through the API and exercises the lifecycle (**PASS** on an Apple M4).
 - Verified on macOS: core 70, scheduler 171, api 56, network, storage 17, guest-protocol 14, fluxvm-apple 7 unit tests.
   Not verified: macOS guests, the vsock proxy, Linux-only crates.
+- Docs: `docs/macos-cluster.md` (FluxVM on a Mac mini, Mac Studio, MacBook Pro and a Mac cluster for private inference),
+  README cards and a Mac section on the website home page.
 
 ### Changed
 - **Native eBPF is the primary dataplane.** Omitted dataplane configuration now

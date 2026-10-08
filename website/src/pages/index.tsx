@@ -1,6 +1,7 @@
 import type {ReactNode} from 'react';
 import clsx from 'clsx';
 import Link from '@docusaurus/Link';
+import useBaseUrl from '@docusaurus/useBaseUrl';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import FeatureHighlights from '@site/src/components/FeatureHighlights';
@@ -71,6 +72,61 @@ function ProblemStatement() {
               compute.
             </p>
           </div>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+function MacSection() {
+  return (
+    <section className={styles.macs}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <Heading as="h2" className={styles.sectionHeading}>
+              Now on your Mac: Mac mini to Mac Studio cluster
+            </Heading>
+            <p className={styles.enterpriseCopy}>
+              FluxVM's daemon, REST API and <code>fluxctl</code> run natively
+              on Apple silicon with a <code>vz</code> backend on Apple's
+              Virtualization.framework. Linux VMs over the same API on a Mac
+              mini at home, a Mac Studio for a team, or a MacBook Pro, next to
+              a private LLM endpoint from Velora.
+            </p>
+          </div>
+          <img
+            className={styles.macImg}
+            src={useBaseUrl('/img/macos/readme-macs.jpg')}
+            alt="Mac mini for home, Mac Studio for a team, MacBook Pro for development"
+            loading="lazy"
+          />
+          <div className={styles.macGrid}>
+            <div className={styles.macCard}>
+              <Heading as="h3">Home, low cost</Heading>
+              <p>A Mac mini runs a private chat endpoint and one or two Linux VMs. Silent, always on.</p>
+            </div>
+            <div className={styles.macCard}>
+              <Heading as="h3">Team</Heading>
+              <p>A Mac Studio holds larger models in unified memory and runs VMs for CI and dev.</p>
+            </div>
+            <div className={styles.macCard}>
+              <Heading as="h3">On-premise cluster</Heading>
+              <p>Two to four Mac Studios, scheduled as Kairon Nodes, VMs through FluxVM on each.</p>
+            </div>
+          </div>
+          <img
+            className={styles.macImg}
+            src={useBaseUrl('/img/macos/readme-home-cluster.jpg')}
+            alt="A private LLM cluster made of Mac Studios joined by Thunderbolt 5"
+            loading="lazy"
+          />
+          <p className="text--center">
+            Verified on an Apple M4 with macOS 27.2: Debian 13 boots, SSH,
+            pause, resume, stop, start, delete through the REST API. Multi-Mac
+            clusters are not yet verified.{' '}
+            <Link to="/docs/macos-cluster">Read the Mac guide →</Link>
+          </p>
         </Reveal>
       </div>
     </section>
@@ -153,6 +209,7 @@ export default function Home(): ReactNode {
         <Reveal>
           <FeatureHighlights />
         </Reveal>
+        <MacSection />
         <TrustBand />
         <EnterpriseCTA />
       </main>

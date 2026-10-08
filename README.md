@@ -276,3 +276,11 @@ Report vulnerabilities per [SECURITY.md](SECURITY.md).
 ## Native macOS (Apple silicon)
 
 The daemon, API and `fluxctl` build and run natively on macOS, with a `vz` backend on Apple's Virtualization.framework for ARM64 Linux guests. See [docs/macos.md](docs/macos.md) for what is verified and what is not.
+
+![Mac mini for home, Mac Studio for a team, MacBook Pro for development](docs/assets/macos/readme-macs.jpg)
+
+The same REST API and `fluxctl` now run on a [Mac mini](https://www.apple.com/in/mac-mini/) at home, a [Mac Studio](https://www.apple.com/in/mac-studio/) for a team or a [MacBook Pro](https://www.apple.com/in/macbook-pro/) on the road. Pair FluxVM with [Velora](https://github.com/zyvorai/zyvor-velora) (a private OpenAI-compatible LLM endpoint on MLX) and [Kairon](https://github.com/zyvorai/zyvor-kairon) (every Mac as a Kubernetes Node) and a few Macs become a quiet, low-power, on-premise inference cluster with real Linux VMs alongside.
+
+![A private LLM cluster made of Macs](docs/assets/macos/readme-home-cluster.jpg)
+
+**Verified** on an Apple M4, macOS 27.2: Debian 13 through the API (create, SSH, pause, resume, stop, start, delete). **Not yet verified:** multi-Mac clusters, Thunderbolt RDMA, macOS guests. Sizing, the cluster design (after GK Servis's [Mac Studio case study](https://www.gkservis.com/case-studies/llm-inference-cluster.html)) and the roadmap: [docs/macos-cluster.md](docs/macos-cluster.md).
