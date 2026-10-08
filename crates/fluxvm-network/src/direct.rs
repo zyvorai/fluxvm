@@ -76,6 +76,7 @@ pub async fn ip_in_netns(netns_path: &str, args: &[&str]) -> Result<()> {
 /// The tap is *not* persistent: it disappears when the last fd to it closes,
 /// so a VMM exit, a failed launch (the backends close the fd) or a daemon
 /// crash all clean it up without a separate teardown step.
+#[cfg(target_os = "linux")]
 fn open_tap_in_netns_blocking(netns_path: &str, name: &str) -> Result<i32> {
     let mut ifr = ifreq_for(name)?;
     let ns = File::open(netns_path).with_context(|| format!("opening netns {netns_path}"))?;
@@ -106,6 +107,12 @@ fn open_tap_in_netns_blocking(netns_path: &str, name: &str) -> Result<i32> {
         bail!("TUNSETIFF {name} in {netns_path}: {err}");
     }
     Ok(fd)
+}
+
+/// Network namespaces and tun devices are Linux kernel features.
+#[cfg(not(target_os = "linux"))]
+fn open_tap_in_netns_blocking(netns_path: &str, _name: &str) -> Result<i32> {
+    bail!("network namespaces (netns {netns_path}) are only available on Linux")
 }
 
 /// Opens an exec-inheritable (no `O_CLOEXEC`) fd bound to the existing

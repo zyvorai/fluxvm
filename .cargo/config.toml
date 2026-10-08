@@ -1,0 +1,4 @@
+
+# macOS (Apple silicon): Homebrew installs libhivex (needed by guestkit's registry support) under /opt/homebrew.
+[target.aarch64-apple-darwin]
+rustflags = ["-L", "/opt/homebrew/lib"]

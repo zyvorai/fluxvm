@@ -224,6 +224,7 @@ fn host_map_dirs(cfg: &Config) -> Vec<PathBuf> {
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 fn obj_get(path: &Path) -> Result<MapFd> {
     let c = CString::new(path.as_os_str().as_bytes()).context("BPF pin path contains NUL")?;
     let attr = BpfObjGetAttr {
@@ -247,6 +248,12 @@ fn obj_get(path: &Path) -> Result<MapFd> {
     Ok(MapFd(fd as RawFd))
 }
 
+#[cfg(not(target_os = "linux"))]
+fn obj_get(_path: &Path) -> Result<MapFd> {
+    anyhow::bail!("BPF maps are only available on Linux")
+}
+
+#[cfg(target_os = "linux")]
 fn pop_queue(fd: RawFd) -> Result<Option<[u8; EVENT_SIZE]>> {
     let mut value = [0u8; EVENT_SIZE];
     let attr = BpfMapElemAttr {
@@ -272,6 +279,11 @@ fn pop_queue(fd: RawFd) -> Result<Option<[u8; EVENT_SIZE]>> {
         return Ok(None);
     }
     Err(err).context("BPF_MAP_LOOKUP_AND_DELETE_ELEM fluxvm_haq")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pop_queue(_fd: RawFd) -> Result<Option<[u8; EVENT_SIZE]>> {
+    anyhow::bail!("BPF maps are only available on Linux")
 }
 
 fn parse_event(raw: &[u8; EVENT_SIZE]) -> Result<ParsedEvent> {

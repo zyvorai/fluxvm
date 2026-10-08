@@ -1030,7 +1030,12 @@ fn boottime_ns() -> Result<u64> {
         tv_nsec: 0,
     };
     // SAFETY: ts is valid writable storage for clock_gettime.
-    let rc = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut ts) };
+    #[cfg(target_os = "linux")]
+    const CLOCK: libc::clockid_t = libc::CLOCK_BOOTTIME;
+    // macOS has no CLOCK_BOOTTIME; the monotonic clock is the closest equivalent.
+    #[cfg(not(target_os = "linux"))]
+    const CLOCK: libc::clockid_t = libc::CLOCK_MONOTONIC;
+    let rc = unsafe { libc::clock_gettime(CLOCK, &mut ts) };
     if rc != 0 {
         return Err(std::io::Error::last_os_error()).context("reading CLOCK_BOOTTIME");
     }
