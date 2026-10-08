@@ -299,16 +299,16 @@ impl VirtualMachine {
                 Ok(mut v) => {
                     let mut why_not: Option<String> = None;
                     if let Some(ref tap) = tap {
-                        match v.bind_tap(tap.fd, 2) {
+                        match v.attach_tap(tap.fd, 2) {
                             Ok(()) => {
                                 notes.push(
-                                    "vhost-net bound to TAP (queue 0/1 backend; VRING GPA on driver ready)"
+                                    "vhost-net armed with TAP (features, rings, IRQ relay and backend attach once the driver is ready)"
                                         .into(),
                                 );
                             }
                             Err(e) => {
                                 notes.push(format!(
-                                    "vhost-net cannot bind before the guest sets up its rings ({e}); using userspace virtio-net"
+                                    "vhost-net cannot take the TAP ({e}); using userspace virtio-net"
                                 ));
                                 why_not = Some(format!("vhost-net bind failed: {e}"));
                             }
@@ -320,7 +320,7 @@ impl VirtualMachine {
                             }
                             let bound = tap.attach_queue().and_then(|qtap| {
                                 let mut pv = VhostNet::open()?;
-                                pv.bind_tap(qtap.fd, 2)?;
+                                pv.attach_tap(qtap.fd, 2)?;
                                 Ok(VhostPair {
                                     vhost: pv,
                                     tap: qtap,
@@ -354,7 +354,7 @@ impl VirtualMachine {
                             net_datapath.set(
                                 false,
                                 net_pairs as u32,
-                                "vhost-net bound; kernel datapath starts once the guest sets up its rings",
+                                "vhost-net armed; kernel datapath starts once the guest sets up its rings",
                             );
                             Some(v)
                         }

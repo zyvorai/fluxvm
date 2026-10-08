@@ -182,8 +182,9 @@ impl QueueService {
             if (st.num_queues as usize) < lo + 2 {
                 return;
             }
-            st.queues[lo..lo + 2].to_vec()
+            (st.queues[lo..lo + 2].to_vec(), st.driver_features)
         };
+        let (qs, driver_features) = qs;
         let ready = qs
             .iter()
             .all(|qq| qq.ready != 0 && qq.num > 0 && qq.desc != 0 && qq.avail != 0 && qq.used != 0);
@@ -193,16 +194,24 @@ impl QueueService {
             self.vhost_pairs.get_mut(pair - 1).map(|p| &mut p.vhost)
         };
         let Some(v) = v else { return };
-        if !v.bound || v.rings_programmed || !ready {
+        if !v.has_tap() || v.rings_programmed || !ready {
             return;
         }
-        match v.program_vrings(self.mem.host_ptr(), self.mem.len(), &qs) {
+        let irq_net = net.clone();
+        let raise: Arc<dyn Fn() + Send + Sync> = Arc::new(move || irq_net.raise_vring_interrupt());
+        match v.program_vrings(
+            self.mem.host_ptr(),
+            self.mem.len(),
+            &qs,
+            driver_features,
+            raise,
+        ) {
             Ok(()) => {
                 if verbose_io() {
                     eprintln!("[net] vhost VRING GPA programmed (H3) pair={pair}");
                 }
                 let detail = if self.vhost_all_kernel() {
-                    "vhost-net rings programmed".to_string()
+                    "vhost-net rings programmed, irq relay running".to_string()
                 } else {
                     format!("vhost-net pair {pair} programmed; waiting for the other pairs")
                 };
