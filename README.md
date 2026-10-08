@@ -256,3 +256,7 @@ Report vulnerabilities per [SECURITY.md](SECURITY.md).
 [![Star on GitHub](https://img.shields.io/github/stars/zyvorai/zyvor-fluxvm?style=for-the-badge&logo=github&label=Star&color=2997ff)](https://github.com/zyvorai/zyvor-fluxvm)
 
 </div>
+
+## Native macOS (Apple silicon)
+
+The daemon, API and `fluxctl` build and run natively on macOS, with a `vz` backend on Apple's Virtualization.framework for ARM64 Linux guests. See [docs/macos.md](docs/macos.md) for what is verified and what is not.

@@ -1,0 +1,160 @@
+// Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+// SPDX-License-Identifier: Apache-2.0
+
+use anyhow::{Context, Result, bail};
+use fluxvm_core::{
+    backend::LaunchContext,
+    model::{AppleGuest, CreateVmRequest},
+};
+use serde::Serialize;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+/// JSON handed to `fluxvm-vz-runner --config`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunnerConfig {
+    pub id: String,
+    pub workspace: PathBuf,
+    pub cpus: u8,
+    pub memory_mib: u64,
+    pub guest_os: &'static str,
+    pub disk: PathBuf,
+    pub seed: Option<PathBuf>,
+    pub media: Option<PathBuf>,
+    pub mac: String,
+    pub control_socket: PathBuf,
+    pub serial_log: PathBuf,
+    pub vsock_socket: Option<PathBuf>,
+    pub ip_file: PathBuf,
+    pub window: bool,
+}
+
+impl RunnerConfig {
+    pub fn for_launch(req: &CreateVmRequest, ctx: &LaunchContext) -> Result<Self> {
+        let apple = req.apple.clone().unwrap_or_default();
+        let id8: String = ctx.id.simple().to_string().chars().take(8).collect();
+        Ok(Self {
+            id: ctx.id.to_string(),
+            workspace: ctx.workspace.clone(),
+            cpus: req.vcpus,
+            memory_mib: req.memory_mib,
+            guest_os: match apple.guest_os {
+                AppleGuest::Linux => "linux",
+                AppleGuest::Macos => "macos",
+            },
+            disk: ctx.disk.clone(),
+            seed: ctx.seed_disk.clone(),
+            media: apple.media,
+            mac: stable_mac(&ctx.workspace)?,
+            control_socket: control_socket_path(&id8)?,
+            serial_log: ctx.log_path.clone(),
+            vsock_socket: ctx.vsock_socket.clone().map(|p| short_socket(&id8, "vsock", p)),
+            ip_file: ip_file(&ctx.workspace),
+            window: apple.window,
+        })
+    }
+
+    pub fn write(&self, workspace: &Path) -> Result<PathBuf> {
+        let p = workspace.join("vz-config.json");
+        fs::write(&p, serde_json::to_vec_pretty(self)?).with_context(|| format!("writing {}", p.display()))?;
+        Ok(p)
+    }
+}
+
+/// unix socket paths are limited to ~104 bytes on macOS, so sockets live under a short per-user directory.
+fn socket_dir() -> Result<PathBuf> {
+    let uid = unsafe { libc::getuid() };
+    let dir = PathBuf::from(format!("/tmp/fluxvm-{uid}"));
+    fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
+fn control_socket_path(id8: &str) -> Result<PathBuf> {
+    Ok(socket_dir()?.join(format!("{id8}.ctl")))
+}
+
+fn short_socket(id8: &str, kind: &str, requested: PathBuf) -> PathBuf {
+    // Keep the requested path if it already fits; otherwise relocate under the short directory.
+    if requested.as_os_str().len() < 100 {
+        return requested;
+    }
+    socket_dir().map(|d| d.join(format!("{id8}.{kind}"))).unwrap_or(requested)
+}
+
+/// A locally-administered MAC kept in the workspace so a VM keeps its identity (and DHCP lease) across restarts.
+fn stable_mac(workspace: &Path) -> Result<String> {
+    let f = workspace.join("vz-mac");
+    if let Ok(m) = fs::read_to_string(&f) {
+        let m = m.trim().to_owned();
+        if m.len() == 17 {
+            return Ok(m);
+        }
+    }
+    let u = uuid::Uuid::new_v4();
+    let b = u.as_bytes();
+    let mac = format!("02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", b[0], b[1], b[2], b[3], b[4]);
+    fs::write(&f, &mac)?;
+    Ok(mac)
+}
+
+/// Where the runner writes the guest's address once the guest reports it on the serial console.
+pub fn ip_file(workspace: &Path) -> PathBuf {
+    workspace.join("vz-ip")
+}
+
+pub fn read_guest_ip(workspace: &Path) -> Option<String> {
+    let s = fs::read_to_string(ip_file(workspace)).ok()?;
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
+pub(crate) fn open_runner_log(workspace: &Path) -> Result<fs::File> {
+    fs::OpenOptions::new().create(true).append(true).open(workspace.join("vz-runner.log")).context("opening the runner log")
+}
+
+pub(crate) fn tail_runner_log(workspace: &Path) -> String {
+    let s = fs::read_to_string(workspace.join("vz-runner.log")).unwrap_or_default();
+    let lines: Vec<&str> = s.lines().rev().take(6).collect();
+    let mut v = lines;
+    v.reverse();
+    if v.is_empty() { "(no runner output)".into() } else { v.join(" | ") }
+}
+
+/// Locates the signed runner: `FLUXVM_VZ_RUNNER`, then next to the daemon binary, then the copy built by this crate.
+pub fn find_runner() -> Result<PathBuf> {
+    let mut tried = Vec::new();
+    if let Some(p) = std::env::var_os("FLUXVM_VZ_RUNNER") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+        tried.push(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("fluxvm-vz-runner");
+            if p.is_file() {
+                return Ok(p);
+            }
+            tried.push(p);
+        }
+    }
+    if let Some(p) = option_env!("FLUXVM_VZ_RUNNER_BUILT") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Ok(p);
+        }
+        tried.push(p);
+    }
+    bail!(
+        "the Apple runner `fluxvm-vz-runner` was not found (looked at: {}). Build it with `cargo build -p fluxvm-apple` on macOS or set FLUXVM_VZ_RUNNER.",
+        tried.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+    )
+}

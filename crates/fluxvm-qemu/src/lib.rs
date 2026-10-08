@@ -782,6 +782,7 @@ mod tests {
 
     fn req(memory_mib: u64) -> CreateVmRequest {
         CreateVmRequest {
+            apple: None,
             name: "fixture".into(),
             tenant: None,
             created_by_token: None,
@@ -1234,6 +1235,7 @@ mod snapshot_save_tests {
             log_path: workspace.join("console.log"),
             error: None,
             request: CreateVmRequest {
+                apple: None,
                 name: "fixture".into(),
                 tenant: None,
                 created_by_token: None,

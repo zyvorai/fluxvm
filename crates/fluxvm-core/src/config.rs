@@ -83,12 +83,31 @@ pub enum FluxVmEngine {
     Kvm,
 }
 
+/// `/var/lib/fluxvm` on Linux; a per-user folder on macOS, where the daemon runs unprivileged.
+fn default_state_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join("Library/Application Support/FluxVM");
+    }
+    "/var/lib/fluxvm".into()
+}
+
+/// `/run/fluxvm` on Linux; a short per-user directory on macOS (unix socket paths are limited to ~104 bytes).
+fn default_run_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        return PathBuf::from(format!("/tmp/fluxvm-run-{}", unsafe { libc::getuid() }));
+    }
+    #[cfg(not(target_os = "macos"))]
+    "/run/fluxvm".into()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:7788".into(),
-            state_dir: "/var/lib/fluxvm".into(),
-            run_dir: "/run/fluxvm".into(),
+            state_dir: default_state_dir(),
+            run_dir: default_run_dir(),
             qemu_binary: "qemu-system-x86_64".into(),
             qemu_img_binary: "qemu-img".into(),
             virtiofsd_binary: "virtiofsd".into(),

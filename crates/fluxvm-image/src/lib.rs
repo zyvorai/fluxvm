@@ -678,7 +678,11 @@ pub async fn clone_for_vm(
             base.display()
         );
     }
-    let base_fmt = image_format(cfg, base).await?;
+    let base_fmt = if backend == BackendKind::Vz {
+        apple_raw_image_format(base)?
+    } else {
+        image_format(cfg, base).await?
+    };
     if backend == BackendKind::FluxVm
         && cfg.fluxvm_engine == fluxvm_core::config::FluxVmEngine::Kvm
         && base_fmt != "raw"
@@ -725,6 +729,7 @@ pub async fn clone_for_vm(
                 convert_image(cfg, base, out, "raw").await?;
             }
         }
+        BackendKind::Vz => clone_raw_for_apple(base, out).await?,
         BackendKind::Auto => bail!(
             "VM has an unresolved BackendKind::Auto — this is a bug, backend selection must happen before cloning its disk"
         ),
@@ -752,6 +757,43 @@ pub async fn clone_for_vm(
         }
     }
     Ok(())
+}
+
+/// Virtualization.framework boots raw disk images only, and macOS has no `qemu-img` by default, so the
+/// format is decided from the file header: qcow2 is refused with a conversion hint, anything else is raw.
+fn apple_raw_image_format(base: &Path) -> Result<String> {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    let mut f = std::fs::File::open(base).with_context(|| format!("opening image {}", base.display()))?;
+    if f.read_exact(&mut magic).is_ok() && &magic == b"QFI\xfb" {
+        bail!(
+            "{} is qcow2; the vz backend needs a raw disk image (convert with `qemu-img convert -O raw`)",
+            base.display()
+        );
+    }
+    Ok("raw".into())
+}
+
+/// Instant copy-on-write clone on APFS (`cp -c`), with a plain sparse copy as the fallback elsewhere.
+async fn clone_raw_for_apple(base: &Path, out: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let clone = run_checked("cp", &["-c".into(), base.display().to_string(), out.display().to_string()]).await;
+        if clone.is_ok() {
+            return Ok(());
+        }
+        run_checked("cp", &[base.display().to_string(), out.display().to_string()]).await?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_checked(
+            "cp",
+            &["--reflink=auto".into(), "--sparse=always".into(), base.display().to_string(), out.display().to_string()],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

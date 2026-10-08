@@ -14,6 +14,9 @@ pub enum BackendKind {
     Firecracker,
     /// In-tree FluxVM hypervisor (`fluxvm-hypervisor`) — agent-sandbox track.
     FluxVm,
+    /// Apple Virtualization.framework (macOS on Apple silicon), driven through the
+    /// signed `fluxvm-vz-runner` helper. See `fluxvm-apple` and `docs/macos.md`.
+    Vz,
     /// Resolved to a concrete backend by `fluxvm_scheduler::resolve_backend`
     /// as the very first step of `VmManager::create` — never persisted, and
     /// every other function taking a `BackendKind` (the backend dispatcher,
@@ -437,8 +440,35 @@ impl CdromSpec {
 /// AHCI ports available for `CreateVmRequest::cdroms` (q35's ich9-ahci has six).
 pub const MAX_CDROMS: usize = 4;
 
+/// Guest operating system for the Apple (`vz`) backend.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppleGuest {
+    /// ARM64 Linux booted with EFI from a raw disk image.
+    #[default]
+    Linux,
+    /// macOS installed from an Apple IPSW restore image (needs an explicit `install` before first boot).
+    Macos,
+}
+
+/// Options for the Apple (`vz`) backend. Ignored by every other backend.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct AppleSpec {
+    #[serde(default)]
+    pub guest_os: AppleGuest,
+    /// macOS guests: the IPSW restore image. Linux guests: an optional installer ISO attached read-only.
+    #[serde(default)]
+    pub media: Option<PathBuf>,
+    /// Open the guest's native console window (a `VZVirtualMachineView`).
+    #[serde(default)]
+    pub window: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateVmRequest {
+    /// Apple Virtualization.framework options (`backend: "vz"` only).
+    #[serde(default)]
+    pub apple: Option<AppleSpec>,
     pub name: String,
     /// First-class tenant id for multi-team hosts. Optional; filterable on list.
     #[serde(default)]

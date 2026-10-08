@@ -865,6 +865,7 @@ fn backend_label(b: BackendKind) -> &'static str {
         BackendKind::CloudHypervisor => "cloud-hypervisor",
         BackendKind::Firecracker => "firecracker",
         BackendKind::FluxVm => "fluxvm",
+        BackendKind::Vz => "vz",
         BackendKind::Auto => "auto",
     }
 }
@@ -4331,6 +4332,7 @@ mod tests {
             log_path: PathBuf::from("/tmp/x/console.log"),
             error: None,
             request: CreateVmRequest {
+                apple: None,
                 name: "fixture".into(),
                 tenant: None,
                 created_by_token: None,

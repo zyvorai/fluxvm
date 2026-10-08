@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Live test of the macOS (Apple Virtualization.framework) backend: starts the daemon, creates a real ARM64 Linux VM
+# through the REST API, SSHes into it, pauses/resumes, stops and restarts it, then deletes it.
+#   scripts/macos-live-test.sh [path/to/arm64-linux-image.raw]
+# Needs Apple silicon, the Xcode command line tools and Rust. Without an image argument it downloads Debian 13 (~300 MB).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo "Apple silicon macOS only" >&2; exit 2; }
+T="$(mktemp -d "${TMPDIR:-/tmp}/fluxvm-live.XXXXXX")"; PORT="${FLUXVM_LIVE_PORT:-7799}"
+cleanup() { [[ -n "${DPID:-}" ]] && kill "$DPID" 2>/dev/null || true; pkill -f "fluxvm-vz-runner run --config $T" 2>/dev/null || true; rm -rf "$T"; }
+trap cleanup EXIT
+ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; exit 1; }
+
+cargo build -p fluxctl -j 4 2>&1 | tail -1
+IMG="${1:-}"
+if [[ -z "$IMG" ]]; then
+  echo "downloading Debian 13 ARM64 (generic cloud image)…"
+  curl -fsSL -o "$T/debian.tar.xz" https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-arm64.tar.xz
+  mkdir "$T/img" && tar -xf "$T/debian.tar.xz" -C "$T/img" && IMG="$T/img/disk.raw"
+fi
+ssh-keygen -q -t ed25519 -N "" -f "$T/key" && PUB="$(cat "$T/key.pub")"
+cat > "$T/fluxvm.toml" <<EOT
+listen = "127.0.0.1:$PORT"
+state_dir = "$T/state"
+run_dir = "/tmp/fluxvm-run-live"
+EOT
+./target/debug/fluxctl --config "$T/fluxvm.toml" serve > "$T/daemon.log" 2>&1 & DPID=$!
+for _ in $(seq 1 30); do curl -fs "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; sleep 1; done
+curl -fs "http://127.0.0.1:$PORT/healthz" >/dev/null && ok "daemon is up on macOS" || bad "daemon did not start: $(tail -3 "$T/daemon.log")"
+
+B="http://127.0.0.1:$PORT/v1/vms"
+RESP="$(curl -fs -X POST "$B" -H 'Content-Type: application/json' -d "{\"name\":\"live\",\"backend\":\"vz\",\"image\":\"$IMG\",\"vcpus\":2,\"memory_mib\":2048,\"network\":{\"mode\":\"user\"},\"cloud_init\":{\"hostname\":\"live\",\"user\":\"velora\",\"ssh_authorized_keys\":[\"$PUB\"]}}")" || bad "create failed"
+ID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$RESP")"; V="$B/$ID"
+field() { curl -fs "$V" | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1') or '')"; }
+[[ "$(field status)" == running ]] && ok "VM created and running through the vz backend" || bad "status $(field status)"
+ip_wait() { local ip=""; for _ in $(seq 1 60); do ip="$(field guest_ip)"; [[ -n "$ip" ]] && break; sleep 3; done; echo "$ip"; }
+sshc() { ssh -i "$T/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 "velora@$1" "$2"; }
+IP="$(ip_wait)"; [[ -n "$IP" ]] && ok "guest address reported by the API: $IP" || bad "no guest_ip"
+for _ in $(seq 1 20); do sshc "$IP" hostname >/dev/null 2>&1 && break; sleep 3; done
+[[ "$(sshc "$IP" hostname)" == live ]] && ok "SSH into the guest works (hostname from cloud-init)" || bad "ssh failed"
+
+curl -fs -X POST "$V/pause" >/dev/null && [[ "$(field status)" == paused ]] && ok "pause" || bad "pause"
+curl -fs -X POST "$V/resume" >/dev/null && [[ "$(field status)" == running ]] && ok "resume" || bad "resume"
+curl -fs -X POST "$V/stop" >/dev/null; sleep 6; [[ "$(field status)" == stopped ]] && ok "stop" || bad "stop: $(field status)"
+pgrep -f "fluxvm-vz-runner run --config $T" >/dev/null && bad "runner still running after stop" || ok "runner process exited"
+curl -fs -X POST "$V/start" >/dev/null; IP="$(ip_wait)"
+for _ in $(seq 1 20); do sshc "$IP" hostname >/dev/null 2>&1 && break; sleep 3; done
+[[ "$(sshc "$IP" hostname)" == live ]] && ok "restart: the VM boots again and reports its address" || bad "restart ssh"
+curl -fs -X DELETE "$V" >/dev/null && sleep 3 && ok "delete"
+pgrep -f "fluxvm-vz-runner run --config $T" >/dev/null && bad "runner still running after delete" || ok "no runner left behind"
+echo "PASS"

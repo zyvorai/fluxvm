@@ -737,6 +737,7 @@ mod tests {
 
     fn req() -> CreateVmRequest {
         CreateVmRequest {
+            apple: None,
             name: "fixture".into(),
             tenant: None,
             created_by_token: None,
