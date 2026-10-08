@@ -30,8 +30,8 @@ use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-mod idempotency;
 mod grants;
+mod idempotency;
 mod oidc;
 mod openapi;
 mod rate_limit;
@@ -875,6 +875,27 @@ struct CreateVmQuery {
     /// has fenced the previous holder's node (HA re-create).
     #[serde(default)]
     shared_takeover: bool,
+    /// `ready=exec` (or `wait_first_command=true`): block until a trivial
+    /// guest-agent exec succeeds and add `first_command_ms` + `phases`.
+    #[serde(default)]
+    ready: Option<String>,
+    #[serde(default)]
+    wait_first_command: bool,
+}
+
+/// `?ready=exec` / `?wait_first_command=true` on fork and pool claim.
+#[derive(Debug, Default, Deserialize)]
+struct ReadyQuery {
+    #[serde(default)]
+    ready: Option<String>,
+    #[serde(default)]
+    wait_first_command: bool,
+}
+
+impl ReadyQuery {
+    fn wants_exec(&self) -> bool {
+        self.wait_first_command || self.ready.as_deref() == Some("exec")
+    }
 }
 
 async fn create_vm(
@@ -885,6 +906,12 @@ async fn create_vm(
     Query(q): Query<CreateVmQuery>,
     Json(req): Json<CreateVmRequest>,
 ) -> ApiResult<impl IntoResponse> {
+    let started = std::time::Instant::now();
+    let want_exec = ReadyQuery {
+        ready: q.ready.clone(),
+        wait_first_command: q.wait_first_command,
+    }
+    .wants_exec();
     require_admin(role)?;
     if q.shared_takeover {
         if req.storage != fluxvm_core::model::StorageBackend::Shared {
@@ -892,10 +919,24 @@ async fn create_vm(
         }
         m.break_shared_disk_lock(&req.image)?;
     }
-    Ok((
-        StatusCode::CREATED,
-        Json(create_vm_as(&m, actor, token_tenant, req).await?),
-    ))
+    let rec = create_vm_as(&m, actor, token_tenant, req).await?;
+    let mut body = json!(rec);
+    if want_exec {
+        merge_first_command(
+            &mut body,
+            m.measure_first_command(rec.id, "create", started).await?,
+        );
+    }
+    Ok((StatusCode::CREATED, Json(body)))
+}
+
+/// Copy `first_command_ms` and `phases` from `extra` into the JSON object `body`.
+fn merge_first_command(body: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(obj), Some(src)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in src {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
 }
 
 /// `create` on behalf of the authenticated caller: tenant and
@@ -2155,6 +2196,7 @@ async fn fork_vm(
     Extension(role): Extension<Role>,
     Path(id): Path<Uuid>,
     actor: Option<Extension<AuditActor>>,
+    Query(rq): Query<ReadyQuery>,
     Json(req): Json<ForkVmRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
@@ -2169,10 +2211,29 @@ async fn fork_vm(
     let items = m
         .fork_vm(id, req.count, req.name_prefix, actor_name)
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({"items": items, "elapsed_ms": started.elapsed().as_millis() as u64})),
-    ))
+    let mut body = json!({"items": items, "elapsed_ms": started.elapsed().as_millis() as u64});
+    if rq.wants_exec() {
+        let mut tasks = Vec::new();
+        for item in &items {
+            let m = Arc::clone(&m);
+            let id = item.id;
+            tasks.push(tokio::spawn(async move {
+                m.measure_first_command(id, "fork", started).await
+            }));
+        }
+        let mut per_child = Vec::new();
+        let mut worst = 0u64;
+        for t in tasks {
+            let r = t
+                .await
+                .map_err(|e| anyhow::anyhow!("first-command task failed: {e}"))??;
+            worst = worst.max(r["first_command_ms"].as_u64().unwrap_or(0));
+            per_child.push(r);
+        }
+        body["first_command_ms"] = json!(worst);
+        body["first_command"] = json!(per_child);
+    }
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 #[derive(Deserialize)]
@@ -4119,8 +4180,10 @@ async fn claim_pool(
     Extension(role): Extension<Role>,
     Path(name): Path<String>,
     token_tenant: Option<Extension<TokenTenant>>,
+    Query(rq): Query<ReadyQuery>,
     Json(overrides): Json<ClaimOverrides>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let started = std::time::Instant::now();
     require_admin(role)?;
     let pool = m.get_pool(&name).await?;
     if !pool_visible_to(&pool, &token_tenant) {
@@ -4130,10 +4193,17 @@ async fn claim_pool(
         });
     }
     let token_tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
-    Ok(Json(json!(
-        m.claim_from_pool(&name, overrides, token_tenant.as_deref())
-            .await?
-    )))
+    let rec = m
+        .claim_from_pool(&name, overrides, token_tenant.as_deref())
+        .await?;
+    let mut body = json!(rec);
+    if rq.wants_exec() {
+        merge_first_command(
+            &mut body,
+            m.measure_first_command(rec.id, "claim", started).await?,
+        );
+    }
+    Ok(Json(body))
 }
 
 /// Changes an existing pool's target size without deleting and recreating
