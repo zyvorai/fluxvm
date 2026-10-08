@@ -373,6 +373,7 @@ impl VmManager {
                     exit_code,
                     stdout,
                     stderr,
+                    ..
                 } => (exit_code, stdout, stderr),
                 AgentResponse::Error { message } => bail!("guest agent error: {message}"),
                 other => bail!("unexpected guest response: {other:?}"),

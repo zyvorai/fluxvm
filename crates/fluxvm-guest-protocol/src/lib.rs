@@ -9,6 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
+mod exec_policy;
+pub use exec_policy::{
+    ExecEnforcement, ExecIsolation, ExecPolicy, ExecRunAs, ExecSeccompMode, ExecTcpRule,
+};
+
 /// Default AF_VSOCK port the guest agent listens on.
 pub const DEFAULT_PORT: u32 = 17777;
 
@@ -38,6 +43,10 @@ pub enum AgentRequest {
         command: String,
         #[serde(default)]
         timeout_seconds: Option<u64>,
+        /// Confine the command with Landlock + seccomp (via procbox) inside
+        /// the guest. Absent = run unconfined, as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy: Option<ExecPolicy>,
     },
     /// Write `content_base64` (decoded) to `path` inside the guest,
     /// creating parent directories as needed. Replaces machinectl's
@@ -145,6 +154,10 @@ pub enum AgentResponse {
         exit_code: i32,
         stdout: String,
         stderr: String,
+        /// What was actually enforced; present only when the request carried
+        /// a `policy`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enforcement: Option<ExecEnforcement>,
     },
     FileWritten,
     FileContent {
@@ -321,6 +334,7 @@ mod tests {
             AgentRequest::Exec {
                 command: "echo hi".into(),
                 timeout_seconds: Some(5),
+                policy: None,
             },
         );
         let line = encode_line(&env).unwrap();
@@ -332,6 +346,7 @@ mod tests {
             AgentRequest::Exec {
                 command,
                 timeout_seconds,
+                ..
             } => {
                 assert_eq!(command, "echo hi");
                 assert_eq!(timeout_seconds, Some(5));

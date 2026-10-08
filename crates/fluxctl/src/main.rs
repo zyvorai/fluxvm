@@ -476,6 +476,11 @@ enum Command {
         id: Uuid,
         #[arg(long)]
         timeout_seconds: Option<u64>,
+        /// JSON confinement policy (fluxvm-procbox policy shape) applied
+        /// inside the guest with Landlock + seccomp; the response reports
+        /// what was enforced.
+        #[arg(long)]
+        policy: Option<PathBuf>,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         command: Vec<String>,
     },
@@ -3185,9 +3190,23 @@ async fn main() -> Result<()> {
         Command::Exec {
             id,
             timeout_seconds,
+            policy,
             command,
         } => {
-            let response = m.exec(id, command.join(" "), timeout_seconds).await?;
+            let policy = match policy {
+                Some(path) => {
+                    let text = std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading policy {}", path.display()))?;
+                    Some(
+                        fluxvm_scheduler::guest_exec::parse_exec_policy(&text)
+                            .with_context(|| format!("parsing policy {}", path.display()))?,
+                    )
+                }
+                None => None,
+            };
+            let response = m
+                .exec_with_policy(id, command.join(" "), timeout_seconds, policy)
+                .await?;
             println!("{}", serde_json::to_string_pretty(&response)?);
         }
         Command::Ping { id } => {

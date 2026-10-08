@@ -5,6 +5,7 @@ pub mod backend;
 pub mod config;
 pub mod fs_image;
 pub mod gpu;
+pub mod grants;
 pub mod metrics;
 pub mod model;
 pub mod policy;

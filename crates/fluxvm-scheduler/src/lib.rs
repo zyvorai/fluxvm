@@ -28,6 +28,8 @@ pub mod confidential;
 pub mod events;
 pub mod fork;
 pub mod idempotency;
+pub mod grants;
+pub mod guest_exec;
 pub mod journal;
 pub mod live_migration;
 mod migration_relay;
@@ -3958,22 +3960,8 @@ impl VmManager {
         command: String,
         timeout_seconds: Option<u64>,
     ) -> Result<fluxvm_guest_protocol::AgentResponse> {
-        let vm = self.get(id).await?;
-        if let Some(spec) = procbox_sandbox::load_spec(&vm)? {
-            return self.procbox_exec(&vm, spec, command, timeout_seconds).await;
-        }
-        let wait = std::time::Duration::from_secs(
-            timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS) + 5,
-        );
-        fluxvm_vsock_client::call(
-            &vm,
-            AgentRequest::Exec {
-                command,
-                timeout_seconds,
-            },
-            wait,
-        )
-        .await
+        self.exec_with_policy(id, command, timeout_seconds, None)
+            .await
     }
 
     /// Health-checks the vsock guest agent (`AgentRequest::Ping`) — proves
@@ -4333,6 +4321,7 @@ impl VmManager {
         self.remove_unreferenced_clone_base(&vm.request.image).await;
         journal::finish_delete(&self.cfg.state_dir, id)?;
         let vm_id = id.to_string();
+        fluxvm_core::grants::global().remove_sandbox(&vm_id);
         let tenant = vm.request.tenant.clone().unwrap_or_default();
         audit_event("vm.delete", &[("vm_id", &vm_id), ("tenant", &tenant)]);
         Ok(())
