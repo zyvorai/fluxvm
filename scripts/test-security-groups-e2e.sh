@@ -608,9 +608,10 @@ else
   fail "fluxvm_id pin missing"
 fi
 
+SCHEMA=$(sed -n 's/^pub const DATAPLANE_SCHEMA_VERSION: u32 = \([0-9]*\);/\1/p' "$PROJECT_DIR/crates/fluxvm-network/src/ebpf.rs")
 STATUS=$(api GET "/v1/vms/${ID}/network/status")
-echo "$STATUS" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("mode")=="ebpf"; assert d.get("schema_version")==4' \
-  && pass "network/status still schema_v3 ebpf" \
+echo "$STATUS" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("mode")=="ebpf"; assert d.get("schema_version")==int(sys.argv[1])' "$SCHEMA" \
+  && pass "network/status still schema_v${SCHEMA} ebpf" \
   || fail "status unexpected: $STATUS"
 
 # ---------------------------------------------------------------------------

@@ -343,9 +343,10 @@ META="/run/fluxvm/ebpf/vms/${SIMPLE}/iface"
 # ---------------------------------------------------------------------------
 section "REST status / policy / stats / flows"
 # ---------------------------------------------------------------------------
+SCHEMA=$(sed -n 's/^pub const DATAPLANE_SCHEMA_VERSION: u32 = \([0-9]*\);/\1/p' "$PROJECT_DIR/crates/fluxvm-network/src/ebpf.rs")
 STATUS=$(api GET "/v1/vms/${ID}/network/status")
-echo "$STATUS" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("mode")=="ebpf"; assert d.get("identity"); assert d.get("schema_compatible") is True; assert d.get("schema_version")==4; print("ok")' >/dev/null \
-  && pass "GET network/status mode=ebpf schema_v4" \
+echo "$STATUS" | python3 -c 'import json,sys;d=json.load(sys.stdin);assert d.get("mode")=="ebpf"; assert d.get("identity"); assert d.get("schema_compatible") is True; assert d.get("schema_version")==int(sys.argv[1]); print("ok")' "$SCHEMA" >/dev/null \
+  && pass "GET network/status mode=ebpf schema_v${SCHEMA}" \
   || fail "GET network/status unexpected: $STATUS"
 
 POLICY=$(api GET "/v1/vms/${ID}/network/policy")
