@@ -152,18 +152,27 @@ delete intent mentions it. Unclaimed:
 | Resource | Shape considered | Grace before removal |
 |---|---|---|
 | Workspace | `<state_dir>/instances/<uuid>` directory with no record or intent and no VMM process referencing it | `ORPHAN_DIR_GRACE` = 1 hour since its newest modification |
-| Network namespace | `eph-<8 hex>` in `/run/netns` (or `/var/run/netns`) | `ORPHAN_NET_GRACE` = 120 s of being seen unclaimed across successive sweeps |
-| Tap | `eph<8 hex>` in `/sys/class/net` that has `tun_flags` (a bridge or veth with a matching name is left alone) | same 120 s |
+| Network namespace (**opt-in**) | `eph-<8 hex>` in `/run/netns` (or `/var/run/netns`) | `ORPHAN_NET_GRACE` = 120 s of being seen unclaimed across successive sweeps |
+| Tap (**opt-in**) | `eph<8 hex>` in `/sys/class/net` that has `tun_flags` (a bridge or veth with a matching name is left alone) | same 120 s |
 
 The long directory grace exists because some paths (sandbox staging, migration
 receivers) create the directory a little before their record. The same sweep
 also purges expired idempotency records (see below).
 
 Names must match the daemon's own scheme exactly. Anything else is left alone.
-**The netns and tap sweeps work on host-wide names.** On a host shared with
-another FluxVM instance that uses a different state dir, that instance's
-namespaces look unclaimed to this one. Do not run two daemons with different
-state dirs on one host.
+**The netns and tap sweeps are off by default.** They match host-wide names, so
+on a host where another FluxVM daemon (or the same binary with a different state
+dir, for example a test daemon) owns VMs, that daemon's live namespaces and taps
+look unclaimed and would be removed. Set `FLUXVM_ORPHAN_NET_SWEEP=1` in the
+daemon's environment only on a host that this one daemon owns exclusively.
+Leaks in a create that crashed are still rolled back without the sweep, because
+the journal records the exact resource names. Only resources whose record and
+journal entry are both gone need the opt-in sweep. The workspace sweep stays on:
+it only looks inside this daemon's own `<state_dir>/instances`.
+
+This default exists because an earlier version swept host-wide unconditionally;
+a test daemon with a private state dir could therefore remove a production VM's
+`eph-*` namespace.
 
 ## Idempotency keys
 

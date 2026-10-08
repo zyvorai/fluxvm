@@ -28,8 +28,9 @@ Crash safety ([docs/crash-recovery.md](docs/crash-recovery.md))
   fails; owner liveness uses pid plus `/proc` start time.
 - **Recovery on start.** `reconcile()` rolls back intents of dead owners
   (`replay_pending_ops`, at most 5 attempts) and sweeps orphaned workspaces (1 h
-  grace), network namespaces and taps (120 s grace), validating every name against
-  FluxVM's own scheme and the VM id first.
+  grace) and, only with `FLUXVM_ORPHAN_NET_SWEEP=1`, network namespaces and taps
+  (120 s grace; off by default because the names are host-wide), validating every
+  name against FluxVM's own scheme and the VM id first.
 - **`Idempotency-Key`** on `POST /v1/vms`, `DELETE /v1/vms/{id}`, `POST
   /v1/vms/{id}/snapshot` and `/fork`: durable 24 h replay with `Idempotent-Replayed:
   true`; 422 for a changed body, 409 while the first request runs, 400 for a bad key.
