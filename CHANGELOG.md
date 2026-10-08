@@ -12,6 +12,75 @@
   allow-all; use the production profile for deny-by-default. See
   [primary-ebpf.md](docs/primary-ebpf.md).
 
+### Added: crash safety, fork, density, vhost-net (2026-10-08)
+
+Everything in this block is implemented and type-checked and passes unit tests.
+**None of it has been run end to end on real VMs yet.** No performance figure is
+claimed.
+
+Crash safety ([docs/crash-recovery.md](docs/crash-recovery.md))
+- **Durable writes.** `fluxvm_storage::write_durable` (write temp, fsync, rename,
+  fsync the directory) now backs `vms.json`, the quota ledger, journal intents and
+  idempotency records.
+- **Operation journal.** `<state_dir>/journal/` records create, snapshot, fork and
+  restore intents (and the existing delete intent) before any resource is
+  allocated. `OpGuard` marks an intent abandoned if the operation is dropped or
+  fails; owner liveness uses pid plus `/proc` start time.
+- **Recovery on start.** `reconcile()` rolls back intents of dead owners
+  (`replay_pending_ops`, at most 5 attempts) and sweeps orphaned workspaces (1 h
+  grace), network namespaces and taps (120 s grace), validating every name against
+  FluxVM's own scheme and the VM id first.
+- **`Idempotency-Key`** on `POST /v1/vms`, `DELETE /v1/vms/{id}`, `POST
+  /v1/vms/{id}/snapshot` and `/fork`: durable 24 h replay with `Idempotent-Replayed:
+  true`; 422 for a changed body, 409 while the first request runs, 400 for a bad key.
+- **`scripts/test-crash-recovery.sh`**: SIGKILLs the daemon mid create, delete,
+  snapshot and fork and checks convergence. Run it only on hosts you control; an
+  earlier version deleted every `eph-<8hex>` namespace on the host.
+- Known gaps: IPAM lease not released by the orphan sweep, QEMU internal savevm not
+  rolled back, extra-NIC and user-named taps and jailer trees not journaled, delete
+  intent omits nbd and Ceph.
+
+Fork and restore ([docs/fork-and-restore.md](docs/fork-and-restore.md))
+- **`MAP_PRIVATE` snapshot restore** on the in-tree KVM engine, with an eager-copy
+  fallback (`FLUXVM_KVM_EAGER_RESTORE=1`, `FLUXVM_KVM_LOCK_MEM=1`,
+  `FLUXVM_HUGEPAGES=1`, size mismatch, mmap error).
+- **Child identity reset.** Fork children get their own hostname, machine-id and
+  entropy through the new `AgentRequest::ResetIdentity`. Best effort; open connections
+  are not reset.
+- **`?ready=exec`** (or `?wait_first_command=true`) on create, fork and pool claim
+  returns `first_command_ms` and `phases`.
+- Fork is journaled and all-or-nothing.
+- Scripts: `bench-fork.sh` (ready time, PSS, disk per child), `bench-first-command.sh`.
+
+Networking ([docs/native-io-performance.md](docs/native-io-performance.md))
+- **vhost-net bring-up** in the kernel's order: owner, features, mem table, rings,
+  IRQ relay, backend. Previously the backend was bound before the rings were
+  programmed and no interrupt reached the guest.
+- `net_datapath` in the hypervisor Metrics, `FLUXVM_VHOST_NET=0` toggle, opt-in
+  **multiqueue** (`--net-queue-pairs`, `FLUXVM_NET_QUEUE_PAIRS`, up to 4), re-bind
+  after snapshot restore.
+- `scripts/bench-kvm-vhost.sh`. Result tables are empty until measured.
+
+Memory density ([docs/ROADMAP-DENSITY.md](docs/ROADMAP-DENSITY.md))
+- Balloon control `GET|POST /v1/vms/{id}/balloon`, per-VM PSS report `GET
+  /v1/vms/{id}/memory`, idle reclaim (`[sandbox] idle_balloon_secs`,
+  `idle_balloon_percent`), pressure-aware admission (`[policy]
+  min_host_mem_available_mib`, `max_host_mem_psi_some_avg10`,
+  `max_host_mem_psi_full_avg10`, `pressure_defer_secs`; all off by default).
+- `scripts/bench-density-count.sh` (consumes host memory; needs `FLUXVM_BENCH_CONFIRM=1`).
+
+Sandboxes
+- **Speculative execution**: `POST /v1/sandboxes/{id}/speculate` and changesets
+  (list, get, approve, reject, apply) with `fluxctl sandbox` commands. Apply only
+  writes files, only after approval, and only if the real files still match.
+- **Guest exec policy** (Landlock + seccomp) with enforcement reported back.
+- **Per-sandbox credential grants** at `/v1/sandboxes/{id}/grants`: in memory, not
+  persisted, injected by the egress proxy.
+
+### Changed (2026-10-08)
+- **The guest agent fails closed** when it has no token file and refuses every
+  request. Set `FLUXVM_AGENT_ALLOW_INSECURE=1` in the guest to run unauthenticated.
+
 ### Added
 - **Eject install media.** `POST /v1/vms/{id}/cdroms/{name}/eject` (admin) removes a CD-ROM's medium,
   live over QMP when the QEMU VM is running, and records the drive as empty (`path: ""`). Later starts and
