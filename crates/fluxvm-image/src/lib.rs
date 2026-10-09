@@ -1,6 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
+pub mod builtin;
 pub mod catalog;
 pub mod cloudinit;
 pub mod import;
@@ -679,7 +680,7 @@ pub async fn clone_for_vm(
         );
     }
     let base_fmt = if backend == BackendKind::Vz {
-        apple_raw_image_format(base)?
+        apple_image_format(base)?
     } else {
         image_format(cfg, base).await?
     };
@@ -729,6 +730,14 @@ pub async fn clone_for_vm(
                 convert_image(cfg, base, out, "raw").await?;
             }
         }
+        BackendKind::Vz if base_fmt == "qcow2" => convert_image(cfg, base, out, "raw")
+            .await
+            .with_context(|| {
+                format!(
+                    "converting {} from qcow2 for the vz backend (needs qemu-img: `brew install qemu`)",
+                    base.display()
+                )
+            })?,
         BackendKind::Vz => clone_raw_for_apple(base, out).await?,
         BackendKind::Auto => bail!(
             "VM has an unresolved BackendKind::Auto — this is a bug, backend selection must happen before cloning its disk"
@@ -759,18 +768,15 @@ pub async fn clone_for_vm(
     Ok(())
 }
 
-/// Virtualization.framework boots raw disk images only, and macOS has no `qemu-img` by default, so the
-/// format is decided from the file header: qcow2 is refused with a conversion hint, anything else is raw.
-fn apple_raw_image_format(base: &Path) -> Result<String> {
+/// Virtualization.framework boots raw disk images only. macOS has no `qemu-img` by default, so the format is decided
+/// from the file header: qcow2 is converted to raw (with `qemu-img`) while cloning, anything else is taken as raw.
+fn apple_image_format(base: &Path) -> Result<String> {
     use std::io::Read;
     let mut magic = [0u8; 4];
     let mut f =
         std::fs::File::open(base).with_context(|| format!("opening image {}", base.display()))?;
     if f.read_exact(&mut magic).is_ok() && &magic == b"QFI\xfb" {
-        bail!(
-            "{} is qcow2; the vz backend needs a raw disk image (convert with `qemu-img convert -O raw`)",
-            base.display()
-        );
+        return Ok("qcow2".into());
     }
     Ok("raw".into())
 }
@@ -829,6 +835,42 @@ mod qemu_free_raw_tests {
             ..Config::default()
         };
         clone_for_vm(&cfg, &base, BackendKind::FluxVm, &dest, None)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(dest).unwrap(), fs::read(base).unwrap());
+    }
+
+    #[tokio::test]
+    async fn vz_qcow2_without_qemu_img_explains_how_to_get_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("disk.img");
+        fs::write(&base, b"QFI\xfbpadding").unwrap();
+        let cfg = Config {
+            qemu_img_binary: "/definitely/missing/qemu-img".into(),
+            ..Config::default()
+        };
+        let err = clone_for_vm(
+            &cfg,
+            &base,
+            BackendKind::Vz,
+            &dir.path().join("vm.raw"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("brew install qemu"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn vz_raw_image_clones_without_qemu_img() {
+        let dir = tempfile::tempdir().unwrap();
+        let (base, dest) = (dir.path().join("base.raw"), dir.path().join("vm.raw"));
+        fs::write(&base, vec![7u8; 4096]).unwrap();
+        let cfg = Config {
+            qemu_img_binary: "/definitely/missing/qemu-img".into(),
+            ..Config::default()
+        };
+        clone_for_vm(&cfg, &base, BackendKind::Vz, &dest, None)
             .await
             .unwrap();
         assert_eq!(fs::read(dest).unwrap(), fs::read(base).unwrap());
