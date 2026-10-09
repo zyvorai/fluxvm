@@ -16,7 +16,7 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 | `cargo test -p fluxvm-apple` | 16 passed (capability matrix and egress validation, control protocol, SSH helpers, snapshot files, backend supervision against a fake runner) |
 | `scripts/macos-live-test.sh` | **PASS**, end to end on a real Debian 13 guest: create through the API, address, SSH, TCP forwards (host and guest-to-guest), shared folders, pause/resume, stop/start, snapshot and restore, named images, `fluxctl run` (cold and warm), a two-service stack, sandboxes (exec, files, TTL, warm pool and its refresh after an image update, concurrent creates, offline, allow-listed egress, speculate and changesets), nothing left running |
 
-**Not verified:** macOS guests (IPSW install and boot), multi-Mac clusters, Linux-only crates (`fluxvm-procbox`,
+**Verified by hand only:** macOS guests (IPSW install, boot, clone, SSH; see "macOS guests"), not through the API or the live test. **Not verified:** multi-Mac clusters, Linux-only crates (`fluxvm-procbox`,
 `fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent), and any Intel Mac. The hosted CI jobs for the `vz` pull requests
 have not all been green; see the pull requests for their state.
 
@@ -117,6 +117,30 @@ were running keep running, nothing reboots, and the guest address is reported ag
   (`generic-id.bin`) so that holds across launches.
 - Whether a restore survives a FluxVM runner upgrade has not been tested.
 
+## macOS guests
+
+Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as the guest. What works:
+
+- **Install.** `fluxvm-vz-runner install --config <json>` (with `guest_os: "macos"`, `media` = the IPSW, `disk` = a sparse raw file of at
+  least 40 GB, 4 CPUs, 8 GiB) installs from an IPSW and writes `hardware.bin`, `identity.bin` and `auxiliary.bin` beside the disk. The
+  installer reached 100% and the guest then booted. The IPSW is 26.6 GB; Apple's public catalog
+  (`https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml`) lists it, since
+  `VZMacOSRestoreImage.fetchLatestSupported` failed to load its catalog on that machine. The install is not exposed through the API yet.
+- **Prepare once, by hand.** The guest stops at Setup Assistant. Boot it with `window: true` from a terminal (the window needs a
+  foreground app), create a user, turn on **Remote Login** (System Settings, General, Sharing; if the toggle does not stick, give
+  Terminal Full Disk Access and run `sudo systemsetup -setremotelogin on`), install your SSH key, and shut down. That disk is the template.
+  Doing this offline from the host needs root and was not attempted.
+- **Clone.** `POST /v1/vms` with `backend: "vz"`, `apple: {guest_os: "macos"}` and `image` = the template's `disk.raw` clones the disk
+  (APFS `cp -c`, instant) and takes `hardware.bin` and `auxiliary.bin` from beside it. The runner gives every clone its own machine
+  identifier, so a clone is a separate machine (it has its own serial number). The clone's state directory must be on the same APFS volume as
+  the template, or the "clone" is a full copy of a 20+ GB disk.
+- **Address.** A macOS guest has no systemd, so the runner reads the Mac's DHCP leases (`/var/db/dhcpd_leases`) for the MAC the guest's
+  card was given and reports it as `guest_ip`. (The ARP table is not an option: macOS shows it empty to a spawned process.)
+- **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
+
+Not done: installing through the REST API or `fluxctl`, a `macos` image name, shared folders and snapshots for macOS guests (the
+runner only sets those up for Linux), and a vsock proxy. Apple allows two macOS VMs at a time per Mac.
+
 ## Capability matrix
 
 | Supported | Not supported |
@@ -125,7 +149,7 @@ were running keep running, nothing reboots, and the guest address is reported ag
 | NAT networking, TCP port forwards, no-network mode, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
 | shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug, data disks, cdroms |
-| macOS guests via IPSW (runner support only, never run) | live migration, in-place restore of a running VM, direct kernel boot |
+| macOS guests (installed by hand from an IPSW, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
@@ -133,9 +157,8 @@ process starts.
 ## Honest limits
 
 - This is a preview-quality backend. Only Linux ARM64 guests have been booted.
-- macOS guests need an IPSW install step the REST API does not expose yet (`launch` refuses a macOS guest that was never installed). A fresh
-  macOS guest also has no SSH, cloud-init or systemd, so it needs a first-boot setup design before it fits the address-reporting and SSH
-  paths used here. Testing it needs about 40 GB of free disk (the restore image alone is roughly 15 to 20 GB).
+- macOS guests exist only as clones of a template you install and prepare by hand (see "macOS guests"); the API cannot install one. The
+  restore image is 26.6 GB and the installed disk about 24 GB, so plan for 55 GB or more free on the volume that holds them.
 - Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
   where it can.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.

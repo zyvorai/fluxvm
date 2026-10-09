@@ -56,7 +56,7 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     yes(
         "macOS guests",
-        "IPSW install required before first boot (unverified on hardware here)",
+        "installed from an IPSW once, then cloned from a prepared template; see docs/macos.md",
     ),
     no(
         "tap / macvtap / netns / eBPF networking",

@@ -151,6 +151,26 @@ pub fn clone_file(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Files that make a macOS guest the machine it is, kept beside its disk by the installer. A clone of a prepared guest takes
+/// the hardware model and auxiliary storage (NVRAM) from the template; its machine identifier is deliberately not copied, so the
+/// runner gives every clone its own and two clones are two machines.
+pub const MACOS_TEMPLATE_FILES: &[&str] = &["hardware.bin", "auxiliary.bin"];
+
+/// Clones a prepared macOS guest's files into `workspace`. `image` is the template's disk (`<dir>/disk.raw`); the files sit
+/// beside it. `Ok(false)` means `image` is not a prepared guest.
+pub fn adopt_macos_template(image: &Path, workspace: &Path) -> Result<bool> {
+    let Some(dir) = image.parent() else {
+        return Ok(false);
+    };
+    if MACOS_TEMPLATE_FILES.iter().any(|f| !dir.join(f).is_file()) {
+        return Ok(false);
+    }
+    for f in MACOS_TEMPLATE_FILES {
+        clone_file(&dir.join(f), &workspace.join(f))?;
+    }
+    Ok(true)
+}
+
 /// unix socket paths are limited to ~104 bytes on macOS, so sockets live under a short per-user directory.
 fn socket_dir() -> Result<PathBuf> {
     let uid = unsafe { libc::getuid() };
@@ -262,4 +282,40 @@ pub fn find_runner() -> Result<PathBuf> {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    #[test]
+    fn a_prepared_guest_is_cloned_without_its_machine_identifier() {
+        let d = tempfile::tempdir().unwrap();
+        let (tmpl, ws) = (d.path().join("tmpl"), d.path().join("ws"));
+        fs::create_dir_all(&tmpl).unwrap();
+        fs::create_dir_all(&ws).unwrap();
+        for f in ["disk.raw", "hardware.bin", "auxiliary.bin", "identity.bin"] {
+            fs::write(tmpl.join(f), f).unwrap();
+        }
+        assert!(adopt_macos_template(&tmpl.join("disk.raw"), &ws).unwrap());
+        assert_eq!(
+            fs::read_to_string(ws.join("hardware.bin")).unwrap(),
+            "hardware.bin"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.join("auxiliary.bin")).unwrap(),
+            "auxiliary.bin"
+        );
+        assert!(
+            !ws.join("identity.bin").exists(),
+            "each clone gets its own identity"
+        );
+    }
+
+    #[test]
+    fn a_plain_disk_is_not_a_prepared_guest() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("disk.raw"), "x").unwrap();
+        assert!(!adopt_macos_template(&d.path().join("disk.raw"), d.path()).unwrap());
+    }
 }

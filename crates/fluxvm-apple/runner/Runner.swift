@@ -113,7 +113,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 p.machineIdentifier = id
                 p.auxiliaryStorage = try VZMacAuxiliaryStorage(creatingStorageAt: file("auxiliary.bin"), hardwareModel: model, options: .allowOverwrite)
             } else {
-                guard let id = VZMacMachineIdentifier(dataRepresentation: try Data(contentsOf: file("identity.bin"))) else { throw err("invalid Apple machine identifier") }
+                // A clone of a prepared guest has no identity yet: give it its own, so two clones are two machines.
+                let id: VZMacMachineIdentifier
+                if let data = try? Data(contentsOf: file("identity.bin")) {
+                    guard let known = VZMacMachineIdentifier(dataRepresentation: data) else { throw err("invalid Apple machine identifier") }
+                    id = known
+                } else {
+                    id = VZMacMachineIdentifier()
+                    try id.dataRepresentation.write(to: file("identity.bin"), options: .atomic)
+                }
                 p.machineIdentifier = id
                 p.auxiliaryStorage = VZMacAuxiliaryStorage(contentsOf: file("auxiliary.bin"))
             }
@@ -401,6 +409,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         let timer = DispatchSource.makeTimerSource(queue: .global())
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
+            if self?.cfg.guest_os == "macos" { self?.discoverByLease(); return }
             guard let self, let h = FileHandle(forReadingAtPath: self.cfg.serial_log) else { return }
             defer { try? h.close() }
             let size = (try? h.seekToEnd()) ?? 0
@@ -416,6 +425,36 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         ipTimer = timer
     }
     var ipTimer: DispatchSourceTimer?
+
+    // A macOS guest has no systemd service to print its address. The Mac's own DHCP server for the NAT keeps its leases in
+    // /var/db/dhcpd_leases (readable by everyone), and a macOS guest identifies itself by the MAC its network card was given
+    // (`hw_address=1,<mac>`, without leading zeros). The ARP table is not usable here: macOS shows it empty to processes that
+    // were not started from a terminal.
+    var leaseTick = 0
+    func discoverByLease() {
+        leaseTick += 1
+        guard leaseTick % 2 == 0, let mac = cfg.mac,
+              let text = try? String(contentsOfFile: "/var/db/dhcpd_leases", encoding: .utf8) else { return }
+        func norm(_ s: String) -> String { s.lowercased().split(separator: ":").map { String(Int($0, radix: 16) ?? -1, radix: 16) }.joined(separator: ":") }
+        let want = "1," + norm(mac)
+        var best: (ip: String, expires: UInt64)?
+        for block in text.components(separatedBy: "}") {
+            var fields: [String: String] = [:]
+            for line in block.split(separator: "\n") {
+                let kv = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                if kv.count == 2 { fields[kv[0]] = kv[1] }
+            }
+            guard let hw = fields["hw_address"], hw.lowercased() == want, let ip = fields["ip_address"] else { continue }
+            let expires = fields["lease"].flatMap { UInt64($0.dropFirst(2), radix: 16) } ?? 0
+            if best == nil || expires >= best!.expires { best = (ip, expires) }
+        }
+        guard let found = best?.ip else { return }
+        if found != ip {
+            ip = found
+            try? found.write(toFile: cfg.ip_file, atomically: true, encoding: .utf8)
+        }
+        startGuestForwards(guestIP: found)
+    }
 
     // MARK: TCP port forwards (127.0.0.1:host_port -> guest NAT address:guest_port)
 

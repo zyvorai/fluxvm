@@ -18,8 +18,8 @@ pub use capability::{
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use runner::{
-    ForwardConfig, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig, clone_file, find_runner,
-    ip_file, read_guest_ip, snapshot_dir,
+    ForwardConfig, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig, adopt_macos_template,
+    clone_file, find_runner, ip_file, read_guest_ip, snapshot_dir,
 };
 
 use anyhow::{Context, Result, bail};
@@ -57,9 +57,12 @@ impl VmBackend for AppleBackend {
             restore_files(&ctx.workspace, &ctx.disk, tag)?;
         }
         let guest = req.apple.as_ref().map(|a| a.guest_os).unwrap_or_default();
-        if guest == AppleGuest::Macos && !ctx.workspace.join("hardware.bin").exists() {
+        if guest == AppleGuest::Macos
+            && !ctx.workspace.join("hardware.bin").exists()
+            && !adopt_macos_template(&req.image, &ctx.workspace)?
+        {
             bail!(
-                "macOS guests must be installed from an IPSW before their first boot (`fluxvm-apple` install step); this VM has no hardware identity yet"
+                "a macOS guest needs a prepared template: set `image` to the disk.raw of an installed guest (its hardware.bin and auxiliary.bin must sit beside it). Installing one from an IPSW is not available through the API yet"
             );
         }
         let runner = find_runner()?;
