@@ -30,6 +30,7 @@ mod mcp;
 mod output;
 mod remote;
 mod run;
+mod stack;
 mod status;
 mod styles;
 
@@ -417,6 +418,31 @@ enum Command {
     Serial {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
+    },
+    /// Bring up the VMs described in `fluxvm.toml`: create what is missing, start what is stopped, recreate what
+    /// changed, in dependency order, and make the services reachable by name. Naming a service brings up only it and
+    /// what it depends on.
+    Up {
+        #[arg(short = 'f', long, default_value = "fluxvm.toml")]
+        file: PathBuf,
+        services: Vec<String>,
+    },
+    /// Delete the stack's VMs, last-started first (`--keep` only stops them).
+    Down {
+        #[arg(short = 'f', long, default_value = "fluxvm.toml")]
+        file: PathBuf,
+        /// Stack name, instead of reading it from the file.
+        #[arg(long)]
+        stack: Option<String>,
+        #[arg(long)]
+        keep: bool,
+    },
+    /// List the stack's VMs with status and address.
+    Ps {
+        #[arg(short = 'f', long, default_value = "fluxvm.toml")]
+        file: PathBuf,
+        #[arg(long)]
+        stack: Option<String>,
     },
     /// Boot a throwaway VM, SSH into it, and delete it when the session ends (`--keep` to retain it).
     /// `fluxctl run` on a Mac uses the built-in `debian-13`; elsewhere pass an image.
@@ -2074,6 +2100,26 @@ fn run_context(command: ContextCommand, format: output::OutputFormat) -> Result<
 }
 
 /// `--server` dispatch for the core VM verbs; everything else needs a local host.
+fn load_stack_file(file: &Path) -> Result<(stack::StackFile, PathBuf)> {
+    let text = std::fs::read_to_string(file)
+        .with_context(|| format!("reading {} (use -f to name the stack file)", file.display()))?;
+    let dir = file
+        .canonicalize()?
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Ok((stack::parse(&text)?, dir))
+}
+
+/// The stack file when it exists; with `--stack NAME` a missing file is fine.
+fn stack_for(file: &Path, name: Option<&str>) -> Result<Option<stack::StackFile>> {
+    match load_stack_file(file) {
+        Ok((f, _)) => Ok(Some(f)),
+        Err(_) if name.is_some() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 async fn run_remote(
     r: &remote::Remote,
     command: Command,
@@ -2515,6 +2561,23 @@ async fn run_remote(
                 })
                 .unwrap_or_else(|| "root".into());
             run::ssh_to(ip, &user, port, vm["backend"] == "vz", &ssh_args).await?;
+        }
+        Command::Up { file, services } => {
+            let (f, dir) = load_stack_file(&file)?;
+            let only = (!services.is_empty()).then_some(services.as_slice());
+            stack::up(r, &f, &dir, only).await?;
+        }
+        Command::Down { file, stack: name, keep } => {
+            let f = stack_for(&file, name.as_deref())?;
+            let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            stack::down(r, &name, f.as_ref(), keep).await?;
+        }
+        Command::Ps { file, stack: name } => {
+            let f = stack_for(&file, name.as_deref())?;
+            let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            for [svc, vm, status, ip] in stack::ps(r, &name).await? {
+                println!("{svc:<16} {vm:<28} {status:<10} {ip}");
+            }
         }
         Command::Run {
             image,
@@ -3357,6 +3420,29 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
                 run_console_session(&m, id, cols, rows).await?;
+            }
+        }
+        Command::Up { file, services } => {
+            let (f, dir) = load_stack_file(&file)?;
+            let only = (!services.is_empty()).then_some(services.as_slice());
+            stack::up(&run::Local(&m), &f, &dir, only).await?;
+        }
+        Command::Down {
+            file,
+            stack: name,
+            keep,
+        } => {
+            let f = stack_for(&file, name.as_deref())?;
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            stack::down(&run::Local(&m), &name, f.as_ref(), keep).await?;
+        }
+        Command::Ps { file, stack: name } => {
+            let f = stack_for(&file, name.as_deref())?;
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            for [svc, vm, status, ip] in stack::ps(&run::Local(&m), &name).await? {
+                println!("{svc:<16} {vm:<28} {status:<10} {ip}");
             }
         }
         Command::Run {

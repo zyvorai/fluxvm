@@ -72,11 +72,24 @@ curl -fs -X DELETE "$V" >/dev/null && sleep 3 && ok "delete"
 pgrep -f "fluxvm-vz-runner run --config $T" >/dev/null && bad "runner still running after delete" || ok "no runner left behind"
 # `fluxctl run` through the daemon's REST API. The first run builds a warm template (cold boot + snapshot); the next
 # restores it, and must see none of the first run's changes.
-FX=(./target/debug/fluxctl --server "http://127.0.0.1:$PORT")
+FX=("$PWD/target/debug/fluxctl" --server "http://127.0.0.1:$PORT")
 RUNOUT="$("${FX[@]}" run -- 'touch /var/tmp/leak; echo run-ok' 2>/dev/null </dev/null)" || bad "fluxctl run failed"
 [[ "$RUNOUT" == run-ok ]] && ok "fluxctl run: boots, runs a command, exits (builds the warm template)" || bad "fluxctl run output: $RUNOUT"
 START=$SECONDS
 RUNOUT="$("${FX[@]}" run -- 'ls /var/tmp/leak 2>/dev/null || echo clean' 2>/dev/null </dev/null)" || bad "second fluxctl run failed"
 [[ "$RUNOUT" == clean ]] && ok "fluxctl run: the second run restores the warm snapshot, pristine ($((SECONDS-START))s)" || bad "second run saw the first run's file: $RUNOUT"
 [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d) if isinstance(d,dict) else d;print(sum(1 for v in d if not v["name"].startswith("warm-")),sum(1 for v in d if v["name"].startswith("warm-") and v["status"]!="stopped"))')" == "0 0" ]] && ok "fluxctl run left nothing running (only the stopped warm template)" || bad "a run VM was left behind"
+# A stack: two services, one depending on the other. The app reaches the db by name, which only works through the Mac's relay.
+mkdir -p "$T/proj" && cp examples/fluxvm.toml "$T/proj/fluxvm.toml" && echo hello > "$T/proj/marker.txt"
+( cd "$T/proj" && "${FX[@]}" up >"$T/up1.log" 2>&1 </dev/null ) || { tail -5 "$T/up1.log"; bad "fluxctl up failed"; }
+STACKPS="$( cd "$T/proj" && "${FX[@]}" ps 2>/dev/null )"
+[[ "$(grep -c running <<<"$STACKPS")" == 2 ]] && ok "stack: up created db and app" || bad "stack ps: $STACKPS"
+APPIP="$(awk '$1=="app"{print $4}' <<<"$STACKPS")"
+# Stack VMs use your own user name and SSH key (like `fluxctl run`), not this script's throwaway key.
+mine() { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 "$USER@$1" "$2"; }
+[[ "$(mine "$APPIP" 'cat /tmp/db-reply' 2>/dev/null)" == db-ok ]] && ok "stack: app reached db by name through the Mac's relay (after_up)" || bad "app could not reach db"
+[[ "$(mine "$APPIP" 'cat /srv/app/marker.txt' 2>/dev/null)" == hello ]] && ok "stack: the project directory is shared into app" || bad "stack volume"
+START=$SECONDS; ( cd "$T/proj" && "${FX[@]}" up >"$T/up2.log" 2>&1 </dev/null ) && ! grep -qE "creating|recreating" "$T/up2.log" && ok "stack: a second up changes nothing ($((SECONDS-START))s)" || bad "second up was not a no-op: $(cat "$T/up2.log")"
+( cd "$T/proj" && "${FX[@]}" down >/dev/null 2>&1 </dev/null )
+[[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d) if isinstance(d,dict) else d;print(sum(1 for v in d if v["name"].startswith("demo-")))')" == 0 ]] && ok "stack: down removed both VMs" || bad "stack VMs left behind"
 echo "PASS"

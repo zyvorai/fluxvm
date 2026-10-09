@@ -48,6 +48,8 @@ pub struct ShareConfig {
 pub struct ForwardConfig {
     pub host_port: u16,
     pub guest_port: u16,
+    /// Listen on the NAT gateway so other guests can connect (see `PortForward::guests`).
+    pub guests: bool,
 }
 
 impl RunnerConfig {
@@ -95,6 +97,7 @@ impl RunnerConfig {
                     .map(|f| ForwardConfig {
                         host_port: f.host_port,
                         guest_port: f.guest_port,
+                        guests: f.guests,
                     })
                     .collect(),
                 _ => Vec::new(),

@@ -1,0 +1,22 @@
+# fluxvm.toml: the VMs this project needs. `fluxctl up` brings them up, `fluxctl down` removes them.
+name = "demo"
+
+[defaults]
+image = "debian-13"      # built-in; also debian-12, ubuntu-24.04, or a path to a raw image
+memory_mib = 1024
+
+[service.db]
+# cloud-init, first boot only
+run = [
+  "mkdir -p /srv/db && echo db-ok > /srv/db/index.html",
+  "nohup python3 -m http.server 5000 --directory /srv/db >/dev/null 2>&1 &",
+]
+expose = [5000]          # other services reach this as db:5000 (relayed through the Mac)
+ports = ["5000:5000"]    # and you reach it at 127.0.0.1:5000
+ready = "python3 -c \"import urllib.request;urllib.request.urlopen('http://127.0.0.1:5000')\""
+
+[service.app]
+depends_on = ["db"]
+volumes = ["./:/srv/app"]   # this directory, inside the VM
+# After every service is up and the names resolve; only when this service was just created.
+after_up = ["python3 -c \"import urllib.request;print(urllib.request.urlopen('http://db:5000/').read().decode().strip())\" > /tmp/db-reply"]
