@@ -11,6 +11,17 @@ import Foundation
 import Virtualization
 import Darwin
 
+struct Share: Decodable {
+    let tag: String
+    let host_path: String
+    let read_only: Bool
+}
+
+struct Forward: Decodable {
+    let host_port: UInt16
+    let guest_port: UInt16
+}
+
 struct Config: Decodable {
     let id: String
     let workspace: String
@@ -26,11 +37,32 @@ struct Config: Decodable {
     let vsock_socket: String?
     let ip_file: String
     let window: Bool?
+    let shares: [Share]?
+    let forwards: [Forward]?
 }
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write(Data("fluxvm-vz-runner: \(message)\n".utf8))
     exit(code)
+}
+
+/// Copies `from` to `to` until EOF, then half-closes `to`. Writes through `withUnsafeBytes`, because `&buf[i]` can
+/// hand `write` a pointer to a one-byte temporary instead of the array's storage.
+func pump(_ from: Int32, _ to: Int32) {
+    DispatchQueue.global().async {
+        var buf = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let n = read(from, &buf, buf.count)
+            if n <= 0 { break }
+            var off = 0
+            while off < n {
+                let w = buf.withUnsafeBytes { write(to, $0.baseAddress! + off, n - off) }
+                if w <= 0 { return }
+                off += w
+            }
+        }
+        shutdown(to, SHUT_WR)
+    }
 }
 
 func emit(_ object: [String: Any]) {
@@ -127,6 +159,20 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         net.attachment = VZNATNetworkDeviceAttachment()
         if let m = cfg.mac, let mac = VZMACAddress(string: m) { net.macAddress = mac }
         c.networkDevices = [net]
+        if cfg.guest_os == "linux" {
+            var fsDevices: [VZDirectorySharingDeviceConfiguration] = []
+            for share in cfg.shares ?? [] {
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: share.host_path, isDirectory: &isDir), isDir.boolValue else {
+                    throw err("shared folder \(share.host_path) is not a directory")
+                }
+                try VZVirtioFileSystemDeviceConfiguration.validateTag(share.tag)
+                let fs = VZVirtioFileSystemDeviceConfiguration(tag: share.tag)
+                fs.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: share.host_path), readOnly: share.read_only))
+                fsDevices.append(fs)
+            }
+            c.directorySharingDevices = fsDevices
+        }
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         try c.validate()
@@ -151,6 +197,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             startControlServer()
             startIPWatcher()
             if cfg.vsock_socket != nil { startVsockProxy() }
+            for f in cfg.forwards ?? [] { startForward(f) }
             setupSignals()
         } catch { fail(error.localizedDescription) }
     }
@@ -308,6 +355,41 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     }
     var ipTimer: DispatchSourceTimer?
 
+    // MARK: TCP port forwards (127.0.0.1:host_port -> guest NAT address:guest_port)
+
+    func startForward(_ f: Forward) {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { fail("port forward \(f.host_port): \(String(cString: strerror(errno)))") }
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = f.host_port.bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        guard ok == 0, listen(fd, 32) == 0 else { fail("port forward \(f.host_port): \(String(cString: strerror(errno)))") }
+        DispatchQueue.global().async {
+            while true {
+                let c = accept(fd, nil, nil)
+                if c < 0 { continue }
+                DispatchQueue.global().async { self.relay(c, to: f.guest_port) }
+            }
+        }
+    }
+
+    func relay(_ c: Int32, to port: UInt16) {
+        // The guest address is learned from its serial console, so it can appear after the listener is up.
+        guard let ip = self.ip else { close(c); return }
+        let g = socket(AF_INET, SOCK_STREAM, 0)
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = inet_addr(ip)
+        let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(g, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
+        guard g >= 0, ok == 0 else { if g >= 0 { close(g) }; close(c); return }
+        pump(c, g); pump(g, c)
+    }
+
     // MARK: vsock proxy ("CONNECT <port>\n" over a unix socket, like Firecracker's)
 
     func startVsockProxy() {
@@ -343,13 +425,6 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     self.vsockConnections.append(conn)
                     let g = conn.fileDescriptor
                     _ = "OK \(port)\n".withCString { write(c, $0, strlen($0)) }
-                    func pump(_ from: Int32, _ to: Int32) {
-                        DispatchQueue.global().async {
-                            var b = [UInt8](repeating: 0, count: 64 * 1024)
-                            while true { let n = read(from, &b, b.count); if n <= 0 { break }; var off = 0; while off < n { let w = write(to, &b[off], n - off); if w <= 0 { return }; off += w } }
-                            shutdown(to, SHUT_WR)
-                        }
-                    }
                     pump(c, g); pump(g, c)
                 }
             }
