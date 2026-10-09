@@ -701,6 +701,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "name": {"type": "string"},
                     "ttl_seconds": {"type": "integer", "minimum": 1},
                     "offline": {"type": "boolean", "description": "macOS only: no network card at all, so the sandbox cannot reach anything; commands and files still work. Slower to start (about 10 s)."},
+                    "allow_hosts": {"type": "array", "items": {"type": "string"}, "description": "macOS only: host names the sandbox may reach (example.com, *.example.com; ports 80/443) through a proxy on the Mac; everything else is refused. Implies offline."},
                 }),
                 &[],
             ),
@@ -716,6 +717,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         if let Some(v) = str_arg(&args, key) {
                             body[key] = json!(v);
                         }
+                    }
+                    if let Some(hosts) = args.get("allow_hosts").filter(|v| v.is_array()) {
+                        body["allow_hosts"] = hosts.clone();
                     }
                     if let Some(t) = int_arg(&args, "ttl_seconds")? {
                         body["ttl_seconds"] = json!(t);

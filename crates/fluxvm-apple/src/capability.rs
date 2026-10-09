@@ -100,6 +100,26 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             }
         };
     }
+    if let Some(apple) = &req.apple {
+        if !apple.egress_allow.is_empty() {
+            if !matches!(req.network, NetworkSpec::None) {
+                bail!(
+                    "egress_allow needs network.mode = \"none\": with a network card the guest could bypass the proxy"
+                );
+            }
+            for h in &apple.egress_allow {
+                let host = h.strip_prefix("*.").unwrap_or(h);
+                if host.is_empty()
+                    || host.starts_with('.')
+                    || !host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+                {
+                    bail!("egress_allow entry {h:?} is not a host name or *.suffix");
+                }
+            }
+        }
+    }
     match &req.network {
         NetworkSpec::None => {}
         NetworkSpec::User { forwards } => {
@@ -247,9 +267,84 @@ pub fn with_guest_reporting(mut ci: CloudInitSpec) -> CloudInitSpec {
     ci
 }
 
+/// For a guest with no network card and an `egress_allow` list: a forwarder from `127.0.0.1:3128` to the runner's proxy on the
+/// host (vsock CID 2), and the proxy settings that make shells, apt and curl use it. The host decides what gets through.
+pub fn with_egress_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
+    let port = crate::runner::EGRESS_PORT;
+    ci.write_files.push(CloudInitFile {
+        path: "/usr/local/sbin/fluxvm-egress".into(),
+        content: format!(
+            concat!(
+                "#!/usr/bin/python3\n",
+                "import socket, threading\n",
+                "def pump(a, b):\n",
+                "    try:\n",
+                "        while True:\n",
+                "            d = a.recv(65536)\n",
+                "            if not d: break\n",
+                "            b.sendall(d)\n",
+                "    except OSError: pass\n",
+                "    finally:\n",
+                "        for s in (a, b):\n",
+                "            try: s.shutdown(socket.SHUT_RDWR)\n",
+                "            except OSError: pass\n",
+                "def serve(c):\n",
+                "    try:\n",
+                "        v = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)\n",
+                "        v.connect((2, {port}))\n",
+                "    except OSError:\n",
+                "        c.close(); return\n",
+                "    threading.Thread(target=pump, args=(v, c), daemon=True).start()\n",
+                "    pump(c, v)\n",
+                "s = socket.socket()\n",
+                "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n",
+                "s.bind(('127.0.0.1', {port}))\n",
+                "s.listen(64)\n",
+                "while True:\n",
+                "    c, _ = s.accept()\n",
+                "    threading.Thread(target=serve, args=(c,), daemon=True).start()\n"
+            ),
+            port = port
+        ),
+        permissions: Some("0755".into()),
+    });
+    ci.write_files.push(CloudInitFile {
+        path: "/etc/systemd/system/fluxvm-egress.service".into(),
+        content: "[Unit]\nDescription=Forward to the FluxVM host's egress proxy\n[Service]\nExecStart=/usr/local/sbin/fluxvm-egress\nRestart=always\n[Install]\nWantedBy=multi-user.target\n".into(),
+        permissions: Some("0644".into()),
+    });
+    let url = format!("http://127.0.0.1:{port}");
+    ci.write_files.push(CloudInitFile {
+        path: "/etc/environment".into(),
+        content: format!(
+            "http_proxy={url}\nhttps_proxy={url}\nHTTP_PROXY={url}\nHTTPS_PROXY={url}\nno_proxy=localhost,127.0.0.1\nNO_PROXY=localhost,127.0.0.1\n"
+        ),
+        permissions: Some("0644".into()),
+    });
+    ci.write_files.push(CloudInitFile {
+        path: "/etc/apt/apt.conf.d/90fluxvm-proxy".into(),
+        content: format!("Acquire::http::Proxy \"{url}\";\nAcquire::https::Proxy \"{url}\";\n"),
+        permissions: Some("0644".into()),
+    });
+    ci.runcmd
+        .push("systemctl daemon-reload && systemctl enable --now fluxvm-egress.service".into());
+    ci
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn egress_needs_no_network_card_and_sane_names() {
+        let ok =
+            r#""network":{"mode":"none"},"apple":{"egress_allow":["example.com","*.pypi.org"]}"#;
+        assert!(validate_request(&req(ok)).is_ok());
+        let nat = r#""network":{"mode":"user"},"apple":{"egress_allow":["example.com"]}"#;
+        assert!(validate_request(&req(nat)).is_err());
+        let bad = r#""network":{"mode":"none"},"apple":{"egress_allow":["a b"]}"#;
+        assert!(validate_request(&req(bad)).is_err());
+    }
 
     fn req(extra: &str) -> CreateVmRequest {
         let sep = if extra.is_empty() { "" } else { "," };

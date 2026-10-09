@@ -130,6 +130,16 @@ oexec() { curl -fs -X POST "$SB/$OFFID/process" -H 'Content-Type: application/js
 [[ "$(oexec 'curl -s -m 4 -o /dev/null -w %{http_code} https://example.com; echo')" == 000 ]] && ok "offline sandbox: the internet is unreachable" || bad "offline sandbox reached the network"
 curl -fs -X POST "$SB/$OFFID/fs/write" -H 'Content-Type: application/json' -d "{\"path\":\"/tmp/off.txt\",\"content_base64\":\"$(printf 'off\n' | base64)\"}" >/dev/null && ok "offline sandbox: exec and files work over vsock ($(oexec 'whoami'))" || bad "offline sandbox fs write"
 [[ -z "$(curl -fs "$B/$OFFID" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("guest_ip") or "")')" ]] && ok "offline sandbox: no address was ever assigned" || bad "offline sandbox got an address"
+# A sandbox that may reach only example.com: no card, so the only way out is the proxy the runner serves over vsock.
+AL="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"allow_hosts":["example.com"],"ttl_seconds":300}')" || bad "allow-listed sandbox create failed"
+ALID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$AL")"
+aexec() { curl -fs -X POST "$SB/$ALID/process" -H 'Content-Type: application/json' -d "{\"command\":\"$1\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["stdout"],end="")'; }
+[[ "$(aexec 'curl -s -m 20 -o /dev/null -w %{http_code} https://example.com; echo')" == 200 ]] && ok "allow-listed sandbox: example.com (https) is reachable through the host proxy" || bad "allowed host failed: $(aexec 'curl -sv -m 20 https://example.com 2>&1 | tail -5')"
+[[ "$(aexec 'curl -s -m 20 -o /dev/null -w %{http_code} http://example.com; echo')" == 200 ]] && ok "allow-listed sandbox: example.com (plain http) works too" || bad "allowed plain http failed"
+[[ "$(aexec 'curl -s -m 10 -o /dev/null -w %{http_code} https://www.debian.org; echo')" != 200 ]] && ok "allow-listed sandbox: another host is refused" || bad "a host that is not on the list was reachable"
+[[ "$(aexec 'curl -s -m 10 -x http://127.0.0.1:3128 http://www.debian.org | head -c 40; echo')" == *"not on this sandbox"* ]] && ok "allow-listed sandbox: the refusal names the host" || bad "refusal text: $(aexec 'curl -s -m 10 -x http://127.0.0.1:3128 http://www.debian.org')"
+[[ "$(aexec 'curl -s -m 5 --noproxy example.com -o /dev/null -w %{http_code} https://example.com; echo')" == 000 ]] && ok "allow-listed sandbox: going around the proxy reaches nothing" || bad "the guest reached the network without the proxy"
+[[ "$(aexec 'ls /sys/class/net')" == lo ]] && ok "allow-listed sandbox: still no network card" || bad "allow-listed sandbox has a card"
 # The pool refills in the background after the two claims; let it finish so it cannot start a VM while we clean up.
 for _ in $(seq 1 40); do
   [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(sum(1 for v in d if v["name"].startswith("sandbox-slot-") and v["status"]=="stopped"))')" -ge 2 ]] && break; sleep 3

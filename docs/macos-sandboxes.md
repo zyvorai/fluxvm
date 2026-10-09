@@ -49,8 +49,15 @@ each), and no memory while stopped. Restoring needs an unlocked login session.
 - **Offline sandboxes are.** `{"offline": true}` (MCP: `sandbox_create` with `offline`) attaches no network card at all, so there is
   nothing for the guest to route through; it has only `lo`. Commands and files still work: the daemon reaches the guest's sshd over
   **vsock** (stock Debian 13 images have `sshd-vsock.socket` on port 22) through the runner, using a built-in relay
-  (`fluxctl vsock-proxy`, ssh's ProxyCommand). They cold-boot (about 6 s, no warm pool). An allow-listed egress proxy for sandboxes that
-  need *some* network is planned.
+  (`fluxctl vsock-proxy`, ssh's ProxyCommand). They cold-boot (about 6 s, no warm pool). For sandboxes that need *some* network, see below.
+- **Allow-listed egress.** `{"allow_hosts": ["example.com", "*.pypi.org"]}` (MCP: `sandbox_create` with `allow_hosts`) implies `offline`:
+  the guest has no card, and its only way out is an HTTP(S) proxy the runner serves over vsock (guest to host, port 3128). A small
+  forwarder in the guest (`fluxvm-egress.service`, written by cloud-init) exposes it on `127.0.0.1:3128`, and `/etc/environment` plus an
+  apt config point shells, curl and apt at it. The host decides: names are matched in the runner (exact, or `*.suffix`), only ports 80
+  and 443, and a name that resolves to a loopback, private, link-local or CGNAT address is refused so an allowed name cannot be aimed at
+  the Mac or the LAN. Refusals are `403` naming the host. A program that ignores the proxy settings simply has no route.
+  Limits: HTTP and HTTPS only (no raw TCP, no UDP; DNS is done by the host), tools must honour `http_proxy`, the allow-list is fixed at
+  creation, and these sandboxes cold-boot. HTTPS is tunnelled (CONNECT), not inspected.
 - Sandboxes of any other shape (a `spec`, a `template`, volumes, a different size) always cold-boot.
 - Not yet on `vz`: speculate/changesets, snapshots through the sandbox endpoints, volumes, GPUs.
 

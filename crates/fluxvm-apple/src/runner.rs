@@ -35,6 +35,8 @@ pub struct RunnerConfig {
     pub forwards: Vec<ForwardConfig>,
     /// Attach no network device (`network.mode = "none"`).
     pub network_none: bool,
+    /// Hosts the guest may reach through the vsock proxy on `EGRESS_PORT` (empty: no proxy).
+    pub egress_allow: Vec<String>,
     /// A state file written by a snapshot; the runner resumes from it instead of cold-booting.
     pub restore_state: Option<PathBuf>,
 }
@@ -98,6 +100,7 @@ impl RunnerConfig {
                 })
                 .collect(),
             network_none: matches!(req.network, NetworkSpec::None),
+            egress_allow: apple.egress_allow.clone(),
             forwards: match &req.network {
                 NetworkSpec::User { forwards } => forwards
                     .iter()
@@ -119,6 +122,9 @@ impl RunnerConfig {
         Ok(p)
     }
 }
+
+/// The vsock port the runner's egress proxy listens on (guest to host); the guest forwards 127.0.0.1:3128 to it.
+pub const EGRESS_PORT: u32 = 3128;
 
 pub const STATE_FILE: &str = "state.vzvmsave";
 /// Files cloned alongside the saved state, so a restore gets the disk exactly as it was when the state was saved.

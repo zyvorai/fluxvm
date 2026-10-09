@@ -63,6 +63,10 @@ pub struct SandboxCreateRequest {
     /// vsock). Cold-boots (the warm pool is for sandboxes with a network).
     #[serde(default)]
     pub offline: bool,
+    /// vz only: host names the sandbox may reach (`example.com`, `*.example.com`; ports 80 and 443). Implies `offline`: the guest has
+    /// no network card, and the only way out is an HTTP(S) proxy on the host that refuses everything not listed. Enforced by the host.
+    #[serde(default)]
+    pub allow_hosts: Vec<String>,
 }
 
 pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
@@ -241,9 +245,11 @@ impl VmManager {
             && req.memory_mib.is_none()
             && gpus == 0
             && !req.offline
+            && req.allow_hosts.is_empty()
             && token_tenant.is_none();
         let (claim_name, claim_ttl) = (req.name.clone(), req.ttl_seconds);
-        let offline = req.offline;
+        let allow_hosts = req.allow_hosts.clone();
+        let offline = req.offline || !allow_hosts.is_empty();
         let from_template = req.template.is_some();
         let mut create = if let Some(template) = &req.template {
             self.load_template_spec(template).await?
@@ -291,6 +297,14 @@ impl VmManager {
             }
             create.network = fluxvm_core::model::NetworkSpec::None;
         }
+        if !allow_hosts.is_empty() {
+            create
+                .apple
+                .get_or_insert_with(Default::default)
+                .egress_allow = allow_hosts.clone();
+            let ci = create.cloud_init.take().unwrap_or_default();
+            create.cloud_init = Some(fluxvm_apple::with_egress_forwarder(ci));
+        }
         if create.backend == BackendKind::Vz {
             self.prepare_vz_sandbox(&mut create)?;
         } else if create.agent.is_none() {
@@ -336,9 +350,26 @@ impl VmManager {
         }
         if on_vz {
             // A sandbox is ready when commands can run in it, so wait for the guest to accept SSH.
-            let ready = self
+            let ready = match self
                 .wait_vz_guest(record.id, std::time::Duration::from_secs(120))
-                .await;
+                .await
+            {
+                // The proxy forwarder is installed by cloud-init, a little after sshd is up.
+                Ok(guest) if !allow_hosts.is_empty() => fluxvm_apple::ssh::exec(
+                    &guest,
+                    "cloud-init status --wait >/dev/null 2>&1; systemctl is-active --quiet fluxvm-egress",
+                    std::time::Duration::from_secs(120),
+                )
+                .await
+                .and_then(|o| {
+                    if o.exit_code == 0 {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("the egress forwarder did not start in the guest"))
+                    }
+                }),
+                other => other.map(|_| ()),
+            };
             if let Err(e) = ready {
                 let _ = self.delete(record.id).await;
                 return Err(e.context("starting the sandbox"));
