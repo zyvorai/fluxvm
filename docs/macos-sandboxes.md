@@ -44,16 +44,20 @@ each), and no memory while stopped. Restoring needs an unlocked login session.
   the daemon uses SSH with its own key (`<state_dir>/sandbox_ed25519`, created on first use and authorised by cloud-init as user
   `sandbox`). A file is moved with `cat`/`chmod`, so the limits are 32 MiB per file and a normal Linux userland in the guest.
 - **No per-exec policy.** `policy` (Landlock/seccomp confinement of one command) needs the agent and is refused on `vz`.
-- **Network is not isolated.** A sandbox on `network.mode = "user"` (the default) has full outbound access through the Mac's NAT, and
-  Virtualization.framework gives no way to filter it. Use `"network": {"mode": "none"}` for a sandbox that cannot reach anything, but
-  note that it also cannot be reached over SSH, so exec and file access do not work on it yet. An allow-listed egress proxy is planned.
+- **Network is not isolated by default.** A sandbox on `network.mode = "user"` has full outbound access through the Mac's NAT, and
+  Virtualization.framework gives no way to filter it.
+- **Offline sandboxes are.** `{"offline": true}` (MCP: `sandbox_create` with `offline`) attaches no network card at all, so there is
+  nothing for the guest to route through; it has only `lo`. Commands and files still work: the daemon reaches the guest's sshd over
+  **vsock** (stock Debian 13 images have `sshd-vsock.socket` on port 22) through the runner, using a built-in relay
+  (`fluxctl vsock-proxy`, ssh's ProxyCommand). They cold-boot (about 6 s, no warm pool). An allow-listed egress proxy for sandboxes that
+  need *some* network is planned.
 - Sandboxes of any other shape (a `spec`, a `template`, volumes, a different size) always cold-boot.
 - Not yet on `vz`: speculate/changesets, snapshots through the sandbox endpoints, volumes, GPUs.
 
 ## Verified
 
 On an Apple M4 (macOS 27.2): create with no body, exec with exit code and output, file write and read with awkward paths and a mode,
-a missing file reported cleanly, the TTL removing the sandbox, no runner left behind, and the same through the MCP server over stdio.
+a missing file reported cleanly, an offline sandbox with only `lo` (DNS and routes fail) still running commands and file transfers, the TTL removing the sandbox, no runner left behind, and the same through the MCP server over stdio.
 With the pool: 2 warm slots built in about 15 s after the first create; two concurrent creates took 1.7 s and 3.6 s (7.6 s cold), got
 different addresses and did not see each other's files; a create after the pool was consumed and refilled took 1.9 s.
 `scripts/macos-live-test.sh` covers the REST path.

@@ -21,10 +21,6 @@ impl VmManager {
     }
 
     pub(crate) fn vz_guest(&self, vm: &VmRecord) -> Result<GuestSsh> {
-        let ip = vm
-            .guest_ip
-            .clone()
-            .context("the VM has not reported an address yet")?;
         let user = vm
             .request
             .cloud_init
@@ -32,7 +28,29 @@ impl VmManager {
             .and_then(|c| c.user.clone())
             .unwrap_or_else(|| DEFAULT_SANDBOX_USER.into());
         let (_, key) = self.sandbox_ssh_key()?;
-        Ok(GuestSsh { ip, user, key })
+        // A guest with no network card is reached through the runner's vsock proxy; the others by address.
+        if matches!(vm.request.network, fluxvm_core::model::NetworkSpec::None) {
+            let sock = vm
+                .vsock_socket
+                .clone()
+                .context("the VM has no vsock socket recorded")?;
+            return Ok(GuestSsh {
+                ip: "vsock".into(),
+                user,
+                key,
+                vsock: Some(sock),
+            });
+        }
+        let ip = vm
+            .guest_ip
+            .clone()
+            .context("the VM has not reported an address yet")?;
+        Ok(GuestSsh {
+            ip,
+            user,
+            key,
+            vsock: None,
+        })
     }
 
     pub(crate) async fn vz_exec(

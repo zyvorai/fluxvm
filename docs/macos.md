@@ -84,7 +84,7 @@ to the VM log, and records the guest's NAT address.
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner
   parses it and `GET /v1/vms/{id}` reports it as `guest_ip`. It also turns off OpenSSH's per-source penalties inside the
   guest so the managing host is never throttled.
-- **Networking:** Virtualization.framework NAT only (`network.mode = "user"` or `"none"`). The guest is reachable at its address
+- **Networking:** Virtualization.framework NAT only (`network.mode = "user"`), or `"none"`, which attaches no network card at all (see [sandboxes](macos-sandboxes.md)). The guest is reachable at its address
   from the Mac. TCP `forwards` listen on `127.0.0.1:<host_port>` (ports 1024 and up) and relay to the guest's address. Guests on this NAT cannot reach
   each other; a forward with `"guests": true` also listens on the NAT gateway address (the Mac, as guests see it) so other guests can use it
   (that is how [stacks](macos-stacks.md) connect services).

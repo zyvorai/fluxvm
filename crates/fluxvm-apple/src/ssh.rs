@@ -23,6 +23,8 @@ pub struct GuestSsh {
     pub ip: String,
     pub user: String,
     pub key: PathBuf,
+    /// Reach sshd over the runner's vsock proxy instead of the network (for guests with no network card).
+    pub vsock: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +64,44 @@ pub fn ensure_key(dir: &Path) -> Result<(String, PathBuf)> {
     Ok((std::fs::read_to_string(&public)?.trim().to_owned(), key))
 }
 
+/// ssh's ProxyCommand for a guest with no network: `fluxctl vsock-proxy <runner socket> 22` asks the runner for the guest's vsock
+/// port 22 (sshd listens there by itself on systemd 256+ images) and relays stdin/stdout. A built-in relay rather than `nc`,
+/// whose buffering and half-close behaviour differ between systems.
+pub fn proxy_command(exe: &Path, sock: &Path) -> String {
+    format!(
+        "{} vsock-proxy {} 22",
+        shell_quote(&exe.to_string_lossy()),
+        shell_quote(&sock.to_string_lossy())
+    )
+}
+
+/// The relay itself: connect to the runner's proxy socket, ask for `port`, then copy both ways until either side closes.
+pub fn vsock_proxy(sock: &Path, port: u32) -> Result<()> {
+    use std::io::{Read, Write};
+    let mut s = std::os::unix::net::UnixStream::connect(sock)
+        .with_context(|| format!("connecting to {}", sock.display()))?;
+    s.write_all(format!("CONNECT {port} QUIET\n").as_bytes())?;
+    let mut to_guest = s.try_clone()?;
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buf = [0u8; 32 * 1024];
+        while let Ok(n) = stdin.read(&mut buf) {
+            if n == 0 || to_guest.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+        let _ = to_guest.shutdown(std::net::Shutdown::Write);
+    });
+    let mut stdout = std::io::stdout().lock();
+    let mut buf = [0u8; 32 * 1024];
+    while let Ok(n) = s.read(&mut buf) {
+        if n == 0 || stdout.write_all(&buf[..n]).is_err() || stdout.flush().is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// `'...'` with embedded quotes escaped, safe to put in a POSIX shell command.
 pub fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -85,8 +125,13 @@ fn command(g: &GuestSsh) -> Command {
             "-o",
             "ConnectTimeout=5",
         ])
-        .arg(format!("{}@{}", g.user, g.ip))
         .kill_on_drop(true);
+    if let Some(sock) = &g.vsock {
+        let exe = std::env::current_exe().unwrap_or_else(|_| "fluxctl".into());
+        c.arg("-o")
+            .arg(format!("ProxyCommand={}", proxy_command(&exe, sock)));
+    }
+    c.arg(format!("{}@{}", g.user, g.ip));
     c
 }
 
@@ -207,6 +252,31 @@ mod tests {
         assert_eq!(shell_quote("/tmp/a b"), "'/tmp/a b'");
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
         assert_eq!(shell_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+    }
+
+    #[test]
+    fn the_vsock_proxy_command_quotes_the_socket_path() {
+        let c = proxy_command(
+            Path::new("/opt/fluxvm bin/fluxctl"),
+            Path::new("/tmp/with space/v.sock"),
+        );
+        assert_eq!(
+            c,
+            "'/opt/fluxvm bin/fluxctl' vsock-proxy '/tmp/with space/v.sock' 22"
+        );
+        let g = GuestSsh {
+            ip: "vsock".into(),
+            user: "u".into(),
+            key: "/k".into(),
+            vsock: Some("/tmp/v.sock".into()),
+        };
+        let args: Vec<String> = command(&g)
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.iter().any(|a| a.starts_with("ProxyCommand=")));
+        assert_eq!(args.last().unwrap(), "u@vsock");
     }
 
     #[test]

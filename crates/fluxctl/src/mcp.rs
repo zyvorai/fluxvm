@@ -700,6 +700,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "template": {"type": "string", "description": "sandbox template name"},
                     "name": {"type": "string"},
                     "ttl_seconds": {"type": "integer", "minimum": 1},
+                    "offline": {"type": "boolean", "description": "macOS only: no network card at all, so the sandbox cannot reach anything; commands and files still work. Slower to start (about 10 s)."},
                 }),
                 &[],
             ),
@@ -708,6 +709,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             |r, args| async move {
                 timed(Duration::from_secs(180), async {
                     let mut body = json!({});
+                    if args.get("offline").and_then(|v| v.as_bool()) == Some(true) {
+                        body["offline"] = json!(true);
+                    }
                     for key in ["template", "name"] {
                         if let Some(v) = str_arg(&args, key) {
                             body[key] = json!(v);

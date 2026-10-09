@@ -37,6 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+fluxvm-apple = { path = "../fluxvm-apple" }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "alloc"] }
 
 [dev-dependencies]

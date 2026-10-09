@@ -122,6 +122,14 @@ WIP1="$(curl -fs "$B/$WID1" | python3 -c 'import sys,json;print(json.load(sys.st
 curl -fs -X POST "$SB/$WID1/process" -H 'Content-Type: application/json' -d '{"command":"echo one > /tmp/mark"}' >/dev/null
 OTHER="$(curl -fs -X POST "$SB/$WID2/process" -H 'Content-Type: application/json' -d '{"command":"cat /tmp/mark 2>/dev/null || echo none"}')"
 python3 -c 'import sys,json;assert json.loads(sys.argv[1])["stdout"]=="none\n",sys.argv[1]' "$OTHER" && ok "sandbox: warm sandboxes are isolated from each other" || bad "warm sandboxes share state: $OTHER"
+# An offline sandbox has no network card at all: nothing to route through, yet commands and files work (over vsock).
+OFF="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"offline":true,"ttl_seconds":300}')" || bad "offline sandbox create failed"
+OFFID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$OFF")"
+oexec() { curl -fs -X POST "$SB/$OFFID/process" -H 'Content-Type: application/json' -d "{\"command\":\"$1\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["stdout"],end="")'; }
+[[ "$(oexec 'ls /sys/class/net')" == lo ]] && ok "offline sandbox: the guest has no network interface but lo" || bad "offline interfaces: $(oexec 'ls /sys/class/net')"
+[[ "$(oexec 'curl -s -m 4 -o /dev/null -w %{http_code} https://example.com; echo')" == 000 ]] && ok "offline sandbox: the internet is unreachable" || bad "offline sandbox reached the network"
+curl -fs -X POST "$SB/$OFFID/fs/write" -H 'Content-Type: application/json' -d "{\"path\":\"/tmp/off.txt\",\"content_base64\":\"$(printf 'off\n' | base64)\"}" >/dev/null && ok "offline sandbox: exec and files work over vsock ($(oexec 'whoami'))" || bad "offline sandbox fs write"
+[[ -z "$(curl -fs "$B/$OFFID" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("guest_ip") or "")')" ]] && ok "offline sandbox: no address was ever assigned" || bad "offline sandbox got an address"
 # The pool refills in the background after the two claims; let it finish so it cannot start a VM while we clean up.
 for _ in $(seq 1 40); do
   [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(sum(1 for v in d if v["name"].startswith("sandbox-slot-") and v["status"]=="stopped"))')" -ge 2 ]] && break; sleep 3

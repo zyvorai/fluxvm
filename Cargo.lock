@@ -2176,6 +2176,7 @@ dependencies = [
  "clap_complete",
  "fluxvm-agent",
  "fluxvm-api",
+ "fluxvm-apple",
  "fluxvm-core",
  "fluxvm-guest-protocol",
  "fluxvm-image",

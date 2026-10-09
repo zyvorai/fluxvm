@@ -444,6 +444,14 @@ enum Command {
         #[arg(long)]
         stack: Option<String>,
     },
+    /// Internal: relay stdin/stdout to a guest's vsock port through a runner's proxy socket. Used as ssh's ProxyCommand for
+    /// guests with no network card.
+    #[command(hide = true)]
+    VsockProxy {
+        socket: PathBuf,
+        #[arg(default_value_t = 22)]
+        port: u32,
+    },
     /// Boot a throwaway VM, SSH into it, and delete it when the session ends (`--keep` to retain it).
     /// `fluxctl run` on a Mac uses the built-in `debian-13`; elsewhere pass an image.
     /// Everything after `--` runs in the guest instead of a shell.
@@ -2813,6 +2821,9 @@ async fn main() -> Result<()> {
         }
         return Ok(());
     }
+    if let Command::VsockProxy { socket, port } = &cli.command {
+        return fluxvm_apple::ssh::vsock_proxy(socket, *port);
+    }
     let format = cli.output;
     if let Command::Mcp {
         command: McpCommand::Serve { allow_write },
@@ -2909,6 +2920,7 @@ async fn main() -> Result<()> {
         | Command::Readyz
         | Command::Metrics { .. }
         | Command::Completions { .. }
+        | Command::VsockProxy { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
