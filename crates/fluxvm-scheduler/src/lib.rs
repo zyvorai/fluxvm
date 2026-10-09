@@ -5180,6 +5180,18 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn auto_resolves_to_the_apple_backend_on_macos() {
+        let r = req(BackendKind::Auto, None, None);
+        assert_eq!(resolve_backend(&r, &Config::default()), BackendKind::Vz);
+        // An explicit backend is never overridden.
+        let q = req(BackendKind::Qemu, None, None);
+        assert_eq!(resolve_backend(&q, &Config::default()), BackendKind::Qemu);
+    }
+
+    // The Linux selection order; on macOS `auto` always resolves to the Apple backend (see the test below).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn auto_prefers_firecracker_when_request_supplies_a_kernel() {
         let cfg = Config::default();
@@ -5187,6 +5199,8 @@ mod tests {
         assert_eq!(resolve_backend(&r, &cfg), BackendKind::Firecracker);
     }
 
+    // The Linux selection order; on macOS `auto` always resolves to the Apple backend (see the test below).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn auto_prefers_firecracker_when_config_has_a_default_kernel() {
         let mut cfg = Config::default();
@@ -5195,6 +5209,8 @@ mod tests {
         assert_eq!(resolve_backend(&r, &cfg), BackendKind::Firecracker);
     }
 
+    // The Linux selection order; on macOS `auto` always resolves to the Apple backend (see the test below).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn auto_uses_opted_in_native_kvm_for_raw_linux() {
         let mut cfg = Config::default();
@@ -5336,6 +5352,8 @@ mod tests {
         assert!(validate_cpu_template(&r, &cfg).is_err());
     }
 
+    // The Linux selection order; on macOS `auto` always resolves to the Apple backend (see the test below).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn auto_falls_back_to_cloud_hypervisor_when_only_firmware_is_available() {
         let cfg = Config::default();
@@ -5343,6 +5361,8 @@ mod tests {
         assert_eq!(resolve_backend(&r, &cfg), BackendKind::CloudHypervisor);
     }
 
+    // The Linux selection order; on macOS `auto` always resolves to the Apple backend (see the test below).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn auto_falls_back_to_cloud_hypervisor_when_config_has_default_firmware() {
         let mut cfg = Config::default();
@@ -5351,6 +5371,8 @@ mod tests {
         assert_eq!(resolve_backend(&r, &cfg), BackendKind::CloudHypervisor);
     }
 
+    // The Linux selection order; on macOS `auto` always resolves to the Apple backend (see the test below).
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn auto_falls_back_to_qemu_with_nothing_configured() {
         let cfg = Config::default();
