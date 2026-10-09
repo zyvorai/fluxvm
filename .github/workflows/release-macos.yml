@@ -1,0 +1,60 @@
+name: Release (macOS package)
+
+# Builds the Apple-silicon package (fluxctl + the signed Virtualization.framework runner) for a version tag and attaches it,
+# with its checksum, to that tag's GitHub release (created as a DRAFT if it does not exist yet, so nothing is published
+# until someone publishes it). The Homebrew formula in packaging/homebrew is then updated with scripts/update-homebrew-formula.sh.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to package (builds and uploads a workflow artifact only if empty)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: fluxvm
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      - uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+      - run: brew install hivex
+      - name: Package
+        id: pkg
+        working-directory: fluxvm
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          scripts/package-macos.sh --version "${TAG#v}"
+          echo "file=$(ls target/package/*.tar.gz)" >> "$GITHUB_OUTPUT"
+      - name: Smoke test the package
+        working-directory: fluxvm
+        run: |
+          D="$(mktemp -d)"; tar -xzf "${{ steps.pkg.outputs.file }}" -C "$D"
+          "$D"/fluxvm-*/bin/fluxctl --version
+          codesign -d --entitlements - "$D"/fluxvm-*/bin/fluxvm-vz-runner 2>&1 | grep com.apple.security.virtualization
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fluxvm-macos-arm64
+          path: |
+            fluxvm/target/package/*.tar.gz
+            fluxvm/target/package/*.sha256
+      - name: Attach to the release (draft if new)
+        if: github.event_name == 'push' || github.event.inputs.tag != ''
+        working-directory: fluxvm
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --draft --title "$TAG" --notes "macOS (Apple silicon) package. Install with Homebrew once the formula is updated for $TAG."
+          gh release upload "$TAG" target/package/*.tar.gz target/package/*.sha256 --clobber
