@@ -242,7 +242,16 @@ fn procbox_effects(spec: &ProcboxSpec) -> (EgressMode, Vec<String>) {
 }
 
 fn vm_effects(vm: &VmRecord, allow_domains: &[String]) -> (EgressMode, Vec<String>) {
-    if matches!(vm.request.network, NetworkSpec::None) {
+    let proxied = vm
+        .request
+        .apple
+        .as_ref()
+        .map(|a| a.egress_allow.clone())
+        .unwrap_or_default();
+    if !proxied.is_empty() {
+        // A vz sandbox with a card-less, proxied network: only these hosts, enforced by the host.
+        (EgressMode::AllowListed, proxied)
+    } else if matches!(vm.request.network, NetworkSpec::None) {
         (EgressMode::Blocked, Vec::new())
     } else if !allow_domains.is_empty() {
         (EgressMode::AllowListed, allow_domains.to_vec())
@@ -729,7 +738,9 @@ impl VmManager {
                     "paths is required for a VM sandbox speculation: the guest root is too large to scan"
                 ),
             };
-            if !vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
+            if vm.backend != fluxvm_core::model::BackendKind::Vz
+                && !vm.request.agent.as_ref().is_some_and(|a| a.enabled)
+            {
                 bail!("speculation needs the guest agent, and this sandbox was created without it");
             }
             let effects = vm_effects(&vm, &self.cfg.sandbox.egress_allow_domains);
