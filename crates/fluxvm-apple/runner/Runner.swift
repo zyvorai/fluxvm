@@ -40,6 +40,7 @@ struct Config: Decodable {
     let window: Bool?
     let shares: [Share]?
     let forwards: [Forward]?
+    let network_none: Bool?         // attach no network device at all
     let restore_state: String?      // resume from a state file written by `save` instead of cold-booting
 }
 
@@ -170,7 +171,8 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         let net = VZVirtioNetworkDeviceConfiguration()
         net.attachment = VZNATNetworkDeviceAttachment()
         if let m = cfg.mac, let mac = VZMACAddress(string: m) { net.macAddress = mac }
-        c.networkDevices = [net]
+        // `network: none` means no network card, so the guest has nothing to route through.
+        c.networkDevices = cfg.network_none == true ? [] : [net]
         if cfg.guest_os == "linux" {
             var fsDevices: [VZDirectorySharingDeviceConfiguration] = []
             for share in cfg.shares ?? [] {
@@ -490,7 +492,10 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         var byte: UInt8 = 0
         while read(c, &byte, 1) == 1 { if byte == 10 { break }; line.append(byte); if line.count > 64 { close(c); return } }
         let parts = (String(data: line, encoding: .utf8) ?? "").split(separator: " ")
-        guard parts.count == 2, parts[0] == "CONNECT", let port = UInt32(parts[1]) else { close(c); return }
+        // `CONNECT <port>` answers `OK <port>`; `CONNECT <port> QUIET` does not, for clients (ssh's ProxyCommand) that
+        // need the stream to start with the guest's own bytes.
+        guard parts.count == 2 || (parts.count == 3 && parts[2] == "QUIET"), parts[0] == "CONNECT", let port = UInt32(parts[1]) else { close(c); return }
+        let quiet = parts.count == 3
         DispatchQueue.main.async {
             guard let device = self.vm?.socketDevices.first as? VZVirtioSocketDevice else { close(c); return }
             device.connect(toPort: port) { result in
@@ -499,7 +504,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 case .success(let conn):
                     self.vsockConnections.append(conn)
                     let g = conn.fileDescriptor
-                    _ = "OK \(port)\n".withCString { write(c, $0, strlen($0)) }
+                    if !quiet { _ = "OK \(port)\n".withCString { write(c, $0, strlen($0)) } }
                     pump(c, g); pump(g, c)
                 }
             }

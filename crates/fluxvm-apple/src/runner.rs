@@ -33,6 +33,8 @@ pub struct RunnerConfig {
     pub shares: Vec<ShareConfig>,
     /// Host `127.0.0.1:host_port` listeners that relay TCP to the guest's NAT address.
     pub forwards: Vec<ForwardConfig>,
+    /// Attach no network device (`network.mode = "none"`).
+    pub network_none: bool,
     /// A state file written by a snapshot; the runner resumes from it instead of cold-booting.
     pub restore_state: Option<PathBuf>,
 }
@@ -71,10 +73,14 @@ impl RunnerConfig {
             mac: stable_mac(&ctx.workspace)?,
             control_socket: control_socket_path(&id8)?,
             serial_log: ctx.log_path.clone(),
-            vsock_socket: ctx
-                .vsock_socket
-                .clone()
-                .map(|p| short_socket(&id8, "vsock", p)),
+            // Always present: the daemon reaches an offline guest's sshd through it (the guest listens on vsock port 22).
+            vsock_socket: Some(short_socket(
+                &id8,
+                "vsock",
+                ctx.vsock_socket
+                    .clone()
+                    .unwrap_or_else(|| ctx.workspace.join("vsock.sock")),
+            )),
             ip_file: ip_file(&ctx.workspace),
             window: apple.window,
             restore_state: req
@@ -91,6 +97,7 @@ impl RunnerConfig {
                     read_only: f.read_only,
                 })
                 .collect(),
+            network_none: matches!(req.network, NetworkSpec::None),
             forwards: match &req.network {
                 NetworkSpec::User { forwards } => forwards
                     .iter()

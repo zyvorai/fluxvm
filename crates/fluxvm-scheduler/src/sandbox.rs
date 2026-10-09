@@ -59,6 +59,10 @@ pub struct SandboxCreateRequest {
     /// appear in the returned record as `request.vfio_devices`. Absent or 0 means none.
     #[serde(default)]
     pub gpus: Option<u8>,
+    /// vz only: give the sandbox no network card at all, so it cannot reach anything. Commands and files still work (over
+    /// vsock). Cold-boots (the warm pool is for sandboxes with a network).
+    #[serde(default)]
+    pub offline: bool,
 }
 
 pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
@@ -236,8 +240,10 @@ impl VmManager {
             && req.vcpus.is_none()
             && req.memory_mib.is_none()
             && gpus == 0
+            && !req.offline
             && token_tenant.is_none();
         let (claim_name, claim_ttl) = (req.name.clone(), req.ttl_seconds);
+        let offline = req.offline;
         let from_template = req.template.is_some();
         let mut create = if let Some(template) = &req.template {
             self.load_template_spec(template).await?
@@ -278,6 +284,12 @@ impl VmManager {
         }
         if let Some(ttl) = req.ttl_seconds {
             create.ttl_seconds = Some(ttl);
+        }
+        if offline {
+            if create.backend != BackendKind::Vz {
+                bail!("offline sandboxes are only supported on the vz backend (macOS)");
+            }
+            create.network = fluxvm_core::model::NetworkSpec::None;
         }
         if create.backend == BackendKind::Vz {
             self.prepare_vz_sandbox(&mut create)?;
@@ -385,7 +397,10 @@ impl VmManager {
         let started = std::time::Instant::now();
         let guest = loop {
             let vm = self.get(id).await?;
-            if vm.guest_ip.is_some() {
+            // An offline guest never reports an address; it is reached over vsock as soon as it has booted.
+            if vm.guest_ip.is_some()
+                || matches!(vm.request.network, fluxvm_core::model::NetworkSpec::None)
+            {
                 break self.vz_guest(&vm)?;
             }
             if started.elapsed() > timeout {
