@@ -477,21 +477,17 @@ pub async fn resolve_with_provenance(cfg: &Config, image_ref: &Path) -> Result<R
         signed_by: None,
         sha256: None,
     };
-    let Some(catalog_path) = &cfg.catalog.path else {
-        return Ok(passthrough());
-    };
     let Some(ref_str) = image_ref.to_str() else {
         return Ok(passthrough());
     };
+    let Some(catalog_path) = cfg.catalog.path.as_ref().filter(|p| p.exists()) else {
+        return builtin_or(cfg, image_ref, ref_str, passthrough()).await;
+    };
     // A configured-but-not-yet-created catalog matches nothing — every
     // image_ref passes through unchanged, same as catalog.path being unset.
-    if !catalog_path.exists() {
-        return Ok(passthrough());
-    }
-
     let catalog = load_catalog(catalog_path)?;
     let Some(entry) = catalog.iter().find(|e| e.name == ref_str) else {
-        return Ok(passthrough());
+        return builtin_or(cfg, image_ref, ref_str, passthrough()).await;
     };
 
     let mut signed_by = None;
@@ -519,6 +515,23 @@ pub async fn resolve_with_provenance(cfg: &Config, image_ref: &Path) -> Result<R
         signed_by,
         sha256: Some(entry.sha256.clone()),
     })
+}
+
+/// A bare built-in name (`debian-13`) that is not an existing file resolves to the downloaded, verified image;
+/// anything else is returned as `fallback`. Never marked `from_catalog`, so catalog-only policy still rejects it.
+async fn builtin_or(
+    cfg: &Config,
+    image_ref: &Path,
+    ref_str: &str,
+    fallback: ResolvedImage,
+) -> Result<ResolvedImage> {
+    match crate::builtin::find(ref_str) {
+        Some(img) if cfg!(target_os = "macos") && !image_ref.exists() => Ok(ResolvedImage {
+            path: crate::builtin::ensure(cfg, img).await?,
+            ..fallback
+        }),
+        _ => Ok(fallback),
+    }
 }
 
 /// Shell out to `cosign verify-blob` when `cosign_identities` is configured.

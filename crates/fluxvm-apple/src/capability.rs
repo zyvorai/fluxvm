@@ -33,7 +33,7 @@ pub const CAPABILITIES: &[Capability] = &[
     yes("memory_mib", "checked against the host"),
     yes(
         "disk (raw image, APFS clone)",
-        "qcow2 must be converted to raw first",
+        "qcow2 is converted to raw while cloning (needs qemu-img); named images: debian-13, debian-12, ubuntu-24.04",
     ),
     yes("cloud_init", "NoCloud seed built with hdiutil"),
     yes(

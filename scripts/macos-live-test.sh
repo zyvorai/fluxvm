@@ -3,7 +3,7 @@
 # Live test of the macOS (Apple Virtualization.framework) backend: starts the daemon, creates a real ARM64 Linux VM
 # through the REST API, SSHes into it, pauses/resumes, stops and restarts it, then deletes it.
 #   scripts/macos-live-test.sh [path/to/arm64-linux-image.raw]
-# Needs Apple silicon, the Xcode command line tools and Rust. Without an image argument it downloads Debian 13 (~300 MB).
+# Needs Apple silicon, the Xcode command line tools and Rust. Without an image argument it asks FluxVM for the built-in `debian-13`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo "Apple silicon macOS only" >&2; exit 2; }
@@ -13,12 +13,8 @@ trap cleanup EXIT
 ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; exit 1; }
 
 cargo build -p fluxctl -j 4 2>&1 | tail -1
-IMG="${1:-}"
-if [[ -z "$IMG" ]]; then
-  echo "downloading Debian 13 ARM64 (generic cloud image)…"
-  curl -fsSL -o "$T/debian.tar.xz" https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-arm64.tar.xz
-  mkdir "$T/img" && tar -xf "$T/debian.tar.xz" -C "$T/img" && IMG="$T/img/disk.raw"
-fi
+# Default: the built-in name `debian-13`, which FluxVM downloads and checksum-verifies itself (~400 MB, cached).
+IMG="${1:-debian-13}"
 FWD="${FLUXVM_LIVE_FWD_PORT:-22722}"; mkdir "$T/share" && echo "from-the-mac" > "$T/share/marker.txt"
 ssh-keygen -q -t ed25519 -N "" -f "$T/key" && PUB="$(cat "$T/key.pub")"
 cat > "$T/fluxvm.toml" <<EOT

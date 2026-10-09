@@ -25,7 +25,7 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 xcode-select --install          # compiler for the Swift runner
 brew install hivex              # linked by guestkit's registry support
 cargo build -p fluxctl          # also builds and ad-hoc signs target/*/build/fluxvm-apple-*/out/fluxvm-vz-runner
-./scripts/macos-live-test.sh    # boots a real Debian VM through the API (downloads ~300 MB)
+./scripts/macos-live-test.sh    # boots a real Debian VM through the API (downloads the built-in debian-13)
 ```
 
 Run the daemon yourself:
@@ -49,7 +49,11 @@ The daemon never links Virtualization.framework. `fluxvm-apple` supervises one s
 `status`, `pause`, `resume`, `shutdown`, `stop`). The runner holds the `VZVirtualMachine`, writes the guest's serial console
 to the VM log, and records the guest's NAT address.
 
-- **Disk:** raw images only (APFS `cp -c` clone; qcow2 is refused with a conversion hint).
+- **Disk:** raw images are cloned instantly (APFS `cp -c`). A qcow2 image is converted to raw while cloning, which needs
+  `qemu-img` (`brew install qemu`).
+- **Named images:** `"image": "debian-13"` (also `debian-12`, `ubuntu-24.04`) downloads the ARM64 cloud image over HTTPS, checks it against
+  the vendor's published SHA file, and caches it under `<state_dir>/images`. Ubuntu ships qcow2, so it is converted to raw once. A
+  file of the same name, or a catalog entry, wins. Named images are not catalog images, so `policy.require_catalog_names` rejects them.
 - **Cloud-init:** a NoCloud ISO built with `hdiutil`, with a MAC-based DHCP identity so the address stays stable.
 - **Guest address:** macOS offers no usable DHCP-lease or ARP view to a spawned process, so FluxVM adds a small systemd
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner
