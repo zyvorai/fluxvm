@@ -14,8 +14,11 @@ mod runner;
 pub use capability::{
     CAPABILITIES, Capability, validate_request, with_guest_reporting, with_shared_folder_mounts,
 };
-pub use control::{ControlReply, call as control_call};
-pub use runner::{ForwardConfig, RunnerConfig, ShareConfig, find_runner, ip_file, read_guest_ip};
+pub use control::{ControlReply, call as control_call, call_with as control_call_with};
+pub use runner::{
+    ForwardConfig, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig, clone_file, find_runner,
+    ip_file, read_guest_ip, snapshot_dir,
+};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -43,7 +46,14 @@ impl VmBackend for AppleBackend {
         req: &CreateVmRequest,
         ctx: &LaunchContext,
     ) -> Result<LaunchResult> {
-        validate_request(req)?;
+        // `loadvm_tag` is how the scheduler asks for a restore; creation still rejects it (see `validate_request`).
+        validate_request(&CreateVmRequest {
+            loadvm_tag: None,
+            ..req.clone()
+        })?;
+        if let Some(tag) = &req.loadvm_tag {
+            restore_files(&ctx.workspace, &ctx.disk, tag)?;
+        }
         let guest = req.apple.as_ref().map(|a| a.guest_os).unwrap_or_default();
         if guest == AppleGuest::Macos && !ctx.workspace.join("hardware.bin").exists() {
             bail!(
@@ -54,7 +64,10 @@ impl VmBackend for AppleBackend {
         let conf = RunnerConfig::for_launch(req, ctx)?;
         let conf_path = conf.write(&ctx.workspace)?;
         // A restarted VM must not report the previous boot's address.
-        let _ = std::fs::remove_file(ip_file(&ctx.workspace));
+        // (A restore keeps it: the restored guest does not announce its address again.)
+        if req.loadvm_tag.is_none() {
+            let _ = std::fs::remove_file(ip_file(&ctx.workspace));
+        }
         let log = runner::open_runner_log(&ctx.workspace)?;
         let mut cmd = tokio::process::Command::new(&runner);
         cmd.args(["run", "--config"]).arg(&conf_path);
@@ -133,5 +146,101 @@ async fn send(vm: &VmRecord, cmd: &str) -> Result<()> {
             "runner refused `{cmd}`: {}",
             reply.error().unwrap_or("unknown error")
         )
+    }
+}
+
+/// Puts the disk and EFI variables from snapshot `tag` back in place, ahead of resuming the saved state.
+fn restore_files(workspace: &std::path::Path, disk: &std::path::Path, tag: &str) -> Result<()> {
+    let dir = snapshot_dir(workspace, tag);
+    if !dir.join(STATE_FILE).is_file() {
+        bail!("snapshot {tag:?} has no saved state at {}", dir.display());
+    }
+    for name in SNAPSHOT_FILES {
+        let src = dir.join(name);
+        let dst = if *name == "disk.raw" {
+            disk.to_path_buf()
+        } else {
+            workspace.join(name)
+        };
+        if src.is_file() {
+            clone_file(&src, &dst)?;
+        }
+    }
+    Ok(())
+}
+
+/// Saves the running guest's memory and device state plus a matching copy of its disk under
+/// `<workspace>/snapshots/<tag>/`. The guest is paused while both are taken, then continues if it was running.
+pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
+    let sock = vm
+        .control_socket
+        .as_deref()
+        .context("VM has no runner control socket recorded")?;
+    let dir = snapshot_dir(&vm.workspace, tag);
+    if dir.exists() {
+        bail!("snapshot {tag:?} already exists for this VM");
+    }
+    std::fs::create_dir_all(&dir)?;
+    let reply = control_call_with(
+        sock,
+        serde_json::json!({"cmd": "save", "path": dir.join(STATE_FILE)}),
+    )
+    .await
+    .context("runner `save`");
+    let was_running = reply.as_ref().is_ok_and(|r| r.ok() && r.was_running());
+    let outcome: Result<()> = (|| {
+        let reply = reply?;
+        if !reply.ok() {
+            bail!(
+                "the runner could not save the VM: {}",
+                reply.error().unwrap_or("unknown error")
+            );
+        }
+        // The guest is paused, so these files match the saved memory exactly.
+        clone_file(&vm.disk, &dir.join("disk.raw"))?;
+        let efi = vm.workspace.join("efi.bin");
+        if efi.is_file() {
+            clone_file(&efi, &dir.join("efi.bin"))?;
+        }
+        Ok(())
+    })();
+    if was_running {
+        // Even after a failure, the guest must not be left paused.
+        let _ = send(vm, "resume").await;
+    }
+    if outcome.is_err() {
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn restore_puts_the_snapshot_disk_and_efi_back() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = snapshot_dir(ws.path(), "s1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(STATE_FILE), b"state").unwrap();
+        std::fs::write(dir.join("disk.raw"), b"disk at snapshot").unwrap();
+        std::fs::write(dir.join("efi.bin"), b"efi at snapshot").unwrap();
+        let disk = ws.path().join("disk.raw");
+        std::fs::write(&disk, b"disk now").unwrap();
+        std::fs::write(ws.path().join("efi.bin"), b"efi now").unwrap();
+        restore_files(ws.path(), &disk, "s1").unwrap();
+        assert_eq!(std::fs::read(&disk).unwrap(), b"disk at snapshot");
+        assert_eq!(
+            std::fs::read(ws.path().join("efi.bin")).unwrap(),
+            b"efi at snapshot"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_a_tag_without_saved_state() {
+        let ws = tempfile::tempdir().unwrap();
+        let err = restore_files(ws.path(), &ws.path().join("disk.raw"), "nope").unwrap_err();
+        assert!(err.to_string().contains("no saved state"), "{err}");
     }
 }

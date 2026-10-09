@@ -25,16 +25,26 @@ impl ControlReply {
     pub fn error(&self) -> Option<&str> {
         self.0.get("error").and_then(|v| v.as_str())
     }
+    pub fn was_running(&self) -> bool {
+        self.0
+            .get("was_running")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
 }
 
 /// Sends `{"cmd": cmd}` and reads the one-line JSON reply.
 pub async fn call(socket: &Path, cmd: &str) -> Result<ControlReply> {
-    tokio::time::timeout(Duration::from_secs(35), async {
+    call_with(socket, serde_json::json!({ "cmd": cmd })).await
+}
+
+/// Sends an arbitrary one-line JSON request (for commands with arguments, like `save`).
+pub async fn call_with(socket: &Path, request: serde_json::Value) -> Result<ControlReply> {
+    tokio::time::timeout(Duration::from_secs(120), async {
         let mut s = UnixStream::connect(socket)
             .await
             .with_context(|| format!("connecting to {}", socket.display()))?;
-        s.write_all(format!("{{\"cmd\":\"{cmd}\"}}\n").as_bytes())
-            .await?;
+        s.write_all(format!("{request}\n").as_bytes()).await?;
         let mut line = String::new();
         BufReader::new(s).read_line(&mut line).await?;
         Ok(ControlReply(

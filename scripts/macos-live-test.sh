@@ -43,6 +43,24 @@ for _ in $(seq 1 10); do [[ "$(sshc "$IP" 'cat /mnt/share/marker.txt' 2>/dev/nul
 [[ "$(sshc "$IP" 'cat /mnt/share/marker.txt' 2>/dev/null)" == from-the-mac ]] && ok "shared folder: the guest reads a file from the Mac" || bad "shared folder not mounted"
 sshc "$IP" 'echo from-the-guest > /mnt/share/back.txt'; [[ "$(cat "$T/share/back.txt" 2>/dev/null)" == from-the-guest ]] && ok "shared folder: the guest's write lands on the Mac" || bad "write-back"
 
+# Snapshot the running guest, change it, then stop and restore: memory (a running process) and disk both roll back.
+# (Restoring needs an unlocked login session: Virtualization.framework's saved-state key is not usable on a locked Mac.)
+sshc "$IP" 'echo before > /var/tmp/marker; nohup sh -c "while :; do date +%s >> /var/tmp/tick; sleep 1; done" >/dev/null 2>&1 &' || bad "could not set up the snapshot test"
+SNAP="$(curl -s -X POST "$V/snapshot" -H 'Content-Type: application/json' -d '{"tag":"s1"}')"
+echo "$SNAP" | grep -q '"ok":true' && ok "snapshot of the running VM" || bad "snapshot: $SNAP"
+[[ "$(field status)" == running ]] && ok "the VM keeps running after a snapshot" || bad "status after snapshot: $(field status)"
+sshc "$IP" 'echo after > /var/tmp/marker' && sleep 2
+curl -fs -X POST "$V/stop" >/dev/null; sleep 6
+RESTORE="$(curl -s -X POST "$V/restore" -H 'Content-Type: application/json' -d '{"tag":"s1"}')"
+[[ "$(field status)" == running ]] && ok "restore: the VM is running again" || bad "restore: $RESTORE"
+IP="$(ip_wait)"; [[ -n "$IP" ]] && ok "restore: the guest address is reported again" || bad "no guest_ip after restore"
+for _ in $(seq 1 20); do sshc "$IP" true >/dev/null 2>&1 && break; sleep 2; done
+[[ "$(sshc "$IP" 'cat /var/tmp/marker')" == before ]] && ok "restore: the disk is back as it was at the snapshot" || bad "restore: marker is $(sshc "$IP" 'cat /var/tmp/marker')"
+T1="$(sshc "$IP" 'tail -1 /var/tmp/tick')"; sleep 3; T2="$(sshc "$IP" 'tail -1 /var/tmp/tick')"
+[[ -n "$T1" && "$T2" -gt "$T1" ]] && ok "restore: the process that was running keeps running (memory restored, no reboot)" || bad "tick did not advance: $T1 -> $T2"
+sshc "$IP" 'echo shared-after-restore > /mnt/share/after.txt'; [[ "$(cat "$T/share/after.txt" 2>/dev/null)" == shared-after-restore ]] && ok "restore: the shared folder still works" || bad "shared folder after restore"
+curl -fs "$V/snapshots" | grep -q '"s1"' && ok "snapshot listed" || bad "snapshot not listed"
+
 curl -fs -X POST "$V/pause" >/dev/null && [[ "$(field status)" == paused ]] && ok "pause" || bad "pause"
 curl -fs -X POST "$V/resume" >/dev/null && [[ "$(field status)" == running ]] && ok "resume" || bad "resume"
 curl -fs -X POST "$V/stop" >/dev/null; sleep 6; [[ "$(field status)" == stopped ]] && ok "stop" || bad "stop: $(field status)"

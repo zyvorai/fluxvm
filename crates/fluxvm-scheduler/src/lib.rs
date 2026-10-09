@@ -382,6 +382,7 @@ fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
         BackendKind::Qemu
         | BackendKind::CloudHypervisor
         | BackendKind::Firecracker
+        | BackendKind::Vz
         | BackendKind::FluxVm => None,
         other => Some(format!("snapshot not supported for backend {other:?}")),
     }
@@ -3153,6 +3154,7 @@ impl VmManager {
         }
         match vm.backend {
             BackendKind::Qemu => fluxvm_qemu::snapshot_save(&self.cfg, &vm, tag).await,
+            BackendKind::Vz => fluxvm_apple::snapshot_save(&vm, tag).await,
             BackendKind::CloudHypervisor => {
                 let dest = vm.workspace.join("snapshots").join(tag);
                 tokio::fs::create_dir_all(&dest).await?;

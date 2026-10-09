@@ -78,15 +78,33 @@ to the VM log, and records the guest's NAT address.
 - **Signing:** the runner is ad-hoc signed with `com.apple.security.virtualization` by `build.rs`.
   Set `FLUXVM_VZ_RUNNER` to use another binary; `FLUXVM_SKIP_VZ_RUNNER=1` skips building it.
 
+## Snapshots
+
+`POST /v1/vms/{id}/snapshot {"tag": "s1"}` saves a running (or paused) guest: the runner pauses it, writes its memory and device
+state with Virtualization.framework (`saveMachineStateTo`), FluxVM clones the disk and EFI variables beside it with APFS
+`cp -c` while it is still paused, and the guest continues. Everything lives in `<vm workspace>/snapshots/<tag>/`.
+`GET /v1/vms/{id}/snapshots` lists them and `DELETE /v1/vms/{id}/snapshots/{tag}` removes one.
+
+`POST /v1/vms/{id}/restore {"tag": "s1"}` on a **stopped** VM puts the cloned disk back and resumes the saved state: processes that
+were running keep running, nothing reboots, and the guest address is reported again. A running VM must be stopped first.
+
+- Needs macOS 14 or later, Apple silicon, and Linux guests.
+- **Restoring needs an unlocked login session.** Virtualization.framework encrypts the saved state with a Secure Enclave key that is
+  unusable while the Mac's screen is locked: restore then fails with "permission denied". Saving still works. Keep a headless Mac
+  mini logged in (auto-login) if you restore on it.
+- A saved state is only valid for the configuration it was saved with, and each VM now keeps one machine identifier
+  (`generic-id.bin`) so that holds across launches.
+- Whether a restore survives a FluxVM runner upgrade has not been tested.
+
 ## Capability matrix
 
 | Supported | Not supported |
 | --- | --- |
 | vCPUs, memory, raw disk, cloud-init | tap / macvtap / netns / eBPF networking, port forwards |
 | NAT networking, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
-| shared folders (virtiofs), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
+| shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug, data disks, cdroms |
-| macOS guests via IPSW (runner support only) | live migration, running-VM snapshots, direct kernel boot |
+| macOS guests via IPSW (runner support only) | live migration, in-place restore of a running VM, direct kernel boot |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
