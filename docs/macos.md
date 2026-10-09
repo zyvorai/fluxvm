@@ -25,8 +25,20 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 xcode-select --install          # compiler for the Swift runner
 brew install hivex              # linked by guestkit's registry support
 cargo build -p fluxctl          # also builds and ad-hoc signs target/*/build/fluxvm-apple-*/out/fluxvm-vz-runner
-./scripts/macos-live-test.sh    # boots a real Debian VM through the API (downloads the built-in debian-13)
+./scripts/macos-live-test.sh    # boots a real Debian VM through the API (downloads the built-in debian-13, about 300 MB)
 ```
+
+Or skip the API: `fluxctl run` boots a throwaway VM, SSHes in, and deletes it when you leave.
+
+```bash
+fluxctl run                                  # built-in debian-13, a shell as your own user name
+fluxctl run -v ~/src:/mnt/src -p 8080:80     # share a folder, forward 127.0.0.1:8080 to guest port 80
+fluxctl run ubuntu-24.04 -- 'uname -a'       # run one command; its exit code is yours
+fluxctl run --keep --name dev                # keep the VM; `fluxctl ssh dev` or `fluxctl delete dev` later
+```
+
+It uses your first `~/.ssh/id_*.pub` key (or creates `~/.ssh/fluxvm_ed25519`). A run takes about 90 s on an M4, mostly the
+guest's first boot (cloud-init); the image itself is cached after the first download.
 
 Run the daemon yourself:
 

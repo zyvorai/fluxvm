@@ -30,7 +30,18 @@ pub struct BuiltinImage {
     file: &'static str,
     sums_file: &'static str,
     sum: Sum,
-    qcow2: bool,
+    /// How the downloaded file becomes a raw disk.
+    kind: Kind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Already a raw disk image.
+    Raw,
+    /// qcow2, converted once with `qemu-img`.
+    Qcow2,
+    /// A tarball holding `disk.raw` (Debian's cloud images; about a tenth of the raw download).
+    TarDiskRaw,
 }
 
 /// ARM64 images, the only guests Virtualization.framework runs on Apple silicon.
@@ -38,18 +49,18 @@ pub const BUILTIN_IMAGES: &[BuiltinImage] = &[
     BuiltinImage {
         name: "debian-13",
         base_url: "https://cloud.debian.org/images/cloud/trixie/latest",
-        file: "debian-13-generic-arm64.raw",
+        file: "debian-13-generic-arm64.tar.xz",
         sums_file: "SHA512SUMS",
         sum: Sum::Sha512,
-        qcow2: false,
+        kind: Kind::TarDiskRaw,
     },
     BuiltinImage {
         name: "debian-12",
         base_url: "https://cloud.debian.org/images/cloud/bookworm/latest",
-        file: "debian-12-generic-arm64.raw",
+        file: "debian-12-generic-arm64.tar.xz",
         sums_file: "SHA512SUMS",
         sum: Sum::Sha512,
-        qcow2: false,
+        kind: Kind::TarDiskRaw,
     },
     BuiltinImage {
         name: "ubuntu-24.04",
@@ -57,7 +68,7 @@ pub const BUILTIN_IMAGES: &[BuiltinImage] = &[
         file: "ubuntu-24.04-server-cloudimg-arm64.img",
         sums_file: "SHA256SUMS",
         sum: Sum::Sha256,
-        qcow2: true,
+        kind: Kind::Qcow2,
     },
 ];
 
@@ -99,24 +110,43 @@ pub async fn ensure(cfg: &Config, img: &BuiltinImage) -> Result<PathBuf> {
     if !download.exists() {
         fetch_verified(&client, img, &want, &download).await?;
     }
-    if img.qcow2 {
-        // Convert beside the final name, then rename, so an interrupted conversion is never mistaken for an image.
-        let part = dir.join(format!("{}-{tag}.raw.part", img.name));
-        let _ = fs::remove_file(&part);
-        crate::convert_image(cfg, &download, &part, "raw")
+    // Build beside the final name, then rename, so an interrupted step is never mistaken for an image.
+    let part = dir.join(format!("{}-{tag}.raw.part", img.name));
+    let _ = fs::remove_file(&part);
+    match img.kind {
+        Kind::Raw => fs::rename(&download, &part)?,
+        Kind::Qcow2 => crate::convert_image(cfg, &download, &part, "raw")
             .await
             .with_context(|| {
                 format!(
                     "converting {} to raw (needs qemu-img: `brew install qemu`)",
                     img.name
                 )
-            })?;
-        fs::rename(&part, &raw)?;
-        let _ = fs::remove_file(&download);
-    } else {
-        fs::rename(&download, &raw)?;
+            })?,
+        Kind::TarDiskRaw => extract_disk_raw(&download, &part)
+            .await
+            .with_context(|| format!("unpacking {}", img.file))?,
     }
+    fs::rename(&part, &raw)?;
+    let _ = fs::remove_file(&download);
     Ok(raw)
+}
+
+/// Unpacks `disk.raw` from the tarball with the system `tar` (bsdtar on macOS reads xz).
+async fn extract_disk_raw(archive: &Path, out: &Path) -> Result<()> {
+    let file = fs::File::create(out)?;
+    let status = tokio::process::Command::new("tar")
+        .args(["-xOf"])
+        .arg(archive)
+        .arg("disk.raw")
+        .stdout(file)
+        .status()
+        .await
+        .context("running tar")?;
+    if !status.success() {
+        bail!("tar could not extract disk.raw from {}", archive.display());
+    }
+    Ok(())
 }
 
 async fn fetch_verified(
@@ -172,7 +202,7 @@ mod tests {
     #[test]
     fn known_names_resolve() {
         assert!(find("debian-13").is_some());
-        assert!(find("ubuntu-24.04").is_some_and(|i| i.qcow2));
+        assert!(find("ubuntu-24.04").is_some_and(|i| i.kind == Kind::Qcow2));
         assert!(find("windows-11").is_none());
     }
 }
