@@ -58,6 +58,10 @@ each), and no memory while stopped. Restoring needs an unlocked login session.
   the Mac or the LAN. Refusals are `403` naming the host. A program that ignores the proxy settings simply has no route.
   Limits: HTTP and HTTPS only (no raw TCP, no UDP; DNS is done by the host), tools must honour `http_proxy`, the allow-list is fixed at
   creation, and these sandboxes cold-boot. HTTPS is tunnelled (CONNECT), not inspected.
+- **The pool follows the base image.** Each warm slot is labelled with the build of `debian-13` it was made from
+  (`fluxvm.image-id`). When a newer build is downloaded (the vendor's list is checked at most once a day), slots from the old one are
+  never restored: the next sandbox cold-boots, the old slots are deleted, and the pool is rebuilt from the new image. `fluxctl run`
+  warm templates are not covered yet; delete a `warm-*` VM to rebuild it.
 - Sandboxes of any other shape (a `spec`, a `template`, volumes, a different size) always cold-boot.
 - **Speculate and changesets work.** `POST /v1/sandboxes/{id}/speculate {"command", "paths": [...]}` snapshots the running sandbox, runs
   the command, records which files under `paths` were added, modified or deleted (with their contents), then puts the VM back by

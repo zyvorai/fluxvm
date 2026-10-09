@@ -160,6 +160,17 @@ aexec() { curl -fs -X POST "$SB/$ALID/process" -H 'Content-Type: application/jso
 for _ in $(seq 1 40); do
   [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(sum(1 for v in d if v["name"].startswith("sandbox-slot-") and v["status"]=="stopped"))')" -ge 2 ]] && break; sleep 3
 done
+# A newer base image: pretend the vendor published one (a copy under a new checksum). Slots built from the old image must not be
+# restored; the next sandbox cold-boots, and the pool is rebuilt from the new image.
+IMGDIR="$T/state/images"; OLDRAW=""; for f in "$IMGDIR"/debian-13-*.raw; do [[ "$f" == *ffffffffffff.raw ]] || OLDRAW="$f"; done
+cp -c "$OLDRAW" "$IMGDIR/debian-13-ffffffffffff.raw" && echo "$(date +%s) ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" > "$IMGDIR/debian-13.latest"
+NEWSB="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"ttl_seconds":300}')" || bad "sandbox create after an image update failed"
+NEWSBID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$NEWSB")"
+curl -fs "$B/$NEWSBID/snapshots" | grep -q '"warm"' && bad "a slot from the old image was restored" || ok "warm pool: slots from the old image are not used after an image update"
+for _ in $(seq 1 60); do
+  [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(sum(1 for v in d if v["name"].startswith("sandbox-slot-") and v["status"]=="stopped" and v.get("labels",{}).get("fluxvm.image-id")=="ffffffffffff"))')" -ge 2 ]] && break; sleep 3
+done
+curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);s=[v for v in d if v["name"].startswith("sandbox-slot-")];assert len(s)>=2 and all(v["labels"].get("fluxvm.image-id")=="ffffffffffff" for v in s),[(v["name"],v["labels"]) for v in s]' && ok "warm pool: stale slots were removed and rebuilt from the new image" || bad "pool was not rebuilt from the new image"
 # Remove everything (sandboxes and warm slots) before checking nothing is left running.
 for id in $(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(" ".join(v["id"] for v in d))'); do curl -fs -X DELETE "$B/$id" >/dev/null || true; done
 sleep 3
