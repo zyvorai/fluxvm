@@ -467,6 +467,10 @@ pub struct AppleSpec {
     /// Open the guest's native console window (a `VZVirtualMachineView`).
     #[serde(default)]
     pub window: bool,
+    /// Host names the guest may reach, through an HTTP(S) proxy the runner serves over vsock (`network.mode = "none"` only: the guest
+    /// has no card, so the proxy is its only way out). `example.com` matches that host, `*.example.com` its subdomains; ports 80 and 443.
+    #[serde(default)]
+    pub egress_allow: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

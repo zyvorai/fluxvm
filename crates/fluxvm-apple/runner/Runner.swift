@@ -41,6 +41,7 @@ struct Config: Decodable {
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
+    let egress_allow: [String]?     // hosts the guest may reach through the vsock proxy on port 3128 (nil/empty: no proxy)
     let restore_state: String?      // resume from a state file written by `save` instead of cold-booting
 }
 
@@ -226,6 +227,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             startControlServer()
             startIPWatcher()
             if cfg.vsock_socket != nil { startVsockProxy() }
+            if let allow = cfg.egress_allow, !allow.isEmpty { startEgressProxy(allow) }
             for f in cfg.forwards ?? [] where f.guests != true { startForward(f, bind: "127.0.0.1", fatal: true) }
             setupSignals()
         } catch { fail(error.localizedDescription) }
@@ -467,6 +469,115 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         pump(c, g); pump(g, c)
     }
 
+    // MARK: egress proxy (guest -> host over vsock, allow-listed HTTP CONNECT / plain HTTP)
+
+    // The guest has no network card, so this is the only way out. Names are matched here, on the host, and the address they
+    // resolve to must be a public one, so an allowed name cannot be pointed at the Mac or at the local network.
+    var egressListener: VZVirtioSocketListener?
+    var egressDelegate: EgressDelegate?
+
+    func startEgressProxy(_ allow: [String]) {
+        DispatchQueue.main.async {
+            guard let device = self.vm?.socketDevices.first as? VZVirtioSocketDevice else { return }
+            let rules = allow.map { $0.lowercased() }
+            let delegate = EgressDelegate { conn in
+                self.vsockConnections.append(conn)
+                let fd = conn.fileDescriptor
+                DispatchQueue.global().async { self.serveEgress(fd, rules) }
+            }
+            let listener = VZVirtioSocketListener()
+            listener.delegate = delegate
+            device.setSocketListener(listener, forPort: 3128)
+            self.egressListener = listener
+            self.egressDelegate = delegate
+        }
+    }
+
+    func hostAllowed(_ host: String, _ rules: [String]) -> Bool {
+        let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        return rules.contains { r in r.hasPrefix("*.") ? h.hasSuffix(String(r.dropFirst(1))) : h == r }
+    }
+
+    func publicAddress(_ a: UInt32) -> Bool {   // host byte order
+        let b0 = a >> 24, b1 = (a >> 16) & 255
+        if b0 == 0 || b0 == 10 || b0 == 127 || b0 >= 224 { return false }
+        if b0 == 169 && b1 == 254 { return false }
+        if b0 == 172 && (16...31).contains(b1) { return false }
+        if b0 == 192 && b1 == 168 { return false }
+        if b0 == 100 && (64...127).contains(b1) { return false }
+        return true
+    }
+
+    func connectUpstream(_ host: String, _ port: UInt16) -> Int32? {
+        var hints = addrinfo(); hints.ai_family = AF_INET; hints.ai_socktype = SOCK_STREAM
+        var res: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &res) == 0, let first = res else { return nil }
+        defer { freeaddrinfo(res) }
+        var p: UnsafeMutablePointer<addrinfo>? = first
+        while let ai = p {
+            let sin = ai.pointee.ai_addr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee }
+            if publicAddress(UInt32(bigEndian: sin.sin_addr.s_addr)) {
+                let s = socket(AF_INET, SOCK_STREAM, 0)
+                if s >= 0 {
+                    if Darwin.connect(s, ai.pointee.ai_addr, ai.pointee.ai_addrlen) == 0 { return s }
+                    close(s)
+                }
+            }
+            p = ai.pointee.ai_next
+        }
+        return nil
+    }
+
+    func serveEgress(_ c: Int32, _ rules: [String]) {
+        func reply(_ status: String, _ body: String) {
+            let text = "HTTP/1.1 \(status)\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
+            _ = text.withCString { write(c, $0, strlen($0)) }
+            close(c)
+        }
+        var head = Data()
+        var byte: UInt8 = 0
+        let end = Data("\r\n\r\n".utf8)
+        while head.count < 16384, read(c, &byte, 1) == 1 {
+            head.append(byte)
+            if head.suffix(4) == end { break }
+        }
+        guard head.suffix(4) == end, let text = String(data: head, encoding: .utf8) else { close(c); return }
+        var lines = text.components(separatedBy: "\r\n")
+        let first = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard first.count == 3 else { reply("400 Bad Request", "bad request\n"); return }
+        let method = first[0], target = first[1], version = first[2]
+        var host = "", port: UInt16 = 80, path = "/"
+        if method.uppercased() == "CONNECT" {
+            let hp = target.split(separator: ":").map(String.init)
+            host = hp.first ?? ""; port = hp.count == 2 ? (UInt16(hp[1]) ?? 0) : 443
+        } else if let u = URLComponents(string: target), u.scheme == "http", let h = u.host {
+            host = h; port = UInt16(u.port ?? 80)
+            path = (u.percentEncodedPath.isEmpty ? "/" : u.percentEncodedPath) + (u.percentEncodedQuery.map { "?" + $0 } ?? "")
+        } else { reply("400 Bad Request", "this proxy needs an absolute http:// URL or CONNECT\n"); return }
+        guard port == 80 || port == 443, hostAllowed(host, rules) else {
+            emit(["event": "egress-denied", "host": host, "port": Int(port)])
+            reply("403 Forbidden", "\(host):\(port) is not on this sandbox's allow-list\n"); return
+        }
+        guard let up = connectUpstream(host, port) else {
+            emit(["event": "egress-unreachable", "host": host])
+            reply("502 Bad Gateway", "cannot reach \(host)\n"); return
+        }
+        emit(["event": "egress-allowed", "host": host, "port": Int(port)])
+        if method.uppercased() == "CONNECT" {
+            _ = "HTTP/1.1 200 Connection Established\r\n\r\n".withCString { write(c, $0, strlen($0)) }
+        } else {
+            // Forward as an ordinary origin-form request on a connection that closes after the response, so a keep-alive
+            // client cannot send a second request for another host down the same tunnel.
+            let kept = lines.filter { l in
+                let k = l.lowercased()
+                return !l.isEmpty && !k.hasPrefix("connection:") && !k.hasPrefix("proxy-connection:") && !k.hasPrefix("proxy-authorization:")
+            }
+            let out = (["\(method) \(path) \(version)"] + kept + ["Connection: close", "", ""]).joined(separator: "\r\n")
+            _ = out.withCString { write(up, $0, strlen($0)) }
+        }
+        pump(c, up); pump(up, c)
+    }
+
     // MARK: vsock proxy ("CONNECT <port>\n" over a unix socket, like Firecracker's)
 
     func startVsockProxy() {
@@ -509,6 +620,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 }
             }
         }
+    }
+}
+
+final class EgressDelegate: NSObject, VZVirtioSocketListenerDelegate {
+    let accept: (VZVirtioSocketConnection) -> Void
+    init(_ accept: @escaping (VZVirtioSocketConnection) -> Void) { self.accept = accept }
+    func listener(_ listener: VZVirtioSocketListener, shouldAcceptNewConnection connection: VZVirtioSocketConnection, from socketDevice: VZVirtioSocketDevice) -> Bool {
+        accept(connection)
+        return true
     }
 }
 
