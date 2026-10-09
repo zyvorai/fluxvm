@@ -4,7 +4,7 @@
 use anyhow::{Context, Result, bail};
 use fluxvm_core::{
     backend::LaunchContext,
-    model::{AppleGuest, CreateVmRequest},
+    model::{AppleGuest, CreateVmRequest, NetworkSpec},
 };
 use serde::Serialize;
 use std::{
@@ -29,6 +29,23 @@ pub struct RunnerConfig {
     pub vsock_socket: Option<PathBuf>,
     pub ip_file: PathBuf,
     pub window: bool,
+    /// virtiofs shares, tagged `fs0`, `fs1`, … in request order (the tags the guest-side mount uses).
+    pub shares: Vec<ShareConfig>,
+    /// Host `127.0.0.1:host_port` listeners that relay TCP to the guest's NAT address.
+    pub forwards: Vec<ForwardConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ShareConfig {
+    pub tag: String,
+    pub host_path: PathBuf,
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForwardConfig {
+    pub host_port: u16,
+    pub guest_port: u16,
 }
 
 impl RunnerConfig {
@@ -56,6 +73,26 @@ impl RunnerConfig {
                 .map(|p| short_socket(&id8, "vsock", p)),
             ip_file: ip_file(&ctx.workspace),
             window: apple.window,
+            shares: req
+                .shared_folders
+                .iter()
+                .enumerate()
+                .map(|(i, f)| ShareConfig {
+                    tag: format!("fs{i}"),
+                    host_path: f.host_path.clone(),
+                    read_only: f.read_only,
+                })
+                .collect(),
+            forwards: match &req.network {
+                NetworkSpec::User { forwards } => forwards
+                    .iter()
+                    .map(|f| ForwardConfig {
+                        host_port: f.host_port,
+                        guest_port: f.guest_port,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
         })
     }
 

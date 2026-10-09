@@ -11,9 +11,11 @@ mod capability;
 mod control;
 mod runner;
 
-pub use capability::{CAPABILITIES, Capability, validate_request, with_guest_reporting};
+pub use capability::{
+    CAPABILITIES, Capability, validate_request, with_guest_reporting, with_shared_folder_mounts,
+};
 pub use control::{ControlReply, call as control_call};
-pub use runner::{RunnerConfig, find_runner, ip_file, read_guest_ip};
+pub use runner::{ForwardConfig, RunnerConfig, ShareConfig, find_runner, ip_file, read_guest_ip};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;

@@ -38,7 +38,11 @@ pub const CAPABILITIES: &[Capability] = &[
     yes("cloud_init", "NoCloud seed built with hdiutil"),
     yes(
         "network user (NAT)",
-        "guest reachable by its address; no port forwards",
+        "guest reachable by its address; TCP port forwards relay from 127.0.0.1",
+    ),
+    yes(
+        "shared folders (virtiofs)",
+        "host directory mounted in the guest as tag fs0, fs1, …",
     ),
     yes("serial console", "VM log and /v1/vms/{id}/serial"),
     yes("pause / resume", "Virtualization.framework"),
@@ -58,7 +62,7 @@ pub const CAPABILITIES: &[Capability] = &[
         "tap / macvtap / netns / eBPF networking",
         "Linux kernel features",
     ),
-    no("port forwards", "NAT has no host-side forwards"),
+    no("UDP port forwards", "only TCP is relayed"),
     no(
         "NUMA, hugepages, cpuset, vfio",
         "no such controls on Apple silicon",
@@ -68,7 +72,6 @@ pub const CAPABILITIES: &[Capability] = &[
         "not offered by Virtualization.framework",
     ),
     no("hotplug (cpu, memory, disks, nics)", "not supported"),
-    no("shared folders (virtiofs)", "not implemented yet"),
     no(
         "data disks, cdroms, non-default storage",
         "not implemented yet",
@@ -98,10 +101,26 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
     }
     match &req.network {
         NetworkSpec::None => {}
-        NetworkSpec::User { forwards } => reject!(
-            !forwards.is_empty(),
-            "port forwards (use the guest's NAT address)"
-        ),
+        NetworkSpec::User { forwards } => {
+            reject!(
+                forwards
+                    .iter()
+                    .any(|f| !f.protocol.eq_ignore_ascii_case("tcp")),
+                "UDP port forwards (only tcp is relayed)"
+            );
+            let mut seen = std::collections::HashSet::new();
+            for f in forwards {
+                if f.host_port < 1024 {
+                    bail!(
+                        "the vz backend cannot forward host port {} (ports below 1024 need root)",
+                        f.host_port
+                    );
+                }
+                if !seen.insert(f.host_port) {
+                    bail!("host port {} is forwarded more than once", f.host_port);
+                }
+            }
+        }
         _ => bail!(
             "the vz backend supports only network mode `user` (NAT) or `none`; tap and macvtap are Linux features"
         ),
@@ -120,7 +139,20 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         req.secure_boot == Some(true) || req.tpm == Some(true),
         "secure boot or a TPM"
     );
-    reject!(!req.shared_folders.is_empty(), "shared folders");
+    for share in &req.shared_folders {
+        if !share.host_path.is_dir() {
+            bail!(
+                "shared folder {} is not an existing directory on this Mac",
+                share.host_path.display()
+            );
+        }
+        if !share.guest_path.starts_with('/') {
+            bail!(
+                "shared folder guest_path {:?} must be absolute",
+                share.guest_path
+            );
+        }
+    }
     reject!(!req.data_disks.is_empty(), "data disks");
     reject!(
         !req.cdroms.is_empty(),
@@ -155,7 +187,22 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
     Ok(())
 }
 
-use fluxvm_core::model::{CloudInitFile, CloudInitSpec};
+use fluxvm_core::model::{CloudInitFile, CloudInitSpec, SharedFolder};
+
+/// Appends the guest-side mount for each virtiofs share (tags `fs0`, `fs1`, … as the runner names them). The fstab
+/// line, not just a one-shot `mount`, keeps the share across stop/start, when cloud-init's `runcmd` does not replay.
+pub fn with_shared_folder_mounts(mut ci: CloudInitSpec, shares: &[SharedFolder]) -> CloudInitSpec {
+    for (i, share) in shares.iter().enumerate() {
+        let (tag, path) = (format!("fs{i}"), &share.guest_path);
+        let opts = if share.read_only { "ro" } else { "defaults" };
+        ci.runcmd.push(format!("mkdir -p {path}"));
+        ci.runcmd.push(format!(
+            "grep -qF ' {path} ' /etc/fstab || echo '{tag} {path} virtiofs {opts},nofail 0 0' >> /etc/fstab"
+        ));
+        ci.runcmd.push(format!("mount {path}"));
+    }
+    ci
+}
 
 /// Adds what the Apple backend needs from the guest: a service that prints `VELORA-IP <addr>` on the serial
 /// console (the host cannot read DHCP leases or ARP on macOS), and an sshd setting that stops OpenSSH's per-source
@@ -215,6 +262,18 @@ mod tests {
         assert!(validate_request(&req(r#""vcpus":2,"memory_mib":2048"#)).is_ok());
         assert!(validate_request(&req(r#""network":{"mode":"user"}"#)).is_ok());
         assert!(validate_request(&req(r#""network":{"mode":"none"}"#)).is_ok());
+        assert!(
+            validate_request(&req(
+                r#""network":{"mode":"user","forwards":[{"host_port":2222,"guest_port":22}]}"#
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_request(&req(
+                r#""shared_folders":[{"host_path":"/tmp","guest_path":"/mnt/src","read_only":true}]"#
+            ))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -222,8 +281,24 @@ mod tests {
         for (json, needle) in [
             (r#""network":{"mode":"tap"}"#, "tap"),
             (
-                r#""network":{"mode":"user","forwards":[{"host_port":2222,"guest_port":22}]}"#,
-                "port forwards",
+                r#""network":{"mode":"user","forwards":[{"host_port":2222,"guest_port":53,"protocol":"udp"}]}"#,
+                "UDP port forwards",
+            ),
+            (
+                r#""network":{"mode":"user","forwards":[{"host_port":80,"guest_port":80}]}"#,
+                "below 1024",
+            ),
+            (
+                r#""network":{"mode":"user","forwards":[{"host_port":2222,"guest_port":22},{"host_port":2222,"guest_port":23}]}"#,
+                "more than once",
+            ),
+            (
+                r#""shared_folders":[{"host_path":"/nonexistent-fluxvm-dir","guest_path":"/mnt/x"}]"#,
+                "not an existing directory",
+            ),
+            (
+                r#""shared_folders":[{"host_path":"/tmp","guest_path":"mnt"}]"#,
+                "absolute",
             ),
             (r#""hugepages":true"#, "hugepages"),
             (r#""numa_node":1"#, "NUMA"),
@@ -255,6 +330,23 @@ mod tests {
                 .iter()
                 .any(|c| !c.supported && c.feature.contains("GPU"))
         );
+    }
+
+    #[test]
+    fn shared_folders_get_a_persistent_fstab_mount() {
+        let share = |p: &str, ro| SharedFolder {
+            host_path: "/tmp".into(),
+            guest_path: p.into(),
+            read_only: ro,
+        };
+        let ci = with_shared_folder_mounts(
+            CloudInitSpec::default(),
+            &[share("/mnt/a", false), share("/mnt/b", true)],
+        );
+        let all = ci.runcmd.join("\n");
+        assert!(all.contains("fs0 /mnt/a virtiofs defaults,nofail"));
+        assert!(all.contains("fs1 /mnt/b virtiofs ro,nofail"));
+        assert!(all.contains("mount /mnt/b"));
     }
 
     #[test]

@@ -19,6 +19,7 @@ if [[ -z "$IMG" ]]; then
   curl -fsSL -o "$T/debian.tar.xz" https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-arm64.tar.xz
   mkdir "$T/img" && tar -xf "$T/debian.tar.xz" -C "$T/img" && IMG="$T/img/disk.raw"
 fi
+FWD="${FLUXVM_LIVE_FWD_PORT:-22722}"; mkdir "$T/share" && echo "from-the-mac" > "$T/share/marker.txt"
 ssh-keygen -q -t ed25519 -N "" -f "$T/key" && PUB="$(cat "$T/key.pub")"
 cat > "$T/fluxvm.toml" <<EOT
 listen = "127.0.0.1:$PORT"
@@ -30,7 +31,7 @@ for _ in $(seq 1 30); do curl -fs "http://127.0.0.1:$PORT/healthz" >/dev/null 2>
 curl -fs "http://127.0.0.1:$PORT/healthz" >/dev/null && ok "daemon is up on macOS" || bad "daemon did not start: $(tail -3 "$T/daemon.log")"
 
 B="http://127.0.0.1:$PORT/v1/vms"
-RESP="$(curl -fs -X POST "$B" -H 'Content-Type: application/json' -d "{\"name\":\"live\",\"backend\":\"vz\",\"image\":\"$IMG\",\"vcpus\":2,\"memory_mib\":2048,\"network\":{\"mode\":\"user\"},\"cloud_init\":{\"hostname\":\"live\",\"user\":\"velora\",\"ssh_authorized_keys\":[\"$PUB\"]}}")" || bad "create failed"
+RESP="$(curl -fs -X POST "$B" -H 'Content-Type: application/json' -d "{\"name\":\"live\",\"backend\":\"vz\",\"image\":\"$IMG\",\"vcpus\":2,\"memory_mib\":2048,\"network\":{\"mode\":\"user\",\"forwards\":[{\"host_port\":$FWD,\"guest_port\":22}]},\"shared_folders\":[{\"host_path\":\"$T/share\",\"guest_path\":\"/mnt/share\"}],\"cloud_init\":{\"hostname\":\"live\",\"user\":\"velora\",\"ssh_authorized_keys\":[\"$PUB\"]}}")" || bad "create failed"
 ID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$RESP")"; V="$B/$ID"
 field() { curl -fs "$V" | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1') or '')"; }
 [[ "$(field status)" == running ]] && ok "VM created and running through the vz backend" || bad "status $(field status)"
@@ -39,6 +40,12 @@ sshc() { ssh -i "$T/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/
 IP="$(ip_wait)"; [[ -n "$IP" ]] && ok "guest address reported by the API: $IP" || bad "no guest_ip"
 for _ in $(seq 1 20); do sshc "$IP" hostname >/dev/null 2>&1 && break; sleep 3; done
 [[ "$(sshc "$IP" hostname)" == live ]] && ok "SSH into the guest works (hostname from cloud-init)" || bad "ssh failed"
+
+FWDOUT="$(ssh -i "$T/key" -p "$FWD" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 velora@127.0.0.1 hostname 2>&1 || true)"
+[[ "$FWDOUT" == live ]] && ok "port forward: ssh -p $FWD 127.0.0.1 reaches the guest" || bad "port forward: $FWDOUT"
+for _ in $(seq 1 10); do [[ "$(sshc "$IP" 'cat /mnt/share/marker.txt' 2>/dev/null)" == from-the-mac ]] && break; sleep 3; done
+[[ "$(sshc "$IP" 'cat /mnt/share/marker.txt' 2>/dev/null)" == from-the-mac ]] && ok "shared folder: the guest reads a file from the Mac" || bad "shared folder not mounted"
+sshc "$IP" 'echo from-the-guest > /mnt/share/back.txt'; [[ "$(cat "$T/share/back.txt" 2>/dev/null)" == from-the-guest ]] && ok "shared folder: the guest's write lands on the Mac" || bad "write-back"
 
 curl -fs -X POST "$V/pause" >/dev/null && [[ "$(field status)" == paused ]] && ok "pause" || bad "pause"
 curl -fs -X POST "$V/resume" >/dev/null && [[ "$(field status)" == running ]] && ok "resume" || bad "resume"

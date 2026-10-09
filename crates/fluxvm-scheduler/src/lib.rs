@@ -1012,10 +1012,15 @@ impl VmManager {
     /// attached to the guest but never actually reachable inside it.
     fn effective_cloud_init(req: &CreateVmRequest) -> Option<CloudInitSpec> {
         if req.backend == BackendKind::Vz {
-            return req
-                .cloud_init
-                .clone()
-                .map(fluxvm_apple::with_guest_reporting);
+            // Shares need the in-guest mount, so they imply a cloud-init even when the caller gave none.
+            let ci = match (&req.cloud_init, req.shared_folders.is_empty()) {
+                (None, true) => return None,
+                (ci, _) => ci.clone().unwrap_or_default(),
+            };
+            return Some(fluxvm_apple::with_shared_folder_mounts(
+                fluxvm_apple::with_guest_reporting(ci),
+                &req.shared_folders,
+            ));
         }
         if req.shared_folders.is_empty() {
             return req.cloud_init.clone();
