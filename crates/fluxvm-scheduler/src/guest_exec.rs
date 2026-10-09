@@ -34,6 +34,9 @@ impl VmManager {
             }
             return self.procbox_exec(&vm, spec, command, timeout_seconds).await;
         }
+        if vm.backend == fluxvm_core::model::BackendKind::Vz {
+            return self.vz_exec(&vm, command, timeout_seconds, policy).await;
+        }
         let wait = std::time::Duration::from_secs(
             timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS) + 5,
         );

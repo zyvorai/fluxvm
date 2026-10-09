@@ -233,16 +233,26 @@ impl VmManager {
             self.load_template_spec(template).await?
         } else if let Some(spec) = req.spec {
             spec
+        } else if cfg!(target_os = "macos") {
+            // Nothing asked for: a small Debian VM on the Mac's own hypervisor, so `sandbox_create {}` just works.
+            serde_json::from_value(serde_json::json!({
+                "name": "", "backend": "auto", "image": "debian-13",
+                "vcpus": 2, "memory_mib": 2048, "network": {"mode": "user"},
+            }))?
         } else {
             bail!("sandbox create requires `template` or `spec`");
         };
         apply_resources(&mut create, req.vcpus, req.memory_mib)?;
         enforce_sandbox_tenant(&mut create, token_tenant)?;
         create.created_by_token = created_by_token.map(String::from);
-        // A client-supplied `spec` is always the in-tree backend. Only an
-        // operator-authored template may opt into QEMU (virtiofs volumes) or
-        // Firecracker (stronger microVM cell; no virtiofs — volumes stay QEMU-only).
-        create.backend = if from_template
+        // On a Mac the only backend that runs is Apple's (`vz`), so a spec that did not ask for another one gets it.
+        // Elsewhere a client-supplied `spec` is always the in-tree backend, and only an operator-authored template may
+        // opt into QEMU (virtiofs volumes) or Firecracker (stronger microVM cell; no virtiofs: volumes stay QEMU-only).
+        let on_vz = cfg!(target_os = "macos")
+            && matches!(create.backend, BackendKind::Vz | BackendKind::Auto);
+        create.backend = if on_vz {
+            BackendKind::Vz
+        } else if from_template
             && matches!(create.backend, BackendKind::Qemu | BackendKind::Firecracker)
         {
             create.backend
@@ -262,8 +272,18 @@ impl VmManager {
         if let Some(ttl) = req.ttl_seconds {
             create.ttl_seconds = Some(ttl);
         }
-        // Agent on by default for sandbox exec/filesystem APIs.
-        if create.agent.is_none() {
+        if create.backend == BackendKind::Vz {
+            // vz guests have no vsock agent: exec and files go over SSH with the daemon's own key (see `vz_guest`).
+            create.agent = None;
+            let (public_key, _) = self.sandbox_ssh_key()?;
+            let ci = create.cloud_init.get_or_insert_with(Default::default);
+            ci.user
+                .get_or_insert_with(|| crate::vz_guest::DEFAULT_SANDBOX_USER.into());
+            if !ci.ssh_authorized_keys.contains(&public_key) {
+                ci.ssh_authorized_keys.push(public_key);
+            }
+        } else if create.agent.is_none() {
+            // Agent on by default for sandbox exec/filesystem APIs.
             create.agent = Some(fluxvm_core::model::AgentSpec {
                 enabled: true,
                 port: 17777,
@@ -289,7 +309,31 @@ impl VmManager {
             self.assign_gpus(&mut create, gpus).await?;
             Some(guard)
         };
-        let record = self.create(create).await?;
+        let on_vz = create.backend == BackendKind::Vz;
+        let mut record = self.create(create).await?;
+        if on_vz {
+            // A sandbox is ready when commands can run in it, so wait for the guest to accept SSH.
+            let ready = async {
+                let started = std::time::Instant::now();
+                let guest = loop {
+                    let vm = self.get(record.id).await?;
+                    if vm.guest_ip.is_some() {
+                        break self.vz_guest(&vm)?;
+                    }
+                    if started.elapsed() > std::time::Duration::from_secs(120) {
+                        bail!("the sandbox did not report an address within 120s");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                };
+                fluxvm_apple::ssh::wait_ready(&guest, std::time::Duration::from_secs(120)).await
+            }
+            .await;
+            if let Err(e) = ready {
+                let _ = self.delete(record.id).await;
+                return Err(e.context("starting the sandbox"));
+            }
+            record = self.get(record.id).await?;
+        }
         if let Some(status) = &confidential {
             crate::confidential::write_status(&record.workspace, status).await?;
         }

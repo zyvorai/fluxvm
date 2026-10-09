@@ -51,6 +51,8 @@ instead. Remove a template with `fluxctl delete warm-<hash>`, for example after 
 
 A project that needs several VMs can describe them in a `fluxvm.toml` and use `fluxctl up` / `down`; see [stacks](macos-stacks.md).
 
+An AI agent can get a disposable VM through the sandbox API or MCP; see [sandboxes](macos-sandboxes.md).
+
 Run the daemon yourself:
 
 ```bash

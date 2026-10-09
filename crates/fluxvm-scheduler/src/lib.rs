@@ -41,6 +41,7 @@ pub mod shared_disk;
 pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
+mod vz_guest;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 
@@ -4225,6 +4226,9 @@ impl VmManager {
         if procbox_sandbox::is_procbox(&vm) {
             return self.procbox_put_file(&vm, path, content_base64, mode).await;
         }
+        if vm.backend == BackendKind::Vz {
+            return self.vz_put_file(&vm, path, content_base64, mode).await;
+        }
         fluxvm_vsock_client::call(
             &vm,
             AgentRequest::PutFile {
@@ -4247,6 +4251,9 @@ impl VmManager {
         let vm = self.get(id).await?;
         if procbox_sandbox::is_procbox(&vm) {
             return self.procbox_get_file(&vm, path).await;
+        }
+        if vm.backend == BackendKind::Vz {
+            return self.vz_get_file(&vm, path).await;
         }
         fluxvm_vsock_client::call(
             &vm,
