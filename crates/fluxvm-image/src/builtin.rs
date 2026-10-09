@@ -84,26 +84,92 @@ fn checksum_for(listing: &str, file: &str) -> Option<String> {
     })
 }
 
+/// How long a successful look at the vendor's checksum list is trusted before it is fetched again.
+const FRESH_FOR: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// `<name>.latest` holds `<unix seconds> <checksum>` from the last successful look at the vendor's list.
+fn read_latest(dir: &Path, name: &str) -> Option<(u64, String)> {
+    let text = fs::read_to_string(dir.join(format!("{name}.latest"))).ok()?;
+    let (at, sum) = text.trim().split_once(' ')?;
+    Some((at.parse().ok()?, sum.to_owned()))
+}
+
+fn raw_path(dir: &Path, name: &str, sum: &str) -> PathBuf {
+    dir.join(format!("{name}-{}.raw", &sum[..12.min(sum.len())]))
+}
+
+/// The newest ready image already on disk for `name`, for when the vendor cannot be reached.
+fn newest_cached(dir: &Path, name: &str) -> Option<PathBuf> {
+    let prefix = format!("{name}-");
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            let f = e.file_name().to_string_lossy().into_owned();
+            f.starts_with(&prefix) && f.ends_with(".raw")
+        })
+        .max_by_key(|e| e.metadata().and_then(|m| m.modified()).ok())
+        .map(|e| e.path())
+}
+
 /// Local path of the ready-to-clone raw image for `name`, downloading and converting it on first use.
+///
+/// A cached image is used without any network access for a day after the vendor's list was last checked, and
+/// whenever the vendor cannot be reached, so creating a VM never waits on a slow or missing connection.
 pub async fn ensure(cfg: &Config, img: &BuiltinImage) -> Result<PathBuf> {
-    let client = reqwest::Client::new();
-    let listing = client
-        .get(format!("{}/{}", img.base_url, img.sums_file))
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .with_context(|| format!("fetching the checksum list for {}", img.name))?
-        .text()
-        .await?;
+    let dir = cfg.state_dir.join("images");
+    fs::create_dir_all(&dir)?;
+    if let Some((at, sum)) = read_latest(&dir, img.name) {
+        let raw = raw_path(&dir, img.name, &sum);
+        if raw.exists() && now_secs().saturating_sub(at) < FRESH_FOR.as_secs() {
+            return Ok(raw);
+        }
+    }
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .build()?;
+    let listing = async {
+        client
+            .get(format!("{}/{}", img.base_url, img.sums_file))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status())?
+            .text()
+            .await
+    }
+    .await;
+    let listing = match listing {
+        Ok(l) => l,
+        Err(e) => {
+            return match newest_cached(&dir, img.name) {
+                Some(raw) => {
+                    tracing::warn!(image = img.name, error = %e, "cannot reach the image vendor; using the cached image");
+                    Ok(raw)
+                }
+                None => {
+                    Err(e).with_context(|| format!("fetching the checksum list for {}", img.name))
+                }
+            };
+        }
+    };
     let want = checksum_for(&listing, img.file)
         .with_context(|| format!("{} is not listed in {}", img.file, img.sums_file))?;
 
-    let dir = cfg.state_dir.join("images");
-    fs::create_dir_all(&dir)?;
     // The hash is in the name, so a new upstream "latest" is fetched instead of silently reusing a stale copy.
+    let raw = raw_path(&dir, img.name, &want);
     let tag = &want[..12.min(want.len())];
-    let raw = dir.join(format!("{}-{tag}.raw", img.name));
     if raw.exists() {
+        let _ = fs::write(
+            dir.join(format!("{}.latest", img.name)),
+            format!("{} {want}", now_secs()),
+        );
         return Ok(raw);
     }
     let download = dir.join(format!("{}-{tag}.download", img.name));
@@ -129,6 +195,10 @@ pub async fn ensure(cfg: &Config, img: &BuiltinImage) -> Result<PathBuf> {
     }
     fs::rename(&part, &raw)?;
     let _ = fs::remove_file(&download);
+    let _ = fs::write(
+        dir.join(format!("{}.latest", img.name)),
+        format!("{} {want}", now_secs()),
+    );
     Ok(raw)
 }
 
@@ -197,6 +267,30 @@ mod tests {
         assert_eq!(checksum_for(l, "wanted.img").as_deref(), Some("bbbb22"));
         assert_eq!(checksum_for(l, "other.raw").as_deref(), Some("aaaa11"));
         assert_eq!(checksum_for(l, "missing"), None);
+    }
+
+    #[test]
+    fn a_cached_image_is_found_without_the_network() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(newest_cached(dir.path(), "debian-13").is_none());
+        fs::write(dir.path().join("debian-13-aaaaaaaaaaaa.raw"), b"x").unwrap();
+        fs::write(dir.path().join("debian-12-bbbbbbbbbbbb.raw"), b"x").unwrap();
+        fs::write(dir.path().join("debian-13-cccccccccccc.raw.part"), b"x").unwrap();
+        assert_eq!(
+            newest_cached(dir.path(), "debian-13").unwrap(),
+            dir.path().join("debian-13-aaaaaaaaaaaa.raw")
+        );
+        fs::write(
+            dir.path().join("debian-13.latest"),
+            format!("{} aaaaaaaaaaaa1234", now_secs()),
+        )
+        .unwrap();
+        let (at, sum) = read_latest(dir.path(), "debian-13").unwrap();
+        assert!(now_secs() - at < 5);
+        assert_eq!(
+            raw_path(dir.path(), "debian-13", &sum),
+            dir.path().join("debian-13-aaaaaaaaaaaa.raw")
+        );
     }
 
     #[test]

@@ -20,14 +20,22 @@ pub struct RunOptions {
     pub volumes: Vec<String>,
     pub user: Option<String>,
     pub keep: bool,
+    /// Skip the warm snapshot and always cold-boot a fresh VM.
+    pub no_warm: bool,
     pub command: Vec<String>,
 }
 
-/// The three VM operations `run` needs, so one flow serves both the local state dir and `--server`.
+/// What `run` needs from a daemon, so one flow serves both the local state dir and `--server`.
 pub trait VmApi {
     async fn create(&self, spec: Value) -> Result<Uuid>;
     async fn guest_ip(&self, id: Uuid) -> Result<Option<String>>;
     async fn delete(&self, id: Uuid) -> Result<()>;
+    /// The VM with this name and its status (`running`, `stopped`, …), if any.
+    async fn find(&self, name: &str) -> Result<Option<(Uuid, String)>>;
+    async fn snapshot(&self, id: Uuid, tag: &str) -> Result<()>;
+    async fn has_snapshot(&self, id: Uuid, tag: &str) -> Result<bool>;
+    async fn stop(&self, id: Uuid) -> Result<()>;
+    async fn restore(&self, id: Uuid, tag: &str) -> Result<()>;
 }
 
 pub struct Local<'a>(pub &'a std::sync::Arc<fluxvm_scheduler::VmManager>);
@@ -41,6 +49,32 @@ impl VmApi for Local<'_> {
     }
     async fn delete(&self, id: Uuid) -> Result<()> {
         self.0.delete(id).await
+    }
+    async fn find(&self, name: &str) -> Result<Option<(Uuid, String)>> {
+        Ok(self
+            .0
+            .list()
+            .await
+            .into_iter()
+            .find(|v| v.name == name)
+            .map(|v| (v.id, format!("{:?}", v.status).to_lowercase())))
+    }
+    async fn snapshot(&self, id: Uuid, tag: &str) -> Result<()> {
+        self.0.create_vm_snapshot(id, tag).await
+    }
+    async fn has_snapshot(&self, id: Uuid, tag: &str) -> Result<bool> {
+        Ok(self
+            .0
+            .list_vm_snapshots(id)
+            .await?
+            .iter()
+            .any(|s| s.tag == tag))
+    }
+    async fn stop(&self, id: Uuid) -> Result<()> {
+        self.0.stop(id).await.map(drop)
+    }
+    async fn restore(&self, id: Uuid, tag: &str) -> Result<()> {
+        self.0.restore_vm_snapshot(id, tag).await.map(drop)
     }
 }
 
@@ -62,6 +96,47 @@ impl VmApi for crate::remote::Remote {
     }
     async fn delete(&self, id: Uuid) -> Result<()> {
         self.vm_op(id, "delete").await.map(drop)
+    }
+    async fn find(&self, name: &str) -> Result<Option<(Uuid, String)>> {
+        Ok(self.list_vms(None).await?.into_iter().find_map(|v| {
+            (v["name"] == name).then(|| {
+                let id = v["id"].as_str()?.parse().ok()?;
+                Some((id, v["status"].as_str().unwrap_or("").to_lowercase()))
+            })?
+        }))
+    }
+    async fn snapshot(&self, id: Uuid, tag: &str) -> Result<()> {
+        self.call(
+            reqwest::Method::POST,
+            &format!("/v1/vms/{id}/snapshot"),
+            Some(json!({"tag": tag})),
+        )
+        .await
+        .map(drop)
+    }
+    async fn has_snapshot(&self, id: Uuid, tag: &str) -> Result<bool> {
+        let v = self
+            .call(
+                reqwest::Method::GET,
+                &format!("/v1/vms/{id}/snapshots"),
+                None,
+            )
+            .await?;
+        Ok(v["items"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|s| s["tag"] == tag)))
+    }
+    async fn stop(&self, id: Uuid) -> Result<()> {
+        self.vm_op(id, "stop").await.map(drop)
+    }
+    async fn restore(&self, id: Uuid, tag: &str) -> Result<()> {
+        self.call(
+            reqwest::Method::POST,
+            &format!("/v1/vms/{id}/restore"),
+            Some(json!({"tag": tag})),
+        )
+        .await
+        .map(drop)
     }
 }
 
@@ -172,6 +247,167 @@ pub fn build_spec(
     }))
 }
 
+/// Snapshot tag on the warm template VM.
+const WARM_TAG: &str = "warm";
+
+/// Name of the stopped template VM for this exact configuration (image, size, ports, volumes, user, key).
+pub fn warm_name(spec: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let mut s = spec.clone();
+    s["name"] = json!("");
+    s["cloud_init"]["hostname"] = json!("");
+    let digest = Sha256::digest(s.to_string().as_bytes());
+    format!(
+        "warm-{}",
+        digest
+            .iter()
+            .take(5)
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
+}
+
+/// Waits for the guest's address and for sshd to accept a login.
+async fn wait_ssh<A: VmApi>(
+    api: &A,
+    id: Uuid,
+    user: &str,
+    identity: &Option<PathBuf>,
+) -> Result<String> {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let ip = loop {
+        if let Some(ip) = api.guest_ip(id).await? {
+            break ip;
+        }
+        if Instant::now() > deadline {
+            bail!("the VM did not report an address within 180s");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    eprintln!("waiting for ssh on {ip}…");
+    loop {
+        let ready = tokio::process::Command::from(ssh_base(&ip, user, identity))
+            .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "true"])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await
+            .context("running ssh (is the OpenSSH client installed?)")?
+            .success();
+        if ready {
+            return Ok(ip);
+        }
+        if Instant::now() > deadline {
+            bail!("ssh did not come up within 180s");
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// The user's shell (or one command) over SSH. Ctrl-C while waiting cleans up too, as exit code 130.
+async fn interactive(
+    ip: &str,
+    user: &str,
+    identity: &Option<PathBuf>,
+    command: &[String],
+) -> Result<i32> {
+    let mut c = tokio::process::Command::from(ssh_base(ip, user, identity));
+    if command.is_empty() {
+        c.arg("-tt");
+    }
+    let run = async {
+        let status = c.args(command).status().await.context("running ssh")?;
+        Ok::<i32, anyhow::Error>(status.code().unwrap_or(1))
+    };
+    tokio::select! {
+        r = run => r,
+        _ = tokio::signal::ctrl_c() => Ok(130),
+    }
+}
+
+/// Runs the session on a warm template: restores its snapshot (about a second), and stops it afterwards so the next
+/// run starts from the same pristine state. The first run builds the template by cold-booting and snapshotting once
+/// the guest has finished its first-boot setup. `Ok(None)` means "use a normal cold VM instead".
+async fn run_warm<A: VmApi>(
+    api: &A,
+    o: &RunOptions,
+    name: &str,
+    spec: Value,
+    user: &str,
+    identity: &Option<PathBuf>,
+) -> Result<Option<i32>> {
+    let id = match api.find(name).await? {
+        Some((id, status)) if status == "stopped" && api.has_snapshot(id, WARM_TAG).await? => {
+            eprintln!("restoring {name}…");
+            if let Err(e) = api.restore(id, WARM_TAG).await {
+                eprintln!("warm restore failed ({e:#}); booting a fresh VM instead");
+                let _ = api.stop(id).await;
+                return Ok(None);
+            }
+            id
+        }
+        Some((id, status)) if status == "running" => {
+            eprintln!(
+                "{name} is in use by another run (or was left running: `fluxctl stop {id}`); booting a separate VM"
+            );
+            return Ok(None);
+        }
+        Some((id, _)) => {
+            // Half-built or broken template: start over.
+            let _ = api.delete(id).await;
+            return build_warm(api, o, name, spec, user, identity).await;
+        }
+        None => return build_warm(api, o, name, spec, user, identity).await,
+    };
+    let result = async {
+        let ip = wait_ssh(api, id, user, identity).await?;
+        interactive(&ip, user, identity, &o.command).await
+    }
+    .await;
+    let _ = api.stop(id).await;
+    result.map(Some)
+}
+
+async fn build_warm<A: VmApi>(
+    api: &A,
+    o: &RunOptions,
+    name: &str,
+    spec: Value,
+    user: &str,
+    identity: &Option<PathBuf>,
+) -> Result<Option<i32>> {
+    eprintln!(
+        "first run for this setup: booting once to build the warm snapshot {name} (later runs start in about a second)…"
+    );
+    let id = api.create(spec).await.context("creating the VM")?;
+    let result = async {
+        let ip = wait_ssh(api, id, user, identity).await?;
+        // sshd answers before cloud-init is done; snapshot only once first-boot setup has finished.
+        let _ = tokio::process::Command::from(ssh_base(&ip, user, identity))
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "sudo cloud-init status --wait || cloud-init status --wait",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .await;
+        api.snapshot(id, WARM_TAG)
+            .await
+            .context("saving the warm snapshot")?;
+        interactive(&ip, user, identity, &o.command).await
+    }
+    .await;
+    let _ = api.stop(id).await;
+    if result.is_err() {
+        // Never leave a template without its snapshot behind.
+        if !api.has_snapshot(id, WARM_TAG).await.unwrap_or(false) {
+            let _ = api.delete(id).await;
+        }
+    }
+    result.map(Some)
+}
+
 /// Returns the exit code `fluxctl` should finish with.
 pub async fn run<A: VmApi>(api: &A, o: RunOptions) -> Result<i32> {
     if o.image.is_none() && !cfg!(target_os = "macos") {
@@ -186,62 +422,40 @@ pub async fn run<A: VmApi>(api: &A, o: RunOptions) -> Result<i32> {
         .clone()
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_else(|| "fluxvm".into());
-    let name = o
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("run-{}", &Uuid::new_v4().simple().to_string()[..6]));
     let volumes = o
         .volumes
         .iter()
         .map(|v| parse_volume(v, &cwd, Some(&home)))
         .collect::<Result<Vec<_>>>()?;
     let (pubkey, identity) = ssh_key(&home)?;
-    let spec = build_spec(&o, &name, &user, &pubkey, volumes)?;
 
+    // A warm template is a stopped VM with a snapshot, so it needs macOS's snapshot support and a plain throwaway run.
+    if cfg!(target_os = "macos") && !o.no_warm && !o.keep && o.name.is_none() {
+        let spec = build_spec(&o, "warm", &user, &pubkey, volumes.clone())?;
+        let name = warm_name(&spec);
+        let mut spec = spec;
+        spec["name"] = json!(name);
+        spec["cloud_init"]["hostname"] = json!("fluxvm");
+        if let Some(code) = run_warm(api, &o, &name, spec, &user, &identity).await? {
+            return Ok(code);
+        }
+    }
+
+    let name = o
+        .name
+        .clone()
+        .unwrap_or_else(|| format!("run-{}", &Uuid::new_v4().simple().to_string()[..6]));
+    let spec = build_spec(&o, &name, &user, &pubkey, volumes)?;
     eprintln!(
         "creating {name} from {}…",
         spec["image"].as_str().unwrap_or("")
     );
     let id = api.create(spec).await.context("creating the VM")?;
     let session = async {
-        let deadline = Instant::now() + Duration::from_secs(180);
-        let ip = loop {
-            if let Some(ip) = api.guest_ip(id).await? {
-                break ip;
-            }
-            if Instant::now() > deadline {
-                bail!("the VM did not report an address within 180s");
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        };
-        eprintln!("waiting for ssh on {ip}…");
-        loop {
-            let ready = tokio::process::Command::from(ssh_base(&ip, &user, &identity))
-                .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "true"])
-                .stdin(std::process::Stdio::null())
-                .status()
-                .await
-                .context("running ssh (is the OpenSSH client installed?)")?
-                .success();
-            if ready {
-                break;
-            }
-            if Instant::now() > deadline {
-                bail!("ssh did not come up within 180s");
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-        let mut c = tokio::process::Command::from(ssh_base(&ip, &user, &identity));
-        if o.command.is_empty() {
-            c.arg("-tt");
-        }
-        let status = c.args(&o.command).status().await.context("running ssh")?;
-        Ok::<i32, anyhow::Error>(status.code().unwrap_or(1))
+        let ip = wait_ssh(api, id, &user, &identity).await?;
+        interactive(&ip, &user, &identity, &o.command).await
     };
-    let result = tokio::select! {
-        r = session => r,
-        _ = tokio::signal::ctrl_c() => Ok(130),
-    };
+    let result = session.await;
     if o.keep {
         eprintln!("kept {name} ({id}); remove it with `fluxctl delete {name}`");
     } else {
@@ -286,6 +500,28 @@ mod tests {
     }
 
     #[test]
+    fn the_warm_template_name_depends_on_the_setup_but_not_the_vm_name() {
+        let o = |ports: &[&str]| RunOptions {
+            image: None,
+            name: None,
+            cpus: 2,
+            memory_mib: 2048,
+            ports: ports.iter().map(|s| s.to_string()).collect(),
+            volumes: vec![],
+            user: None,
+            keep: false,
+            no_warm: false,
+            command: vec![],
+        };
+        let spec =
+            |o: &RunOptions, n: &str| build_spec(o, n, "dev", "ssh-ed25519 AAA", vec![]).unwrap();
+        let a = warm_name(&spec(&o(&[]), "x"));
+        assert_eq!(a, warm_name(&spec(&o(&[]), "y")));
+        assert_ne!(a, warm_name(&spec(&o(&["2222:22"]), "x")));
+        assert!(a.starts_with("warm-") && a.len() == 15);
+    }
+
+    #[test]
     fn spec_defaults_to_debian_13_on_the_auto_backend() {
         let o = RunOptions {
             image: None,
@@ -296,6 +532,7 @@ mod tests {
             volumes: vec![],
             user: None,
             keep: false,
+            no_warm: false,
             command: vec![],
         };
         let s = build_spec(&o, "run-abc", "dev", "ssh-ed25519 AAA", vec![]).unwrap();

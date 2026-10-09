@@ -28,17 +28,23 @@ cargo build -p fluxctl          # also builds and ad-hoc signs target/*/build/fl
 ./scripts/macos-live-test.sh    # boots a real Debian VM through the API (downloads the built-in debian-13, about 300 MB)
 ```
 
-Or skip the API: `fluxctl run` boots a throwaway VM, SSHes in, and deletes it when you leave.
+Or skip the API: `fluxctl run` gives you a throwaway VM and a shell, and everything you did in it is gone when you leave.
 
 ```bash
 fluxctl run                                  # built-in debian-13, a shell as your own user name
 fluxctl run -v ~/src:/mnt/src -p 8080:80     # share a folder, forward 127.0.0.1:8080 to guest port 80
 fluxctl run ubuntu-24.04 -- 'uname -a'       # run one command; its exit code is yours
 fluxctl run --keep --name dev                # keep the VM; `fluxctl ssh dev` or `fluxctl delete dev` later
+fluxctl run --no-warm                        # always cold-boot instead of restoring the warm snapshot
 ```
 
-It uses your first `~/.ssh/id_*.pub` key (or creates `~/.ssh/fluxvm_ed25519`). A run takes about 90 s on an M4, mostly the
-guest's first boot (cloud-init); the image itself is cached after the first download.
+It uses your first `~/.ssh/id_*.pub` key (or creates `~/.ssh/fluxvm_ed25519`).
+
+**Warm starts.** The first run for a given setup (image, size, ports, volumes, user, key) cold-boots a VM, waits for cloud-init to
+finish, snapshots it as a stopped template named `warm-<hash>`, and runs your session on it. Every later run restores that snapshot
+(about 2 s on an M4 against about 10 s for a cold boot) and stops the VM afterwards, so each run starts pristine. If the template is
+in use by another run, or the restore fails (for example on a locked screen, see Snapshots), `fluxctl run` boots a separate VM
+instead. Remove a template with `fluxctl delete warm-<hash>`, for example after a new image version.
 
 Run the daemon yourself:
 
