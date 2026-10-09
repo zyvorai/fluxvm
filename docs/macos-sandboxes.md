@@ -59,7 +59,14 @@ each), and no memory while stopped. Restoring needs an unlocked login session.
   Limits: HTTP and HTTPS only (no raw TCP, no UDP; DNS is done by the host), tools must honour `http_proxy`, the allow-list is fixed at
   creation, and these sandboxes cold-boot. HTTPS is tunnelled (CONNECT), not inspected.
 - Sandboxes of any other shape (a `spec`, a `template`, volumes, a different size) always cold-boot.
-- Not yet on `vz`: speculate/changesets, snapshots through the sandbox endpoints, volumes, GPUs.
+- **Speculate and changesets work.** `POST /v1/sandboxes/{id}/speculate {"command", "paths": [...]}` snapshots the running sandbox, runs
+  the command, records which files under `paths` were added, modified or deleted (with their contents), then puts the VM back by
+  relaunching it from the snapshot. The result is a pending changeset; `approve` then `apply` writes it into the sandbox, refusing
+  with a conflict if those files changed meanwhile. Measured: about 5 s for a small command. `paths` is required (the guest root is too
+  large to scan). Limits: it needs an **unlocked login session** (it uses snapshot restore), the VM restarts its processes' memory
+  state back to the snapshot (anything the command did in memory is discarded too), and only file changes are captured: network
+  calls the command made really happened (the changeset's `side_effects` says whether the sandbox could reach out).
+- Not yet on `vz`: volumes, GPUs.
 
 ## Verified
 

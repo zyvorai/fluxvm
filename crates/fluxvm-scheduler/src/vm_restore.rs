@@ -213,6 +213,11 @@ impl VmManager {
     /// Wait until the guest agent answers again; returns how long that took.
     pub(crate) async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
         let started = std::time::Instant::now();
+        // vz guests have no agent: "ready" means sshd answers (see `vz_guest`).
+        if self.get(id).await?.backend == BackendKind::Vz {
+            self.wait_vz_guest(id, AGENT_READY_DEADLINE).await?;
+            return Ok(started.elapsed());
+        }
         let mut last = String::from("no attempt");
         while started.elapsed() < AGENT_READY_DEADLINE {
             match self.exec(id, "true".into(), Some(5)).await {
@@ -398,7 +403,7 @@ impl VmManager {
         };
         let _guard = BusyGuard::acquire(id)?;
 
-        if !vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
+        if vm.backend != BackendKind::Vz && !vm.request.agent.as_ref().is_some_and(|a| a.enabled) {
             return Err(RestoreError::Conflict(
                 "dry-run needs the guest agent, and this sandbox was created without it".into(),
             )

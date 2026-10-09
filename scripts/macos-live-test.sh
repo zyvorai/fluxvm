@@ -130,6 +130,22 @@ oexec() { curl -fs -X POST "$SB/$OFFID/process" -H 'Content-Type: application/js
 [[ "$(oexec 'curl -s -m 4 -o /dev/null -w %{http_code} https://example.com; echo')" == 000 ]] && ok "offline sandbox: the internet is unreachable" || bad "offline sandbox reached the network"
 curl -fs -X POST "$SB/$OFFID/fs/write" -H 'Content-Type: application/json' -d "{\"path\":\"/tmp/off.txt\",\"content_base64\":\"$(printf 'off\n' | base64)\"}" >/dev/null && ok "offline sandbox: exec and files work over vsock ($(oexec 'whoami'))" || bad "offline sandbox fs write"
 [[ -z "$(curl -fs "$B/$OFFID" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("guest_ip") or "")')" ]] && ok "offline sandbox: no address was ever assigned" || bad "offline sandbox got an address"
+# Speculate: run a command in a throwaway state (snapshot, run, put the VM back), keep what it changed as a pending changeset,
+# and only touch the sandbox when the changeset is approved and applied.
+SP="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"ttl_seconds":600}')" || bad "speculate sandbox create failed"
+SPID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$SP")"
+spexec() { curl -fs -X POST "$SB/$SPID/process" -H 'Content-Type: application/json' -d "{\"command\":\"$1\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["stdout"],end="")'; }
+spexec 'mkdir -p /tmp/spec && echo base > /tmp/spec/base.txt && echo gone > /tmp/spec/gone.txt' >/dev/null
+SPIP="$(curl -fs "$B/$SPID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["guest_ip"])')"
+SPSTART=$SECONDS
+CS="$(curl -fs -X POST "$SB/$SPID/speculate" -H 'Content-Type: application/json' -d '{"command":"echo new > /tmp/spec/new.txt; echo changed > /tmp/spec/base.txt; rm /tmp/spec/gone.txt","paths":["/tmp/spec"],"timeout_seconds":60}')" || bad "speculate failed"
+CSID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$CS")"
+python3 -c 'import sys,json;d=json.loads(sys.argv[1]);c=d["changes"];assert d["state"]=="pending" and d["exit_code"]==0,d;assert c["added"]==["/tmp/spec/new.txt"] and c["modified"]==["/tmp/spec/base.txt"] and c["deleted"]==["/tmp/spec/gone.txt"],c;print(d["run_via"])' "$CS" > "$T/via" && ok "speculate: the changeset lists the added, modified and deleted files (via $(cat "$T/via"), $((SECONDS-SPSTART))s)" || bad "speculate result: $CS"
+[[ "$(spexec 'echo $(cat /tmp/spec/base.txt) $(ls /tmp/spec)')" == "base base.txt gone.txt" ]] && ok "speculate: the sandbox itself was not changed" || bad "speculate leaked into the sandbox: $(spexec 'echo $(ls /tmp/spec)')"
+[[ "$(curl -fs "$B/$SPID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["guest_ip"])')" == "$SPIP" ]] && ok "speculate: the sandbox kept its address" || bad "speculate changed the sandbox address"
+curl -fs -X POST "$SB/$SPID/changesets/$CSID/apply" >/dev/null 2>&1 && bad "applied a changeset that was not approved" || ok "speculate: an unapproved changeset cannot be applied"
+curl -fs -X POST "$SB/$SPID/changesets/$CSID/approve" >/dev/null && curl -fs -X POST "$SB/$SPID/changesets/$CSID/apply" >/dev/null || bad "approve/apply failed"
+[[ "$(spexec 'echo $(cat /tmp/spec/base.txt /tmp/spec/new.txt) $(ls /tmp/spec)')" == "changed new base.txt new.txt" ]] && ok "speculate: approve and apply put the changes into the sandbox" || bad "after apply: $(spexec 'echo $(ls /tmp/spec)')"
 # A sandbox that may reach only example.com: no card, so the only way out is the proxy the runner serves over vsock.
 AL="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"allow_hosts":["example.com"],"ttl_seconds":300}')" || bad "allow-listed sandbox create failed"
 ALID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$AL")"
