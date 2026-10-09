@@ -100,23 +100,23 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             }
         };
     }
-    if let Some(apple) = &req.apple {
-        if !apple.egress_allow.is_empty() {
-            if !matches!(req.network, NetworkSpec::None) {
-                bail!(
-                    "egress_allow needs network.mode = \"none\": with a network card the guest could bypass the proxy"
-                );
-            }
-            for h in &apple.egress_allow {
-                let host = h.strip_prefix("*.").unwrap_or(h);
-                if host.is_empty()
-                    || host.starts_with('.')
-                    || !host
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
-                {
-                    bail!("egress_allow entry {h:?} is not a host name or *.suffix");
-                }
+    if let Some(apple) = &req.apple
+        && !apple.egress_allow.is_empty()
+    {
+        if !matches!(req.network, NetworkSpec::None) {
+            bail!(
+                "egress_allow needs network.mode = \"none\": with a network card the guest could bypass the proxy"
+            );
+        }
+        for h in &apple.egress_allow {
+            let host = h.strip_prefix("*.").unwrap_or(h);
+            if host.is_empty()
+                || host.starts_with('.')
+                || !host
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+            {
+                bail!("egress_allow entry {h:?} is not a host name or *.suffix");
             }
         }
     }
