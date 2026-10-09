@@ -39,6 +39,7 @@ struct Config: Decodable {
     let window: Bool?
     let shares: [Share]?
     let forwards: [Forward]?
+    let restore_state: String?      // resume from a state file written by `save` instead of cold-booting
 }
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -78,6 +79,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     var ip: String?
     var signalSources: [DispatchSourceSignal] = []
     var vsockConnections: [VZVirtioSocketConnection] = []
+    var lastConfiguration: VZVirtualMachineConfiguration?
 
     init(_ cfg: Config) { self.cfg = cfg; super.init() }
 
@@ -125,7 +127,16 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 ? VZEFIVariableStore(url: file("efi.bin"))
                 : try VZEFIVariableStore(creatingVariableStoreAt: file("efi.bin"))
             c.bootLoader = boot
-            c.platform = VZGenericPlatformConfiguration()
+            // A saved VM state is tied to the machine identifier, and a generic platform invents a new one on every
+            // launch, so keep one per VM or a restore fails with "invalid argument".
+            let platform = VZGenericPlatformConfiguration()
+            let idFile = file("generic-id.bin")
+            if let data = try? Data(contentsOf: idFile), let id = VZGenericMachineIdentifier(dataRepresentation: data) {
+                platform.machineIdentifier = id
+            } else {
+                try platform.machineIdentifier.dataRepresentation.write(to: idFile, options: .atomic)
+            }
+            c.platform = platform
             let g = VZVirtioGraphicsDeviceConfiguration()
             g.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: 1280, heightInPixels: 800)]
             c.graphicsDevices = [g]
@@ -176,6 +187,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         try c.validate()
+        lastConfiguration = c
         return c
     }
 
@@ -188,10 +200,24 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             vm = machine
             state = "starting"
             if cfg.window == true { showWindow(machine) }
-            machine.start { result in
-                switch result {
-                case .success: self.state = "running"; emit(["event": "running"])
-                case .failure(let e): fail("start failed: \(e.localizedDescription)")
+            if let state = cfg.restore_state, cfg.guest_os == "linux" {
+                // Same configuration as when the state was saved; the machine comes back paused and is then resumed.
+                guard #available(macOS 14.0, *) else { fail("restoring a saved state needs macOS 14 or later") }
+                machine.restoreMachineStateFrom(url: URL(fileURLWithPath: state)) { error in
+                    if let error { fail("restore failed: \(error.localizedDescription)") }
+                    machine.resume { result in
+                        switch result {
+                        case .success: self.state = "running"; emit(["event": "running", "restored": true])
+                        case .failure(let e): fail("resume after restore failed: \(e.localizedDescription)")
+                        }
+                    }
+                }
+            } else {
+                machine.start { result in
+                    switch result {
+                    case .success: self.state = "running"; emit(["event": "running"])
+                    case .failure(let e): fail("start failed: \(e.localizedDescription)")
+                    }
                 }
             }
             startControlServer()
@@ -312,6 +338,30 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             case "status": response = ["ok": true, "state": self.state, "ip": self.ip as Any? ?? NSNull()]; sem.signal()
             case "pause": self.vm?.pause { r in response = self.result(r, "paused", set: { self.state = "paused" }); sem.signal() }
             case "resume": self.vm?.resume { r in response = self.result(r, "running", set: { self.state = "running" }); sem.signal() }
+            case "save":
+                // Pauses the guest and writes its memory and device state to `path`. The guest stays paused so the
+                // host can clone the disk at the same instant; `resume` continues it.
+                guard let path = o["path"] as? String, let vm = self.vm else { response = ["ok": false, "error": "save needs a path and a running guest"]; sem.signal(); break }
+                guard #available(macOS 14.0, *) else { response = ["ok": false, "error": "saving a VM needs macOS 14 or later"]; sem.signal(); break }
+                do { try self.lastConfiguration?.validateSaveRestoreSupport() } catch {
+                    response = ["ok": false, "error": "this VM's devices cannot be saved: \(error.localizedDescription)"]; sem.signal(); break
+                }
+                let wasRunning = self.state == "running"
+                let write = {
+                    vm.saveMachineStateTo(url: URL(fileURLWithPath: path)) { error in
+                        if let error { response = ["ok": false, "error": error.localizedDescription] }
+                        else { self.state = "paused"; response = ["ok": true, "state": "paused", "was_running": wasRunning] }
+                        sem.signal()
+                    }
+                }
+                if wasRunning {
+                    vm.pause { r in
+                        switch r {
+                        case .success: write()
+                        case .failure(let e): response = ["ok": false, "error": e.localizedDescription]; sem.signal()
+                        }
+                    }
+                } else { write() }
             case "shutdown":
                 do { try self.vm?.requestStop(); response = ["ok": true, "state": "stopping"] } catch { response = ["ok": false, "error": error.localizedDescription] }
                 sem.signal()
@@ -319,7 +369,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             default: sem.signal()
             }
         }
-        _ = sem.wait(timeout: .now() + 30)
+        _ = sem.wait(timeout: .now() + 120)
         reply(c, response)
     }
 
@@ -336,7 +386,12 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     func startIPWatcher() {
         // Only look at serial output written by *this* boot; earlier runs append to the same log.
         let bootOffset = ((try? FileManager.default.attributesOfItem(atPath: cfg.serial_log)[.size]) as? UInt64) ?? 0
-        try? FileManager.default.removeItem(atPath: cfg.ip_file)
+        if cfg.restore_state != nil {
+            // A restored guest does not print its address again; the address it had when saved is still in the file.
+            ip = (try? String(contentsOfFile: cfg.ip_file, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            try? FileManager.default.removeItem(atPath: cfg.ip_file)
+        }
         let timer = DispatchSource.makeTimerSource(queue: .global())
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in

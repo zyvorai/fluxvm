@@ -80,10 +80,11 @@ pub const CAPABILITIES: &[Capability] = &[
         "direct kernel boot, firmware overrides",
         "EFI boot from the disk only",
     ),
-    no(
-        "live migration, snapshots of running VMs",
-        "not implemented",
+    yes(
+        "snapshots of running VMs",
+        "memory, devices and disk; restore from a stopped VM; needs an unlocked login session",
     ),
+    no("live migration", "not implemented"),
     no(
         "GPU passthrough",
         "macOS guests get Metal-accelerated paravirtual graphics; Linux guests a 2D virtio display",

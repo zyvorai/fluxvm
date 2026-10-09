@@ -33,6 +33,8 @@ pub struct RunnerConfig {
     pub shares: Vec<ShareConfig>,
     /// Host `127.0.0.1:host_port` listeners that relay TCP to the guest's NAT address.
     pub forwards: Vec<ForwardConfig>,
+    /// A state file written by a snapshot; the runner resumes from it instead of cold-booting.
+    pub restore_state: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +75,10 @@ impl RunnerConfig {
                 .map(|p| short_socket(&id8, "vsock", p)),
             ip_file: ip_file(&ctx.workspace),
             window: apple.window,
+            restore_state: req
+                .loadvm_tag
+                .as_deref()
+                .map(|tag| snapshot_dir(&ctx.workspace, tag).join(STATE_FILE)),
             shares: req
                 .shared_folders
                 .iter()
@@ -102,6 +108,31 @@ impl RunnerConfig {
             .with_context(|| format!("writing {}", p.display()))?;
         Ok(p)
     }
+}
+
+pub const STATE_FILE: &str = "state.vzvmsave";
+/// Files cloned alongside the saved state, so a restore gets the disk exactly as it was when the state was saved.
+pub const SNAPSHOT_FILES: &[&str] = &["disk.raw", "efi.bin"];
+
+pub fn snapshot_dir(workspace: &Path, tag: &str) -> PathBuf {
+    workspace.join("snapshots").join(tag)
+}
+
+/// Copy-on-write clone on APFS (`cp -c`), a plain copy elsewhere. Replaces `to` if it exists.
+pub fn clone_file(from: &Path, to: &Path) -> Result<()> {
+    let _ = fs::remove_file(to);
+    let cloned = std::process::Command::new("cp")
+        .arg("-c")
+        .arg(from)
+        .arg(to)
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if !cloned {
+        fs::copy(from, to)
+            .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    }
+    Ok(())
 }
 
 /// unix socket paths are limited to ~104 bytes on macOS, so sockets live under a short per-user directory.
