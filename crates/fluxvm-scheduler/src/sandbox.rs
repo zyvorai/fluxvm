@@ -1022,9 +1022,13 @@ mod gpu_tests {
         assert!(e.contains("confidential"), "{e}");
         let e = error(&m, serde_json::json!({"template": "t", "gpus": 9})).await;
         assert!(e.contains("at most"), "{e}");
-        // Zero is the same as absent: it reaches the normal path and fails there instead.
-        let e = error(&m, serde_json::json!({"gpus": 0})).await;
-        assert!(e.contains("requires `template` or `spec`"), "{e}");
+        // Zero is the same as absent: it reaches the normal path and fails there instead. (On a Mac that path boots a default
+        // sandbox, which a unit test must not do.)
+        #[cfg(not(target_os = "macos"))]
+        {
+            let e = error(&m, serde_json::json!({"gpus": 0})).await;
+            assert!(e.contains("requires `template` or `spec`"), "{e}");
+        }
     }
 
     fn gpu(bdf: &str, free: bool) -> fluxvm_core::gpu::HostGpu {
