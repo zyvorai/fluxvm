@@ -103,5 +103,31 @@ curl -fs -X POST "$SB/$SBID/fs/write" -H 'Content-Type: application/json' -d "{\
 python3 -c 'import sys,json,base64;d=json.loads(sys.argv[1]);assert base64.b64decode(d["content_base64"])==b"x\ny\n" and d["mode"]==0o640,d' "$(curl -fs -X POST "$SB/$SBID/fs/read" -H 'Content-Type: application/json' -d '{"path":"/tmp/a dir/it'"'"'s.txt"}')" && ok "sandbox: file round trip keeps content and mode (awkward path)" || bad "sandbox fs read"
 for _ in $(seq 1 30); do [[ "$(curl -fs "$SB" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(len(d))')" == 0 ]] && break; sleep 3; done
 [[ "$(curl -fs "$SB" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(len(d))')" == 0 ]] && ok "sandbox: the TTL removed it" || bad "sandbox still present after its TTL"
+# The first sandbox cold-booted and started filling the warm pool. Once two slots are ready, two sandboxes created at the same
+# time each restore one (a claimed slot still has its "warm" snapshot; a cold-booted sandbox has none), get their own addresses,
+# and do not see each other's files.
+for _ in $(seq 1 40); do
+  [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(sum(1 for v in d if v["name"].startswith("sandbox-slot-") and v["status"]=="stopped"))')" -ge 2 ]] && break; sleep 3
+done
+WSTART=$SECONDS
+for n in 1 2; do curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"ttl_seconds":300}' > "$T/warm$n.json" & eval "WP$n=$!"; done
+wait "$WP1" "$WP2" || bad "a warm sandbox create failed"
+WID1="$(python3 -c 'import sys,json;print(json.load(open(sys.argv[1]))["id"])' "$T/warm1.json")"; WID2="$(python3 -c 'import sys,json;print(json.load(open(sys.argv[1]))["id"])' "$T/warm2.json")"
+for id in "$WID1" "$WID2"; do
+  curl -fs "$B/$id/snapshots" | grep -q '"warm"' || bad "sandbox $id was cold-booted, not restored from the warm pool"
+done
+ok "sandbox: two concurrent creates restored warm slots ($((SECONDS-WSTART))s for both)"
+WIP1="$(curl -fs "$B/$WID1" | python3 -c 'import sys,json;print(json.load(sys.stdin)["guest_ip"])')"; WIP2="$(curl -fs "$B/$WID2" | python3 -c 'import sys,json;print(json.load(sys.stdin)["guest_ip"])')"
+[[ -n "$WIP1" && -n "$WIP2" && "$WIP1" != "$WIP2" ]] && ok "sandbox: warm sandboxes have different addresses ($WIP1, $WIP2)" || bad "warm sandbox addresses: '$WIP1' '$WIP2'"
+curl -fs -X POST "$SB/$WID1/process" -H 'Content-Type: application/json' -d '{"command":"echo one > /tmp/mark"}' >/dev/null
+OTHER="$(curl -fs -X POST "$SB/$WID2/process" -H 'Content-Type: application/json' -d '{"command":"cat /tmp/mark 2>/dev/null || echo none"}')"
+python3 -c 'import sys,json;assert json.loads(sys.argv[1])["stdout"]=="none\n",sys.argv[1]' "$OTHER" && ok "sandbox: warm sandboxes are isolated from each other" || bad "warm sandboxes share state: $OTHER"
+# The pool refills in the background after the two claims; let it finish so it cannot start a VM while we clean up.
+for _ in $(seq 1 40); do
+  [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(sum(1 for v in d if v["name"].startswith("sandbox-slot-") and v["status"]=="stopped"))')" -ge 2 ]] && break; sleep 3
+done
+# Remove everything (sandboxes and warm slots) before checking nothing is left running.
+for id in $(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(" ".join(v["id"] for v in d))'); do curl -fs -X DELETE "$B/$id" >/dev/null || true; done
+sleep 3
 pgrep -f "fluxvm-vz-runner run --config $T" >/dev/null && bad "a sandbox runner is still running" || ok "sandbox: no runner left behind"
 echo "PASS"
