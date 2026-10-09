@@ -228,6 +228,16 @@ impl VmManager {
         // fails before anything is created.
         let confidential =
             crate::confidential::resolve(req.confidential, &crate::confidential::detect())?;
+        // The shape a warm slot has: nothing but defaults asked for, and no tenant to scope the VM to (token quotas were checked above).
+        let default_shape = cfg!(target_os = "macos")
+            && req.template.is_none()
+            && req.spec.is_none()
+            && req.volumes.is_empty()
+            && req.vcpus.is_none()
+            && req.memory_mib.is_none()
+            && gpus == 0
+            && token_tenant.is_none();
+        let (claim_name, claim_ttl) = (req.name.clone(), req.ttl_seconds);
         let from_template = req.template.is_some();
         let mut create = if let Some(template) = &req.template {
             self.load_template_spec(template).await?
@@ -235,10 +245,7 @@ impl VmManager {
             spec
         } else if cfg!(target_os = "macos") {
             // Nothing asked for: a small Debian VM on the Mac's own hypervisor, so `sandbox_create {}` just works.
-            serde_json::from_value(serde_json::json!({
-                "name": "", "backend": "auto", "image": "debian-13",
-                "vcpus": 2, "memory_mib": 2048, "network": {"mode": "user"},
-            }))?
+            serde_json::from_value(crate::sandbox_pool::default_sandbox_spec())?
         } else {
             bail!("sandbox create requires `template` or `spec`");
         };
@@ -273,15 +280,7 @@ impl VmManager {
             create.ttl_seconds = Some(ttl);
         }
         if create.backend == BackendKind::Vz {
-            // vz guests have no vsock agent: exec and files go over SSH with the daemon's own key (see `vz_guest`).
-            create.agent = None;
-            let (public_key, _) = self.sandbox_ssh_key()?;
-            let ci = create.cloud_init.get_or_insert_with(Default::default);
-            ci.user
-                .get_or_insert_with(|| crate::vz_guest::DEFAULT_SANDBOX_USER.into());
-            if !ci.ssh_authorized_keys.contains(&public_key) {
-                ci.ssh_authorized_keys.push(public_key);
-            }
+            self.prepare_vz_sandbox(&mut create)?;
         } else if create.agent.is_none() {
             // Agent on by default for sandbox exec/filesystem APIs.
             create.agent = Some(fluxvm_core::model::AgentSpec {
@@ -310,24 +309,24 @@ impl VmManager {
             Some(guard)
         };
         let on_vz = create.backend == BackendKind::Vz;
-        let mut record = self.create(create).await?;
+        let claimed = if on_vz && default_shape {
+            self.claim_warm_sandbox(claim_name.as_deref(), claim_ttl, created_by_token)
+                .await?
+        } else {
+            None
+        };
+        let mut record = match claimed {
+            Some(vm) => vm,
+            None => self.create(create).await?,
+        };
+        if on_vz && default_shape {
+            self.spawn_pool_fill();
+        }
         if on_vz {
             // A sandbox is ready when commands can run in it, so wait for the guest to accept SSH.
-            let ready = async {
-                let started = std::time::Instant::now();
-                let guest = loop {
-                    let vm = self.get(record.id).await?;
-                    if vm.guest_ip.is_some() {
-                        break self.vz_guest(&vm)?;
-                    }
-                    if started.elapsed() > std::time::Duration::from_secs(120) {
-                        bail!("the sandbox did not report an address within 120s");
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                };
-                fluxvm_apple::ssh::wait_ready(&guest, std::time::Duration::from_secs(120)).await
-            }
-            .await;
+            let ready = self
+                .wait_vz_guest(record.id, std::time::Duration::from_secs(120))
+                .await;
             if let Err(e) = ready {
                 let _ = self.delete(record.id).await;
                 return Err(e.context("starting the sandbox"));
@@ -361,6 +360,44 @@ impl VmManager {
         )
         .await?;
         Ok(record)
+    }
+
+    /// vz guests have no vsock agent: exec and files go over SSH with the daemon's own key (see `vz_guest`), authorised through
+    /// cloud-init for the sandbox user.
+    pub(crate) fn prepare_vz_sandbox(&self, create: &mut CreateVmRequest) -> Result<()> {
+        create.agent = None;
+        let (public_key, _) = self.sandbox_ssh_key()?;
+        let ci = create.cloud_init.get_or_insert_with(Default::default);
+        ci.user
+            .get_or_insert_with(|| crate::vz_guest::DEFAULT_SANDBOX_USER.into());
+        if !ci.ssh_authorized_keys.contains(&public_key) {
+            ci.ssh_authorized_keys.push(public_key);
+        }
+        Ok(())
+    }
+
+    /// Waits for a vz VM to report an address and accept SSH; returns how to reach it.
+    pub(crate) async fn wait_vz_guest(
+        &self,
+        id: Uuid,
+        timeout: std::time::Duration,
+    ) -> Result<fluxvm_apple::ssh::GuestSsh> {
+        let started = std::time::Instant::now();
+        let guest = loop {
+            let vm = self.get(id).await?;
+            if vm.guest_ip.is_some() {
+                break self.vz_guest(&vm)?;
+            }
+            if started.elapsed() > timeout {
+                bail!(
+                    "the sandbox did not report an address within {}s",
+                    timeout.as_secs()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        };
+        fluxvm_apple::ssh::wait_ready(&guest, timeout).await?;
+        Ok(guest)
     }
 
     /// Choose `count` free GPUs and add them to `create.vfio_devices`. The caller holds

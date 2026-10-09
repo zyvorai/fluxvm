@@ -37,6 +37,7 @@ mod migration_relay;
 pub mod procbox_sandbox;
 mod recovery;
 mod sandbox;
+mod sandbox_pool;
 pub mod shared_disk;
 pub mod speculate;
 pub mod templates;

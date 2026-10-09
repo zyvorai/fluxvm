@@ -212,6 +212,11 @@ pub struct SandboxConfig {
     /// Default guest port for `/sandbox/{id}/…` when no port is in the path.
     #[serde(default = "default_http_proxy_port")]
     pub http_proxy_default_port: u16,
+    /// vz backend: how many warm, snapshotted sandbox VMs to keep ready, so creating a default sandbox restores one in about
+    /// two seconds instead of cold-booting for about eight. Each needs its own snapshot (a saved state is tied to its MAC), so
+    /// this is also the number of sandboxes that can start fast at once. 0 turns it off. Default: 2 on macOS, 0 elsewhere.
+    #[serde(default = "default_warm_slots")]
+    pub warm_slots: usize,
     /// VM-edge dataplane. Legacy nftables is the default; native eBPF and
     /// Cilium-coexistence modes are explicit opt-ins.
     pub dataplane: DataplaneConfig,
@@ -280,6 +285,10 @@ impl Default for ProcboxConfig {
     }
 }
 
+fn default_warm_slots() -> usize {
+    if cfg!(target_os = "macos") { 2 } else { 0 }
+}
+
 fn default_http_proxy_port() -> u16 {
     8080
 }
@@ -306,6 +315,7 @@ impl Default for SandboxConfig {
             volumes_dir: None,
             egress_proxy_listen: String::new(),
             http_proxy_default_port: default_http_proxy_port(),
+            warm_slots: default_warm_slots(),
             dataplane: DataplaneConfig::default(),
             procbox: ProcboxConfig::default(),
         }
