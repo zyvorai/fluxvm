@@ -118,6 +118,16 @@ fn newest_cached(dir: &Path, name: &str) -> Option<PathBuf> {
         .map(|e| e.path())
 }
 
+/// Identifies the image `name` currently resolves to (the start of the vendor's checksum), without touching the network:
+/// `None` when it was never downloaded. It changes when the vendor publishes a new build and `ensure` has noticed.
+pub fn current_id(cfg: &Config, name: &str) -> Option<String> {
+    let dir = cfg.state_dir.join("images");
+    let (_, sum) = read_latest(&dir, name)?;
+    raw_path(&dir, name, &sum)
+        .exists()
+        .then(|| sum[..12.min(sum.len())].to_owned())
+}
+
 /// Local path of the ready-to-clone raw image for `name`, downloading and converting it on first use.
 ///
 /// A cached image is used without any network access for a day after the vendor's list was last checked, and
