@@ -10,8 +10,18 @@
   syscall, `CLOCK_BOOTTIME`) are cfg-gated with `Unsupported` stubs; no behaviour change on Linux.
 - macOS defaults for the state and run directories, a `cp -c` raw-disk clone, and a `hdiutil` NoCloud seed builder.
 - `scripts/macos-live-test.sh`: boots a real VM through the API and exercises the lifecycle (**PASS** on an Apple M4).
-- Verified on macOS: core 70, scheduler 171, api 56, network, storage 17, guest-protocol 14, fluxvm-apple 7 unit tests.
-  Not verified: macOS guests, the vsock proxy, Linux-only crates.
+- Verified on macOS: core 70, scheduler 171, api 56, network, storage 17, guest-protocol 14 unit tests when the backend landed;
+  `fluxvm-apple` now has 16. Not verified: macOS guests, Linux-only crates.
+- **Developer features on the `vz` backend** (each verified live on an Apple M4, see `scripts/macos-live-test.sh`): TCP port forwards
+  (including `guests: true` on the NAT gateway), virtiofs shared folders, named images (`debian-13`, `debian-12`, `ubuntu-24.04`,
+  downloaded, checksum-verified and cached offline-tolerantly), snapshots with restore (memory and disk, about 0.7 s to save and 1.4 s to
+  SSH after restore), and `network.mode = "none"`, which now really attaches no network card.
+- **`fluxctl run`** (a throwaway VM and a shell, warm-started in 2 to 3 s), **`fluxctl ssh`**, and **`fluxctl up | down | ps`** for
+  multi-VM stacks described in a `fluxvm.toml` ([docs/macos-stacks.md](docs/macos-stacks.md)).
+- **Agent sandboxes on a Mac** ([docs/macos-sandboxes.md](docs/macos-sandboxes.md)): the sandbox API and MCP tools over SSH; a warm pool
+  (`sandbox.warm_slots`) that follows the base image; `offline` sandboxes reached over vsock; `allow_hosts` for allow-listed HTTP(S)
+  egress through a host proxy; speculate and changesets.
+- **Packaging:** `scripts/package-macos.sh`, a release workflow and a Homebrew formula template (no tap is published).
 - Docs: `docs/macos-cluster.md` (FluxVM on a Mac mini, Mac Studio, MacBook Pro and a Mac cluster for private inference),
   README cards and a Mac section on the website home page.
 
