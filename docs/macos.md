@@ -11,13 +11,14 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 | Check | Result |
 | --- | --- |
 | `cargo build -p fluxctl`, `cargo build -p fluxvm-apple` | Builds; `fluxctl --version` runs |
-| `cargo test -p fluxvm-core --lib` / `-p fluxvm-scheduler --lib` / `-p fluxvm-api --lib` | 70 / 171 / 56 passed |
+| `cargo test -p fluxvm-core --lib` / `-p fluxvm-scheduler --lib` / `-p fluxvm-api --lib` | passed when the backend landed (70 / 171 / 56); CI runs them on every change |
 | `cargo test -p fluxvm-network --lib`, `-p fluxvm-storage --lib`, `-p fluxvm-guest-protocol --lib` | all passed (one Linux-only test is gated) |
-| `cargo test -p fluxvm-apple` | 7 passed (capability matrix, control protocol, backend supervision against a fake runner) |
-| `scripts/macos-live-test.sh` | **PASS**: daemon → REST create (`backend: vz`) → Debian 13 boots → address in the API → SSH → TCP port forward → shared folder read and write → pause → resume → stop → start → delete |
+| `cargo test -p fluxvm-apple` | 16 passed (capability matrix and egress validation, control protocol, SSH helpers, snapshot files, backend supervision against a fake runner) |
+| `scripts/macos-live-test.sh` | **PASS**, end to end on a real Debian 13 guest: create through the API, address, SSH, TCP forwards (host and guest-to-guest), shared folders, pause/resume, stop/start, snapshot and restore, named images, `fluxctl run` (cold and warm), a two-service stack, sandboxes (exec, files, TTL, warm pool and its refresh after an image update, concurrent creates, offline, allow-listed egress, speculate and changesets), nothing left running |
 
-**Not verified:** macOS guests (IPSW install and boot), the guest-agent vsock proxy, Linux-only crates (`fluxvm-procbox`,
-`fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent), and any Intel Mac.
+**Not verified:** macOS guests (IPSW install and boot), multi-Mac clusters, Linux-only crates (`fluxvm-procbox`,
+`fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent), and any Intel Mac. The hosted CI jobs for the `vz` pull requests
+have not all been green; see the pull requests for their state.
 
 ## Quick start
 
@@ -49,6 +50,9 @@ finish, snapshots it as a stopped template named `warm-<hash>`, and runs your se
 in use by another run, or the restore fails (for example on a locked screen, see Snapshots), `fluxctl run` boots a separate VM
 instead. Remove a template with `fluxctl delete warm-<hash>`, for example after a new image version.
 
+Measured on an Apple M4: cold boot about 10 s, warm run 2 to 3 s, snapshot 0.7 s, restore to SSH 1.4 s, sandbox create 8 s cold and
+about 2 s from the warm pool.
+
 A project that needs several VMs can describe them in a `fluxvm.toml` and use `fluxctl up` / `down`; see [stacks](macos-stacks.md).
 
 An AI agent can get a disposable VM through the sandbox API or MCP; see [sandboxes](macos-sandboxes.md).
@@ -71,7 +75,7 @@ On a Mac, `"backend": "auto"` resolves to `vz`.
 
 The daemon never links Virtualization.framework. `fluxvm-apple` supervises one signed helper process per VM,
 `fluxvm-vz-runner` (`crates/fluxvm-apple/runner/Runner.swift`), over a unix control socket (one JSON line per request:
-`status`, `pause`, `resume`, `shutdown`, `stop`). The runner holds the `VZVirtualMachine`, writes the guest's serial console
+`status`, `pause`, `resume`, `shutdown`, `stop`, `save`). The runner holds the `VZVirtualMachine`, writes the guest's serial console
 to the VM log, and records the guest's NAT address.
 
 - **Disk:** raw images are cloned instantly (APFS `cp -c`). A qcow2 image is converted to raw while cloning, which needs
@@ -90,6 +94,8 @@ to the VM log, and records the guest's NAT address.
   (that is how [stacks](macos-stacks.md) connect services).
 - **Shared folders:** `shared_folders` become virtiofs shares tagged `fs0`, `fs1`, …; with `cloud_init` (implied if you give shares)
   the guest mounts them at `guest_path` via `/etc/fstab`, so they survive stop/start. `read_only` is enforced by the host.
+- **vsock:** every VM has a vsock proxy socket (`CONNECT <port>` over a unix socket). The daemon uses it to reach an offline sandbox's sshd
+  (guest port 22), and the guest reaches a host-side egress proxy over it (guest to host, port 3128). See [sandboxes](macos-sandboxes.md).
 - **Signing:** the runner is ad-hoc signed with `com.apple.security.virtualization` by `build.rs`.
   Set `FLUXVM_VZ_RUNNER` to use another binary; `FLUXVM_SKIP_VZ_RUNNER=1` skips building it.
 
@@ -115,11 +121,11 @@ were running keep running, nothing reboots, and the guest address is reported ag
 
 | Supported | Not supported |
 | --- | --- |
-| vCPUs, memory, raw disk, cloud-init | tap / macvtap / netns / eBPF networking, port forwards |
-| NAT networking, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
+| vCPUs, memory, raw disk, cloud-init | tap / macvtap / netns / eBPF networking, UDP port forwards |
+| NAT networking, TCP port forwards, no-network mode, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
 | shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug, data disks, cdroms |
-| macOS guests via IPSW (runner support only) | live migration, in-place restore of a running VM, direct kernel boot |
+| macOS guests via IPSW (runner support only, never run) | live migration, in-place restore of a running VM, direct kernel boot |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
@@ -127,6 +133,11 @@ process starts.
 ## Honest limits
 
 - This is a preview-quality backend. Only Linux ARM64 guests have been booted.
-- macOS guests need an IPSW install step the REST API does not expose yet (`launch` refuses a macOS guest that was never installed).
+- macOS guests need an IPSW install step the REST API does not expose yet (`launch` refuses a macOS guest that was never installed). A fresh
+  macOS guest also has no SSH, cloud-init or systemd, so it needs a first-boot setup design before it fits the address-reporting and SSH
+  paths used here. Testing it needs about 40 GB of free disk (the restore image alone is roughly 15 to 20 GB).
+- Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
+  where it can.
+- A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.
 - Memory is not enforced by FluxVM here; the Mac's own memory pressure applies. Plan for one or two small VMs on a 16 GB Mac.
