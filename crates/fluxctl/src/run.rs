@@ -36,6 +36,14 @@ pub trait VmApi {
     async fn has_snapshot(&self, id: Uuid, tag: &str) -> Result<bool>;
     async fn stop(&self, id: Uuid) -> Result<()>;
     async fn restore(&self, id: Uuid, tag: &str) -> Result<()>;
+    async fn start(&self, id: Uuid) -> Result<()>;
+    async fn set_labels(
+        &self,
+        id: Uuid,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> Result<()>;
+    /// The VMs carrying `fluxvm.stack=<stack>`.
+    async fn list_stack(&self, stack: &str) -> Result<Vec<crate::stack::StackVm>>;
 }
 
 pub struct Local<'a>(pub &'a std::sync::Arc<fluxvm_scheduler::VmManager>);
@@ -75,6 +83,37 @@ impl VmApi for Local<'_> {
     }
     async fn restore(&self, id: Uuid, tag: &str) -> Result<()> {
         self.0.restore_vm_snapshot(id, tag).await.map(drop)
+    }
+    async fn start(&self, id: Uuid) -> Result<()> {
+        self.0.start(id).await.map(drop)
+    }
+    async fn set_labels(
+        &self,
+        id: Uuid,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        let patch = fluxvm_core::model::VmPatch {
+            name: None,
+            labels: labels.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+        };
+        self.0.patch(id, patch).await.map(drop)
+    }
+    async fn list_stack(&self, stack: &str) -> Result<Vec<crate::stack::StackVm>> {
+        use crate::stack::{L_HASH, L_SERVICE, L_STACK, StackVm};
+        Ok(self
+            .0
+            .list()
+            .await
+            .into_iter()
+            .filter(|v| v.labels.get(L_STACK).map(String::as_str) == Some(stack))
+            .map(|v| StackVm {
+                id: v.id,
+                name: v.name.clone(),
+                service: v.labels.get(L_SERVICE).cloned().unwrap_or_default(),
+                hash: v.labels.get(L_HASH).cloned().unwrap_or_default(),
+                status: format!("{:?}", v.status).to_lowercase(),
+            })
+            .collect())
     }
 }
 
@@ -138,6 +177,39 @@ impl VmApi for crate::remote::Remote {
         .await
         .map(drop)
     }
+    async fn start(&self, id: Uuid) -> Result<()> {
+        self.vm_op(id, "start").await.map(drop)
+    }
+    async fn set_labels(
+        &self,
+        id: Uuid,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.call(
+            reqwest::Method::PATCH,
+            &format!("/v1/vms/{id}"),
+            Some(json!({"labels": labels})),
+        )
+        .await
+        .map(drop)
+    }
+    async fn list_stack(&self, stack: &str) -> Result<Vec<crate::stack::StackVm>> {
+        use crate::stack::{L_HASH, L_SERVICE, L_STACK, StackVm};
+        let items = self.list_vms(Some(&format!("{L_STACK}={stack}"))).await?;
+        Ok(items
+            .iter()
+            .filter_map(|v| {
+                let l = &v["labels"];
+                Some(StackVm {
+                    id: v["id"].as_str()?.parse().ok()?,
+                    name: v["name"].as_str()?.to_owned(),
+                    service: l[L_SERVICE].as_str().unwrap_or_default().to_owned(),
+                    hash: l[L_HASH].as_str().unwrap_or_default().to_owned(),
+                    status: v["status"].as_str().unwrap_or_default().to_lowercase(),
+                })
+            })
+            .collect())
+    }
 }
 
 /// `8080:80` -> a TCP forward from 127.0.0.1:8080 to guest port 80.
@@ -180,7 +252,7 @@ pub fn parse_volume(s: &str, cwd: &Path, home: Option<&Path>) -> Result<Value> {
 
 /// The user's first SSH public key, or a new `~/.ssh/fluxvm_ed25519` pair. Returns the key text and, for a
 /// generated key, the private key `ssh` must be told to use.
-fn ssh_key(home: &Path) -> Result<(String, Option<PathBuf>)> {
+pub(crate) fn ssh_key(home: &Path) -> Result<(String, Option<PathBuf>)> {
     let ssh = home.join(".ssh");
     for n in ["id_ed25519", "id_ecdsa", "id_rsa"] {
         if let Ok(k) = std::fs::read_to_string(ssh.join(format!("{n}.pub"))) {
@@ -253,7 +325,7 @@ fn generated_identity() -> Option<PathBuf> {
     (!own && key.exists()).then_some(key)
 }
 
-fn ssh_base(ip: &str, user: &str, key: &Option<PathBuf>) -> std::process::Command {
+pub(crate) fn ssh_base(ip: &str, user: &str, key: &Option<PathBuf>) -> std::process::Command {
     let mut c = std::process::Command::new("ssh");
     c.args([
         "-o",
@@ -316,7 +388,7 @@ pub fn warm_name(spec: &Value) -> String {
 }
 
 /// Waits for the guest's address and for sshd to accept a login.
-async fn wait_ssh<A: VmApi>(
+pub(crate) async fn wait_ssh<A: VmApi>(
     api: &A,
     id: Uuid,
     user: &str,

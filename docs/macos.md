@@ -46,6 +46,8 @@ finish, snapshots it as a stopped template named `warm-<hash>`, and runs your se
 in use by another run, or the restore fails (for example on a locked screen, see Snapshots), `fluxctl run` boots a separate VM
 instead. Remove a template with `fluxctl delete warm-<hash>`, for example after a new image version.
 
+A project that needs several VMs can describe them in a `fluxvm.toml` and use `fluxctl up` / `down`; see [stacks](macos-stacks.md).
+
 Run the daemon yourself:
 
 ```bash
@@ -78,7 +80,9 @@ to the VM log, and records the guest's NAT address.
   parses it and `GET /v1/vms/{id}` reports it as `guest_ip`. It also turns off OpenSSH's per-source penalties inside the
   guest so the managing host is never throttled.
 - **Networking:** Virtualization.framework NAT only (`network.mode = "user"` or `"none"`). The guest is reachable at its address
-  from the Mac. TCP `forwards` listen on `127.0.0.1:<host_port>` (ports 1024 and up) and relay to the guest's address.
+  from the Mac. TCP `forwards` listen on `127.0.0.1:<host_port>` (ports 1024 and up) and relay to the guest's address. Guests on this NAT cannot reach
+  each other; a forward with `"guests": true` also listens on the NAT gateway address (the Mac, as guests see it) so other guests can use it
+  (that is how [stacks](macos-stacks.md) connect services).
 - **Shared folders:** `shared_folders` become virtiofs shares tagged `fs0`, `fs1`, …; with `cloud_init` (implied if you give shares)
   the guest mounts them at `guest_path` via `/etc/fstab`, so they survive stop/start. `read_only` is enforced by the host.
 - **Signing:** the runner is ad-hoc signed with `com.apple.security.virtualization` by `build.rs`.

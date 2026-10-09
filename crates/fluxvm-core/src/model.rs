@@ -245,6 +245,11 @@ pub struct PortForward {
     pub guest_port: u16,
     #[serde(default = "default_tcp")]
     pub protocol: String,
+    /// vz backend: listen on the NAT gateway address (the Mac, as the guests see it) instead of `127.0.0.1`, so *other
+    /// guests* can reach this port. Guests on Virtualization.framework's NAT cannot talk to each other directly; this
+    /// relays through the Mac. Ignored by other backends.
+    #[serde(default)]
+    pub guests: bool,
 }
 fn default_tcp() -> String {
     "tcp".into()

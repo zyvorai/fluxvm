@@ -109,6 +109,7 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                     .any(|f| !f.protocol.eq_ignore_ascii_case("tcp")),
                 "UDP port forwards (only tcp is relayed)"
             );
+            // 127.0.0.1 and the NAT gateway are different addresses, so one port number may be used on each.
             let mut seen = std::collections::HashSet::new();
             for f in forwards {
                 if f.host_port < 1024 {
@@ -117,7 +118,7 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                         f.host_port
                     );
                 }
-                if !seen.insert(f.host_port) {
+                if !seen.insert((f.host_port, f.guests)) {
                     bail!("host port {} is forwarded more than once", f.host_port);
                 }
             }
@@ -275,6 +276,14 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn one_port_may_be_forwarded_to_the_host_and_to_other_guests() {
+        let both = r#""network":{"mode":"user","forwards":[{"host_port":5000,"guest_port":5000},{"host_port":5000,"guest_port":5000,"guests":true}]}"#;
+        assert!(validate_request(&req(both)).is_ok());
+        let twice = r#""network":{"mode":"user","forwards":[{"host_port":5000,"guest_port":5000,"guests":true},{"host_port":5000,"guest_port":6000,"guests":true}]}"#;
+        assert!(validate_request(&req(twice)).is_err());
     }
 
     #[test]

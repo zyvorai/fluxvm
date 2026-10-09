@@ -20,6 +20,7 @@ struct Share: Decodable {
 struct Forward: Decodable {
     let host_port: UInt16
     let guest_port: UInt16
+    let guests: Bool?
 }
 
 struct Config: Decodable {
@@ -223,7 +224,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             startControlServer()
             startIPWatcher()
             if cfg.vsock_socket != nil { startVsockProxy() }
-            for f in cfg.forwards ?? [] { startForward(f) }
+            for f in cfg.forwards ?? [] where f.guests != true { startForward(f, bind: "127.0.0.1", fatal: true) }
             setupSignals()
         } catch { fail(error.localizedDescription) }
     }
@@ -392,6 +393,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         } else {
             try? FileManager.default.removeItem(atPath: cfg.ip_file)
         }
+        if let known = ip, !known.isEmpty { startGuestForwards(guestIP: known) }
         let timer = DispatchSource.makeTimerSource(queue: .global())
         timer.schedule(deadline: .now() + 1, repeating: 1)
         timer.setEventHandler { [weak self] in
@@ -404,6 +406,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                   let m = re.matches(in: text, range: NSRange(text.startIndex..., in: text)).last, let r = Range(m.range(at: 1), in: text) else { return }
             let found = String(text[r])
             if found != self.ip { self.ip = found; try? found.write(toFile: self.cfg.ip_file, atomically: true, encoding: .utf8) }
+            self.startGuestForwards(guestIP: found)
         }
         timer.resume()
         ipTimer = timer
@@ -412,17 +415,21 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
 
     // MARK: TCP port forwards (127.0.0.1:host_port -> guest NAT address:guest_port)
 
-    func startForward(_ f: Forward) {
+    func startForward(_ f: Forward, bind address: String, fatal: Bool) {
+        func problem(_ what: String) {
+            let message = "port forward \(address):\(f.host_port): \(what)"
+            if fatal { fail(message) } else { emit(["event": "forward-error", "message": message]) }
+        }
         let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { fail("port forward \(f.host_port): \(String(cString: strerror(errno)))") }
+        guard fd >= 0 else { problem(String(cString: strerror(errno))); return }
         var one: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = f.host_port.bigEndian
-        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        addr.sin_addr.s_addr = inet_addr(address)
         let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
-        guard ok == 0, listen(fd, 32) == 0 else { fail("port forward \(f.host_port): \(String(cString: strerror(errno)))") }
+        guard ok == 0, listen(fd, 32) == 0 else { problem(String(cString: strerror(errno))); close(fd); return }
         DispatchQueue.global().async {
             while true {
                 let c = accept(fd, nil, nil)
@@ -430,6 +437,19 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 DispatchQueue.global().async { self.relay(c, to: f.guest_port) }
             }
         }
+    }
+
+    // Ports other guests may use. Guests on Virtualization.framework's NAT cannot reach each other, but all of them
+    // reach the Mac at the NAT gateway (the guest's /24, address .1), so each such port is listened on there and
+    // relayed to this guest. Bound to that address only, so nothing is exposed to the LAN.
+    var guestForwardsStarted = false
+    func startGuestForwards(guestIP: String) {
+        guard !guestForwardsStarted else { return }
+        let octets = guestIP.split(separator: ".")
+        guard octets.count == 4 else { return }
+        guestForwardsStarted = true
+        let gateway = octets[0..<3].joined(separator: ".") + ".1"
+        for f in cfg.forwards ?? [] where f.guests == true { startForward(f, bind: gateway, fatal: false) }
     }
 
     func relay(_ c: Int32, to port: UInt16) {
