@@ -454,8 +454,9 @@ enum Command {
     Ssh {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
-        #[arg(long, short = 'l', default_value = "root")]
-        user: String,
+        /// Login user (default: the user the VM's cloud-init created, else root).
+        #[arg(long, short = 'l')]
+        user: Option<String>,
         #[arg(long, short = 'p', default_value_t = 22)]
         port: u16,
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -2496,6 +2497,25 @@ async fn run_remote(
                 ),
             }
         }
+        Command::Ssh {
+            id,
+            user,
+            port,
+            ssh_args,
+        } => {
+            let vm = r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?;
+            let ip = vm["guest_ip"]
+                .as_str()
+                .context("VM has no guest_ip yet — wait for it to boot")?;
+            let user = user
+                .or_else(|| {
+                    vm["request"]["cloud_init"]["user"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| "root".into());
+            run::ssh_to(ip, &user, port, vm["backend"] == "vz", &ssh_args).await?;
+        }
         Command::Run {
             image,
             name,
@@ -2527,7 +2547,7 @@ async fn run_remote(
             std::process::exit(code);
         }
         _ => anyhow::bail!(
-            "this command is not available with --server; supported: run, create, vm-template, list, get, \
+            "this command is not available with --server; supported: run, ssh, create, vm-template, list, get, \
              status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, import-image, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
@@ -3379,18 +3399,10 @@ async fn main() -> Result<()> {
             let ip = vm.guest_ip.as_deref().context(
                 "VM has no guest_ip yet — wait for DHCP/lease, or use `console`/`login` over vsock",
             )?;
-            let status = tokio::process::Command::new("ssh")
-                .arg("-tt")
-                .arg("-p")
-                .arg(port.to_string())
-                .arg(format!("{user}@{ip}"))
-                .args(&ssh_args)
-                .status()
-                .await
-                .context("running ssh (is OpenSSH client installed?)")?;
-            if !status.success() {
-                anyhow::bail!("ssh exited with {status}");
-            }
+            let user = user
+                .or_else(|| vm.request.cloud_init.as_ref().and_then(|c| c.user.clone()))
+                .unwrap_or_else(|| "root".into());
+            run::ssh_to(ip, &user, port, vm.backend == BackendKind::Vz, &ssh_args).await?;
         }
         Command::Show { id } => {
             println!("{}", serde_json::to_string_pretty(&m.get(id).await?)?);
@@ -5712,10 +5724,19 @@ mod machinectl_parity_cli_tests {
             panic!("expected Command::Ssh");
         };
         assert_eq!(parsed, id);
-        assert_eq!(user, "ubuntu");
+        assert_eq!(user.as_deref(), Some("ubuntu"));
         assert_eq!(port, 2222);
         assert_eq!(ssh_args, vec!["uptime".to_string()]);
 
+        // No -l: the user is decided later, from the VM's own cloud-init.
+        assert!(matches!(
+            parse(&["ssh", &id.to_string()]),
+            Command::Ssh {
+                user: None,
+                port: 22,
+                ..
+            }
+        ));
         assert!(matches!(
             parse(&["show", &id.to_string()]),
             Command::Show { .. }
