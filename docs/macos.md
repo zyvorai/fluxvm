@@ -21,6 +21,9 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 
 ## Quick start
 
+A Homebrew package can be built from each version tag (see [`packaging/homebrew`](../packaging/homebrew/README.md)), but no tap is
+published yet, so build from source as below.
+
 ```bash
 xcode-select --install          # compiler for the Swift runner
 brew install hivex              # linked by guestkit's registry support
