@@ -58,7 +58,7 @@ Create a VM with `"backend": "vz"` (or `"auto"`, which resolves to `vz` on a Mac
 - **Verified** on an Apple M4, macOS 27.2: the core crates' unit tests, `fluxvm-apple` tests, and the live test (Debian 13: the VM
   lifecycle, forwards, shares, snapshots, `fluxctl run`, stacks and agent sandboxes; see [macos.md](macos.md)); a Kairon `vz` Machine
   scheduled to the Mac and run through FluxVM.
-- **Not verified:** macOS guests, multi-Mac clusters, Thunderbolt RDMA, any throughput figure on this page.
+- **Verified by hand only:** a macOS 27 guest installed from an IPSW, cloned and reached over SSH ([macos.md](macos.md#macos-guests)). **Not verified:** macOS guests through the API, multi-Mac clusters, Thunderbolt RDMA, any throughput figure on this page.
 - **Roadmap (not FluxVM's job, listed for the whole stack):** sharding one model across Macs (EXO or MLX distributed), a
   topology view of Thunderbolt links, per-node temperature and tok/s, and a benchmark command.
 
