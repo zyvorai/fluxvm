@@ -205,6 +205,54 @@ fn ssh_key(home: &Path) -> Result<(String, Option<PathBuf>)> {
     Ok((k.trim().to_owned(), Some(key)))
 }
 
+/// `fluxctl ssh`: an interactive session (or one command) with the host's OpenSSH client.
+///
+/// On a Mac the guests are local NAT VMs whose addresses get reused, so for `vz` VMs the host key is not
+/// remembered (otherwise a recycled address triggers a host-key warning). Other backends keep normal checking.
+pub async fn ssh_to(
+    ip: &str,
+    user: &str,
+    port: u16,
+    local_nat_vm: bool,
+    args: &[String],
+) -> Result<()> {
+    let mut c = tokio::process::Command::new("ssh");
+    c.arg("-tt").arg("-p").arg(port.to_string());
+    if local_nat_vm {
+        c.args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "LogLevel=ERROR",
+        ]);
+        if let Some(key) = generated_identity() {
+            c.arg("-i").arg(key);
+        }
+    }
+    let status = c
+        .arg(format!("{user}@{ip}"))
+        .args(args)
+        .status()
+        .await
+        .context("running ssh (is OpenSSH client installed?)")?;
+    if !status.success() {
+        bail!("ssh exited with {status}");
+    }
+    Ok(())
+}
+
+/// `~/.ssh/fluxvm_ed25519`, when `fluxctl run` had to create it because the user has no key of their own.
+fn generated_identity() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let own = ["id_ed25519", "id_ecdsa", "id_rsa"]
+        .iter()
+        .any(|n| home.join(".ssh").join(format!("{n}.pub")).exists());
+    let key = home.join(".ssh/fluxvm_ed25519");
+    (!own && key.exists()).then_some(key)
+}
+
 fn ssh_base(ip: &str, user: &str, key: &Option<PathBuf>) -> std::process::Command {
     let mut c = std::process::Command::new("ssh");
     c.args([

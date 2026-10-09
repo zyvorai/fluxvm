@@ -34,7 +34,7 @@ Or skip the API: `fluxctl run` gives you a throwaway VM and a shell, and everyth
 fluxctl run                                  # built-in debian-13, a shell as your own user name
 fluxctl run -v ~/src:/mnt/src -p 8080:80     # share a folder, forward 127.0.0.1:8080 to guest port 80
 fluxctl run ubuntu-24.04 -- 'uname -a'       # run one command; its exit code is yours
-fluxctl run --keep --name dev                # keep the VM; `fluxctl ssh dev` or `fluxctl delete dev` later
+fluxctl run --keep --name dev                # keep the VM; `fluxctl ssh dev` (as your user) or `fluxctl delete dev` later
 fluxctl run --no-warm                        # always cold-boot instead of restoring the warm snapshot
 ```
 
