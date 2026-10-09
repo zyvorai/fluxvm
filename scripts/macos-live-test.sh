@@ -92,4 +92,16 @@ mine() { ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogL
 START=$SECONDS; ( cd "$T/proj" && "${FX[@]}" up >"$T/up2.log" 2>&1 </dev/null ) && ! grep -qE "creating|recreating" "$T/up2.log" && ok "stack: a second up changes nothing ($((SECONDS-START))s)" || bad "second up was not a no-op: $(cat "$T/up2.log")"
 ( cd "$T/proj" && "${FX[@]}" down >/dev/null 2>&1 </dev/null )
 [[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d) if isinstance(d,dict) else d;print(sum(1 for v in d if v["name"].startswith("demo-")))')" == 0 ]] && ok "stack: down removed both VMs" || bad "stack VMs left behind"
+# Agent sandbox API on a Mac: create with no template (default Debian VM, ready for commands), exec over SSH, a file round trip,
+# and the TTL removing the sandbox on its own.
+SB="http://127.0.0.1:$PORT/v1/sandboxes"
+SBRESP="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"ttl_seconds":40}')" || bad "sandbox create failed"
+SBID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$SBRESP")"
+SBOUT="$(curl -fs -X POST "$SB/$SBID/process" -H 'Content-Type: application/json' -d '{"command":"echo sandbox-ok; exit 3"}')"
+python3 -c 'import sys,json;d=json.loads(sys.argv[1]);assert d["exit_code"]==3 and d["stdout"]=="sandbox-ok\n",d' "$SBOUT" && ok "sandbox: create is ready for commands; exec returns the exit code and output" || bad "sandbox exec: $SBOUT"
+curl -fs -X POST "$SB/$SBID/fs/write" -H 'Content-Type: application/json' -d "{\"path\":\"/tmp/a dir/it's.txt\",\"content_base64\":\"$(printf 'x\ny\n' | base64)\",\"mode\":416}" >/dev/null || bad "sandbox fs write"
+python3 -c 'import sys,json,base64;d=json.loads(sys.argv[1]);assert base64.b64decode(d["content_base64"])==b"x\ny\n" and d["mode"]==0o640,d' "$(curl -fs -X POST "$SB/$SBID/fs/read" -H 'Content-Type: application/json' -d '{"path":"/tmp/a dir/it'"'"'s.txt"}')" && ok "sandbox: file round trip keeps content and mode (awkward path)" || bad "sandbox fs read"
+for _ in $(seq 1 30); do [[ "$(curl -fs "$SB" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(len(d))')" == 0 ]] && break; sleep 3; done
+[[ "$(curl -fs "$SB" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d);print(len(d))')" == 0 ]] && ok "sandbox: the TTL removed it" || bad "sandbox still present after its TTL"
+pgrep -f "fluxvm-vz-runner run --config $T" >/dev/null && bad "a sandbox runner is still running" || ok "sandbox: no runner left behind"
 echo "PASS"

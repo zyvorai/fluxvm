@@ -694,7 +694,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "sandbox_create",
-            "Create an agent sandbox VM from a named template (or the host default) with an optional TTL.",
+            "Create an agent sandbox VM from a named template (or the host default; on a Mac, a small Debian VM) with an optional TTL. Returns once commands can run in it.",
             object(
                 json!({
                     "template": {"type": "string", "description": "sandbox template name"},
@@ -723,7 +723,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "sandbox_exec",
-            "Run a shell command inside a sandbox VM through the guest agent; returns exit code, stdout and stderr.",
+            "Run a shell command inside a sandbox VM (through the guest agent; over SSH on a Mac); returns exit code, stdout and stderr.",
             object(
                 json!({
                     "vm": vm_prop,

@@ -10,6 +10,7 @@
 mod capability;
 mod control;
 mod runner;
+pub mod ssh;
 
 pub use capability::{
     CAPABILITIES, Capability, validate_request, with_guest_reporting, with_shared_folder_mounts,
