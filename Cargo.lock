@@ -2189,6 +2189,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-tungstenite 0.26.2",
@@ -2441,6 +2442,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

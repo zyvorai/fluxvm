@@ -442,6 +442,9 @@ enum Command {
         /// Keep the VM after the session instead of deleting it.
         #[arg(long)]
         keep: bool,
+        /// Cold-boot a fresh VM every time instead of restoring the warm snapshot (macOS).
+        #[arg(long)]
+        no_warm: bool,
         #[arg(last = true)]
         command: Vec<String>,
     },
@@ -2502,6 +2505,7 @@ async fn run_remote(
             volumes,
             user,
             keep,
+            no_warm,
             command,
         } => {
             let code = run::run(
@@ -2515,6 +2519,7 @@ async fn run_remote(
                     volumes,
                     user,
                     keep,
+                    no_warm,
                     command,
                 },
             )
@@ -3343,6 +3348,7 @@ async fn main() -> Result<()> {
             volumes,
             user,
             keep,
+            no_warm,
             command,
         } => {
             let code = run::run(
@@ -3356,6 +3362,7 @@ async fn main() -> Result<()> {
                     volumes,
                     user,
                     keep,
+                    no_warm,
                     command,
                 },
             )

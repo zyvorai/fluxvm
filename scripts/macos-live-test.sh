@@ -70,8 +70,13 @@ for _ in $(seq 1 20); do sshc "$IP" hostname >/dev/null 2>&1 && break; sleep 3; 
 [[ "$(sshc "$IP" hostname)" == live ]] && ok "restart: the VM boots again and reports its address" || bad "restart ssh"
 curl -fs -X DELETE "$V" >/dev/null && sleep 3 && ok "delete"
 pgrep -f "fluxvm-vz-runner run --config $T" >/dev/null && bad "runner still running after delete" || ok "no runner left behind"
-# `fluxctl run` through the daemon's REST API: boots a throwaway VM, runs a command over SSH, and deletes it.
-RUNOUT="$(./target/debug/fluxctl --server "http://127.0.0.1:$PORT" run -- 'echo run-ok' 2>/dev/null </dev/null)" || bad "fluxctl run failed"
-[[ "$RUNOUT" == run-ok ]] && ok "fluxctl run: throwaway VM boots, runs a command, exits" || bad "fluxctl run output: $RUNOUT"
-[[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("items",d) if isinstance(d,dict) else d))')" == 0 ]] && ok "fluxctl run left no VM behind" || bad "a run VM was left behind"
+# `fluxctl run` through the daemon's REST API. The first run builds a warm template (cold boot + snapshot); the next
+# restores it, and must see none of the first run's changes.
+FX=(./target/debug/fluxctl --server "http://127.0.0.1:$PORT")
+RUNOUT="$("${FX[@]}" run -- 'touch /var/tmp/leak; echo run-ok' 2>/dev/null </dev/null)" || bad "fluxctl run failed"
+[[ "$RUNOUT" == run-ok ]] && ok "fluxctl run: boots, runs a command, exits (builds the warm template)" || bad "fluxctl run output: $RUNOUT"
+START=$SECONDS
+RUNOUT="$("${FX[@]}" run -- 'ls /var/tmp/leak 2>/dev/null || echo clean' 2>/dev/null </dev/null)" || bad "second fluxctl run failed"
+[[ "$RUNOUT" == clean ]] && ok "fluxctl run: the second run restores the warm snapshot, pristine ($((SECONDS-START))s)" || bad "second run saw the first run's file: $RUNOUT"
+[[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);d=d.get("items",d) if isinstance(d,dict) else d;print(sum(1 for v in d if not v["name"].startswith("warm-")),sum(1 for v in d if v["name"].startswith("warm-") and v["status"]!="stopped"))')" == "0 0" ]] && ok "fluxctl run left nothing running (only the stopped warm template)" || bad "a run VM was left behind"
 echo "PASS"
