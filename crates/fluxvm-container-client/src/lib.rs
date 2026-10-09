@@ -85,6 +85,9 @@ fn open_stream_blocking(vm: &VmRecord, attach: &IoStreamAttach) -> Result<Contai
                 .context("VM has no vsock proxy socket recorded")?;
             uds_proxy_stream_blocking(socket, DEFAULT_CONTAINER_STREAM_PORT, attach)
         }
+        BackendKind::Vz => {
+            bail!("the container agent is not reachable on the Apple (vz) backend yet")
+        }
         BackendKind::Auto => bail!("unresolved FluxVM backend"),
     }
 }
@@ -253,6 +256,9 @@ pub async fn call(
                     .as_deref()
                     .context("VM has no vsock proxy socket recorded")?;
                 uds_proxy_call(socket, DEFAULT_CONTAINER_AGENT_PORT, &envelope).await
+            }
+            BackendKind::Vz => {
+                bail!("the container agent is not reachable on the Apple (vz) backend yet")
             }
             BackendKind::Auto => bail!("unresolved FluxVM backend"),
         }
