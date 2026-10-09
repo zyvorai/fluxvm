@@ -29,6 +29,7 @@ mod fleet_client;
 mod mcp;
 mod output;
 mod remote;
+mod run;
 mod status;
 mod styles;
 
@@ -416,6 +417,33 @@ enum Command {
     Serial {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
+    },
+    /// Boot a throwaway VM, SSH into it, and delete it when the session ends (`--keep` to retain it).
+    /// `fluxctl run` on a Mac uses the built-in `debian-13`; elsewhere pass an image.
+    /// Everything after `--` runs in the guest instead of a shell.
+    Run {
+        /// Image name or path (default on macOS: debian-13; also debian-12, ubuntu-24.04).
+        image: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, default_value_t = 2)]
+        cpus: u8,
+        #[arg(long, default_value_t = 2048)]
+        memory_mib: u64,
+        /// Forward 127.0.0.1:HOST to guest port GUEST (TCP). Repeatable.
+        #[arg(short = 'p', long = "publish", value_name = "HOST:GUEST")]
+        ports: Vec<String>,
+        /// Share a host directory into the guest: HOST:GUEST[:ro]. Repeatable.
+        #[arg(short = 'v', long = "volume", value_name = "HOST:GUEST[:ro]")]
+        volumes: Vec<String>,
+        /// Guest login user (default: your local user name).
+        #[arg(long, short = 'l')]
+        user: Option<String>,
+        /// Keep the VM after the session instead of deleting it.
+        #[arg(long)]
+        keep: bool,
+        #[arg(last = true)]
+        command: Vec<String>,
     },
     /// SSH into the guest at its `guest_ip` via the host OpenSSH client.
     /// Needs a reachable address and `sshd` in the guest — distinct from
@@ -2465,8 +2493,36 @@ async fn run_remote(
                 ),
             }
         }
+        Command::Run {
+            image,
+            name,
+            cpus,
+            memory_mib,
+            ports,
+            volumes,
+            user,
+            keep,
+            command,
+        } => {
+            let code = run::run(
+                r,
+                run::RunOptions {
+                    image,
+                    name,
+                    cpus,
+                    memory_mib,
+                    ports,
+                    volumes,
+                    user,
+                    keep,
+                    command,
+                },
+            )
+            .await?;
+            std::process::exit(code);
+        }
         _ => anyhow::bail!(
-            "this command is not available with --server; supported: create, vm-template, list, get, \
+            "this command is not available with --server; supported: run, create, vm-template, list, get, \
              status <vm>, start, stop, restart, delete, pause, resume, label, rename-vm, clone-vm, fork-vm, import-image, snapshot, \
              snapshot-list, snapshot-delete, backup, disk, events [-f], serial, quota, healthz, \
              readyz, wait (not --for agent)"
@@ -3277,6 +3333,34 @@ async fn main() -> Result<()> {
             } else {
                 run_console_session(&m, id, cols, rows).await?;
             }
+        }
+        Command::Run {
+            image,
+            name,
+            cpus,
+            memory_mib,
+            ports,
+            volumes,
+            user,
+            keep,
+            command,
+        } => {
+            let code = run::run(
+                &run::Local(&m),
+                run::RunOptions {
+                    image,
+                    name,
+                    cpus,
+                    memory_mib,
+                    ports,
+                    volumes,
+                    user,
+                    keep,
+                    command,
+                },
+            )
+            .await?;
+            std::process::exit(code);
         }
         Command::Ssh {
             id,

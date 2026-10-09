@@ -52,4 +52,8 @@ for _ in $(seq 1 20); do sshc "$IP" hostname >/dev/null 2>&1 && break; sleep 3; 
 [[ "$(sshc "$IP" hostname)" == live ]] && ok "restart: the VM boots again and reports its address" || bad "restart ssh"
 curl -fs -X DELETE "$V" >/dev/null && sleep 3 && ok "delete"
 pgrep -f "fluxvm-vz-runner run --config $T" >/dev/null && bad "runner still running after delete" || ok "no runner left behind"
+# `fluxctl run` through the daemon's REST API: boots a throwaway VM, runs a command over SSH, and deletes it.
+RUNOUT="$(./target/debug/fluxctl --server "http://127.0.0.1:$PORT" run -- 'echo run-ok' 2>/dev/null </dev/null)" || bad "fluxctl run failed"
+[[ "$RUNOUT" == run-ok ]] && ok "fluxctl run: throwaway VM boots, runs a command, exits" || bad "fluxctl run output: $RUNOUT"
+[[ "$(curl -fs "$B" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("items",d) if isinstance(d,dict) else d))')" == 0 ]] && ok "fluxctl run left no VM behind" || bad "a run VM was left behind"
 echo "PASS"
