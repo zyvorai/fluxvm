@@ -456,6 +456,17 @@ pub enum AppleGuest {
     Macos,
 }
 
+/// First-boot material for a macOS guest. The guest runs `firstboot.sh` from the share (once, as an admin, or from a
+/// LaunchDaemon in the template): it installs the keys as a root-owned `AuthorizedKeysFile` outside any home directory, so
+/// fresh clones accept them before anyone has logged in, and turns on Remote Login.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleFirstBoot {
+    #[serde(default)]
+    pub ssh_public_keys: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enable_remote_login: bool,
+}
+
 /// Mode of a macOS 26+ vmnet network.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -504,6 +515,13 @@ pub struct AppleSpec {
     /// macOS guests: the IPSW restore image. Linux guests: an optional installer ISO attached read-only.
     #[serde(default)]
     pub media: Option<PathBuf>,
+    /// macOS guests: install from the IPSW (`media`, or `image` when `media` is unset) onto a fresh sparse disk of
+    /// `disk_size_gib` before the first boot, instead of cloning a prepared template.
+    #[serde(default)]
+    pub install: bool,
+    /// macOS guests: files shared into the guest at `/Volumes/My Shared Files/firstboot` for a first-boot helper.
+    #[serde(default)]
+    pub firstboot: Option<AppleFirstBoot>,
     /// Open the guest's native console window (a `VZVirtualMachineView`).
     #[serde(default)]
     pub window: bool,
@@ -596,6 +614,8 @@ impl Default for AppleSpec {
         Self {
             guest_os: AppleGuest::default(),
             media: None,
+            install: false,
+            firstboot: None,
             window: false,
             display_count: default_apple_display_count(),
             clipboard: false,

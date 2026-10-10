@@ -2244,19 +2244,35 @@ impl VmManager {
                 self.claim_shared_disk(&req.image, id, &[]).await?;
             }
             let agent_token = req.agent.as_ref().and_then(|a| a.token.as_deref());
-            let provisioned = fluxvm_image::storage::provision(
-                &self.cfg,
-                &req.image,
-                req.backend,
-                req.storage,
-                &workspace,
-                &disk,
-                req.disk_size_gib,
-                id,
-                agent_token,
-            )
-            .await
-            .context("provisioning VM disk")?;
+            let provisioned = if req.backend == BackendKind::Vz
+                && fluxvm_apple::macos_install::is_macos_install(&req)
+            {
+                // `image` is the IPSW here: the installer writes a fresh disk instead of a clone.
+                if req.storage != StorageBackend::Default {
+                    bail!("apple.install needs the default storage backend");
+                }
+                fluxvm_apple::macos_install::create_install_disk(&disk, req.disk_size_gib)?;
+                fluxvm_image::storage::ProvisionedDisk {
+                    disk: disk.clone(),
+                    lvm_lv: None,
+                    nbd_export: None,
+                    nbd_pid: None,
+                }
+            } else {
+                fluxvm_image::storage::provision(
+                    &self.cfg,
+                    &req.image,
+                    req.backend,
+                    req.storage,
+                    &workspace,
+                    &disk,
+                    req.disk_size_gib,
+                    id,
+                    agent_token,
+                )
+                .await
+                .context("provisioning VM disk")?
+            };
             record.disk = provisioned.disk.clone();
             record.lvm_lv = provisioned.lvm_lv.clone();
             record.nbd_pid = provisioned.nbd_pid;

@@ -1,0 +1,17 @@
+{
+  "name": "macos-ci-runner",
+  "backend": "vz",
+  "image": "/Users/Shared/fluxvm-templates/macos-27/disk.raw",
+  "vcpus": 2,
+  "memory_mib": 4096,
+  "network": {
+    "mode": "user",
+    "forwards": [{ "host_port": 2222, "guest_port": 22 }]
+  },
+  "apple": {
+    "guest_os": "macos"
+  },
+  "shared_folders": [
+    { "host_path": "/Users/Shared/projects", "guest_path": "/Volumes/My Shared Files/projects", "read_only": false }
+  ]
+}

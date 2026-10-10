@@ -16,6 +16,17 @@ across several Macs.
 | Team | [Mac Studio](https://www.apple.com/in/mac-studio/) (M5 Max, 36 GB and up) | VMs for CI and sandboxes while most memory serves models |
 | On-premise cluster | 2-4 Mac Studios | A Kairon Node per Mac; Kairon schedules `Machines`, FluxVM runs them with `backend: vz` |
 
+Sizing a Mac Studio by use case:
+
+| Use case | Memory | Notes |
+| --- | --- | --- |
+| CI and one or two Linux VMs | 36 GB and up | Comfortable with models running alongside |
+| macOS guest templates | 64 GB and up | Two macOS VMs (Apple's limit), the host and models |
+| Agent sandboxes | 36 GB and up | Prefer Linux guests and the `tiny` profile for density (see [agent-density.md](agent-density.md)) |
+
+Use macOS guests when you need the real macOS userspace (Xcode, Apple frameworks, signing); keep the template on the same APFS
+volume as the VMs so `cp -c` clones stay instant.
+
 FluxVM does not enforce memory on a Mac; macOS memory pressure applies. Size VMs against what is left after the models:
 plan one or two small VMs on a 16 GB Mac. Kairon's Mac Node reports allocatable memory as unified memory minus the larger of
 3 GiB and a quarter, so the scheduler already keeps headroom for macOS.
@@ -58,7 +69,7 @@ Create a VM with `"backend": "vz"` (or `"auto"`, which resolves to `vz` on a Mac
 - **Verified** on an Apple M4, macOS 27.2: the core crates' unit tests, `fluxvm-apple` tests, and the live test (Debian 13: the VM
   lifecycle, forwards, shares, snapshots, `fluxctl run`, stacks and agent sandboxes; see [macos.md](macos.md)); a Kairon `vz` Machine
   scheduled to the Mac and run through FluxVM.
-- **Verified by hand only:** a macOS 27 guest installed from an IPSW, cloned and reached over SSH ([macos.md](macos.md#macos-guests)). **Not verified:** macOS guests through the API, multi-Mac clusters, Thunderbolt RDMA, any throughput figure on this page.
+- **Verified by hand only:** a macOS 27 guest installed from an IPSW, cloned and reached over SSH ([macos.md](macos.md#macos-guests)). **Implemented, not verified on hardware:** installing macOS guests through the API (`apple.install`), first-boot keys, and snapshots of macOS guests. **Not verified:** multi-Mac clusters, Thunderbolt RDMA, any throughput figure on this page.
 - **Roadmap (not FluxVM's job, listed for the whole stack):** sharding one model across Macs (EXO or MLX distributed), a
   topology view of Thunderbolt links, per-node temperature and tok/s, and a benchmark command.
 

@@ -99,7 +99,7 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     yes(
         "macOS guests",
-        "installed from an IPSW once, then cloned from a prepared template; see docs/macos.md",
+        "installed from an IPSW through the API (apple.install) or cloned from a prepared template; see docs/macos.md",
     ),
     no(
         "tap / macvtap / netns / eBPF networking",
@@ -235,6 +235,7 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                 }
             }
         }
+        crate::macos_install::validate(req)?;
         if apple.custom_virtio && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
             bail!("apple.custom_virtio is a Linux-guest feature");
         }

@@ -142,8 +142,37 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
   when you prepare the template. We did not automate either.
 - **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
 
-Not done: installing through the REST API or `fluxctl`, a `macos` image name, shared folders and snapshots for macOS guests (the
-runner only sets those up for Linux), and a vsock proxy. Apple allows two macOS VMs at a time per Mac.
+### Installing through the API
+
+`apple.install: true` installs from an IPSW as part of `POST /v1/vms` (tested against a fake runner; not yet run against a real IPSW
+through the API):
+
+```bash
+curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examples/macos-install.json
+```
+
+- The IPSW is `apple.media`, or `image` when `media` is unset; it must be a local absolute path (URLs are refused, download first).
+- FluxVM creates a sparse disk of `disk_size_gib` (default 64, minimum 40), runs `fluxvm-vz-runner install` to completion (progress
+  events land in `vz-runner.log` in the VM workspace; the request returns only after the install, up to 3 hours), then boots the guest.
+  A workspace marker (`macos-installed`) stops a restart from installing again; a failed install leaves no marker and is retried.
+- The installed guest stops at Setup Assistant unless you use the macOS 27 `provision_*` options (see "Mac Studio options"). Stop the
+  VM afterwards and use its `root.raw` as a template for clones.
+
+### First-boot keys
+
+`apple.firstboot: {"ssh_public_keys": ["ssh-ed25519 …"], "enable_remote_login": true}` shares a read-only folder into the guest at
+`/Volumes/My Shared Files/firstboot` with `authorized_keys` and `firstboot.sh` (also in [`scripts/macos-firstboot-helper.sh`](../scripts/macos-firstboot-helper.sh)).
+Run it once in the template as an admin, or from a LaunchDaemon you bake in: it installs the keys as a root-owned
+`/etc/ssh/fluxvm_authorized_keys` (via `sshd_config.d`), which sshd reads before any home directory is unlocked, so fresh clones accept
+the key on first boot, and turns on Remote Login. FluxVM cannot run it inside the guest for you.
+
+### Snapshots of macOS guests
+
+The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host); the snapshot also keeps the guest's NVRAM
+(`auxiliary.bin`). Not yet exercised on a real macOS guest.
+
+Not done: a `macos` image name, downloading an IPSW, and exec over vsock for macOS guests (they have no FluxVM guest agent). Apple
+allows two macOS VMs at a time per Mac.
 
 ## Display, audio, sharing and USB options
 
@@ -201,7 +230,7 @@ These compile against the macOS 27 SDK and are validated at admission, but have 
 | NAT networking, TCP port forwards, no-network mode, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
 | shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug, data disks, cdroms |
-| macOS guests (installed by hand from an IPSW, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot |
+| macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
@@ -209,8 +238,9 @@ process starts.
 ## Honest limits
 
 - This is a preview-quality backend. Only Linux ARM64 guests have been booted.
-- macOS guests exist only as clones of a template you install and prepare by hand (see "macOS guests"); the API cannot install one. The
-  restore image is 26.6 GB and the installed disk about 24 GB, so plan for 55 GB or more free on the volume that holds them.
+- macOS guests are installed through the API or by hand, but finishing Setup Assistant still needs a person unless the host and guest
+  are on macOS 27 (`provision_*`). The restore image is 26.6 GB and the installed disk about 24 GB, so plan for 55 GB or more free on
+  the volume that holds them.
 - Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
   where it can.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
