@@ -6,6 +6,7 @@ pub mod catalog;
 pub mod cloudinit;
 pub mod import;
 pub mod oci;
+pub mod oci_registry;
 pub mod ova;
 pub mod qga;
 pub mod raw_ext4;
