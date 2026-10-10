@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 300" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif">
+  <title id="t">Warm pool: stopped VMs with their own snapshot, restored on demand</title>
+  <desc id="d">A slot is built by cold boot, snapshotted and stopped. A sandbox request restores a free slot in about two seconds. A slot whose address is already in use is skipped and the request cold-boots instead.</desc>
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#0a84ff"/></marker>
+  </defs>
+  <rect width="1100" height="300" rx="22" fill="#000"/>
+  <rect x="24" y="24" width="1052" height="252" rx="18" fill="none" stroke="#2c2c2e" stroke-width="1.5"/>
+  <g font-size="15" text-anchor="middle">
+    <rect x="48" y="96" width="190" height="96" rx="14" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="143" y="130" fill="#f5f5f7" font-weight="700">1  Build a slot</text>
+    <text x="143" y="154" fill="#a1a1a6" font-size="13">cold boot, wait for</text>
+    <text x="143" y="173" fill="#a1a1a6" font-size="13">first-boot setup</text>
+
+    <rect x="300" y="96" width="190" height="96" rx="14" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="395" y="130" fill="#f5f5f7" font-weight="700">2  Snapshot + stop</text>
+    <text x="395" y="154" fill="#a1a1a6" font-size="13">own MAC, own `warm`</text>
+    <text x="395" y="173" fill="#a1a1a6" font-size="13">snapshot, no RAM held</text>
+
+    <rect x="552" y="96" width="190" height="96" rx="14" fill="#0b2a4a" stroke="#0a84ff"/>
+    <text x="647" y="130" fill="#f5f5f7" font-weight="700">3  Claim = restore</text>
+    <text x="647" y="154" fill="#9ecbff" font-size="13">about 2 s on the M4</text>
+    <text x="647" y="173" fill="#9ecbff" font-size="13">the slot becomes the sandbox</text>
+
+    <rect x="804" y="96" width="248" height="96" rx="14" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="928" y="130" fill="#f5f5f7" font-weight="700">4  Delete = gone</text>
+    <text x="928" y="154" fill="#a1a1a6" font-size="13">the pool refills in the</text>
+    <text x="928" y="173" fill="#a1a1a6" font-size="13">background to warm_slots</text>
+  </g>
+  <g stroke="#0a84ff" stroke-width="2" fill="none" marker-end="url(#ar)">
+    <path d="M238 144 H300"/><path d="M490 144 H552"/><path d="M742 144 H804"/>
+  </g>
+  <g font-size="13" fill="#a1a1a6" text-anchor="middle">
+    <text x="647" y="228">If a slot's address is held by a running VM, or no slot is free,</text>
+    <text x="647" y="248">the request cold-boots instead (about 8 to 10 s).</text>
+  </g>
+</svg>

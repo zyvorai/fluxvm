@@ -69,6 +69,7 @@ const config: Config = {
       },
       hideOnScroll: false,
       items: [
+        {to: '/mac', label: 'Mac', position: 'right'},
         {
           type: 'docSidebar',
           sidebarId: 'docsSidebar',
@@ -89,6 +90,8 @@ const config: Config = {
           title: 'Docs',
           items: [
             {label: 'Quick start', href: 'https://github.com/zyvorai/zyvor-fluxvm#quick-start'},
+            {label: 'FluxVM on Mac', to: '/mac'},
+            {label: 'How it works on a Mac', to: '/docs/macos-architecture'},
             {label: 'Use cases', to: '/docs/use-cases'},
             {label: 'Product overview', to: '/docs/PRODUCT_OVERVIEW'},
             {label: 'Positioning', to: '/docs/POSITIONING'},

@@ -7,6 +7,8 @@ across several Macs.
 
 ![Mac mini, Mac Studio, MacBook Pro](assets/macos/readme-macs.jpg)
 
+How the `vz` backend works inside, in detail: [macos-architecture.md](macos-architecture.md).
+
 ## Which Mac, for what
 
 | Tier | Hardware | FluxVM's role |

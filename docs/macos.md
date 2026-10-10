@@ -4,6 +4,8 @@ FluxVM's control plane (daemon, REST API, `fluxctl`, scheduler) builds and runs 
 **`vz` backend** that runs VMs on Apple's Virtualization.framework. It is a separate, smaller feature set than the
 Linux backends: no KVM, TAP, eBPF, cgroups or network namespaces.
 
+For how the pieces fit together (runner per VM, control socket, vsock, warm pool, networking), see [macos-architecture.md](macos-architecture.md).
+
 ## What is verified
 
 On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):

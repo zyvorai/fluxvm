@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 560" role="img" aria-labelledby="t d" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, sans-serif">
+  <title id="t">FluxVM on a Mac: one daemon, one signed runner per VM</title>
+  <desc id="d">Clients call the FluxVM daemon over REST. The daemon starts one signed runner process per VM. Each runner hosts a Virtualization.framework guest and exposes a control socket, a vsock proxy and port forwards.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#101114"/><stop offset="1" stop-color="#000"/></linearGradient>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="#0a84ff"/></marker>
+  </defs>
+  <rect width="1100" height="560" rx="22" fill="url(#bg)"/>
+  <g fill="none" stroke="#2c2c2e" stroke-width="1.5"><rect x="24" y="24" width="1052" height="512" rx="18"/></g>
+  <text x="48" y="58" fill="#a1a1a6" font-size="14" letter-spacing="2">YOUR MAC (APPLE SILICON)</text>
+
+  <!-- clients -->
+  <g>
+    <rect x="48" y="96" width="190" height="64" rx="12" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="143" y="123" fill="#f5f5f7" font-size="16" font-weight="600" text-anchor="middle">fluxctl / REST</text>
+    <text x="143" y="145" fill="#a1a1a6" font-size="13" text-anchor="middle">scripts, CI, dashboards</text>
+    <rect x="48" y="184" width="190" height="64" rx="12" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="143" y="211" fill="#f5f5f7" font-size="16" font-weight="600" text-anchor="middle">MCP server</text>
+    <text x="143" y="233" fill="#a1a1a6" font-size="13" text-anchor="middle">coding agents</text>
+    <rect x="48" y="272" width="190" height="64" rx="12" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="143" y="299" fill="#f5f5f7" font-size="16" font-weight="600" text-anchor="middle">Kairon / fleet</text>
+    <text x="143" y="321" fill="#a1a1a6" font-size="13" text-anchor="middle">places VMs across Macs</text>
+  </g>
+
+  <!-- daemon -->
+  <rect x="316" y="96" width="250" height="240" rx="16" fill="#0b2a4a" stroke="#0a84ff" stroke-width="1.5"/>
+  <text x="441" y="128" fill="#f5f5f7" font-size="19" font-weight="700" text-anchor="middle">fluxctl serve</text>
+  <text x="441" y="150" fill="#9ecbff" font-size="12" text-anchor="middle">daemon: no Virtualization.framework</text>
+  <g fill="#f5f5f7" font-size="13">
+    <text x="340" y="186">REST API + policy + audit</text>
+    <text x="340" y="212">warm pool and density report</text>
+    <text x="340" y="238">snapshots (APFS clone)</text>
+    <text x="340" y="264">guest agent / SSH exec</text>
+    <text x="340" y="290">egress allow-list proxy</text>
+    <text x="340" y="316">fluxvm-vz-switch (private nets)</text>
+  </g>
+
+  <g stroke="#0a84ff" stroke-width="2" fill="none" marker-end="url(#ar)">
+    <path d="M238 128 H316"/><path d="M238 216 H316"/><path d="M238 304 H316"/>
+  </g>
+
+  <!-- runners -->
+  <g>
+    <rect x="660" y="84" width="392" height="120" rx="16" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="680" y="112" fill="#f5f5f7" font-size="16" font-weight="700">fluxvm-vz-runner  (one per VM, ad-hoc signed)</text>
+    <rect x="680" y="126" width="168" height="62" rx="10" fill="#0a84ff22" stroke="#0a84ff"/>
+    <text x="764" y="150" fill="#f5f5f7" font-size="14" font-weight="600" text-anchor="middle">Linux ARM64 guest</text>
+    <text x="764" y="170" fill="#9ecbff" font-size="12" text-anchor="middle">Debian, Ubuntu, agent-micro</text>
+    <g fill="#a1a1a6" font-size="12">
+      <text x="872" y="146">control socket (JSON)</text>
+      <text x="872" y="164">vsock proxy: CONNECT port</text>
+      <text x="872" y="182">TCP port forwards</text>
+    </g>
+
+    <rect x="660" y="222" width="392" height="120" rx="16" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="680" y="250" fill="#f5f5f7" font-size="16" font-weight="700">fluxvm-vz-runner</text>
+    <rect x="680" y="264" width="168" height="62" rx="10" fill="#30d15822" stroke="#30d158"/>
+    <text x="764" y="288" fill="#f5f5f7" font-size="14" font-weight="600" text-anchor="middle">Container sandbox</text>
+    <text x="764" y="308" fill="#8fe6a6" font-size="12" text-anchor="middle">OCI image, one VM each</text>
+    <g fill="#a1a1a6" font-size="12">
+      <text x="872" y="284">direct kernel boot</text>
+      <text x="872" y="302">fluxvm-oci-init as PID 1</text>
+      <text x="872" y="320">cloned ext4 rootfs</text>
+    </g>
+
+    <rect x="660" y="360" width="392" height="120" rx="16" fill="#1c1c1e" stroke="#3a3a3c"/>
+    <text x="680" y="388" fill="#f5f5f7" font-size="16" font-weight="700">fluxvm-vz-runner</text>
+    <rect x="680" y="402" width="168" height="62" rx="10" fill="#ff9f0a22" stroke="#ff9f0a"/>
+    <text x="764" y="426" fill="#f5f5f7" font-size="14" font-weight="600" text-anchor="middle">macOS guest</text>
+    <text x="764" y="446" fill="#ffd089" font-size="12" text-anchor="middle">cloned from a template</text>
+    <g fill="#a1a1a6" font-size="12">
+      <text x="872" y="422">address from DHCP lease</text>
+      <text x="872" y="440">SSH (no guest agent)</text>
+      <text x="872" y="458">2 running per Mac (Apple licence)</text>
+    </g>
+  </g>
+
+  <g stroke="#0a84ff" stroke-width="2" fill="none" marker-end="url(#ar)">
+    <path d="M566 160 H660"/><path d="M566 246 H660"/><path d="M566 316 C610 316 610 420 660 420"/>
+  </g>
+
+  <!-- base -->
+  <rect x="48" y="496" width="1004" height="28" rx="8" fill="#1c1c1e" stroke="#3a3a3c"/>
+  <text x="550" y="515" fill="#a1a1a6" font-size="13" text-anchor="middle">Apple Virtualization.framework  ·  APFS (clones, snapshots)  ·  vmnet / NAT  ·  unified memory</text>
+</svg>
