@@ -67,10 +67,14 @@ pub struct OciSandboxSpec {
     /// `127.0.0.1:HOST` reaches the container's `CONTAINER`. Host ports are 1024 and up. Not with `offline`/`allow_hosts`.
     #[serde(default)]
     pub ports: Vec<String>,
-    /// Also listen on the NAT gateway address so *other* sandboxes and VMs on this Mac reach the published ports
-    /// (`http://<gateway>:HOST`); used by stacks to connect services.
+    /// Container ports *other* sandboxes and VMs on this Mac reach at the NAT gateway address, same number on both
+    /// sides (`http://<gateway>:PORT`); used by stacks to connect services. 1024 and up.
     #[serde(default)]
-    pub publish_to_guests: bool,
+    pub expose: Vec<u16>,
+    /// Host names that resolve to the NAT gateway inside the container (`/etc/hosts`), so `db` reaches a service
+    /// another sandbox `expose`s.
+    #[serde(default)]
+    pub gateway_hosts: Vec<String>,
     /// `no` (default), `on-failure` or `always`; restarts back off from 1 s to 60 s.
     #[serde(default)]
     pub restart: RestartPolicy,
@@ -147,13 +151,29 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
             bail!("host port {host} is published more than once");
         }
     }
-    if !oci.ports.is_empty() && (req.offline || !req.allow_hosts.is_empty()) {
+    let mut exposed = std::collections::HashSet::new();
+    for &p in &oci.expose {
+        if p < 1024 {
+            bail!("exposed port {p}: ports below 1024 cannot be relayed on the Mac");
+        }
+        if !exposed.insert(p) {
+            bail!("port {p} is exposed more than once");
+        }
+    }
+    let networked =
+        !oci.ports.is_empty() || !oci.expose.is_empty() || !oci.gateway_hosts.is_empty();
+    if networked && (req.offline || !req.allow_hosts.is_empty()) {
         bail!(
-            "ports need the sandbox's network card: they cannot be combined with offline or allow_hosts"
+            "ports, expose and gateway_hosts need the sandbox's network card: they cannot be combined with offline or allow_hosts"
         );
     }
-    if oci.publish_to_guests && oci.ports.is_empty() {
-        bail!("publish_to_guests needs ports");
+    if oci.gateway_hosts.len() > 64 {
+        bail!("at most 64 gateway_hosts");
+    }
+    for h in &oci.gateway_hosts {
+        if !init::valid_host_name(h) {
+            bail!("gateway host {h:?} is not a valid host name");
+        }
     }
     if let Some(h) = &oci.healthcheck {
         h.validate().map_err(anyhow::Error::msg)?;
@@ -161,25 +181,26 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
     Ok(())
 }
 
-/// The forwards for `ports`, refused when another VM on this Mac already uses one of the host ports.
+/// The forwards for `ports` (loopback) and `expose` (gateway), refused when another VM on this Mac already listens
+/// there.
 fn forwards(oci: &OciSandboxSpec, taken: &[(u16, bool)]) -> Result<Vec<PortForward>> {
+    let published = oci
+        .ports
+        .iter()
+        .map(|p| parse_port(p).map(|(h, g)| (h, g, false)));
+    let exposed = oci.expose.iter().map(|&p| Ok((p, p, true)));
     let mut out = Vec::new();
-    for p in &oci.ports {
-        let (host_port, guest_port) = parse_port(p)?;
-        for guests in [false]
-            .into_iter()
-            .chain(oci.publish_to_guests.then_some(true))
-        {
-            if taken.contains(&(host_port, guests)) {
-                bail!("host port {host_port} is already published by another VM");
-            }
-            out.push(PortForward {
-                host_port,
-                guest_port,
-                protocol: "tcp".into(),
-                guests,
-            });
+    for f in published.chain(exposed) {
+        let (host_port, guest_port, guests) = f?;
+        if taken.contains(&(host_port, guests)) {
+            bail!("host port {host_port} is already published by another VM");
         }
+        out.push(PortForward {
+            host_port,
+            guest_port,
+            protocol: "tcp".into(),
+            guests,
+        });
     }
     Ok(out)
 }
@@ -272,6 +293,7 @@ pub(crate) fn build_create(
         max_restarts: spec.max_restarts,
         healthcheck: spec.healthcheck.clone(),
         mounts,
+        gateway_hosts: spec.gateway_hosts.clone(),
     });
     let mut create: CreateVmRequest = serde_json::from_value(serde_json::json!({
         "name": name,
@@ -627,22 +649,25 @@ mod tests {
             serde_json::json!({"oci": {"image": "nginx", "ports": ["8080:80"]}, "offline": true}),
             serde_json::json!({"oci": {"image": "nginx", "ports": ["8080:80"]}, "allow_hosts": ["a.com"]}),
             serde_json::json!({"oci": {"image": "nginx", "ports": ["8080:80", "8080:81"]}}),
-            serde_json::json!({"oci": {"image": "nginx", "publish_to_guests": true}}),
+            serde_json::json!({"oci": {"image": "nginx", "expose": [80]}}),
+            serde_json::json!({"oci": {"image": "nginx", "expose": [5432, 5432]}}),
+            serde_json::json!({"oci": {"image": "nginx", "expose": [5432]}, "offline": true}),
+            serde_json::json!({"oci": {"image": "nginx", "gateway_hosts": ["db"]}, "allow_hosts": ["a.com"]}),
+            serde_json::json!({"oci": {"image": "nginx", "gateway_hosts": ["bad host"]}}),
             serde_json::json!({"oci": {"image": "nginx", "healthcheck": {"command": []}}}),
         ] {
             assert!(validate(&sandbox(bad.clone())).is_err(), "{bad}");
         }
         let both = spec(
-            serde_json::json!({"image": "nginx", "ports": ["8080:80"], "publish_to_guests": true}),
+            serde_json::json!({"image": "nginx", "ports": ["8080:80"], "expose": [5432], "gateway_hosts": ["db"]}),
         );
         let f = forwards(&both, &[]).unwrap();
         assert_eq!(f.len(), 2);
-        assert!(f.iter().all(|f| f.host_port == 8080 && f.guest_port == 80));
-        assert!(f.iter().any(|f| f.guests) && f.iter().any(|f| !f.guests));
+        assert!(!f[0].guests && f[0].host_port == 8080 && f[0].guest_port == 80);
+        assert!(f[1].guests && f[1].host_port == 5432 && f[1].guest_port == 5432);
         assert!(forwards(&both, &[(8080, false)]).is_err());
-        assert!(forwards(&both, &[(8080, true)]).is_err());
-        let local = spec(serde_json::json!({"image": "nginx", "ports": ["8080:80"]}));
-        assert!(forwards(&local, &[(8080, true)]).is_ok());
+        assert!(forwards(&both, &[(5432, true)]).is_err());
+        assert!(forwards(&both, &[(8080, true), (5432, false)]).is_ok());
     }
 
     #[test]

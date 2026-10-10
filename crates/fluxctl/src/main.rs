@@ -24,6 +24,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
+mod compose;
 mod contexts;
 mod fleet_client;
 mod mcp;
@@ -444,6 +445,18 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         stack: Option<String>,
+    },
+    /// Convert a docker-compose.yml into a stack file of container services (printed, or written with -o). What
+    /// cannot be carried over (bind mounts, UDP, build, …) is listed on stderr.
+    ImportCompose {
+        #[arg(default_value = "docker-compose.yml")]
+        file: PathBuf,
+        /// Stack name; default: the compose file's `name`, else its directory's name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Write here instead of stdout (an existing file is not overwritten).
+        #[arg(long = "out")]
+        output: Option<PathBuf>,
     },
     /// Internal: relay stdin/stdout to a guest's vsock port through a runner's proxy socket. Used as ssh's ProxyCommand for
     /// guests with no network card.
@@ -2159,6 +2172,48 @@ fn load_stack_file(file: &Path) -> Result<(stack::StackFile, PathBuf)> {
     Ok((stack::parse(&text)?, dir))
 }
 
+fn import_compose(file: &Path, name: Option<&str>, output: Option<&Path>) -> Result<()> {
+    let text =
+        std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+    let name = match name {
+        Some(n) => n.to_owned(),
+        None => {
+            let declared = serde_yaml::from_str::<serde_yaml::Value>(&text)
+                .ok()
+                .and_then(|d| d.get("name")?.as_str().map(str::to_owned));
+            let dir = file.canonicalize()?;
+            let dir = dir.parent().and_then(Path::file_name).map(|d| {
+                d.to_string_lossy()
+                    .to_ascii_lowercase()
+                    .replace(['_', '.', ' '], "-")
+            });
+            declared.or(dir).context("name the stack with --name")?
+        }
+    };
+    let c = compose::convert(&text, &name)?;
+    for w in &c.warnings {
+        eprintln!("warning: {w}");
+    }
+    match output {
+        None => print!("{}", c.toml),
+        Some(path) => {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .with_context(|| format!("creating {}", path.display()))?
+                .write_all(c.toml.as_bytes())?;
+            eprintln!(
+                "wrote {}; review it, then `fluxctl up -f {}`",
+                path.display(),
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The stack file when it exists; with `--stack NAME` a missing file is fine.
 fn stack_for(file: &Path, name: Option<&str>) -> Result<Option<stack::StackFile>> {
     match load_stack_file(file) {
@@ -2883,6 +2938,9 @@ async fn main() -> Result<()> {
     if let Command::VsockProxy { socket, port } = &cli.command {
         return fluxvm_apple::ssh::vsock_proxy(socket, *port);
     }
+    if let Command::ImportCompose { file, name, output } = &cli.command {
+        return import_compose(file, name.as_deref(), output.as_deref());
+    }
     let format = cli.output;
     if let Command::Mcp {
         command: McpCommand::Serve { allow_write },
@@ -2980,6 +3038,7 @@ async fn main() -> Result<()> {
         | Command::Metrics { .. }
         | Command::Completions { .. }
         | Command::VsockProxy { .. }
+        | Command::ImportCompose { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
@@ -6079,6 +6138,18 @@ mod backlog_tier1_cli_tests {
             ]
         );
         assert!(Cli::try_parse_from(["fluxctl", "label", &id.to_string(), "bad"]).is_err());
+    }
+
+    #[test]
+    fn every_subcommand_has_consistent_arguments() {
+        Cli::command().debug_assert();
+        assert!(matches!(
+            cli(&["import-compose", "c.yml", "--out", "f.toml"]).command,
+            Command::ImportCompose {
+                output: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]

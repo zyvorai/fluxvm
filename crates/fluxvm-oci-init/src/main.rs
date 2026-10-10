@@ -32,7 +32,7 @@ mod linux {
         BLOBS_TAG, BootConfig, CONFIG_FILE, DEFAULT_PATH, EGRESS_PROXY_PORT, EGRESS_PROXY_URL,
         EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, INIT_ERR, InitConfig, META_TAG, NetworkMode,
         POWEROFF_VIA_INIT_ENV, ProcessSpec, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR, UNPACK_OK,
-        UnpackConfig,
+        UnpackConfig, valid_host_name,
     };
     use fluxvm_oci_init::supervise::{
         HealthCheck, HealthEvent, HealthState, RestartPolicy, STOP_GRACE, health_line,
@@ -275,6 +275,26 @@ mod linux {
         fs::write(path, contents).with_context(|| format!("writing {path}"))
     }
 
+    /// Appends `<router> name…` to the `/etc/hosts` written above.
+    fn add_gateway_hosts(names: &[String], router: Option<Ipv4Addr>) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let Some(gw) = router else {
+            say("fluxvm-oci-init: no gateway in the DHCP lease; gateway_hosts not added");
+            return Ok(());
+        };
+        if let Some(bad) = names.iter().find(|n| !valid_host_name(n)) {
+            bail!("gateway host {bad:?} is not a valid host name");
+        }
+        let path = format!("{NEWROOT}/etc/hosts");
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {path}"))?;
+        writeln!(f, "{gw}\t{}", names.join(" ")).with_context(|| format!("writing {path}"))
+    }
+
     fn boot_mode(b: &BootConfig) -> Result<()> {
         if b.read_only_root {
             mount_new(DISK, LOWER, "ext4", libc::MS_RDONLY, None)?;
@@ -340,6 +360,7 @@ mod linux {
                         .map(|s| format!("nameserver {s}\n"))
                         .collect();
                     write_fresh(&format!("{NEWROOT}/etc/resolv.conf"), &resolv)?;
+                    add_gateway_hosts(&b.gateway_hosts, lease.router)?;
                 }
                 Err(e) => say(&format!("fluxvm-oci-init: network: {}", one_line(&e))),
             }

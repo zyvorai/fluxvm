@@ -131,7 +131,7 @@ impl RunArgs {
 }
 
 /// `NAME:/path[:ro]` → `{"name", "guest_path", "read_only"}`; `null` when there are none.
-fn volumes_json(specs: &[String]) -> Result<Value> {
+pub(crate) fn volumes_json(specs: &[String]) -> Result<Value> {
     if specs.is_empty() {
         return Ok(Value::Null);
     }

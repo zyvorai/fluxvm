@@ -37,6 +37,7 @@ pub const DEFAULT_USER: &str = "65534:65534";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "lowercase")]
+#[allow(clippy::large_enum_variant)]
 pub enum InitConfig {
     Boot(BootConfig),
     Unpack(UnpackConfig),
@@ -68,6 +69,22 @@ pub struct BootConfig {
     /// Persistent volumes: virtiofs shares mounted into the root before the process starts.
     #[serde(default)]
     pub mounts: Vec<VolumeMount>,
+    /// Names that resolve to the DHCP router (the Mac's NAT gateway) in the container's `/etc/hosts`.
+    #[serde(default)]
+    pub gateway_hosts: Vec<String>,
+}
+
+/// An RFC 1123 host name: dot-separated labels of 1-63 letters, digits and inner hyphens, 253 characters at most.
+pub fn valid_host_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
 }
 
 /// A virtiofs share (tag `fluxvm-vol<N>`) mounted at `target` in the container's root.
@@ -279,6 +296,24 @@ pub fn unpack_result_from_log(log: &str) -> Option<Result<(), String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_names_follow_rfc_1123() {
+        for ok in ["db", "myapp-db", "a.b-c.d", "x1"] {
+            assert!(valid_host_name(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "-db",
+            "db-",
+            "a..b",
+            "a b",
+            "db\n1.2.3.4 evil",
+            &"a".repeat(64),
+        ] {
+            assert!(!valid_host_name(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn volume_mounts_stay_inside_the_root() {
