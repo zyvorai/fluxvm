@@ -33,11 +33,12 @@ VM = {
 STOPS = []
 
 READ_TOOLS = {"list_vms", "get_vm", "host_status", "vm_network", "vm_logs", "backup_list", "sandbox_read_file",
-              "sandbox_logs", "vm_snapshot_list"}
+              "sandbox_logs", "vm_snapshot_list", "vm_screenshot"}
 WRITE_TOOLS = {
     "vm_power", "vm_capture", "vm_fork", "image_import", "vm_backup", "backup_restore",
     "pool_claim", "sandbox_create", "sandbox_exec", "sandbox_write_file",
     "vm_create", "vm_clone", "vm_exec", "vm_snapshot", "vm_snapshot_restore", "vm_snapshot_delete", "vm_delete",
+    "vm_input", "vm_sign_in",
 }
 
 
