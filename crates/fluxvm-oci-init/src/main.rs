@@ -31,8 +31,8 @@ mod linux {
     use fluxvm_oci_init::config::{
         BLOBS_TAG, BootConfig, CONFIG_FILE, DEFAULT_PATH, EGRESS_PROXY_PORT, EGRESS_PROXY_URL,
         EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, INIT_ERR, InitConfig, META_TAG, NetworkMode,
-        POWEROFF_VIA_INIT_ENV, ProcessSpec, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR, UNPACK_OK,
-        UnpackConfig, valid_host_name,
+        POWEROFF_VIA_INIT_ENV, ProcessSpec, SECRETS_FILE, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR,
+        UNPACK_OK, UnpackConfig, valid_env_name, valid_host_name, with_secrets,
     };
     use fluxvm_oci_init::supervise::{
         HealthCheck, HealthEvent, HealthState, RestartPolicy, STOP_GRACE, health_line,
@@ -190,10 +190,24 @@ mod linux {
         )
     }
 
+    /// `config.json`, with the secrets file (when the host wrote one) merged into the process environment.
     fn read_config() -> Result<InitConfig> {
         let path = format!("{META_DIR}/{CONFIG_FILE}");
         let raw = fs::read(&path).with_context(|| format!("reading {path}"))?;
-        serde_json::from_slice(&raw).with_context(|| format!("parsing {path}"))
+        let mut cfg: InitConfig =
+            serde_json::from_slice(&raw).with_context(|| format!("parsing {path}"))?;
+        let secrets_path = format!("{META_DIR}/{SECRETS_FILE}");
+        if let InitConfig::Boot(b) = &mut cfg
+            && let Ok(raw) = fs::read(&secrets_path)
+        {
+            let secrets: std::collections::BTreeMap<String, String> =
+                serde_json::from_slice(&raw).with_context(|| format!("parsing {secrets_path}"))?;
+            if let Some(bad) = secrets.keys().find(|k| !valid_env_name(k)) {
+                bail!("{secrets_path}: {bad:?} is not an environment variable name");
+            }
+            b.process.env = with_secrets(&b.process.env, &secrets);
+        }
+        Ok(cfg)
     }
 
     fn run(program: &str, args: &[&str]) -> Result<()> {

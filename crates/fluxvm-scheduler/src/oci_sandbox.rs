@@ -84,7 +84,15 @@ pub struct OciSandboxSpec {
     /// with a restart policy it is stopped and restarted.
     #[serde(default)]
     pub healthcheck: Option<HealthCheck>,
+    /// `{"NAME": "value"}` added to the process's environment like `env`, but write-only: kept out of the VM record and
+    /// every API response, and stored only in a 0600 file in the VM's private meta share until the VM is deleted.
+    #[serde(default, skip_serializing)]
+    pub secret_env: BTreeMap<String, fluxvm_core::grants::Secret>,
 }
+
+/// Most secrets per sandbox, and their combined size.
+const MAX_SECRET_ENV: usize = 64;
+const MAX_SECRET_ENV_BYTES: usize = 64 * 1024;
 
 /// `HOST:CONTAINER`, `HOST:CONTAINER/tcp`, or `PORT`.
 pub fn parse_port(spec: &str) -> Result<(u16, u16)> {
@@ -177,6 +185,22 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
     }
     if let Some(h) = &oci.healthcheck {
         h.validate().map_err(anyhow::Error::msg)?;
+    }
+    if oci.secret_env.len() > MAX_SECRET_ENV {
+        bail!("at most {MAX_SECRET_ENV} secret_env entries");
+    }
+    let mut size = 0;
+    for (k, v) in &oci.secret_env {
+        if !init::valid_env_name(k) {
+            bail!("secret_env name {k:?} is not an environment variable name");
+        }
+        if v.expose().contains('\0') {
+            bail!("secret_env {k} contains a NUL byte");
+        }
+        size += k.len() + v.expose().len();
+    }
+    if size > MAX_SECRET_ENV_BYTES {
+        bail!("secret_env is larger than {MAX_SECRET_ENV_BYTES} bytes");
     }
     Ok(())
 }
@@ -314,6 +338,9 @@ pub(crate) fn build_create(
         },
     }))
     .context("building the OCI sandbox VM request")?;
+    if let Some(apple) = create.apple.as_mut() {
+        apple.secret_env = spec.secret_env.clone();
+    }
     create.network = if offline {
         if !forwards.is_empty() {
             bail!("an offline sandbox has no network card to publish ports on");
@@ -655,6 +682,8 @@ mod tests {
             serde_json::json!({"oci": {"image": "nginx", "gateway_hosts": ["db"]}, "allow_hosts": ["a.com"]}),
             serde_json::json!({"oci": {"image": "nginx", "gateway_hosts": ["bad host"]}}),
             serde_json::json!({"oci": {"image": "nginx", "healthcheck": {"command": []}}}),
+            serde_json::json!({"oci": {"image": "nginx", "secret_env": {"BAD-NAME": "x"}}}),
+            serde_json::json!({"oci": {"image": "nginx", "secret_env": {"A": "x\u{0}y"}}}),
         ] {
             assert!(validate(&sandbox(bad.clone())).is_err(), "{bad}");
         }
@@ -699,7 +728,9 @@ mod tests {
         let s = spec(serde_json::json!({
             "image": "nginx", "ports": ["8080:80"], "restart": "on-failure", "max_restarts": 5,
             "healthcheck": {"command": ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1"], "interval_seconds": 10},
+            "secret_env": {"API_KEY": "hunter2"},
         }));
+        assert!(!serde_json::to_string(&s).unwrap().contains("hunter2"));
         let c = build_create(
             "web",
             Path::new("/r"),
@@ -728,6 +759,8 @@ mod tests {
         assert_eq!(b.max_restarts, Some(5));
         assert_eq!(b.healthcheck.unwrap().interval_seconds, 10);
         assert_eq!(b.mounts.len(), 2);
+        assert_eq!(apple.secret_env["API_KEY"].expose(), "hunter2");
+        assert!(!serde_json::to_string(&c).unwrap().contains("hunter2"));
         fluxvm_apple::validate_request(&c).unwrap();
     }
 }

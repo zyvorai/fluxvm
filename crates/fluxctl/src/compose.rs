@@ -361,7 +361,7 @@ fn health_command(v: &Yaml) -> Result<Option<String>> {
     }
 }
 
-fn shell_quote(w: &str) -> String {
+pub(crate) fn shell_quote(w: &str) -> String {
     if !w.is_empty()
         && w.chars()
             .all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c))

@@ -40,6 +40,10 @@ pub struct RunArgs {
     /// `KEY=value` (repeatable).
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
+    /// Pass this variable from your environment as a write-only secret (repeatable): it is never stored in the VM
+    /// record or shown by the API.
+    #[arg(long = "secret-env")]
+    pub secret_env: Vec<String>,
     #[arg(short = 'w', long)]
     pub workdir: Option<String>,
     /// `uid[:gid]` or `name[:group]`.
@@ -99,6 +103,15 @@ impl RunArgs {
         }
         if let Some(r) = &self.restart {
             oci["restart"] = json!(r);
+        }
+        if !self.secret_env.is_empty() {
+            let mut secrets = serde_json::Map::new();
+            for name in &self.secret_env {
+                let value = std::env::var(name)
+                    .with_context(|| format!("--secret-env {name}: it is not set in this shell"))?;
+                secrets.insert(name.clone(), json!(value));
+            }
+            oci["secret_env"] = Value::Object(secrets);
         }
         if let Some(n) = self.max_restarts {
             oci["max_restarts"] = json!(n);
@@ -319,6 +332,7 @@ mod tests {
             offline: false,
             allow_hosts: vec![],
             env: vec!["A=1".into()],
+            secret_env: vec!["PATH".into()],
             workdir: None,
             user: None,
             entrypoint: Some("/bin/sh -c".into()),
@@ -343,6 +357,10 @@ mod tests {
             json!("poweroff")
         );
         assert_eq!(oci.ports, ["8080:80"]);
+        assert_eq!(
+            oci.secret_env["PATH"].expose(),
+            std::env::var("PATH").unwrap()
+        );
         assert_eq!(oci.max_restarts, Some(2));
         assert_eq!(oci.healthcheck.unwrap().interval_seconds, 5);
         assert_eq!(req.volumes.len(), 2);

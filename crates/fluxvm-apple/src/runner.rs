@@ -202,15 +202,38 @@ pub fn oci_meta_dir(workspace: &Path) -> PathBuf {
 
 /// Writes `apple.init_config` and the agent token into [`oci_meta_dir`], replacing what a previous boot left.
 pub fn write_oci_meta(req: &CreateVmRequest, workspace: &Path) -> Result<()> {
-    use fluxvm_oci_init::config::{CONFIG_FILE, TOKEN_FILE};
-    use std::os::unix::fs::PermissionsExt;
-    let Some(init) = req.apple.as_ref().and_then(|a| a.init_config.as_ref()) else {
+    use fluxvm_oci_init::config::{CONFIG_FILE, SECRETS_FILE, TOKEN_FILE};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let Some(apple) = req.apple.as_ref() else {
+        return Ok(());
+    };
+    let Some(init) = apple.init_config.as_ref() else {
         return Ok(());
     };
     let dir = oci_meta_dir(workspace);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     fs::write(dir.join(CONFIG_FILE), serde_json::to_vec_pretty(init)?)?;
+    // Only the creating launch carries secrets (they are never persisted); later boots keep the file it wrote.
+    if !apple.secret_env.is_empty() {
+        let values: std::collections::BTreeMap<&str, &str> = apple
+            .secret_env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.expose()))
+            .collect();
+        let path = dir.join(SECRETS_FILE);
+        let tmp = dir.join(format!("{SECRETS_FILE}.tmp"));
+        let _ = fs::remove_file(&tmp);
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        std::io::Write::write_all(&mut f, &serde_json::to_vec(&values)?)?;
+        f.sync_all()?;
+        fs::rename(&tmp, &path)?;
+    }
     let token_path = dir.join(TOKEN_FILE);
     match req
         .agent
@@ -509,6 +532,44 @@ mod one_shot_tests {
             json["serial_log"],
             dir.path().join("serial.log").display().to_string()
         );
+    }
+
+    #[test]
+    fn secrets_go_only_to_a_private_meta_file_that_later_boots_keep() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let mut req: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": "s", "backend": "vz", "image": "/r.ext4", "kernel": "/k",
+            "apple": {"init_config": {"mode": "boot", "hostname": "s"}},
+        }))
+        .unwrap();
+        req.apple.as_mut().unwrap().secret_env.insert(
+            "DB_PASSWORD".into(),
+            fluxvm_core::grants::Secret::new("hunter2"),
+        );
+        assert!(!serde_json::to_string(&req).unwrap().contains("hunter2"));
+        assert!(!format!("{req:?}").contains("hunter2"));
+        write_oci_meta(&req, dir.path()).unwrap();
+        let meta = oci_meta_dir(dir.path());
+        let secrets = meta.join("secrets.json");
+        assert_eq!(
+            fs::read_to_string(&secrets).unwrap(),
+            r#"{"DB_PASSWORD":"hunter2"}"#
+        );
+        assert_eq!(
+            fs::metadata(&secrets).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            !fs::read_to_string(meta.join("config.json"))
+                .unwrap()
+                .contains("hunter2")
+        );
+
+        let reloaded: CreateVmRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        write_oci_meta(&reloaded, dir.path()).unwrap();
+        assert!(fs::read_to_string(&secrets).unwrap().contains("hunter2"));
     }
 
     #[test]

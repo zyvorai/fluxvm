@@ -12,6 +12,30 @@ pub const META_TAG: &str = "fluxvm-meta";
 pub const BLOBS_TAG: &str = "fluxvm-blobs";
 pub const CONFIG_FILE: &str = "config.json";
 pub const TOKEN_FILE: &str = "agent.token";
+/// `{"NAME": "value"}` in the meta share: environment the host keeps out of `config.json`.
+pub const SECRETS_FILE: &str = "secrets.json";
+
+/// A POSIX environment variable name.
+pub fn valid_env_name(name: &str) -> bool {
+    let mut b = name.bytes();
+    matches!(b.next(), Some(c) if c.is_ascii_alphabetic() || c == b'_')
+        && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// `env` with each secret set, replacing an entry of the same name.
+pub fn with_secrets(
+    env: &[String],
+    secrets: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    env.iter()
+        .filter(|e| {
+            let name = e.split_once('=').map_or(e.as_str(), |(n, _)| n);
+            !secrets.contains_key(name)
+        })
+        .cloned()
+        .chain(secrets.iter().map(|(k, v)| format!("{k}={v}")))
+        .collect()
+}
 /// Where the initramfs tools are visible inside the container after the root switch.
 pub const TOOLS_DIR: &str = "/.fluxvm";
 /// virtiofs tags of persistent volumes: `fluxvm-vol0`, `fluxvm-vol1`, …
@@ -296,6 +320,29 @@ pub fn unpack_result_from_log(log: &str) -> Option<Result<(), String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secrets_replace_env_entries_of_the_same_name() {
+        let secrets = std::collections::BTreeMap::from([
+            ("DB_PASSWORD".to_string(), "s3=cret".to_string()),
+            ("TOKEN".to_string(), String::new()),
+        ]);
+        let env = [
+            "PATH=/bin".to_string(),
+            "DB_PASSWORD=old".to_string(),
+            "TOKEN".to_string(),
+        ];
+        assert_eq!(
+            with_secrets(&env, &secrets),
+            ["PATH=/bin", "DB_PASSWORD=s3=cret", "TOKEN="]
+        );
+        for ok in ["A", "_x", "DB_PASSWORD2"] {
+            assert!(valid_env_name(ok), "{ok}");
+        }
+        for bad in ["", "1A", "A-B", "A=B", "A B"] {
+            assert!(!valid_env_name(bad), "{bad}");
+        }
+    }
 
     #[test]
     fn host_names_follow_rfc_1123() {
