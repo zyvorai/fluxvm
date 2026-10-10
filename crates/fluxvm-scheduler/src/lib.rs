@@ -38,6 +38,7 @@ mod migration_relay;
 pub mod procbox_sandbox;
 mod recovery;
 mod sandbox;
+pub mod sandbox_density;
 mod sandbox_pool;
 pub mod shared_disk;
 pub mod speculate;
@@ -815,6 +816,11 @@ impl VmManager {
         let mut vm = self.get(id).await?;
         if vm.status == VmStatus::Paused {
             vm = self.resume(id).await.context("AutoResume on request")?;
+        } else if crate::sandbox_density::is_hibernated(&vm) {
+            vm = self
+                .wake_sandbox(id)
+                .await
+                .context("waking hibernated sandbox")?;
         }
         self.touch_activity(id).await;
         Ok(vm)

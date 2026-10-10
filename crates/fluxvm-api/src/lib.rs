@@ -596,6 +596,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/qga/firewall/open", post(qga_firewall_open))
         .route("/v1/vms/{id}/qga/firewall/close", post(qga_firewall_close))
         .route("/v1/sandboxes", post(create_sandbox).get(list_sandboxes))
+        .route("/v1/sandboxes/warm", post(warm_sandboxes))
+        .route("/v1/sandboxes/density", get(sandbox_density))
         .route("/v1/sandboxes/{id}/snapshot", post(snapshot_sandbox))
         .route("/v1/sandboxes/{id}/fs/read", post(sandbox_fs_read))
         .route("/v1/sandboxes/{id}/fs/write", post(sandbox_fs_write))
@@ -812,6 +814,23 @@ fn render_metrics(vms: &[VmRecord]) -> String {
     out.push_str(&format!(
         "fluxvm_egress_deny_total {}\n",
         fluxvm_core::metrics::egress_deny_total()
+    ));
+
+    out.push_str(
+        "# HELP fluxvm_sandbox_warm_hits_total Default-shaped sandbox creates served from a warm slot.\n",
+    );
+    out.push_str("# TYPE fluxvm_sandbox_warm_hits_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_sandbox_warm_hits_total {}\n",
+        fluxvm_core::agent_density::warm_hits()
+    ));
+    out.push_str(
+        "# HELP fluxvm_sandbox_warm_misses_total Default-shaped sandbox creates that cold-booted.\n",
+    );
+    out.push_str("# TYPE fluxvm_sandbox_warm_misses_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_sandbox_warm_misses_total {}\n",
+        fluxvm_core::agent_density::warm_misses()
     ));
 
     out.push_str("# HELP fluxvm_vm_create_total VM create operations completed successfully.\n");
@@ -1090,6 +1109,38 @@ async fn create_sandbox(
     Ok((StatusCode::CREATED, Json(body)))
 }
 
+/// Fill the warm sandbox pool to `count` slots in the background. Host-wide, so not for tenant tokens.
+async fn warm_sandboxes(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+    Json(req): Json<fluxvm_core::agent_density::WarmRequest>,
+) -> ApiResult<impl IntoResponse> {
+    require_admin(role)?;
+    if token_tenant.is_some() {
+        return Err(ApiError::forbidden(
+            "the warm pool is host-wide; use a token without a tenant",
+        ));
+    }
+    let target = m.warm_sandboxes(req.count).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "target": target }))))
+}
+
+/// Sandbox counts, warm-pool state and host memory pressure.
+async fn sandbox_density(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> ApiResult<Json<fluxvm_core::agent_density::DensityReport>> {
+    require_admin(role)?;
+    if token_tenant.is_some() {
+        return Err(ApiError::forbidden(
+            "density is host-wide; use a token without a tenant",
+        ));
+    }
+    Ok(Json(m.sandbox_density().await))
+}
+
 /// What this host offers for confidential guests, and whether FluxVM can use it.
 async fn host_confidential() -> Json<serde_json::Value> {
     Json(json!(fluxvm_scheduler::confidential::detect()))
@@ -1111,7 +1162,10 @@ async fn list_sandboxes(
         // QEMU-backed sandboxes (volume templates) are sandboxes too; they are
         // recognised by the marker `create_sandbox` writes into their workspace.
         .filter(|v| {
-            v.backend == BackendKind::FluxVm || v.workspace.join("sandbox-proxy.json").exists()
+            v.backend == BackendKind::FluxVm
+                || v.labels
+                    .contains_key(fluxvm_scheduler::sandbox_density::SANDBOX_LABEL)
+                || v.workspace.join("sandbox-proxy.json").exists()
         })
         .filter(|v| match &token_tenant {
             Some(Extension(TokenTenant(t))) => v.request.tenant.as_deref() == Some(t.as_str()),

@@ -1,0 +1,14 @@
+# fluxvm.toml fragment for a Mac running many small agent sandboxes. See docs/agent-density.md.
+
+[sandbox]
+warm_slots = 4
+autopause_scan_secs = 10
+idle_balloon_secs = 60
+idle_balloon_percent = 50
+autopause_idle_secs = 180
+hibernate_idle_secs = 900
+
+[policy]
+deny_host_pressure_level = "warn"
+min_host_mem_available_mib = 4096
+pressure_defer_secs = 30

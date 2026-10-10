@@ -1,0 +1,5 @@
+{
+  "name": "tiny-agent",
+  "profile": "tiny",
+  "ttl_seconds": 900
+}

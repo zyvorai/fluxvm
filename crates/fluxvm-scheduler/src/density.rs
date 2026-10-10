@@ -206,10 +206,7 @@ impl VmManager {
         let cutoff = Utc::now() - Duration::seconds(secs as i64);
         let mut changed = 0;
         for vm in self.list().await {
-            if !matches!(vm.backend, BackendKind::FluxVm | BackendKind::Vz)
-                || vm.status != VmStatus::Running
-                || crate::procbox_sandbox::is_procbox(&vm)
-            {
+            if !crate::sandbox_density::autopause_eligible(&vm) || vm.status != VmStatus::Running {
                 continue;
             }
             let last = self.last_activity(vm.id).await.unwrap_or(vm.created_at);

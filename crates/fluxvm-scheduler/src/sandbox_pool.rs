@@ -47,7 +47,7 @@ pub(crate) fn default_sandbox_spec() -> serde_json::Value {
     })
 }
 
-fn is_slot(vm: &VmRecord) -> bool {
+pub(crate) fn is_slot(vm: &VmRecord) -> bool {
     vm.backend == BackendKind::Vz
         && vm.labels.get(POOL_LABEL).map(String::as_str) == Some(POOL_VALUE)
 }
@@ -86,9 +86,6 @@ impl VmManager {
         ttl_seconds: Option<u64>,
         created_by_token: Option<&str>,
     ) -> Result<Option<VmRecord>> {
-        if self.cfg.sandbox.warm_slots == 0 {
-            return Ok(None);
-        }
         let _guard = CLAIM_LOCK.lock().await;
         for slot in self
             .list()
@@ -113,7 +110,13 @@ impl VmManager {
                 .unwrap_or_else(|| format!("sandbox-{}", Uuid::new_v4()));
             let patch = VmPatch {
                 name: Some(name),
-                labels: BTreeMap::from([(POOL_LABEL.to_owned(), None)]),
+                labels: BTreeMap::from([
+                    (POOL_LABEL.to_owned(), None),
+                    (
+                        crate::sandbox_density::SANDBOX_LABEL.to_owned(),
+                        Some("1".to_owned()),
+                    ),
+                ]),
             };
             let mut vm = self.patch(slot.id, patch).await?;
             vm.expires_at =
@@ -126,9 +129,13 @@ impl VmManager {
         Ok(None)
     }
 
-    /// Starts refilling the pool in the background (one filler at a time).
+    /// Starts refilling the pool to `sandbox.warm_slots` in the background.
     pub(crate) fn spawn_pool_fill(self: &Arc<Self>) {
-        let want = self.cfg.sandbox.warm_slots;
+        self.spawn_pool_fill_to(self.cfg.sandbox.warm_slots);
+    }
+
+    /// Starts filling the pool to `want` slots in the background (one filler at a time).
+    pub(crate) fn spawn_pool_fill_to(self: &Arc<Self>, want: usize) {
         if want == 0 || FILLING.swap(true, Ordering::SeqCst) {
             return;
         }

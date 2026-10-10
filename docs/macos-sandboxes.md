@@ -38,6 +38,9 @@ warm_slots = 4   # 0 turns the pool off
 Slots show up in `fluxctl list` as `sandbox-slot-…`. They cost disk (an APFS clone of the image plus a few hundred MB of saved memory
 each), and no memory while stopped. Restoring needs an unlocked login session.
 
+For many sandboxes on one Mac (sizes such as `"profile": "tiny"`, admission on macOS memory pressure, idle pause and hibernate,
+`POST /v1/sandboxes/warm` and `GET /v1/sandboxes/density`), see [agent-density.md](agent-density.md).
+
 ## How it differs from Linux
 
 - **SSH, not the vsock agent.** Linux sandboxes talk to a guest agent over vsock. `vz` guests run stock cloud images with no agent, so
