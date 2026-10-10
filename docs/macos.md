@@ -337,7 +337,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 - **Fleet placement for `vz`:** `fluxvm-agent node` puts these capabilities, with free CPU and memory and the macOS guest count, in its
   heartbeat (`apple`), and `fluxvm-agent central` scores nodes with `fluxvm_scheduler::apple_placement` for `backend: vz` requests. Nodes
   without Apple capabilities are excluded for `vz`; among nodes that fit, the tightest fit wins. **Verified** only on loopback: one real
-  M4 node plus two fake nodes registered by hand. No second Mac was used, and central's `vz` filtering has no unit tests yet.
+  M4 node plus two fake nodes registered by hand. No second Mac was used; central's `vz` filtering is unit-tested (request parsing, nodes without Apple capabilities, feature requirements, the two-macOS-guest limit).
 
 ## Capability matrix
 

@@ -2355,4 +2355,147 @@ mod tests {
         assert_eq!(resp["node"], "a");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
+
+    fn apple_node(name: &str, vm_count: usize, caps: AppleHostCaps) -> NodeInfo {
+        NodeInfo {
+            apple: Some(caps),
+            ..node(name, vm_count, 0)
+        }
+    }
+
+    fn caps(free_cpu: u32, free_memory_mib: u64) -> AppleHostCaps {
+        AppleHostCaps {
+            free_cpu,
+            free_memory_mib,
+            ..AppleHostCaps::default()
+        }
+    }
+
+    #[test]
+    fn apple_request_only_exists_for_vz_and_reads_the_apple_options() {
+        let linux = json!({"backend": "qemu", "apple": {"custom_virtio": true}});
+        assert!(apple_placement_request(&linux, 1, 512).is_none());
+        let no_backend = json!({"vcpus": 1});
+        assert!(apple_placement_request(&no_backend, 1, 512).is_none());
+
+        let plain = apple_placement_request(&json!({"backend": "vz"}), 2, 1024).unwrap();
+        assert_eq!((plain.vcpus, plain.memory_mib), (2, 1024));
+        assert!(!plain.macos_guest && !plain.needs_nested && !plain.needs_vmnet);
+        assert!(!plain.needs_custom_virtio && plain.bridge_interface.is_none());
+
+        let full = apple_placement_request(
+            &json!({"backend": "vz", "apple": {
+                "guest_os": "macos", "nested_virtualization": true,
+                "vmnet": {"mode": "shared"}, "custom_virtio": true,
+                "bridge_interface": "en0"}}),
+            4,
+            8192,
+        )
+        .unwrap();
+        assert!(full.macos_guest && full.needs_nested && full.needs_vmnet);
+        assert!(full.needs_custom_virtio);
+        assert_eq!(full.bridge_interface.as_deref(), Some("en0"));
+
+        // A null vmnet is "not asked for".
+        let null_vmnet =
+            apple_placement_request(&json!({"backend": "vz", "apple": {"vmnet": null}}), 1, 512)
+                .unwrap();
+        assert!(!null_vmnet.needs_vmnet);
+    }
+
+    #[test]
+    fn vz_placement_skips_nodes_without_apple_capabilities() {
+        let mut nodes = HashMap::new();
+        // A big Linux node (no `apple`) and a small Mac: only the Mac may take a vz VM.
+        nodes.insert("linux".into(), node("linux", 0, 0));
+        nodes.insert("mac".into(), apple_node("mac", 3, caps(8, 8192)));
+        let req = apple_placement_request(&json!({"backend": "vz"}), 1, 512).unwrap();
+        let pick = |req: Option<&ApplePlacementRequest>| {
+            pick_best_capacity_excluding_apple(
+                &nodes,
+                1,
+                512,
+                &HashSet::new(),
+                &HashMap::new(),
+                SecurityProfile::default(),
+                req,
+            )
+            .map(|n| n.name)
+        };
+        assert_eq!(pick(Some(&req)).as_deref(), Some("mac"));
+        // Without an Apple request (any other backend) the Linux node is still eligible.
+        assert!(pick(None).is_some());
+    }
+
+    #[test]
+    fn vz_placement_requires_the_features_the_request_needs() {
+        let mut nodes = HashMap::new();
+        let mut cv = caps(8, 8192);
+        cv.custom_virtio = true;
+        nodes.insert("capable".into(), apple_node("capable", 5, cv));
+        // Far more room, but no custom Virtio.
+        nodes.insert("roomy".into(), apple_node("roomy", 0, caps(64, 262144)));
+        let pick = |body: Value| {
+            let req = apple_placement_request(&body, 1, 512).unwrap();
+            pick_best_capacity_excluding_apple(
+                &nodes,
+                1,
+                512,
+                &HashSet::new(),
+                &HashMap::new(),
+                SecurityProfile::default(),
+                Some(&req),
+            )
+            .map(|n| n.name)
+        };
+        assert_eq!(
+            pick(json!({"backend": "vz", "apple": {"custom_virtio": true}})).as_deref(),
+            Some("capable")
+        );
+        // Nothing offers nested virtualization: no placement at all.
+        assert!(pick(json!({"backend": "vz", "apple": {"nested_virtualization": true}})).is_none());
+        // A bridge interface the hosts do not have.
+        assert!(pick(json!({"backend": "vz", "apple": {"bridge_interface": "en9"}})).is_none());
+    }
+
+    #[test]
+    fn vz_placement_enforces_the_two_macos_guest_limit() {
+        let mut nodes = HashMap::new();
+        let mut full = caps(8, 16384);
+        full.macos_guests = 2;
+        nodes.insert("full".into(), apple_node("full", 2, full));
+        let mut one = caps(8, 16384);
+        one.macos_guests = 1;
+        nodes.insert("one".into(), apple_node("one", 1, one));
+        let req = apple_placement_request(
+            &json!({"backend": "vz", "apple": {"guest_os": "macos"}}),
+            2,
+            4096,
+        )
+        .unwrap();
+        let picked = pick_best_capacity_excluding_apple(
+            &nodes,
+            2,
+            4096,
+            &HashSet::new(),
+            &HashMap::new(),
+            SecurityProfile::default(),
+            Some(&req),
+        )
+        .map(|n| n.name);
+        assert_eq!(picked.as_deref(), Some("one"));
+        nodes.remove("one");
+        assert!(
+            pick_best_capacity_excluding_apple(
+                &nodes,
+                2,
+                4096,
+                &HashSet::new(),
+                &HashMap::new(),
+                SecurityProfile::default(),
+                Some(&req),
+            )
+            .is_none()
+        );
+    }
 }
