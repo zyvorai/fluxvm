@@ -9,7 +9,10 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 
 const DOCKER_HUB: &str = "registry-1.docker.io";
@@ -352,11 +355,33 @@ pub struct Credentials {
     pub password: String,
 }
 
+/// Bearer tokens by registry, repository and user, shared by every pull in the process so a cached image costs one
+/// registry round trip instead of three.
+static TOKENS: LazyLock<Mutex<HashMap<String, (String, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One client for every pull, so its kept-alive connections spare the next pull a TLS handshake.
+static HTTP: LazyLock<reqwest::Result<reqwest::Client>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent(concat!("fluxvm/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .build()
+});
+
+fn cached_token(key: &str) -> Option<String> {
+    let tokens = TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    tokens
+        .get(key)
+        .filter(|(_, until)| *until > Instant::now())
+        .map(|(t, _)| t.clone())
+}
+
 pub struct Puller {
     http: reqwest::Client,
     store: BlobStore,
     creds: Option<Credentials>,
     token: Option<String>,
+    token_key: Option<String>,
     /// `architecture`, `os` to select from a multi-platform index.
     platform: (String, String),
 }
@@ -364,13 +389,14 @@ pub struct Puller {
 impl Puller {
     pub fn new(store: BlobStore) -> Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder()
-                .user_agent(concat!("fluxvm/", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(std::time::Duration::from_secs(15))
-                .build()?,
+            http: HTTP
+                .as_ref()
+                .map_err(|e| anyhow::anyhow!("building the registry HTTP client: {e}"))?
+                .clone(),
             store,
             creds: None,
             token: None,
+            token_key: None,
             platform: ("arm64".into(), "linux".into()),
         })
     }
@@ -388,6 +414,14 @@ impl Puller {
     /// Resolves `reference` to a platform manifest, then fetches its config and any layer not already stored.
     pub async fn pull(&mut self, reference: &str) -> Result<PulledImage> {
         let r = ImageRef::parse(reference)?;
+        let key = format!(
+            "{}/{}#{}",
+            r.registry,
+            r.repository,
+            self.creds.as_ref().map_or("", |c| c.username.as_str())
+        );
+        self.token = cached_token(&key);
+        self.token_key = Some(key);
         let (mut bytes, mut digest) = self.manifest(&r, &r.reference).await?;
         let mut doc: ManifestDoc = serde_json::from_slice(&bytes).context("parsing manifest")?;
         if doc.media_type == MT_OCI_INDEX
@@ -469,7 +503,15 @@ impl Puller {
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or_default()
                     .to_string();
-                self.token = Some(self.fetch_token(&challenge).await?);
+                let (token, ttl) = self.fetch_token(&challenge).await?;
+                if let Some(key) = &self.token_key {
+                    let until = Instant::now() + ttl.saturating_sub(Duration::from_secs(10));
+                    TOKENS
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(key.clone(), (token.clone(), until));
+                }
+                self.token = Some(token);
                 continue;
             }
             if !resp.status().is_success() {
@@ -480,7 +522,8 @@ impl Puller {
         bail!("GET {url}: still unauthorized after a token")
     }
 
-    async fn fetch_token(&self, challenge: &str) -> Result<String> {
+    /// The token and how long the registry says it lasts (60 s when it does not say).
+    async fn fetch_token(&self, challenge: &str) -> Result<(String, Duration)> {
         let params = parse_bearer_challenge(challenge)
             .with_context(|| format!("registry asked for unsupported auth: {challenge:?}"))?;
         let realm = params
@@ -505,14 +548,26 @@ impl Puller {
         struct Tok {
             token: Option<String>,
             access_token: Option<String>,
+            expires_in: Option<u64>,
         }
         let t: Tok = resp.json().await.context("parsing token response")?;
-        t.token
+        let ttl = Duration::from_secs(t.expires_in.unwrap_or(60));
+        let token = t
+            .token
             .or(t.access_token)
-            .context("token response has no token")
+            .context("token response has no token")?;
+        Ok((token, ttl))
     }
 
     async fn manifest(&mut self, r: &ImageRef, reference: &str) -> Result<(Vec<u8>, String)> {
+        // A manifest fetched by digest never changes, so it is kept with the blobs.
+        let by_digest = reference.starts_with("sha256:");
+        if by_digest
+            && let Ok(bytes) = self.store.read(reference)
+            && sha256_digest(&bytes) == reference
+        {
+            return Ok((bytes, reference.to_owned()));
+        }
         let url = format!("{}/manifests/{reference}", r.base_url());
         let accept = [
             MT_OCI_INDEX,
@@ -525,6 +580,9 @@ impl Puller {
         let digest = sha256_digest(&bytes);
         if reference.starts_with("sha256:") && digest != reference {
             bail!("manifest digest mismatch: asked for {reference}, got {digest}");
+        }
+        if by_digest {
+            self.store.put(&digest, &bytes)?;
         }
         Ok((bytes, digest))
     }
@@ -864,7 +922,7 @@ mod tests {
         assert!(store.has(&img.layers[0].digest));
         assert!(hits.lock().unwrap().iter().any(|h| h.starts_with("/token")));
 
-        // A second pull reuses stored blobs: only manifests are fetched.
+        // A second pull reuses the token, the stored blobs and the platform manifest: only the tag is resolved.
         hits.lock().unwrap().clear();
         let again = Puller::new(store)
             .unwrap()
@@ -872,7 +930,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(again, img);
-        assert!(!hits.lock().unwrap().iter().any(|h| h.contains("/blobs/")));
+        assert_eq!(*hits.lock().unwrap(), ["/v2/app/manifests/1.0"]);
     }
 
     #[tokio::test]

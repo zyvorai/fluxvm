@@ -9,6 +9,10 @@
 - Container sandboxes and `apple.oci_warm_sizes` require at least 512 MiB, the `vz` minimum, and say so up front.
 - The `oci-boot` workflow builds the boot artifacts again: USB_PCI for the warm pool's XHCI, `gen_init_cpio` compiled
   directly, and `musl-gcc` for zstd-sys.
+- Faster container sandbox creation with a cached image: registry tokens, manifests fetched by digest and HTTP connections
+  are reused across pulls (one registry round trip instead of four), and warm slots boot with
+  `usb_storage.delay_use=0` so a claim no longer waits a second for the USB rootfs. Measured on Apple silicon: warm claim
+  3.6 s to 1.3 s, cold start 2.6 s to 1.75 s.
 
 ### Changed: `vz` follow-ups
 - `fluxctl disk detach` unplugs a hot-attached USB disk from the running guest at once.
