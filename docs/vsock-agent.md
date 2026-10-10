@@ -35,6 +35,15 @@ The shared crate `fluxvm-guest-protocol`: one JSON object per line, one request 
 
 Errors are `{"result": "error", "message": "…"}`. Files are capped at 64 MiB per transfer.
 
+`exec` may carry a `process` object instead of relying on `command`: the agent then runs `argv` directly with `execve`, with no
+`/bin/sh -c`, so it works in images without a shell. `env` adds `KEY=value` entries (or replaces the environment with
+`clean_env`), `cwd` sets the directory, and `user` (`{"uid", "gid"}`) drops privileges. Older agents ignore the field, so only send it
+to an agent known to support it. Over REST: `POST /v1/sandboxes/{id}/process {"process": {"argv": [...]}}`.
+
+```json
+{"token": "…", "op": "exec", "command": "", "process": {"argv": ["python3", "-c", "print(6*7)"], "cwd": "/tmp"}}
+```
+
 ## Turning it on
 
 A VM opts in with `"agent": {"enabled": true}` (port 17777 by default). The daemon generates a token for it. On Linux hosts the
@@ -48,6 +57,11 @@ it, so sandboxes on them keep using SSH.
 
 `agent.enabled` is refused for macOS guests: the agent is a Linux binary.
 
+In a [container sandbox](oci-sandboxes.md) there is no cloud-init and no systemd: `fluxvm-oci-init` (PID 1) starts the agent from
+the initramfs with `--token-file` pointing at the token on the read-only `fluxvm-meta` share. With `FLUXVM_POWEROFF_VIA_INIT` set,
+the agent's `shutdown` signals PID 1 (`SIGUSR2`) instead of running `shutdown`, which such images do not have.
+
 ## Sandboxes
 
-See [vsock-proxy.md](vsock-proxy.md) for how sandbox `exec` and file operations pick the agent and fall back to SSH.
+See [vsock-proxy.md](vsock-proxy.md) for how sandbox `exec` and file operations pick the agent and fall back to SSH. Container
+sandboxes use the agent only.

@@ -72,6 +72,46 @@ pub struct Config {
     /// Measured / confidential-VM control-plane gates (Phase 6).
     #[serde(default)]
     pub security: SecurityConfig,
+    /// `vz` backend settings (macOS): OCI sandbox boot artifacts and registry access.
+    #[serde(default)]
+    pub apple: AppleConfig,
+}
+
+/// `vz` backend settings. See `docs/oci-sandboxes.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppleConfig {
+    /// Kernel for OCI sandboxes: an absolute path, a catalog name, or a file in `<state_dir>/oci/boot`.
+    /// Build it with `scripts/build-oci-boot.sh`.
+    pub oci_kernel: String,
+    /// Initramfs holding fluxvm-oci-init, the guest agent and mke2fs; resolved like `oci_kernel`.
+    pub oci_initrd: String,
+    /// Kernel command line for OCI sandbox and builder VMs.
+    pub oci_cmdline: String,
+    /// Memory for the short-lived VM that unpacks an image into its rootfs.
+    pub oci_builder_memory_mib: u64,
+    /// Registry logins for private images (public images need none).
+    pub oci_registry_credentials: Vec<OciRegistryCredential>,
+}
+
+impl Default for AppleConfig {
+    fn default() -> Self {
+        Self {
+            oci_kernel: "oci-kernel".into(),
+            oci_initrd: "oci-initrd".into(),
+            oci_cmdline: "console=hvc0 loglevel=4 panic=-1".into(),
+            oci_builder_memory_mib: 1024,
+            oci_registry_credentials: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OciRegistryCredential {
+    /// Registry host as in the image reference, e.g. `ghcr.io` (Docker Hub is `registry-1.docker.io`).
+    pub registry: String,
+    pub username: String,
+    pub password: String,
 }
 
 /// Which guest runner backs the FluxVM hypervisor control plane.
@@ -134,6 +174,7 @@ impl Default for Config {
             sandbox: SandboxConfig::default(),
             fluxvm_engine: FluxVmEngine::default(),
             security: SecurityConfig::default(),
+            apple: AppleConfig::default(),
         }
     }
 }

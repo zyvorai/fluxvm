@@ -13,7 +13,7 @@ use std::{
 };
 
 /// JSON handed to `fluxvm-vz-runner --config`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RunnerConfig {
     pub id: String,
     pub workspace: PathBuf,
@@ -58,6 +58,12 @@ pub struct RunnerConfig {
     pub egress_allow: Vec<String>,
     /// A state file written by a snapshot; the runner resumes from it instead of cold-booting.
     pub restore_state: Option<PathBuf>,
+    /// Direct boot (`VZLinuxBootLoader`): an uncompressed arm64 `Image`. None boots EFI from the disk.
+    pub kernel: Option<PathBuf>,
+    pub initrd: Option<PathBuf>,
+    pub cmdline: Option<String>,
+    pub root_read_only: bool,
+    pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -140,6 +146,16 @@ impl RunnerConfig {
                     host_path: f.host_path.clone(),
                     read_only: f.read_only,
                 })
+                .chain(apple.tagged_shares.iter().map(|s| ShareConfig {
+                    tag: s.tag.clone(),
+                    host_path: s.host_path.clone(),
+                    read_only: s.read_only,
+                }))
+                .chain(apple.init_config.is_some().then(|| ShareConfig {
+                    tag: fluxvm_oci_init::config::META_TAG.into(),
+                    host_path: oci_meta_dir(&ctx.workspace),
+                    read_only: true,
+                }))
                 .chain(
                     (apple.guest_os == AppleGuest::Macos && apple.firstboot.is_some()).then(|| {
                         ShareConfig {
@@ -150,6 +166,11 @@ impl RunnerConfig {
                     }),
                 )
                 .collect(),
+            kernel: req.kernel.clone(),
+            initrd: req.initrd.clone(),
+            cmdline: req.kernel_args.clone(),
+            root_read_only: apple.root_read_only,
+            extra_disks: apple.extra_disks.clone(),
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
             forwards: match &req.network {
@@ -172,6 +193,40 @@ impl RunnerConfig {
             .with_context(|| format!("writing {}", p.display()))?;
         Ok(p)
     }
+}
+
+/// Where an OCI sandbox's `config.json` and agent token live (shared into the guest as `fluxvm-meta`).
+pub fn oci_meta_dir(workspace: &Path) -> PathBuf {
+    workspace.join("meta")
+}
+
+/// Writes `apple.init_config` and the agent token into [`oci_meta_dir`], replacing what a previous boot left.
+pub fn write_oci_meta(req: &CreateVmRequest, workspace: &Path) -> Result<()> {
+    use fluxvm_oci_init::config::{CONFIG_FILE, TOKEN_FILE};
+    use std::os::unix::fs::PermissionsExt;
+    let Some(init) = req.apple.as_ref().and_then(|a| a.init_config.as_ref()) else {
+        return Ok(());
+    };
+    let dir = oci_meta_dir(workspace);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    fs::write(dir.join(CONFIG_FILE), serde_json::to_vec_pretty(init)?)?;
+    let token_path = dir.join(TOKEN_FILE);
+    match req
+        .agent
+        .as_ref()
+        .filter(|a| a.enabled)
+        .and_then(|a| a.token.as_deref())
+    {
+        Some(token) => {
+            fs::write(&token_path, token)?;
+            fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600))?;
+        }
+        None => {
+            let _ = fs::remove_file(&token_path);
+        }
+    }
+    Ok(())
 }
 
 /// The vsock port the runner's egress proxy listens on (guest to host); the guest forwards 127.0.0.1:3128 to it.
@@ -334,6 +389,176 @@ pub fn find_runner() -> Result<PathBuf> {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+/// A headless direct-boot Linux VM with no network card that runs until its guest powers off (the OCI rootfs builder).
+#[derive(Debug, Clone)]
+pub struct OneShotVm {
+    pub workspace: PathBuf,
+    pub disk: PathBuf,
+    pub kernel: PathBuf,
+    pub initrd: PathBuf,
+    pub cmdline: String,
+    pub cpus: u8,
+    pub memory_mib: u64,
+    pub shares: Vec<ShareConfig>,
+}
+
+impl OneShotVm {
+    pub fn runner_config(&self) -> Result<RunnerConfig> {
+        let id = uuid::Uuid::new_v4();
+        let id8: String = id.simple().to_string().chars().take(8).collect();
+        Ok(RunnerConfig {
+            id: id.to_string(),
+            workspace: self.workspace.clone(),
+            cpus: self.cpus,
+            memory_mib: self.memory_mib,
+            guest_os: "linux",
+            disk: self.disk.clone(),
+            mac: stable_mac(&self.workspace)?,
+            control_socket: control_socket_path(&id8)?,
+            serial_log: self.serial_log(),
+            ip_file: ip_file(&self.workspace),
+            display_count: 1,
+            display_width: 1280,
+            display_height: 800,
+            display_ppi: 220,
+            shares: self.shares.clone(),
+            network_none: true,
+            kernel: Some(self.kernel.clone()),
+            initrd: Some(self.initrd.clone()),
+            cmdline: Some(self.cmdline.clone()),
+            ..RunnerConfig::default()
+        })
+    }
+
+    pub fn serial_log(&self) -> PathBuf {
+        self.workspace.join("serial.log")
+    }
+
+    /// Boots the VM and waits for the runner to exit (the guest powered off), killing it after `timeout`.
+    /// Returns the guest's serial console output.
+    pub async fn run(&self, timeout: std::time::Duration) -> Result<String> {
+        let runner = find_runner()?;
+        let conf = self.runner_config()?;
+        let conf_path = conf.write(&self.workspace)?;
+        let log = open_runner_log(&self.workspace)?;
+        let mut child = tokio::process::Command::new(&runner)
+            .args(["run", "--config"])
+            .arg(&conf_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().context("cloning the runner log")?)
+            .stderr(log)
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("starting {}", runner.display()))?;
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(s) => s?,
+            Err(_) => {
+                let _ = child.kill().await;
+                bail!(
+                    "the VM did not power off within {}s: {}",
+                    timeout.as_secs(),
+                    tail_runner_log(&self.workspace)
+                );
+            }
+        };
+        let serial = fs::read_to_string(self.serial_log()).unwrap_or_default();
+        if !status.success() {
+            bail!(
+                "the Apple runner exited ({status}): {}",
+                tail_runner_log(&self.workspace)
+            );
+        }
+        Ok(serial)
+    }
+}
+
+#[cfg(test)]
+mod one_shot_tests {
+    use super::*;
+
+    #[test]
+    fn one_shot_vm_is_headless_offline_direct_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = OneShotVm {
+            workspace: dir.path().into(),
+            disk: dir.path().join("disk.raw"),
+            kernel: "/k/oci-kernel".into(),
+            initrd: "/k/oci-initrd".into(),
+            cmdline: "console=hvc0".into(),
+            cpus: 2,
+            memory_mib: 1024,
+            shares: vec![ShareConfig {
+                tag: "fluxvm-meta".into(),
+                host_path: dir.path().join("meta"),
+                read_only: true,
+            }],
+        };
+        let c = vm.runner_config().unwrap();
+        assert_eq!(c.guest_os, "linux");
+        assert!(
+            c.network_none && !c.window && c.vsock_socket.is_none() && c.egress_allow.is_empty()
+        );
+        assert_eq!(c.kernel.as_deref(), Some(Path::new("/k/oci-kernel")));
+        assert_eq!(c.shares[0].tag, "fluxvm-meta");
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["cmdline"], "console=hvc0");
+        assert_eq!(
+            json["serial_log"],
+            dir.path().join("serial.log").display().to_string()
+        );
+    }
+
+    #[test]
+    fn oci_sandbox_meta_holds_config_and_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let req: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": "s", "backend": "vz", "image": "/r.ext4", "kernel": "/k",
+            "agent": {"enabled": true, "port": 17777, "token": "t0k"},
+            "apple": {"init_config": {"mode": "boot", "hostname": "s"}},
+        }))
+        .unwrap();
+        write_oci_meta(&req, dir.path()).unwrap();
+        let meta = oci_meta_dir(dir.path());
+        let cfg: serde_json::Value =
+            serde_json::from_slice(&fs::read(meta.join("config.json")).unwrap()).unwrap();
+        assert_eq!(cfg["hostname"], "s");
+        assert_eq!(fs::read_to_string(meta.join("agent.token")).unwrap(), "t0k");
+        let mode = fs::metadata(meta.join("agent.token"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let ctx = fluxvm_core::backend::LaunchContext {
+            id: uuid::Uuid::new_v4(),
+            workspace: dir.path().into(),
+            disk: dir.path().join("root.raw"),
+            seed_disk: None,
+            log_path: dir.path().join("console.log"),
+            network: fluxvm_core::backend::PreparedNetwork {
+                spec: NetworkSpec::None,
+                tap_name: None,
+                tap_fd: None,
+                netns: None,
+                dhcp_leasefile: None,
+                guest_ip: None,
+                guest_cidr: None,
+                gateway: None,
+                extra_tap_fds: vec![],
+            },
+            guest_cid: Some(3),
+            vsock_socket: None,
+            disk_format: "raw".into(),
+            nbd_export: None,
+        };
+        let conf = RunnerConfig::for_launch(&req, &ctx).unwrap();
+        let share = conf.shares.iter().find(|s| s.tag == "fluxvm-meta").unwrap();
+        assert!(share.read_only && share.host_path == meta);
+    }
 }
 
 #[cfg(test)]

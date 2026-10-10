@@ -596,6 +596,37 @@ pub struct AppleSpec {
     /// has no card, so the proxy is its only way out). `example.com` matches that host, `*.example.com` its subdomains; ports 80 and 443.
     #[serde(default)]
     pub egress_allow: Vec<String>,
+    /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
+    #[serde(default)]
+    pub root_read_only: bool,
+    /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
+    #[serde(default)]
+    pub extra_disks: Vec<AppleDisk>,
+    /// virtiofs shares with fixed tags for a Linux guest's own init to mount (an OCI sandbox's `fluxvm-meta`),
+    /// alongside the positional `fs0`, `fs1`, … of `shared_folders`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tagged_shares: Vec<AppleShare>,
+    /// OCI sandbox: the guest's PID 1 is fluxvm-oci-init, and this is its `config.json`. At launch it is written with the
+    /// agent token to `<workspace>/meta`, shared read-only under the `fluxvm-meta` tag. Needs direct boot (`kernel`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_config: Option<serde_json::Value>,
+}
+
+/// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleShare {
+    pub tag: String,
+    pub host_path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// A raw disk image attached to a `vz` Linux guest as a virtio block device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleDisk {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 fn default_true() -> bool {
@@ -642,6 +673,10 @@ impl Default for AppleSpec {
             vmnet: None,
             custom_virtio: false,
             egress_allow: Vec::new(),
+            root_read_only: false,
+            extra_disks: Vec::new(),
+            tagged_shares: Vec::new(),
+            init_config: None,
         }
     }
 }

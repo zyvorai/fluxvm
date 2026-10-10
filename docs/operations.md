@@ -1395,6 +1395,11 @@ of a surprise landing somewhere else.
     clones/                   (standalone root images written by clone-vm)
   kernels/
   templates/                 ([sandbox].templates_dir; OCI→template export)
+  oci/                        (macOS container sandboxes; docs/oci-sandboxes.md)
+    blobs/sha256/<hex>        (pulled manifests, configs and layers, digest-verified)
+    rootfs/<digest>.ext4      (one built root filesystem per image, + <digest>.json)
+    build/                    (builder VM workspaces while a rootfs is built)
+    boot/                     (oci-kernel, oci-initrd when given as file names)
   vm-templates.json           (VM templates, /v1/vm-templates)
   backups/                    (fluxctl backup / POST /v1/vms/{id}/backup output)
   instances/

@@ -3,14 +3,15 @@
 
 //! Sandbox exec and file access for `vz` guests. A guest with the agent enabled (the `agent-micro` image, or a spec that asks
 //! for it) is reached over vsock through the runner's `CONNECT` proxy first; when the agent does not answer, and always for
-//! other guests, over SSH (see `fluxvm_apple::ssh`).
+//! other guests, over SSH (see `fluxvm_apple::ssh`). Container (OCI) sandboxes run no sshd: they are reached only through
+//! the agent.
 
 use crate::VmManager;
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use fluxvm_apple::ssh::{self, GuestSsh};
 use fluxvm_core::model::{AgentSpec, CreateVmRequest, VmRecord};
-use fluxvm_guest_protocol::{AgentRequest, AgentResponse, ExecPolicy};
+use fluxvm_guest_protocol::{AgentRequest, AgentResponse, ExecPolicy, ExecProcess};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -95,6 +96,20 @@ impl VmManager {
         })
     }
 
+    /// Asks the agent of a container sandbox, which has no SSH to fall back to.
+    async fn oci_agent(
+        &self,
+        vm: &VmRecord,
+        request: AgentRequest,
+        timeout: Duration,
+    ) -> Result<AgentResponse> {
+        let r = fluxvm_vsock_client::call(vm, request, timeout + AGENT_GRACE)
+            .await
+            .context("the container sandbox's guest agent did not answer (container sandboxes have no SSH fallback)")?;
+        AGENT_CALLS.fetch_add(1, Ordering::Relaxed);
+        Ok(r)
+    }
+
     /// Asks the guest agent; `None` means "use SSH".
     async fn vz_agent(
         &self,
@@ -123,18 +138,26 @@ impl VmManager {
         command: String,
         timeout_seconds: Option<u64>,
         policy: Option<ExecPolicy>,
+        process: Option<ExecProcess>,
     ) -> Result<AgentResponse> {
         let secs = timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS);
+        let needs_agent = policy.is_some() || process.is_some();
         let request = AgentRequest::Exec {
             command: command.clone(),
             timeout_seconds: Some(secs),
-            policy: policy.clone(),
+            policy,
+            process,
         };
+        if crate::oci_sandbox::is_oci(vm) {
+            return self.oci_agent(vm, request, Duration::from_secs(secs)).await;
+        }
         if let Some(r) = self.vz_agent(vm, request, Duration::from_secs(secs)).await {
             return Ok(r);
         }
-        if policy.is_some() {
-            bail!("a per-exec policy needs the vsock guest agent, which this guest does not run");
+        if needs_agent {
+            bail!(
+                "a per-exec policy or argv exec needs the vsock guest agent, which this guest does not run"
+            );
         }
         let out = ssh::exec(&self.vz_guest(vm)?, &command, Duration::from_secs(secs)).await?;
         Ok(AgentResponse::Exec {
@@ -147,6 +170,11 @@ impl VmManager {
 
     pub(crate) async fn vz_get_file(&self, vm: &VmRecord, path: String) -> Result<AgentResponse> {
         let request = AgentRequest::GetFile { path: path.clone() };
+        if crate::oci_sandbox::is_oci(vm) {
+            return self
+                .oci_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
+                .await;
+        }
         if let Some(r) = self
             .vz_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
             .await
@@ -175,6 +203,11 @@ impl VmManager {
             content_base64,
             mode,
         };
+        if crate::oci_sandbox::is_oci(vm) {
+            return self
+                .oci_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
+                .await;
+        }
         if let Some(r) = self
             .vz_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
             .await

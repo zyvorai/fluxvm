@@ -2,6 +2,30 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: container sandboxes on a Mac, one VM per container
+- **OCI images as sandboxes on `vz`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md)): `POST /v1/sandboxes` with
+  `"oci": {"image", "command"?, "entrypoint"?, "env"?, "workdir"?, "user"?, "read_only_root"?, "exit_policy"?}` boots the image
+  in its own lightweight VM. Virtualization.framework direct kernel boot (`VZLinuxBootLoader`) starts a small kernel and initramfs,
+  and the new `fluxvm-oci-init` (PID 1) mounts the image read-only, runs DHCP, starts the guest agent and runs the entrypoint as
+  65534 with `no_new_privs`. There is no SSH: exec and files go through the agent only. `offline`, `allow_hosts`, `profile` and
+  `ttl_seconds` apply.
+- **Pull and rootfs cache**: a pure-Rust registry client (`linux/arm64`, digest-verified blobs, anonymous tokens or
+  `[[apple.oci_registry_credentials]]`). A network-less builder VM unpacks the layers (whiteouts, owners, xattrs, diff_id checks)
+  into `state_dir/oci/rootfs/<digest>.ext4` once per digest. Each sandbox gets an APFS clone of it.
+  `fluxctl oci pull | ls | rm | prune` and `/v1/oci/images`, `/v1/oci/prune` manage the cache.
+- **`fluxctl sandbox run IMAGE [--rm] -- CMD`** prints the container's console and exits with its exit code.
+  `fluxctl sandbox logs ID` and `GET /v1/sandboxes/{id}/logs` return the console tail with `exit_code` and `init_error`.
+- **MCP**: `sandbox_create` takes `oci_image`, `oci_command` and `oci_env`; the new read-only `sandbox_logs` tool returns the
+  exit code.
+- **Exec with argv**: `POST /v1/sandboxes/{id}/process` takes `{"process": {"argv", "env"?, "cwd"?}}`, which the agent runs
+  without a shell (distroless images). `AgentRequest::Exec.process` is optional, so older agents and clients are unaffected.
+- **Runner**: `kernel`, `initrd` and `kernel_args` boot Linux guests directly on `vz`. New options are a read-only root disk
+  (`apple.root_read_only`) and virtiofs shares with fixed tags (`apple.tagged_shares`).
+- **Boot artifacts**: `scripts/build-oci-boot.sh` (Linux arm64) and the `oci-boot` CI workflow build `oci-kernel` and
+  `oci-initrd` from `guest/oci-vz.config.fragment`, using checksummed kernel and e2fsprogs sources. New config keys:
+  `apple.oci_kernel`, `oci_initrd`, `oci_cmdline` and `oci_builder_memory_mib`.
+- `scripts/oci-live-test.sh` is the hardware test (not yet run on a Mac).
+
 ### Added: Mac Studio options, macOS guests through the API, and many small agent VMs per Mac
 - **Mac Studio options on `vz`** ([docs/macos.md](docs/macos.md)): up to eight displays, Linux clipboard (SPICE), bridged networking
   (`apple.bridge_interface`, needs the networking entitlement), vmnet networks on macOS 26+ (`apple.vmnet`: shared or host-only,

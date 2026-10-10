@@ -602,6 +602,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/sandboxes/{id}/fs/read", post(sandbox_fs_read))
         .route("/v1/sandboxes/{id}/fs/write", post(sandbox_fs_write))
         .route("/v1/sandboxes/{id}/process", post(sandbox_process))
+        .route("/v1/sandboxes/{id}/logs", get(sandbox_logs))
         .route("/v1/sandboxes/{id}/baseline", post(sandbox_baseline))
         .route("/v1/sandboxes/{id}/changes", post(sandbox_changes))
         .route("/v1/sandboxes/{id}/dry-run", post(sandbox_dry_run))
@@ -651,6 +652,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/images/catalog/clean", post(clean_catalog))
         .route("/v1/images/catalog", get(list_catalog))
+        .route("/v1/oci/images", get(list_oci_images).post(pull_oci_image))
+        .route("/v1/oci/images/{what}", delete(remove_oci_image))
+        .route("/v1/oci/prune", post(prune_oci_images))
         .route("/v1/pools", post(create_pool).get(list_pools))
         .route("/v1/pools/{name}", get(get_pool).delete(delete_pool))
         .route("/v1/pools/{name}/claim", post(claim_pool))
@@ -1272,11 +1276,15 @@ async fn sandbox_fs_write(
 
 #[derive(Deserialize)]
 struct ProcessBody {
+    #[serde(default)]
     command: String,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     policy: Option<fluxvm_guest_protocol::ExecPolicy>,
+    /// Run `argv` directly instead of `command` through a shell; needs the guest agent.
+    #[serde(default)]
+    process: Option<fluxvm_guest_protocol::ExecProcess>,
 }
 
 async fn sandbox_process(
@@ -1287,10 +1295,23 @@ async fn sandbox_process(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     m.ensure_running_for_request(id).await?;
-    Ok(Json(json!(
-        m.exec_with_policy(id, body.command, body.timeout_seconds, body.policy)
-            .await?
-    )))
+    let response = match body.process {
+        Some(_) if body.policy.is_some() || !body.command.is_empty() => {
+            return Err(anyhow::anyhow!(
+                "give either process (argv) or command (and policy), not both"
+            )
+            .into());
+        }
+        Some(process) => m.exec_process(id, process, body.timeout_seconds).await?,
+        None if body.command.is_empty() => {
+            return Err(anyhow::anyhow!("command or process is required").into());
+        }
+        None => {
+            m.exec_with_policy(id, body.command, body.timeout_seconds, body.policy)
+                .await?
+        }
+    };
+    Ok(Json(json!(response)))
 }
 
 #[derive(Deserialize)]
@@ -3542,6 +3563,26 @@ fn default_log_lines() -> usize {
     100
 }
 
+#[derive(Debug, Deserialize)]
+struct SandboxLogsQuery {
+    #[serde(default = "default_sandbox_log_lines")]
+    lines: usize,
+}
+
+fn default_sandbox_log_lines() -> usize {
+    200
+}
+
+/// `GET /v1/sandboxes/{id}/logs?lines=N` — the console tail as JSON, with a
+/// container sandbox's exit code (`null` while it runs) and init error.
+async fn sandbox_logs(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<SandboxLogsQuery>,
+) -> ApiResult<Json<fluxvm_scheduler::oci_sandbox::SandboxLogs>> {
+    Ok(Json(m.sandbox_logs(id, q.lines.min(10_000)).await?))
+}
+
 /// `GET /v1/vms/{id}/logs?lines=N&follow=true` — tail-follow the VM's
 /// captured console output (`VmRecord.log_path`) as a plain-text chunked
 /// stream, one line per chunk. Raw serial output has no journald-equivalent
@@ -4204,6 +4245,41 @@ async fn clean_catalog(
     require_admin(role)?;
     let removed = m.clean_catalog_downloads().await?;
     Ok(Json(json!({"removed": removed})))
+}
+
+async fn list_oci_images(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.oci_list()?})))
+}
+
+#[derive(Deserialize)]
+struct OciPullRequest {
+    image: String,
+}
+
+async fn pull_oci_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<OciPullRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.oci_pull(&req.image).await?)))
+}
+
+async fn remove_oci_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(what): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"removed": m.oci_remove(&what)?})))
+}
+
+async fn prune_oci_images(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.oci_prune().await?)))
 }
 
 async fn create_pool(

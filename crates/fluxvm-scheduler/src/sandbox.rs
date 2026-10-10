@@ -75,6 +75,11 @@ pub struct SandboxCreateRequest {
     /// no network card, and the only way out is an HTTP(S) proxy on the host that refuses everything not listed. Enforced by the host.
     #[serde(default)]
     pub allow_hosts: Vec<String>,
+    /// vz only: run a container image as the sandbox, one lightweight VM per container (see
+    /// [`crate::oci_sandbox`] and `docs/oci-sandboxes.md`). Not combinable with `template`, `spec`, `image`, `procbox`,
+    /// `volumes`, `gpus` or `confidential`; `profile`, `vcpus`, `memory_mib`, `offline`, `allow_hosts` and `ttl_seconds` apply.
+    #[serde(default)]
+    pub oci: Option<crate::oci_sandbox::OciSandboxSpec>,
 }
 
 pub const MIN_SANDBOX_MEMORY_MIB: u64 = 128;
@@ -235,9 +240,15 @@ impl VmManager {
                 "gpus cannot be combined with confidential: a passed-through device is outside the encrypted guest"
             );
         }
+        crate::oci_sandbox::validate(&req)?;
         if let Some(pb) = req.procbox.clone() {
             return self
                 .create_procbox_sandbox(req, pb, token_tenant, created_by_token)
+                .await;
+        }
+        if req.oci.is_some() {
+            return self
+                .create_oci_sandbox(req, token_tenant, created_by_token)
                 .await;
         }
         // Decide first, so a `required` request on a host that cannot honor it
@@ -408,30 +419,34 @@ impl VmManager {
         if let Some(status) = &confidential {
             crate::confidential::write_status(&record.workspace, status).await?;
         }
-        let proxy_ports: Vec<u16> = {
-            let mut ports = Vec::new();
-            if let Some(p) = req.http_proxy_port {
-                ports.push(p);
-            } else {
-                ports.push(self.cfg.sandbox.http_proxy_default_port);
+        self.write_sandbox_proxy_meta(&record, req.http_proxy_port, &req.http_proxy_ports)
+            .await?;
+        Ok(record)
+    }
+
+    /// Records which guest ports `/sandbox/{id}/…` and `/v1/sandboxes/{id}/http/{port}/…` may reach.
+    pub(crate) async fn write_sandbox_proxy_meta(
+        &self,
+        record: &VmRecord,
+        default_port: Option<u16>,
+        extra_ports: &[u16],
+    ) -> Result<()> {
+        let mut ports = vec![default_port.unwrap_or(self.cfg.sandbox.http_proxy_default_port)];
+        for p in extra_ports {
+            if !ports.contains(p) {
+                ports.push(*p);
             }
-            for p in req.http_proxy_ports {
-                if !ports.contains(&p) {
-                    ports.push(p);
-                }
-            }
-            ports
-        };
+        }
         let meta = serde_json::json!({
-            "http_proxy_default_port": proxy_ports.first().copied().unwrap_or(8080),
-            "http_proxy_ports": proxy_ports,
+            "http_proxy_default_port": ports.first().copied().unwrap_or(8080),
+            "http_proxy_ports": ports,
         });
         tokio::fs::write(
             record.workspace.join("sandbox-proxy.json"),
             serde_json::to_vec_pretty(&meta)?,
         )
         .await?;
-        Ok(record)
+        Ok(())
     }
 
     /// vz guests have no vsock agent: exec and files go over SSH with the daemon's own key (see `vz_guest`), authorised through
@@ -776,7 +791,10 @@ impl VmManager {
 /// `VmManager`/I/O) so the actual enforcement decision is unit-testable
 /// without needing a real `create()` call -- see `create_sandbox`'s own
 /// doc comment for why this exists at all.
-fn enforce_sandbox_tenant(create: &mut CreateVmRequest, token_tenant: Option<&str>) -> Result<()> {
+pub(crate) fn enforce_sandbox_tenant(
+    create: &mut CreateVmRequest,
+    token_tenant: Option<&str>,
+) -> Result<()> {
     let Some(t) = token_tenant else {
         return Ok(());
     };

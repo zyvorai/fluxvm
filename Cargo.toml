@@ -29,6 +29,7 @@ members = [
     "crates/fluxvm-containerd-shim",
     "crates/fluxvm-intelligence",
     "crates/fluxvm-procbox",
+    "crates/fluxvm-oci-init",
 ]
 
 # containerd-shim 0.11 fatally mis-parses containerd ≥ 2.3 BootstrapParams on

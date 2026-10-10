@@ -878,10 +878,13 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "sandbox_create",
-            "Create an agent sandbox VM from a named template (or the host default; on a Mac, a small Debian VM) with an optional TTL. Returns once commands can run in it.",
+            "Create an agent sandbox VM from a named template (or the host default; on a Mac, a small Debian VM) with an optional TTL, or (macOS) from a container image, one lightweight VM per container. Returns once commands can run in it.",
             object(
                 json!({
                     "template": {"type": "string", "description": "sandbox template name"},
+                    "oci_image": {"type": "string", "description": "macOS only: run this linux/arm64 container image (alpine:3.22, ghcr.io/org/app:1.2) as the sandbox instead of a template. The first use of an image pulls it and builds its root filesystem (up to a few minutes)."},
+                    "oci_command": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: argv replacing the image's Cmd"},
+                    "oci_env": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: KEY=value entries"},
                     "name": {"type": "string"},
                     "ttl_seconds": {"type": "integer", "minimum": 1},
                     "offline": {"type": "boolean", "description": "macOS only: no network card at all, so the sandbox cannot reach anything; commands and files still work. Slower to start (about 10 s)."},
@@ -892,8 +895,21 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             true,
             &remote,
             |r, args| async move {
-                timed(Duration::from_secs(180), async {
+                let oci = str_arg(&args, "oci_image").map(|image| {
+                    let mut oci = json!({"image": image});
+                    for (from, to) in [("oci_command", "command"), ("oci_env", "env")] {
+                        if let Some(v) = args.get(from).filter(|v| v.is_array()) {
+                            oci[to] = v.clone();
+                        }
+                    }
+                    oci
+                });
+                let limit = Duration::from_secs(if oci.is_some() { 1200 } else { 180 });
+                timed(limit, async {
                     let mut body = json!({});
+                    if let Some(oci) = oci {
+                        body["oci"] = oci;
+                    }
                     if args.get("offline").and_then(|v| v.as_bool()) == Some(true) {
                         body["offline"] = json!(true);
                     }
@@ -909,6 +925,34 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                         body["ttl_seconds"] = json!(t);
                     }
                     pretty(&r.call(Method::POST, "/v1/sandboxes", Some(body)).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "sandbox_logs",
+            "A sandbox's console output (last N lines) and, for a container sandbox, its main process's exit code (null while it runs) or why it failed to start.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "lines": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "default 200"},
+                }),
+                &["vm"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(30), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let lines = int_arg(&args, "lines")?.unwrap_or(200).clamp(1, 10_000);
+                    pretty(
+                        &r.call(
+                            Method::GET,
+                            &format!("/v1/sandboxes/{id}/logs?lines={lines}"),
+                            None,
+                        )
+                        .await?,
+                    )
                 })
                 .await
             },

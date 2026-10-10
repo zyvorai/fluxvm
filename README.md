@@ -41,6 +41,7 @@ From the 0.4.0 (unreleased) section of the [CHANGELOG](CHANGELOG.md) and recent 
 | **VM fork** | `POST /v1/vms/{id}/fork` / `fluxctl fork-vm`: snapshot a running FluxVM-engine VM once and restore N children with a shared read-only memory file and reflinked rootfs |
 | **VM import** | `POST /v1/images/import` / `fluxctl import-image`: OVA/OVF/VMDK/VHD(X)/qcow2 to raw disks, with offline GuestKit repair of the boot disk for virtio |
 | **Backups with quiesce** | Guest `fsfreeze` through QGA around the snapshot, plus list, delete and restore-backup |
+| **Container sandboxes on a Mac** | `"oci": {"image": "alpine:3.22"}` on `POST /v1/sandboxes`, or `fluxctl sandbox run IMAGE -- CMD`, boots the container in its own lightweight `vz` VM: direct kernel boot, a read-only root, uid 65534, no SSH, agent-only exec ([docs/oci-sandboxes.md](docs/oci-sandboxes.md)) |
 | **GPUs for sandboxes** | `gpus: N` on `POST /v1/sandboxes` passes free VFIO-bound GPUs to a QEMU-backed sandbox; supported in all three SDKs |
 | **Kairon VM edge, enforced** | Anti-spoof, learn-IP, DNS and SNI allow lists and an egress token bucket loaded into the VM's TC program |
 | **VM-edge packet capture** | A bounded `tcpdump` on the VM's dataplane interface with pcap download |
@@ -200,6 +201,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | REST API, auth/RBAC and the VM JSON contract | [docs/api.md](docs/api.md) |
 | Day-2 operations | [docs/operations.md](docs/operations.md) |
 | Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
+| Native macOS: the `vz` backend, sandboxes, container sandboxes | [docs/macos.md](docs/macos.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
 | Agent sandboxes, procbox and the SDKs | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [python/](python/README.md) · [go/](go/README.md) · [typescript/](typescript/README.md) |
 | Network Fabric and Service Fabric | [docs/network-fabric.md](docs/network-fabric.md) · [docs/service-fabric.md](docs/service-fabric.md) |
 | Secure Containers and MicroVM | [docs/secure-containers.md](docs/secure-containers.md) · [docs/microvm.md](docs/microvm.md) |
@@ -283,4 +285,4 @@ The same REST API and `fluxctl` now run on a [Mac mini](https://www.apple.com/in
 
 ![A private LLM cluster made of Macs](docs/assets/macos/readme-home-cluster.jpg)
 
-**Verified** on an Apple M4, macOS 27.2: Debian 13 through the API (create, SSH, pause, resume, stop, start, delete), plus port forwards, shared folders, named images, snapshots and warm starts, `fluxctl run`, [stacks](docs/macos-stacks.md) (`fluxctl up`), and [agent sandboxes](docs/macos-sandboxes.md) (a warm pool, offline and allow-listed network, speculate and changesets). macOS guests install from an IPSW, boot and clone on the same hardware by hand ([details](docs/macos.md#macos-guests)). **Not yet verified:** multi-Mac clusters, Thunderbolt RDMA, macOS guests through the API. Sizing, the cluster design (after GK Servis's [Mac Studio case study](https://www.gkservis.com/case-studies/llm-inference-cluster.html)) and the roadmap: [docs/macos-cluster.md](docs/macos-cluster.md).
+**Verified** on an Apple M4, macOS 27.2: Debian 13 through the API (create, SSH, pause, resume, stop, start, delete), plus port forwards, shared folders, named images, snapshots and warm starts, `fluxctl run`, [stacks](docs/macos-stacks.md) (`fluxctl up`), and [agent sandboxes](docs/macos-sandboxes.md) (a warm pool, offline and allow-listed network, speculate and changesets). [Container sandboxes](docs/oci-sandboxes.md) (an OCI image in its own VM, `fluxctl sandbox run`) are implemented and unit-tested; their live test has not been run on hardware yet. macOS guests install from an IPSW, boot and clone on the same hardware by hand ([details](docs/macos.md#macos-guests)). **Not yet verified:** multi-Mac clusters, Thunderbolt RDMA, macOS guests through the API. Sizing, the cluster design (after GK Servis's [Mac Studio case study](https://www.gkservis.com/case-studies/llm-inference-cluster.html)) and the roadmap: [docs/macos-cluster.md](docs/macos-cluster.md).

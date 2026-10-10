@@ -21,6 +21,10 @@ An explicit `vcpus` or `memory_mib` wins over the profile. Warm slots are standa
 (about 8 s with `debian-13`); `"image": "agent-micro"` gives them the [vsock guest agent](agent-micro.md) instead of SSH. A `standard` profile is the same as
 no profile and can claim a warm slot. See [examples/sandbox-tiny.json](../examples/sandbox-tiny.json).
 
+Container sandboxes ([oci-sandboxes.md](oci-sandboxes.md)) are the lightest shape: a container image booted straight into its
+entrypoint with no systemd, cloud-init or sshd, 1 vCPU and 512 MiB unless a profile or size says otherwise. Profiles, admission,
+quotas and TTLs apply to them as to any sandbox; they do not use the warm pool yet.
+
 ## Admission on real memory pressure
 
 The pressure gate in `policy` (all off by default) now works on macOS too. On a Mac the daemon samples available memory from

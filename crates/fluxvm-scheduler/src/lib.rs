@@ -35,6 +35,8 @@ pub mod idempotency;
 pub mod journal;
 pub mod live_migration;
 mod migration_relay;
+pub mod oci_images;
+pub mod oci_sandbox;
 pub mod procbox_sandbox;
 mod recovery;
 mod sandbox;
@@ -901,6 +903,33 @@ impl VmManager {
     pub async fn clean_catalog_downloads(&self) -> Result<Vec<String>> {
         let _guard = self.catalog_lock.lock().await;
         fluxvm_image::catalog::clean_downloads(&self.cfg)
+    }
+
+    /// Pull an OCI image and build its `vz` sandbox rootfs (cached by manifest digest).
+    pub async fn oci_pull(&self, reference: &str) -> Result<oci_images::OciImageEntry> {
+        let image = oci_images::pull(&self.cfg, reference).await?;
+        oci_images::ensure_rootfs(&self.cfg, &image).await?;
+        oci_images::find(&self.cfg, &image.manifest_digest)
+    }
+
+    pub fn oci_list(&self) -> Result<Vec<oci_images::OciImageEntry>> {
+        oci_images::list(&self.cfg)
+    }
+
+    /// Remove one cached OCI rootfs (by digest, 12+ hex prefix, or reference). Running sandboxes keep their clones.
+    pub fn oci_remove(&self, what: &str) -> Result<oci_images::OciImageEntry> {
+        oci_images::remove(&self.cfg, what)
+    }
+
+    /// Remove cached OCI rootfs images no sandbox was booted from, and blobs nothing needs.
+    pub async fn oci_prune(&self) -> Result<oci_images::OciPruneReport> {
+        let in_use = self
+            .list()
+            .await
+            .into_iter()
+            .filter_map(|v| v.labels.get(oci_images::OCI_LABEL).cloned())
+            .collect();
+        oci_images::prune(&self.cfg, &in_use)
     }
 
     /// One catalog entry with signature verification, or an error if missing.
@@ -2188,7 +2217,9 @@ impl VmManager {
             }
         }
         // guestkit cannot open a disk on macOS, so a vz guest gets its token from cloud-init instead.
-        if needs_cid && req.backend == BackendKind::Vz {
+        // An OCI sandbox has no cloud-init: its token goes in the meta share (`fluxvm_apple::oci_meta_dir`).
+        let oci_init = req.apple.as_ref().is_some_and(|a| a.init_config.is_some());
+        if needs_cid && req.backend == BackendKind::Vz && !oci_init {
             vz_agent_token_via_cloud_init(&mut req);
         }
 

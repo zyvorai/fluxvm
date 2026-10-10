@@ -90,18 +90,23 @@ POST   /v1/images/catalog/{name}/clone
 POST   /v1/images/catalog/{name}/export
 POST   /v1/images/catalog/{name}/read-only
 POST   /v1/images/catalog/clean
+GET    /v1/oci/images                    # cached OCI rootfs images for vz sandboxes; see oci-sandboxes.md
+POST   /v1/oci/images                    # {"image": "alpine:3.22"}; admin; pull and build the rootfs
+DELETE /v1/oci/images/{digest|reference} # admin
+POST   /v1/oci/prune                     # admin; drop images no sandbox was started from, and unused blobs
 POST   /v1/pools
 GET    /v1/pools
 GET    /v1/pools/{name}
 DELETE /v1/pools/{name}
 POST   /v1/pools/{name}/claim            # ?ready=exec adds first_command_ms + phases
 POST   /v1/pools/{name}/resize
-POST   /v1/sandboxes                     # optional volumes: [{name, guest_path, read_only}] (QEMU template)
+POST   /v1/sandboxes                     # optional volumes: [{name, guest_path, read_only}] (QEMU template); vz: "oci": {"image", ...} (oci-sandboxes.md)
 GET    /v1/sandboxes
 POST   /v1/sandboxes/{id}/snapshot
 POST   /v1/sandboxes/{id}/fs/read
 POST   /v1/sandboxes/{id}/fs/write
-POST   /v1/sandboxes/{id}/process        # {"command", "timeout_seconds"?, "policy"?}; see guest-exec-policy.md
+POST   /v1/sandboxes/{id}/process        # {"command", "timeout_seconds"?, "policy"?} or {"process": {"argv", "env"?, "cwd"?}} (no shell; agent); see guest-exec-policy.md
+GET    /v1/sandboxes/{id}/logs           # ?lines=N (200); console tail + container exit_code / init_error
 POST   /v1/sandboxes/{id}/dry-run        # {"command", "paths"}; procbox: workspace copy; flux-vm/qemu/firecracker: snapshot/restore
 POST   /v1/sandboxes/{id}/speculate      # {"command", "timeout_seconds"?, "paths"?, "ttl_seconds"?}; admin; returns a pending changeset
 GET    /v1/sandboxes/{id}/changesets     # {"items": [...]}, newest first

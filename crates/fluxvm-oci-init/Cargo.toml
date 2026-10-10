@@ -1,0 +1,29 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "fluxvm-oci-init"
+version = "0.3.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "PID 1 for FluxVM OCI sandboxes on vz: mounts the image rootfs, starts the guest agent, runs the entrypoint; also unpacks layers in the builder VM"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "fluxvm-oci-init"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+flate2 = "1"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
