@@ -322,7 +322,9 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   The device also handles DRIVER_OK, stop, pause, resume and reset, and saves its counters with a VM snapshot (the configuration sets
   `supportsSaveRestore`; without it Virtualization refuses to save a VM with the device). **Verified** on the M4: snapshot, stop and
   `start-from-snapshot` resumed the Debian guest without a reboot, `ping` and `echo` worked, and the counters continued. The control socket takes
-  `{"cmd":"virtio-status"}` (driver state and counters) and `{"cmd":"virtio-reset"}` (host-initiated reset; the driver re-probes);
+  `{"cmd":"virtio-status"}` (driver state and counters) and `{"cmd":"virtio-reset"}` (host-initiated reset: the device sets DEVICE_NEEDS_RESET, which Linux ignores unless the
+  driver handles it; `virtio_flux` resets the device, aborts requests still queued with `EIO`, and sets the queues up again. Needs
+  `CONFIG_PM_SLEEP`. **Verified** on the M4: after two resets in a row, `ping` and `bulk-test` worked);
   `fluxvm_apple::vz27` wraps both.
 - **EFI Secure Boot (macOS 27+, Linux EFI guests):** top-level `secure_boot: true` enrolls Microsoft's KEK, UEFI CA and revocation list
   and enables Secure Boot with Apple's platform key, so Microsoft-signed shims boot. `apple.efi_secure_boot` customises it:

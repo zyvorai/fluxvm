@@ -37,7 +37,7 @@ Checked against WWDC26 session 224, the macOS 27 SDK headers (Virtualization, vm
 |---|---|---|---|
 | Guest provisioning | `VZMacGuestProvisioningOptions`, `setGuestProvisioning`, `guestProvisioningInvalid*` errors | `ModernFeatures.swift`, `SecureBoot.swift` | earlier gate |
 | EFI Secure Boot | `enableSecureBoot(platformKey:)`, `enableSecureBootUsingDefaultPlatformKey`, `disableSecureBoot`, `resetSecureBoot`, `enrollDefaultSecureBootSignatures`, `enrollSecureBootSignatures`, `isSecureBootEnabled`, `enrolledSecureBootSignatures`, `VZEFISignatureList`, `efi*` errors | `SecureBoot.swift` | enable/status/disable verified on the M4 |
-| Custom Virtio | provider, `didCreateDevice`, notifications, `DidAcceptDriverOk`, `WillStop/Pause/Resume/Reset`, `SaveState(forRestore:)`, `ShouldRestore`, `requestReset`, `guestMemoryMapping` | `CustomVirtio.swift` | control, bulk-fill, driver-ready/pause/resume/stop and save/restore verified; `requestReset` not yet |
+| Custom Virtio | provider, `didCreateDevice`, notifications, `DidAcceptDriverOk`, `WillStop/Pause/Resume/Reset`, `SaveState(forRestore:)`, `ShouldRestore`, `requestReset`, `guestMemoryMapping` | `CustomVirtio.swift` | control, bulk operations, driver-ready/pause/resume/stop, save/restore and `requestReset` (with the driver's NEEDS_RESET handler) verified |
 | USB | `VZUSBPassthroughDevice`, `VZUSBController.Delegate` (`usbPassthroughDeviceDidDisconnect`) | `USBPassthrough.swift` | not run (no consent helper) |
 | Configuration and view | `VZVirtualMachineConfiguration.label`, `VZVirtualMachineViewAdaptor` | `Runner.swift` | label verified; window not opened |
 | DiskImageKit | `VZDiskImageStorageDeviceAttachment(diskImage:)` | `ModernFeatures.swift` | earlier gate |
