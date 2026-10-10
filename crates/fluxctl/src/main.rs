@@ -29,6 +29,7 @@ mod contexts;
 mod fleet_client;
 mod launch_agent;
 mod mcp;
+mod mcp_install;
 mod output;
 mod remote;
 mod run;
@@ -121,6 +122,43 @@ enum McpCommand {
         /// Also offer tools that change state (VM power, packet capture).
         #[arg(long)]
         allow_write: bool,
+    },
+    /// Register `fluxctl mcp serve` with an MCP client (Claude Code, Cursor, Claude Desktop, Codex, VS Code,
+    /// Windsurf, Gemini CLI) by editing its config file. `--server`, `--context` and `--config` are carried over.
+    Install {
+        #[arg(value_enum)]
+        client: mcp_install::Client,
+        /// Write the project's config in the current directory instead of the user-wide one.
+        #[arg(long)]
+        project: bool,
+        /// Let the client use write tools (VM power, input, sign-in, snapshots).
+        #[arg(long)]
+        allow_write: bool,
+        /// Also store `--server-token` in the config file (plain text).
+        #[arg(long)]
+        with_token: bool,
+        /// Server name in the client's config.
+        #[arg(long, default_value = "fluxvm")]
+        name: String,
+        /// Print the entry and the file it would go in without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove the entry added by `mcp install`.
+    Uninstall {
+        #[arg(value_enum)]
+        client: mcp_install::Client,
+        #[arg(long)]
+        project: bool,
+        #[arg(long, default_value = "fluxvm")]
+        name: String,
+    },
+    /// Which clients have FluxVM configured.
+    Status {
+        #[arg(long)]
+        project: bool,
+        #[arg(long, default_value = "fluxvm")]
+        name: String,
     },
 }
 
@@ -3391,6 +3429,70 @@ async fn main() -> Result<()> {
     }
     if let Command::ImportCompose { file, name, output } = &cli.command {
         return import_compose(file, name.as_deref(), output.as_deref());
+    }
+    if let Command::Mcp { command } = &cli.command {
+        let out = match command {
+            McpCommand::Serve { .. } => None,
+            McpCommand::Install {
+                client,
+                project,
+                allow_write,
+                with_token,
+                name,
+                dry_run,
+            } => {
+                let exe = std::env::current_exe().context("locating fluxctl")?;
+                let exe = exe.canonicalize().unwrap_or(exe);
+                let mut args = Vec::new();
+                if let Some(c) = &cli.context {
+                    args.extend(["--context".to_owned(), c.clone()]);
+                }
+                args.extend(["mcp".to_owned(), "serve".to_owned()]);
+                if *allow_write {
+                    args.push("--allow-write".into());
+                }
+                let mut env = Vec::new();
+                if let Some(s) = &cli.server {
+                    env.push(("FLUXVM_URL".to_owned(), s.clone()));
+                }
+                if let Some(c) = &cli.config {
+                    let c = c.canonicalize().unwrap_or_else(|_| c.clone());
+                    env.push(("FLUXVM_CONFIG".to_owned(), c.display().to_string()));
+                }
+                if *with_token {
+                    let t = cli
+                        .server_token
+                        .clone()
+                        .context("--with-token needs --server-token or FLUXVM_TOKEN")?;
+                    env.push(("FLUXVM_TOKEN".to_owned(), t));
+                }
+                let entry = mcp_install::Entry {
+                    command: exe.display().to_string(),
+                    args,
+                    env,
+                };
+                Some(mcp_install::install(
+                    *client, *project, name, &entry, *dry_run,
+                )?)
+            }
+            McpCommand::Uninstall {
+                client,
+                project,
+                name,
+            } => Some(mcp_install::uninstall(*client, *project, name)?),
+            McpCommand::Status { project, name } => Some(mcp_install::status(*project, name)?),
+        };
+        if let Some(out) = out {
+            if let (McpCommand::Install { dry_run: true, .. }, Some(snippet)) =
+                (command, out.get("entry").and_then(|v| v.as_str()))
+            {
+                eprintln!("# {}", out["path"].as_str().unwrap_or_default());
+                println!("{snippet}");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            return Ok(());
+        }
     }
     if let Command::Service { command } = &cli.command {
         let out = match command {

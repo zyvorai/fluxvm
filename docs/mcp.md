@@ -109,6 +109,40 @@ The daemon is chosen like any remote `fluxctl` command: `--server` or
 `vm_network` with `conntrack` or `capture`, which need `admin`; the write
 tools need `admin`.
 
+## Installing into a client
+
+`fluxctl mcp install <client>` adds a `fluxvm` server to the client's own
+config file, pointing at the running `fluxctl` binary, and leaves every
+other entry alone (Codex's TOML keeps its comments and layout):
+
+```sh
+fluxctl mcp install claude-code                 # ~/.claude.json
+fluxctl mcp install cursor --allow-write        # ~/.cursor/mcp.json, with write tools
+fluxctl --server http://mac:7788 mcp install codex   # ~/.codex/config.toml, FLUXVM_URL set
+fluxctl mcp install vscode --project            # ./.vscode/mcp.json
+fluxctl mcp install gemini --dry-run            # print the entry and the file, write nothing
+fluxctl mcp status                              # which clients have it
+fluxctl mcp uninstall cursor
+```
+
+| Client | User-wide | `--project` (current directory) |
+| --- | --- | --- |
+| `claude-code` | `~/.claude.json` | `.mcp.json` |
+| `cursor` | `~/.cursor/mcp.json` | `.cursor/mcp.json` |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` (Linux: `~/.config/Claude/`) | — |
+| `codex` | `~/.codex/config.toml` | `.codex/config.toml` |
+| `vscode` | — (kept in the VS Code profile) | `.vscode/mcp.json` |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | — |
+| `gemini` | `~/.gemini/settings.json` | `.gemini/settings.json` |
+
+`--server`/`FLUXVM_URL` and `--config` become the entry's `FLUXVM_URL` and
+`FLUXVM_CONFIG`, and `--context` its first arguments. The token is only
+written with `--with-token`, since these files are plain text. A JSON file
+with comments is refused rather than rewritten without them; `--dry-run`
+prints what to paste. Restart the client, or reload its MCP servers,
+afterwards. Verified with Claude Code (`claude mcp list` connects), Codex
+(`codex mcp list`) and Cursor's agent.
+
 ## Other MCP clients
 
 Claude Code (`.mcp.json`), Cursor (`.cursor/mcp.json`) and Claude Desktop
