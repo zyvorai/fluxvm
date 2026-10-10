@@ -274,6 +274,21 @@ tools are `vm_screenshot` and `vm_input` ([mcp.md](mcp.md)).
 With `"apple": {"self_control": true}` (Linux guests), software inside the VM, such as a coding agent, can snapshot,
 restore and restart the VM it runs in through an MCP server at `http://127.0.0.1:7790/mcp` in the guest:
 
+### Extra guest→host vsock services
+
+`apple.vsock_services` opens more vsock ports from the guest to the host, and only the ports it lists (Linux guests; the guest
+reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "telemetry"}` or `{"port": N, "socket": "name"}`:
+
+- `metadata`: the guest connects and reads one JSON line (`id`, `name`, `vcpus`, `memory_mib`); the runner then closes.
+- `telemetry`: the guest writes lines and the runner appends them to `<workspace>/telemetry.log`, up to 8 MiB, then drops the rest.
+- `socket`: connections are relayed to `/tmp/fluxvm-<uid>/<vm id>.svc-<name>`. The host operator runs whatever listens there. The
+  name is `[a-z0-9_-]{1,32}`, so a spec cannot point the guest at another host path (such as the daemon's own socket).
+
+Ports must be 1024-65535, not 3128 (egress proxy), 7790 (self-control), 7791 or 22, at most 16 per VM. Create with
+`fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo`. From a guest with python3:
+`s=socket.socket(socket.AF_VSOCK); s.connect((2, 5001)); print(s.recv(4096))`.
+Verified on a Debian 13 guest by `scripts/vz-vsock-services-live-test.sh`.
+
 ```sh
 # inside the guest
 claude mcp add --transport http fluxvm http://127.0.0.1:7790/mcp

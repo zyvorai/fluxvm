@@ -623,6 +623,10 @@ pub struct AppleSpec {
     /// `http://127.0.0.1:7790/mcp` in the guest (relayed to the host over vsock; scoped to this VM only).
     #[serde(default)]
     pub self_control: bool,
+    /// Extra guest→host vsock services: each guest-facing `port` is relayed either to a host Unix socket the daemon owner
+    /// runs (`socket`, a name resolved under the runner socket directory, never an arbitrary path) or answered by the runner itself (`builtin`: `metadata` or `telemetry`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vsock_services: Vec<AppleVsockService>,
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
@@ -704,6 +708,20 @@ pub struct AppleShare {
     pub host_path: PathBuf,
     #[serde(default)]
     pub read_only: bool,
+}
+
+/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket` and `builtin` is set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppleVsockService {
+    /// The vsock port the guest connects to (1024..=65535; not 3128, 7790 or 7791, which the runner uses itself).
+    pub port: u32,
+    /// Relay to the host Unix socket `<runner socket dir>/<vm id>.svc-<socket>`; the name is `[a-z0-9_-]{1,32}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
+    /// `metadata`: the guest reads one JSON document (id, name, vcpus, memory_mib) and the runner closes.
+    /// `telemetry`: the guest writes lines that the runner appends to `<workspace>/telemetry.log` (capped at 8 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
 }
 
 /// An extra disk for a `vz` Linux guest: a raw image file (default), a host block device, or a network block device
@@ -828,6 +846,7 @@ impl Default for AppleSpec {
             custom_virtio: false,
             egress_allow: Vec::new(),
             self_control: false,
+            vsock_services: Vec::new(),
             root_read_only: false,
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),

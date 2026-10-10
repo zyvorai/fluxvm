@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added: `apple.vsock_services` (guest→host vsock beyond the egress proxy and self-control)
+- `"apple": {"vsock_services": [{"port": 5001, "builtin": "metadata"}, {"port": 5002, "builtin": "telemetry"},
+  {"port": 5003, "socket": "echo"}]}` (or `fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo`).
+  `metadata` returns one JSON line (id, name, vcpus, memory_mib) and closes; `telemetry` appends the guest's bytes to
+  `<workspace>/telemetry.log` (8 MiB cap, then dropped); `socket: NAME` relays to `/tmp/fluxvm-<uid>/<vm id>.svc-NAME`, a socket
+  the host operator runs, so a spec can never name an arbitrary host path. Only listed ports answer; 22, 3128, 7790 and 7791 and
+  ports below 1024 are refused, at most 16 entries. Verified on a Debian 13 guest with `scripts/vz-vsock-services-live-test.sh`
+  (all three kinds, an unlisted port stays closed).
+
 ### Fixed: `POST /v1/vms/{id}/clone` on the `vz` backend
 - A `vz` clone is now an APFS copy (`cp -c`) of the stopped VM's raw disk instead of a `qemu-img convert` to qcow2 (which the
   clone's create then converted back to raw). It is instant and no longer needs `qemu-img` on the Mac, where it is usually not

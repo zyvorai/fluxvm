@@ -23,6 +23,12 @@ struct Forward: Decodable {
     let guests: Bool?
 }
 
+struct VsockService: Decodable {
+    let port: UInt32
+    let socket: String?             // host unix socket to relay to
+    let builtin: String?            // "metadata" | "telemetry"
+}
+
 struct Config: Decodable {
     let id: String
     let workspace: String
@@ -61,6 +67,9 @@ struct Config: Decodable {
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
+    let vsock_services: [VsockService]?   // extra guest -> host vsock services (host unix socket relay, or a built-in)
+    let vsock_metadata: String?     // JSON served by the "metadata" built-in
+    let telemetry_log: String?      // file the "telemetry" built-in appends to
     let egress_allow: [String]?     // hosts the guest may reach through the vsock proxy on port 3128 (nil/empty: no proxy)
     let restore_state: String?      // resume from a state file written by `save` instead of cold-booting
     let kernel: String?             // direct boot (VZLinuxBootLoader): uncompressed arm64 Image; nil boots EFI from the disk
@@ -765,6 +774,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             for b in consoleBridges { b.start() }
             if let allow = cfg.egress_allow, !allow.isEmpty { startEgressProxy(allow) }
             if let path = cfg.self_socket { startSelfControl(path) }
+            if let services = cfg.vsock_services, !services.isEmpty { startVsockServices(services) }
             for f in cfg.forwards ?? [] where f.guests != true { startForward(f, bind: "127.0.0.1", fatal: true) }
             setupSignals()
         } catch { fail(error.localizedDescription) }
@@ -1179,6 +1189,94 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             device.setSocketListener(listener, forPort: 7790)
             self.selfListener = listener
             self.selfDelegate = delegate
+        }
+    }
+
+    // MARK: allow-listed vsock services (guest -> host, only the ports the spec names)
+
+    var serviceListeners: [VZVirtioSocketListener] = []
+    var serviceDelegates: [EgressDelegate] = []
+    let telemetryLock = NSLock()
+    var telemetryBytes = 0
+    let telemetryCap = 8 << 20
+
+    func connectUnix(_ path: String) -> Int32? {
+        let u = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard u >= 0 else { return nil }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let fits = withUnsafeMutableBytes(of: &addr.sun_path) { raw -> Bool in
+            let bytes = Array(path.utf8)
+            guard bytes.count < raw.count else { return false }
+            raw.copyBytes(from: bytes)
+            return true
+        }
+        let ok = fits && withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(u, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        } == 0
+        if !ok { close(u); return nil }
+        return u
+    }
+
+    func serveMetadata(_ fd: Int32, done: @escaping () -> Void) {
+        let doc = Array((cfg.vsock_metadata ?? "{}").utf8) + [10]
+        var off = 0
+        while off < doc.count {
+            let w = doc.withUnsafeBytes { write(fd, $0.baseAddress! + off, doc.count - off) }
+            if w <= 0 { break }
+            off += w
+        }
+        done()
+    }
+
+    func serveTelemetry(_ fd: Int32, done: @escaping () -> Void) {
+        guard let path = cfg.telemetry_log else { done(); return }
+        let out = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        defer { if out >= 0 { close(out) } }
+        var buf = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            let n = read(fd, &buf, buf.count)
+            if n == 0 { break }
+            if n < 0 { if errno == EINTR { continue }; break }
+            telemetryLock.lock()
+            let room = max(0, telemetryCap - telemetryBytes)
+            let take = min(n, room)
+            telemetryBytes += take
+            telemetryLock.unlock()
+            // Past the cap the guest's bytes are read and dropped, so it cannot grow the file or block on a full pipe.
+            if take > 0 && out >= 0 { _ = buf.withUnsafeBytes { write(out, $0.baseAddress!, take) } }
+        }
+        done()
+    }
+
+    func startVsockServices(_ services: [VsockService]) {
+        DispatchQueue.main.async {
+            guard let device = self.vm?.socketDevices.first as? VZVirtioSocketDevice else { return }
+            if let path = self.cfg.telemetry_log, let st = try? FileManager.default.attributesOfItem(atPath: path),
+               let size = st[.size] as? Int { self.telemetryBytes = size }
+            for svc in services {
+                let delegate = EgressDelegate { conn in
+                    self.vsockConnections.append(conn)
+                    let fd = conn.fileDescriptor
+                    let finish = { DispatchQueue.main.async { self.release(conn) } }
+                    DispatchQueue.global().async {
+                        if let name = svc.builtin {
+                            if name == "metadata" { self.serveMetadata(fd, done: finish) }
+                            else if name == "telemetry" { self.serveTelemetry(fd, done: finish) }
+                            else { finish() }
+                        } else if let path = svc.socket, let u = self.connectUnix(path) {
+                            splice(fd, u) { close(u); self.release(conn) }
+                        } else {
+                            finish()
+                        }
+                    }
+                }
+                let listener = VZVirtioSocketListener()
+                listener.delegate = delegate
+                device.setSocketListener(listener, forPort: svc.port)
+                self.serviceListeners.append(listener)
+                self.serviceDelegates.append(delegate)
+            }
         }
     }
 
