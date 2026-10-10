@@ -141,6 +141,16 @@ fn parse_v4(what: &str, v: &str) -> Result<std::net::Ipv4Addr> {
 
 /// Admission checks for a custom vmnet network (addresses only; macOS 26+ is checked by the runner).
 fn validate_vmnet(v: &fluxvm_core::model::AppleVmnetSpec) -> Result<()> {
+    if let Some(name) = &v.name {
+        let valid = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+        if !valid {
+            bail!("apple.vmnet.name must be 1..=64 of a-z/A-Z/0-9/._-");
+        }
+    }
     let subnet = u32::from(parse_v4("subnet", &v.subnet)?);
     let mask = u32::from(parse_v4("mask", &v.mask)?);
     let host_bits = !mask;

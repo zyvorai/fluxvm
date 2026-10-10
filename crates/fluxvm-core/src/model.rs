@@ -495,6 +495,10 @@ fn default_vmnet_protocol() -> String {
 /// A per-VM vmnet network (macOS 26+). VMs sharing one network need the broker in `docs/VMNET_BROKER.md`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppleVmnetSpec {
+    /// Optional broker-owned network name. VMs using the same name and identical
+    /// spec share one vmnet_network_ref through fluxvm-vmnetd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub mode: AppleVmnetMode,
     /// IPv4 subnet address, for example `192.168.105.0`.
     pub subnet: String,

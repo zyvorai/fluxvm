@@ -1,9 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
-//
-// Compiles the Swift runner (runner/Runner.swift) into `fluxvm-vz-runner` and signs it with the
-// com.apple.security.virtualization entitlement. macOS only; elsewhere this crate builds without a runner.
-
 use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
@@ -21,7 +17,6 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let out = out_dir.join("fluxvm-vz-runner");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    // With more than one source file swiftc only accepts top-level code in a file named main.swift.
     let main_swift = out_dir.join("main.swift");
     let _ = fs::remove_file(&main_swift);
     if std::os::unix::fs::symlink(manifest.join("runner/Runner.swift"), &main_swift).is_err() {
@@ -42,6 +37,7 @@ fn main() {
     for p in &extra {
         println!("cargo:rerun-if-changed={}", p.display());
     }
+
     let swiftc = Command::new("xcrun")
         .args([
             "swiftc",
@@ -54,6 +50,15 @@ fn main() {
             "AppKit",
             "-framework",
             "Virtualization",
+            "-framework",
+            "vmnet",
+            // AccessoryAccess is new in the macOS 27 SDK. Weak-link it so a
+            // runner built with Xcode 27 still starts on the macOS 14-26
+            // baseline when physical USB passthrough is not requested.
+            "-Xlinker",
+            "-weak_framework",
+            "-Xlinker",
+            "AccessoryAccess",
         ])
         .arg(&main_swift)
         .args(&extra)
@@ -64,7 +69,7 @@ fn main() {
         Ok(s) if s.success() => {}
         _ => {
             println!(
-                "cargo:warning=could not compile the Swift runner (install the Xcode command line tools); the vz backend will not launch VMs"
+                "cargo:warning=could not compile the Swift runner (install Xcode/CLT); the vz backend will not launch VMs"
             );
             return;
         }
