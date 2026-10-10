@@ -87,6 +87,14 @@
   border-radius: 18px;
 }
 
+.macButtons {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 2.5rem 0;
+}
+
 .macGrid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

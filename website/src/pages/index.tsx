@@ -5,6 +5,7 @@ import useBaseUrl from '@docusaurus/useBaseUrl';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
 import FeatureHighlights from '@site/src/components/FeatureHighlights';
+import MacCloud from '@site/src/components/MacCloud';
 import Reveal from '@site/src/components/Reveal';
 
 import styles from './index.module.css';
@@ -19,7 +20,8 @@ function HomepageHeader() {
           </Heading>
           <p className="hero__subtitle">
             Secure, isolated virtual machines — via Firecracker, Cloud
-            Hypervisor, QEMU/KVM, or the in-tree FluxVM hypervisor — from one
+            Hypervisor, QEMU/KVM, the in-tree FluxVM hypervisor, or Apple's
+            Virtualization.framework (<code>vz</code>) on a Mac — from one
             Rust-native control plane with a real REST API. Run it standalone
             as a libvirt replacement, or as the VM engine under another Zyvor
             product. Use optional TTL and CoW when you want disposable
@@ -85,7 +87,7 @@ function MacSection() {
         <Reveal>
           <div className="text--center">
             <Heading as="h2" className={styles.sectionHeading}>
-              Now on your Mac: Mac mini to Mac Studio cluster
+              Your own Mac cloud: Mac mini to Mac Studio
             </Heading>
             <p className={styles.enterpriseCopy}>
               FluxVM's daemon, REST API and <code>fluxctl</code> run natively
@@ -95,12 +97,15 @@ function MacSection() {
               a private LLM endpoint from Velora.
             </p>
           </div>
-          <img
-            className={styles.macImg}
-            src={useBaseUrl('/img/macos/readme-macs.jpg')}
-            alt="Mac mini for home, Mac Studio for a team, MacBook Pro for development"
-            loading="lazy"
-          />
+          <MacCloud />
+          <div className={styles.macButtons}>
+            <Link className="button button--primary button--lg" to="/mac">
+              FluxVM on Mac
+            </Link>
+            <Link className="button button--outline button--primary button--lg" to="/mac-cloud">
+              Build a Mac cloud
+            </Link>
+          </div>
           <div className={styles.macGrid}>
             <div className={styles.macCard}>
               <Heading as="h3">Home, low cost</Heading>

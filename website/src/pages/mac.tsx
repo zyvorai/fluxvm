@@ -1,9 +1,11 @@
+import {useState} from 'react';
 import type {ReactNode} from 'react';
 import clsx from 'clsx';
 import Link from '@docusaurus/Link';
 import useBaseUrl from '@docusaurus/useBaseUrl';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
+import MacCloud from '@site/src/components/MacCloud';
 import Reveal from '@site/src/components/Reveal';
 
 import styles from './mac.module.css';
@@ -121,34 +123,349 @@ function Hero() {
   return (
     <header className={styles.hero}>
       <div className="container">
+        <div className={styles.pills}>
+          <span className={styles.pill}>Apple silicon</span>
+          <span className={styles.pill}>macOS 27</span>
+          <span className={clsx(styles.pill, styles.pillBlue)}>vz backend</span>
+          <span className={styles.pill}>Virtualization.framework</span>
+        </div>
         <Heading as="h1" className={styles.heroTitle}>
-          Real machines on your Mac.
+          Your own <span className={styles.gradientText}>Mac cloud.</span>
           <br />
           One signed runner per VM.
         </Heading>
         <p className={styles.heroSub}>
-          FluxVM puts a REST API, a warm pool and a fleet story on top of Apple's
+          FluxVM puts a REST API, a warm pool and a fleet scheduler on top of Apple's
           Virtualization.framework. Linux VMs, macOS guests, agent sandboxes and
           container sandboxes on a Mac mini, a Mac Studio or a MacBook Pro.
         </p>
         <div className={styles.buttons}>
-          <Link className="button button--primary button--lg" href={`${REPO}#quick-start`}>
+          <Link className="button button--primary button--lg" href="#install">
             Get started
           </Link>
-          <Link className="button button--outline button--lg button--secondary" to="/docs/macos-architecture">
-            How it works
+          <Link className="button button--outline button--lg button--secondary" to="/mac-cloud">
+            Build a Mac cloud
           </Link>
         </div>
-        <img
-          className={styles.heroShot}
-          src={useBaseUrl('/img/macos/velora-debian-macos27.png')}
-          alt="A Debian 13 guest running on Virtualization.framework, captured on an Apple M4 with macOS 27"
-        />
-        <p className={styles.shotCaption}>
-          A real capture: a Debian 13 guest on an Apple M4, macOS 27, shown in Velora's app.
-        </p>
+        <MacCloud caption="An illustration of the setup FluxVM is built for. One Apple M4 is verified today; multi-Mac fleets are not yet." />
       </div>
     </header>
+  );
+}
+
+function RealCapture() {
+  return (
+    <section className={clsx(styles.section, styles.darkBand)}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>Not a mockup</p>
+            <Heading as="h2" className={styles.h2}>
+              A real guest, on a real Mac
+            </Heading>
+          </div>
+          <img
+            className={styles.heroShot}
+            src={useBaseUrl('/img/macos/velora-debian-macos27.png')}
+            alt="A Debian 13 guest running on Virtualization.framework, captured on an Apple M4 with macOS 27"
+            loading="lazy"
+          />
+          <p className={styles.shotCaption}>
+            A Debian 13 guest on an Apple M4 with macOS 27, shown in Velora's app.
+          </p>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+type Perk = {icon: string; hue: string; title: string; body: string; to?: string};
+
+// Each perk is backed by a section of docs/macos.md, docs/oci-sandboxes.md or deploy/launchd-notes.md.
+const PERKS: Perk[] = [
+  {
+    icon: 'M',
+    hue: 'linear-gradient(135deg,#5e5ce6,#bf5af2)',
+    title: 'Apple silicon native',
+    body: 'Daemon, API, fluxctl and a Swift runner built for arm64. No QEMU, no emulation, no Linux VM in the middle.',
+    to: '/docs/macos',
+  },
+  {
+    icon: 'R',
+    hue: 'linear-gradient(135deg,#ff9f0a,#ff375f)',
+    title: 'Rosetta in Linux guests',
+    body: 'Run x86_64 Linux binaries and linux/amd64 container images inside arm64 guests through Apple\'s Rosetta share.',
+    to: '/docs/macos#display-audio-sharing-and-usb-options',
+  },
+  {
+    icon: 'K',
+    hue: 'linear-gradient(135deg,#8e8e93,#3a3a3c)',
+    title: 'Keychain sign-in',
+    body: 'fluxctl signin keeps a guest password in your login Keychain and types it into the display. It is never returned by the API.',
+    to: '/docs/macos#stored-sign-in',
+  },
+  {
+    icon: 'A',
+    hue: 'linear-gradient(135deg,#0a84ff,#64d2ff)',
+    title: 'APFS clones',
+    body: 'Disks and snapshots are copy-on-write clones (cp -c). A throwaway VM costs almost no disk until it writes.',
+    to: '/docs/macos#how-it-works',
+  },
+  {
+    icon: 'F',
+    hue: 'linear-gradient(135deg,#30d158,#64d2ff)',
+    title: 'Shared folders',
+    body: 'Edit in your favourite macOS editor; build in Linux. virtiofs shares, read-only enforced by the host: fluxctl run -v ~/src:/mnt/src.',
+    to: '/docs/macos#quick-start',
+  },
+  {
+    icon: '5K',
+    hue: 'linear-gradient(135deg,#ff375f,#bf5af2)',
+    title: 'Retina displays',
+    body: 'Guest displays up to 5120 x 2880 at 220 ppi, audio out, and a window that follows your resize.',
+    to: '/docs/macos#display-audio-sharing-and-usb-options',
+  },
+  {
+    icon: 'L',
+    hue: 'linear-gradient(135deg,#1c1c1e,#48484a)',
+    title: 'launchd, not cron',
+    body: 'fluxctl service install writes a LaunchAgent, so a headless Mac mini serves VMs after every reboot.',
+    to: '/docs/mac-cloud#run-it-as-a-service',
+  },
+  {
+    icon: 'AI',
+    hue: 'linear-gradient(135deg,#64d2ff,#5e5ce6)',
+    title: 'Agents can see the screen',
+    body: 'Screenshots, keyboard and mouse for any vz guest, without Screen Recording or Accessibility permission on the host.',
+    to: '/docs/macos#agent-screen-and-input',
+  },
+];
+
+function BuiltForMac() {
+  return (
+    <section className={clsx(styles.section, styles.alt)}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>Built for Mac people</p>
+            <Heading as="h2" className={styles.h2}>
+              Feels like it belongs on your Mac
+            </Heading>
+            <p className={styles.lead}>
+              FluxVM uses the parts of macOS you already trust: Virtualization.framework, APFS,
+              the Keychain, launchd and Rosetta.
+            </p>
+          </div>
+          <div className={styles.grid4}>
+            {PERKS.map((p) => (
+              <div key={p.title} className={styles.perk}>
+                <span className={styles.perkIcon} style={{background: p.hue}}>
+                  {p.icon}
+                </span>
+                <Heading as="h3">{p.to ? <Link to={p.to}>{p.title}</Link> : p.title}</Heading>
+                <p>{p.body}</p>
+              </div>
+            ))}
+          </div>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+type Guest = {name: string; boot: string; body: string; tag: string; ok: boolean};
+
+const GUESTS: Guest[] = [
+  {
+    name: 'macOS guest',
+    boot: 'IPSW install, macOS boot loader',
+    body: 'A real macOS userspace for Xcode, signing and UI tests. Prepare a template once, then clone it with APFS in an instant; every clone gets its own machine identity.',
+    tag: 'Verified by hand on M4',
+    ok: true,
+  },
+  {
+    name: 'Linux VM',
+    boot: 'EFI from disk, or direct kernel',
+    body: 'Debian 13, Debian 12 and Ubuntu 24.04 ARM64 from named images, with cloud-init, port forwards, shared folders, snapshots and the vsock guest agent.',
+    tag: 'Verified on M4',
+    ok: true,
+  },
+  {
+    name: 'Container VM',
+    boot: 'Direct kernel, read-only root',
+    body: 'An OCI image in its own lightweight VM: uid 65534, no SSH, agent-only exec, a digest-verified rootfs cache and a warm pool.',
+    tag: 'Core verified on M4',
+    ok: true,
+  },
+];
+
+function VzExplained() {
+  return (
+    <section className={styles.section}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>vz and macOS virtualization</p>
+            <Heading as="h2" className={styles.h2}>
+              Apple's hypervisor. FluxVM's API.
+            </Heading>
+            <p className={styles.lead}>
+              The <code>vz</code> backend drives Apple's Virtualization.framework, the same
+              hypervisor behind macOS's own virtual machines. On a Mac, <code>"backend": "auto"</code>{' '}
+              resolves to <code>vz</code>.
+            </p>
+          </div>
+          <div className={styles.stack}>
+            <div className={styles.stackRow}>
+              <span className={styles.stackLabel}>You</span>
+              <div className={styles.stackItems}>
+                <code>fluxctl</code>
+                <code>REST :7788</code>
+                <code>MCP</code>
+                <code>Python / Go / TS SDKs</code>
+              </div>
+            </div>
+            <div className={styles.stackArrow} aria-hidden="true" />
+            <div className={styles.stackRow}>
+              <span className={styles.stackLabel}>Daemon</span>
+              <div className={styles.stackItems}>
+                <code>fluxctl serve</code>
+                <code>warm pool</code>
+                <code>APFS clones</code>
+                <code>egress proxy over vsock</code>
+              </div>
+            </div>
+            <div className={styles.stackArrow} aria-hidden="true" />
+            <div className={clsx(styles.stackRow, styles.stackRowHot)}>
+              <span className={styles.stackLabel}>Per VM</span>
+              <div className={styles.stackItems}>
+                <code>fluxvm-vz-runner</code>
+                <span>signed with com.apple.security.virtualization, one process per guest</span>
+              </div>
+            </div>
+            <div className={styles.stackArrow} aria-hidden="true" />
+            <div className={styles.stackRow}>
+              <span className={styles.stackLabel}>Apple</span>
+              <div className={styles.stackItems}>
+                <code>Virtualization.framework</code>
+                <code>Hypervisor.framework</code>
+                <code>Apple silicon</code>
+              </div>
+            </div>
+          </div>
+          <div className={styles.grid3}>
+            {GUESTS.map((g) => (
+              <div key={g.name} className={styles.card}>
+                <Heading as="h3">{g.name}</Heading>
+                <p className={styles.boot}>{g.boot}</p>
+                <p>{g.body}</p>
+                <span className={clsx(styles.tag, g.ok ? styles.tagOk : styles.tagWarn)}>{g.tag}</span>
+              </div>
+            ))}
+          </div>
+          <p className={clsx(styles.footnote, 'text--center')}>
+            Apple's licence allows two macOS guests running at once per Mac; the fleet scheduler
+            respects it. Snapshot restore needs an unlocked login session.{' '}
+            <Link to="/docs/macos-architecture">Full architecture &rarr;</Link>
+          </p>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
+const INSTALL_TABS: {id: string; label: string; note: ReactNode; code: string}[] = [
+  {
+    id: 'source',
+    label: 'From source',
+    note: 'Needs Xcode 27 for the Swift runner. The build signs the runner for you.',
+    code: [
+      'xcode-select --install',
+      'brew install hivex',
+      'git clone https://github.com/zyvorai/zyvor-fluxvm && cd zyvor-fluxvm',
+      'cargo build -p fluxctl',
+      './scripts/macos-live-test.sh   # boots Debian 13 through the API',
+    ].join('\n'),
+  },
+  {
+    id: 'brew',
+    label: 'Homebrew',
+    note: (
+      <>
+        Each version tag builds a Homebrew package; the tap is not published yet. See{' '}
+        <a href={`${REPO}/tree/main/packaging/homebrew`}>packaging/homebrew</a>.
+      </>
+    ),
+    code: ['brew install zyvorai/fluxvm/fluxvm   # once the tap is published', 'brew services start fluxvm'].join('\n'),
+  },
+  {
+    id: 'first',
+    label: 'First VM',
+    note: 'A throwaway VM and a shell. Everything you did is gone when you leave.',
+    code: [
+      'fluxctl run                                 # debian-13, a shell as you',
+      'fluxctl run -v ~/src:/mnt/src -p 8080:80    # share a folder, forward a port',
+      'fluxctl run ubuntu-24.04 -- uname -a        # one command, its exit code',
+      'fluxctl sandbox run alpine:3.22 --rm -- echo hi',
+    ].join('\n'),
+  },
+];
+
+function Install() {
+  const [tab, setTab] = useState(INSTALL_TABS[0].id);
+  const [copied, setCopied] = useState(false);
+  const current = INSTALL_TABS.find((t) => t.id === tab) ?? INSTALL_TABS[0];
+  const copy = () => {
+    navigator.clipboard?.writeText(current.code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <section className={clsx(styles.section, styles.darkBand)}>
+      <div className="container">
+        <Reveal>
+          <div className="text--center">
+            <p className={styles.kicker}>Install</p>
+            <Heading as="h2" id="install" className={styles.h2}>
+              From zero to a VM in a minute
+            </Heading>
+          </div>
+          <div className={styles.terminal}>
+            <div className={styles.windowBar}>
+              <span className={styles.dotRed} />
+              <span className={styles.dotYellow} />
+              <span className={styles.dotGreen} />
+              <div className={styles.tabs} role="tablist">
+                {INSTALL_TABS.map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={t.id === tab}
+                    className={clsx(styles.tabBtn, t.id === tab && styles.tabActive)}
+                    onClick={() => setTab(t.id)}>
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className={styles.copyBtn} onClick={copy}>
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+            <pre className={styles.terminalBody}>
+              {current.code.split('\n').map((line) => (
+                <div key={line}>
+                  <span className={styles.prompt}>$ </span>
+                  {line}
+                </div>
+              ))}
+            </pre>
+          </div>
+          <p className={clsx(styles.footnote, 'text--center')}>{current.note}</p>
+        </Reveal>
+      </div>
+    </section>
   );
 }
 
@@ -277,6 +594,38 @@ function HowItWorks() {
   );
 }
 
+function MacPicker() {
+  const [selected, setSelected] = useState(MACS[1].name);
+  const mac = MACS.find((m) => m.name === selected) ?? MACS[0];
+  return (
+    <div className={styles.picker}>
+      <div className={styles.segmented} role="tablist">
+        {MACS.map((m) => (
+          <button
+            key={m.name}
+            type="button"
+            role="tab"
+            aria-selected={m.name === selected}
+            className={clsx(styles.segment, m.name === selected && styles.segmentActive)}
+            onClick={() => setSelected(m.name)}>
+            {m.name}
+          </button>
+        ))}
+      </div>
+      <div className={styles.pickerBody}>
+        <div>
+          <p className={styles.pickerLabel}>What Apple ships</p>
+          <p>{mac.role}</p>
+        </div>
+        <div>
+          <p className={styles.pickerLabel}>What it means for FluxVM</p>
+          <p>{mac.fluxvm}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ChooseYourMac() {
   return (
     <section className={clsx(styles.section, styles.alt)}>
@@ -298,30 +647,7 @@ function ChooseYourMac() {
             alt="Mac mini for home, Mac Studio for a team, MacBook Pro for development"
             loading="lazy"
           />
-          {MACS.length > 0 && (
-            <div className={styles.tableWrap}>
-              <table className={styles.macTable}>
-                <thead>
-                  <tr>
-                    <th>Mac</th>
-                    <th>What Apple ships</th>
-                    <th>What it means for FluxVM</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {MACS.map((m) => (
-                    <tr key={m.name}>
-                      <td>
-                        <strong>{m.name}</strong>
-                      </td>
-                      <td>{m.role}</td>
-                      <td>{m.fluxvm}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <MacPicker />
           <p className={clsx(styles.footnote, 'text--center')}>
             Chips, memory and ports are Apple's figures, read from{' '}
             <a href="https://www.apple.com/mac-mini/specs/">Mac mini</a>,{' '}
@@ -442,9 +768,13 @@ export default function MacPage(): ReactNode {
       <Hero />
       <main>
         <Numbers />
+        <BuiltForMac />
+        <VzExplained />
+        <RealCapture />
         <WhatYouCanRun />
         <HowItWorks />
         <ChooseYourMac />
+        <Install />
         <NewInMacOS />
         <Honest />
         <Cta />
