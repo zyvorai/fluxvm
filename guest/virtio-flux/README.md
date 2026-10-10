@@ -11,4 +11,8 @@ sudo ./fluxvm-virtioctl capabilities
 sudo ./fluxvm-virtioctl bulk-test 65536 90
 ```
 
+Built and tested on Debian 13 (kernel 6.12.111): `ping`, `echo`, `stats` and `capabilities` work. The driver needs the 6.12 API (`struct virtqueue_info` for `virtio_find_vqs`, no `no_llseek`, no `virtio_set_drvdata`).
+
 `bulk-test` allocates guest memory in the kernel, passes its guest physical address to the host through queue 1, asks the VZ host backend to fill it through `VZGuestMemoryMapping`, verifies every byte in the guest and reports CRC32.
+
+**Known issue:** on the one hardware run so far, `bulk-test 65536 90` (queue 1) never completes. The guest blocks in `wait_for_completion`, and afterwards even control requests hang. The root cause is not found, so treat the bulk path as unverified.

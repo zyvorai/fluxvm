@@ -2,6 +2,39 @@
 
 ## 0.4.0 (unreleased)
 
+### Fixed: macOS 27 follow-ups after hardware testing (PR #200)
+- Custom Virtio device id is now `0x3F` (PCI `1af4:107f`). As merged (`0xFF00`) the PCI device id fell outside the range Linux
+  binds (`0x1040..0x107f`), so a guest saw the device but never attached a driver.
+- `guest/virtio-flux/virtio_flux.c` builds on Linux 6.12 again (missing `virtio_config.h` include, `no_llseek`,
+  `virtio_find_vqs` taking `struct virtqueue_info`, `virtio_set_drvdata`).
+- `crates/fluxvm-apple/tests/vz27_source_contract.rs` was unformatted and failed `scripts/ci-fmt-check.sh`.
+
+### Added: complete macOS 27 host path (PRs #198 and #199)
+- **Custom Virtio host provider and guest bus**: `apple.custom_virtio: true` adds a vendor Virtio device. Queue 0 is a bounded
+  versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is a bulk queue
+  (`bulk_zero`/`fill`/`copy`/`crc32`). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`,
+  `fluxvm_virtioctl`). Verified on an Apple M4 with a Debian 13 guest (after #200): `ping`, `echo`, `stats` and `capabilities`.
+  **Open:** `fluxvm_virtioctl bulk-test` on queue 1 never completes and later control requests then hang; root cause not found.
+- **Shared vmnet broker** (`macos/vmnetd`, `fluxvm-vmnetd`): VMs that name the same network with `apple.vmnet.name` share it
+  through a broker over XPC ([docs/VMNET_BROKER.md](docs/VMNET_BROKER.md)). Not verified: on the test host the ad-hoc signed
+  broker (`com.apple.vm.networking`) was killed at launch (SIP on), so the two-runner test did not run. Without a broker a
+  named shared vmnet VM fails with "vmnetd XPC connection failed".
+- **Physical USB passthrough** through Accessory Access: runner control commands `usb-physical-list` and `usb-physical-attach`,
+  with a `FluxVMUSBAccess` app that needs the `com.apple.developer.accessory-access.usb` entitlement. There is no REST route or
+  `fluxctl` command. Not verified: the ad-hoc signed app was killed at launch and no USB device was attached to the test Mac.
+- **`fluxvm-vz-runner host-capabilities`** and `fluxvm_apple::host_capabilities`: reports OS version, CPU and memory,
+  nested virtualization, vmnet, custom Virtio, guest memory mapping, the USB API and bridgeable interfaces. Verified on the M4.
+- **Apple placement in the fleet**: `fluxvm-agent node` heartbeats carry the host's `apple` capabilities, and `fluxvm-agent
+  central` uses `apple_placement` for requests with backend `vz` (nodes without Apple capabilities are excluded for `vz`; a plain
+  `vz` request prefers the tightest fit). Verified on loopback with one real M4 node plus two fake nodes registered by hand; a
+  request with a named shared vmnet was placed on the only vmnet-capable node. Not verified: more than one real Mac. There are
+  no unit tests yet for the `vz` filtering in `central.rs`.
+- **Capability decode fix**: the Rust decode of `maximumVmCPUs` and `usbPassthroughAPI` uses explicit serde renames; checked
+  against the real M4 output.
+- Unit tests on the M4: `fluxvm-apple` 49 (plus 1 `backend` integration test and 6 source-contract tests, which only grep Swift
+  and C source), `fluxvm-agent` 55, `fluxvm-core` 79, `fluxvm-scheduler` 204; clippy on `fluxvm-apple` and `fluxvm-agent` is clean.
+- Still not verified: the two-runner broker test, physical USB, more than one Mac, the custom Virtio bulk queue.
+
 ### Added: a Mac section on the website, and an architecture guide
 - A `/mac` page on the docs site: measured numbers (one Apple M4, macOS 27.2), what runs on a Mac, how it works, which Mac to
   choose (Apple's published specs, with FluxVM capacity guidance marked as estimates), what macOS 27 adds, and what is and is not
@@ -152,7 +185,7 @@
 - **Mac Studio options on `vz`** ([docs/macos.md](docs/macos.md)): up to eight displays, Linux clipboard (SPICE), bridged networking
   (`apple.bridge_interface`, needs the networking entitlement), vmnet networks on macOS 26+ (`apple.vmnet`: shared or host-only,
   subnet, a DHCP reservation, port forwards), custom virtio devices on macOS 27, an ASIF disk overlay that snapshots with the VM,
-  macOS guest provisioning, balloon control and USB mass-storage attach. `apple_placement::pick` places macOS guests (two per Mac).
+  macOS guest provisioning, balloon control and USB mass-storage attach. `apple_placement::pick` scores hosts (macOS guests: two per Mac); the fleet registry now calls it for `vz` requests (see above).
 - **macOS guests through the API**: `apple.install` installs from an IPSW into a new disk, then boots; `apple.firstboot` puts SSH keys
   in place and turns on Remote Login on first boot. Examples in `examples/macos-install.json` and `macos-clone.json`.
 - **Agent density** ([docs/agent-density.md](docs/agent-density.md)): sandbox `profile` (`tiny` 1/512, `small` 1/1024, `standard`);

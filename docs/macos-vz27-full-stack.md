@@ -4,7 +4,7 @@ This change closes the largest correctness gap in FluxVM's macOS 27 support: `ap
 
 ## What this PR implements
 
-- **Custom Virtio host device:** device `0x3F`, two queues, provider/delegate lifecycle, queue draining, bounded JSON request/response protocol, ping/echo/capabilities/stats/map-probe operations.
+- **Custom Virtio host device:** device `0x3F` (`0xFF00` was wrong; see below), two queues, provider/delegate lifecycle, queue draining, bounded JSON request/response protocol, ping/echo/capabilities/stats/map-probe operations.
 - **TOCTOU-safe queue handling:** every request buffer is consumed once with `readBytes(withExactLength:)`; every element is returned exactly once.
 - **Guest-memory mapping plumbing:** the host can validate whether a guest physical range is mappable without leaking a host pointer.
 - **vmnet broker primitives:** wrappers for Apple's supported `vmnet_network_copy_serialization` and `vmnet_network_create_with_serialization` XPC objects. These are the required primitives for the separate `fluxvm-vmnetd` process described in `docs/VMNET_BROKER.md`.
@@ -21,6 +21,16 @@ Two macOS 27 capabilities cannot truthfully be declared end-to-end tested by gen
 
 1. **Physical USB passthrough.** `VZUSBPassthroughDeviceConfiguration` consumes an `AAUSBAccessory`, while `AAUSBAccessoryManager` requires a foreground UI application and user approval. FluxVM's runner is a headless helper, so production passthrough needs a small signed UI/XPC broker. Existing USB mass-storage hotplug remains independent and tested by the existing VZ device suite.
 2. **Shared custom vmnet across separate runner processes.** Apple requires the network's XPC serialization object to cross process boundaries. This PR adds the correct serialization/import primitives; `fluxvm-vmnetd` still needs its signed XPC service lifecycle and a real multi-Mac hardware run before it should replace the already-working userspace private switch.
+
+## Hardware status (2026-10-10, one Apple M4, macOS 27.2)
+
+Recorded in full in [macos-architecture.md](macos-architecture.md#14-what-is-verified). In short:
+
+- Verified: unit tests and clippy; `host-capabilities` on the M4; loopback fleet placement with one real node and two fake ones; the custom Virtio control queue (ping, echo, stats, capabilities) after PR #200.
+- Fixed in PR #200: the device id (`0xFF00` gave PCI `1af4:0f40`, which Linux does not bind; it is now `0x3F`), `virtio_flux.c` on kernel 6.12, and the fmt gate.
+- Open: the bulk queue (`bulk-test`, queue 1) hangs and even control requests hang afterwards; root cause not found.
+- Blocked: `fluxvm-vmnetd` and `FluxVMUSBAccess.app` were killed at launch (SIGKILL) when ad-hoc signed with their entitlements on a SIP-on host, so two-runner vmnet sharing and physical USB attach were not run.
+- Not run: placement across two real Macs.
 
 ## Test matrix
 

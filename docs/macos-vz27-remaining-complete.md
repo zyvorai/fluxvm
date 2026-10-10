@@ -1,6 +1,6 @@
 # macOS 27 VZ: remaining full-stack implementation
 
-This change finishes the post-#198 work in one PR.
+This change finishes the post-#198 work in one PR. Everything below is implemented; what was and was not verified on hardware is listed under "Hardware status" at the end.
 
 ## 1. virtio-flux guest path
 
@@ -27,6 +27,16 @@ The runner control protocol adds:
 ## 4. Apple-aware fleet placement
 
 `fluxvm-agent node` now works as a Mac fleet heartbeat source: macOS memory comes from `hw.memsize`, the node queries the signed VZ runner's new `host-capabilities` mode, counts active macOS guests, and reports `AppleHostCaps`. Central placement applies `fluxvm_scheduler::apple_placement::score` for automatic `backend: vz` requests while retaining existing capacity/security/selector scoring for every other backend.
+
+## Hardware status (2026-10-10, one Apple M4, macOS 27.2)
+
+Details in [macos-architecture.md](macos-architecture.md#14-what-is-verified).
+
+1. Runner `host-capabilities`: verified. Compile of the vmnetd and USB helper: built, but both were killed at launch (SIGKILL) under ad-hoc signing on a SIP-on host.
+2. Linux guest with `virtio_flux.ko`: after PR #200 (id `0x3F`, kernel 6.12 build fixes), `ping`, `echo`, `stats` and `capabilities` work. `bulk-test` (queue 1) hangs; open.
+3. Two runners on one named vmnet network: not run (broker could not start).
+4. Accessory Access consent, USB list and attach: not run (helper could not start; no USB devices attached).
+5. Fleet placement: verified only on loopback with one real Mac and two fake nodes; no second Mac.
 
 ## Production gates
 

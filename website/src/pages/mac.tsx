@@ -106,9 +106,14 @@ const MACOS27 = [
     tag: 'Implemented, not yet hardware-verified',
   },
   {
-    title: 'vmnet networks and custom Virtio',
-    body: 'Per-VM vmnet networks (macOS 26) and custom Virtio devices (macOS 27) open up isolated networks and host-backed devices.',
-    tag: 'Implemented, not yet hardware-verified',
+    title: 'Custom Virtio devices',
+    body: 'A vendor Virtio device with a host-side provider and a guest driver. Ping, echo, stats and capabilities work on a Debian 13 guest; the bulk queue hangs.',
+    tag: 'Control plane verified on M4; bulk path open',
+  },
+  {
+    title: 'Shared vmnet networks and physical USB',
+    body: 'VMs that name one vmnet network share it through a broker, and a physical USB device can be passed through with Accessory Access. Both need signing this Mac did not allow.',
+    tag: 'Implemented, blocked on this host by signing; not verified',
   },
 ];
 
@@ -383,11 +388,14 @@ function Honest(): ReactNode {
               </li>
               <li>
                 Mac Studio options (displays, bridging, vmnet, balloon, ASIF, provisioning) are
-                implemented but mostly not yet verified on hardware.
+                implemented but mostly not yet verified on hardware. The custom Virtio control channel,
+                host capabilities and fleet placement are the exceptions; the vmnet broker, physical USB
+                and the Virtio bulk queue are not verified.
               </li>
               <li>
-                Placement across Macs is a scorer you can call; the built-in registry does not use it
-                yet.
+                The fleet registry now places <code>vz</code> requests with the Apple scorer, using the
+                capabilities each node reports. It was checked on one Mac plus simulated nodes; no
+                second Mac has been used.
               </li>
             </ul>
             <p style={{marginTop: '0.75rem', marginBottom: 0}}>
