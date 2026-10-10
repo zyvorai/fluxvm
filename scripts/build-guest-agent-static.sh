@@ -29,11 +29,13 @@ fi
 
 # Prove it is static: a dynamic binary has an INTERP program header or NEEDED
 # entries, and `ldd` reports "not a dynamic executable" only for static ones.
-if ldd "$BUILT" 2>&1 | grep -qiE "not a dynamic executable|statically linked"; then
+# ldd does not exist on macOS (and cannot run a foreign-arch binary), so a cross build there is judged by `file`.
+if { command -v ldd >/dev/null 2>&1 && ldd "$BUILT" 2>&1 | grep -qiE "not a dynamic executable|statically linked"; } \
+  || file -b "$BUILT" | grep -qE "statically linked|static-pie linked"; then
   :
 else
   echo "FAIL: ${BUILT} is dynamically linked:" >&2
-  ldd "$BUILT" >&2 || true
+  { ldd "$BUILT" || file -b "$BUILT"; } >&2 || true
   exit 1
 fi
 
