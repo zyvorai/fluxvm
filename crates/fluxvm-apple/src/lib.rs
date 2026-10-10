@@ -12,6 +12,7 @@ mod control;
 mod host_caps;
 pub mod macos_install;
 mod runner;
+pub mod screen;
 pub mod ssh;
 mod usb_passthrough;
 pub mod vz27;

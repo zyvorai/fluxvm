@@ -585,6 +585,8 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
+        .route("/v1/vms/{id}/screenshot", get(vm_screenshot))
+        .route("/v1/vms/{id}/input", post(vm_input))
         .route("/v1/vms/{id}/agent/ping", post(agent_ping))
         .route("/v1/vms/{id}/agent/put-file", post(agent_put_file))
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
@@ -3713,6 +3715,70 @@ async fn agent_exec(
         .exec_with_policy(id, req.command, req.timeout_seconds, req.policy)
         .await?;
     Ok(Json(json!(response)))
+}
+
+#[derive(Deserialize)]
+struct ScreenshotQuery {
+    max_width: Option<u32>,
+}
+
+/// `GET /v1/vms/{id}/screenshot[?max_width=N]` — the guest display of a running `vz` VM as a PNG. The size is in the
+/// `x-fluxvm-screen-width`/`-height` headers; `x-fluxvm-screen-blank: true` means nothing is drawn yet. Admin-only: the
+/// screen can show anything the guest does.
+async fn vm_screenshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ScreenshotQuery>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let shot = m.vm_screenshot(id, q.max_width).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png".to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-width"),
+                shot.width.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-height"),
+                shot.height.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-blank"),
+                shot.blank.to_string(),
+            ),
+        ],
+        shot.png,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InputRequest {
+    Batch {
+        actions: Vec<fluxvm_scheduler::vz_screen::InputAction>,
+    },
+    One(fluxvm_scheduler::vz_screen::InputAction),
+}
+
+/// `POST /v1/vms/{id}/input` — keyboard and mouse input for a running `vz` VM's display: one action
+/// (`{"action": "click", "x": 10, "y": 20}`) or `{"actions": [...]}` run in order. Admin-only, like `agent_exec`.
+async fn vm_input(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<InputRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actions = match req {
+        InputRequest::Batch { actions } => actions,
+        InputRequest::One(a) => vec![a],
+    };
+    let n = m.vm_input(id, &actions).await?;
+    Ok(Json(json!({"ok": true, "actions": n})))
 }
 
 /// `POST /v1/vms/{id}/agent/ping` — health-checks the vsock guest agent

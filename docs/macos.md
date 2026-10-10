@@ -220,6 +220,35 @@ allows two macOS VMs at a time per Mac.
   of the `[apple]` table in `fluxvm.toml`, not a request field) the runner moves it to `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the
   disk. `sandbox logs` reads both files; `GET /v1/vms/{id}/serial` follows the current one.
 
+### Agent screen and input
+
+An agent can see and drive the display of any running `vz` VM, Linux or macOS guest, with no console window and no Screen
+Recording or Accessibility permission on the host: the runner renders the display into a hidden window of its own and sends
+keyboard and mouse events to it.
+
+```sh
+fluxctl screenshot web --out screen.png --max-width 1280
+fluxctl input web '{"action":"click","x":600,"y":400}' --text 'ls -la
+'
+fluxctl input web '{"action":"key","key":"c","modifiers":["control"]}'
+```
+
+The REST routes are `GET /v1/vms/{id}/screenshot` and `POST /v1/vms/{id}/input` (admin only, see [api.md](api.md)); the MCP
+tools are `vm_screenshot` and `vm_input` ([mcp.md](mcp.md)).
+
+- **Size:** a display 1920 pixels or wider is captured at half its pixels (a 2560x1600 display gives 1280x800, the size macOS
+  shows it at on a Retina screen); a smaller one at its own size. `max_width` scales down further.
+- **Coordinates** are screenshot pixels from the top left. After scaling with `max_width`, pass the same number as
+  `screen_width`.
+- **Typing** uses a US layout and covers printable ASCII, newline and tab. Keys: a character, `enter`, `tab`, `escape`,
+  `backspace`, `delete`, arrows, `home`, `end`, `page_up`, `page_down`, `f1`-`f12`; modifiers `shift`, `control`, `option`,
+  `command`.
+- **Pointer:** the guest gets absolute positions (a Linux guest's USB screen-coordinate digitizer, a macOS guest's trackpad), so a
+  click lands where the screenshot shows it; `right_click` and `middle_click` send those buttons, and `scroll` moves by wheel
+  notches.
+- **Verified** on macOS 27.2 (M4) with a Debian 13 guest: console login by typing, Ctrl+C, and left/right/middle clicks, drag and
+  scroll checked with evdev in the guest, before and after a guest reboot and a stop/start.
+
 ### Named console ports
 
 `apple.console_ports` (Linux guests, up to 8) adds virtio console ports for a byte stream between host and guest that needs no

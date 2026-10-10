@@ -24,8 +24,26 @@ pub const MAX_OUTPUT: usize = 64 * 1024;
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LOG_LINES: u64 = 500;
 
-type ToolFuture = Pin<Box<dyn Future<Output = Result<String>> + Send>>;
+type ToolFuture = Pin<Box<dyn Future<Output = Result<Reply>> + Send>>;
 type ToolFn = Arc<dyn Fn(Value) -> ToolFuture + Send + Sync>;
+
+/// What a tool returns: text, or MCP content blocks (e.g. an image with a caption).
+pub enum Reply {
+    Text(String),
+    Content(Vec<Value>),
+}
+
+impl From<String> for Reply {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<Vec<Value>> for Reply {
+    fn from(c: Vec<Value>) -> Self {
+        Self::Content(c)
+    }
+}
 
 /// One callable tool. Write tools change state and are only listed and
 /// callable when the server allows writes.
@@ -158,7 +176,10 @@ impl Server {
                     return Ok(tool_result(&e.to_string(), true));
                 }
                 match (tool.call)(args).await {
-                    Ok(text) => Ok(tool_result(&text, false)),
+                    Ok(Reply::Text(text)) => Ok(tool_result(&text, false)),
+                    Ok(Reply::Content(content)) => {
+                        Ok(json!({"content": content, "isError": false}))
+                    }
                     Err(e) => Ok(tool_result(&format!("{e:#}"), true)),
                 }
             }
@@ -332,7 +353,7 @@ const NETWORK_KINDS: &[&str] = &[
 ];
 const POWER_OPS: &[&str] = &["start", "stop", "pause", "resume", "restart"];
 
-fn tool<F, Fut>(
+fn tool<F, Fut, T>(
     name: &'static str,
     description: &'static str,
     schema: Value,
@@ -342,7 +363,8 @@ fn tool<F, Fut>(
 ) -> Tool
 where
     F: Fn(Arc<Remote>, Value) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<String>> + Send + 'static,
+    Fut: Future<Output = Result<T>> + Send + 'static,
+    T: Into<Reply>,
 {
     let remote = remote.clone();
     let f = Arc::new(f);
@@ -354,7 +376,7 @@ where
         call: Arc::new(move |args| {
             let remote = remote.clone();
             let f = f.clone();
-            Box::pin(async move { f(remote, args).await })
+            Box::pin(async move { f(remote, args).await.map(Into::into) })
         }),
     }
 }
@@ -650,6 +672,72 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     r.call(Method::DELETE, &format!("/v1/vms/{id}/snapshots/{tag}"), None).await?;
                     pretty(&json!({"id": id, "tag": str_arg(&args, "tag").unwrap_or_default(), "deleted": true}))
                 }).await
+            },
+        ),
+        tool(
+            "vm_screenshot",
+            "Screenshot of a running Apple VZ VM's display (Linux or macOS guest), as an image. Coordinates for vm_input are pixels of this image from the top left; pass its width as screen_width.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "max_width": {"type": "integer", "minimum": 64, "maximum": 8192, "description": "scale down to this width (default 1280)"}
+                }),
+                &["vm"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let width = int_arg(&args, "max_width")?.unwrap_or(DEFAULT_SCREEN_WIDTH);
+                    screenshot_content(&r, id, width).await
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_input",
+            "Keyboard and mouse input for a running Apple VZ VM's display. action: type (text), key (key, modifiers), move, click (modifiers), double_click, right_click, middle_click, down, up, drag (to_x, to_y) or scroll (dx, dy notches; positive dy scrolls down). Keys: a character, enter, tab, escape, backspace, delete, up, down, left, right, home, end, page_up, page_down, f1-f12; modifiers: shift, control, option, command. Coordinates are vm_screenshot pixels; pass that image's width as screen_width. actions runs a list of such objects in order instead. screenshot returns the display afterwards.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "action": {"type": "string", "enum": INPUT_ACTIONS},
+                    "text": {"type": "string"},
+                    "key": {"type": "string"},
+                    "modifiers": {"type": "array", "items": {"type": "string", "enum": ["shift", "control", "option", "command"]}},
+                    "x": {"type": "number"},
+                    "y": {"type": "number"},
+                    "to_x": {"type": "number"},
+                    "to_y": {"type": "number"},
+                    "dx": {"type": "integer"},
+                    "dy": {"type": "integer"},
+                    "screen_width": {"type": "integer", "minimum": 1},
+                    "actions": {"type": "array", "maxItems": 100, "items": {"type": "object"}},
+                    "screenshot": {"type": "boolean", "description": "return a screenshot (default width 1280) after the input"}
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = input_body(&args)?;
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/input"), Some(body))
+                        .await?;
+                    if args.get("screenshot").and_then(Value::as_bool) == Some(true) {
+                        // Give the guest a moment to redraw.
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        let width = args
+                            .get("screen_width")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(DEFAULT_SCREEN_WIDTH);
+                        return screenshot_content(&r, id, width).await;
+                    }
+                    Ok(vec![json!({"type": "text", "text": pretty(&v)?})])
+                })
+                .await
             },
         ),
         tool(
@@ -1109,6 +1197,88 @@ async fn capture(r: Arc<Remote>, args: Value, seconds: u64) -> Result<String> {
     }
 }
 
+const DEFAULT_SCREEN_WIDTH: u64 = 1280;
+const INPUT_ACTIONS: &[&str] = &[
+    "type",
+    "key",
+    "move",
+    "click",
+    "double_click",
+    "right_click",
+    "middle_click",
+    "down",
+    "up",
+    "drag",
+    "scroll",
+];
+
+/// The `POST /v1/vms/{id}/input` body for `vm_input`'s arguments: `{"actions": [...]}` or one action.
+fn input_body(args: &Value) -> Result<Value> {
+    let single = args.get("action").is_some();
+    match args.get("actions") {
+        Some(_) if single => bail!("give either action or actions, not both"),
+        Some(Value::Array(list)) => {
+            let width = args.get("screen_width").cloned();
+            let actions = list
+                .iter()
+                .map(|a| {
+                    let mut a = a.clone();
+                    if let (Some(w), Some(o)) = (&width, a.as_object_mut()) {
+                        o.entry("screen_width").or_insert_with(|| w.clone());
+                    }
+                    a
+                })
+                .collect::<Vec<_>>();
+            Ok(json!({"actions": actions}))
+        }
+        Some(_) => bail!("actions must be a list"),
+        None if single => {
+            let mut a = args.as_object().cloned().unwrap_or_default();
+            a.remove("vm");
+            a.remove("screenshot");
+            Ok(Value::Object(a))
+        }
+        None => bail!("give an action (or a list of actions)"),
+    }
+}
+
+/// `vm_screenshot`'s reply: the PNG as an MCP image block and a caption with its size.
+async fn screenshot_content(r: &Remote, id: Uuid, max_width: u64) -> Result<Vec<Value>> {
+    use base64::Engine as _;
+    let (status, png) = r
+        .get_raw(&format!("/v1/vms/{id}/screenshot?max_width={max_width}"))
+        .await?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&png);
+        let msg = serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_else(|| body.into_owned());
+        bail!("screenshot: {status}: {msg}");
+    }
+    let (w, h) = png_size(&png).context("the screenshot is not a PNG")?;
+    Ok(vec![
+        json!({
+            "type": "image",
+            "mimeType": "image/png",
+            "data": base64::engine::general_purpose::STANDARD.encode(&png),
+        }),
+        json!({
+            "type": "text",
+            "text": format!("{w}x{h} screenshot; for vm_input use these pixel coordinates with screen_width={w}"),
+        }),
+    ])
+}
+
+/// Width and height from a PNG's IHDR chunk.
+fn png_size(png: &[u8]) -> Option<(u32, u32)> {
+    if png.len() < 24 || &png[..8] != b"\x89PNG\r\n\x1a\n" || &png[12..16] != b"IHDR" {
+        return None;
+    }
+    let be = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+    Some((be(&png[16..20]), be(&png[20..24])))
+}
+
 pub async fn serve(remote: Remote, allow_write: bool) -> Result<()> {
     let mut server = Server::new("fluxvm", env!("CARGO_PKG_VERSION"), allow_write);
     server.add(tools(Arc::new(remote)));
@@ -1122,11 +1292,11 @@ mod tests {
     fn test_server(allow_write: bool) -> Server {
         let mut s = Server::new("t", "0", allow_write);
         let echo: ToolFn = Arc::new(|args| {
-            Box::pin(async move { Ok(str_arg(&args, "msg").unwrap_or("").to_string()) })
+            Box::pin(async move { Ok(str_arg(&args, "msg").unwrap_or("").to_string().into()) })
         });
         let fail: ToolFn = Arc::new(|_| Box::pin(async { Err(anyhow!("boom")) }));
-        let big: ToolFn = Arc::new(|_| Box::pin(async { Ok("é".repeat(MAX_OUTPUT)) }));
-        let stop: ToolFn = Arc::new(|_| Box::pin(async { Ok("stopped".to_string()) }));
+        let big: ToolFn = Arc::new(|_| Box::pin(async { Ok("é".repeat(MAX_OUTPUT).into()) }));
+        let stop: ToolFn = Arc::new(|_| Box::pin(async { Ok("stopped".to_string().into()) }));
         s.add([
             Tool {
                 name: "echo",
@@ -1282,6 +1452,7 @@ mod tests {
             "vm_snapshot_restore",
             "vm_snapshot_delete",
             "vm_delete",
+            "vm_input",
         ] {
             assert!(lookup(name).write, "{name} must require --allow-write");
         }
@@ -1298,6 +1469,43 @@ mod tests {
             .is_ok()
         );
         assert!(check_args(&lookup("vm_snapshot").schema, &json!({"vm":"web"})).is_err());
+        assert!(
+            !lookup("vm_screenshot").write,
+            "screenshots must remain available to read-only agents"
+        );
+    }
+
+    #[test]
+    fn input_body_builds_one_action_or_a_batch() {
+        assert_eq!(
+            input_body(
+                &json!({"vm": "web", "action": "click", "x": 3, "y": 4, "screenshot": true})
+            )
+            .unwrap(),
+            json!({"action": "click", "x": 3, "y": 4})
+        );
+        assert_eq!(
+            input_body(&json!({"vm": "web", "screen_width": 1280, "actions": [
+                {"action": "type", "text": "hi"},
+                {"action": "click", "x": 1, "y": 2, "screen_width": 640}
+            ]}))
+            .unwrap(),
+            json!({"actions": [
+                {"action": "type", "text": "hi", "screen_width": 1280},
+                {"action": "click", "x": 1, "y": 2, "screen_width": 640}
+            ]})
+        );
+        assert!(input_body(&json!({"vm": "web"})).is_err());
+        assert!(input_body(&json!({"vm": "web", "action": "type", "actions": []})).is_err());
+    }
+
+    #[test]
+    fn png_size_reads_the_header() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(1280u32.to_be_bytes());
+        png.extend(800u32.to_be_bytes());
+        assert_eq!(png_size(&png), Some((1280, 800)));
+        assert_eq!(png_size(b"not a png at all, really no"), None);
     }
 
     #[tokio::test]
