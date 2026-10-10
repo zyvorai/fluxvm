@@ -3907,6 +3907,8 @@ async fn main() -> Result<()> {
                     }
                 });
             }
+            #[cfg(target_os = "macos")]
+            api::self_control::spawn(m.clone(), &cfg.state_dir);
             let app = api::router(m);
             if cfg.tls.enabled() {
                 // rustls 0.23: select a process-wide CryptoProvider (ring) before

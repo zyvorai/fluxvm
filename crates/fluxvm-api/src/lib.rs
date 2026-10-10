@@ -36,6 +36,8 @@ mod idempotency;
 mod oidc;
 mod openapi;
 mod rate_limit;
+#[cfg(target_os = "macos")]
+pub mod self_control;
 mod speculate_api;
 
 #[derive(Clone)]

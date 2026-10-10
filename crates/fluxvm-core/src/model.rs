@@ -619,6 +619,10 @@ pub struct AppleSpec {
     /// has no card, so the proxy is its only way out). `example.com` matches that host, `*.example.com` its subdomains; ports 80 and 443.
     #[serde(default)]
     pub egress_allow: Vec<String>,
+    /// Linux guests: let software inside the guest snapshot, restore and restart this VM through an MCP server at
+    /// `http://127.0.0.1:7790/mcp` in the guest (relayed to the host over vsock; scoped to this VM only).
+    #[serde(default)]
+    pub self_control: bool,
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
@@ -823,6 +827,7 @@ impl Default for AppleSpec {
             vmnet: None,
             custom_virtio: false,
             egress_allow: Vec::new(),
+            self_control: false,
             root_read_only: false,
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),
