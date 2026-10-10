@@ -5,6 +5,7 @@ FluxVM's control plane (daemon, REST API, `fluxctl`, scheduler) builds and runs 
 Linux backends: no KVM, TAP, eBPF, cgroups or network namespaces.
 
 For how the pieces fit together (runner per VM, control socket, vsock, warm pool, networking), see [macos-architecture.md](macos-architecture.md).
+To run several Mac minis and Mac Studios as one VM API, see [mac-cloud.md](mac-cloud.md).
 
 ## What is verified
 

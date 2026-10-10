@@ -7,7 +7,8 @@ across several Macs.
 
 ![Mac mini, Mac Studio, MacBook Pro](assets/macos/readme-macs.jpg)
 
-How the `vz` backend works inside, in detail: [macos-architecture.md](macos-architecture.md).
+How the `vz` backend works inside, in detail: [macos-architecture.md](macos-architecture.md). A step-by-step fleet setup
+(launchd, registry, placement): [mac-cloud.md](mac-cloud.md).
 
 ## Which Mac, for what
 
