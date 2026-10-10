@@ -39,6 +39,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 mod speculate_api;
+mod vz_api;
 
 #[derive(Clone)]
 struct AuthState {
@@ -686,6 +687,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(vz_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,

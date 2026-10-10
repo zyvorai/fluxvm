@@ -55,7 +55,7 @@ pub const CAPABILITIES: &[Capability] = &[
     yes("Linux clipboard", "SPICE port; guest needs spice-vdagent"),
     yes(
         "vmnet custom network",
-        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; one network per VM until the broker lands; unverified on hardware",
+        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; named networks are shared across VMs through the fluxvm-vmnetd broker; unverified on hardware",
     ),
     yes(
         "custom Virtio device",
@@ -120,8 +120,8 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     no("hotplug (cpu, memory, disks, nics)", "not supported"),
     no(
-        "data disks, cdroms, non-default storage",
-        "not implemented yet",
+        "top-level data_disks and cdroms",
+        "use apple.extra_disks (image, block, NBD; virtio, NVMe, USB) or apple.media instead",
     ),
     no(
         "firmware overrides",
@@ -631,7 +631,10 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             );
         }
     }
-    reject!(!req.data_disks.is_empty(), "data disks");
+    reject!(
+        !req.data_disks.is_empty(),
+        "data_disks (use apple.extra_disks)"
+    );
     reject!(
         !req.cdroms.is_empty(),
         "cdroms (use apple.media for an installer image)"

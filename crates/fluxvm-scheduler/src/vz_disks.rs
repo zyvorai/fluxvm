@@ -189,6 +189,13 @@ impl VmManager {
             map.insert(name.to_owned(), Hotplug { uuid, pid: vm.pid });
             write_hotplug(&vm.workspace, &map)?;
         }
+        if !live && matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            tracing::warn!(
+                vm = %id,
+                disk = name,
+                "vz can only hot-attach USB image disks; this disk applies at the next boot"
+            );
+        }
         self.store.update(vm.clone()).await?;
         crate::audit_event(
             "vm.disk.attach",

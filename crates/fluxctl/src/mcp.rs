@@ -675,6 +675,51 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "host_apple_capabilities",
+            "What this Mac's Virtualization.framework offers: macOS version, CPU/memory limits, nested virtualization, bridged interfaces, vmnet custom networks, custom Virtio, EFI Secure Boot, Rosetta. Apple VZ hosts only.",
+            object(json!({}), &[]),
+            false,
+            &remote,
+            |r, _args| async move {
+                timed(CALL_TIMEOUT, async {
+                    pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_vz_status",
+            "Virtualization.framework device state of a running Apple VZ VM. what: secure_boot (EFI Secure Boot enabled and key counts, the pre-boot snapshot while it runs), custom_virtio (custom Virtio device driver state and counters), usb (USB devices on the VM's controllers) or usb_physical (host accessories granted for passthrough).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "what": {"type": "string", "enum": ["secure_boot", "custom_virtio", "usb", "usb_physical"]}
+                }),
+                &["vm", "what"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let path = match str_arg(&args, "what").unwrap_or_default() {
+                        "secure_boot" => "secure-boot",
+                        "custom_virtio" => "custom-virtio",
+                        "usb" => "usb",
+                        "usb_physical" => "usb/physical",
+                        other => bail!(
+                            "what must be secure_boot, custom_virtio, usb or usb_physical (got {other:?})"
+                        ),
+                    };
+                    pretty(
+                        &r.call(Method::GET, &format!("/v1/vms/{id}/vz/{path}"), None)
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
             "vm_screenshot",
             "Screenshot of a running Apple VZ VM's display (Linux or macOS guest), as an image. Coordinates for vm_input are pixels of this image from the top left; pass its width as screen_width.",
             object(
@@ -1509,6 +1554,11 @@ mod tests {
         assert!(
             !lookup("vm_screenshot").write,
             "screenshots must remain available to read-only agents"
+        );
+        assert!(!lookup("vm_vz_status").write && !lookup("host_apple_capabilities").write);
+        assert!(
+            check_args(&lookup("vm_vz_status").schema, &json!({"vm":"web"})).is_err(),
+            "what is required"
         );
     }
 

@@ -48,6 +48,7 @@ pub mod shared_disk;
 pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
+pub mod vz_devices;
 mod vz_disks;
 pub mod vz_guest;
 pub mod vz_screen;
