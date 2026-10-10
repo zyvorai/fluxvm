@@ -37,6 +37,7 @@ pub const MAX_FILE_TRANSFER_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentRequest {
     Ping,
     Exec {
