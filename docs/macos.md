@@ -199,9 +199,9 @@ allows two macOS VMs at a time per Mac.
 - **Linux only:** `rosetta: true` adds a Rosetta share (the guest still mounts it and registers binfmt); `nested_virtualization: true`
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
 - **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
-- **Console log:** a Linux guest's serial console goes to the VM's `console.log`. Past 16 MiB the runner moves it to
-  `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the disk. `GET
-  /v1/vms/{id}/serial` and `sandbox logs` read the current file only.
+- **Console log:** a Linux guest's serial console goes to the VM's `console.log`. Past `apple.serial_log_max_mib` (default 16)
+  the runner moves it to `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the
+  disk. `sandbox logs` reads both files; `GET /v1/vms/{id}/serial` follows the current one.
 
 ### Named console ports
 
@@ -270,7 +270,8 @@ A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk at
 - NBD URLs are `nbd://host:port/export`, `nbds://…` (TLS), or `nbd+unix:///export?socket=/path`. Virtualization.framework
   reconnects when the server drops; a missing server fails the VM's start.
 - Virtualization.framework fixes a VM's devices when it starts, so `fluxctl disk attach` and `detach` apply at the next start. The
-  exception is a USB image disk on a running guest, which is also hot-attached at once (macOS 15).
+  exception is a USB image disk on a running guest: attach plugs it in at once (macOS 15), and detach unplugs it at once as long
+  as the VM has not restarted since. A new image made with `--size-gib` is deleted on detach once nothing uses it.
 
 ```bash
 fluxctl disk attach web scratch --size-gib 20 --controller nvme --caching uncached   # a new sparse image in the VM's workspace

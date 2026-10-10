@@ -67,6 +67,9 @@ pub struct RunnerConfig {
     /// Private networks: one more network card each, connected to the network's switch.
     pub networks: Vec<NetworkConfig>,
     pub console_ports: Vec<ConsolePortConfig>,
+    /// The console log is rotated to `<log>.1` past this size (the runner defaults to 16 MiB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub serial_log_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,6 +222,7 @@ impl RunnerConfig {
                     })
                 })
                 .collect::<Result<_>>()?,
+            serial_log_max_bytes: None,
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
             forwards: match &req.network {

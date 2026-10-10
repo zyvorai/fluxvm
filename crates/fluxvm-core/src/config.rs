@@ -97,6 +97,8 @@ pub struct AppleConfig {
     pub oci_warm_slots: usize,
     /// `VCPUSxMEMORY_MIB` shapes the pool keeps warm, e.g. `["1x512", "2x1024"]`.
     pub oci_warm_sizes: Vec<String>,
+    /// A Linux guest's `console.log` moves to `console.log.1` (replacing it) past this size.
+    pub serial_log_max_mib: u64,
 }
 
 impl Default for AppleConfig {
@@ -109,6 +111,7 @@ impl Default for AppleConfig {
             oci_registry_credentials: Vec::new(),
             oci_warm_slots: 0,
             oci_warm_sizes: vec!["1x512".into()],
+            serial_log_max_mib: 16,
         }
     }
 }

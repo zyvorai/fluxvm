@@ -2177,6 +2177,9 @@ struct ListVmsQuery {
     /// Label selector: `k=v,k2!=v2,k3` (all terms must match).
     #[serde(default)]
     label: Option<String>,
+    /// Include the container warm pool's waiting VMs.
+    #[serde(default)]
+    all: bool,
 }
 
 async fn list_vms(
@@ -2185,6 +2188,7 @@ async fn list_vms(
     Query(q): Query<ListVmsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let mut items = m.list().await;
+    items.retain(|vm| fluxvm_scheduler::vm_listed(vm, q.all, q.label.as_deref()));
     if let Some(name) = q.name {
         items.retain(|vm| vm.name == name);
     }

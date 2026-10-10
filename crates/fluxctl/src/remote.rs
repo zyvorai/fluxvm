@@ -115,10 +115,19 @@ impl Remote {
     }
 
     pub async fn list_vms(&self, selector: Option<&str>) -> Result<Vec<Value>> {
-        let path = match selector {
+        self.list_vms_all(selector, false).await
+    }
+
+    /// [`Self::list_vms`]; `all` includes the container warm pool's waiting VMs.
+    pub async fn list_vms_all(&self, selector: Option<&str>, all: bool) -> Result<Vec<Value>> {
+        let mut path = match selector {
             Some(s) => format!("/v1/vms?label={}", encode_query(s)),
             None => "/v1/vms".into(),
         };
+        if all {
+            path.push(if selector.is_some() { '&' } else { '?' });
+            path.push_str("all=true");
+        }
         let v = self.call(Method::GET, &path, None).await?;
         Ok(v.get("items")
             .and_then(Value::as_array)
