@@ -13,7 +13,8 @@ private var fluxVirtioBusKeepAlive: [String: FluxVirtioBus] = [:]
 
 @available(macOS 27.0, *)
 final class FluxVirtioBus: NSObject, VZCustomVirtioDeviceConfigurationDelegate, VZCustomVirtioDeviceDelegate {
-    static let deviceID: UInt16 = 0xFF00
+    // Linux binds a virtio-pci device only when 0x1040 + id fits 0x1040...0x107f, so the id must be <= 0x3f.
+    static let deviceID: UInt16 = 0x003F
     static let controlQueue: UInt16 = 0
     static let bulkQueue: UInt16 = 1
     static let maximumBulkBytes = 64 * 1024 * 1024

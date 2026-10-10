@@ -311,7 +311,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   so the whole subnet is served and `dhcp_start`/`dhcp_end` are refused. Each runner owns its network; VMs sharing one network need the
   broker in [VMNET_BROKER.md](VMNET_BROKER.md). Exclusive with `bridge_interface`. IP discovery and the 127.0.0.1 `network.forwards`
   relay read the NAT lease file, so use `vmnet.forwards` instead.
-- **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0xFF00`) with a host-side provider: queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is reserved and fails closed. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
+- **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`) with a host-side provider: queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is reserved and fails closed. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
 - **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
   the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.
 - **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts

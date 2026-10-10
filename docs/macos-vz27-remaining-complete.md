@@ -4,7 +4,7 @@ This change finishes the post-#198 work in one PR.
 
 ## 1. virtio-flux guest path
 
-The host custom device remains ID `0xff00` with two virtqueues. Queue 0 is the bounded JSON control plane. Queue 1 is now active for guest-memory operations through `VZGuestMemoryMapping`: zero, fill, copy and CRC32, capped at 64 MiB per request. The Linux out-of-tree driver exposes `/dev/fluxvm` and `/dev/fluxvm-bulk`; `fluxvm-virtioctl bulk-test` allocates guest memory, asks the host to mutate it by guest physical address, then verifies the bytes and CRC in the guest.
+The host custom device is ID `0x3f` with two virtqueues. Queue 0 is the bounded JSON control plane. Queue 1 is now active for guest-memory operations through `VZGuestMemoryMapping`: zero, fill, copy and CRC32, capped at 64 MiB per request. The Linux out-of-tree driver exposes `/dev/fluxvm` and `/dev/fluxvm-bulk`; `fluxvm-virtioctl bulk-test` allocates guest memory, asks the host to mutate it by guest physical address, then verifies the bytes and CRC in the guest.
 
 The existing vsock guest agent remains the **host→guest management plane** (exec, file copy, shell, shutdown). `virtio-flux` is the **guest→host high-performance service/telemetry plane**. This avoids inventing a polling protocol merely to duplicate a management channel VZ already provides efficiently through vsock.
 
