@@ -2,6 +2,43 @@
 
 ## 0.4.0 (2026-10-10)
 
+### Added: agents drive a `vz` VM's screen (PR #214)
+- `GET /v1/vms/{id}/screenshot` (PNG, scaled with `?max_width`) and `POST /v1/vms/{id}/input` (type, key with modifiers, move,
+  click, double/right/middle click, drag, scroll; batches of up to 100 validated before anything is sent), with `fluxctl
+  screenshot`/`input` and MCP `vm_screenshot` (image content, read-only) and `vm_input` (write). Works for Linux and macOS
+  guests without a console window or host Screen Recording/Accessibility permission. Verified on an Apple M4 (macOS 27.2) with a
+  Debian 13 guest: console login by typing, Ctrl+C, and clicks, drag and scroll checked with evdev in the guest, before and after
+  a reboot and a stop/start.
+
+### Added: stored guest sign-in in the Keychain (PR #215)
+- `/v1/vms/{id}/signin` (`PUT`/`GET`/`DELETE`/`POST`), `fluxctl signin set|status|clear|type` and MCP `vm_sign_in` keep a
+  guest username and password in the host's login Keychain and type them into the VM's login screen (`password`, `username`
+  or `username_tab` mode), so an agent never sees the password. Deleting the VM removes the item. Verified with a Debian 13
+  tty1 login.
+
+### Added: more named images, and qcow2 without qemu-img (PR #218)
+- `ubuntu-26.04`, `fedora-44`, `centos-stream-10`, `almalinux-10`, `rocky-10` and `kali` (rolling), each booted and reached
+  over ssh on `vz`. Builtin file names may use a `*` for versioned releases; BSD-style checksum lists are read; downloads send
+  a User-Agent (cloud.centos.org refused requests without one).
+- qcow2 v2/v3 is converted to raw natively (deflate or zstd clusters, zero clusters left as holes); qemu-img is only needed for
+  backing files or encryption. Tarball images are extracted sparse (Kali's 25 GiB disk: 12 GB to 5.6 GB on disk).
+
+### Added: `fluxctl mcp install` (PR #219)
+- `fluxctl mcp install|uninstall|status` registers FluxVM's MCP server with Claude Code, Cursor, Claude Desktop, Codex, VS Code,
+  Windsurf or Gemini CLI by editing that client's config (user-wide or `--project`), keeping other entries and Codex's TOML
+  comments. Checked with `claude mcp list` (connected), `codex mcp list` and Cursor's agent.
+
+### Added: guest self-control (PR #220)
+- With `apple.self_control` (Linux guests), software inside the VM gets an MCP server at `http://127.0.0.1:7790/mcp` to
+  snapshot, restore and restart that VM only (`self_info`, `self_snapshot_list`, `self_snapshot`, `self_snapshot_restore`,
+  `self_snapshot_delete`, `self_restart`). The guest reaches it over vsock and the host names the VM, so no network, token or
+  host port is involved. Verified on an M4 with a Debian 13 guest: a restore brought back a file's old content with the same boot
+  id, and a restart gave a new one.
+
+### Changed: website
+- A Mac cloud page and illustration, a refreshed `/mac` page, an Open Graph image, and an apple.com-style home page (PRs #216
+  and #217).
+
 ### Fixed: `secure_boot` on `vz`
 - `secure_boot: true` was rejected for the `vz` backend by the scheduler's backend check ("secure_boot requires backend qemu"), so the
   Apple EFI Secure Boot support could not be used through the API. `vz` is now allowed (a TPM is still refused). Checked on an
