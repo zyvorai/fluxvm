@@ -46,6 +46,7 @@ Write tools are offered only with `--allow-write`:
 | `vm_snapshot_delete` | Delete a named snapshot | `DELETE /v1/vms/{id}/snapshots/{tag}` |
 | `vm_delete` | Delete a VM | `DELETE /v1/vms/{id}` |
 | `vm_input` | Keyboard and mouse input for a running Apple VZ VM's display: one `action` (`type`, `key`, `move`, `click`, `double_click`, `right_click`, `middle_click`, `down`, `up`, `drag`, `scroll`) or a list of `actions`; coordinates are `vm_screenshot` pixels with `screen_width` set to its width; `screenshot: true` returns the display afterwards | `POST /v1/vms/{id}/input` |
+| `vm_sign_in` | Types the sign-in stored with `fluxctl signin set` into an Apple VZ VM's login screen (`mode`: `password`, `username`, `username_tab`; `submit`); the password never passes through the agent; `screenshot: true` returns the display afterwards | `POST /v1/vms/{id}/signin` |
 | `vm_power` | `op` = `start`, `stop`, `pause`, `resume` or `restart` | `POST /v1/vms/{id}/{op}` |
 | `vm_capture` | A 1-30 s tcpdump capture (optional `filter`). With `output`, waits and writes the pcap to that path on the machine running fluxctl; otherwise returns the token | `POST` / `GET /v1/vms/{id}/network/capture[/{token}]` |
 | `vm_fork` | Fork a running flux-vm VM into `count` (1-32) running children sharing its memory snapshot | `POST /v1/vms/{id}/fork` |

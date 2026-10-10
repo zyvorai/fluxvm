@@ -4506,6 +4506,11 @@ impl VmManager {
         let _ = fluxvm_network::edge_contract::delete(&self.cfg, id);
         self.release_pod_identity(&vm).await;
         self.activity.lock().await.remove(&id);
+        if vm.backend == BackendKind::Vz && cfg!(target_os = "macos") {
+            if let Err(e) = self.delete_vm_signin(id).await {
+                tracing::warn!(vm = %id, error = %e, "failed to remove the stored sign-in");
+            }
+        }
         // These three point at live state outside `workspace` (a
         // still-active LV, a still-running qemu-nbd process, a Ceph clone)
         // that only `delete` ever reclaims — `stop` deliberately leaves them

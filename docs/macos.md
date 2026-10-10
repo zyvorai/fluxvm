@@ -249,6 +249,24 @@ tools are `vm_screenshot` and `vm_input` ([mcp.md](mcp.md)).
 - **Verified** on macOS 27.2 (M4) with a Debian 13 guest: console login by typing, Ctrl+C, and left/right/middle clicks, drag and
   scroll checked with evdev in the guest, before and after a guest reboot and a stop/start.
 
+### Stored sign-in
+
+`fluxctl signin` keeps a guest username and password in the host's login Keychain (service `dev.zyvor.fluxvm.vm-signin`,
+account: the VM id) and types them into the display, so you, a script or an agent (MCP `vm_sign_in`) can get past a login
+screen without handling the password:
+
+```sh
+fluxctl signin set web --user velora        # prompts for the password with echo off, or reads it from stdin
+fluxctl signin type web --mode username     # username, Enter, password, Enter: a text console login
+fluxctl signin type web                     # just the password, e.g. a macOS lock screen
+fluxctl signin status web                   # {"configured": true, "username": "velora"}
+fluxctl signin clear web
+```
+
+`--mode username_tab` types the username, Tab and the password for a graphical form; `--no-submit` leaves out the final Enter.
+The password is never returned by the API, the CLI or MCP, and deleting the VM removes the item. Verified on macOS 27.2 with a
+Debian 13 guest's tty1 login.
+
 ### Named console ports
 
 `apple.console_ports` (Linux guests, up to 8) adds virtio console ports for a byte stream between host and guest that needs no
