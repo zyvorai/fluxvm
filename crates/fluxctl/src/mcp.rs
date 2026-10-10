@@ -483,6 +483,190 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "vm_create",
+            "Create a normal FluxVM VM from a REST create spec. Use backend=vz and apple.guest_os=macos for prepared macOS templates. With ready_exec=true, wait until guest commands are usable.",
+            object(
+                json!({
+                    "spec": {"type": "object", "description": "CreateVmRequest JSON accepted by POST /v1/vms"},
+                    "ready_exec": {"type": "boolean", "description": "wait until guest command execution is ready"}
+                }),
+                &["spec"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(900), async {
+                    let spec = args.get("spec").cloned().unwrap_or_else(|| json!({}));
+                    if !spec.is_object() {
+                        bail!("spec must be an object");
+                    }
+                    let path = if args.get("ready_exec").and_then(Value::as_bool) == Some(true) {
+                        "/v1/vms?ready=exec"
+                    } else {
+                        "/v1/vms"
+                    };
+                    let v = r.call(Method::POST, path, Some(spec)).await?;
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_clone",
+            "Clone a stopped VM into a new VM with a fresh identity/MAC and copy-on-write storage where supported.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "name": {"type": "string", "description": "name for the clone"}
+                }),
+                &["vm", "name"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"name": str_arg(&args, "name").unwrap_or_default()});
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/clone"), Some(body))
+                        .await?;
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_exec",
+            "Run a shell command in a normal VM. Apple VZ guests use FluxVM's SSH transport; agent-enabled guests use the authenticated guest agent.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "command": {"type": "string"},
+                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600}
+                }),
+                &["vm", "command"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                let timeout = int_arg(&args, "timeout_seconds")?
+                    .unwrap_or(60)
+                    .clamp(1, 600);
+                timed(Duration::from_secs(timeout + 30), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({
+                        "command": str_arg(&args, "command").unwrap_or_default(),
+                        "timeout_seconds": timeout
+                    });
+                    pretty(
+                        &r.call(Method::POST, &format!("/v1/vms/{id}/agent"), Some(body))
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot",
+            "Create a named VM snapshot. On the Apple VZ backend this captures VM state and the disk consistently.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "tag": {"type": "string", "description": "snapshot name/tag"}
+                }),
+                &["vm", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"tag": str_arg(&args, "tag").unwrap_or_default()});
+                    let v = r
+                        .call(Method::POST, &format!("/v1/vms/{id}/snapshot"), Some(body))
+                        .await?;
+                    pretty(&v)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot_list",
+            "List a VM's named snapshots.",
+            object(json!({"vm": vm_prop}), &["vm"]),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    pretty(
+                        &r.call(Method::GET, &format!("/v1/vms/{id}/snapshots"), None)
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot_restore",
+            "Restore a VM from a named snapshot. Uses the generic restore endpoint so supported running VMs can restore in place.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "tag": {"type": "string"}
+                }),
+                &["vm", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(300), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let body = json!({"tag": str_arg(&args, "tag").unwrap_or_default()});
+                    pretty(
+                        &r.call(Method::POST, &format!("/v1/vms/{id}/restore"), Some(body))
+                            .await?,
+                    )
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_snapshot_delete",
+            "Delete a named VM snapshot.",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "tag": {"type": "string"}
+                }),
+                &["vm", "tag"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let tag = encode_query(str_arg(&args, "tag").unwrap_or_default());
+                    r.call(Method::DELETE, &format!("/v1/vms/{id}/snapshots/{tag}"), None).await?;
+                    pretty(&json!({"id": id, "tag": str_arg(&args, "tag").unwrap_or_default(), "deleted": true}))
+                }).await
+            },
+        ),
+        tool(
+            "vm_delete",
+            "Delete a VM and its FluxVM-owned runtime resources.",
+            object(json!({"vm": vm_prop}), &["vm"]),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(120), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    pretty(&r.vm_op(id, "delete").await?)
+                })
+                .await
+            },
+        ),
+        tool(
             "vm_power",
             "Change a VM's power state: start (a stopped VM), stop, pause, resume or restart. For Kairon-managed VMs prefer Kairon's set_power_state, or Kairon will reconcile it back.",
             object(
@@ -1026,6 +1210,41 @@ mod tests {
         assert_eq!(got["5"]["error"]["code"], -32602);
         let (t, _) = text(&got["6"]);
         assert!(t.contains("[truncated") && t.len() < MAX_OUTPUT + 200);
+    }
+
+    #[test]
+    fn vmpal_parity_tools_are_registered_with_safe_write_gates() {
+        let registry = tools(Arc::new(Remote::new("127.0.0.1:9", None)));
+        let lookup = |name: &str| {
+            registry
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("missing MCP tool {name}"))
+        };
+        for name in [
+            "vm_create",
+            "vm_clone",
+            "vm_exec",
+            "vm_snapshot",
+            "vm_snapshot_restore",
+            "vm_snapshot_delete",
+            "vm_delete",
+        ] {
+            assert!(lookup(name).write, "{name} must require --allow-write");
+        }
+        assert!(
+            !lookup("vm_snapshot_list").write,
+            "snapshot listing must remain available to read-only agents"
+        );
+        assert!(check_args(&lookup("vm_exec").schema, &json!({"vm":"web"})).is_err());
+        assert!(
+            check_args(
+                &lookup("vm_exec").schema,
+                &json!({"vm":"web","command":"uname -a"})
+            )
+            .is_ok()
+        );
+        assert!(check_args(&lookup("vm_snapshot").schema, &json!({"vm":"web"})).is_err());
     }
 
     #[tokio::test]

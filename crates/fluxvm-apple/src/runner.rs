@@ -29,6 +29,14 @@ pub struct RunnerConfig {
     pub vsock_socket: Option<PathBuf>,
     pub ip_file: PathBuf,
     pub window: bool,
+    pub display_width: u32,
+    pub display_height: u32,
+    pub display_ppi: u32,
+    pub audio_output: bool,
+    pub microphone: bool,
+    pub rosetta: bool,
+    pub nested_virtualization: bool,
+    pub usb_controller: bool,
     /// virtiofs shares, tagged `fs0`, `fs1`, … in request order (the tags the guest-side mount uses).
     pub shares: Vec<ShareConfig>,
     /// Host `127.0.0.1:host_port` listeners that relay TCP to the guest's NAT address.
@@ -85,6 +93,14 @@ impl RunnerConfig {
             )),
             ip_file: ip_file(&ctx.workspace),
             window: apple.window,
+            display_width: apple.display_width.clamp(800, 5120),
+            display_height: apple.display_height.clamp(600, 2880),
+            display_ppi: apple.display_ppi.clamp(72, 300),
+            audio_output: apple.audio_output,
+            microphone: apple.microphone,
+            rosetta: apple.rosetta,
+            nested_virtualization: apple.nested_virtualization,
+            usb_controller: apple.usb_controller,
             restore_state: req
                 .loadvm_tag
                 .as_deref()

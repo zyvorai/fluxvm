@@ -38,6 +38,14 @@ struct Config: Decodable {
     let vsock_socket: String?
     let ip_file: String
     let window: Bool?
+    let display_width: Int?
+    let display_height: Int?
+    let display_ppi: Int?
+    let audio_output: Bool?
+    let microphone: Bool?
+    let rosetta: Bool?
+    let nested_virtualization: Bool?
+    let usb_controller: Bool?
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
@@ -128,7 +136,11 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.platform = p
             c.bootLoader = VZMacOSBootLoader()
             let g = VZMacGraphicsDeviceConfiguration()
-            g.displays = [VZMacGraphicsDisplayConfiguration(widthInPixels: 2560, heightInPixels: 1600, pixelsPerInch: 220)]
+            g.displays = [VZMacGraphicsDisplayConfiguration(
+                widthInPixels: cfg.display_width ?? 2560,
+                heightInPixels: cfg.display_height ?? 1600,
+                pixelsPerInch: cfg.display_ppi ?? 220
+            )]
             c.graphicsDevices = [g]
             c.keyboards = [VZMacKeyboardConfiguration()]
             c.pointingDevices = [VZMacTrackpadConfiguration()]
@@ -146,6 +158,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 platform.machineIdentifier = id
             } else {
                 try platform.machineIdentifier.dataRepresentation.write(to: idFile, options: .atomic)
+            }
+            if cfg.nested_virtualization == true {
+                guard #available(macOS 15.0, *) else {
+                    throw err("nested virtualization needs macOS 15 or later")
+                }
+                guard VZGenericPlatformConfiguration.isNestedVirtualizationSupported else {
+                    throw err("nested virtualization is not supported on this Mac (M3 or later required)")
+                }
+                platform.isNestedVirtualizationEnabled = true
             }
             c.platform = platform
             let g = VZVirtioGraphicsDeviceConfiguration()
@@ -194,7 +215,66 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 fs.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: share.host_path), readOnly: share.read_only))
                 fsDevices.append(fs)
             }
+            if cfg.rosetta == true {
+                let fs = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
+                fs.share = try VZLinuxRosettaDirectoryShare()
+                fsDevices.append(fs)
+            }
             c.directorySharingDevices = fsDevices
+        } else if !(cfg.shares ?? []).isEmpty {
+            guard #available(macOS 13.0, *) else {
+                throw err("shared folders for macOS guests need a macOS 13+ host")
+            }
+            var dirs: [String: VZSharedDirectory] = [:]
+            for (index, share) in (cfg.shares ?? []).enumerated() {
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: share.host_path, isDirectory: &isDir),
+                      isDir.boolValue else {
+                    throw err("shared folder \(share.host_path) is not a directory")
+                }
+                let base = URL(fileURLWithPath: share.host_path).lastPathComponent
+                let wanted = base.isEmpty ? "share\(index)" : base
+                let canonical = VZMultipleDirectoryShare.canonicalizedName(from: wanted) ?? "share\(index)"
+                var name = canonical
+                var suffix = 2
+                while dirs[name] != nil {
+                    name = "\(canonical)-\(suffix)"
+                    suffix += 1
+                }
+                dirs[name] = VZSharedDirectory(
+                    url: URL(fileURLWithPath: share.host_path),
+                    readOnly: share.read_only
+                )
+            }
+            let fs = VZVirtioFileSystemDeviceConfiguration(
+                tag: VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag
+            )
+            fs.share = VZMultipleDirectoryShare(directories: dirs)
+            c.directorySharingDevices = [fs]
+        }
+
+        var audio: [VZAudioDeviceConfiguration] = []
+        if cfg.audio_output != false {
+            let stream = VZVirtioSoundDeviceOutputStreamConfiguration()
+            stream.sink = VZHostAudioOutputStreamSink()
+            let device = VZVirtioSoundDeviceConfiguration()
+            device.streams = [stream]
+            audio.append(device)
+        }
+        if cfg.microphone == true {
+            let stream = VZVirtioSoundDeviceInputStreamConfiguration()
+            stream.source = VZHostAudioInputStreamSource()
+            let device = VZVirtioSoundDeviceConfiguration()
+            device.streams = [stream]
+            audio.append(device)
+        }
+        c.audioDevices = audio
+
+        if cfg.usb_controller == true {
+            guard #available(macOS 15.0, *) else {
+                throw err("USB XHCI passthrough support needs macOS 15 or later")
+            }
+            c.usbControllers = [VZXHCIControllerConfiguration()]
         }
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
@@ -242,7 +322,11 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     }
 
     func showWindow(_ machine: VZVirtualMachine) {
-        let view = VZVirtualMachineView(frame: NSRect(x: 0, y: 0, width: 1100, height: 700))
+        let aspect = Double(cfg.display_width ?? 2560) / Double(cfg.display_height ?? 1600)
+        let initialWidth = 1100.0
+        let view = VZVirtualMachineView(frame: NSRect(
+            x: 0, y: 0, width: initialWidth, height: initialWidth / aspect
+        ))
         view.virtualMachine = machine
         view.capturesSystemKeys = true
         view.automaticallyReconfiguresDisplay = true

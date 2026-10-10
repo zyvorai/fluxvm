@@ -37,6 +37,13 @@ Write tools are offered only with `--allow-write`:
 
 | Tool | Effect | API |
 | --- | --- | --- |
+| `vm_create` | Create a normal VM from a `CreateVmRequest` JSON object; optional `ready_exec` waits for command readiness | `POST /v1/vms[?ready=exec]` |
+| `vm_clone` | Clone a stopped VM under a new name | `POST /v1/vms/{id}/clone` |
+| `vm_exec` | Execute a command in a normal VM; VZ guests use the Apple SSH transport | `POST /v1/vms/{id}/agent` |
+| `vm_snapshot` | Save a named snapshot | `POST /v1/vms/{id}/snapshot` |
+| `vm_snapshot_restore` | Restore a named snapshot | `POST /v1/vms/{id}/restore` |
+| `vm_snapshot_delete` | Delete a named snapshot | `DELETE /v1/vms/{id}/snapshots/{tag}` |
+| `vm_delete` | Delete a VM | `DELETE /v1/vms/{id}` |
 | `vm_power` | `op` = `start`, `stop`, `pause`, `resume` or `restart` | `POST /v1/vms/{id}/{op}` |
 | `vm_capture` | A 1-30 s tcpdump capture (optional `filter`). With `output`, waits and writes the pcap to that path on the machine running fluxctl; otherwise returns the token | `POST` / `GET /v1/vms/{id}/network/capture[/{token}]` |
 | `vm_fork` | Fork a running flux-vm VM into `count` (1-32) running children sharing its memory snapshot | `POST /v1/vms/{id}/fork` |
@@ -49,9 +56,11 @@ Write tools are offered only with `--allow-write`:
 | `sandbox_exec` | Run `command` in a sandbox through the guest agent | `POST /v1/sandboxes/{id}/process` |
 | `sandbox_write_file` | Write UTF-8 `content` to `path` in a sandbox | `POST /v1/sandboxes/{id}/fs/write` |
 
-`sandbox_read_file` (`POST /v1/sandboxes/{id}/fs/read`) is read-only and always offered.
+`vm_snapshot_list` (`GET /v1/vms/{id}/snapshots`) and
+`sandbox_read_file` (`POST /v1/sandboxes/{id}/fs/read`) are read-only and
+always offered.
 
-Delete, migrate, and edge or policy changes are not exposed.
+Migrate, and edge or policy changes are not exposed.
 
 `vm` accepts a VM name, a UUID or a unique UUID prefix. Unknown or missing
 required arguments are rejected with an error the model can read.
