@@ -506,7 +506,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "vm_create",
-            "Create a normal FluxVM VM from a REST create spec. Use backend=vz and apple.guest_os=macos for prepared macOS templates. With ready_exec=true, wait until guest commands are usable.",
+            "Create a normal FluxVM VM from a REST create spec. Minimal vz spec: {\"name\", \"backend\":\"vz\", \"image\"}. apple.* options (all optional): guest_os (linux|macos), install (macOS from the IPSW in image/media), display_width/display_height/display_ppi/display_count (1-8 displays, macOS), window, rosetta, clipboard, microphone, audio_output, nested_virtualization, usb_controller, asif_overlay, bridge_interface, recovery, vmnet {mode, subnet, mask}, provision_full_name/provision_username/provision_password_file (macOS 27 first boot), extra_disks, console_ports, custom_virtio, efi_secure_boot. With ready_exec=true, wait until guest commands are usable.",
             object(
                 json!({
                     "spec": {"type": "object", "description": "CreateVmRequest JSON accepted by POST /v1/vms"},

@@ -207,6 +207,17 @@ allows two macOS VMs at a time per Mac.
  "display_ppi": 220, "audio_output": true, "microphone": false, "usb_controller": true}}
 ```
 
+The same options as flags, without a spec file:
+
+```sh
+fluxctl create --name mac --image ~/ipsw/UniversalMac.ipsw --guest macos --install \
+  --display 5120x2880@220 --window --usb-controller
+fluxctl create --name dev --image debian-13 --rosetta --clipboard --mute --vcpus 4
+```
+
+`--spec FILE` can be combined with these flags; a flag overrides the file's field. `--provision-full-name`,
+`--provision-username` and `--provision-password-file` set the macOS 27 first-boot account.
+
 - **Display:** `display_width` 800 to 5120 (default 2560), `display_height` 600 to 2880 (default 1600), `display_ppi` 72 to 300 (default 220).
   With `window: true` the guest follows the window as it is resized. Linux guests use `display_width` and `display_height` for
   their virtio-gpu scanout too (they used a fixed 1280x800 before).
