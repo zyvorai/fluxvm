@@ -5,6 +5,7 @@ pub mod builtin;
 pub mod catalog;
 pub mod cloudinit;
 pub mod import;
+pub mod ipsw;
 pub mod oci;
 pub mod oci_boot;
 pub mod oci_registry;

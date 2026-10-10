@@ -7,10 +7,35 @@
 use crate::{VmManager, audit_event};
 use anyhow::{Result, bail};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 impl VmManager {
+    /// Apple's newest macOS restore image for this Mac (`image: "macos"` with `apple.install`), and whether it is already
+    /// downloaded. With `download` it is fetched now (about 15 GB) and `path` is its cache file.
+    pub async fn macos_ipsw(&self, download: bool) -> Result<Value> {
+        let info = fluxvm_apple::latest_ipsw().await?;
+        let mut out = serde_json::to_value(&info)?;
+        let cached = self
+            .cfg
+            .state_dir
+            .join("images")
+            .join(format!("macos-{}.ipsw", info.build_version));
+        let path = if download {
+            Some(fluxvm_image::ipsw::ensure(&self.cfg, &info.url, &info.build_version).await?)
+        } else {
+            cached.exists().then_some(cached)
+        };
+        out["downloaded"] = json!(path.is_some());
+        if let Some(p) = path {
+            out["path"] = json!(p);
+        }
+        if download {
+            audit_event("host.macos_ipsw", &[("build", &info.build_version)]);
+        }
+        Ok(out)
+    }
+
     async fn vz_running_vm(&self, id: Uuid) -> Result<VmRecord> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Vz {
