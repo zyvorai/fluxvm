@@ -28,7 +28,9 @@ cold-boots as before.
 Why a pool and not one snapshot restored many times: a saved VM state is tied to the MAC address and machine identifier it was saved
 with (restoring with another MAC or identifier fails with "invalid argument"), and two VMs restored from one snapshot share a MAC and
 so an address on the Mac's NAT; the Mac then reaches one or the other at random. Each slot therefore has its own MAC and snapshot, so
-the number of sandboxes that can start fast at once is `warm_slots`.
+the number of sandboxes that can start fast at once is `warm_slots`. Slots are built one after another and the NAT frees a stopped
+guest's address, so two slots can end up with the same one. Each slot records its address in the `fluxvm.slot-ip` label, and a slot
+whose address a running VM already holds is skipped: that create cold-boots instead of sharing the address.
 
 ```toml
 [sandbox]
@@ -78,7 +80,7 @@ For many sandboxes on one Mac (sizes such as `"profile": "tiny"`, admission on m
   large to scan). Limits: it needs an **unlocked login session** (it uses snapshot restore), the VM restarts its processes' memory
   state back to the snapshot (anything the command did in memory is discarded too), and only file changes are captured: network
   calls the command made really happened (the changeset's `side_effects` says whether the sandbox could reach out).
-- Not yet on `vz`: volumes, GPUs.
+- Not yet on `vz` for VM sandboxes: volumes, GPUs. Container sandboxes do take named `volumes`; see [oci-sandboxes.md](oci-sandboxes.md).
 
 ## Verified
 

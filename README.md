@@ -37,7 +37,7 @@ From the 0.4.0 (unreleased) section of the [CHANGELOG](CHANGELOG.md) and recent 
 
 | Feature | What it does |
 |---|---|
-| **MCP server for AI agents** | `fluxctl mcp serve` speaks the Model Context Protocol over stdio; read tools by default, `--allow-write` adds power and capture ([docs/mcp.md](docs/mcp.md)) |
+| **MCP server for AI agents** | `fluxctl mcp serve` speaks the Model Context Protocol over stdio; read tools by default, `--allow-write` adds VM create, clone, exec, snapshot, delete, power and capture, backups, pools and sandboxes ([docs/mcp.md](docs/mcp.md)) |
 | **VM fork** | `POST /v1/vms/{id}/fork` / `fluxctl fork-vm`: snapshot a running FluxVM-engine VM once and restore N children with a shared read-only memory file and reflinked rootfs |
 | **VM import** | `POST /v1/images/import` / `fluxctl import-image`: OVA/OVF/VMDK/VHD(X)/qcow2 to raw disks, with offline GuestKit repair of the boot disk for virtio |
 | **Backups with quiesce** | Guest `fsfreeze` through QGA around the snapshot, plus list, delete and restore-backup |
@@ -277,7 +277,7 @@ Report vulnerabilities per [SECURITY.md](SECURITY.md).
 
 ## Native macOS (Apple silicon)
 
-The daemon, API and `fluxctl` build and run natively on macOS, with a `vz` backend on Apple's Virtualization.framework for ARM64 Linux guests. See [docs/macos.md](docs/macos.md) for what is verified and what is not.
+The daemon, API and `fluxctl` build and run natively on macOS, with a `vz` backend on Apple's Virtualization.framework for ARM64 Linux guests and, from a prepared template, macOS guests. See [docs/macos.md](docs/macos.md) for what is verified and what is not.
 
 ![Mac mini for home, Mac Studio for a team, MacBook Pro for development](docs/assets/macos/readme-macs.jpg)
 
@@ -285,4 +285,4 @@ The same REST API and `fluxctl` now run on a [Mac mini](https://www.apple.com/in
 
 ![A private LLM cluster made of Macs](docs/assets/macos/readme-home-cluster.jpg)
 
-**Verified** on an Apple M4, macOS 27.2: Debian 13 through the API (create, SSH, pause, resume, stop, start, delete), plus port forwards, shared folders, named images, snapshots and warm starts, `fluxctl run`, [stacks](docs/macos-stacks.md) (`fluxctl up`), and [agent sandboxes](docs/macos-sandboxes.md) (a warm pool, offline and allow-listed network, speculate and changesets). [Container sandboxes](docs/oci-sandboxes.md) (an OCI image in its own VM, `fluxctl sandbox run`) are implemented and unit-tested; their live test has not been run on hardware yet. macOS guests install from an IPSW, boot and clone on the same hardware by hand ([details](docs/macos.md#macos-guests)). **Not yet verified:** multi-Mac clusters, Thunderbolt RDMA, macOS guests through the API. Sizing, the cluster design (after GK Servis's [Mac Studio case study](https://www.gkservis.com/case-studies/llm-inference-cluster.html)) and the roadmap: [docs/macos-cluster.md](docs/macos-cluster.md).
+**Verified** on an Apple M4, macOS 27.2: Debian 13 through the API (create, SSH, pause, resume, stop, start, delete), plus port forwards, shared folders, named images, snapshots and warm starts, `fluxctl run`, [stacks](docs/macos-stacks.md) (`fluxctl up`), and [agent sandboxes](docs/macos-sandboxes.md) (a warm pool, offline and allow-listed network, speculate and changesets). [Container sandboxes](docs/oci-sandboxes.md) (an OCI image in its own VM, `fluxctl sandbox run`) pass `scripts/oci-live-test.sh` on the same hardware (exit codes, read-only root, exec, offline and allow-listed network, a private network, `linux/amd64` under Rosetta, a warm-pool claim); published ports, volumes, restart policies, health checks, `secret_env`, stacks, `--fleet` placement and the dashboard are unit-tested only. `scripts/vz-devices-live-test.sh` also passes (extra disks, USB hot-plug, console ports, Linux display size). macOS guests install from an IPSW, boot and clone on the same hardware by hand ([details](docs/macos.md#macos-guests)). **Not yet verified:** multi-Mac clusters, Thunderbolt RDMA, macOS guests through the API. Sizing, the cluster design (after GK Servis's [Mac Studio case study](https://www.gkservis.com/case-studies/llm-inference-cluster.html)) and the roadmap: [docs/macos-cluster.md](docs/macos-cluster.md).

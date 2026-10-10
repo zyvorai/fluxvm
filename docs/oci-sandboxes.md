@@ -47,7 +47,8 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 
 `POST /v1/sandboxes` with an `oci` object. `ttl_seconds`, `profile`, `vcpus`, `memory_mib`, `offline`, `allow_hosts`,
 `http_proxy_port(s)`, `volumes` and `name` apply as for other sandboxes. `template`, `spec`, `image`, `procbox`, `gpus` and
-`confidential` are refused with `oci`. Without a profile or size the VM gets 1 vCPU and 512 MiB.
+`confidential` are refused with `oci`. Without a profile or size the VM gets 1 vCPU and 512 MiB. 512 MiB is also the minimum: a smaller `memory_mib` is refused with
+`memory_mib must be at least 512 for a container sandbox`, because `vz` will not start a VM with less.
 
 | Field | Default | Meaning |
 |---|---|---|
@@ -71,7 +72,9 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 `fluxctl sandbox run IMAGE [--platform linux/amd64] [--profile P] [--offline | --allow-host H…] [-e K=V…] [--secret-env NAME…] [-w DIR] [-u USER] [--entrypoint "…"]
 [--writable-root] [-p HOST:CONTAINER…] [-v NAME:/path[:ro]…] [--restart POLICY] [--max-restarts N] [--health-cmd "…"
 [--health-interval S]] [--rm] [--name N] -- CMD…` creates the sandbox with `exit_policy: poweroff`, prints its console as it goes
-and exits with the container's exit code. It works locally and with `--server`.
+and exits with the container's exit code. It works locally and with `--server`. Lines the container wrote go to stdout; lines
+from init, the guest agent and the protocol markers (`fluxvm-oci-init…`, `fluxvm-guest-agent…`, `FLUXVM-…`, `VELORA-IP …`) go to
+stderr, so `fluxctl sandbox run … > out` captures only the container's output.
 
 ### Published ports
 
@@ -170,8 +173,12 @@ They do not inherit the image's `Env` or the proxy settings.
 6. **Ready**: create returns when the guest agent answers a ping over vsock (port 17777), or when the process has already exited.
    An init error fails the create at once, and the VM is deleted.
 
-`GET /v1/sandboxes/{id}/logs?lines=N` returns `{status, oci, exit_code, init_error, restarts, health, log}`. The markers are
-searched in the whole log; `log` is only the tail.
+`GET /v1/sandboxes/{id}/logs?lines=N` (MCP `sandbox_logs`, `fluxctl sandbox logs`) returns
+`{id, status, oci, exit_code, init_error, restarts, health, log}`. `lines` defaults to 200 and is capped at 10,000. `log` is the
+last `lines` lines of the console, one per line (newline-separated, no trailing newline), read from `console.log` preceded by the
+rotated `console.log.1` if there is one. The markers are searched in the whole log, not just the tail: `exit_code` is `null` while
+the process runs (or will be restarted), `init_error` carries a `FLUXVM-INIT-ERR` reason, `restarts` counts `FLUXVM-RESTART`
+lines, and `health` is `healthy` or `unhealthy` once a health check has run. `oci` is `false` for a non-container sandbox.
 
 ## Warm pool
 
@@ -183,6 +190,9 @@ waiting. A matching sandbox takes one instead of cold-booting:
 oci_warm_slots = 2
 oci_warm_sizes = ["1x512", "2x1024"]   # VCPUSxMEMORY_MIB
 ```
+
+`oci_warm_slots` defaults to 0 (off) and `oci_warm_sizes` to `["1x512"]`. A size needs at least 1 vCPU (at most 255) and at least
+512 MiB; an invalid entry is ignored with a warning in the daemon log.
 
 - **A slot** is a running VM whose init is in `wait` mode. `fluxctl ls` and `GET /v1/vms` leave slots out unless given `--all`
   (`?all=true`) or a selector on `fluxvm.oci-warm`; the sandbox list never shows them. The kernel has booted, the network card holds its DHCP lease, and init
@@ -206,7 +216,7 @@ oci_warm_sizes = ["1x512", "2x1024"]   # VCPUSxMEMORY_MIB
 - **Needs** macOS 15 for USB hot-attach, and a kernel with the USB options in `oci-vz.config.fragment` (built by
   `scripts/build-oci-boot.sh` from this release on).
 
-`GET /v1/sandboxes/density` reports `oci_warm_slots_ready`, `oci_warm_slots_booting`, `oci_warm_resident_mib`, `oci_warm_hits`,
+`GET /v1/sandboxes/density` reports `oci_warm_slots_configured` (`oci_warm_slots` times the number of sizes), `oci_warm_slots_ready`, `oci_warm_slots_booting`, `oci_warm_resident_mib`, `oci_warm_hits`,
 `oci_warm_misses` and `oci_warm_last_claim_ms` (picking the slot to the container's agent answering). Each waiting slot holds its
 memory, so size the pool to what you create in bursts.
 
@@ -327,4 +337,13 @@ the tag on Docker Hub.
 - exit codes, a read-only root with a writable `/tmp`, and uid 65534;
 - argv exec in a distroless image;
 - offline mode, an allow-list, and TTL expiry;
+- a private network between two offline sandboxes, with no internet;
+- `linux/amd64` under Rosetta (skipped when Rosetta is not installed);
+- a warm-pool claim (a `1x768` slot, skipped before macOS 15), with `oci_warm_hits` counted and exec working in the claimed
+  sandbox;
 - the cold-start time.
+
+Not covered by `oci-live-test.sh`, so unit-tested only: published ports, volumes, `restart` and health checks, `secret_env`,
+`GET /v1/sandboxes/{id}/logs` field details such as `restarts` and `health`, stacks of containers and `--fleet` placement. The
+dashboard (`fluxctl dashboard`, served at `/console`) is not covered either. `scripts/vz-devices-live-test.sh` is about VM devices
+(disks, USB, console ports, display), not containers.

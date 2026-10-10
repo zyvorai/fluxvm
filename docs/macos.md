@@ -17,8 +17,9 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 | `scripts/macos-live-test.sh` | **PASS**, end to end on a real Debian 13 guest: create through the API, address, SSH, TCP forwards (host and guest-to-guest), shared folders, pause/resume, stop/start, snapshot and restore, named images, `fluxctl run` (cold and warm), a two-service stack, sandboxes (exec, files, TTL, warm pool and its refresh after an image update, concurrent creates, offline, allow-listed egress, speculate and changesets), nothing left running |
 | `scripts/oci-live-test.sh` | **PASS** with the `oci-boot` CI artifacts: container exit codes, uid, read-only root, exec, distroless argv exec, offline, allow-list, a private network between two sandboxes, `linux/amd64` under Rosetta, a warm-pool claim, TTL |
 | `scripts/vz-devices-live-test.sh` | **PASS** on a Debian 13 guest: extra disks on virtio, NVMe and USB, a host block device, an NBD export, USB hot-attach and detach, a console port both ways, a 1600x900 Linux display |
+| `scripts/macos-guest-live-test.sh` | Clones a prepared macOS guest template through the API, checks the reported address and SSH, deletes it; needs your own template (`FLUXVM_MACOS_TEMPLATE`), so CI does not run it |
 
-**Verified by hand only:** macOS guests (IPSW install, boot, clone, SSH; see "macOS guests"), not through the API or the live test. **Not verified:** multi-Mac clusters, Linux-only crates (`fluxvm-procbox`,
+**Verified by hand only:** the macOS IPSW install (see "macOS guests"); `apple.install` and `provision_*` have not run against a real IPSW through the API. **Not verified:** multi-Mac clusters, Linux-only crates (`fluxvm-procbox`,
 `fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent), and any Intel Mac. The hosted CI jobs for the `vz` pull requests
 have not all been green; see the pull requests for their state.
 
@@ -205,9 +206,10 @@ allows two macOS VMs at a time per Mac.
   `/Volumes/My Shared Files`; two folders with the same name get a `-2` suffix. Linux guests keep the `fs0`, `fs1`, … tags.
 - **Linux only:** `rosetta: true` adds a Rosetta share (the guest still mounts it and registers binfmt); `nested_virtualization: true`
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
-- **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
-- **Console log:** a Linux guest's serial console goes to the VM's `console.log`. Past `apple.serial_log_max_mib` (default 16)
-  the runner moves it to `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the
+- **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Attaching a disk image to a running guest is covered under
+  "Extra disks" and "Mac Studio options"; choosing and attaching a physical device is not built.
+- **Console log:** a Linux guest's serial console goes to the VM's `console.log`. Past `serial_log_max_mib` (default 16; a key
+  of the `[apple]` table in `fluxvm.toml`, not a request field) the runner moves it to `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the
   disk. `sandbox logs` reads both files; `GET /v1/vms/{id}/serial` follows the current one.
 
 ### Named console ports
@@ -291,7 +293,8 @@ fluxctl disk detach web scratch
 
 ## Mac Studio options
 
-These compile against the macOS 27 SDK and are validated at admission, but have **not been verified on hardware** yet.
+These compile against the macOS 27 SDK and are validated at admission. Except for USB disk hot-attach and the share swap, which
+`scripts/vz-devices-live-test.sh` and `scripts/oci-live-test.sh` exercise, they have **not been verified on hardware** yet.
 
 - **Several displays (macOS guests):** `display_count` 1 to 8 (default 1), each `display_width` x `display_height`.
 - **Clipboard (Linux guests):** `clipboard: true` adds a SPICE agent port; the guest needs `spice-vdagent`. Refused for macOS guests.
@@ -330,20 +333,27 @@ These compile against the macOS 27 SDK and are validated at admission, but have 
 | vCPUs, memory, raw disk, cloud-init, direct kernel boot (Linux guests) | tap / macvtap / netns / eBPF networking, UDP port forwards |
 | NAT networking, TCP port forwards, no-network mode, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
 | shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
-| guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug, data disks, cdroms |
+| guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
+| extra disks (image, block device, NBD; virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
 
 ## Honest limits
 
-- This is a preview-quality backend. Only Linux ARM64 guests have been booted.
+- This is a preview-quality backend. Linux ARM64 guests are what the live tests boot; macOS guests were booted by hand and cloned
+  through `scripts/macos-guest-live-test.sh`.
 - macOS guests are installed through the API or by hand, but finishing Setup Assistant still needs a person unless the host and guest
   are on macOS 27 (`provision_*`). The restore image is 26.6 GB and the installed disk about 24 GB, so plan for 55 GB or more free on
   the volume that holds them.
 - Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
   where it can.
+- Container warm-pool slots are hidden from `fluxctl ls` and `GET /v1/vms` unless you pass `--all` / `?all=true` or select
+  `fluxvm.oci-warm`. A sandbox claimed from a warm slot is not hibernated until it restarts, because its root disk is a hot-attached
+  USB disk.
+- The Mac's DHCP server keeps one lease per MAC for a day, so a deleted VM's MAC is handed to the next new VM (and with it the old
+  address), rather than filling the lease file.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
 - Private networks (`apple.networks`) are IPv4 /24s with static addresses: no DHCP, DNS or routing between networks. The switch runs
   in user space, so it is slower than the NAT card.

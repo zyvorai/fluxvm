@@ -23,6 +23,9 @@ How the control plane, the four backends and the image path fit together, and ho
             |
      KVM + TAP/bridge + Linux host
 
+On macOS the same control plane drives a fifth backend, `vz` (`fluxvm-apple`, Apple's Virtualization.framework through the
+`fluxvm-vz-runner` helper); see [macos.md](macos.md). It has no KVM, TAP or eBPF and is not part of the Linux diagram above.
+
 Image path:
 base image -> SHA256 -> native VMDK-to-raw / qemu-img fallback -> customize -> reusable template
                                       |
@@ -54,7 +57,7 @@ Network Fabric dataplane diagrams (packet decision and control-plane sequence):
 
 ## Project layout
 
-A Cargo workspace of **26 crates** (plus the [`python/`](../python/README.md) and [`go/`](../go/README.md) SDKs), structured for FluxVM's multi-node architecture.
+A Cargo workspace of **27 crates** (plus the [`python/`](../python/README.md) and [`go/`](../go/README.md) SDKs), structured for FluxVM's multi-node architecture.
 
 <details>
 <summary><b>Show the crate map</b></summary>
@@ -73,6 +76,7 @@ crates/
 ├── fluxvm-hypervisor            in-tree microVMM + `FluxVmBackend` (`fluxvm-hypervisor` binary)
 ├── fluxvm-apple                 macOS `vz` backend: supervises `fluxvm-vz-runner` (Virtualization.framework)
 ├── fluxvm-oci-init              PID 1 of container sandboxes on `vz` (boot an OCI rootfs) and the layer unpacker
+├── fluxvm-vz-switch             `fluxvm-vz-switch`: serves one private network between `vz` guests (`apple.networks`)
 ├── fluxvm-guest-protocol        wire types shared by the guest agent and its host client
 ├── fluxvm-guest-agent           in-guest AF_VSOCK agent binary (ping/exec/shutdown)
 ├── fluxvm-vsock-client          host-side vsock dialing (native for QEMU, UDS proxy for CH/Firecracker)
