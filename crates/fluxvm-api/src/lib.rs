@@ -1276,11 +1276,15 @@ async fn sandbox_fs_write(
 
 #[derive(Deserialize)]
 struct ProcessBody {
+    #[serde(default)]
     command: String,
     #[serde(default)]
     timeout_seconds: Option<u64>,
     #[serde(default)]
     policy: Option<fluxvm_guest_protocol::ExecPolicy>,
+    /// Run `argv` directly instead of `command` through a shell; needs the guest agent.
+    #[serde(default)]
+    process: Option<fluxvm_guest_protocol::ExecProcess>,
 }
 
 async fn sandbox_process(
@@ -1291,10 +1295,23 @@ async fn sandbox_process(
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
     m.ensure_running_for_request(id).await?;
-    Ok(Json(json!(
-        m.exec_with_policy(id, body.command, body.timeout_seconds, body.policy)
-            .await?
-    )))
+    let response = match body.process {
+        Some(_) if body.policy.is_some() || !body.command.is_empty() => {
+            return Err(anyhow::anyhow!(
+                "give either process (argv) or command (and policy), not both"
+            )
+            .into());
+        }
+        Some(process) => m.exec_process(id, process, body.timeout_seconds).await?,
+        None if body.command.is_empty() => {
+            return Err(anyhow::anyhow!("command or process is required").into());
+        }
+        None => {
+            m.exec_with_policy(id, body.command, body.timeout_seconds, body.policy)
+                .await?
+        }
+    };
+    Ok(Json(json!(response)))
 }
 
 #[derive(Deserialize)]

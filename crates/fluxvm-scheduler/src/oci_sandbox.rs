@@ -53,7 +53,8 @@ pub struct OciSandboxSpec {
     /// `uid[:gid]` or `name[:group]`. Default: the image's `User`, else 65534 (nobody).
     #[serde(default)]
     pub user: Option<String>,
-    /// Keep the image read-only (writes go to tmpfs and are lost on stop); `/tmp` and `/run` are tmpfs either way.
+    /// Mount the root read-only. `false` mounts the sandbox's own copy of the image read-write (kept until the sandbox is
+    /// deleted). `/tmp` and `/run` are tmpfs either way.
     #[serde(default = "default_true")]
     pub read_only_root: bool,
     /// `keep` (default) leaves the VM up for exec after the process exits; `poweroff` stops it.
@@ -176,7 +177,6 @@ pub(crate) fn build_create(
     Ok(create)
 }
 
-/// An OCI sandbox VM: exec and files only through its guest agent.
 /// `GET /v1/sandboxes/{id}/logs`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxLogs {
@@ -189,6 +189,7 @@ pub struct SandboxLogs {
     pub log: String,
 }
 
+/// An OCI sandbox VM: exec and files only through its guest agent.
 pub(crate) fn is_oci(vm: &VmRecord) -> bool {
     vm.request
         .apple

@@ -6,7 +6,7 @@
 
 use crate::{VmManager, procbox_sandbox};
 use anyhow::{Result, bail};
-use fluxvm_guest_protocol::{AgentRequest, AgentResponse, ExecPolicy};
+use fluxvm_guest_protocol::{AgentRequest, AgentResponse, ExecPolicy, ExecProcess};
 use uuid::Uuid;
 
 /// Parse a JSON exec policy (the `fluxvm-procbox` policy shape). Unknown
@@ -25,6 +25,31 @@ impl VmManager {
         timeout_seconds: Option<u64>,
         policy: Option<ExecPolicy>,
     ) -> Result<AgentResponse> {
+        self.exec_request(id, command, timeout_seconds, policy, None)
+            .await
+    }
+
+    /// Runs `process.argv` directly, with no shell (images without one, such as distroless). Needs the guest agent.
+    pub async fn exec_process(
+        &self,
+        id: Uuid,
+        process: ExecProcess,
+        timeout_seconds: Option<u64>,
+    ) -> Result<AgentResponse> {
+        process.validate().map_err(anyhow::Error::msg)?;
+        let command = process.argv.join(" ");
+        self.exec_request(id, command, timeout_seconds, None, Some(process))
+            .await
+    }
+
+    async fn exec_request(
+        &self,
+        id: Uuid,
+        command: String,
+        timeout_seconds: Option<u64>,
+        policy: Option<ExecPolicy>,
+        process: Option<ExecProcess>,
+    ) -> Result<AgentResponse> {
         let vm = self.get(id).await?;
         if let Some(spec) = procbox_sandbox::load_spec(&vm)? {
             if policy.is_some() {
@@ -32,10 +57,15 @@ impl VmManager {
                     "a per-exec policy is not supported on procbox sandboxes (they are already confined by their own spec)"
                 );
             }
+            if process.is_some() {
+                bail!("exec with argv is not supported on procbox sandboxes; pass a command");
+            }
             return self.procbox_exec(&vm, spec, command, timeout_seconds).await;
         }
         if vm.backend == fluxvm_core::model::BackendKind::Vz {
-            return self.vz_exec(&vm, command, timeout_seconds, policy).await;
+            return self
+                .vz_exec(&vm, command, timeout_seconds, policy, process)
+                .await;
         }
         let wait = std::time::Duration::from_secs(
             timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS) + 5,
@@ -46,7 +76,7 @@ impl VmManager {
                 command,
                 timeout_seconds,
                 policy,
-                process: None,
+                process,
             },
             wait,
         )

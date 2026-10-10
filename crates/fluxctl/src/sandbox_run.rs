@@ -24,7 +24,7 @@ pub struct RunArgs {
     pub image: String,
     #[arg(long)]
     pub name: Option<String>,
-    /// Sandbox size: small, medium or large.
+    /// Sandbox size: tiny (1 vCPU, 512 MiB), small or standard; see docs/agent-density.md.
     #[arg(long)]
     pub profile: Option<String>,
     #[arg(long)]
@@ -48,7 +48,7 @@ pub struct RunArgs {
     /// Replace the image's entrypoint (space-separated argv).
     #[arg(long)]
     pub entrypoint: Option<String>,
-    /// Let the process write to the image (to a tmpfs overlay, lost on stop).
+    /// Mount the sandbox's own copy of the image read-write (default: read-only; `/tmp` and `/run` are tmpfs either way).
     #[arg(long)]
     pub writable_root: bool,
     /// Delete the sandbox when the process has exited.

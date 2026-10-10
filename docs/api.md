@@ -105,7 +105,7 @@ GET    /v1/sandboxes
 POST   /v1/sandboxes/{id}/snapshot
 POST   /v1/sandboxes/{id}/fs/read
 POST   /v1/sandboxes/{id}/fs/write
-POST   /v1/sandboxes/{id}/process        # {"command", "timeout_seconds"?, "policy"?}; see guest-exec-policy.md
+POST   /v1/sandboxes/{id}/process        # {"command", "timeout_seconds"?, "policy"?} or {"process": {"argv", "env"?, "cwd"?}} (no shell; agent); see guest-exec-policy.md
 GET    /v1/sandboxes/{id}/logs           # ?lines=N (200); console tail + container exit_code / init_error
 POST   /v1/sandboxes/{id}/dry-run        # {"command", "paths"}; procbox: workspace copy; flux-vm/qemu/firecracker: snapshot/restore
 POST   /v1/sandboxes/{id}/speculate      # {"command", "timeout_seconds"?, "paths"?, "ttl_seconds"?}; admin; returns a pending changeset

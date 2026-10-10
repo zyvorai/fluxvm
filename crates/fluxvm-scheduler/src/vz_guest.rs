@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use fluxvm_apple::ssh::{self, GuestSsh};
 use fluxvm_core::model::{AgentSpec, CreateVmRequest, VmRecord};
-use fluxvm_guest_protocol::{AgentRequest, AgentResponse, ExecPolicy};
+use fluxvm_guest_protocol::{AgentRequest, AgentResponse, ExecPolicy, ExecProcess};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -138,13 +138,15 @@ impl VmManager {
         command: String,
         timeout_seconds: Option<u64>,
         policy: Option<ExecPolicy>,
+        process: Option<ExecProcess>,
     ) -> Result<AgentResponse> {
         let secs = timeout_seconds.unwrap_or(fluxvm_guest_protocol::DEFAULT_EXEC_TIMEOUT_SECS);
+        let needs_agent = policy.is_some() || process.is_some();
         let request = AgentRequest::Exec {
             command: command.clone(),
             timeout_seconds: Some(secs),
-            policy: policy.clone(),
-            process: None,
+            policy,
+            process,
         };
         if crate::oci_sandbox::is_oci(vm) {
             return self.oci_agent(vm, request, Duration::from_secs(secs)).await;
@@ -152,8 +154,10 @@ impl VmManager {
         if let Some(r) = self.vz_agent(vm, request, Duration::from_secs(secs)).await {
             return Ok(r);
         }
-        if policy.is_some() {
-            bail!("a per-exec policy needs the vsock guest agent, which this guest does not run");
+        if needs_agent {
+            bail!(
+                "a per-exec policy or argv exec needs the vsock guest agent, which this guest does not run"
+            );
         }
         let out = ssh::exec(&self.vz_guest(vm)?, &command, Duration::from_secs(secs)).await?;
         Ok(AgentResponse::Exec {
