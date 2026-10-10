@@ -31,6 +31,7 @@
   .pill { position:absolute; left:60px; bottom:40px; display:flex; gap:10px; z-index:3; }
   .pill span { font-family:var(--mono); font-size:13.5px; font-weight:700; padding:7px 13px; border-radius:18px; border:1.5px solid rgba(255,255,255,.2); color:#e5e5ea; background:rgba(0,0,0,.6); }
   .pill span.b { background:var(--blue); border-color:var(--blue); color:#fff; box-shadow:0 0 24px rgba(0,113,227,.55); }
+  .pill span.mac { color:#fff; border-color:rgba(191,90,242,.7); background:linear-gradient(90deg,rgba(94,92,230,.55),rgba(191,90,242,.55)); box-shadow:0 0 22px rgba(191,90,242,.35); }
   .art { position:absolute; left:520px; top:0; width:680px; height:630px; z-index:2; }
   .art svg { display:block; }
   #labels { position:absolute; inset:0; z-index:4; pointer-events:none; }
@@ -52,10 +53,10 @@
   <div class="brand"><svg viewBox="0 0 64 64" width="30" height="30" aria-hidden="true"><defs><linearGradient id="zb" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#ff5a15"/><stop offset="1" stop-color="#cc420a"/></linearGradient></defs><rect width="64" height="64" rx="15" fill="url(#zb)"/><path d="M18.5,20.5 45.5,20.5 18.5,43.5 45.5,43.5" fill="none" stroke="#fff" stroke-width="8.3" stroke-linecap="round" stroke-linejoin="round"/></svg><b>Zyvor</b><span>&middot;</span><span>VM control plane</span></div>
   <div class="word">FluxVM</div>
   <div class="tag">Run real VMs.<br><em>With a real API.</em></div>
-  <div class="lede">One Rust control plane and REST API for Firecracker, Cloud Hypervisor, QEMU/KVM and its own KVM hypervisor. No libvirtd, no XML.</div>
-  <div class="stats"><div class="stat"><b>4</b><span>VM backends</span></div><div class="stat"><b>24</b><span>Rust crates</span></div><div class="stat"><b>3</b><span>SDKs: Py/Go/TS</span></div></div>
+  <div class="lede">One Rust control plane and REST API for Firecracker, Cloud Hypervisor, QEMU/KVM, its own KVM hypervisor and, on a Mac, Apple's Virtualization.framework. No libvirtd, no XML.</div>
+  <div class="stats"><div class="stat"><b>5</b><span>VM backends</span></div><div class="stat"><b>2</b><span>Linux + macOS</span></div><div class="stat"><b>3</b><span>SDKs: Py/Go/TS</span></div></div>
 </div>
-<div class="pill"><span class="b">github.com/zyvorai/zyvor-fluxvm</span><span>Apache-2.0</span></div>
+<div class="pill"><span class="b">github.com/zyvorai/zyvor-fluxvm</span><span class="mac">vz &middot; macOS virtualization</span><span>Apache-2.0</span></div>
 <script>
 var Z = (function () {
   var NS = 'http://www.w3.org/2000/svg', svg = document.getElementById('art'), labels = document.getElementById('labels');
@@ -69,7 +70,7 @@ var Z = (function () {
     c: { blue: '#0071e3', signal: '#2997ff', cyan: '#64d2ff', green: '#30d158', amber: '#ff9f0a', red: '#ff453a', violet: '#bf5af2', teal: '#40c8e0', indigo: '#5e5ce6', pink: '#ff375f', white: '#f5f5f7', grey: '#8e8e93' } };
 })();
 (function () {
-// FluxVM: dipole flux around one control-plane core. The four VM backends ride on the field lines.
+// FluxVM: dipole flux around one control-plane core. The five VM backends ride on the field lines.
 var C = Z.c;
 var defs = Z.el('defs', {});
 defs.innerHTML = '<filter id="fxGl" filterUnits="userSpaceOnUse" x="-50" y="-50" width="780" height="730"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>' +
@@ -131,7 +132,8 @@ var nodes = [
   { L: 170, side: -1, t: 55, n: 'Firecracker', c: C.cyan, up: true },
   { L: 262, side: 1, t: 60, n: 'Cloud Hypervisor', c: C.teal, up: true },
   { L: 232, side: -1, t: 128, n: 'QEMU/KVM', c: C.signal, up: false },
-  { L: 200, side: 1, t: 128, n: 'FluxVM hypervisor', c: C.violet, up: false }
+  { L: 200, side: 1, t: 128, n: 'FluxVM hypervisor', c: C.violet, up: false },
+  { L: 142, side: 1, t: 92, n: 'vz &middot; Apple Virtualization', c: C.pink, up: true }
 ];
 nodes.forEach(function (nd) {
   var th = nd.t * Math.PI / 180, r = nd.L * Math.sin(th) * Math.sin(th);

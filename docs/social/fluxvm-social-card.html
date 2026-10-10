@@ -34,6 +34,7 @@
   .attr .why { margin-left:auto; color:#a1a1a6; font-size:15px; letter-spacing:.06em; text-transform:uppercase; }
   .chips { margin-top:auto; padding-top:22px; display:flex; flex-wrap:wrap; gap:10px; }
   .chip { font-size:20px; font-weight:700; padding:6px 16px; border-radius:22px; background:var(--blue); color:#fff; border:1.5px solid var(--blue); }
+  .chip.m { background:linear-gradient(90deg,#5e5ce6,#bf5af2); border-color:#a35ef0; }
   .chip.g { background:#e8f2fd; color:var(--deep); border:1.5px solid #b9d7f7; }
   .foot { margin-top:18px; padding-top:16px; border-top:1px solid var(--hair); display:flex; align-items:center; font-family:var(--mono); font-size:22px; color:var(--soft); }
   .foot b { color:var(--ink); }
@@ -44,13 +45,13 @@
 <div class="bar"></div>
 <div class="wrap">
   <div class="top"><img src="zyvor-logo.svg" alt=""><b>Zyvor</b><span>&middot;</span><span>FluxVM</span><span class="r">Replace libvirt/virsh locally</span></div>
-  <h1>One spec. <em>Four</em> hypervisors.</h1>
-  <p class="sub">Pick QEMU, Cloud Hypervisor, Firecracker, or flux-vm per workload. Same JSON VM spec, REST API, and fluxctl verbs on every backend.</p>
+  <h1>One spec. <em>Five</em> hypervisors.</h1>
+  <p class="sub">Pick QEMU, Cloud Hypervisor, Firecracker or flux-vm on Linux, and vz (Apple Virtualization.framework) on a Mac mini or Mac Studio. Same JSON VM spec, REST API, and fluxctl verbs on every backend.</p>
   <div class="flow">
     <div class="step k"><span class="lane">SPEC</span><span class="n">1</span>
       <h3>JSON VM model</h3><p>No XML — <b>fluxctl create --spec</b> or POST to the API.</p></div>
     <div class="step a"><span class="lane">BOOT</span><span class="n">2</span>
-      <h3>Backend trait</h3><p>Auto or explicit backend; qcow2 CoW overlays and jailer where applicable.</p></div>
+      <h3>Backend trait</h3><p>Auto picks KVM on Linux and <b>vz</b> on a Mac; macOS and Linux guests, APFS clones.</p></div>
     <div class="step c"><span class="lane">EXEC</span><span class="n">3</span>
       <h3>vsock agent</h3><p><b>fluxctl exec</b>, PTY console, file copy — no SSH path required.</p></div>
     <div class="step o"><span class="lane">NET</span><span class="n">4</span>
@@ -58,9 +59,10 @@
     <div class="step o2"><span class="lane">CLEAN</span><span class="n">5</span>
       <h3>ttl_seconds</h3><p>Delete on schedule; operator reconciles CRDs on real k3s clusters.</p></div>
   </div>
-  <div class="attr"><span class="tag">MATURITY</span><span>Verified on real k3s &nbsp;·&nbsp; Secure Containers = GA &nbsp;·&nbsp; not KubeVirt-compatible</span><span class="why">Honest</span></div>
+  <div class="attr"><span class="tag">MATURITY</span><span>Verified on real k3s &nbsp;&middot;&nbsp; Secure Containers = GA &nbsp;&middot;&nbsp; vz verified on Apple M4</span><span class="why">Honest</span></div>
   <div class="chips">
-    <span class="chip">Direct datapath −31% latency</span><span class="chip">Ceph RBD verified</span>
+    <span class="chip m">vz &middot; macOS virtualization</span><span class="chip m">Mac mini + Mac Studio</span>
+    <span class="chip">Direct datapath &minus;31% latency</span>
     <span class="chip g">Multi-host fleet</span><span class="chip g">DisposableVm CRD</span><span class="chip g">Apache-2.0</span>
   </div>
   <div class="foot"><span><b>github.com/zyvorai/fluxvm</b></span><span class="r">Evidence-linked claims only</span></div>
