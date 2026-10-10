@@ -851,6 +851,13 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             case "usb-detach":
                 guard let id = o["uuid"] as? String else { response = ["ok": false, "error": "usb-detach needs uuid"]; sem.signal(); break }
                 self.detachUSB(uuid: id) { response = $0; sem.signal() }
+            case "usb-physical-list":
+                self.listPhysicalUSB { response = $0; sem.signal() }
+            case "usb-physical-attach":
+                guard let id = (o["registry_id"] as? NSNumber)?.uint64Value else {
+                    response = ["ok": false, "error": "usb-physical-attach needs registry_id"]; sem.signal(); break
+                }
+                self.attachPhysicalUSB(registryID: id) { response = $0; sem.signal() }
             case "share-set":
                 // Points a running virtiofs share at another directory (warm-pool slots boot on placeholders).
                 guard let tag = o["tag"] as? String, let path = o["path"] as? String, let vm = self.vm else { response = ["ok": false, "error": "share-set needs tag, path and a running guest"]; sem.signal(); break }
@@ -1164,8 +1171,14 @@ final class EgressDelegate: NSObject, VZVirtioSocketListenerDelegate {
 // MARK: Entry point
 
 let args = CommandLine.arguments
+if args.count == 2 && args[1] == "host-capabilities" {
+    do {
+        let data = try JSONEncoder().encode(fluxAppleHostCapabilities())
+        FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10])); exit(0)
+    } catch { fail("cannot encode host capabilities: \(error.localizedDescription)", code: 2) }
+}
 guard args.count == 4, ["run", "install", "check"].contains(args[1]), args[2] == "--config" else {
-    fail("usage: fluxvm-vz-runner run|install|check --config <json>", code: 2)
+    fail("usage: fluxvm-vz-runner host-capabilities | run|install|check --config <json>", code: 2)
 }
 guard let data = FileManager.default.contents(atPath: args[3]), let cfg = try? JSONDecoder().decode(Config.self, from: data) else { fail("cannot read config \(args[3])", code: 2) }
 let runner = Runner(cfg)

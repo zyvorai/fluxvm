@@ -21,6 +21,9 @@ use chrono::{DateTime, Utc};
 use fluxvm_core::agent_density::DensityReport;
 use fluxvm_core::pressure_admission::PressureLevel;
 use fluxvm_core::security::{NodeSecurityCapabilities, SecurityProfile};
+use fluxvm_scheduler::apple_placement::{
+    AppleHostCaps, ApplePlacementRequest, score as apple_score,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -79,6 +82,9 @@ pub struct NodeInfo {
     /// `None` from a node agent that predates it, or a daemon that does not serve it.
     #[serde(default)]
     pub density: Option<DensityReport>,
+    /// Apple VZ placement capabilities; None for Linux/non-VZ nodes and old agents.
+    #[serde(default)]
+    pub apple: Option<AppleHostCaps>,
 }
 
 impl NodeInfo {
@@ -170,6 +176,8 @@ pub struct RegisterRequest {
     pub security: NodeSecurityCapabilities,
     #[serde(default)]
     pub density: Option<DensityReport>,
+    #[serde(default)]
+    pub apple: Option<AppleHostCaps>,
 }
 
 #[derive(Debug)]
@@ -347,6 +355,7 @@ fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
             labels: req.labels,
             security: req.security,
             density: req.density,
+            apple: req.apple,
         },
     );
 }
@@ -375,6 +384,7 @@ fn node_json(n: &NodeInfo) -> Value {
         "free_memory_mib": n.free_memory_mib(),
         "security": n.security,
         "density": n.density,
+        "apple": n.apple,
     })
 }
 
@@ -557,20 +567,45 @@ fn pick_best_capacity_excluding(
     selector: &HashMap<String, String>,
     profile: SecurityProfile,
 ) -> Option<NodeInfo> {
+    pick_best_capacity_excluding_apple(
+        nodes,
+        request_vcpus,
+        request_mem,
+        exclude,
+        selector,
+        profile,
+        None,
+    )
+}
+
+fn pick_best_capacity_excluding_apple(
+    nodes: &HashMap<String, NodeInfo>,
+    request_vcpus: u32,
+    request_mem: u64,
+    exclude: &HashSet<String>,
+    selector: &HashMap<String, String>,
+    profile: SecurityProfile,
+    apple: Option<&ApplePlacementRequest>,
+) -> Option<NodeInfo> {
     nodes
         .values()
         .filter(|n| !exclude.contains(&n.name))
         .filter(|n| n.matches_selector(selector))
         .filter(|n| n.security.supports(profile).is_ok())
         .filter_map(|n| {
-            n.capacity_score(request_vcpus, request_mem)
-                .map(|score| (score, n))
+            let generic = n.capacity_score(request_vcpus, request_mem)?;
+            let ascore = match apple {
+                Some(r) => apple_score(n.apple.as_ref()?, r)?,
+                None => 0,
+            };
+            Some(((ascore, generic), n))
         })
         .max_by(|(a, _), (b, _)| {
-            a.2.cmp(&b.2)
-                .then(a.0.cmp(&b.0))
-                .then(a.1.cmp(&b.1))
-                .then(a.3.cmp(&b.3).reverse())
+            a.0.cmp(&b.0)
+                .then(a.1.2.cmp(&b.1.2))
+                .then(a.1.0.cmp(&b.1.0))
+                .then(a.1.1.cmp(&b.1.1))
+                .then(a.1.3.cmp(&b.1.3).reverse())
         })
         .map(|(_, n)| n.clone())
 }
@@ -620,6 +655,40 @@ fn extract_selector(body: &mut Value) -> HashMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn apple_placement_request(
+    body: &Value,
+    vcpus: u32,
+    memory_mib: u64,
+) -> Option<ApplePlacementRequest> {
+    if body.get("backend").and_then(Value::as_str) != Some("vz") {
+        return None;
+    }
+    let apple = body.get("apple");
+    Some(ApplePlacementRequest {
+        vcpus,
+        memory_mib,
+        macos_guest: apple
+            .and_then(|a| a.get("guest_os"))
+            .and_then(Value::as_str)
+            == Some("macos"),
+        needs_nested: apple
+            .and_then(|a| a.get("nested_virtualization"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        needs_vmnet: apple
+            .and_then(|a| a.get("vmnet"))
+            .is_some_and(|v| !v.is_null()),
+        needs_custom_virtio: apple
+            .and_then(|a| a.get("custom_virtio"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        bridge_interface: apple
+            .and_then(|a| a.get("bridge_interface"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 fn request_sizes(body: &Value) -> (u32, u64) {
@@ -777,6 +846,7 @@ async fn create_vm(
 
     let (req_vcpus, req_mem) = request_sizes(&body);
     let profile = extract_security_profile(&body)?;
+    let apple_request = apple_placement_request(&body, req_vcpus, req_mem);
 
     if let Some(name) = requested_node {
         let target = {
@@ -798,7 +868,15 @@ async fn create_vm(
     loop {
         let target = {
             let nodes = fleet.nodes.lock().await;
-            pick_best_capacity_excluding(&nodes, req_vcpus, req_mem, &tried, &selector, profile)
+            pick_best_capacity_excluding_apple(
+                &nodes,
+                req_vcpus,
+                req_mem,
+                &tried,
+                &selector,
+                profile,
+                apple_request.as_ref(),
+            )
         };
         let Some(target) = target else {
             return Err(last_unreachable.unwrap_or_else(|| {
@@ -1088,6 +1166,7 @@ mod tests {
             labels: HashMap::new(),
             security: NodeSecurityCapabilities::default(),
             density: None,
+            apple: None,
         }
     }
 
@@ -1167,6 +1246,7 @@ mod tests {
             labels: HashMap::new(),
             security: NodeSecurityCapabilities::default(),
             density: None,
+            apple: None,
         }
     }
 
@@ -1297,6 +1377,7 @@ mod tests {
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
                 density: None,
+                apple: None,
             },
         );
         assert!(nodes["a"].cordoned);
@@ -1317,6 +1398,7 @@ mod tests {
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
                 density: None,
+                apple: None,
             },
         );
         assert!(!nodes["new"].cordoned);
@@ -1573,6 +1655,7 @@ mod tests {
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
                 density: None,
+                apple: None,
             },
         );
         assert!(!nodes["a"].cordoned);

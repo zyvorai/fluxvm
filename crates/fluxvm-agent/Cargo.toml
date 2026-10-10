@@ -16,6 +16,8 @@ path = "src/main.rs"
 anyhow = "1"
 axum = "0.8"
 fluxvm-core = { path = "../fluxvm-core" }
+fluxvm-apple = { path = "../fluxvm-apple" }
+fluxvm-scheduler = { path = "../fluxvm-scheduler" }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }

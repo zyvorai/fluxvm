@@ -9,9 +9,11 @@
 
 mod capability;
 mod control;
+mod host_caps;
 pub mod macos_install;
 mod runner;
 pub mod ssh;
+mod usb_passthrough;
 pub mod vznet;
 
 pub use capability::{
@@ -19,11 +21,13 @@ pub use capability::{
     with_guest_reporting, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
+pub use host_caps::{AppleHostCapabilities, host_capabilities};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig,
     adopt_macos_template, clone_file, console_port_socket, find_runner, ip_file, oci_meta_dir,
     read_guest_ip, release_mac, snapshot_dir, write_oci_meta_as,
 };
+pub use usb_passthrough::{physical_usb_attach, physical_usb_list};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;

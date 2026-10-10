@@ -1,10 +1,5 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
-//
-// macOS 26+ custom vmnet networks (DHCP reservation, TCP/UDP host forwarding) and the macOS 27 custom
-// Virtio hook. A vmnet network object is private to the process that created it (VZ refuses to start an
-// interface on another process's network), so each runner owns its own network; sharing one network
-// between VMs needs the broker in docs/VMNET_BROKER.md, which is not built.
 import Foundation
 import Virtualization
 #if canImport(vmnet)
@@ -19,22 +14,23 @@ struct FluxVMNetForward: Codable {
 }
 
 struct FluxVMNetSpec: Codable {
-    let mode: String            // "shared" | "host-only"
+    let name: String?            // named network => shared through fluxvm-vmnetd
+    let mode: String             // "shared" | "host-only"
     let subnet: String
     let mask: String
-    let dhcp_start: String?     // accepted for wire compatibility; vmnet has no pool API, admission rejects it
+    let dhcp_start: String?
     let dhcp_end: String?
     let reserved_ip: String?
     let forwards: [FluxVMNetForward]?
 }
 
 #if canImport(vmnet)
-/// Keeps the network alive for the life of the runner process (the attachment does not retain it for us).
 var fluxVMNetNetworkKeepAlive: [Any] = []
 
 @available(macOS 26.0, *)
 final class FluxVMNetNetwork {
     let network: vmnet_network_ref
+    let brokerName: String?
 
     private static func fail(_ what: String, _ status: vmnet_return_t? = nil) -> NSError {
         let detail = status.map { " (vmnet status \($0.rawValue))" } ?? ""
@@ -55,6 +51,13 @@ final class FluxVMNetNetwork {
     }
 
     init(spec: FluxVMNetSpec, macAddress: String?) throws {
+        if let name = spec.name, !name.isEmpty {
+            self.network = try FluxVmnetBrokerClient().acquire(name: name, spec: spec, macAddress: macAddress)
+            self.brokerName = name
+            fluxVMNetNetworkKeepAlive.append(self)
+            return
+        }
+
         var status = vmnet_return_t.VMNET_FAILURE
         let mode: vmnet_mode_t = spec.mode == "host-only" ? .VMNET_HOST_MODE : .VMNET_SHARED_MODE
         guard let cfg = vmnet_network_configuration_create(mode, &status), status == .VMNET_SUCCESS else {
@@ -69,7 +72,6 @@ final class FluxVMNetNetwork {
         if spec.dhcp_start != nil || spec.dhcp_end != nil {
             throw Self.fail("a custom DHCP range is not supported by the vmnet SDK; use reserved_ip")
         }
-
         if let ip = spec.reserved_ip {
             guard let macAddress else { throw Self.fail("reserved_ip needs the VM to have a MAC address") }
             var mac = try Self.parseMAC(macAddress)
@@ -77,7 +79,6 @@ final class FluxVMNetNetwork {
             status = vmnet_network_configuration_add_dhcp_reservation(cfg, &mac, &a)
             guard status == .VMNET_SUCCESS else { throw Self.fail("add_dhcp_reservation failed", status) }
         }
-
         for f in spec.forwards ?? [] {
             var a = try Self.addr(f.guest_ip, "forward guest_ip")
             let proto = f.protocol.lowercased() == "udp" ? UInt8(IPPROTO_UDP) : UInt8(IPPROTO_TCP)
@@ -85,19 +86,22 @@ final class FluxVMNetNetwork {
                 cfg, proto, sa_family_t(AF_INET), f.guest_port, f.host_port, &a)
             guard status == .VMNET_SUCCESS else { throw Self.fail("add_port_forwarding_rule failed", status) }
         }
-
         guard let net = vmnet_network_create(cfg, &status), status == .VMNET_SUCCESS else {
             throw Self.fail("could not create network (needs the com.apple.vm.networking entitlement)", status)
         }
         self.network = net
+        self.brokerName = nil
         fluxVMNetNetworkKeepAlive.append(self)
+    }
+
+    deinit {
+        if let brokerName { FluxVmnetBrokerClient().release(name: brokerName) }
     }
 
     func attachment() -> VZVmnetNetworkDeviceAttachment {
         VZVmnetNetworkDeviceAttachment(network: network)
     }
 }
-
 #endif
 
 @available(macOS 27.0, *)
