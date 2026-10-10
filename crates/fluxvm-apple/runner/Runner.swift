@@ -720,7 +720,9 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         try self.configureCustomVirtio(c)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        #if compiler(>=6.4)
         if #available(macOS 27.0, *) { c.label = fluxVMLabel(cfg.label, id: cfg.id) }
+        #endif
         try c.validate()
         lastConfiguration = c
         return c
@@ -767,11 +769,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         let view = VZVirtualMachineView(frame: NSRect(
             x: 0, y: 0, width: initialWidth, height: initialWidth / aspect
         ))
+        #if compiler(>=6.4)
         if #available(macOS 27.0, *) {
             view.adaptor = VZVirtualMachineViewAdaptor(virtualMachine: machine)
         } else {
             view.virtualMachine = machine
         }
+        #else
+        view.virtualMachine = machine
+        #endif
         view.capturesSystemKeys = true
         view.automaticallyReconfiguresDisplay = true
         let w = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
