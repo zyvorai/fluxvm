@@ -85,12 +85,22 @@ extension Runner {
         }
     }
 
-    /// `secure-boot-status`: whether Secure Boot is on and how many signature lists each database holds.
+    /// `secure-boot-status`: whether Secure Boot is on and how many signatures each database holds. While the VM
+    /// runs, the store is locked, so the answer is the state read just before it started (`"as_of": "boot"`).
     func secureBootStatus() -> [String: Any] {
         guard #available(macOS 27.0, *) else { return ["ok": false, "error": "EFI Secure Boot needs a macOS 27+ host"] }
         guard let store = (lastConfiguration?.bootLoader as? VZEFIBootLoader)?.variableStore else {
             return ["ok": false, "error": "this VM does not boot through EFI"]
         }
+        if let vm, vm.state != .stopped, vm.state != .error, var cached = secureBootAtBoot {
+            cached["as_of"] = "boot"
+            return cached
+        }
+        return readSecureBoot(store)
+    }
+
+    func readSecureBoot(_ store: VZEFIVariableStore) -> [String: Any] {
+        guard #available(macOS 27.0, *) else { return ["ok": false, "error": "EFI Secure Boot needs a macOS 27+ host"] }
         do {
             let sigs = try store.enrolledSecureBootSignatures
             func count(_ l: [VZEFISignatureList]) -> Int { l.reduce(0) { $0 + $1.signatures.count } }
