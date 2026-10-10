@@ -378,6 +378,21 @@ fn secure_boot_or_tpm_backend_error(req: &CreateVmRequest) -> Option<String> {
     None
 }
 
+/// Adds the guest agent's token file to a vz guest's cloud-init, replacing any earlier copy.
+fn vz_agent_token_via_cloud_init(req: &mut CreateVmRequest) {
+    let Some(token) = req.agent.as_ref().and_then(|a| a.token.clone()) else {
+        return;
+    };
+    let path = fluxvm_guest_protocol::TOKEN_FILE_PATH;
+    let ci = req.cloud_init.get_or_insert_with(Default::default);
+    ci.write_files.retain(|f| f.path != path);
+    ci.write_files.push(fluxvm_core::model::CloudInitFile {
+        path: path.to_owned(),
+        content: token,
+        permissions: Some("0600".to_owned()),
+    });
+}
+
 /// VM-state snapshot save/restore: QEMU (`savevm`/`-loadvm`), Cloud Hypervisor
 /// (snapshot dir + `--restore`), Firecracker (`/snapshot/create`+`/load`), and
 /// FluxVm (hypervisor control SnapshotSave/Restore — FC or FLUXKVM1 by engine).
@@ -2172,6 +2187,10 @@ impl VmManager {
                 agent.token = Some(Uuid::new_v4().to_string());
             }
         }
+        // guestkit cannot open a disk on macOS, so a vz guest gets its token from cloud-init instead.
+        if needs_cid && req.backend == BackendKind::Vz {
+            vz_agent_token_via_cloud_init(&mut req);
+        }
 
         let placeholder = VmRecord {
             id,
@@ -2249,7 +2268,11 @@ impl VmManager {
                 // Claimed before provisioning writes the agent token into it.
                 self.claim_shared_disk(&req.image, id, &[]).await?;
             }
-            let agent_token = req.agent.as_ref().and_then(|a| a.token.as_deref());
+            let agent_token = req
+                .agent
+                .as_ref()
+                .and_then(|a| a.token.as_deref())
+                .filter(|_| req.backend != BackendKind::Vz);
             let provisioned = if req.backend == BackendKind::Vz
                 && fluxvm_apple::macos_install::is_macos_install(&req)
             {
@@ -5095,6 +5118,26 @@ async fn wait_for_agent_ready(vm: &VmRecord) -> Result<()> {
 mod tests {
     use super::*;
     use fluxvm_core::model::NetworkSpec;
+
+    #[test]
+    fn vz_agent_token_is_written_by_cloud_init_once() {
+        let mut r = req(BackendKind::Vz, None, None);
+        vz_agent_token_via_cloud_init(&mut r);
+        assert!(r.cloud_init.is_none(), "no agent, nothing to write");
+        r.agent = Some(fluxvm_core::model::AgentSpec {
+            enabled: true,
+            port: fluxvm_guest_protocol::DEFAULT_PORT,
+            token: Some("t1".into()),
+        });
+        vz_agent_token_via_cloud_init(&mut r);
+        r.agent.as_mut().unwrap().token = Some("t2".into());
+        vz_agent_token_via_cloud_init(&mut r);
+        let files = &r.cloud_init.unwrap().write_files;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, fluxvm_guest_protocol::TOKEN_FILE_PATH);
+        assert_eq!(files[0].content, "t2");
+        assert_eq!(files[0].permissions.as_deref(), Some("0600"));
+    }
 
     fn req(backend: BackendKind, kernel: Option<&str>, firmware: Option<&str>) -> CreateVmRequest {
         CreateVmRequest {

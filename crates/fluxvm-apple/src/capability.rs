@@ -183,6 +183,11 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                 "apple.rosetta, apple.nested_virtualization and apple.clipboard are Linux-guest features"
             );
         }
+        if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
+            && req.agent.as_ref().is_some_and(|a| a.enabled)
+        {
+            bail!("agent.enabled needs a Linux guest: fluxvm-guest-agent is a Linux binary");
+        }
         if apple.bridge_interface.as_deref().is_some_and(str::is_empty) {
             bail!("apple.bridge_interface cannot be empty");
         }
@@ -628,6 +633,15 @@ mod tests {
             let err = validate_request(&req(json)).expect_err(json).to_string();
             assert!(err.contains(needle), "{json}: {err}");
         }
+    }
+
+    #[test]
+    fn guest_agent_is_linux_only() {
+        let agent = r#""agent":{"enabled":true}"#;
+        assert!(validate_request(&req(agent)).is_ok());
+        let mac = r#""agent":{"enabled":true},"apple":{"guest_os":"macos"}"#;
+        let err = validate_request(&req(mac)).unwrap_err().to_string();
+        assert!(err.contains("Linux guest"), "{err}");
     }
 
     #[test]
