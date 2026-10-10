@@ -27,6 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libsystemd-dev pkg-config
       - run: ./scripts/ci-fmt-check.sh
       - run: cargo test -p fluxvm-core
       - run: FLUXVM_SKIP_VZ_RUNNER=1 cargo test -p fluxvm-apple
