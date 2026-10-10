@@ -190,7 +190,8 @@ allows two macOS VMs at a time per Mac.
 ```
 
 - **Display:** `display_width` 800 to 5120 (default 2560), `display_height` 600 to 2880 (default 1600), `display_ppi` 72 to 300 (default 220).
-  With `window: true` the guest follows the window as it is resized.
+  With `window: true` the guest follows the window as it is resized. Linux guests use `display_width` and `display_height` for
+  their virtio-gpu scanout too (they used a fixed 1280x800 before).
 - **Audio:** output to the host's default device is on by default. `microphone` is off by default; turning it on makes macOS ask for
   microphone access.
 - **Shared folders on macOS guests** (macOS 13+ host): all entries share one automount device, so they appear under
@@ -198,6 +199,26 @@ allows two macOS VMs at a time per Mac.
 - **Linux only:** `rosetta: true` adds a Rosetta share (the guest still mounts it and registers binfmt); `nested_virtualization: true`
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
 - **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
+- **Console log:** a Linux guest's serial console goes to the VM's `console.log`. Past 16 MiB the runner moves it to
+  `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the disk. `GET
+  /v1/vms/{id}/serial` and `sandbox logs` read the current file only.
+
+### Named console ports
+
+`apple.console_ports` (Linux guests, up to 8) adds virtio console ports for a byte stream between host and guest that needs no
+network and no agent, for example a debug shell, a log pipe or a custom control channel:
+
+```json
+"apple": {"console_ports": ["agent", "debug"]}
+```
+
+- **Guest:** each port appears as `/dev/virtio-ports/<name>` (udev creates the link; without udev, find the name in
+  `/sys/class/virtio-ports/vport*/name`).
+- **Host:** the runner bridges each port to a unix socket, `/tmp/fluxvm-<uid>/<vm id>.port-<name>` (mode 0600). One client at a
+  time; a new client replaces the old one. Guest output while no client is connected is dropped.
+- **Clients:** `fluxctl port-connect <vm> <name>` connects stdin and stdout (Ctrl-] detaches), locally or with `--server`. Over
+  REST, the websocket `GET /v1/vms/{id}/ports/{name}` (admin) carries raw bytes both ways.
+- **Names:** 1-32 of `a-z`, `0-9`, `.`, `-` and `_`, starting with a letter or digit. Ports are fixed when the VM starts.
 
 ## Private networks between guests
 

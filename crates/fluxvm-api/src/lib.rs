@@ -589,6 +589,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
         .route("/v1/vms/{id}/console", get(agent_console))
         .route("/v1/vms/{id}/serial", get(serial_console))
+        .route("/v1/vms/{id}/ports/{name}", get(console_port))
         .route("/v1/vms/{id}/qga/ping", post(qga_ping))
         .route(
             "/v1/vms/{id}/qga/network-interfaces",
@@ -4042,6 +4043,19 @@ async fn serial_console(
         return Ok(ws.on_upgrade(move |socket| relay_log_tail(socket, file)));
     }
     let stream = m.open_serial(id).await?;
+    Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
+/// Raw bytes to and from a `vz` VM's named console port (`apple.console_ports`). Binary and text frames are both written
+/// verbatim; a new connection replaces the previous one.
+async fn console_port(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let stream = m.open_console_port(id, &name).await?;
     Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
 }
 

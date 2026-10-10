@@ -48,6 +48,7 @@ DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file (or overlay); only u
                                          # (virtio|nvme|usb); applies at the next start (a USB image disk at once); see macos.md#extra-disks
 POST   /v1/vms/{uuid}/cdroms/{name}/eject # remove install media (live when running); the empty drive stays
 GET    /v1/vms/{uuid}/serial             # websocket, raw serial bytes (QEMU)
+GET    /v1/vms/{uuid}/ports/{name}       # websocket, raw bytes to and from a vz console port (apple.console_ports; admin)
 POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
 POST   /v1/vms/{uuid}/resume

@@ -619,6 +619,10 @@ pub struct AppleSpec {
     /// `mac` when they are left out.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub networks: Vec<AppleNetwork>,
+    /// Named virtio console ports (Linux guests): each appears in the guest as `/dev/virtio-ports/<name>` and on the host as
+    /// a unix socket, reached with `fluxctl port-connect` or the websocket `GET /v1/vms/{id}/ports/{name}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub console_ports: Vec<String>,
 }
 
 /// One private network a `vz` guest joins (see [`AppleSpec::networks`]).
@@ -767,6 +771,7 @@ impl Default for AppleSpec {
             init_config: None,
             secret_env: std::collections::BTreeMap::new(),
             networks: Vec::new(),
+            console_ports: Vec::new(),
         }
     }
 }

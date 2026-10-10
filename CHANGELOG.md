@@ -2,6 +2,14 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: `vz` developer conveniences
+- **Named console ports**: `apple.console_ports` ([docs/macos.md](docs/macos.md#named-console-ports)) adds
+  `VZVirtioConsolePortConfiguration` ports. A Linux guest sees `/dev/virtio-ports/<name>`, and the runner bridges each port to a
+  unix socket. Connect with `fluxctl port-connect <vm> <name>` or the websocket `GET /v1/vms/{id}/ports/{name}`.
+- **Linux display size**: Linux guests now use `display_width` and `display_height` for their scanout instead of a fixed
+  1280x800. The defaults are the same as for macOS guests (2560x1600).
+- **Serial log rotation**: the runner moves `console.log` to `console.log.1` past 16 MiB, keeping one old file.
+
 ### Added: `vz` storage options
 - **`apple.extra_disks`** ([docs/macos.md](docs/macos.md#extra-disks)) takes `kind` (`image`, `block` for a host device through
   `VZDiskBlockDeviceStorageDeviceAttachment`, `nbd` for an NBD export through `VZNetworkBlockDeviceStorageDeviceAttachment`),

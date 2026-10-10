@@ -457,6 +457,13 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Connect stdin/stdout to a vz VM's named console port (`apple.console_ports`, `/dev/virtio-ports/<name>` in the
+    /// guest). Ctrl-] detaches. REST: websocket `GET /v1/vms/{id}/ports/{name}`.
+    PortConnect {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        name: String,
+    },
     /// Bring up the VMs described in `fluxvm.toml`: create what is missing, start what is stopped, recreate what
     /// changed, in dependency order, and make the services reachable by name. Naming a service brings up only it and
     /// what it depends on.
@@ -1920,11 +1927,14 @@ async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> R
 const SERIAL_ESCAPE: u8 = 0x1d;
 
 async fn run_serial_session(m: &VmManager, id: Uuid) -> Result<()> {
+    run_stream_session(m.open_serial(id).await?, &format!("{id} serial console")).await
+}
+
+async fn run_stream_session(stream: tokio::net::UnixStream, what: &str) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let stream = m.open_serial(id).await?;
     let interactive = std::io::stdin().is_terminal();
     if interactive {
-        eprintln!("Connected to {id} serial console. Escape: Ctrl-]\r");
+        eprintln!("Connected to {what}. Escape: Ctrl-]\r");
     }
     let _raw = RawTerminal::enter()?;
     let (mut reader, mut writer) = stream.into_split();
@@ -1967,13 +1977,22 @@ async fn run_serial_session(m: &VmManager, id: Uuid) -> Result<()> {
 
 /// [`run_serial_session`] over the daemon's `/v1/vms/{id}/serial` websocket.
 async fn run_remote_serial(r: &remote::Remote, id: Uuid) -> Result<()> {
+    run_remote_stream(
+        r,
+        &format!("/v1/vms/{id}/serial"),
+        &format!("{id} serial console"),
+    )
+    .await
+}
+
+async fn run_remote_stream(r: &remote::Remote, path: &str, what: &str) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message;
-    let ws = r.websocket(&format!("/v1/vms/{id}/serial")).await?;
+    let ws = r.websocket(path).await?;
     let interactive = std::io::stdin().is_terminal();
     if interactive {
-        eprintln!("Connected to {id} serial console. Escape: Ctrl-]\r");
+        eprintln!("Connected to {what}. Escape: Ctrl-]\r");
     }
     let _raw = RawTerminal::enter()?;
     let (mut tx, mut rx) = ws.split();
@@ -2708,6 +2727,14 @@ async fn run_remote(
             }
         }
         Command::Serial { id } => run_remote_serial(r, id).await?,
+        Command::PortConnect { id, name } => {
+            run_remote_stream(
+                r,
+                &format!("/v1/vms/{id}/ports/{name}"),
+                &format!("{id} port {name}"),
+            )
+            .await?
+        }
         Command::Create { spec } => {
             let body: serde_json::Value = serde_json::from_slice(&std::fs::read(spec)?)?;
             pretty(&r.call(Method::POST, "/v1/vms", Some(body)).await?)?
@@ -3389,6 +3416,13 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::json!({"ok": true, "deleted": tag}));
         }
         Command::Serial { id } => run_serial_session(&m, id).await?,
+        Command::PortConnect { id, name } => {
+            run_stream_session(
+                m.open_console_port(id, &name).await?,
+                &format!("{id} port {name}"),
+            )
+            .await?
+        }
         Command::VmTemplate { command } => match command {
             TemplateCommand::List => {
                 output::print_list(format, &m.list_vm_templates()?, output::TEMPLATE_COLUMNS)?
@@ -6626,6 +6660,10 @@ mod tier2_cli_tests {
         assert!(matches!(
             cli(&["serial", &id]).unwrap().command,
             Command::Serial { .. }
+        ));
+        assert!(matches!(
+            cli(&["port-connect", &id, "agent"]).unwrap().command,
+            Command::PortConnect { name, .. } if name == "agent"
         ));
         assert!(matches!(
             cli(&["backup", &id, "--compress"]).unwrap().command,

@@ -183,6 +183,19 @@ fn validate_vmnet(v: &fluxvm_core::model::AppleVmnetSpec) -> Result<()> {
 }
 
 /// Rejects, with a specific message, any request feature the Apple backend cannot honour.
+/// Virtio console ports per VM (one console device holds them all).
+pub const MAX_CONSOLE_PORTS: usize = 8;
+
+/// A console port name: it becomes `/dev/virtio-ports/<name>` in the guest and part of a socket path on the host.
+pub fn valid_console_port(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
+        })
+}
+
 /// One `apple.extra_disks` entry: the fields its `kind` needs and nothing it cannot use.
 pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
     use fluxvm_core::model::{AppleDiskCaching, AppleDiskKind, AppleDiskSync};
@@ -423,6 +436,23 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         }
         if apple.root_read_only && apple.asif_overlay {
             bail!("apple.root_read_only cannot be combined with apple.asif_overlay");
+        }
+        if macos_guest && !apple.console_ports.is_empty() {
+            bail!("apple.console_ports is a Linux-guest feature");
+        }
+        if apple.console_ports.len() > MAX_CONSOLE_PORTS {
+            bail!("at most {MAX_CONSOLE_PORTS} apple.console_ports");
+        }
+        let mut ports = std::collections::HashSet::new();
+        for p in &apple.console_ports {
+            if !valid_console_port(p) {
+                bail!(
+                    "console port {p:?}: 1-32 of a-z, 0-9, '.', '-' and '_', starting with a letter or digit"
+                );
+            }
+            if !ports.insert(p) {
+                bail!("console port {p} is listed twice");
+            }
         }
         let mut names = std::collections::HashSet::new();
         for (i, d) in apple.extra_disks.iter().enumerate() {
@@ -1072,5 +1102,27 @@ mod tests {
         let twice =
             req(r#""apple":{"extra_disks":[{"path":"/a.raw"},{"name":"disk0","path":"/b.raw"}]}"#);
         assert!(format!("{:#}", validate_request(&twice).unwrap_err()).contains("twice"));
+    }
+
+    #[test]
+    fn console_ports_are_named_and_linux_only() {
+        assert!(validate_request(&req(r#""apple":{"console_ports":["agent","log.v1"]}"#)).is_ok());
+        for (json, needle) in [
+            (r#""apple":{"console_ports":["Agent"]}"#, "a-z"),
+            (r#""apple":{"console_ports":["../x"]}"#, "a-z"),
+            (r#""apple":{"console_ports":[".x"]}"#, "a-z"),
+            (r#""apple":{"console_ports":["a","a"]}"#, "twice"),
+            (
+                r#""apple":{"console_ports":["a","b","c","d","e","f","g","h","i"]}"#,
+                "at most",
+            ),
+            (
+                r#""apple":{"guest_os":"macos","console_ports":["a"]}"#,
+                "Linux",
+            ),
+        ] {
+            let err = format!("{:#}", validate_request(&req(json)).expect_err(json));
+            assert!(err.contains(needle), "{json}: {err}");
+        }
     }
 }

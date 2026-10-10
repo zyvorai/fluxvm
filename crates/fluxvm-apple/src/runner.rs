@@ -66,6 +66,18 @@ pub struct RunnerConfig {
     pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
     /// Private networks: one more network card each, connected to the network's switch.
     pub networks: Vec<NetworkConfig>,
+    pub console_ports: Vec<ConsolePortConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConsolePortConfig {
+    pub name: String,
+    pub socket: PathBuf,
+}
+
+/// The host end of VM `id`'s console port `name`.
+pub fn console_port_socket(id: uuid::Uuid, name: &str) -> Result<PathBuf> {
+    Ok(socket_dir()?.join(format!("{}.port-{name}", id.simple())))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,6 +206,16 @@ impl RunnerConfig {
                             .with_context(|| format!("network {} has no MAC assigned", n.name))?,
                         socket: crate::vznet::socket_path(&n.name)?,
                         switch_bin: PathBuf::new(),
+                    })
+                })
+                .collect::<Result<_>>()?,
+            console_ports: apple
+                .console_ports
+                .iter()
+                .map(|name| {
+                    Ok(ConsolePortConfig {
+                        name: name.clone(),
+                        socket: console_port_socket(ctx.id, name)?,
                     })
                 })
                 .collect::<Result<_>>()?,

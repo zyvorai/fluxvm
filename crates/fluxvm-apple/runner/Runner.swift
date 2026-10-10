@@ -68,6 +68,147 @@ struct Config: Decodable {
     let root_read_only: Bool?
     let extra_disks: [ExtraDisk]?
     let networks: [PrivateNetwork]?
+    let console_ports: [ConsolePort]?
+    let serial_log_max_bytes: UInt64?
+}
+
+struct ConsolePort: Decodable {
+    let name: String
+    let socket: String
+}
+
+func writeAll(_ fd: Int32, _ p: UnsafeRawPointer, _ n: Int) -> Bool {
+    var off = 0
+    while off < n {
+        let w = write(fd, p + off, n - off)
+        if w < 0 && errno == EINTR { continue }
+        if w <= 0 { return false }
+        off += w
+    }
+    return true
+}
+
+func listenUnix(_ path: String) -> Int32? {
+    unlink(path)
+    let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+    guard fd >= 0 else { return nil }
+    var addr = sockaddr_un(); addr.sun_family = sa_family_t(AF_UNIX)
+    guard path.utf8.count < MemoryLayout.size(ofValue: addr.sun_path) else { close(fd); return nil }
+    withUnsafeMutableBytes(of: &addr.sun_path) { buf in path.withCString { _ = strncpy(buf.baseAddress!.assumingMemoryBound(to: CChar.self), $0, buf.count - 1) } }
+    let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+    guard ok == 0, listen(fd, 4) == 0 else { close(fd); return nil }
+    chmod(path, 0o600)
+    return fd
+}
+
+/// A named virtio console port (`/dev/virtio-ports/<name>` in the guest) bridged to a unix socket on the host. One client at a
+/// time, and a new one replaces the old; guest output while no client is connected is dropped.
+final class ConsolePortBridge {
+    let port: ConsolePort
+    let guestEnd: FileHandle
+    let hostFd: Int32
+    var client: Int32 = -1
+    let lock = NSLock()
+
+    init(_ port: ConsolePort) throws {
+        var fds: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &fds) == 0 else {
+            throw NSError(domain: "fluxvm-vz", code: 1, userInfo: [NSLocalizedDescriptionKey: "console port \(port.name): socketpair: \(String(cString: strerror(errno)))"])
+        }
+        self.port = port
+        guestEnd = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
+        hostFd = fds[1]
+        var one: Int32 = 1
+        setsockopt(hostFd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+    }
+
+    func configuration() -> VZVirtioConsolePortConfiguration {
+        let c = VZVirtioConsolePortConfiguration()
+        c.name = port.name
+        c.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: guestEnd, fileHandleForWriting: guestEnd)
+        return c
+    }
+
+    func start() {
+        guard let listener = listenUnix(port.socket) else {
+            emit(["event": "warning", "message": "console port \(port.name): cannot listen on \(port.socket)"]); return
+        }
+        Thread {
+            var buf = [UInt8](repeating: 0, count: 16 * 1024)
+            while true {
+                let n = read(self.hostFd, &buf, buf.count)
+                if n < 0 && errno == EINTR { continue }
+                if n <= 0 { return }
+                self.lock.lock(); let c = self.client; self.lock.unlock()
+                if c >= 0 { _ = buf.withUnsafeBytes { writeAll(c, $0.baseAddress!, n) } }
+            }
+        }.start()
+        Thread {
+            while true {
+                let c = accept(listener, nil, nil)
+                if c < 0 { if errno == EINTR { continue }; return }
+                var one: Int32 = 1
+                setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+                self.lock.lock()
+                if self.client >= 0 { shutdown(self.client, SHUT_RDWR) }
+                self.client = c
+                self.lock.unlock()
+                Thread {
+                    var buf = [UInt8](repeating: 0, count: 16 * 1024)
+                    while true {
+                        let n = read(c, &buf, buf.count)
+                        if n < 0 && errno == EINTR { continue }
+                        if n <= 0 { break }
+                        if !buf.withUnsafeBytes({ writeAll(self.hostFd, $0.baseAddress!, n) }) { break }
+                    }
+                    self.lock.lock(); if self.client == c { self.client = -1 }; self.lock.unlock()
+                    close(c)
+                }.start()
+            }
+        }.start()
+    }
+}
+
+/// The guest console log, rotated once to `<log>.1` when it passes the size limit, so a chatty guest cannot fill the disk.
+final class SerialLog {
+    let path: String
+    let limit: UInt64
+    let pipe = Pipe()
+    var handle: FileHandle?
+    var size: UInt64 = 0
+    var onRotate: (() -> Void)?
+    let lock = NSLock()
+
+    init(path: String, limit: UInt64) {
+        self.path = path
+        self.limit = limit
+        FileManager.default.createFile(atPath: path, contents: nil, attributes: nil)
+        handle = FileHandle(forWritingAtPath: path)
+        size = (try? handle?.seekToEnd()) ?? 0
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            if d.isEmpty { h.readabilityHandler = nil; return }
+            self?.append(d)
+        }
+    }
+
+    var writer: FileHandle { pipe.fileHandleForWriting }
+
+    func append(_ d: Data) {
+        lock.lock(); defer { lock.unlock() }
+        if size > 0 && size + UInt64(d.count) > limit {
+            try? handle?.close()
+            let old = path + ".1"
+            unlink(old)
+            rename(path, old)
+            FileManager.default.createFile(atPath: path, contents: nil, attributes: nil)
+            handle = FileHandle(forWritingAtPath: path)
+            size = 0
+            onRotate?()
+        }
+        handle?.write(d)
+        size += UInt64(d.count)
+    }
 }
 
 struct PrivateNetwork: Decodable {
@@ -293,6 +434,10 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     var vsockConnections: [VZVirtioSocketConnection] = []
     var lastConfiguration: VZVirtualMachineConfiguration?
     var privateLinks: [String: PrivateLink] = [:]
+    var consoleBridges: [ConsolePortBridge] = []
+    var serialLog: SerialLog?
+    /// Where this boot's console output starts in the log (reset when the log rotates).
+    var serialBootOffset: UInt64 = 0
 
     init(_ cfg: Config) { self.cfg = cfg; super.init() }
 
@@ -375,17 +520,24 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             }
             c.platform = platform
             let g = VZVirtioGraphicsDeviceConfiguration()
-            g.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: 1280, heightInPixels: 800)]
+            g.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: cfg.display_width ?? 1280, heightInPixels: cfg.display_height ?? 800)]
             c.graphicsDevices = [g]
             c.keyboards = [VZUSBKeyboardConfiguration()]
             c.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
             // Guest serial console (hvc0) goes to the VM log, which FluxVM serves as /v1/vms/{id}/serial.
-            FileManager.default.createFile(atPath: cfg.serial_log, contents: nil, attributes: nil)
-            if let h = FileHandle(forWritingAtPath: cfg.serial_log) {
-                try? h.seekToEnd()
-                let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
-                serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: h)
-                c.serialPorts = [serial]
+            if serialLog == nil {
+                let log = SerialLog(path: cfg.serial_log, limit: cfg.serial_log_max_bytes ?? 16 << 20)
+                log.onRotate = { [weak self] in self?.serialBootOffset = 0 }
+                serialLog = log
+            }
+            let serial = VZVirtioConsoleDeviceSerialPortConfiguration()
+            serial.attachment = VZFileHandleSerialPortAttachment(fileHandleForReading: nil, fileHandleForWriting: serialLog!.writer)
+            c.serialPorts = [serial]
+            if let ports = cfg.console_ports, !ports.isEmpty {
+                if consoleBridges.isEmpty { consoleBridges = try ports.map(ConsolePortBridge.init) }
+                let console = VZVirtioConsoleDeviceConfiguration()
+                for (i, b) in consoleBridges.enumerated() { console.ports[i] = b.configuration() }
+                c.consoleDevices = [console]
             }
             c.socketDevices = [VZVirtioSocketDeviceConfiguration()]   // vsock, used by the guest agent proxy
         }
@@ -536,6 +688,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             startControlServer()
             startIPWatcher()
             if cfg.vsock_socket != nil { startVsockProxy() }
+            for b in consoleBridges { b.start() }
             if let allow = cfg.egress_allow, !allow.isEmpty { startEgressProxy(allow) }
             for f in cfg.forwards ?? [] where f.guests != true { startForward(f, bind: "127.0.0.1", fatal: true) }
             setupSignals()
@@ -728,7 +881,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
 
     func startIPWatcher() {
         // Only look at serial output written by *this* boot; earlier runs append to the same log.
-        let bootOffset = ((try? FileManager.default.attributesOfItem(atPath: cfg.serial_log)[.size]) as? UInt64) ?? 0
+        serialBootOffset = ((try? FileManager.default.attributesOfItem(atPath: cfg.serial_log)[.size]) as? UInt64) ?? 0
         if cfg.restore_state != nil {
             // A restored guest does not print its address again; the address it had when saved is still in the file.
             ip = (try? String(contentsOfFile: cfg.ip_file, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -743,7 +896,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             guard let self, let h = FileHandle(forReadingAtPath: self.cfg.serial_log) else { return }
             defer { try? h.close() }
             let size = (try? h.seekToEnd()) ?? 0
-            try? h.seek(toOffset: max(bootOffset, size > 16384 ? size - 16384 : 0))
+            try? h.seek(toOffset: min(size, max(self.serialBootOffset, size > 16384 ? size - 16384 : 0)))
             guard let text = (try? h.readToEnd()).flatMap({ String(data: $0, encoding: .utf8) }),
                   let re = try? NSRegularExpression(pattern: #"VELORA-IP (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})"#),
                   let m = re.matches(in: text, range: NSRange(text.startIndex..., in: text)).last, let r = Range(m.range(at: 1), in: text) else { return }

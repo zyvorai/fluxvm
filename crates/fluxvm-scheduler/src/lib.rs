@@ -3936,6 +3936,29 @@ impl VmManager {
     }
 
     /// Connect to a running QEMU VM's serial socket.
+    /// Connects to `vz` VM `id`'s console port `name` (`apple.console_ports`); the runner serves one client at a time.
+    pub async fn open_console_port(&self, id: Uuid, name: &str) -> Result<tokio::net::UnixStream> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Vz {
+            bail!("console ports are a vz feature");
+        }
+        if !vm
+            .request
+            .apple
+            .as_ref()
+            .is_some_and(|a| a.console_ports.iter().any(|p| p == name))
+        {
+            bail!("VM {id} has no console port {name:?}");
+        }
+        if !matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            bail!("VM {id} is not running (status={:?})", vm.status);
+        }
+        let path = fluxvm_apple::console_port_socket(id, name)?;
+        tokio::net::UnixStream::connect(&path)
+            .await
+            .with_context(|| format!("connecting {}", path.display()))
+    }
+
     pub async fn open_serial(&self, id: Uuid) -> Result<tokio::net::UnixStream> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu {
