@@ -329,7 +329,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   `platform_key` (X.509, DER or PEM), `kek`/`db`/`dbx` (certificates, SHA-256 hashes or EFI signature lists),
   `default_signatures: false` and `reset: true` (clear previously enrolled keys first). `secure_boot: false` turns it off and keeps the
   keys; leaving it out does not touch `efi.bin`. Refused with direct kernel boot and for macOS guests. `{"cmd":"secure-boot-status"}` reports
-  the state and signature counts. **Verified** on the M4: enable with default keys (2 KEK, 2 db, 26 dbx), status, disable.
+  the state and signature counts. **Verified** on the M4: enable with default keys (2 KEK, 2 db, 26 dbx), status, disable, and a stock Debian 13 cloud image booting through the API with `secure_boot: true` (guest efivars: `SecureBoot=1`, `SetupMode=0`). `secure-boot-status` fails with "variable store already in use" while the VM runs, so read it only when no guest holds `efi.bin`.
 - **Recovery (macOS guests):** `recovery: true` starts the guest in macOS Recovery.
 - **Rosetta cache (Linux guests):** with `rosetta: true`, `rosetta_cache` is `"default"`, a guest socket path or an abstract socket name for
   `rosettad`'s AOT cache. A Mac without Rosetta fails at boot with a pointer to `fluxvm-vz-runner install-rosetta`.

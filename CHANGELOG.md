@@ -2,6 +2,12 @@
 
 ## 0.4.0 (unreleased)
 
+### Fixed: `secure_boot` on `vz`
+- `secure_boot: true` was rejected for the `vz` backend by the scheduler's backend check ("secure_boot requires backend qemu"), so the
+  Apple EFI Secure Boot support could not be used through the API. `vz` is now allowed (a TPM is still refused). Checked on an
+  Apple M4: a Debian 13 cloud image boots with Secure Boot on (`SecureBoot=1`, `SetupMode=0` in the guest) and the node heartbeat
+  reports `secure_boot` and `rosetta` host capabilities. `secure-boot-status` cannot read the store while the VM runs.
+
 ### Fixed: macOS 27 follow-ups after hardware testing (PR #200)
 - Custom Virtio device id is now `0x3F` (PCI `1af4:107f`). As merged (`0xFF00`) the PCI device id fell outside the range Linux
   binds (`0x1040..0x107f`), so a guest saw the device but never attached a driver.

@@ -58,7 +58,7 @@ Details in [macos-architecture.md](macos-architecture.md#14-what-is-verified).
 4. Accessory Access consent, USB list and attach: not run (helper could not start; no USB devices attached).
 5. Fleet placement: verified only on loopback with one real Mac and two fake nodes; no second Mac.
 6. EFI Secure Boot: verified with an EFI guest on an empty disk: default keys enrolled (2 KEK, 2 db, 26 dbx), `secure-boot-status`
-   reports enabled, `secure_boot: false` disables it and keeps the keys. Booting a signed distro under Secure Boot is not run.
+   reports enabled, `secure_boot: false` disables it and keeps the keys. Through the API, `secure_boot: true` for `vz` was rejected by the scheduler ("requires backend qemu"); fixed in the follow-up PR. After the fix a stock Debian 13 cloud image boots with Secure Boot on (the guest reads `SecureBoot=1`, `SetupMode=0` from efivars, and the runner emits a `secure-boot` event). `secure-boot-status` cannot read the variable store while the VM is running ("EFI variable store is already in use").
 7. Custom Virtio save/restore: Debian 13 guest with `virtio_flux.ko`, snapshot, stop, `start-from-snapshot`. The guest resumed without
    a reboot, `ping` and `echo` answered, and the device counters continued from the saved values. Without `supportsSaveRestore` the
    save failed with "Unsupported custom virtio device in configuration"; the runner now sets it.
