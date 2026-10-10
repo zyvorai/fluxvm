@@ -38,6 +38,15 @@ struct Config: Decodable {
     let vsock_socket: String?
     let ip_file: String
     let window: Bool?
+    let display_count: Int?
+    let clipboard: Bool?
+    let bridge_interface: String?
+    let asif_overlay: Bool?
+    let provision_full_name: String?
+    let provision_username: String?
+    let provision_password_file: String?
+    let provision_auto_login: Bool?
+    let provision_remote_login: Bool?
     let display_width: Int?
     let display_height: Int?
     let display_ppi: Int?
@@ -136,11 +145,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.platform = p
             c.bootLoader = VZMacOSBootLoader()
             let g = VZMacGraphicsDeviceConfiguration()
-            g.displays = [VZMacGraphicsDisplayConfiguration(
-                widthInPixels: cfg.display_width ?? 2560,
-                heightInPixels: cfg.display_height ?? 1600,
-                pixelsPerInch: cfg.display_ppi ?? 220
-            )]
+            g.displays = self.macDisplays()
             c.graphicsDevices = [g]
             c.keyboards = [VZMacKeyboardConfiguration()]
             c.pointingDevices = [VZMacTrackpadConfiguration()]
@@ -186,7 +191,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         }
 
         var storage: [VZStorageDeviceConfiguration] = [
-            VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: cfg.disk), readOnly: false))
+            VZVirtioBlockDeviceConfiguration(attachment: try self.rootStorageAttachment())
         ]
         if cfg.guest_os == "linux" {
             if let seed = cfg.seed, FileManager.default.fileExists(atPath: seed) {
@@ -199,7 +204,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         c.storageDevices = storage
 
         let net = VZVirtioNetworkDeviceConfiguration()
-        net.attachment = VZNATNetworkDeviceAttachment()
+        net.attachment = try self.networkAttachment()
         if let m = cfg.mac, let mac = VZMACAddress(string: m) { net.macAddress = mac }
         // `network: none` means no network card, so the guest has nothing to route through.
         c.networkDevices = cfg.network_none == true ? [] : [net]
@@ -276,6 +281,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             }
             c.usbControllers = [VZXHCIControllerConfiguration()]
         }
+        try self.configureClipboard(c)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         try c.validate()
@@ -305,12 +311,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     }
                 }
             } else {
-                machine.start { result in
-                    switch result {
-                    case .success: self.state = "running"; emit(["event": "running"])
-                    case .failure(let e): fail("start failed: \(e.localizedDescription)")
-                    }
-                }
+                self.startMachine(machine)
             }
             startControlServer()
             startIPWatcher()
@@ -459,6 +460,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                         }
                     }
                 } else { write() }
+            case "balloon":
+                response = self.balloonControl(reclaimMiB: (o["balloon_mib"] as? NSNumber)?.uint64Value)
+                sem.signal()
+            case "usb-attach":
+                guard let path = o["path"] as? String else { response = ["ok": false, "error": "usb-attach needs path"]; sem.signal(); break }
+                self.attachUSBMassStorage(path: path, readOnly: (o["read_only"] as? Bool) ?? false) { response = $0; sem.signal() }
+            case "usb-detach":
+                guard let id = o["uuid"] as? String else { response = ["ok": false, "error": "usb-detach needs uuid"]; sem.signal(); break }
+                self.detachUSB(uuid: id) { response = $0; sem.signal() }
             case "shutdown":
                 do { try self.vm?.requestStop(); response = ["ok": true, "state": "stopping"] } catch { response = ["ok": false, "error": error.localizedDescription] }
                 sem.signal()

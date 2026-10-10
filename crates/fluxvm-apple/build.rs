@@ -8,7 +8,10 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=runner/Runner.swift");
+    println!("cargo:rerun-if-changed=runner/ModernFeatures.swift");
     println!("cargo:rerun-if-changed=runner/Entitlements.plist");
+    println!("cargo:rerun-if-changed=runner/Entitlements.networking.plist");
+    println!("cargo:rerun-if-env-changed=FLUXVM_VZ_BRIDGE");
     println!("cargo:rerun-if-env-changed=FLUXVM_SKIP_VZ_RUNNER");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
         || env::var_os("FLUXVM_SKIP_VZ_RUNNER").is_some()
@@ -17,6 +20,14 @@ fn main() {
     }
     let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("fluxvm-vz-runner");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    // swiftc only allows top-level code in a file named main.swift once there is more than one source file.
+    let main_swift = out.with_file_name("main.swift");
+    if std::fs::copy(manifest.join("runner/Runner.swift"), &main_swift).is_err() {
+        println!(
+            "cargo:warning=could not stage the Swift runner source; the vz backend will not launch VMs"
+        );
+        return;
+    }
     let swiftc = Command::new("xcrun")
         .args([
             "swiftc",
@@ -30,7 +41,8 @@ fn main() {
             "-framework",
             "Virtualization",
         ])
-        .arg(manifest.join("runner/Runner.swift"))
+        .arg(&main_swift)
+        .arg(manifest.join("runner/ModernFeatures.swift"))
         .arg("-o")
         .arg(&out)
         .status();
@@ -43,9 +55,16 @@ fn main() {
             return;
         }
     }
+    // com.apple.vm.networking is a restricted entitlement: an ad-hoc signed runner that carries it is
+    // killed by AMFI unless the host allows it, so it is opt-in (FLUXVM_VZ_BRIDGE=1) for bridged networking.
+    let entitlement = if env::var_os("FLUXVM_VZ_BRIDGE").is_some() {
+        manifest.join("runner/Entitlements.networking.plist")
+    } else {
+        manifest.join("runner/Entitlements.plist")
+    };
     let sign = Command::new("codesign")
         .args(["--force", "--sign", "-", "--entitlements"])
-        .arg(manifest.join("runner/Entitlements.plist"))
+        .arg(entitlement)
         .arg(&out)
         .status();
     if !matches!(sign, Ok(s) if s.success()) {
