@@ -130,7 +130,8 @@ pub(crate) fn slot_request(
         "memory_mib": memory_mib,
         "kernel": boot.kernel,
         "initrd": boot.initrd,
-        "kernel_args": boot.cmdline,
+        // usb-storage otherwise waits a second before scanning the hot-attached rootfs.
+        "kernel_args": format!("{} usb_storage.delay_use=0", boot.cmdline),
         "agent": {"enabled": true, "port": fluxvm_guest_protocol::DEFAULT_PORT},
         "apple": {
             "guest_os": "linux",
@@ -468,6 +469,10 @@ mod tests {
         assert_eq!(a.tagged_shares[3].tag, "fluxvm-vol3");
         assert!(matches!(&c.network, NetworkSpec::User { forwards } if forwards.is_empty()));
         assert!(c.agent.as_ref().unwrap().enabled);
+        assert_eq!(
+            c.kernel_args.as_deref(),
+            Some("console=hvc0 usb_storage.delay_use=0")
+        );
     }
 
     #[test]
