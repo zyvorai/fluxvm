@@ -50,6 +50,22 @@ The cluster design follows GK Servis's [Mac Studio LLM inference cluster](https:
 
 ![Why Macs for private inference](assets/macos/readme-cost.jpg)
 
+## Placing a VM on the right Mac
+
+Macs in one cluster differ: macOS version (vmnet needs 26, custom Virtio devices 27), nested virtualization (M3 or later), which
+bridged interfaces exist, and free CPU and memory. `fluxvm_scheduler::apple_placement` is a pure scorer for this. A host is described
+by `AppleHostCaps`, a request is reduced from a `CreateVmRequest` by `ApplePlacementRequest::from_request`, and `pick` returns the
+best host:
+
+- A host is excluded if it lacks the free vCPUs or memory, the needed feature (nested, vmnet, custom Virtio, the named bridge
+  interface), or, for a macOS guest, if it already runs two macOS guests (Apple's licence limit, `MAX_MACOS_GUESTS`).
+- Among hosts that fit, the tightest fit wins, so small agent VMs pack onto busy hosts and the big Macs stay free for big VMs.
+
+Today this is a library function with unit tests. Nothing in the built-in fleet registry calls it yet, so a scheduler such as
+Kairon has to gather each Mac's capabilities (the runner's `capabilities` control command plus free memory from
+`GET /v1/sandboxes/density`) and call it. Also note that sandboxes restored from warm slots keep the address they had when the slot
+was built, so on one Mac a slot whose address is in use is skipped and that sandbox cold-boots instead.
+
 ## Quick start on one Mac
 
 ```bash
