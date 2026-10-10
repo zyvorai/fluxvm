@@ -58,7 +58,8 @@ while IFS= read -r line; do
   grep -qx "$line" "${ksrc}/.config" || { echo "kernel config: ${line} did not survive Kconfig" >&2; missing=1; }
 done <"$FRAGMENT"
 [ "$missing" = 0 ] || exit 1
-make -C "$ksrc" ARCH=arm64 -j"$JOBS" Image usr/gen_init_cpio >/dev/null
+make -C "$ksrc" ARCH=arm64 -j"$JOBS" Image >/dev/null
+cc -O2 -o "${ksrc}/usr/gen_init_cpio" "${ksrc}/usr/gen_init_cpio.c"
 install -m644 "${ksrc}/arch/arm64/boot/Image" "${OUT}/oci-kernel"
 
 # ---- static mke2fs ----
