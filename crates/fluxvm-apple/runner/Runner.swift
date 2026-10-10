@@ -656,6 +656,13 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             case "usb-detach":
                 guard let id = o["uuid"] as? String else { response = ["ok": false, "error": "usb-detach needs uuid"]; sem.signal(); break }
                 self.detachUSB(uuid: id) { response = $0; sem.signal() }
+            case "share-set":
+                // Points a running virtiofs share at another directory (warm-pool slots boot on placeholders).
+                guard let tag = o["tag"] as? String, let path = o["path"] as? String, let vm = self.vm else { response = ["ok": false, "error": "share-set needs tag, path and a running guest"]; sem.signal(); break }
+                guard let dev = vm.directorySharingDevices.compactMap({ $0 as? VZVirtioFileSystemDevice }).first(where: { $0.tag == tag }) else { response = ["ok": false, "error": "no share tagged \(tag)"]; sem.signal(); break }
+                dev.share = VZSingleDirectoryShare(directory: VZSharedDirectory(url: URL(fileURLWithPath: path), readOnly: (o["read_only"] as? Bool) ?? false))
+                response = ["ok": true]
+                sem.signal()
             case "shutdown":
                 do { try self.vm?.requestStop(); response = ["ok": true, "state": "stopping"] } catch { response = ["ok": false, "error": error.localizedDescription] }
                 sem.signal()

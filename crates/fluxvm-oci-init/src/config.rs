@@ -65,6 +65,68 @@ pub const DEFAULT_USER: &str = "65534:65534";
 pub enum InitConfig {
     Boot(BootConfig),
     Unpack(UnpackConfig),
+    /// A warm-pool VM: boot, take a lease, then wait on vsock for a [`Claim`] naming the real boot config and the
+    /// root disk the host hot-attaches over USB.
+    Wait(WaitConfig),
+}
+
+/// Default vsock port a waiting init accepts its claim on.
+pub const WARM_PORT: u32 = 1026;
+/// Printed once a waiting init is ready to be claimed.
+pub const WARM_READY: &str = "FLUXVM-WARM-READY";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitConfig {
+    #[serde(default = "default_warm_port")]
+    pub port: u32,
+    /// The NIC is configured before the claim, so a claimed container starts with its address.
+    #[serde(default)]
+    pub network: NetworkMode,
+}
+
+fn default_warm_port() -> u32 {
+    WARM_PORT
+}
+
+/// The one JSON line the host sends a waiting init; init answers `ok` or `error <reason>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    /// A file in the meta share holding a `boot` [`InitConfig`] (a new name, so no cached copy is read).
+    pub config: String,
+    /// The hot-attached root disk, e.g. `/dev/sda`.
+    pub disk: String,
+}
+
+impl Claim {
+    pub fn validate(&self) -> Result<()> {
+        let c = &self.config;
+        if c.is_empty()
+            || c.len() > 64
+            || c.contains('/')
+            || c.starts_with('.')
+            || !c.ends_with(".json")
+        {
+            bail!("claim config {c:?} must be a .json file name in the meta share");
+        }
+        let dev = self.disk.strip_prefix("/dev/").unwrap_or("");
+        if dev.is_empty()
+            || dev.len() > 16
+            || !dev
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            bail!(
+                "claim disk {:?} must be a /dev/<name> block device",
+                self.disk
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Whether the console shows a waiting init ready for a claim.
+pub fn warm_ready_in_log(log: &str) -> bool {
+    log.lines().any(|l| l.trim_end() == WARM_READY)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +469,40 @@ mod tests {
         for bad in ["", "1A", "A-B", "A=B", "A B"] {
             assert!(!valid_env_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn claims_name_a_meta_file_and_a_block_device() {
+        let ok = Claim {
+            config: "claim-1a2b.json".into(),
+            disk: "/dev/sda".into(),
+        };
+        ok.validate().unwrap();
+        for (config, disk) in [
+            ("../config.json", "/dev/sda"),
+            ("a/b.json", "/dev/sda"),
+            (".hidden.json", "/dev/sda"),
+            ("claim.txt", "/dev/sda"),
+            ("claim.json", "/dev/../etc"),
+            ("claim.json", "/tmp/sda"),
+            ("claim.json", "/dev/"),
+        ] {
+            let c = Claim {
+                config: config.into(),
+                disk: disk.into(),
+            };
+            assert!(c.validate().is_err(), "{config} {disk}");
+        }
+        let w: InitConfig = serde_json::from_str(r#"{"mode": "wait"}"#).unwrap();
+        assert_eq!(
+            w,
+            InitConfig::Wait(WaitConfig {
+                port: WARM_PORT,
+                network: NetworkMode::default()
+            })
+        );
+        assert!(warm_ready_in_log("boot\nFLUXVM-WARM-READY\n"));
+        assert!(!warm_ready_in_log("FLUXVM-WARM-READY-ish"));
     }
 
     #[test]

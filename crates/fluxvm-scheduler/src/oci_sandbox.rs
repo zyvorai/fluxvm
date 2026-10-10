@@ -499,7 +499,13 @@ impl VmManager {
         create.created_by_token = created_by_token.map(String::from);
         self.enforce_token_quotas(created_by_token, &create).await?;
 
-        let record = self.create(create).await?;
+        let started = Instant::now();
+        let warm = self.claim_oci_warm(&create, &rootfs).await;
+        let claimed = warm.is_some();
+        let record = match warm {
+            Some(vm) => vm,
+            None => self.create(create).await?,
+        };
         let id = record.id;
         let labelled = async {
             self.label_vz_sandbox(id).await?;
@@ -517,6 +523,11 @@ impl VmManager {
         if let Err(e) = labelled {
             let _ = self.delete(id).await;
             return Err(e.context("starting the OCI sandbox"));
+        }
+        if claimed {
+            crate::oci_pool::record_claim_time(started.elapsed().as_millis() as u64);
+        } else {
+            self.spawn_oci_pool_fill();
         }
         let record = self.get(id).await?;
         self.write_sandbox_proxy_meta(&record, req.http_proxy_port, &req.http_proxy_ports)

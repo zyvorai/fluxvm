@@ -247,6 +247,9 @@ These compile against the macOS 27 SDK and are validated at admission, but have 
 - **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts
   `{"cmd":"usb-attach","path":"/path/disk.img","read_only":false}` (returns a `uuid`) and `{"cmd":"usb-detach","uuid":"…"}` (macOS 15+).
   Physical accessories stay user-mediated through Apple's Accessory Access consent.
+- **Share swap:** `{"cmd":"share-set","tag":"fluxvm-vol0","path":"/dir","read_only":false}` points a running guest's virtiofs share at
+  another directory. The container sandbox warm pool ([oci-sandboxes.md](oci-sandboxes.md#warm-pool)) uses it with USB hot-attach
+  to hand a pre-booted VM its rootfs and volumes.
 - **ASIF overlay (macOS 27+):** `asif_overlay: true` keeps the base disk read-only and writes to a sparse `disk-overlay.asif`, which
   snapshots include.
 - **Unattended first boot (macOS 27 guests):** `provision_full_name`, `provision_username`, `provision_password_file` (a one-shot file the

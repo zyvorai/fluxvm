@@ -36,6 +36,7 @@ pub mod journal;
 pub mod live_migration;
 mod migration_relay;
 pub mod oci_images;
+mod oci_pool;
 pub mod oci_sandbox;
 pub mod procbox_sandbox;
 mod recovery;

@@ -90,9 +90,14 @@ fluxctl sandbox density            # or: curl -s localhost:7788/v1/sandboxes/den
   "warm_slots_configured": 2, "warm_slots_ready": 2, "warm_hits": 14, "warm_misses": 3,
   "active_sandboxes": 9, "paused_sandboxes": 4, "hibernated_sandboxes": 11,
   "resident_estimate_mib": 6656,
-  "host_mem_available_mib": 9120, "host_mem_total_mib": 36864, "host_pressure_level": "normal"
+  "host_mem_available_mib": 9120, "host_mem_total_mib": 36864, "host_pressure_level": "normal",
+  "oci_warm_slots_configured": 2, "oci_warm_slots_ready": 2, "oci_warm_slots_booting": 0,
+  "oci_warm_resident_mib": 1024, "oci_warm_hits": 31, "oci_warm_misses": 2, "oci_warm_last_claim_ms": 410
 }
 ```
+
+The `oci_warm_*` fields describe the container sandbox warm pool ([oci-sandboxes.md](oci-sandboxes.md#warm-pool)): waiting slots
+hold their memory, so `oci_warm_resident_mib` is not part of `resident_estimate_mib`.
 
 `resident_estimate_mib` is the configured memory of running and paused sandboxes (a balloon gives some of it back). `/metrics` adds
 `fluxvm_sandbox_warm_hits_total` and `fluxvm_sandbox_warm_misses_total`.

@@ -78,6 +78,18 @@ pub struct DensityReport {
     pub host_mem_total_mib: Option<u64>,
     /// `normal`, `warn` or `critical` (macOS); `None` where the host has no such signal.
     pub host_pressure_level: Option<crate::pressure_admission::PressureLevel>,
+    /// `apple.oci_warm_slots` times the number of `apple.oci_warm_sizes`.
+    pub oci_warm_slots_configured: usize,
+    /// Pre-booted OCI slots waiting for a claim, and slots still booting.
+    pub oci_warm_slots_ready: usize,
+    pub oci_warm_slots_booting: usize,
+    /// Memory the waiting OCI slots hold, MiB.
+    pub oci_warm_resident_mib: u64,
+    /// OCI sandbox creates served from / not served from a warm slot since the daemon started.
+    pub oci_warm_hits: u64,
+    pub oci_warm_misses: u64,
+    /// The last claim, from picking a slot to the container's agent answering, ms.
+    pub oci_warm_last_claim_ms: Option<u64>,
 }
 
 /// `POST /v1/sandboxes/warm`.

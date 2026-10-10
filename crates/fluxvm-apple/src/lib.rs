@@ -22,7 +22,7 @@ pub use control::{ControlReply, call as control_call, call_with as control_call_
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig,
     adopt_macos_template, clone_file, find_runner, ip_file, oci_meta_dir, read_guest_ip,
-    snapshot_dir,
+    snapshot_dir, write_oci_meta_as,
 };
 
 use anyhow::{Context, Result, bail};
@@ -110,6 +110,76 @@ pub async fn usb_detach(vm: &VmRecord, uuid: &str) -> Result<()> {
             reply.error().unwrap_or("unknown error")
         )
     }
+}
+
+/// Points the running VM's virtiofs share `tag` at `path`.
+pub async fn share_set(
+    vm: &VmRecord,
+    tag: &str,
+    path: &std::path::Path,
+    read_only: bool,
+) -> Result<()> {
+    let sock = vm
+        .control_socket
+        .as_deref()
+        .context("VM has no runner control socket recorded")?;
+    let reply = control_call_with(
+        sock,
+        serde_json::json!({"cmd":"share-set","tag":tag,"path":path,"read_only":read_only}),
+    )
+    .await?;
+    if reply.ok() {
+        Ok(())
+    } else {
+        bail!(
+            "runner refused share-set: {}",
+            reply.error().unwrap_or("unknown error")
+        )
+    }
+}
+
+/// Hands a waiting warm-pool guest its [`Claim`](fluxvm_oci_init::config::Claim) over the runner's vsock proxy.
+pub async fn warm_claim(
+    vm: &VmRecord,
+    port: u32,
+    claim: &fluxvm_oci_init::config::Claim,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    claim.validate()?;
+    let sock = vm
+        .vsock_socket
+        .as_deref()
+        .context("VM has no vsock socket recorded")?;
+    let talk = async {
+        let s = tokio::net::UnixStream::connect(sock)
+            .await
+            .with_context(|| format!("connecting to {}", sock.display()))?;
+        let mut s = BufReader::new(s);
+        s.get_mut()
+            .write_all(format!("CONNECT {port}\n").as_bytes())
+            .await?;
+        let mut line = String::new();
+        s.read_line(&mut line).await?;
+        if !line.starts_with("OK") {
+            bail!(
+                "the guest is not listening on vsock port {port}: {}",
+                line.trim()
+            );
+        }
+        let mut body = serde_json::to_vec(claim)?;
+        body.push(b'\n');
+        s.get_mut().write_all(&body).await?;
+        line.clear();
+        s.read_line(&mut line).await?;
+        match line.trim() {
+            "ok" => Ok(()),
+            "" => bail!("the guest closed the claim without answering"),
+            other => bail!("the guest refused the claim: {other}"),
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), talk)
+        .await
+        .context("the guest did not answer the claim in 20s")?
 }
 
 /// How long `launch` waits for the runner to report a running guest.

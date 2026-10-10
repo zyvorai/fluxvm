@@ -2,6 +2,15 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: warm pool for container sandboxes
+- **`apple.oci_warm_slots`** and **`apple.oci_warm_sizes`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#warm-pool)) keep
+  pre-booted container VMs per size. Their init waits in the new `wait` mode with its DHCP lease. A matching sandbox gets its
+  rootfs hot-attached over USB (macOS 15) and its volumes swapped in with the new runner `share-set` command. The claim goes over
+  vsock, and init continues as on a cold boot. Any failure cold-boots instead.
+- `GET /v1/sandboxes/density` adds `oci_warm_slots_configured`, `oci_warm_slots_ready`, `oci_warm_slots_booting`,
+  `oci_warm_resident_mib`, `oci_warm_hits`, `oci_warm_misses` and `oci_warm_last_claim_ms`.
+- The OCI kernel fragment enables XHCI and USB mass storage. `scripts/oci-live-test.sh` checks a warm claim on macOS 15.
+
 ### Added: x86-64 container images under Rosetta
 - **`oci.platform: "linux/amd64"`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#x86-64-images-rosetta)) pulls the amd64
   variant and runs it under Rosetta for Linux. The VM gets the Rosetta share, and init registers it with `binfmt_misc` (flags `F`

@@ -228,7 +228,12 @@ pub fn oci_meta_dir(workspace: &Path) -> PathBuf {
 
 /// Writes `apple.init_config` and the agent token into [`oci_meta_dir`], replacing what a previous boot left.
 pub fn write_oci_meta(req: &CreateVmRequest, workspace: &Path) -> Result<()> {
-    use fluxvm_oci_init::config::{CONFIG_FILE, SECRETS_FILE, TOKEN_FILE};
+    write_oci_meta_as(req, workspace, fluxvm_oci_init::config::CONFIG_FILE)
+}
+
+/// [`write_oci_meta`] with the init config under `config_name` (a warm-pool claim writes a fresh name).
+pub fn write_oci_meta_as(req: &CreateVmRequest, workspace: &Path, config_name: &str) -> Result<()> {
+    use fluxvm_oci_init::config::{SECRETS_FILE, TOKEN_FILE};
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
     let Some(apple) = req.apple.as_ref() else {
         return Ok(());
@@ -251,7 +256,9 @@ pub fn write_oci_meta(req: &CreateVmRequest, workspace: &Path) -> Result<()> {
                 .collect::<Vec<_>>(),
         )?;
     }
-    fs::write(dir.join(CONFIG_FILE), serde_json::to_vec_pretty(&init)?)?;
+    let tmp = dir.join(format!("{config_name}.tmp"));
+    fs::write(&tmp, serde_json::to_vec_pretty(&init)?)?;
+    fs::rename(&tmp, dir.join(config_name))?;
     // Only the creating launch carries secrets (they are never persisted); later boots keep the file it wrote.
     if !apple.secret_env.is_empty() {
         let values: std::collections::BTreeMap<&str, &str> = apple
