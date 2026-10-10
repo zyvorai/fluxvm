@@ -111,7 +111,9 @@ to the VM log, and records the guest's NAT address.
   disk read-only, and `apple.tagged_shares` adds virtiofs shares with fixed tags (other than `fsN` and `rosetta`). Container sandboxes
   use all three ([oci-sandboxes.md](oci-sandboxes.md)).
 - **Signing:** the runner is ad-hoc signed with `com.apple.security.virtualization` by `build.rs`.
-  Set `FLUXVM_VZ_RUNNER` to use another binary; `FLUXVM_SKIP_VZ_RUNNER=1` skips building it.
+  Set `FLUXVM_VZ_RUNNER` to use another binary; `FLUXVM_SKIP_VZ_RUNNER=1` skips building it. The runner needs the macOS 27 SDK
+  (Xcode 27). If Swift is installed but the runner does not compile or sign, the build fails and shows the swiftc errors; with no
+  Swift toolchain it only warns.
 
 ## Snapshots
 

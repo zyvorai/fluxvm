@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       # fluxvm-image depends on the sibling guestkit project through a relative path.
       - uses: actions/checkout@v7
@@ -29,6 +29,11 @@ jobs:
           repository: zyvorai/guestkit
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
+      - name: Use the newest Xcode (the VZ runner needs the macOS 27 SDK)
+        run: |
+          X="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          echo "$(xcode-select -p): SDK $(xcrun --show-sdk-version)"
       - run: brew install hivex
       - name: Build the buildable subset (Linux-only crates are not built on macOS)
         working-directory: fluxvm
