@@ -596,6 +596,20 @@ pub struct AppleSpec {
     /// has no card, so the proxy is its only way out). `example.com` matches that host, `*.example.com` its subdomains; ports 80 and 443.
     #[serde(default)]
     pub egress_allow: Vec<String>,
+    /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
+    #[serde(default)]
+    pub root_read_only: bool,
+    /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
+    #[serde(default)]
+    pub extra_disks: Vec<AppleDisk>,
+}
+
+/// A raw disk image attached to a `vz` Linux guest as a virtio block device.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleDisk {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 fn default_true() -> bool {
@@ -642,6 +656,8 @@ impl Default for AppleSpec {
             vmnet: None,
             custom_virtio: false,
             egress_allow: Vec::new(),
+            root_read_only: false,
+            extra_disks: Vec::new(),
         }
     }
 }

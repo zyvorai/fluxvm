@@ -120,8 +120,8 @@ pub const CAPABILITIES: &[Capability] = &[
         "not implemented yet",
     ),
     no(
-        "direct kernel boot, firmware overrides",
-        "EFI boot from the disk only",
+        "firmware overrides",
+        "EFI from the disk, or direct kernel boot for Linux guests",
     ),
     yes(
         "snapshots of running VMs",
@@ -327,10 +327,43 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             "the vz backend supports only network mode `user` (NAT) or `none`; tap and macvtap are Linux features"
         ),
     }
+    let macos_guest = req
+        .apple
+        .as_ref()
+        .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos);
     reject!(
-        req.kernel.is_some() || req.initrd.is_some() || req.kernel_args.is_some(),
-        "direct kernel boot (it boots EFI from the disk)"
+        macos_guest && (req.kernel.is_some() || req.initrd.is_some() || req.kernel_args.is_some()),
+        "direct kernel boot for macOS guests"
     );
+    if req.kernel.is_none() && (req.initrd.is_some() || req.kernel_args.is_some()) {
+        bail!(
+            "initrd and kernel_args need kernel (direct boot); without it the guest boots EFI from the disk"
+        );
+    }
+    for p in [&req.kernel, &req.initrd].into_iter().flatten() {
+        if !p.is_absolute() {
+            bail!(
+                "kernel and initrd must be absolute paths, got {}",
+                p.display()
+            );
+        }
+    }
+    if let Some(apple) = &req.apple {
+        if macos_guest && (apple.root_read_only || !apple.extra_disks.is_empty()) {
+            bail!("apple.root_read_only and apple.extra_disks are Linux-guest features");
+        }
+        if apple.root_read_only && apple.asif_overlay {
+            bail!("apple.root_read_only cannot be combined with apple.asif_overlay");
+        }
+        for d in &apple.extra_disks {
+            if !d.path.is_absolute() {
+                bail!(
+                    "apple.extra_disks path {} must be absolute",
+                    d.path.display()
+                );
+            }
+        }
+    }
     reject!(req.firmware.is_some(), "firmware overrides");
     reject!(
         req.numa_node.is_some() || req.cpuset.is_some() || req.hugepages == Some(true),
@@ -708,6 +741,32 @@ mod tests {
     }
 
     #[test]
+    fn direct_kernel_boot_is_for_linux_guests() {
+        let ok = r#""kernel":"/k/Image","initrd":"/k/initrd","kernel_args":"console=hvc0","apple":{"root_read_only":true,"extra_disks":[{"path":"/d/b.raw","read_only":true}]}"#;
+        assert!(validate_request(&req(ok)).is_ok());
+        for (json, needle) in [
+            (
+                r#""kernel":"/k/Image","apple":{"guest_os":"macos"}"#,
+                "macOS guests",
+            ),
+            (r#""kernel":"Image""#, "absolute"),
+            (r#""kernel_args":"quiet""#, "need kernel"),
+            (
+                r#""apple":{"root_read_only":true,"asif_overlay":true}"#,
+                "asif_overlay",
+            ),
+            (r#""apple":{"extra_disks":[{"path":"b.raw"}]}"#, "absolute"),
+            (
+                r#""apple":{"guest_os":"macos","extra_disks":[{"path":"/b.raw"}]}"#,
+                "Linux-guest",
+            ),
+        ] {
+            let err = validate_request(&req(json)).expect_err(json).to_string();
+            assert!(err.contains(needle), "{json}: {err}");
+        }
+    }
+
+    #[test]
     fn custom_virtio_is_linux_only() {
         assert!(validate_request(&req(r#""apple":{"custom_virtio":true}"#)).is_ok());
         let mac = r#""apple":{"guest_os":"macos","custom_virtio":true}"#;
@@ -776,7 +835,7 @@ mod tests {
             (r#""numa_node":1"#, "NUMA"),
             (r#""tpm":true"#, "TPM"),
             (r#""secure_boot":true"#, "secure boot"),
-            (r#""kernel":"/boot/vmlinuz""#, "direct kernel boot"),
+            (r#""initrd":"/boot/initrd""#, "need kernel"),
             (r#""vfio_devices":["0000:01:00.0"]"#, "VFIO"),
             (r#""memory_mib":128"#, "512 MiB"),
         ] {

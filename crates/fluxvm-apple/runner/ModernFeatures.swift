@@ -55,7 +55,7 @@ extension Runner {
 
     func rootStorageAttachment() throws -> VZStorageDeviceAttachment {
         let u = URL(fileURLWithPath: cfg.disk)
-        guard cfg.asif_overlay == true else { return try VZDiskImageStorageDeviceAttachment(url: u, readOnly: false) }
+        guard cfg.asif_overlay == true else { return try VZDiskImageStorageDeviceAttachment(url: u, readOnly: cfg.root_read_only ?? false) }
         #if canImport(DiskImageKit)
         if #available(macOS 27.0, *) {
             let base = try DiskImage(opening: .open(url: u, mode: .readOnly))

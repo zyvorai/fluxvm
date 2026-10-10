@@ -58,6 +58,12 @@ pub struct RunnerConfig {
     pub egress_allow: Vec<String>,
     /// A state file written by a snapshot; the runner resumes from it instead of cold-booting.
     pub restore_state: Option<PathBuf>,
+    /// Direct boot (`VZLinuxBootLoader`): an uncompressed arm64 `Image`. None boots EFI from the disk.
+    pub kernel: Option<PathBuf>,
+    pub initrd: Option<PathBuf>,
+    pub cmdline: Option<String>,
+    pub root_read_only: bool,
+    pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,6 +156,11 @@ impl RunnerConfig {
                     }),
                 )
                 .collect(),
+            kernel: req.kernel.clone(),
+            initrd: req.initrd.clone(),
+            cmdline: req.kernel_args.clone(),
+            root_read_only: apple.root_read_only,
+            extra_disks: apple.extra_disks.clone(),
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
             forwards: match &req.network {

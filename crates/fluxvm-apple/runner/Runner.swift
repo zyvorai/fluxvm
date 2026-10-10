@@ -62,6 +62,16 @@ struct Config: Decodable {
     let network_none: Bool?         // attach no network device at all
     let egress_allow: [String]?     // hosts the guest may reach through the vsock proxy on port 3128 (nil/empty: no proxy)
     let restore_state: String?      // resume from a state file written by `save` instead of cold-booting
+    let kernel: String?             // direct boot (VZLinuxBootLoader): uncompressed arm64 Image; nil boots EFI from the disk
+    let initrd: String?
+    let cmdline: String?
+    let root_read_only: Bool?
+    let extra_disks: [ExtraDisk]?
+}
+
+struct ExtraDisk: Decodable {
+    let path: String
+    let read_only: Bool?
 }
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -162,11 +172,18 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.keyboards = [VZMacKeyboardConfiguration()]
             c.pointingDevices = [VZMacTrackpadConfiguration()]
         } else {
-            let boot = VZEFIBootLoader()
-            boot.variableStore = FileManager.default.fileExists(atPath: file("efi.bin").path)
-                ? VZEFIVariableStore(url: file("efi.bin"))
-                : try VZEFIVariableStore(creatingVariableStoreAt: file("efi.bin"))
-            c.bootLoader = boot
+            if let kernel = cfg.kernel {
+                let boot = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: kernel))
+                if let initrd = cfg.initrd { boot.initialRamdiskURL = URL(fileURLWithPath: initrd) }
+                boot.commandLine = cfg.cmdline ?? "console=hvc0"
+                c.bootLoader = boot
+            } else {
+                let boot = VZEFIBootLoader()
+                boot.variableStore = FileManager.default.fileExists(atPath: file("efi.bin").path)
+                    ? VZEFIVariableStore(url: file("efi.bin"))
+                    : try VZEFIVariableStore(creatingVariableStoreAt: file("efi.bin"))
+                c.bootLoader = boot
+            }
             // A saved VM state is tied to the machine identifier, and a generic platform invents a new one on every
             // launch, so keep one per VM or a restore fails with "invalid argument".
             let platform = VZGenericPlatformConfiguration()
@@ -211,6 +228,9 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             }
             if let media = cfg.media, !media.isEmpty {
                 storage.append(VZUSBMassStorageDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: media), readOnly: true)))
+            }
+            for d in cfg.extra_disks ?? [] {
+                storage.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: d.path), readOnly: d.read_only ?? false)))
             }
         }
         c.storageDevices = storage
