@@ -58,15 +58,43 @@ pub async fn ensure(cfg: &Config, url: &str, build: &str) -> Result<PathBuf> {
         .user_agent(concat!("fluxvm/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(std::time::Duration::from_secs(15))
         .build()?;
-    let mut resp = client
-        .get(url)
+    // An interrupted download continues where it stopped (a server that ignores `Range` restarts it).
+    let have = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    let mut req = client.get(url);
+    if have > 0 {
+        req = req.header(reqwest::header::RANGE, format!("bytes={have}-"));
+    }
+    let mut resp = req
         .send()
         .await
         .and_then(|r| r.error_for_status())
         .context("downloading the macOS restore image")?;
-    let want = resp.content_length();
-    let mut out = tokio::fs::File::create(&part).await?;
-    let mut got = 0u64;
+    let resuming = have > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let start = if resuming { have } else { 0 };
+    // `content_length` is what is still to come; the file ends up `start + that` long.
+    let total = resp.content_length().map(|n| n + start);
+    if let Some(total) = total {
+        let free = free_bytes(&dir(cfg));
+        let need = total - start;
+        if free.is_some_and(|f| f < need + HEADROOM) {
+            bail!(
+                "not enough disk space for the macOS restore image: it needs {} more GiB in {} and {} GiB are free (the \
+                 install then needs about 25 GiB for the guest disk)",
+                (need + HEADROOM).div_ceil(1 << 30),
+                dir(cfg).display(),
+                free.unwrap_or(0) >> 30
+            );
+        }
+    }
+    let mut out = if resuming {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&part)
+            .await?
+    } else {
+        tokio::fs::File::create(&part).await?
+    };
+    let mut got = start;
     let copied: Result<()> = async {
         while let Some(chunk) = resp.chunk().await? {
             got += chunk.len() as u64;
@@ -76,15 +104,13 @@ pub async fn ensure(cfg: &Config, url: &str, build: &str) -> Result<PathBuf> {
         Ok(())
     }
     .await;
-    if let Err(e) = copied {
-        let _ = fs::remove_file(&part);
-        return Err(e).context("downloading the macOS restore image");
-    }
-    if want.is_some_and(|w| w != got) {
+    // The partial file is kept on a failure so the next attempt resumes; a size mismatch means it is not an image.
+    copied.context("downloading the macOS restore image")?;
+    if total.is_some_and(|w| w != got) {
         let _ = fs::remove_file(&part);
         bail!(
-            "the restore image download was cut short ({got} of {} bytes)",
-            want.unwrap_or(0)
+            "the restore image download has the wrong size ({got} of {} bytes)",
+            total.unwrap_or(0)
         );
     }
     fs::rename(&part, &dest)?;
@@ -92,7 +118,20 @@ pub async fn ensure(cfg: &Config, url: &str, build: &str) -> Result<PathBuf> {
     Ok(dest)
 }
 
-/// An IPSW is about 15 GB; keep only the newest.
+/// Space left free beyond the image itself.
+const HEADROOM: u64 = 2 << 30;
+
+/// Bytes available to an unprivileged writer on the filesystem holding `path`.
+fn free_bytes(path: &Path) -> Option<u64> {
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut vfs: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut vfs) } != 0 {
+        return None;
+    }
+    Some((vfs.f_bavail as u64).saturating_mul(vfs.f_frsize as u64))
+}
+
+/// An IPSW is about 25 GB; keep only the newest.
 fn prune_older(cfg: &Config, keep: &Path) {
     let Ok(rd) = fs::read_dir(dir(cfg)) else {
         return;
@@ -131,6 +170,13 @@ mod tests {
                 .unwrap()
                 .ends_with("images/macos-26A434.ipsw")
         );
+    }
+
+    #[test]
+    fn free_bytes_reads_the_filesystem() {
+        let t = tempfile::tempdir().unwrap();
+        assert!(free_bytes(t.path()).is_some_and(|n| n > 0));
+        assert!(free_bytes(Path::new("/definitely/not/here")).is_none());
     }
 
     #[tokio::test]

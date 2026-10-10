@@ -2442,6 +2442,7 @@ dependencies = [
  "fluxvm-core",
  "fluxvm-guest-protocol",
  "guestkit",
+ "libc",
  "rand 0.8.8",
  "reqwest",
  "roxmltree",

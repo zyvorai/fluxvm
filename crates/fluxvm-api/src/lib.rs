@@ -3700,9 +3700,12 @@ async fn vm_logs(
         }
     };
 
+    // nosniff: clients that sniff a text/plain body (URLSession buffers 512 bytes for it) would hold back a quiet console.
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "no-cache")
         .body(axum::body::Body::from_stream(stream))
         .unwrap())
 }

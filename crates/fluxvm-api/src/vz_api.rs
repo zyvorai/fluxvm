@@ -116,7 +116,7 @@ async fn ipsw_status(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>> 
     Ok(Json(m.macos_ipsw(false).await.map_err(ipsw_error)?))
 }
 
-/// Downloads the newest macOS restore image into the cache (about 15 GB; admin-only).
+/// Downloads the newest macOS restore image into the cache (about 25 GB, resumable; admin-only).
 async fn ipsw_download(
     State(m): State<Arc<VmManager>>,
     Extension(role): Extension<Role>,

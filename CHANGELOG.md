@@ -1,12 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Fixed: `POST /v1/vms/{id}/clone` on the `vz` backend
+- A `vz` clone is now an APFS copy (`cp -c`) of the stopped VM's raw disk instead of a `qemu-img convert` to qcow2 (which the
+  clone's create then converted back to raw). It is instant and no longer needs `qemu-img` on the Mac, where it is usually not
+  installed. A cloud-init hostname equal to the source's name becomes the clone's name. macOS guests are refused with a pointer
+  to template clones. Verified on an Apple M4 (macOS 27.2) through Velora's `--selftest fluxvm`: the clone boots on `vz`, keeps
+  the source's files and answers to its own hostname.
+
+### Fixed: `GET /v1/vms/{id}/logs?follow=true` stalls in URLSession clients
+- The stream now sends `X-Content-Type-Options: nosniff` and `Cache-Control: no-cache`. Without them URLSession held back the first
+  512 bytes of the `text/plain` body for content sniffing, so a quiet console showed nothing in Swift clients.
+
 ## 0.4.0 (2026-10-10)
 
 ### Added: `image: "macos"` installs from Apple's newest restore image
 - With `apple.install`, the image name `macos` (in `image` or `apple.media`) is resolved through the runner's new `latest-ipsw`
   command (`VZMacOSRestoreImage.fetchLatestSupported`), downloaded once over HTTPS and cached as `images/macos-<build>.ipsw`.
   `GET|POST /v1/host/apple/ipsw` and `fluxctl vz ipsw [--download]` show or pre-fetch it. Only the metadata lookup was run on
-  hardware (macOS 27.0.1, build 26A434); the multi-GB download and install have not.
+  hardware (macOS 27.0.1, build 26A434); a download attempt was stopped at 21.9 of 26.6 GB because the 23 GiB USB drive it was writing to could not hold the rest.
+  The IPSW is 26.6 GB (not ~15 GB); the download now checks free space first and resumes a partial file.
 
 ### Added: `fluxctl create` flags for `apple.*`
 - `fluxctl create --name N --image I` builds a `vz` request without a spec file, with `--guest`, `--install`, `--display
