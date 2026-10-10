@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-//! The host-to-guest contract: `init.json` in the meta share, and the markers init prints on the console.
+//! The host-to-guest contract: `config.json` in the meta share, and the markers init prints on the console.
 
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub const META_TAG: &str = "fluxvm-meta";
 /// virtiofs tag of the read-only blob store share (builder VM only).
 pub const BLOBS_TAG: &str = "fluxvm-blobs";
-pub const CONFIG_FILE: &str = "init.json";
+pub const CONFIG_FILE: &str = "config.json";
 pub const TOKEN_FILE: &str = "agent.token";
 /// Where the initramfs tools are visible inside the container after the root switch.
 pub const TOOLS_DIR: &str = "/.fluxvm";

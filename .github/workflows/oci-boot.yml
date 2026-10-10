@@ -1,0 +1,97 @@
+# Copyright 2026 Zyvor AI Labs · https://zyvor.dev
+# SPDX-License-Identifier: Apache-2.0
+#
+# OCI sandboxes on vz: lint and test fluxvm-oci-init on Linux (its PID 1 code only compiles there), then build the
+# boot artifacts (oci-kernel, oci-initrd) on arm64 and upload them. Publishing them as signed catalog entries is a
+# manual `fluxctl catalog add` + `catalog sign` step; see docs/oci-sandboxes.md.
+name: oci-boot
+
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-oci-init/**'
+      - 'crates/fluxvm-guest-agent/**'
+      - 'crates/fluxvm-guest-protocol/**'
+      - 'crates/fluxvm-hypervisor/guest/oci-vz.config.fragment'
+      - 'scripts/build-oci-boot.sh'
+      - 'Cargo.lock'
+      - '.github/workflows/oci-boot.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fluxvm-oci-init/**'
+      - 'crates/fluxvm-guest-agent/**'
+      - 'crates/fluxvm-guest-protocol/**'
+      - 'crates/fluxvm-hypervisor/guest/oci-vz.config.fragment'
+      - 'scripts/build-oci-boot.sh'
+      - 'Cargo.lock'
+      - '.github/workflows/oci-boot.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  init-linux:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: fmt
+        working-directory: fluxvm
+        run: cargo fmt -p fluxvm-oci-init -p fluxvm-guest-agent -p fluxvm-guest-protocol -- --check
+      - name: clippy (PID 1 and the agent, Linux code paths)
+        working-directory: fluxvm
+        run: cargo clippy --locked --no-deps -p fluxvm-oci-init -p fluxvm-guest-agent -p fluxvm-guest-protocol --all-targets -- -D warnings
+      - name: test
+        working-directory: fluxvm
+        run: cargo test --locked -p fluxvm-oci-init -p fluxvm-guest-protocol
+
+  boot-artifacts:
+    needs: init-linux
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout fluxvm
+        uses: actions/checkout@v7
+        with:
+          path: fluxvm
+      - name: Checkout guestkit (sibling path dependency)
+        uses: actions/checkout@v7
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev libssl-dev cpio zstd xz-utils file
+      - name: Kernel and e2fsprogs source cache
+        uses: actions/cache@v6
+        with:
+          path: fluxvm/target/oci-boot/*.tar.xz
+          key: oci-boot-src-${{ hashFiles('fluxvm/scripts/build-oci-boot.sh') }}
+      - name: Build oci-kernel and oci-initrd
+        working-directory: fluxvm
+        run: scripts/build-oci-boot.sh dist/oci-boot
+      - uses: actions/upload-artifact@v7
+        with:
+          name: oci-boot
+          path: fluxvm/dist/oci-boot/
+          if-no-files-found: error
