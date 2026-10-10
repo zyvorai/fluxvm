@@ -456,6 +456,42 @@ pub enum AppleGuest {
     Macos,
 }
 
+/// macOS 26+ vmnet network mode.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppleVmnetMode {
+    Shared,
+    HostOnly,
+}
+
+/// A host-to-guest port forwarding rule on a vmnet network.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleVmnetForward {
+    /// `tcp` or `udp`.
+    pub protocol: String,
+    pub host_port: u16,
+    pub guest_port: u16,
+    pub guest_ip: String,
+}
+
+/// A custom macOS 26+ vmnet network. The network object lives in the VM's runner process, so it is
+/// private to that VM; sharing one network between VMs needs a broker that is not built yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleVmnetSpec {
+    pub mode: AppleVmnetMode,
+    pub subnet: String,
+    pub mask: String,
+    #[serde(default)]
+    pub dhcp_start: Option<String>,
+    #[serde(default)]
+    pub dhcp_end: Option<String>,
+    /// Stable DHCP reservation for this VM's MAC address.
+    #[serde(default)]
+    pub reserved_ip: Option<String>,
+    #[serde(default)]
+    pub forwards: Vec<AppleVmnetForward>,
+}
+
 /// Options for the Apple (`vz`) backend. Ignored by every other backend.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppleSpec {
@@ -523,6 +559,12 @@ pub struct AppleSpec {
     /// Opt-in so hosts that still run the supported macOS 14 baseline do not regress.
     #[serde(default)]
     pub usb_controller: bool,
+    /// macOS 26+ custom vmnet network (needs `network.mode = "user"`; per-VM, not shared).
+    #[serde(default)]
+    pub vmnet: Option<AppleVmnetSpec>,
+    /// macOS 27+ custom Virtio device hook (Linux guests only).
+    #[serde(default)]
+    pub custom_virtio: bool,
     /// Host names the guest may reach, through an HTTP(S) proxy the runner serves over vsock (`network.mode = "none"` only: the guest
     /// has no card, so the proxy is its only way out). `example.com` matches that host, `*.example.com` its subdomains; ports 80 and 443.
     #[serde(default)]
@@ -568,6 +610,8 @@ impl Default for AppleSpec {
             rosetta: false,
             nested_virtualization: false,
             usb_controller: false,
+            vmnet: None,
+            custom_virtio: false,
             egress_allow: Vec::new(),
         }
     }

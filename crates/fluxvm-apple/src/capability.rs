@@ -45,6 +45,10 @@ pub const CAPABILITIES: &[Capability] = &[
         "VZ bridge to host interface; useful for Mac Studio 10GbE; needs com.apple.vm.networking",
     ),
     yes(
+        "vmnet custom network (macOS 26+)",
+        "per-VM shared/host-only network with DHCP pool, reservation and TCP/UDP forwards; not shareable between VMs (needs the unbuilt broker); unverified on hardware",
+    ),
+    yes(
         "shared folders (virtiofs)",
         "Linux: tags fs0, fs1, …; macOS 13+: VZ macOS automount share",
     ),
@@ -127,6 +131,54 @@ pub const CAPABILITIES: &[Capability] = &[
 ];
 
 /// Rejects, with a specific message, any request feature the Apple backend cannot honour.
+fn parse_v4(what: &str, v: &str) -> Result<std::net::Ipv4Addr> {
+    v.parse::<std::net::Ipv4Addr>()
+        .map_err(|_| anyhow::anyhow!("apple.vmnet {what} {v:?} is not a valid IPv4 address"))
+}
+
+/// Admission checks for a custom vmnet network (addresses only; macOS 26+ is checked by the runner).
+fn validate_vmnet(v: &fluxvm_core::model::AppleVmnetSpec) -> Result<()> {
+    let subnet = u32::from(parse_v4("subnet", &v.subnet)?);
+    let mask = u32::from(parse_v4("mask", &v.mask)?);
+    let host_bits = !mask;
+    if mask == 0 || host_bits & host_bits.wrapping_add(1) != 0 {
+        bail!("apple.vmnet mask {:?} is not a contiguous netmask", v.mask);
+    }
+    // A /31 or /32 leaves no room for a host, gateway and guest.
+    if host_bits < 3 {
+        bail!("apple.vmnet mask {:?} leaves no room for guests", v.mask);
+    }
+    let in_net = |what: &str, raw: &str| -> Result<u32> {
+        let a = u32::from(parse_v4(what, raw)?);
+        if a & mask != subnet & mask {
+            bail!(
+                "apple.vmnet {what} {raw} is outside {}/{}",
+                v.subnet,
+                v.mask
+            );
+        }
+        Ok(a)
+    };
+    // The macOS SDK's vmnet network configuration has no DHCP pool setter (only reservations), so a custom
+    // range cannot be honoured; refuse it rather than silently ignore it.
+    if v.dhcp_start.is_some() || v.dhcp_end.is_some() {
+        bail!("apple.vmnet dhcp_start/dhcp_end are not supported by vmnet; use reserved_ip");
+    }
+    if let Some(ip) = &v.reserved_ip {
+        in_net("reserved_ip", ip)?;
+    }
+    for f in &v.forwards {
+        if !matches!(f.protocol.to_ascii_lowercase().as_str(), "tcp" | "udp") {
+            bail!("apple.vmnet forward protocol must be tcp or udp");
+        }
+        if f.host_port == 0 || f.guest_port == 0 {
+            bail!("apple.vmnet forward ports must be nonzero");
+        }
+        in_net("forward guest_ip", &f.guest_ip)?;
+    }
+    Ok(())
+}
+
 pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
     macro_rules! reject {
         ($cond:expr, $msg:expr) => {
@@ -187,6 +239,18 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             {
                 bail!("TCP host forwards are only supported with Apple NAT, not bridge mode");
             }
+        }
+        if let Some(v) = &apple.vmnet {
+            if apple.bridge_interface.is_some() {
+                bail!("apple.vmnet cannot be combined with apple.bridge_interface");
+            }
+            if !matches!(req.network, NetworkSpec::User { .. }) {
+                bail!("apple.vmnet requires network.mode = \"user\"");
+            }
+            validate_vmnet(v)?;
+        }
+        if apple.custom_virtio && !matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Linux) {
+            bail!("apple.custom_virtio is a Linux-guest feature");
         }
         let any_provision = apple.provision_full_name.is_some()
             || apple.provision_username.is_some()
@@ -553,6 +617,43 @@ mod tests {
         assert!(validate_request(&req(none)).is_err());
         let ok = r#""network":{"mode":"user"},"apple":{"bridge_interface":"en0"}"#;
         assert!(validate_request(&req(ok)).is_ok());
+    }
+
+    #[test]
+    fn vmnet_admission_rules() {
+        let v = |net: &str, extra: &str| {
+            format!(
+                r#""network":{{"mode":"{net}"}},"apple":{{{extra}"vmnet":{{"mode":"shared","subnet":"192.168.77.0","mask":"255.255.255.0","reserved_ip":"192.168.77.20","forwards":[{{"protocol":"tcp","host_port":2222,"guest_port":22,"guest_ip":"192.168.77.20"}}]}}}}"#
+            )
+        };
+        assert!(validate_request(&req(&v("user", ""))).is_ok());
+        assert!(validate_request(&req(&v("none", ""))).is_err());
+        assert!(validate_request(&req(&v("user", r#""bridge_interface":"en0","#))).is_err());
+        for (from, to) in [
+            ("255.255.255.0", "255.0.255.0"),
+            (
+                "\"reserved_ip\":\"192.168.77.20\"",
+                "\"reserved_ip\":\"10.0.0.1\"",
+            ),
+            ("\"tcp\"", "\"icmp\""),
+            ("\"host_port\":2222", "\"host_port\":0"),
+            (
+                "\"reserved_ip\"",
+                "\"dhcp_start\":\"192.168.77.10\",\"dhcp_end\":\"192.168.77.99\",\"reserved_ip\"",
+            ),
+            ("192.168.77.0", "not-an-ip"),
+        ] {
+            let json = v("user", "").replace(from, to);
+            assert!(validate_request(&req(&json)).is_err(), "{from} -> {to}");
+        }
+    }
+
+    #[test]
+    fn custom_virtio_is_linux_only() {
+        assert!(validate_request(&req(r#""apple":{"custom_virtio":true}"#)).is_ok());
+        assert!(
+            validate_request(&req(r#""apple":{"guest_os":"macos","custom_virtio":true}"#)).is_err()
+        );
     }
 
     #[test]
