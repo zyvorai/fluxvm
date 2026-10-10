@@ -81,7 +81,8 @@
  * always dark regardless of the page's light/dark theme.
  * ------------------------------------------------------------------- */
 .navbar {
-  height: 4.5rem;
+  height: 3.25rem;
+  font-size: 0.9rem;
   box-shadow: none;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   backdrop-filter: saturate(180%) blur(12px);
@@ -248,4 +249,34 @@ html {
 
 .button {
   border-radius: 980px;
+}
+
+.mac-led {
+  animation: mac-led 2.4s ease-in-out infinite;
+}
+
+@keyframes mac-led {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mac-led {
+    animation: none;
+  }
+}
+
+/* Footer: apple.com's quiet small-print footer, on the site's dark palette. */
+.footer--dark {
+  --ifm-footer-background-color: #1d1d1f;
+  --ifm-footer-color: #86868b;
+  --ifm-footer-link-color: #d2d2d7;
+  --ifm-footer-title-color: #f5f5f7;
+  border-top: 1px solid #424245;
+  font-size: 0.8rem;
+}
+
+.footer--dark .footer__link-item:hover {
+  color: #fff;
 }
