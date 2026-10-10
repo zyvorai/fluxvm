@@ -58,6 +58,12 @@ pub struct RunnerConfig {
     pub network_none: bool,
     /// Hosts the guest may reach through the vsock proxy on `EGRESS_PORT` (empty: no proxy).
     pub egress_allow: Vec<String>,
+    /// Extra guest→host vsock services (see `AppleSpec::vsock_services`), with socket names resolved to host paths.
+    pub vsock_services: Vec<VsockServiceConfig>,
+    /// The JSON the `metadata` built-in serves (id, name, sizing).
+    pub vsock_metadata: Option<String>,
+    /// Where the `telemetry` built-in appends guest lines.
+    pub telemetry_log: Option<PathBuf>,
     /// A state file written by a snapshot; the runner resumes from it instead of cold-booting.
     pub restore_state: Option<PathBuf>,
     /// Direct boot (`VZLinuxBootLoader`): an uncompressed arm64 `Image`. None boots EFI from the disk.
@@ -116,6 +122,21 @@ pub struct ShareConfig {
     pub tag: String,
     pub host_path: PathBuf,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VsockServiceConfig {
+    pub port: u32,
+    /// Host Unix socket the guest's connections are relayed to.
+    pub socket: Option<PathBuf>,
+    /// `metadata` or `telemetry`, answered by the runner.
+    pub builtin: Option<String>,
+}
+
+/// The host end of VM `id`'s allow-listed vsock service `name` (`apple.vsock_services[].socket`). The host-side service
+/// listens here; only names that pass validation resolve, so a spec cannot point the guest at an arbitrary host socket.
+pub fn vsock_service_socket(id: uuid::Uuid, name: &str) -> Result<PathBuf> {
+    Ok(socket_dir()?.join(format!("{}.svc-{name}", id.simple())))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,6 +281,38 @@ impl RunnerConfig {
             rosetta_cache: apple.rosetta_cache.clone(),
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
+            vsock_services: apple
+                .vsock_services
+                .iter()
+                .map(|s| {
+                    Ok(VsockServiceConfig {
+                        port: s.port,
+                        socket: match &s.socket {
+                            Some(n) => Some(vsock_service_socket(ctx.id, n)?),
+                            None => None,
+                        },
+                        builtin: s.builtin.clone(),
+                    })
+                })
+                .collect::<Result<_>>()?,
+            vsock_metadata: apple
+                .vsock_services
+                .iter()
+                .any(|s| s.builtin.as_deref() == Some("metadata"))
+                .then(|| {
+                    serde_json::json!({
+                        "id": ctx.id,
+                        "name": req.name,
+                        "vcpus": req.vcpus,
+                        "memory_mib": req.memory_mib,
+                    })
+                    .to_string()
+                }),
+            telemetry_log: apple
+                .vsock_services
+                .iter()
+                .any(|s| s.builtin.as_deref() == Some("telemetry"))
+                .then(|| ctx.workspace.join("telemetry.log")),
             forwards: match &req.network {
                 NetworkSpec::User { forwards } => forwards
                     .iter()

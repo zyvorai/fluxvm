@@ -53,6 +53,10 @@ pub struct CreateArgs {
     /// Expose the host microphone to the guest.
     #[arg(long)]
     pub microphone: bool,
+    /// Guest→host vsock service, repeatable: `PORT=metadata`, `PORT=telemetry` (answered by the runner) or `PORT=socket:NAME`
+    /// (relayed to the host Unix socket for NAME; see `apple.vsock_services`).
+    #[arg(long = "vsock-service", value_name = "PORT=KIND")]
+    pub vsock_service: Vec<String>,
     /// Do not play guest audio on the host.
     #[arg(long)]
     pub mute: bool,
@@ -174,6 +178,14 @@ pub fn create_body(a: &CreateArgs) -> Result<Value> {
     if a.mute {
         apple.insert("audio_output".into(), json!(false));
     }
+    if !a.vsock_service.is_empty() {
+        let list = a
+            .vsock_service
+            .iter()
+            .map(|v| parse_vsock_service(v))
+            .collect::<Result<Vec<_>>>()?;
+        apple.insert("vsock_services".into(), json!(list));
+    }
     if let Some(b) = &a.bridge {
         apple.insert("bridge_interface".into(), json!(b));
     }
@@ -192,6 +204,20 @@ pub fn create_body(a: &CreateArgs) -> Result<Value> {
         existing.extend(apple);
     }
     Ok(body)
+}
+
+/// `PORT=metadata`, `PORT=telemetry` or `PORT=socket:NAME` → one `apple.vsock_services` entry.
+fn parse_vsock_service(s: &str) -> Result<serde_json::Value> {
+    let (port, kind) = s
+        .split_once('=')
+        .with_context(|| format!("--vsock-service {s:?}: expected PORT=KIND"))?;
+    let port: u32 = port
+        .parse()
+        .with_context(|| format!("--vsock-service {s:?}: {port:?} is not a port"))?;
+    Ok(match kind.strip_prefix("socket:") {
+        Some(name) => json!({"port": port, "socket": name}),
+        None => json!({"port": port, "builtin": kind}),
+    })
 }
 
 #[cfg(test)]
@@ -224,6 +250,18 @@ mod tests {
         assert_eq!(b["apple"]["install"], true);
         assert_eq!(b["apple"]["audio_output"], false);
         assert!(b["apple"].get("rosetta").is_none());
+    }
+
+    #[test]
+    fn vsock_services_from_flags() {
+        let mut a = args();
+        a.vsock_service = vec!["5001=metadata".into(), "5003=socket:echo".into()];
+        let b = create_body(&a).unwrap();
+        assert_eq!(b["apple"]["vsock_services"][0]["builtin"], "metadata");
+        assert_eq!(b["apple"]["vsock_services"][1]["socket"], "echo");
+        assert_eq!(b["apple"]["vsock_services"][1]["port"], 5003);
+        assert!(parse_vsock_service("5001").is_err());
+        assert!(parse_vsock_service("x=metadata").is_err());
     }
 
     #[test]
