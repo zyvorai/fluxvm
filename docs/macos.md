@@ -144,10 +144,15 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
   the template, or the "clone" is a full copy of a 20+ GB disk.
 - **Address.** A macOS guest has no systemd, so the runner reads the Mac's DHCP leases (`/var/db/dhcpd_leases`) for the MAC the guest's
   card was given and reports it as `guest_ip`. (The ARP table is not an option: macOS shows it empty to a spawned process.)
-- **Key login on a fresh clone.** In the guest we prepared, sshd refused the public key on a new clone (home directory not yet readable)
-  until one password login had happened; after that the key worked. Two ways round it: log in once with the password, or put the key
-  in a file outside the home directory (`AuthorizedKeysFile /etc/ssh/fluxvm_authorized_keys` in `/etc/ssh/sshd_config.d/`, root-owned)
-  when you prepare the template. We did not automate either.
+- **Key login on a fresh clone: turn FileVault off in the template.** With FileVault on, a clone boots with its volume locked and sshd
+  refuses every key ("Permission denied (publickey,...)") until one password login unlocks it ("System successfully unlocked. You may
+  now use SSH to authenticate normally."). Moving the key outside the home directory (`AuthorizedKeysFile` in `/etc/ssh/`) does not help,
+  because the whole Data volume is locked. Fix it once, in the template: boot it, log in, and run
+  `sudo fdesetup disable` (give it the user's name and password), then wait for decryption to finish (`fdesetup status` says "FileVault is
+  Off"; about 25 minutes for a 50 GB disk on an Apple M4), shut the guest down cleanly and use that disk as the template. Verified on an
+  Apple M4: a fresh clone of such a template accepted the key on its first login, no password needed. If encryption is still running
+  when you try, `fdesetup disable` fails with error -69573; wait for it to reach 100% first. The guest's disk is a file on your Mac, so
+  turning FileVault off there only matters if the template file itself needs to stay secret.
 - **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
 
 ### Installing through the API

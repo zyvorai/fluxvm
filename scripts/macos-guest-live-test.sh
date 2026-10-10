@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Needs a prepared template (docs/macos.md, "macOS guests"). If the key is refused on a fresh clone, see "Key login on a fresh clone".
+# Needs a prepared template (docs/macos.md, "macOS guests"). If the key is refused on a fresh clone, FileVault is on in the template: see "Key login on a fresh clone".
 # Live test of a macOS guest on the `vz` backend: clones a prepared template through the REST API, checks that the API reports the
 # guest's address and that SSH works, then deletes it. See docs/macos.md ("macOS guests") for how to prepare a template.
 #   FLUXVM_MACOS_TEMPLATE=/Volumes/X/mac1/disk.raw FLUXVM_MACOS_KEY=~/.ssh/key [FLUXVM_MACOS_USER=zeus] \
