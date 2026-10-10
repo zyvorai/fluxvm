@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-oci-init"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "PID 1 for FluxVM OCI sandboxes on vz: mounts the image rootfs, starts the guest agent, runs the entrypoint; also unpacks layers in the builder VM"

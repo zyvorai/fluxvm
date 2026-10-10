@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## 0.4.0 (2026-10-10)
 
 ### Fixed: macOS 27 follow-ups after hardware testing (PR #200)
 - Custom Virtio device id is now `0x3F` (PCI `1af4:107f`). As merged (`0xFF00`) the PCI device id fell outside the range Linux
