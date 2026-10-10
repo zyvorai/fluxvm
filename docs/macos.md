@@ -472,7 +472,9 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   another directory. The container sandbox warm pool ([oci-sandboxes.md](oci-sandboxes.md#warm-pool)) uses it with USB hot-attach
   to hand a pre-booted VM its rootfs and volumes.
 - **ASIF overlay (macOS 27+):** `asif_overlay: true` keeps the base disk read-only and writes to a sparse `disk-overlay.asif`, which
-  snapshots include.
+  snapshots include. Verified on a Linux guest by `scripts/vz-asif-overlay-live-test.sh` (guest writes grow the overlay, the base is
+  byte-identical afterwards); not run with a macOS guest. A plain APFS clone (`cp -c`) is already instant and copy-on-write, so
+  layering several overlays over a shared base is not built: it would save little over what `clone` does today.
 - **Unattended first boot (macOS 27 guests):** `provision_full_name`, `provision_username`, `provision_password_file` (a one-shot file the
   runner deletes after reading), `provision_auto_login`, `provision_remote_login` create the user and turn on Remote Login without Setup
   Assistant.

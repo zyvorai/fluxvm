@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Verified: `apple.asif_overlay` on a Linux guest
+- `scripts/vz-asif-overlay-live-test.sh`: on macOS 27.2 a 64 MiB guest write grows `disk-overlay.asif` and leaves the base `root.raw`
+  byte-identical. The docs no longer list the overlay as unverified (macOS guests with an overlay were not run).
+
 ### Added: `apple.usb_controllers` and `usb_bus` (several USB buses on a `vz` guest)
 - `"apple": {"usb_controllers": 2}` (or `fluxctl create --usb-controllers 2`; 1-4, implies `usb_controller`) gives the guest that
   many XHCI controllers. A USB disk hot-attached with `"usb_bus": N` (`fluxctl disk attach --usb-bus N`) joins bus N (0-based);
