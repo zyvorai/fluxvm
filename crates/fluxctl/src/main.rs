@@ -367,6 +367,12 @@ enum Command {
         #[arg(long)]
         text: Option<String>,
     },
+    /// Per-VM guest sign-in kept in the host's login Keychain, typed into the
+    /// guest's login screen on request. REST: `/v1/vms/{id}/signin`.
+    Signin {
+        #[command(subcommand)]
+        command: SigninCommand,
+    },
     /// Memory use of a VM's VMM process: PSS, private and shared pages, and
     /// balloon state. REST: `GET /v1/vms/{id}/memory`.
     Memory {
@@ -1025,6 +1031,40 @@ enum FleetCommand {
 }
 
 #[derive(Subcommand)]
+enum SigninCommand {
+    /// Store the sign-in; the password is prompted for (echo off) or read
+    /// from stdin when it isn't a terminal.
+    Set {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Username typed before the password by `--mode username`/`username_tab`.
+        #[arg(long = "user")]
+        username: Option<String>,
+    },
+    /// Whether a sign-in is stored, and its username (never the password).
+    Status {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Remove the stored sign-in.
+    Clear {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Type the stored sign-in into the VM's display.
+    Type {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// password, username (username, Enter, password) or username_tab.
+        #[arg(long, default_value = "password")]
+        mode: String,
+        /// Don't press Enter after the password.
+        #[arg(long)]
+        no_submit: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum QgaCommand {
     /// guest-ping over the VM's QGA unix socket.
     Ping {
@@ -1382,6 +1422,40 @@ enum TemplateCommand {
 
 /// `fluxctl input` arguments as a JSON action list: each argument is one action object (or a list of them), then
 /// `--text` as a `type` action.
+/// Reads a secret from the terminal with echo off, or the first line of stdin when it isn't a terminal.
+fn read_secret(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    if stdin.is_terminal() {
+        eprint!("{prompt}");
+        std::io::stderr().flush().ok();
+        let fd = libc::STDIN_FILENO;
+        // SAFETY: termios is plain data filled in by tcgetattr on a valid fd.
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("reading terminal mode");
+        }
+        let mut quiet = saved;
+        quiet.c_lflag &= !libc::ECHO;
+        quiet.c_lflag |= libc::ECHONL;
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &quiet) };
+        let read = stdin.lock().read_line(&mut line);
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
+        read.context("reading password")?;
+    } else {
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .context("reading password from stdin")?;
+    }
+    let secret = line.trim_end_matches(['\r', '\n']).to_string();
+    if secret.is_empty() {
+        anyhow::bail!("empty password");
+    }
+    Ok(secret)
+}
+
 fn input_actions(args: &[String], text: Option<String>) -> Result<Vec<serde_json::Value>> {
     let mut out = Vec::new();
     for a in args {
@@ -2916,6 +2990,39 @@ async fn run_remote(
                 .await?,
             )?
         }
+        Command::Signin { command } => match command {
+            SigninCommand::Set { id, username } => {
+                let password = read_secret("password: ")?;
+                pretty(
+                    &r.call(
+                        Method::PUT,
+                        &format!("/v1/vms/{id}/signin"),
+                        Some(json!({"username": username, "password": password})),
+                    )
+                    .await?,
+                )?
+            }
+            SigninCommand::Status { id } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/signin"), None)
+                    .await?,
+            )?,
+            SigninCommand::Clear { id } => pretty(
+                &r.call(Method::DELETE, &format!("/v1/vms/{id}/signin"), None)
+                    .await?,
+            )?,
+            SigninCommand::Type {
+                id,
+                mode,
+                no_submit,
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/signin"),
+                    Some(json!({"mode": mode, "submit": !no_submit})),
+                )
+                .await?,
+            )?,
+        },
         Command::Memory { id } => pretty(
             &r.call(Method::GET, &format!("/v1/vms/{id}/memory"), None)
                 .await?,
@@ -3875,6 +3982,33 @@ async fn main() -> Result<()> {
             std::fs::write(&output, &shot.png)
                 .with_context(|| format!("writing {}", output.display()))?;
             println!("{}", output.display());
+        }
+        Command::Signin { command } => {
+            let v = match command {
+                SigninCommand::Set { id, username } => {
+                    let password = read_secret("password: ")?;
+                    serde_json::to_value(m.set_vm_signin(id, username, password).await?)?
+                }
+                SigninCommand::Status { id } => {
+                    serde_json::to_value(m.vm_signin_status(id).await?)?
+                }
+                SigninCommand::Clear { id } => {
+                    m.get(id).await?;
+                    serde_json::json!({"deleted": m.delete_vm_signin(id).await?})
+                }
+                SigninCommand::Type {
+                    id,
+                    mode,
+                    no_submit,
+                } => {
+                    let mode: fluxvm_scheduler::vz_screen::SigninMode =
+                        serde_json::from_value(serde_json::Value::String(mode))
+                            .context("--mode must be password, username or username_tab")?;
+                    m.vm_signin(id, mode, !no_submit).await?;
+                    serde_json::json!({"ok": true})
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&v)?);
         }
         Command::Input { id, actions, text } => {
             let actions: Vec<fluxvm_scheduler::vz_screen::InputAction> =

@@ -76,6 +76,10 @@ POST   /v1/vms/{uuid}/agent/put-file
 POST   /v1/vms/{uuid}/agent/get-file
 GET    /v1/vms/{uuid}/screenshot         # vz; ?max_width=N; image/png of the guest display; admin
 POST   /v1/vms/{uuid}/input              # vz; {"action": "type"|"key"|"click"|...} or {"actions": [...]}; admin
+PUT    /v1/vms/{uuid}/signin             # vz; {"username"?, "password"} into the host login Keychain; admin
+GET    /v1/vms/{uuid}/signin             # {"configured", "username"?}; never the password; admin
+DELETE /v1/vms/{uuid}/signin             # {"deleted": bool}; admin
+POST   /v1/vms/{uuid}/signin             # {"mode"?: "password"|"username"|"username_tab", "submit"?: bool}; types it; admin
 GET    /v1/vms/{uuid}/qga/network-interfaces
 DELETE /v1/vms/{uuid}                    # Idempotency-Key honored
 GET    /v1/vm-templates
@@ -223,6 +227,14 @@ Highlights:
   `x`, `y`). Coordinates are screenshot pixels from the top left; after
   `?max_width=N` pass `"screen_width": N` so they are scaled back. A batch is
   validated as a whole before anything is sent (at most 100 actions).
+- `/v1/vms/{uuid}/signin` keeps a guest sign-in for a `vz` VM in the host's
+  login Keychain (service `dev.zyvor.fluxvm.vm-signin`, account: the VM id)
+  and types it into the display on `POST`, so an agent can get past a login
+  screen without ever seeing the password. `mode` is `password` (default; the
+  focused field), `username` (username, Enter, password: a text console) or
+  `username_tab` (username, Tab, password: a graphical form); `submit`
+  (default true) presses Enter afterwards. Username and password are printable
+  ASCII, at most 256 characters. Deleting the VM removes the item.
 - `GET /v1/events/stream` emits `event: <name>` / `data: <json>` frames;
   tenant-scoped tokens only see their tenant's VMs.
 - `GET /v1/openapi.json` is exempt from auth, like `/healthz` and `/readyz`.

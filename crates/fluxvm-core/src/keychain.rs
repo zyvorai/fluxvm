@@ -34,6 +34,42 @@ pub fn read_password(service: &str, account: &str) -> Result<String> {
     Ok(password)
 }
 
+/// Creates or replaces the generic-password item `service` / `account`. The secret goes through the Security
+/// framework, never a command line.
+pub fn write_password(service: &str, account: &str, password: &str) -> Result<()> {
+    if service.is_empty() || account.is_empty() {
+        bail!("a Keychain item needs a service and an account");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        security_framework::passwords::set_generic_password(service, account, password.as_bytes())
+            .map_err(|e| anyhow::anyhow!("writing Keychain item {service:?} / {account:?}: {e}"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = password;
+        bail!("the Keychain is only available on macOS")
+    }
+}
+
+/// Removes the generic-password item `service` / `account`; `false` if there was none.
+pub fn delete_password(service: &str, account: &str) -> Result<bool> {
+    if service.is_empty() || account.is_empty() {
+        bail!("a Keychain item needs a service and an account");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+        match security_framework::passwords::delete_generic_password(service, account) {
+            Ok(()) => Ok(true),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(false),
+            Err(e) => bail!("deleting Keychain item {service:?} / {account:?}: {e}"),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    bail!("the Keychain is only available on macOS")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,6 +78,18 @@ mod tests {
     fn needs_a_service_and_an_account() {
         assert!(read_password("", "me").is_err());
         assert!(read_password("svc", "").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "writes to the login Keychain"]
+    fn writes_reads_and_deletes_an_item() {
+        let (svc, acct) = ("fluxvm-test-keychain-roundtrip", "tester");
+        write_password(svc, acct, "s3cr\"et pa$$").unwrap();
+        write_password(svc, acct, "replaced").unwrap();
+        assert_eq!(read_password(svc, acct).unwrap(), "replaced");
+        assert!(delete_password(svc, acct).unwrap());
+        assert!(!delete_password(svc, acct).unwrap());
     }
 
     #[test]

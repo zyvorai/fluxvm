@@ -741,6 +741,42 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             },
         ),
         tool(
+            "vm_sign_in",
+            "Type the sign-in stored for an Apple VZ VM (fluxctl signin set) into its login screen. The password never passes through the agent. mode: password (default; types the password into the focused field), username (username, Enter, then password, for a text console login) or username_tab (username, Tab, password, for a graphical form). submit presses Enter after the password (default true).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "mode": {"type": "string", "enum": ["password", "username", "username_tab"]},
+                    "submit": {"type": "boolean"},
+                    "screenshot": {"type": "boolean", "description": "return a screenshot (default width 1280) afterwards"}
+                }),
+                &["vm"],
+            ),
+            true,
+            &remote,
+            |r, args| async move {
+                timed(Duration::from_secs(60), async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let mut body = json!({});
+                    for key in ["mode", "submit"] {
+                        if let Some(v) = args.get(key) {
+                            body[key] = v.clone();
+                        }
+                    }
+                    r.call(Method::POST, &format!("/v1/vms/{id}/signin"), Some(body))
+                        .await?;
+                    if args.get("screenshot").and_then(Value::as_bool) == Some(true) {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        return screenshot_content(&r, id, DEFAULT_SCREEN_WIDTH).await;
+                    }
+                    Ok(vec![
+                        json!({"type": "text", "text": "signed in (typed the stored sign-in)"}),
+                    ])
+                })
+                .await
+            },
+        ),
+        tool(
             "vm_delete",
             "Delete a VM and its FluxVM-owned runtime resources.",
             object(json!({"vm": vm_prop}), &["vm"]),
@@ -1453,6 +1489,7 @@ mod tests {
             "vm_snapshot_delete",
             "vm_delete",
             "vm_input",
+            "vm_sign_in",
         ] {
             assert!(lookup(name).write, "{name} must require --allow-write");
         }
