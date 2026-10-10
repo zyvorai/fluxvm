@@ -195,7 +195,7 @@ impl VmBackend for AppleBackend {
 
     async fn launch(
         &self,
-        _cfg: &Config,
+        cfg: &Config,
         req: &CreateVmRequest,
         ctx: &LaunchContext,
     ) -> Result<LaunchResult> {
@@ -226,6 +226,7 @@ impl VmBackend for AppleBackend {
         runner::write_oci_meta(req, &ctx.workspace)?;
         let runner = find_runner()?;
         let mut conf = RunnerConfig::for_launch(req, ctx)?;
+        conf.serial_log_max_bytes = Some(cfg.apple.serial_log_max_mib.max(1) << 20);
         for net in &mut conf.networks {
             net.socket = vznet::ensure_switch(&net.name).await?;
             net.switch_bin = vznet::find_switch()?;

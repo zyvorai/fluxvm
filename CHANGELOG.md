@@ -2,6 +2,13 @@
 
 ## 0.4.0 (unreleased)
 
+### Changed: `vz` follow-ups
+- `fluxctl disk detach` unplugs a hot-attached USB disk from the running guest at once.
+- Warm-claimed container sandboxes are not hibernated until they restart (their root is on USB until then).
+- `fluxctl ls` and `GET /v1/vms` leave out container warm-pool slots unless given `--all` / `?all=true` or a `fluxvm.oci-warm`
+  selector.
+- `apple.serial_log_max_mib` (default 16) sets the console log rotation size; `sandbox logs` reads the rotated file too.
+
 ### Added: `vz` developer conveniences
 - **Named console ports**: `apple.console_ports` ([docs/macos.md](docs/macos.md#named-console-ports)) adds
   `VZVirtioConsolePortConfiguration` ports. A Linux guest sees `/dev/virtio-ports/<name>`, and the runner bridges each port to a

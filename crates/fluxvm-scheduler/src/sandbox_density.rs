@@ -123,7 +123,10 @@ impl VmManager {
         let cutoff = Utc::now() - Duration::seconds(secs as i64);
         let mut n = 0;
         for vm in self.list().await {
-            if !is_vz_sandbox(&vm) || !matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            if !is_vz_sandbox(&vm)
+                || !matches!(vm.status, VmStatus::Running | VmStatus::Paused)
+                || crate::oci_pool::runs_claimed(&vm)
+            {
                 continue;
             }
             let last = self.last_activity(vm.id).await.unwrap_or(vm.created_at);

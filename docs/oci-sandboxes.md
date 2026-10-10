@@ -184,7 +184,8 @@ oci_warm_slots = 2
 oci_warm_sizes = ["1x512", "2x1024"]   # VCPUSxMEMORY_MIB
 ```
 
-- **A slot** is a running VM whose init is in `wait` mode. The kernel has booted, the network card holds its DHCP lease, and init
+- **A slot** is a running VM whose init is in `wait` mode. `fluxctl ls` and `GET /v1/vms` leave slots out unless given `--all`
+  (`?all=true`) or a selector on `fluxvm.oci-warm`; the sandbox list never shows them. The kernel has booted, the network card holds its DHCP lease, and init
   listens on vsock port 1026 and prints `FLUXVM-WARM-READY`. Its root disk is a 1 MiB placeholder, it has a USB controller, and its
   four volume shares (`fluxvm-vol0..3`) point at an empty directory. Slots are labelled `fluxvm.oci-warm=<size>` and have the
   Rosetta share when Rosetta is installed.
@@ -209,8 +210,9 @@ oci_warm_sizes = ["1x512", "2x1024"]   # VCPUSxMEMORY_MIB
 `oci_warm_misses` and `oci_warm_last_claim_ms` (picking the slot to the container's agent answering). Each waiting slot holds its
 memory, so size the pool to what you create in bursts.
 
-Hibernating a claimed sandbox saves a VM whose root is on USB. If the saved state does not restore, waking falls back to a cold
-boot from the same rootfs.
+A claimed sandbox is not hibernated while it runs in the VM it was claimed in (its root is on USB, which the record's devices do
+not describe; it is labelled `fluxvm.oci-warm-claimed=<runner pid>`). Once it restarts, it boots from the rootfs on virtio like
+any sandbox and hibernates normally.
 
 ## Security defaults
 
@@ -254,6 +256,7 @@ oci_cmdline = "console=hvc0 loglevel=4 panic=-1"
 oci_builder_memory_mib = 1024
 oci_warm_slots = 0                   # pre-booted VMs per size; see "Warm pool"
 oci_warm_sizes = ["1x512"]
+serial_log_max_mib = 16              # console.log rotates to console.log.1 past this
 
 [[apple.oci_registry_credentials]]
 registry = "ghcr.io"

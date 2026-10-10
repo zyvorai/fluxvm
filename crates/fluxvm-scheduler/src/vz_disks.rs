@@ -3,7 +3,7 @@
 
 //! Extra disks of `vz` Linux guests (`apple.extra_disks`): image files, host block devices and NBD exports on virtio, NVMe or
 //! USB controllers. Virtualization.framework fixes a VM's devices when it starts, so a change applies at the next start, except
-//! a USB image disk, which is also hot-attached to a running guest (macOS 15).
+//! a USB image disk, which is also hot-attached to a running guest (macOS 15) and hot-detached again.
 
 use crate::VmManager;
 use anyhow::{Context, Result, bail};
@@ -16,6 +16,35 @@ use uuid::Uuid;
 
 /// Most extra disks per VM (virtio and NVMe each take a PCI slot).
 const MAX_EXTRA_DISKS: usize = 16;
+/// `{"<disk name>": {"uuid": "<runner usb id>", "pid": <runner pid>}}`: disks hot-attached to the running guest.
+const HOTPLUG_FILE: &str = "usb-hotplug.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Hotplug {
+    uuid: String,
+    /// The runner the disk was attached to; after a restart the id means nothing.
+    pid: Option<u32>,
+}
+
+fn read_hotplug(workspace: &Path) -> std::collections::BTreeMap<String, Hotplug> {
+    std::fs::read(workspace.join(HOTPLUG_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn write_hotplug(
+    workspace: &Path,
+    map: &std::collections::BTreeMap<String, Hotplug>,
+) -> Result<()> {
+    let path = workspace.join(HOTPLUG_FILE);
+    if map.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    std::fs::write(&path, serde_json::to_vec(map)?)
+        .with_context(|| format!("writing {}", path.display()))
+}
 
 fn controller_name(c: AppleDiskController) -> &'static str {
     match c {
@@ -153,9 +182,12 @@ impl VmManager {
             && disk.kind == AppleDiskKind::Image
             && disk.controller == AppleDiskController::Usb;
         if live {
-            fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only)
+            let uuid = fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only)
                 .await
                 .context("hot-attaching the USB disk")?;
+            let mut map = read_hotplug(&vm.workspace);
+            map.insert(name.to_owned(), Hotplug { uuid, pid: vm.pid });
+            write_hotplug(&vm.workspace, &map)?;
         }
         self.store.update(vm.clone()).await?;
         crate::audit_event(
@@ -174,9 +206,21 @@ impl VmManager {
             .context("the new disk is missing from the list")
     }
 
-    /// Removes extra disk `name` at the next start; a new image made by `attach_vz_disk` is deleted with it.
+    /// Removes extra disk `name`: at once when it was hot-attached to the running guest, otherwise at the next start. A new
+    /// image made by `attach_vz_disk` is deleted with it once nothing uses it.
     pub async fn detach_vz_disk(&self, id: Uuid, name: &str) -> Result<()> {
         let mut vm = self.vz_linux_vm(id).await?;
+        let mut hotplug = read_hotplug(&vm.workspace);
+        let mut live = false;
+        if let Some(h) = hotplug.remove(name) {
+            if matches!(vm.status, VmStatus::Running | VmStatus::Paused) && h.pid == vm.pid {
+                fluxvm_apple::usb_detach(&vm, &h.uuid)
+                    .await
+                    .context("hot-detaching the USB disk")?;
+                live = true;
+            }
+            write_hotplug(&vm.workspace, &hotplug)?;
+        }
         let workspace_disks = vm.workspace.join("disks");
         let apple = vm.request.apple.get_or_insert_with(Default::default);
         let Some(i) = apple
@@ -194,14 +238,18 @@ impl VmManager {
                 d.name = Some(format!("disk{}", if j >= i { j + 1 } else { j }));
             }
         }
-        let stopped = matches!(vm.status, VmStatus::Stopped | VmStatus::Failed);
+        let unused = live || matches!(vm.status, VmStatus::Stopped | VmStatus::Failed);
         self.store.update(vm).await?;
-        if stopped && removed.path.starts_with(&workspace_disks) {
+        if unused && removed.path.starts_with(&workspace_disks) {
             let _ = std::fs::remove_file(&removed.path);
         }
         crate::audit_event(
             "vm.disk.detach",
-            &[("vm_id", &id.to_string()), ("disk", name)],
+            &[
+                ("vm_id", &id.to_string()),
+                ("disk", name),
+                ("live", if live { "true" } else { "false" }),
+            ],
         );
         Ok(())
     }

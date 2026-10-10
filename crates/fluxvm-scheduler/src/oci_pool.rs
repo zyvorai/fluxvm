@@ -34,6 +34,9 @@ use uuid::Uuid;
 
 /// `VCPUSxMEMORY_MIB` of a waiting slot; removed when the slot is claimed.
 pub const WARM_LABEL: &str = "fluxvm.oci-warm";
+/// On a claimed sandbox: the runner pid whose guest has its root on USB. Such a guest is not hibernated (its saved state
+/// would not restore with the record's devices); after a restart the pid differs and the label no longer applies.
+pub const CLAIMED_LABEL: &str = "fluxvm.oci-warm-claimed";
 /// Volume shares every slot carries.
 pub const WARM_VOLUMES: usize = 4;
 /// The hot-attached rootfs: the only USB mass-storage device, so the first SCSI disk.
@@ -80,6 +83,12 @@ pub fn size_label(vcpus: u8, memory_mib: u64) -> String {
 
 pub(crate) fn is_warm_slot(vm: &VmRecord) -> bool {
     vm.backend == BackendKind::Vz && vm.labels.contains_key(WARM_LABEL)
+}
+
+/// VM lists leave out waiting warm slots unless asked for everything (`?all=true`, `fluxctl ls --all`) or the label selector
+/// names [`WARM_LABEL`].
+pub fn listed(vm: &VmRecord, all: bool, selector: Option<&str>) -> bool {
+    all || selector.is_some_and(|s| s.contains(WARM_LABEL)) || !is_warm_slot(vm)
 }
 
 /// Whether a slot can become this sandbox (everything but the size, which the claim matches).
@@ -160,6 +169,13 @@ pub(crate) fn summarize(vms: &[VmRecord], configured: usize, r: &mut DensityRepo
             _ => {}
         }
     }
+}
+
+/// A claimed sandbox still running in the VM it was claimed in (root disk on USB).
+pub(crate) fn runs_claimed(vm: &VmRecord) -> bool {
+    vm.labels
+        .get(CLAIMED_LABEL)
+        .is_some_and(|pid| vm.pid.map(|p| p.to_string()).as_deref() == Some(pid.as_str()))
 }
 
 /// Init in the slot has printed [`init::WARM_READY`].
@@ -404,6 +420,9 @@ impl VmManager {
         }
         vm.request = req;
         vm.labels.remove(WARM_LABEL);
+        if let Some(pid) = vm.pid {
+            vm.labels.insert(CLAIMED_LABEL.to_owned(), pid.to_string());
+        }
         self.store.update(vm.clone()).await?;
         Ok(vm)
     }
@@ -490,6 +509,41 @@ mod tests {
         let extra = c.apple.as_ref().unwrap().tagged_shares[0].clone();
         c.apple.as_mut().unwrap().tagged_shares.push(extra);
         assert!(!eligible(&c), "five volumes");
+    }
+
+    #[test]
+    fn a_claimed_sandbox_is_special_only_in_the_runner_it_was_claimed_in() {
+        let mut vm: VmRecord = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "name": "x", "backend": "vz", "status": "running", "pid": 41,
+            "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "workspace": "/tmp/w",
+            "disk": "/tmp/w/rootfs.raw", "seed_disk": null, "tap_name": null, "control_socket": null,
+            "log_path": "/tmp/w/console.log", "error": null,
+            "request": {"name": "x", "image": "/img", "vcpus": 1, "memory_mib": 512, "backend": "vz"},
+        }))
+        .unwrap();
+        assert!(!runs_claimed(&vm));
+        vm.labels.insert(CLAIMED_LABEL.into(), "41".into());
+        assert!(runs_claimed(&vm));
+        vm.pid = Some(77);
+        assert!(!runs_claimed(&vm), "restarted: the root is on virtio now");
+    }
+
+    #[test]
+    fn lists_hide_waiting_slots_unless_asked() {
+        let mut vm: VmRecord = serde_json::from_value(serde_json::json!({
+            "id": Uuid::new_v4(), "name": "x", "backend": "vz", "status": "running", "pid": 1,
+            "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "workspace": "/tmp/w",
+            "disk": "/tmp/w/root.raw", "seed_disk": null, "tap_name": null, "control_socket": null,
+            "log_path": "/tmp/w/console.log", "error": null,
+            "request": {"name": "x", "image": "/img", "vcpus": 1, "memory_mib": 512, "backend": "vz"},
+        }))
+        .unwrap();
+        assert!(listed(&vm, false, None));
+        vm.labels.insert(WARM_LABEL.into(), "1x512".into());
+        assert!(!listed(&vm, false, None));
+        assert!(!listed(&vm, false, Some("env=dev")));
+        assert!(listed(&vm, true, None));
+        assert!(listed(&vm, false, Some("fluxvm.oci-warm=1x512")));
     }
 
     #[test]

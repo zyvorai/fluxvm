@@ -411,6 +411,21 @@ pub struct SandboxLogs {
     pub log: String,
 }
 
+/// The console log, preceded by the file the runner rotated out (`console.log.1`), if any.
+pub(crate) async fn read_console(path: &Path) -> Result<String> {
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    let mut out = Vec::new();
+    for p in [Path::new(&rotated), path] {
+        match tokio::fs::read(p).await {
+            Ok(b) => out.extend_from_slice(&b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
+        }
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
 /// An OCI sandbox VM: exec and files only through its guest agent.
 pub(crate) fn is_oci(vm: &VmRecord) -> bool {
     vm.request
@@ -539,11 +554,7 @@ impl VmManager {
     /// exited and init's own startup error when it failed. The markers are looked for in the whole log, not just the tail.
     pub async fn sandbox_logs(&self, id: Uuid, lines: usize) -> Result<SandboxLogs> {
         let vm = self.get(id).await?;
-        let log = match tokio::fs::read(&vm.log_path).await {
-            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", vm.log_path.display())),
-        };
+        let log = read_console(&vm.log_path).await?;
         Ok(SandboxLogs {
             id,
             status: vm.status,
@@ -643,6 +654,19 @@ mod tests {
             .is_ok(),
             "volumes are persistent shares for container sandboxes"
         );
+    }
+
+    #[tokio::test]
+    async fn the_console_includes_the_rotated_log_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        assert_eq!(read_console(&log).await.unwrap(), "");
+        std::fs::write(&log, "new\n").unwrap();
+        assert_eq!(read_console(&log).await.unwrap(), "new\n");
+        std::fs::write(dir.path().join("console.log.1"), "FLUXVM-EXIT 3\n").unwrap();
+        let both = read_console(&log).await.unwrap();
+        assert_eq!(both, "FLUXVM-EXIT 3\nnew\n");
+        assert_eq!(init::exit_code_from_log(&both), Some(3));
     }
 
     #[test]

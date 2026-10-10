@@ -172,6 +172,9 @@ enum Command {
     List {
         #[arg(short = 'l', long = "selector")]
         selector: Option<String>,
+        /// Also list the container warm pool's waiting VMs.
+        #[arg(long)]
+        all: bool,
     },
     /// Get a VM by id.
     Get {
@@ -2513,9 +2516,9 @@ async fn run_remote(
         Ok(())
     };
     match command {
-        Command::List { selector } => output::print_list(
+        Command::List { selector, all } => output::print_list(
             format,
-            &r.list_vms(selector.as_deref()).await?,
+            &r.list_vms_all(selector.as_deref(), all).await?,
             output::VM_COLUMNS,
         )?,
         Command::Get { id } | Command::Status { id: Some(id), .. } => {
@@ -3654,8 +3657,9 @@ async fn main() -> Result<()> {
             let req: CreateVmRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
             println!("{}", serde_json::to_string_pretty(&m.create(req).await?)?);
         }
-        Command::List { selector } => {
+        Command::List { selector, all } => {
             let mut items = m.list().await;
+            items.retain(|vm| fluxvm_scheduler::vm_listed(vm, all, selector.as_deref()));
             if let Some(sel) = selector.as_deref() {
                 let sel = fluxvm_core::model::LabelSelector::parse(sel)?;
                 items.retain(|vm| sel.matches(&vm.labels));
@@ -6595,7 +6599,10 @@ mod tier2_cli_tests {
         assert!(cli(&["restart", &id, "-l", "env=dev"]).is_err());
         assert!(matches!(
             cli(&["list", "-l", "team"]).unwrap().command,
-            Command::List { selector: Some(_) }
+            Command::List {
+                selector: Some(_),
+                ..
+            }
         ));
     }
 
