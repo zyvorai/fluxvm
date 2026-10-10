@@ -37,7 +37,7 @@ Checked against WWDC26 session 224, the macOS 27 SDK headers (Virtualization, vm
 |---|---|---|---|
 | Guest provisioning | `VZMacGuestProvisioningOptions`, `setGuestProvisioning`, `guestProvisioningInvalid*` errors | `ModernFeatures.swift`, `SecureBoot.swift` | earlier gate |
 | EFI Secure Boot | `enableSecureBoot(platformKey:)`, `enableSecureBootUsingDefaultPlatformKey`, `disableSecureBoot`, `resetSecureBoot`, `enrollDefaultSecureBootSignatures`, `enrollSecureBootSignatures`, `isSecureBootEnabled`, `enrolledSecureBootSignatures`, `VZEFISignatureList`, `efi*` errors | `SecureBoot.swift` | enable/status/disable verified on the M4 |
-| Custom Virtio | provider, `didCreateDevice`, notifications, `DidAcceptDriverOk`, `WillStop/Pause/Resume/Reset`, `SaveState(forRestore:)`, `ShouldRestore`, `requestReset`, `guestMemoryMapping` | `CustomVirtio.swift` | control + bulk-fill verified; lifecycle and save/restore not yet |
+| Custom Virtio | provider, `didCreateDevice`, notifications, `DidAcceptDriverOk`, `WillStop/Pause/Resume/Reset`, `SaveState(forRestore:)`, `ShouldRestore`, `requestReset`, `guestMemoryMapping` | `CustomVirtio.swift` | control, bulk-fill, driver-ready/pause/resume/stop and save/restore verified; `requestReset` not yet |
 | USB | `VZUSBPassthroughDevice`, `VZUSBController.Delegate` (`usbPassthroughDeviceDidDisconnect`) | `USBPassthrough.swift` | not run (no consent helper) |
 | Configuration and view | `VZVirtualMachineConfiguration.label`, `VZVirtualMachineViewAdaptor` | `Runner.swift` | label verified; window not opened |
 | DiskImageKit | `VZDiskImageStorageDeviceAttachment(diskImage:)` | `ModernFeatures.swift` | earlier gate |
@@ -59,6 +59,9 @@ Details in [macos-architecture.md](macos-architecture.md#14-what-is-verified).
 5. Fleet placement: verified only on loopback with one real Mac and two fake nodes; no second Mac.
 6. EFI Secure Boot: verified with an EFI guest on an empty disk: default keys enrolled (2 KEK, 2 db, 26 dbx), `secure-boot-status`
    reports enabled, `secure_boot: false` disables it and keeps the keys. Booting a signed distro under Secure Boot is not run.
+7. Custom Virtio save/restore: Debian 13 guest with `virtio_flux.ko`, snapshot, stop, `start-from-snapshot`. The guest resumed without
+   a reboot, `ping` and `echo` answered, and the device counters continued from the saved values. Without `supportsSaveRestore` the
+   save failed with "Unsupported custom virtio device in configuration"; the runner now sets it.
 
 ## Production gates
 

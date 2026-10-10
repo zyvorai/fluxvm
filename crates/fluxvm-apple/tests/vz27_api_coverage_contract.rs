@@ -47,6 +47,7 @@ fn macos_27_virtualization_apis() {
         "customVirtioDeviceWillReset",
         "customVirtioDeviceSaveState(forRestore",
         "customVirtioDeviceShouldRestore",
+        "supportsSaveRestore = true",
         "requestReset()",
         "guestMemoryMapping(atPhysicalAddress:",
         // USB
