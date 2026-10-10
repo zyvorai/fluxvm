@@ -40,7 +40,7 @@ extension Runner {
         guard cfg.custom_virtio == true else { return }
         guard cfg.guest_os == "linux" else { throw modernError("apple.custom_virtio is Linux-only") }
         guard #available(macOS 27.0, *) else { throw modernError("apple.custom_virtio needs a macOS 27+ host") }
-        c.customVirtioDevices = [fluxVMCustomVirtioConfiguration()]
+        c.customVirtioDevices = [fluxVMCustomVirtioConfiguration(vmID: cfg.id)]
     }
 
     func configureClipboard(_ c: VZVirtualMachineConfiguration) throws {
