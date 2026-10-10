@@ -1310,8 +1310,12 @@ enum ContextCommand {
         name: String,
         #[arg(long)]
         server: String,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "token_keychain")]
         token: Option<String>,
+        /// Read the token from this Keychain generic-password service (account: the context name) instead of storing
+        /// it, e.g. after `security add-generic-password -s fluxvm-api -a NAME -w`.
+        #[arg(long)]
+        token_keychain: Option<String>,
     },
     /// Make a context current.
     Use {
@@ -2142,11 +2146,19 @@ fn run_context(command: ContextCommand, format: output::OutputFormat) -> Result<
             name,
             server,
             token,
+            token_keychain,
         } => {
             if name == remote::LOCAL_CONTEXT {
                 anyhow::bail!("'{name}' is reserved for local mode");
             }
-            c.add(&name, contexts::Endpoint { server, token })?
+            c.add(
+                &name,
+                contexts::Endpoint {
+                    server,
+                    token,
+                    token_keychain,
+                },
+            )?
         }
         ContextCommand::Use { name } => c.use_context(&name)?,
         ContextCommand::Unset => c.current = None,

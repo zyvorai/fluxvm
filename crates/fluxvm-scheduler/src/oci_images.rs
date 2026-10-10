@@ -119,39 +119,12 @@ async fn registry_password(c: &OciRegistryCredential) -> Result<String> {
             "registry credential for {} sets both password and keychain_service",
             c.registry
         ),
-        (Some(s), true) => s,
+        (Some(s), true) => s.clone(),
     };
-    let out = tokio::process::Command::new("/usr/bin/security")
-        .args([
-            "find-generic-password",
-            "-s",
-            service,
-            "-a",
-            &c.username,
-            "-w",
-        ])
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output()
+    let account = c.username.clone();
+    tokio::task::spawn_blocking(move || fluxvm_core::keychain::read_password(&service, &account))
         .await
-        .context("running /usr/bin/security")?;
-    if !out.status.success() {
-        bail!(
-            "no Keychain password for service {service:?}, account {:?} ({}); add it with \
-             `security add-generic-password -s {service} -a {} -w`",
-            c.username,
-            String::from_utf8_lossy(&out.stderr).trim(),
-            c.username
-        );
-    }
-    let password = String::from_utf8(out.stdout)
-        .context("Keychain password is not UTF-8")?
-        .trim_end_matches('\n')
-        .to_string();
-    if password.is_empty() {
-        bail!("Keychain item for service {service:?} has an empty password");
-    }
-    Ok(password)
+        .context("reading the Keychain")?
 }
 
 /// One lock per rootfs file, so state dirs (and tests) never share a lock.

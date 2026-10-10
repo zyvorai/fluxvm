@@ -12,6 +12,23 @@ pub struct Endpoint {
     pub server: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    /// Keychain generic-password service holding the token (account: the context name), instead of `token`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_keychain: Option<String>,
+}
+
+impl Endpoint {
+    /// The stored token, or the one read from the Keychain item for context `name`.
+    pub fn resolve_token(&self, name: &str) -> Result<Option<String>> {
+        match (&self.token, &self.token_keychain) {
+            (Some(_), Some(_)) => bail!("context {name:?} sets both token and token_keychain"),
+            (Some(t), None) => Ok(Some(t.clone())),
+            (None, Some(service)) => fluxvm_core::keychain::read_password(service, name)
+                .map(Some)
+                .with_context(|| format!("context {name:?}")),
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -114,7 +131,8 @@ impl Contexts {
                 serde_json::json!({
                     "name": name,
                     "server": ep.server,
-                    "token": ep.token.is_some(),
+                    "token": ep.token.is_some() || ep.token_keychain.is_some(),
+                    "token_keychain": ep.token_keychain,
                     "current": self.current.as_deref() == Some(name),
                 })
             })
@@ -130,7 +148,23 @@ mod tests {
         Endpoint {
             server: s.into(),
             token: None,
+            token_keychain: None,
         }
+    }
+
+    #[test]
+    fn a_token_comes_from_the_file_or_the_keychain_not_both() {
+        let mut e = ep("https://lab");
+        assert_eq!(e.resolve_token("lab").unwrap(), None);
+        e.token = Some("t".into());
+        assert_eq!(e.resolve_token("lab").unwrap().as_deref(), Some("t"));
+        e.token_keychain = Some("fluxvm-lab".into());
+        assert!(e.resolve_token("lab").is_err());
+        e.token = None;
+        let parsed: Endpoint =
+            serde_json::from_str(r#"{"server":"https://lab","token_keychain":"fluxvm-lab"}"#)
+                .unwrap();
+        assert_eq!(parsed, e);
     }
 
     #[test]
@@ -166,6 +200,7 @@ mod tests {
             Endpoint {
                 server: "http://lab".into(),
                 token: Some("s3cret".into()),
+                token_keychain: None,
             },
         )
         .unwrap();
