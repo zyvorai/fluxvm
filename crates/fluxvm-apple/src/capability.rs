@@ -59,7 +59,7 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     yes(
         "custom Virtio device",
-        "macOS 27+ Linux guests; discoverable device, host provider is a follow-up",
+        "macOS 27+ Linux guests; provider/delegate, bounded control queue, guest-memory mapping probe",
     ),
     yes(
         "memory balloon",

@@ -13,7 +13,11 @@ struct FluxAppleHostCapabilities: Codable {
     let nestedVirtualization: Bool
     let bridgedInterfaces: [String]
     let vmnetCustomNetworks: Bool
+    let vmnetSerialization: Bool
     let customVirtio: Bool
+    let customVirtioQueueBackend: Bool
+    let guestMemoryMapping: Bool
+    let usbPassthroughAPI: Bool
 }
 
 func fluxAppleHostCapabilities() -> FluxAppleHostCapabilities {
@@ -24,6 +28,14 @@ func fluxAppleHostCapabilities() -> FluxAppleHostCapabilities {
     } else {
         nested = false
     }
+    let has26: Bool = {
+        if #available(macOS 26.0, *) { return true }
+        return false
+    }()
+    let has27: Bool = {
+        if #available(macOS 27.0, *) { return true }
+        return false
+    }()
 
     return FluxAppleHostCapabilities(
         osVersion: p.operatingSystemVersionString,
@@ -33,13 +45,13 @@ func fluxAppleHostCapabilities() -> FluxAppleHostCapabilities {
         maximumVmMemoryBytes: VZVirtualMachineConfiguration.maximumAllowedMemorySize,
         nestedVirtualization: nested,
         bridgedInterfaces: VZBridgedNetworkInterface.networkInterfaces.map { $0.identifier },
-        vmnetCustomNetworks: {
-            if #available(macOS 26.0, *) { return true }
-            return false
-        }(),
-        customVirtio: {
-            if #available(macOS 27.0, *) { return true }
-            return false
-        }()
+        vmnetCustomNetworks: has26,
+        vmnetSerialization: has26,
+        customVirtio: has27,
+        customVirtioQueueBackend: has27,
+        guestMemoryMapping: has27,
+        // The API exists on 27; using it still requires an AccessoryAccess UI
+        // broker and explicit user consent, so this is not a readiness flag.
+        usbPassthroughAPI: has27
     )
 }

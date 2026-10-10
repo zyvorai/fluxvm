@@ -101,11 +101,6 @@ final class FluxVMNetNetwork {
 #endif
 
 @available(macOS 27.0, *)
-func fluxVMCustomVirtioConfiguration() -> VZCustomVirtioDeviceConfiguration {
-    let d = VZCustomVirtioDeviceConfiguration()
-    d.deviceID = 0xFF00
-    d.pciClassID = 0xFF
-    d.pciSubclassID = 0x00
-    d.virtioQueueCount = 2
-    return d
+func fluxVMCustomVirtioConfiguration(vmID: String) -> VZCustomVirtioDeviceConfiguration {
+    fluxVMCustomVirtioConfigurationImpl(vmID: vmID)
 }
