@@ -30,6 +30,7 @@ mod mcp;
 mod output;
 mod remote;
 mod run;
+mod sandbox_run;
 mod stack;
 mod status;
 mod styles;
@@ -1137,6 +1138,18 @@ enum SandboxCommand {
     /// List sandboxes (FluxVm backend or workspace with `sandbox-proxy.json`).
     /// REST: `GET /v1/sandboxes`.
     List,
+    /// Run a container image in its own lightweight VM (vz, macOS), print its
+    /// console and exit with its exit code: `fluxctl sandbox run alpine:3.22 --rm -- echo hi`.
+    /// REST: `POST /v1/sandboxes` with `oci`, then `GET /v1/sandboxes/{id}/logs`.
+    Run(sandbox_run::RunArgs),
+    /// A sandbox's console tail, with a container sandbox's exit code. REST:
+    /// `GET /v1/sandboxes/{id}/logs`.
+    Logs {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+    },
     /// Fill the warm `vz` sandbox pool to COUNT slots in the daemon's
     /// background (macOS; needs --server). REST: `POST /v1/sandboxes/warm`.
     Warm {
@@ -2584,9 +2597,16 @@ async fn run_remote(
                     &r.call(Method::GET, "/v1/sandboxes/density", None)
                         .await?,
                 )?,
+                SandboxCommand::Run(args) => {
+                    let code = sandbox_run::run(sandbox_run::Target::Remote(r), &args).await?;
+                    std::process::exit(code);
+                }
+                SandboxCommand::Logs { id, lines } => pretty(&serde_json::to_value(
+                    sandbox_run::Target::Remote(r).logs(id, lines).await?,
+                )?)?,
                 _ => anyhow::bail!(
-                    "this sandbox command is not available with --server; supported: speculate, \
-                     changesets, changeset, approve, reject, apply, warm, density"
+                    "this sandbox command is not available with --server; supported: run, logs, \
+                     speculate, changesets, changeset, approve, reject, apply, warm, density"
                 ),
             }
         }
@@ -3727,6 +3747,16 @@ async fn main() -> Result<()> {
                     })
                     .collect();
                 output::print_list(format, &items, output::VM_COLUMNS)?;
+            }
+            SandboxCommand::Run(args) => {
+                let code = sandbox_run::run(sandbox_run::Target::Local(&m), &args).await?;
+                std::process::exit(code);
+            }
+            SandboxCommand::Logs { id, lines } => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.sandbox_logs(id, lines).await?)?
+                );
             }
             SandboxCommand::Warm { .. } => {
                 anyhow::bail!(
@@ -5635,6 +5665,41 @@ mod sandbox_cli_tests {
         let mut full = vec!["fluxvm"];
         full.extend_from_slice(args);
         Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn sandbox_run_and_logs_parse() {
+        let Command::Sandbox {
+            command: SandboxCommand::Run(args),
+        } = parse(&[
+            "sandbox",
+            "run",
+            "alpine:3.22",
+            "--rm",
+            "--offline",
+            "-e",
+            "A=1",
+            "--",
+            "sh",
+            "-c",
+            "exit 3",
+        ])
+        else {
+            panic!("expected SandboxCommand::Run");
+        };
+        assert_eq!(args.image, "alpine:3.22");
+        assert!(args.rm && args.offline);
+        assert_eq!(args.env, ["A=1"]);
+        assert_eq!(args.command, ["sh", "-c", "exit 3"]);
+
+        let id = Uuid::nil();
+        let Command::Sandbox {
+            command: SandboxCommand::Logs { id: parsed, lines },
+        } = parse(&["sandbox", "logs", &id.to_string(), "--lines", "5"])
+        else {
+            panic!("expected SandboxCommand::Logs");
+        };
+        assert_eq!((parsed, lines), (id, 5));
     }
 
     #[test]

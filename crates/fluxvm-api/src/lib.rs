@@ -602,6 +602,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/sandboxes/{id}/fs/read", post(sandbox_fs_read))
         .route("/v1/sandboxes/{id}/fs/write", post(sandbox_fs_write))
         .route("/v1/sandboxes/{id}/process", post(sandbox_process))
+        .route("/v1/sandboxes/{id}/logs", get(sandbox_logs))
         .route("/v1/sandboxes/{id}/baseline", post(sandbox_baseline))
         .route("/v1/sandboxes/{id}/changes", post(sandbox_changes))
         .route("/v1/sandboxes/{id}/dry-run", post(sandbox_dry_run))
@@ -3543,6 +3544,26 @@ struct LogsQuery {
 }
 fn default_log_lines() -> usize {
     100
+}
+
+#[derive(Debug, Deserialize)]
+struct SandboxLogsQuery {
+    #[serde(default = "default_sandbox_log_lines")]
+    lines: usize,
+}
+
+fn default_sandbox_log_lines() -> usize {
+    200
+}
+
+/// `GET /v1/sandboxes/{id}/logs?lines=N` — the console tail as JSON, with a
+/// container sandbox's exit code (`null` while it runs) and init error.
+async fn sandbox_logs(
+    State(m): State<Arc<VmManager>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<SandboxLogsQuery>,
+) -> ApiResult<Json<fluxvm_scheduler::oci_sandbox::SandboxLogs>> {
+    Ok(Json(m.sandbox_logs(id, q.lines.min(10_000)).await?))
 }
 
 /// `GET /v1/vms/{id}/logs?lines=N&follow=true` — tail-follow the VM's

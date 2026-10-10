@@ -289,7 +289,7 @@ pub fn list(cfg: &Config) -> Result<Vec<OciImageEntry>> {
             out.push(entry);
         }
     }
-    out.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    out.sort_by_key(|a| std::cmp::Reverse(a.last_used));
     Ok(out)
 }
 

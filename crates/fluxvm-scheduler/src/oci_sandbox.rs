@@ -177,6 +177,18 @@ pub(crate) fn build_create(
 }
 
 /// An OCI sandbox VM: exec and files only through its guest agent.
+/// `GET /v1/sandboxes/{id}/logs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxLogs {
+    pub id: Uuid,
+    pub status: VmStatus,
+    /// A container sandbox: `exit_code` and `init_error` come from its init.
+    pub oci: bool,
+    pub exit_code: Option<i32>,
+    pub init_error: Option<String>,
+    pub log: String,
+}
+
 pub(crate) fn is_oci(vm: &VmRecord) -> bool {
     vm.request
         .apple
@@ -261,6 +273,25 @@ impl VmManager {
         self.write_sandbox_proxy_meta(&record, req.http_proxy_port, &req.http_proxy_ports)
             .await?;
         Ok(record)
+    }
+
+    /// The last `lines` lines of the sandbox console with, for a container sandbox, the process's exit code once it has
+    /// exited and init's own startup error when it failed. The markers are looked for in the whole log, not just the tail.
+    pub async fn sandbox_logs(&self, id: Uuid, lines: usize) -> Result<SandboxLogs> {
+        let vm = self.get(id).await?;
+        let log = match tokio::fs::read(&vm.log_path).await {
+            Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", vm.log_path.display())),
+        };
+        Ok(SandboxLogs {
+            id,
+            status: vm.status,
+            oci: is_oci(&vm),
+            exit_code: init::exit_code_from_log(&log),
+            init_error: init::init_error_from_log(&log),
+            log: oci_images::tail(&log, lines.max(1)),
+        })
     }
 
     /// Ready when the agent answers a ping, or when the process has already run to completion (`exit_policy: poweroff`
