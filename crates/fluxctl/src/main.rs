@@ -1806,7 +1806,7 @@ enum VzCommand {
     /// What this Mac's Virtualization.framework offers (OS, vmnet, custom Virtio, Secure Boot, Rosetta).
     Host,
     /// Apple's newest macOS restore image (what `--image macos --install` uses) and whether it is cached;
-    /// `--download` fetches it now (about 15 GB).
+    /// `--download` fetches it now (about 25 GB).
     Ipsw {
         #[arg(long)]
         download: bool,

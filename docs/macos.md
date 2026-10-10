@@ -175,7 +175,7 @@ curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examp
 ```
 
 - The IPSW is `apple.media`, or `image` when `media` is unset. Use a local absolute path, or the name `macos`: FluxVM asks Apple for
-  the newest restore image this Mac supports, downloads it once (about 15 GB, cached as `images/macos-<build>.ipsw`, older ones removed)
+  the newest restore image this Mac supports, downloads it once (26.6 GB for 27.0.1, so keep about 55 GB free: the image, then about 25 GB for the guest disk; cached as `images/macos-<build>.ipsw`, older ones removed)
   and installs from it. `fluxctl vz ipsw` shows which build that is and whether it is cached; `--download` fetches it ahead of time.
   URLs are still refused. `fluxctl create --name mac --image macos --guest macos --install` is the one-line form.
 - FluxVM creates a sparse disk of `disk_size_gib` (default 64, minimum 40), runs `fluxvm-vz-runner install` to completion (progress

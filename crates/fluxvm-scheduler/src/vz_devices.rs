@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 impl VmManager {
     /// Apple's newest macOS restore image for this Mac (`image: "macos"` with `apple.install`), and whether it is already
-    /// downloaded. With `download` it is fetched now (about 15 GB) and `path` is its cache file.
+    /// downloaded. With `download` it is fetched now (about 25 GB; it resumes if interrupted) and `path` is its cache file.
     pub async fn macos_ipsw(&self, download: bool) -> Result<Value> {
         let info = fluxvm_apple::latest_ipsw().await?;
         let mut out = serde_json::to_value(&info)?;
