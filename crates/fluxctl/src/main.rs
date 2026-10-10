@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 mod compose;
 mod contexts;
+mod create;
 mod fleet_client;
 mod launch_agent;
 mod mcp;
@@ -201,11 +202,9 @@ enum Command {
         token: Option<String>,
     },
     #[command(next_help_heading = "Lifecycle Commands")]
-    /// Create a VM from a JSON spec file.
-    Create {
-        #[arg(long)]
-        spec: PathBuf,
-    },
+    /// Create a VM from a JSON spec file, or on the `vz` backend from `--name` and `--image` plus `apple.*` flags
+    /// (`--guest`, `--display`, `--rosetta`, `--provision-*`, ...); flags override a `--spec` file's fields.
+    Create(create::CreateArgs),
     /// List VMs. `-l env=dev,team!=x,gpu` filters by label selector.
     List {
         #[arg(short = 'l', long = "selector")]
@@ -2930,8 +2929,8 @@ async fn run_remote(
             )
             .await?
         }
-        Command::Create { spec } => {
-            let body: serde_json::Value = serde_json::from_slice(&std::fs::read(spec)?)?;
+        Command::Create(args) => {
+            let body = create::create_body(&args)?;
             pretty(&r.call(Method::POST, "/v1/vms", Some(body)).await?)?
         }
         Command::VmTemplate { command } => match command {
@@ -4013,8 +4012,8 @@ async fn main() -> Result<()> {
                 axum::serve(listener, app).await?;
             }
         }
-        Command::Create { spec } => {
-            let req: CreateVmRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
+        Command::Create(args) => {
+            let req: CreateVmRequest = serde_json::from_value(create::create_body(&args)?)?;
             println!("{}", serde_json::to_string_pretty(&m.create(req).await?)?);
         }
         Command::List { selector, all } => {

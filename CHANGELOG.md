@@ -2,6 +2,12 @@
 
 ## 0.4.0 (2026-10-10)
 
+### Added: `fluxctl create` flags for `apple.*`
+- `fluxctl create --name N --image I` builds a `vz` request without a spec file, with `--guest`, `--install`, `--display
+  WxH[@PPI]`, `--displays`, `--window`, `--rosetta`, `--clipboard`, `--microphone`, `--mute`, `--nested-virtualization`,
+  `--usb-controller`, `--asif-overlay`, `--recovery`, `--bridge` and `--provision-*`; flags also override a `--spec` file.
+  MCP `vm_create` now lists the `apple.*` fields.
+
 ### Added: runner-only `vz` device state reachable over REST, CLI and MCP
 - `GET /v1/host/apple` and `GET /v1/vms/{id}/vz/{secure-boot,custom-virtio,usb,usb/physical}`, plus
   `POST .../vz/custom-virtio/reset` and `POST .../vz/usb/physical {"registry_id"}` (admin), with `fluxctl vz
