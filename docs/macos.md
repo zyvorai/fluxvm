@@ -319,6 +319,26 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   ([VMNET_BROKER.md](VMNET_BROKER.md)). **Not verified:** on the test Mac the ad-hoc signed broker was killed at launch (SIP on, `com.apple.vm.networking`), so two runners on one name have not run; with no broker a named VM fails with "vmnetd XPC connection failed". Exclusive with `bridge_interface`. IP discovery and the 127.0.0.1 `network.forwards`
   relay read the NAT lease file, so use `vmnet.forwards` instead.
 - **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`, PCI `1af4:107f`; an earlier id, `0xFF00`, was outside the range Linux binds) with a host-side provider. Queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is the bulk queue (`bulk_zero`, `fill`, `copy`, `crc32`, up to 64 MiB). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`, `fluxvm_virtioctl`). **Verified** on the M4 with a Debian 13 guest: `ping`, `echo`, `stats` and `capabilities`. `fluxvm_virtioctl bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` (queue 1, 1 B to 1 MiB) pass after the driver stopped using a stack buffer for its request; the 64 MiB host cap was not tried. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
+  The device also handles DRIVER_OK, stop, pause, resume and reset, and saves its counters with a VM snapshot (the configuration sets
+  `supportsSaveRestore`; without it Virtualization refuses to save a VM with the device). **Verified** on the M4: snapshot, stop and
+  `start-from-snapshot` resumed the Debian guest without a reboot, `ping` and `echo` worked, and the counters continued. The control socket takes
+  `{"cmd":"virtio-status"}` (driver state and counters) and `{"cmd":"virtio-reset"}` (host-initiated reset; the driver re-probes);
+  `fluxvm_apple::vz27` wraps both.
+- **EFI Secure Boot (macOS 27+, Linux EFI guests):** top-level `secure_boot: true` enrolls Microsoft's KEK, UEFI CA and revocation list
+  and enables Secure Boot with Apple's platform key, so Microsoft-signed shims boot. `apple.efi_secure_boot` customises it:
+  `platform_key` (X.509, DER or PEM), `kek`/`db`/`dbx` (certificates, SHA-256 hashes or EFI signature lists),
+  `default_signatures: false` and `reset: true` (clear previously enrolled keys first). `secure_boot: false` turns it off and keeps the
+  keys; leaving it out does not touch `efi.bin`. Refused with direct kernel boot and for macOS guests. `{"cmd":"secure-boot-status"}` reports
+  the state and signature counts. **Verified** on the M4: enable with default keys (2 KEK, 2 db, 26 dbx), status, disable.
+- **Recovery (macOS guests):** `recovery: true` starts the guest in macOS Recovery.
+- **Rosetta cache (Linux guests):** with `rosetta: true`, `rosetta_cache` is `"default"`, a guest socket path or an abstract socket name for
+  `rosettad`'s AOT cache. A Mac without Rosetta fails at boot with a pointer to `fluxvm-vz-runner install-rosetta`.
+- **Disk serials:** an `extra_disks` entry on the virtio controller can set `block_device_id` (1-20 ASCII), shown in the guest as
+  `/dev/disk/by-id/virtio-<id>`.
+- **VM label (macOS 27+):** the runner sets `VZVirtualMachineConfiguration.label` to the VM's name (trimmed to 64 characters) so system
+  services show it; the console window uses `VZVirtualMachineViewAdaptor`.
+- **Events:** the runner log gets `network-disconnected` (a bridged or vmnet attachment went away), `nbd-connected` / `nbd-failed`,
+  `usb-passthrough-disconnected` (the host took a device back) and `secure-boot` lines.
 - **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
   the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.
 - **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts

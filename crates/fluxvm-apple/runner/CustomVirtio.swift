@@ -51,6 +51,7 @@ final class FluxVirtioBus: NSObject, VZCustomVirtioDeviceConfigurationDelegate, 
         configuration.pciClassID = 0xFF
         configuration.pciSubclassID = 0x00
         configuration.virtioQueueCount = 2
+        configuration.supportsSaveRestore = true
         configuration.provider = VZCustomVirtioDeviceDelegateProvider(
             deviceQueue: deviceQueue,
             delegate: self
