@@ -182,12 +182,19 @@ impl VmManager {
             && disk.kind == AppleDiskKind::Image
             && disk.controller == AppleDiskController::Usb;
         if live {
-            let uuid = fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only)
+            let uuid = fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only, disk.usb_bus)
                 .await
                 .context("hot-attaching the USB disk")?;
             let mut map = read_hotplug(&vm.workspace);
             map.insert(name.to_owned(), Hotplug { uuid, pid: vm.pid });
             write_hotplug(&vm.workspace, &map)?;
+        }
+        if !live && matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            tracing::warn!(
+                vm = %id,
+                disk = name,
+                "vz can only hot-attach USB image disks; this disk applies at the next boot"
+            );
         }
         self.store.update(vm.clone()).await?;
         crate::audit_event(

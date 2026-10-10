@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 mod compose;
 mod contexts;
+mod create;
 mod fleet_client;
 mod launch_agent;
 mod mcp;
@@ -201,11 +202,9 @@ enum Command {
         token: Option<String>,
     },
     #[command(next_help_heading = "Lifecycle Commands")]
-    /// Create a VM from a JSON spec file.
-    Create {
-        #[arg(long)]
-        spec: PathBuf,
-    },
+    /// Create a VM from a JSON spec file, or on the `vz` backend from `--name` and `--image` plus `apple.*` flags
+    /// (`--guest`, `--display`, `--rosetta`, `--provision-*`, ...); flags override a `--spec` file's fields.
+    Create(create::CreateArgs),
     /// List VMs. `-l env=dev,team!=x,gpu` filters by label selector.
     List {
         #[arg(short = 'l', long = "selector")]
@@ -784,6 +783,12 @@ enum Command {
     Vznet {
         #[command(subcommand)]
         command: VznetCommand,
+    },
+    /// Virtualization.framework device state of a running `vz` VM, and the Mac's own capabilities. REST: `/v1/host/apple`
+    /// and `/v1/vms/{id}/vz/*`. See docs/macos.md.
+    Vz {
+        #[command(subcommand)]
+        command: VzCommand,
     },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
@@ -1595,6 +1600,9 @@ enum DiskCommand {
         /// vz: virtio (default), nvme or usb.
         #[arg(long, value_parser = ["virtio", "nvme", "usb"])]
         controller: Option<String>,
+        /// vz, usb controller, hot-attach only: the XHCI bus (0-based; see `create --usb-controllers`).
+        #[arg(long)]
+        usb_bus: Option<u8>,
     },
     /// Grow `root` or a data disk (live or stopped).
     Resize {
@@ -1794,6 +1802,40 @@ enum OciCommand {
     Rm { image: String },
     /// Remove every cached image no sandbox was started from, and every blob no remaining image needs.
     Prune,
+}
+
+#[derive(Subcommand)]
+enum VzCommand {
+    /// What this Mac's Virtualization.framework offers (OS, vmnet, custom Virtio, Secure Boot, Rosetta).
+    Host,
+    /// Apple's newest macOS restore image (what `--image macos --install` uses) and whether it is cached;
+    /// `--download` fetches it now (about 25 GB).
+    Ipsw {
+        #[arg(long)]
+        download: bool,
+    },
+    /// EFI Secure Boot state of a running guest (the pre-boot snapshot while it runs).
+    SecureBoot {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Driver state and counters of the custom Virtio device; `--reset` asks it to re-negotiate.
+    CustomVirtio {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        reset: bool,
+    },
+    /// USB devices on the VM's controllers. `--physical` lists host accessories granted to FluxVMUSBAccess.app;
+    /// `--attach <registry_id>` passes one through (needs `--physical`).
+    Usb {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        physical: bool,
+        #[arg(long, requires = "physical")]
+        attach: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2830,11 +2872,13 @@ async fn run_remote(
                 caching,
                 sync,
                 controller,
+                usb_bus,
             } => {
                 let mut body =
                     json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing});
                 let vz = json!({"kind": kind, "url": url, "read_only": read_only.then_some(true),
-                    "caching": caching, "sync": sync, "controller": controller});
+                    "caching": caching, "sync": sync, "controller": controller,
+                    "usb_bus": usb_bus});
                 for (k, v) in vz.as_object().into_iter().flatten() {
                     if !v.is_null() {
                         body[k] = v.clone();
@@ -2896,8 +2940,8 @@ async fn run_remote(
             )
             .await?
         }
-        Command::Create { spec } => {
-            let body: serde_json::Value = serde_json::from_slice(&std::fs::read(spec)?)?;
+        Command::Create(args) => {
+            let body = create::create_body(&args)?;
             pretty(&r.call(Method::POST, "/v1/vms", Some(body)).await?)?
         }
         Command::VmTemplate { command } => match command {
@@ -2987,6 +3031,55 @@ async fn run_remote(
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
+        Command::Vz { command } => match command {
+            VzCommand::Host => pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)?,
+            VzCommand::Ipsw { download } => pretty(
+                &r.call(
+                    if download { Method::POST } else { Method::GET },
+                    "/v1/host/apple/ipsw",
+                    download.then(|| json!({})),
+                )
+                .await?,
+            )?,
+            VzCommand::SecureBoot { id } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/secure-boot"), None)
+                    .await?,
+            )?,
+            VzCommand::CustomVirtio { id, reset: true } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/vz/custom-virtio/reset"),
+                    Some(json!({})),
+                )
+                .await?,
+            )?,
+            VzCommand::CustomVirtio { id, reset: false } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/custom-virtio"), None)
+                    .await?,
+            )?,
+            VzCommand::Usb {
+                id,
+                physical: true,
+                attach: Some(registry_id),
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/vz/usb/physical"),
+                    Some(json!({"registry_id": registry_id})),
+                )
+                .await?,
+            )?,
+            VzCommand::Usb {
+                id, physical: true, ..
+            } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/usb/physical"), None)
+                    .await?,
+            )?,
+            VzCommand::Usb { id, .. } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/usb"), None)
+                    .await?,
+            )?,
+        },
         Command::Balloon { id, set_mib } => match set_mib {
             Some(mib) => pretty(
                 &r.call(
@@ -3808,6 +3901,7 @@ async fn main() -> Result<()> {
                 caching,
                 sync,
                 controller,
+                usb_bus,
             } => {
                 if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
                     let disk: fluxvm_core::model::AppleDisk = serde_json::from_value(
@@ -3817,6 +3911,7 @@ async fn main() -> Result<()> {
                             "caching": caching.as_deref().unwrap_or("automatic"),
                             "sync": sync.as_deref().unwrap_or("full"),
                             "controller": controller.as_deref().unwrap_or("virtio"),
+                            "usb_bus": usb_bus,
                         }),
                     )?;
                     let info = m.attach_vz_disk(id, &name, disk, size_gib).await?;
@@ -3938,8 +4033,8 @@ async fn main() -> Result<()> {
                 axum::serve(listener, app).await?;
             }
         }
-        Command::Create { spec } => {
-            let req: CreateVmRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
+        Command::Create(args) => {
+            let req: CreateVmRequest = serde_json::from_value(create::create_body(&args)?)?;
             println!("{}", serde_json::to_string_pretty(&m.create(req).await?)?);
         }
         Command::List { selector, all } => {
@@ -4065,6 +4160,32 @@ async fn main() -> Result<()> {
         }
         Command::Pressure { id } => {
             println!("{}", serde_json::to_string_pretty(&m.pressure(id).await?)?);
+        }
+        Command::Vz { command } => {
+            let out = match command {
+                VzCommand::Host => fluxvm_scheduler::vz_devices::apple_host_capabilities().await?,
+                VzCommand::Ipsw { download } => m.macos_ipsw(download).await?,
+                VzCommand::SecureBoot { id } => m.vz_secure_boot_status(id).await?,
+                VzCommand::CustomVirtio { id, reset: true } => {
+                    m.vz_custom_virtio_reset(id).await?;
+                    serde_json::json!({"ok": true})
+                }
+                VzCommand::CustomVirtio { id, reset: false } => {
+                    m.vz_custom_virtio_status(id).await?
+                }
+                VzCommand::Usb {
+                    id,
+                    physical: true,
+                    attach: Some(registry_id),
+                } => {
+                    serde_json::json!({"uuid": m.vz_usb_physical_attach(id, registry_id).await?})
+                }
+                VzCommand::Usb {
+                    id, physical: true, ..
+                } => serde_json::json!({"items": m.vz_usb_physical_list(id).await?}),
+                VzCommand::Usb { id, .. } => serde_json::json!({"items": m.vz_usb_list(id).await?}),
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
         }
         Command::Balloon { id, set_mib } => {
             println!(

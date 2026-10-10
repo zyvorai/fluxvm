@@ -3,7 +3,7 @@
 
 [package]
 name = "fluxvm-image"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Image build/clone and cloud-init seed generation for Zyvor FluxVM"
@@ -26,5 +26,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tracing = "0.1"
+libc = "0.2"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4", "serde"] }

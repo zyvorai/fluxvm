@@ -174,7 +174,10 @@ through the API):
 curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examples/macos-install.json
 ```
 
-- The IPSW is `apple.media`, or `image` when `media` is unset; it must be a local absolute path (URLs are refused, download first).
+- The IPSW is `apple.media`, or `image` when `media` is unset. Use a local absolute path, or the name `macos`: FluxVM asks Apple for
+  the newest restore image this Mac supports, downloads it once (26.6 GB for 27.0.1, so keep about 55 GB free: the image, then about 25 GB for the guest disk; cached as `images/macos-<build>.ipsw`, older ones removed)
+  and installs from it. `fluxctl vz ipsw` shows which build that is and whether it is cached; `--download` fetches it ahead of time.
+  URLs are still refused. `fluxctl create --name mac --image macos --guest macos --install` is the one-line form.
 - FluxVM creates a sparse disk of `disk_size_gib` (default 64, minimum 40), runs `fluxvm-vz-runner install` to completion (progress
   events land in `vz-runner.log` in the VM workspace; the request returns only after the install, up to 3 hours), then boots the guest.
   A workspace marker (`macos-installed`) stops a restart from installing again; a failed install leaves no marker and is retried.
@@ -193,9 +196,13 @@ the key on first boot, and turns on Remote Login. FluxVM cannot run it inside th
 
 The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host); the snapshot also keeps the guest's NVRAM
 (`auxiliary.bin`). Earlier runners ignored the saved state of a macOS guest and cold-booted it; the runner now resumes it the same
-way as for Linux guests. Not yet exercised on a real macOS guest.
+way as for Linux guests. Exercised once on an Apple M4 (macOS 27.2 host) with a clone of an installed macOS 27.0.1 guest
+(4 vCPUs, 4 GiB, `usb_controller`): `POST /v1/vms/{id}/snapshot` returned 200 after 99 s on a USB-attached APFS drive, the VM stopped,
+and `POST /v1/vms/{id}/restore` returned 200 after 15 s with the VM running and its address reported again. Not checked: that processes
+inside the guest kept running across the restore (no SSH login was set up in that template).
 
-Not done: a `macos` image name, downloading an IPSW, and exec over vsock for macOS guests (they have no FluxVM guest agent). Apple
+Not done: exec over vsock for macOS guests (they have no FluxVM guest agent). The `macos` image name looks up and downloads the
+IPSW; that download path has not been run end to end (only Apple's metadata lookup was checked on an Apple silicon Mac). Apple
 allows two macOS VMs at a time per Mac.
 
 ## Display, audio, sharing and USB options
@@ -206,6 +213,17 @@ allows two macOS VMs at a time per Mac.
 {"backend": "vz", "apple": {"guest_os": "macos", "window": true, "display_width": 5120, "display_height": 2880,
  "display_ppi": 220, "audio_output": true, "microphone": false, "usb_controller": true}}
 ```
+
+The same options as flags, without a spec file:
+
+```sh
+fluxctl create --name mac --image ~/ipsw/UniversalMac.ipsw --guest macos --install \
+  --display 5120x2880@220 --window --usb-controller
+fluxctl create --name dev --image debian-13 --rosetta --clipboard --mute --vcpus 4
+```
+
+`--spec FILE` can be combined with these flags; a flag overrides the file's field. `--provision-full-name`,
+`--provision-username` and `--provision-password-file` set the macOS 27 first-boot account.
 
 - **Display:** `display_width` 800 to 5120 (default 2560), `display_height` 600 to 2880 (default 1600), `display_ppi` 72 to 300 (default 220).
   With `window: true` the guest follows the window as it is resized. Linux guests use `display_width` and `display_height` for
@@ -255,6 +273,21 @@ tools are `vm_screenshot` and `vm_input` ([mcp.md](mcp.md)).
 
 With `"apple": {"self_control": true}` (Linux guests), software inside the VM, such as a coding agent, can snapshot,
 restore and restart the VM it runs in through an MCP server at `http://127.0.0.1:7790/mcp` in the guest:
+
+### Extra guest→host vsock services
+
+`apple.vsock_services` opens more vsock ports from the guest to the host, and only the ports it lists (Linux guests; the guest
+reaches the host at CID 2). Each entry is `{"port": N, "builtin": "metadata" | "telemetry"}` or `{"port": N, "socket": "name"}`:
+
+- `metadata`: the guest connects and reads one JSON line (`id`, `name`, `vcpus`, `memory_mib`); the runner then closes.
+- `telemetry`: the guest writes lines and the runner appends them to `<workspace>/telemetry.log`, up to 8 MiB, then drops the rest.
+- `socket`: connections are relayed to `/tmp/fluxvm-<uid>/<vm id>.svc-<name>`. The host operator runs whatever listens there. The
+  name is `[a-z0-9_-]{1,32}`, so a spec cannot point the guest at another host path (such as the daemon's own socket).
+
+Ports must be 1024-65535, not 3128 (egress proxy), 7790 (self-control), 7791 or 22, at most 16 per VM. Create with
+`fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo`. From a guest with python3:
+`s=socket.socket(socket.AF_VSOCK); s.connect((2, 5001)); print(s.recv(4096))`.
+Verified on a Debian 13 guest by `scripts/vz-vsock-services-live-test.sh`.
 
 ```sh
 # inside the guest
@@ -424,6 +457,9 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 - **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
   the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.
 - **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts
+- **USB buses:** `apple.usb_controllers` (1-4, implies `usb_controller`) creates that many XHCI controllers. Give a hot-attached
+  USB disk `usb_bus` (`fluxctl disk attach --usb-bus N`) to choose its bus; the default is bus 0. Disks present at boot are placed by
+  Virtualization.framework, and physical USB passthrough uses bus 0. The guest shows one more XHCI controller than configured.
   `{"cmd":"usb-attach","path":"/path/disk.img","read_only":false}` (returns a `uuid`) and `{"cmd":"usb-detach","uuid":"…"}` (macOS 15+).
   `{"cmd":"usb-list"}` lists what is attached now. A snapshot is refused while a hot-attached USB disk is still attached: macOS 27 can
   crash restoring such a state without the disk (177528319). Passed-through devices are detached before saving instead (174267926), and
@@ -436,7 +472,9 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   another directory. The container sandbox warm pool ([oci-sandboxes.md](oci-sandboxes.md#warm-pool)) uses it with USB hot-attach
   to hand a pre-booted VM its rootfs and volumes.
 - **ASIF overlay (macOS 27+):** `asif_overlay: true` keeps the base disk read-only and writes to a sparse `disk-overlay.asif`, which
-  snapshots include.
+  snapshots include. Verified on a Linux guest by `scripts/vz-asif-overlay-live-test.sh` (guest writes grow the overlay, the base is
+  byte-identical afterwards); not run with a macOS guest. A plain APFS clone (`cp -c`) is already instant and copy-on-write, so
+  layering several overlays over a shared base is not built: it would save little over what `clone` does today.
 - **Unattended first boot (macOS 27 guests):** `provision_full_name`, `provision_username`, `provision_password_file` (a one-shot file the
   runner deletes after reading), `provision_auto_login`, `provision_remote_login` create the user and turn on Remote Login without Setup
   Assistant.

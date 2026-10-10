@@ -1,6 +1,98 @@
 # Changelog
 
-## 0.4.0 (unreleased)
+## Unreleased
+
+### Verified: `apple.asif_overlay` on a Linux guest
+- `scripts/vz-asif-overlay-live-test.sh`: on macOS 27.2 a 64 MiB guest write grows `disk-overlay.asif` and leaves the base `root.raw`
+  byte-identical. The docs no longer list the overlay as unverified (macOS guests with an overlay were not run).
+
+### Added: `apple.usb_controllers` and `usb_bus` (several USB buses on a `vz` guest)
+- `"apple": {"usb_controllers": 2}` (or `fluxctl create --usb-controllers 2`; 1-4, implies `usb_controller`) gives the guest that
+  many XHCI controllers. A USB disk hot-attached with `"usb_bus": N` (`fluxctl disk attach --usb-bus N`) joins bus N (0-based);
+  detach now finds the device on whichever controller holds it (it only looked at the first before). Disks present at boot are
+  placed by Virtualization.framework. Verified on Debian 13 with `scripts/vz-usb-buses-live-test.sh`: two disks hot-attached on
+  different buses are both visible and sit on different USB buses; bus 2 of 2 and 9 controllers are refused. The guest lists one
+  more XHCI controller than configured (3 for 2). Physical USB passthrough still uses bus 0.
+
+### Added: `apple.vsock_services` (guest→host vsock beyond the egress proxy and self-control)
+- `"apple": {"vsock_services": [{"port": 5001, "builtin": "metadata"}, {"port": 5002, "builtin": "telemetry"},
+  {"port": 5003, "socket": "echo"}]}` (or `fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo`).
+  `metadata` returns one JSON line (id, name, vcpus, memory_mib) and closes; `telemetry` appends the guest's bytes to
+  `<workspace>/telemetry.log` (8 MiB cap, then dropped); `socket: NAME` relays to `/tmp/fluxvm-<uid>/<vm id>.svc-NAME`, a socket
+  the host operator runs, so a spec can never name an arbitrary host path. Only listed ports answer; 22, 3128, 7790 and 7791 and
+  ports below 1024 are refused, at most 16 entries. Verified on a Debian 13 guest with `scripts/vz-vsock-services-live-test.sh`
+  (all three kinds, an unlisted port stays closed).
+
+### Fixed: `POST /v1/vms/{id}/clone` on the `vz` backend
+- A `vz` clone is now an APFS copy (`cp -c`) of the stopped VM's raw disk instead of a `qemu-img convert` to qcow2 (which the
+  clone's create then converted back to raw). It is instant and no longer needs `qemu-img` on the Mac, where it is usually not
+  installed. A cloud-init hostname equal to the source's name becomes the clone's name. macOS guests are refused with a pointer
+  to template clones. Verified on an Apple M4 (macOS 27.2) through Velora's `--selftest fluxvm`: the clone boots on `vz`, keeps
+  the source's files and answers to its own hostname.
+
+### Fixed: `GET /v1/vms/{id}/logs?follow=true` stalls in URLSession clients
+- The stream now sends `X-Content-Type-Options: nosniff` and `Cache-Control: no-cache`. Without them URLSession held back the first
+  512 bytes of the `text/plain` body for content sniffing, so a quiet console showed nothing in Swift clients.
+
+## 0.4.0 (2026-10-10)
+
+### Added: `image: "macos"` installs from Apple's newest restore image
+- With `apple.install`, the image name `macos` (in `image` or `apple.media`) is resolved through the runner's new `latest-ipsw`
+  command (`VZMacOSRestoreImage.fetchLatestSupported`), downloaded once over HTTPS and cached as `images/macos-<build>.ipsw`.
+  `GET|POST /v1/host/apple/ipsw` and `fluxctl vz ipsw [--download]` show or pre-fetch it. Only the metadata lookup was run on
+  hardware (macOS 27.0.1, build 26A434); a download attempt was stopped at 21.9 of 26.6 GB because the 23 GiB USB drive it was writing to could not hold the rest.
+  The IPSW is 26.6 GB (not ~15 GB); the download now checks free space first and resumes a partial file.
+
+### Added: `fluxctl create` flags for `apple.*`
+- `fluxctl create --name N --image I` builds a `vz` request without a spec file, with `--guest`, `--install`, `--display
+  WxH[@PPI]`, `--displays`, `--window`, `--rosetta`, `--clipboard`, `--microphone`, `--mute`, `--nested-virtualization`,
+  `--usb-controller`, `--asif-overlay`, `--recovery`, `--bridge` and `--provision-*`; flags also override a `--spec` file.
+  MCP `vm_create` now lists the `apple.*` fields.
+
+### Added: runner-only `vz` device state reachable over REST, CLI and MCP
+- `GET /v1/host/apple` and `GET /v1/vms/{id}/vz/{secure-boot,custom-virtio,usb,usb/physical}`, plus
+  `POST .../vz/custom-virtio/reset` and `POST .../vz/usb/physical {"registry_id"}` (admin), with `fluxctl vz
+  host|secure-boot|custom-virtio|usb` and read-only MCP `host_apple_capabilities` and `vm_vz_status`. These runner commands
+  existed but had no route.
+- The capability matrix no longer says data disks are "not implemented" (use `apple.extra_disks`) or that vmnet is limited to
+  one network per VM; `disk attach` logs when a running `vz` VM will only see the disk at its next boot.
+
+### Added: agents drive a `vz` VM's screen (PR #214)
+- `GET /v1/vms/{id}/screenshot` (PNG, scaled with `?max_width`) and `POST /v1/vms/{id}/input` (type, key with modifiers, move,
+  click, double/right/middle click, drag, scroll; batches of up to 100 validated before anything is sent), with `fluxctl
+  screenshot`/`input` and MCP `vm_screenshot` (image content, read-only) and `vm_input` (write). Works for Linux and macOS
+  guests without a console window or host Screen Recording/Accessibility permission. Verified on an Apple M4 (macOS 27.2) with a
+  Debian 13 guest: console login by typing, Ctrl+C, and clicks, drag and scroll checked with evdev in the guest, before and after
+  a reboot and a stop/start.
+
+### Added: stored guest sign-in in the Keychain (PR #215)
+- `/v1/vms/{id}/signin` (`PUT`/`GET`/`DELETE`/`POST`), `fluxctl signin set|status|clear|type` and MCP `vm_sign_in` keep a
+  guest username and password in the host's login Keychain and type them into the VM's login screen (`password`, `username`
+  or `username_tab` mode), so an agent never sees the password. Deleting the VM removes the item. Verified with a Debian 13
+  tty1 login.
+
+### Added: more named images, and qcow2 without qemu-img (PR #218)
+- `ubuntu-26.04`, `fedora-44`, `centos-stream-10`, `almalinux-10`, `rocky-10` and `kali` (rolling), each booted and reached
+  over ssh on `vz`. Builtin file names may use a `*` for versioned releases; BSD-style checksum lists are read; downloads send
+  a User-Agent (cloud.centos.org refused requests without one).
+- qcow2 v2/v3 is converted to raw natively (deflate or zstd clusters, zero clusters left as holes); qemu-img is only needed for
+  backing files or encryption. Tarball images are extracted sparse (Kali's 25 GiB disk: 12 GB to 5.6 GB on disk).
+
+### Added: `fluxctl mcp install` (PR #219)
+- `fluxctl mcp install|uninstall|status` registers FluxVM's MCP server with Claude Code, Cursor, Claude Desktop, Codex, VS Code,
+  Windsurf or Gemini CLI by editing that client's config (user-wide or `--project`), keeping other entries and Codex's TOML
+  comments. Checked with `claude mcp list` (connected), `codex mcp list` and Cursor's agent.
+
+### Added: guest self-control (PR #220)
+- With `apple.self_control` (Linux guests), software inside the VM gets an MCP server at `http://127.0.0.1:7790/mcp` to
+  snapshot, restore and restart that VM only (`self_info`, `self_snapshot_list`, `self_snapshot`, `self_snapshot_restore`,
+  `self_snapshot_delete`, `self_restart`). The guest reaches it over vsock and the host names the VM, so no network, token or
+  host port is involved. Verified on an M4 with a Debian 13 guest: a restore brought back a file's old content with the same boot
+  id, and a restart gave a new one.
+
+### Changed: website
+- A Mac cloud page and illustration, a refreshed `/mac` page, an Open Graph image, and an apple.com-style home page (PRs #216
+  and #217).
 
 ### Fixed: `secure_boot` on `vz`
 - `secure_boot: true` was rejected for the `vz` backend by the scheduler's backend check ("secure_boot requires backend qemu"), so the
@@ -145,7 +237,8 @@
 - **Boot artifacts**: `scripts/build-oci-boot.sh` (Linux arm64) and the `oci-boot` CI workflow build `oci-kernel` and
   `oci-initrd` from `guest/oci-vz.config.fragment`, using checksummed kernel and e2fsprogs sources. New config keys:
   `apple.oci_kernel`, `oci_initrd`, `oci_cmdline` and `oci_builder_memory_mib`.
-- `scripts/oci-live-test.sh` is the hardware test (not yet run on a Mac).
+- `scripts/oci-live-test.sh` is the hardware test; it passes on an Apple M4 (exit codes, exec, offline and allow-listed network, a private
+  network between sandboxes, `linux/amd64` under Rosetta, a warm-pool claim).
 
 ### Added: running services in container sandboxes
 - **Published ports**: `oci.ports` (`HOST:CONTAINER`; `fluxctl sandbox run -p`, MCP `oci_ports`) become runner forwards on the
@@ -212,8 +305,9 @@
   `_misses_total`, `fluxvm_sandbox_balloons_inflated`, `fluxvm_vz_agent_calls_total`, `fluxvm_vz_agent_ssh_fallbacks_total`.
 - Scripts: `scripts/density-smoke.sh`, `scripts/e2e-smoke.sh`; guides: [docs/integration.md](docs/integration.md),
   [deploy/launchd-notes.md](deploy/launchd-notes.md), [deploy/kairon-node-mac.md](deploy/kairon-node-mac.md).
-- Not verified on hardware: bridged and vmnet networking, macOS 27 features, macOS guest install and provisioning, USB attach,
-  building and booting `agent-micro`, a multi-Mac fleet.
+- Verified on an Apple M4 since: building and booting `agent-micro` (`scripts/e2e-smoke.sh` with the guest agent answering over vsock),
+  USB disk hot-attach (`scripts/vz-devices-live-test.sh`), and cloning a prepared macOS guest. Not verified: bridged networking, vmnet,
+  macOS guest install and provisioning through the API, physical USB passthrough, a multi-Mac fleet.
 
 ### Added: macOS guest clones, VMPal-parity options, and MCP VM lifecycle tools
 - **Clone prepared macOS guests** ([docs/macos.md](docs/macos.md#macos-guests)): `POST /v1/vms` with `backend: "vz"`,
@@ -238,7 +332,7 @@
 - macOS defaults for the state and run directories, a `cp -c` raw-disk clone, and a `hdiutil` NoCloud seed builder.
 - `scripts/macos-live-test.sh`: boots a real VM through the API and exercises the lifecycle (**PASS** on an Apple M4).
 - Verified on macOS: core 70, scheduler 171, api 56, network, storage 17, guest-protocol 14 unit tests when the backend landed;
-  `fluxvm-apple` now has 16. Not verified: macOS guests, Linux-only crates.
+  `fluxvm-apple` had 16 (it has 49 unit tests, 1 integration test and 6 source-contract tests by 0.4.0). Not verified at the time: macOS guests (cloned and reached over SSH later, see below), Linux-only crates.
 - **Developer features on the `vz` backend** (each verified live on an Apple M4, see `scripts/macos-live-test.sh`): TCP port forwards
   (including `guests: true` on the NAT gateway), virtiofs shared folders, named images (`debian-13`, `debian-12`, `ubuntu-24.04`,
   downloaded, checksum-verified and cached offline-tolerantly), snapshots with restore (memory and disk, about 0.7 s to save and 1.4 s to

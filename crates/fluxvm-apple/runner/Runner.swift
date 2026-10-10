@@ -23,6 +23,12 @@ struct Forward: Decodable {
     let guests: Bool?
 }
 
+struct VsockService: Decodable {
+    let port: UInt32
+    let socket: String?             // host unix socket to relay to
+    let builtin: String?            // "metadata" | "telemetry"
+}
+
 struct Config: Decodable {
     let id: String
     let workspace: String
@@ -56,17 +62,23 @@ struct Config: Decodable {
     let rosetta: Bool?
     let nested_virtualization: Bool?
     let usb_controller: Bool?
+    let usb_controllers: Int?       // XHCI controller count (1-4)
     let vmnet: FluxVMNetSpec?       // macOS 26+ per-VM vmnet network (nil: NAT or bridge)
     let custom_virtio: Bool?        // macOS 27+ custom Virtio device hook (Linux guests)
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
+    let vsock_services: [VsockService]?   // extra guest -> host vsock services (host unix socket relay, or a built-in)
+    let vsock_metadata: String?     // JSON served by the "metadata" built-in
+    let telemetry_log: String?      // file the "telemetry" built-in appends to
     let egress_allow: [String]?     // hosts the guest may reach through the vsock proxy on port 3128 (nil/empty: no proxy)
     let restore_state: String?      // resume from a state file written by `save` instead of cold-booting
     let kernel: String?             // direct boot (VZLinuxBootLoader): uncompressed arm64 Image; nil boots EFI from the disk
     let initrd: String?
     let cmdline: String?
     let root_read_only: Bool?
+    let root_caching: String?       // root/seed disk host caching: automatic | cached | uncached
+    let root_sync: String?          // root/seed disk flush mode: full | fsync | none
     let extra_disks: [ExtraDisk]?
     let networks: [PrivateNetwork]?
     let console_ports: [ConsolePort]?
@@ -720,7 +732,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             guard #available(macOS 15.0, *) else {
                 throw err("USB XHCI passthrough support needs macOS 15 or later")
             }
-            c.usbControllers = [VZXHCIControllerConfiguration()]
+            c.usbControllers = (0..<min(max(cfg.usb_controllers ?? 1, 1), 4)).map { _ in VZXHCIControllerConfiguration() }
         }
         try self.configureClipboard(c)
         try self.configureCustomVirtio(c)
@@ -765,6 +777,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             for b in consoleBridges { b.start() }
             if let allow = cfg.egress_allow, !allow.isEmpty { startEgressProxy(allow) }
             if let path = cfg.self_socket { startSelfControl(path) }
+            if let services = cfg.vsock_services, !services.isEmpty { startVsockServices(services) }
             for f in cfg.forwards ?? [] where f.guests != true { startForward(f, bind: "127.0.0.1", fatal: true) }
             setupSignals()
         } catch { fail(error.localizedDescription) }
@@ -957,7 +970,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 sem.signal()
             case "usb-attach":
                 guard let path = o["path"] as? String else { response = ["ok": false, "error": "usb-attach needs path"]; sem.signal(); break }
-                self.attachUSBMassStorage(path: path, readOnly: (o["read_only"] as? Bool) ?? false) { response = $0; sem.signal() }
+                self.attachUSBMassStorage(path: path, readOnly: (o["read_only"] as? Bool) ?? false, bus: (o["bus"] as? Int) ?? 0) { response = $0; sem.signal() }
             case "usb-detach":
                 guard let id = o["uuid"] as? String else { response = ["ok": false, "error": "usb-detach needs uuid"]; sem.signal(); break }
                 self.detachUSB(uuid: id) { response = $0; sem.signal() }
@@ -1182,6 +1195,94 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         }
     }
 
+    // MARK: allow-listed vsock services (guest -> host, only the ports the spec names)
+
+    var serviceListeners: [VZVirtioSocketListener] = []
+    var serviceDelegates: [EgressDelegate] = []
+    let telemetryLock = NSLock()
+    var telemetryBytes = 0
+    let telemetryCap = 8 << 20
+
+    func connectUnix(_ path: String) -> Int32? {
+        let u = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard u >= 0 else { return nil }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let fits = withUnsafeMutableBytes(of: &addr.sun_path) { raw -> Bool in
+            let bytes = Array(path.utf8)
+            guard bytes.count < raw.count else { return false }
+            raw.copyBytes(from: bytes)
+            return true
+        }
+        let ok = fits && withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(u, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        } == 0
+        if !ok { close(u); return nil }
+        return u
+    }
+
+    func serveMetadata(_ fd: Int32, done: @escaping () -> Void) {
+        let doc = Array((cfg.vsock_metadata ?? "{}").utf8) + [10]
+        var off = 0
+        while off < doc.count {
+            let w = doc.withUnsafeBytes { write(fd, $0.baseAddress! + off, doc.count - off) }
+            if w <= 0 { break }
+            off += w
+        }
+        done()
+    }
+
+    func serveTelemetry(_ fd: Int32, done: @escaping () -> Void) {
+        guard let path = cfg.telemetry_log else { done(); return }
+        let out = open(path, O_WRONLY | O_CREAT | O_APPEND, 0o600)
+        defer { if out >= 0 { close(out) } }
+        var buf = [UInt8](repeating: 0, count: 16 * 1024)
+        while true {
+            let n = read(fd, &buf, buf.count)
+            if n == 0 { break }
+            if n < 0 { if errno == EINTR { continue }; break }
+            telemetryLock.lock()
+            let room = max(0, telemetryCap - telemetryBytes)
+            let take = min(n, room)
+            telemetryBytes += take
+            telemetryLock.unlock()
+            // Past the cap the guest's bytes are read and dropped, so it cannot grow the file or block on a full pipe.
+            if take > 0 && out >= 0 { _ = buf.withUnsafeBytes { write(out, $0.baseAddress!, take) } }
+        }
+        done()
+    }
+
+    func startVsockServices(_ services: [VsockService]) {
+        DispatchQueue.main.async {
+            guard let device = self.vm?.socketDevices.first as? VZVirtioSocketDevice else { return }
+            if let path = self.cfg.telemetry_log, let st = try? FileManager.default.attributesOfItem(atPath: path),
+               let size = st[.size] as? Int { self.telemetryBytes = size }
+            for svc in services {
+                let delegate = EgressDelegate { conn in
+                    self.vsockConnections.append(conn)
+                    let fd = conn.fileDescriptor
+                    let finish = { DispatchQueue.main.async { self.release(conn) } }
+                    DispatchQueue.global().async {
+                        if let name = svc.builtin {
+                            if name == "metadata" { self.serveMetadata(fd, done: finish) }
+                            else if name == "telemetry" { self.serveTelemetry(fd, done: finish) }
+                            else { finish() }
+                        } else if let path = svc.socket, let u = self.connectUnix(path) {
+                            splice(fd, u) { close(u); self.release(conn) }
+                        } else {
+                            finish()
+                        }
+                    }
+                }
+                let listener = VZVirtioSocketListener()
+                listener.delegate = delegate
+                device.setSocketListener(listener, forPort: svc.port)
+                self.serviceListeners.append(listener)
+                self.serviceDelegates.append(delegate)
+            }
+        }
+    }
+
     func hostAllowed(_ host: String, _ rules: [String]) -> Bool {
         let h = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
         return rules.contains { r in r.hasPrefix("*.") ? h.hasSuffix(String(r.dropFirst(1))) : h == r }
@@ -1337,6 +1438,27 @@ if args.count == 2 && args[1] == "host-capabilities" {
         FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10])); exit(0)
     } catch { fail("cannot encode host capabilities: \(error.localizedDescription)", code: 2) }
 }
+if args.count == 2 && args[1] == "latest-ipsw" {
+    // Apple's current restore image for this Mac: where to download it and what it needs.
+    VZMacOSRestoreImage.fetchLatestSupported { result in
+        switch result {
+        case .failure(let e): fail("could not look up the latest macOS restore image: \(e.localizedDescription)")
+        case .success(let image):
+            var out: [String: Any] = ["url": image.url.absoluteString, "build_version": image.buildVersion,
+                                      "os_version": "\(image.operatingSystemVersion.majorVersion).\(image.operatingSystemVersion.minorVersion).\(image.operatingSystemVersion.patchVersion)",
+                                      "supported": image.isSupported]
+            if let req = image.mostFeaturefulSupportedConfiguration {
+                out["min_cpus"] = req.minimumSupportedCPUCount
+                out["min_memory_bytes"] = req.minimumSupportedMemorySize
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: out) {
+                FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10]))
+            }
+            exit(0)
+        }
+    }
+    dispatchMain()
+}
 if args.count == 2 && args[1] == "install-rosetta" {
     switch VZLinuxRosettaDirectoryShare.availability {
     case .installed: print("Rosetta is already installed"); exit(0)
@@ -1350,7 +1472,7 @@ if args.count == 2 && args[1] == "install-rosetta" {
     }
 }
 guard args.count == 4, ["run", "install", "check"].contains(args[1]), args[2] == "--config" else {
-    fail("usage: fluxvm-vz-runner host-capabilities | install-rosetta | run|install|check --config <json>", code: 2)
+    fail("usage: fluxvm-vz-runner host-capabilities | latest-ipsw | install-rosetta | run|install|check --config <json>", code: 2)
 }
 guard let data = FileManager.default.contents(atPath: args[3]), let cfg = try? JSONDecoder().decode(Config.self, from: data) else { fail("cannot read config \(args[3])", code: 2) }
 let runner = Runner(cfg)

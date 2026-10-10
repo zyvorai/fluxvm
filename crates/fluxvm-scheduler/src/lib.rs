@@ -48,6 +48,7 @@ pub mod shared_disk;
 pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
+pub mod vz_devices;
 mod vz_disks;
 pub mod vz_guest;
 pub mod vz_screen;
@@ -2103,6 +2104,41 @@ impl VmManager {
             .context("network flow reader panicked")?
     }
 
+    /// `apple.install` with the image name `macos` (in `apple.media`, or in `image` when `media` is unset) installs from
+    /// Apple's newest restore image: looked up, downloaded once and cached under `state_dir/images`. A file or path of
+    /// that name wins, and anything else is left for admission to judge.
+    async fn resolve_macos_ipsw(&self, req: &mut CreateVmRequest) -> Result<()> {
+        if !fluxvm_apple::macos_install::is_macos_install(req) {
+            return Ok(());
+        }
+        let media = fluxvm_apple::macos_install::install_media(req);
+        if media.as_os_str() != fluxvm_image::ipsw::IMAGE_NAME || media.exists() {
+            return Ok(());
+        }
+        let path = match fluxvm_apple::latest_ipsw().await {
+            Ok(info) => fluxvm_image::ipsw::ensure(&self.cfg, &info.url, &info.build_version)
+                .await
+                .with_context(|| {
+                    format!(
+                        "fetching macOS {} ({})",
+                        info.os_version, info.build_version
+                    )
+                })?,
+            Err(e) => match fluxvm_image::ipsw::newest_cached(&self.cfg) {
+                Some(p) => {
+                    tracing::warn!(error = %e, "cannot look up the latest macOS restore image; using the cached one");
+                    p
+                }
+                None => return Err(e).context("resolving image \"macos\""),
+            },
+        };
+        match req.apple.as_mut() {
+            Some(a) if a.media.is_some() => a.media = Some(path),
+            _ => req.image = path,
+        }
+        Ok(())
+    }
+
     pub async fn create(self: &Arc<Self>, mut req: CreateVmRequest) -> Result<VmRecord> {
         let started = std::time::Instant::now();
         // Resolve BackendKind::Auto before anything else — everything below
@@ -2110,6 +2146,7 @@ impl VmManager {
         // assumes a concrete backend and must never see Auto.
         req.backend = resolve_backend(&req, &self.cfg);
         if req.backend == BackendKind::Vz {
+            self.resolve_macos_ipsw(&mut req).await?;
             fluxvm_apple::validate_request(&req)?;
         }
         let requested_profile = req.security_profile;
@@ -4677,27 +4714,64 @@ impl VmManager {
         if src.request.storage != StorageBackend::Default || !src.disk.is_file() {
             bail!("clone supports local file-backed disks only");
         }
+        let vz = src.backend == BackendKind::Vz;
+        if vz
+            && src
+                .request
+                .apple
+                .as_ref()
+                .is_some_and(|a| a.guest_os == fluxvm_core::model::AppleGuest::Macos)
+        {
+            // Its auxiliary storage and machine identifier live in the workspace, and `create` would reinstall from the IPSW.
+            bail!(
+                "clone of macOS vz guests is not supported; create a VM from a template's disk.raw instead (docs/macos.md)"
+            );
+        }
         let dir = self.clone_base_dir();
         tokio::fs::create_dir_all(&dir).await?;
         let base = dir.join(format!(
-            "{name}-{}.qcow2",
-            &Uuid::new_v4().simple().to_string()[..8]
+            "{name}-{}.{}",
+            &Uuid::new_v4().simple().to_string()[..8],
+            if vz { "raw" } else { "qcow2" }
         ));
-        let out = tokio::process::Command::new(&self.cfg.qemu_img_binary)
-            .args(["convert", "-O", "qcow2"])
-            .arg(&src.disk)
-            .arg(&base)
-            .output()
-            .await
-            .with_context(|| format!("running {}", self.cfg.qemu_img_binary))?;
-        if !out.status.success() {
-            let _ = fs::remove_file(&base);
-            bail!(
-                "qemu-img convert failed: {}",
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
+        if vz {
+            // vz disks are raw: an APFS clone is instant and needs no qemu-img on the Mac.
+            let out = tokio::process::Command::new("cp")
+                .arg("-c")
+                .arg(&src.disk)
+                .arg(&base)
+                .output()
+                .await
+                .context("running cp -c")?;
+            if !out.status.success() {
+                let _ = fs::remove_file(&base);
+                tokio::fs::copy(&src.disk, &base)
+                    .await
+                    .with_context(|| format!("copying {}", src.disk.display()))?;
+            }
+        } else {
+            let out = tokio::process::Command::new(&self.cfg.qemu_img_binary)
+                .args(["convert", "-O", "qcow2"])
+                .arg(&src.disk)
+                .arg(&base)
+                .output()
+                .await
+                .with_context(|| format!("running {}", self.cfg.qemu_img_binary))?;
+            if !out.status.success() {
+                let _ = fs::remove_file(&base);
+                bail!(
+                    "qemu-img convert failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
         }
         let mut req = src.request.clone();
+        // A clone that kept the source's cloud-init hostname would answer to the old name on the network.
+        if let Some(ci) = req.cloud_init.as_mut()
+            && ci.hostname.as_deref() == Some(src.name.as_str())
+        {
+            ci.hostname = Some(name.clone());
+        }
         req.name = name;
         req.image = base.clone();
         req.loadvm_tag = None;

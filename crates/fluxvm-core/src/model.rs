@@ -609,6 +609,10 @@ pub struct AppleSpec {
     /// Opt-in so hosts that still run the supported macOS 14 baseline do not regress.
     #[serde(default)]
     pub usb_controller: bool,
+    /// Number of XHCI controllers (USB buses), 1-4; implies `usb_controller`. 0 keeps the default of one when
+    /// `usb_controller` is set. Hot-plugged USB disks pick a bus with `usb_bus`.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub usb_controllers: u8,
     /// macOS 26+ custom vmnet network (shared or host-only) with its own DHCP pool, reservation and port forwards.
     #[serde(default)]
     pub vmnet: Option<AppleVmnetSpec>,
@@ -623,9 +627,19 @@ pub struct AppleSpec {
     /// `http://127.0.0.1:7790/mcp` in the guest (relayed to the host over vsock; scoped to this VM only).
     #[serde(default)]
     pub self_control: bool,
+    /// Extra guest→host vsock services: each guest-facing `port` is relayed either to a host Unix socket the daemon owner
+    /// runs (`socket`, a name resolved under the runner socket directory, never an arbitrary path) or answered by the runner itself (`builtin`: `metadata` or `telemetry`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vsock_services: Vec<AppleVsockService>,
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
+    /// Host caching of the root (and seed) disk image; `automatic` is VZ's default.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub root_caching: AppleDiskCaching,
+    /// Host flush behaviour of the root (and seed) disk image; `full` is VZ's default.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub root_sync: AppleDiskSync,
     /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
     #[serde(default)]
     pub extra_disks: Vec<AppleDisk>,
@@ -706,6 +720,20 @@ pub struct AppleShare {
     pub read_only: bool,
 }
 
+/// One guest→host vsock service (see `AppleSpec::vsock_services`). Exactly one of `socket` and `builtin` is set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AppleVsockService {
+    /// The vsock port the guest connects to (1024..=65535; not 3128, 7790 or 7791, which the runner uses itself).
+    pub port: u32,
+    /// Relay to the host Unix socket `<runner socket dir>/<vm id>.svc-<socket>`; the name is `[a-z0-9_-]{1,32}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<String>,
+    /// `metadata`: the guest reads one JSON document (id, name, vcpus, memory_mib) and the runner closes.
+    /// `telemetry`: the guest writes lines that the runner appends to `<workspace>/telemetry.log` (capped at 8 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin: Option<String>,
+}
+
 /// An extra disk for a `vz` Linux guest: a raw image file (default), a host block device, or a network block device
 /// export, on a virtio, NVMe or USB controller.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -734,6 +762,10 @@ pub struct AppleDisk {
     /// Virtio controller only: the serial the guest sees, for a stable `/dev/disk/by-id/virtio-<id>` (1-20 ASCII).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_device_id: Option<String>,
+    /// USB controller, hot-plug only: which XHCI bus (0-based, below `apple.usb_controllers`) a hot-attached disk joins.
+    /// Disks present at boot are placed by Virtualization.framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb_bus: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -824,11 +856,15 @@ impl Default for AppleSpec {
             rosetta: false,
             nested_virtualization: false,
             usb_controller: false,
+            usb_controllers: 0,
             vmnet: None,
             custom_virtio: false,
             egress_allow: Vec::new(),
             self_control: false,
+            vsock_services: Vec::new(),
             root_read_only: false,
+            root_caching: AppleDiskCaching::default(),
+            root_sync: AppleDiskSync::default(),
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),
             init_config: None,
@@ -2160,4 +2196,8 @@ mod migration_tls_model_tests {
         .unwrap();
         assert!(value.get("tls").is_some());
     }
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
 }

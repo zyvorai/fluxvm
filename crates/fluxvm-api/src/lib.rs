@@ -39,6 +39,7 @@ mod rate_limit;
 #[cfg(target_os = "macos")]
 pub mod self_control;
 mod speculate_api;
+mod vz_api;
 
 #[derive(Clone)]
 struct AuthState {
@@ -686,6 +687,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
             idempotency::middleware,
         ))
         .merge(speculate_api::routes())
+        .merge(vz_api::routes())
         .layer(middleware::from_fn_with_state(
             manager.clone(),
             tenant_guard_middleware,
@@ -2587,6 +2589,8 @@ struct VzDiskFields {
     sync: Option<fluxvm_core::model::AppleDiskSync>,
     #[serde(default)]
     controller: Option<fluxvm_core::model::AppleDiskController>,
+    #[serde(default)]
+    usb_bus: Option<u8>,
 }
 
 async fn attach_vm_disk(
@@ -2614,6 +2618,7 @@ async fn attach_vm_disk(
             sync: v.sync.unwrap_or_default(),
             controller: v.controller.unwrap_or_default(),
             block_device_id: None,
+            usb_bus: v.usb_bus,
         };
         let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
         return Ok((StatusCode::CREATED, Json(info)));
@@ -2625,9 +2630,10 @@ async fn attach_vm_disk(
         || v.caching.is_some()
         || v.sync.is_some()
         || v.controller.is_some()
+        || v.usb_bus.is_some()
     {
         return Err(anyhow::anyhow!(
-            "kind, url, read_only, caching, sync and controller are vz disk options"
+            "kind, url, read_only, caching, sync, controller and usb_bus are vz disk options"
         )
         .into());
     }
@@ -3698,9 +3704,12 @@ async fn vm_logs(
         }
     };
 
+    // nosniff: clients that sniff a text/plain body (URLSession buffers 512 bytes for it) would hold back a quiet console.
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "no-cache")
         .body(axum::body::Body::from_stream(stream))
         .unwrap())
 }

@@ -1,7 +1,7 @@
 # Homebrew package (macOS, Apple silicon)
 
 `fluxvm.rb` installs the prebuilt package from a GitHub release: `fluxctl` and the signed `fluxvm-vz-runner` side by side in
-`bin`, plus a `brew services` entry for the daemon. Nothing here is published yet: there is no tap until someone creates one.
+`bin`, plus a `brew services` entry for the daemon. The tap is `zyvorai/homebrew-fluxvm` (`Formula/fluxvm.rb`).
 
 ## Cutting a release
 

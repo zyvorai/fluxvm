@@ -506,7 +506,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
         ),
         tool(
             "vm_create",
-            "Create a normal FluxVM VM from a REST create spec. Use backend=vz and apple.guest_os=macos for prepared macOS templates. With ready_exec=true, wait until guest commands are usable.",
+            "Create a normal FluxVM VM from a REST create spec. Minimal vz spec: {\"name\", \"backend\":\"vz\", \"image\"}. apple.* options (all optional): guest_os (linux|macos), install (macOS from the IPSW in image/media), display_width/display_height/display_ppi/display_count (1-8 displays, macOS), window, rosetta, clipboard, microphone, audio_output, nested_virtualization, usb_controller, asif_overlay, bridge_interface, recovery, vmnet {mode, subnet, mask}, provision_full_name/provision_username/provision_password_file (macOS 27 first boot), extra_disks, console_ports, custom_virtio, efi_secure_boot, vsock_services [{port, builtin: metadata|telemetry | socket: name}] (guest→host vsock; Linux guests). With ready_exec=true, wait until guest commands are usable.",
             object(
                 json!({
                     "spec": {"type": "object", "description": "CreateVmRequest JSON accepted by POST /v1/vms"},
@@ -672,6 +672,51 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     r.call(Method::DELETE, &format!("/v1/vms/{id}/snapshots/{tag}"), None).await?;
                     pretty(&json!({"id": id, "tag": str_arg(&args, "tag").unwrap_or_default(), "deleted": true}))
                 }).await
+            },
+        ),
+        tool(
+            "host_apple_capabilities",
+            "What this Mac's Virtualization.framework offers: macOS version, CPU/memory limits, nested virtualization, bridged interfaces, vmnet custom networks, custom Virtio, EFI Secure Boot, Rosetta. Apple VZ hosts only.",
+            object(json!({}), &[]),
+            false,
+            &remote,
+            |r, _args| async move {
+                timed(CALL_TIMEOUT, async {
+                    pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)
+                })
+                .await
+            },
+        ),
+        tool(
+            "vm_vz_status",
+            "Virtualization.framework device state of a running Apple VZ VM. what: secure_boot (EFI Secure Boot enabled and key counts, the pre-boot snapshot while it runs), custom_virtio (custom Virtio device driver state and counters), usb (USB devices on the VM's controllers) or usb_physical (host accessories granted for passthrough).",
+            object(
+                json!({
+                    "vm": vm_prop,
+                    "what": {"type": "string", "enum": ["secure_boot", "custom_virtio", "usb", "usb_physical"]}
+                }),
+                &["vm", "what"],
+            ),
+            false,
+            &remote,
+            |r, args| async move {
+                timed(CALL_TIMEOUT, async {
+                    let id = resolve(&r, str_arg(&args, "vm").unwrap_or_default()).await?;
+                    let path = match str_arg(&args, "what").unwrap_or_default() {
+                        "secure_boot" => "secure-boot",
+                        "custom_virtio" => "custom-virtio",
+                        "usb" => "usb",
+                        "usb_physical" => "usb/physical",
+                        other => bail!(
+                            "what must be secure_boot, custom_virtio, usb or usb_physical (got {other:?})"
+                        ),
+                    };
+                    pretty(
+                        &r.call(Method::GET, &format!("/v1/vms/{id}/vz/{path}"), None)
+                            .await?,
+                    )
+                })
+                .await
             },
         ),
         tool(
@@ -1509,6 +1554,11 @@ mod tests {
         assert!(
             !lookup("vm_screenshot").write,
             "screenshots must remain available to read-only agents"
+        );
+        assert!(!lookup("vm_vz_status").write && !lookup("host_apple_capabilities").write);
+        assert!(
+            check_args(&lookup("vm_vz_status").schema, &json!({"vm":"web"})).is_err(),
+            "what is required"
         );
     }
 

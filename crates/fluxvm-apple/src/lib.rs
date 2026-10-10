@@ -10,6 +10,7 @@
 mod capability;
 mod control;
 mod host_caps;
+pub mod ipsw;
 pub mod macos_install;
 mod runner;
 pub mod screen;
@@ -24,6 +25,7 @@ pub use capability::{
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use host_caps::{AppleHostCapabilities, host_capabilities};
+pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SELF_CONTROL_PORT, SNAPSHOT_FILES,
     STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket, find_runner,
@@ -78,14 +80,19 @@ pub async fn balloon_control(
     serde_json::from_value(reply.0).context("decoding Apple balloon response")
 }
 
-pub async fn usb_attach(vm: &VmRecord, path: &std::path::Path, read_only: bool) -> Result<String> {
+pub async fn usb_attach(
+    vm: &VmRecord,
+    path: &std::path::Path,
+    read_only: bool,
+    bus: Option<u8>,
+) -> Result<String> {
     let sock = vm
         .control_socket
         .as_deref()
         .context("VM has no runner control socket recorded")?;
     let reply = control_call_with(
         sock,
-        serde_json::json!({"cmd":"usb-attach","path":path,"read_only":read_only}),
+        serde_json::json!({"cmd":"usb-attach","path":path,"read_only":read_only,"bus":bus.unwrap_or(0)}),
     )
     .await?;
     if !reply.ok() {

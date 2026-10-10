@@ -48,6 +48,8 @@ pub struct RunnerConfig {
     pub rosetta: bool,
     pub nested_virtualization: bool,
     pub usb_controller: bool,
+    /// XHCI controllers to create (1-4) when `usb_controller` is set.
+    pub usb_controllers: u8,
     pub vmnet: Option<fluxvm_core::model::AppleVmnetSpec>,
     pub custom_virtio: bool,
     /// virtiofs shares, tagged `fs0`, `fs1`, … in request order (the tags the guest-side mount uses).
@@ -58,6 +60,12 @@ pub struct RunnerConfig {
     pub network_none: bool,
     /// Hosts the guest may reach through the vsock proxy on `EGRESS_PORT` (empty: no proxy).
     pub egress_allow: Vec<String>,
+    /// Extra guest→host vsock services (see `AppleSpec::vsock_services`), with socket names resolved to host paths.
+    pub vsock_services: Vec<VsockServiceConfig>,
+    /// The JSON the `metadata` built-in serves (id, name, sizing).
+    pub vsock_metadata: Option<String>,
+    /// Where the `telemetry` built-in appends guest lines.
+    pub telemetry_log: Option<PathBuf>,
     /// A state file written by a snapshot; the runner resumes from it instead of cold-booting.
     pub restore_state: Option<PathBuf>,
     /// Direct boot (`VZLinuxBootLoader`): an uncompressed arm64 `Image`. None boots EFI from the disk.
@@ -65,6 +73,8 @@ pub struct RunnerConfig {
     pub initrd: Option<PathBuf>,
     pub cmdline: Option<String>,
     pub root_read_only: bool,
+    pub root_caching: fluxvm_core::model::AppleDiskCaching,
+    pub root_sync: fluxvm_core::model::AppleDiskSync,
     pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
     /// Private networks: one more network card each, connected to the network's switch.
     pub networks: Vec<NetworkConfig>,
@@ -116,6 +126,21 @@ pub struct ShareConfig {
     pub tag: String,
     pub host_path: PathBuf,
     pub read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VsockServiceConfig {
+    pub port: u32,
+    /// Host Unix socket the guest's connections are relayed to.
+    pub socket: Option<PathBuf>,
+    /// `metadata` or `telemetry`, answered by the runner.
+    pub builtin: Option<String>,
+}
+
+/// The host end of VM `id`'s allow-listed vsock service `name` (`apple.vsock_services[].socket`). The host-side service
+/// listens here; only names that pass validation resolve, so a spec cannot point the guest at an arbitrary host socket.
+pub fn vsock_service_socket(id: uuid::Uuid, name: &str) -> Result<PathBuf> {
+    Ok(socket_dir()?.join(format!("{}.svc-{name}", id.simple())))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -181,7 +206,8 @@ impl RunnerConfig {
             microphone: apple.microphone,
             rosetta: apple.rosetta,
             nested_virtualization: apple.nested_virtualization,
-            usb_controller: apple.usb_controller,
+            usb_controller: apple.usb_controller || apple.usb_controllers > 0,
+            usb_controllers: apple.usb_controllers.max(1),
             vmnet: apple.vmnet.clone(),
             custom_virtio: apple.custom_virtio,
             restore_state: req
@@ -221,6 +247,8 @@ impl RunnerConfig {
             initrd: req.initrd.clone(),
             cmdline: req.kernel_args.clone(),
             root_read_only: apple.root_read_only,
+            root_caching: apple.root_caching,
+            root_sync: apple.root_sync,
             extra_disks: apple.extra_disks.clone(),
             networks: apple
                 .networks
@@ -260,6 +288,38 @@ impl RunnerConfig {
             rosetta_cache: apple.rosetta_cache.clone(),
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
+            vsock_services: apple
+                .vsock_services
+                .iter()
+                .map(|s| {
+                    Ok(VsockServiceConfig {
+                        port: s.port,
+                        socket: match &s.socket {
+                            Some(n) => Some(vsock_service_socket(ctx.id, n)?),
+                            None => None,
+                        },
+                        builtin: s.builtin.clone(),
+                    })
+                })
+                .collect::<Result<_>>()?,
+            vsock_metadata: apple
+                .vsock_services
+                .iter()
+                .any(|s| s.builtin.as_deref() == Some("metadata"))
+                .then(|| {
+                    serde_json::json!({
+                        "id": ctx.id,
+                        "name": req.name,
+                        "vcpus": req.vcpus,
+                        "memory_mib": req.memory_mib,
+                    })
+                    .to_string()
+                }),
+            telemetry_log: apple
+                .vsock_services
+                .iter()
+                .any(|s| s.builtin.as_deref() == Some("telemetry"))
+                .then(|| ctx.workspace.join("telemetry.log")),
             forwards: match &req.network {
                 NetworkSpec::User { forwards } => forwards
                     .iter()

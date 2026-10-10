@@ -55,7 +55,7 @@ pub const CAPABILITIES: &[Capability] = &[
     yes("Linux clipboard", "SPICE port; guest needs spice-vdagent"),
     yes(
         "vmnet custom network",
-        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; one network per VM until the broker lands; unverified on hardware",
+        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; named networks are shared across VMs through the fluxvm-vmnetd broker; unverified on hardware",
     ),
     yes(
         "custom Virtio device",
@@ -120,8 +120,8 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     no("hotplug (cpu, memory, disks, nics)", "not supported"),
     no(
-        "data disks, cdroms, non-default storage",
-        "not implemented yet",
+        "top-level data_disks and cdroms",
+        "use apple.extra_disks (image, block, NBD; virtio, NVMe, USB) or apple.media instead",
     ),
     no(
         "firmware overrides",
@@ -332,6 +332,49 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
     Ok(())
 }
 
+/// Ports the runner uses itself, or that a guest's own services expect (sshd over vsock).
+const RESERVED_VSOCK_PORTS: [u32; 4] = [22, 3128, 7790, 7791];
+
+fn validate_vsock_services(services: &[fluxvm_core::model::AppleVsockService]) -> Result<()> {
+    if services.len() > 16 {
+        bail!("apple.vsock_services allows at most 16 entries");
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for s in services {
+        if !(1024..=65535).contains(&s.port) || RESERVED_VSOCK_PORTS.contains(&s.port) {
+            bail!(
+                "apple.vsock_services port {} must be 1024..=65535 and not one of {:?}",
+                s.port,
+                RESERVED_VSOCK_PORTS
+            );
+        }
+        if !seen.insert(s.port) {
+            bail!("apple.vsock_services lists port {} twice", s.port);
+        }
+        match (&s.socket, &s.builtin) {
+            (Some(n), None) => {
+                if n.is_empty()
+                    || n.len() > 32
+                    || !n.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+                    })
+                {
+                    bail!("apple.vsock_services socket name {n:?} must match [a-z0-9_-]{{1,32}}");
+                }
+            }
+            (None, Some(b)) if b == "metadata" || b == "telemetry" => {}
+            (None, Some(b)) => {
+                bail!("apple.vsock_services builtin {b:?} is not \"metadata\" or \"telemetry\"")
+            }
+            _ => bail!(
+                "apple.vsock_services port {} needs exactly one of socket and builtin",
+                s.port
+            ),
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
     macro_rules! reject {
         ($cond:expr, $msg:expr) => {
@@ -347,6 +390,23 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         bail!(
             "apple.self_control needs a Linux guest (the in-guest relay is installed by cloud-init)"
         );
+    }
+    if let Some(apple) = &req.apple {
+        validate_vsock_services(&apple.vsock_services)?;
+        if apple.usb_controllers > 4 {
+            bail!("apple.usb_controllers must be 0-4");
+        }
+        let buses = apple.usb_controllers.max(1);
+        for d in &apple.extra_disks {
+            if let Some(b) = d.usb_bus {
+                if d.controller != fluxvm_core::model::AppleDiskController::Usb {
+                    bail!("usb_bus applies to the usb controller only");
+                }
+                if b >= buses {
+                    bail!("usb_bus {b} needs apple.usb_controllers > {b}");
+                }
+            }
+        }
     }
     if let Some(apple) = &req.apple
         && !apple.egress_allow.is_empty()
@@ -631,7 +691,10 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             );
         }
     }
-    reject!(!req.data_disks.is_empty(), "data disks");
+    reject!(
+        !req.data_disks.is_empty(),
+        "data_disks (use apple.extra_disks)"
+    );
     reject!(
         !req.cdroms.is_empty(),
         "cdroms (use apple.media for an installer image)"
@@ -815,6 +878,23 @@ pub fn with_self_control_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vsock_services_are_validated() {
+        let ok = r#""apple":{"vsock_services":[{"port":5000,"socket":"metrics"},{"port":5001,"builtin":"metadata"}]}"#;
+        assert!(validate_request(&req(ok)).is_ok());
+        for bad in [
+            r#""apple":{"vsock_services":[{"port":3128,"builtin":"metadata"}]}"#,
+            r#""apple":{"vsock_services":[{"port":80,"builtin":"metadata"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"socket":"../x"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"builtin":"shell"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"socket":"a","builtin":"metadata"}]}"#,
+            r#""apple":{"vsock_services":[{"port":5000,"socket":"a"},{"port":5000,"socket":"b"}]}"#,
+        ] {
+            assert!(validate_request(&req(bad)).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn self_control_is_for_linux_guests_and_installs_the_relay() {
