@@ -27,8 +27,7 @@
 - **Apple placement in the fleet**: `fluxvm-agent node` heartbeats carry the host's `apple` capabilities, and `fluxvm-agent
   central` uses `apple_placement` for requests with backend `vz` (nodes without Apple capabilities are excluded for `vz`; a plain
   `vz` request prefers the tightest fit). Verified on loopback with one real M4 node plus two fake nodes registered by hand; a
-  request with a named shared vmnet was placed on the only vmnet-capable node. Not verified: more than one real Mac. There are
-  no unit tests yet for the `vz` filtering in `central.rs`.
+  request with a named shared vmnet was placed on the only vmnet-capable node. Not verified: more than one real Mac. Central's `vz` filtering now has four unit tests (request parsing, nodes without Apple capabilities, feature requirements, the two-macOS-guest limit).
 - **Capability decode fix**: the Rust decode of `maximumVmCPUs` and `usbPassthroughAPI` uses explicit serde renames; checked
   against the real M4 output.
 - Unit tests on the M4: `fluxvm-apple` 49 (plus 1 `backend` integration test and 6 source-contract tests, which only grep Swift

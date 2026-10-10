@@ -511,8 +511,7 @@ Several Macs, each running `fluxctl serve`, can share bursts of sandboxes ([maco
 - **Placement in central.** For `POST /fleet/vms` with `backend: vz`, central builds the request from the body (`apple.guest_os`,
   `nested_virtualization`, `vmnet`, `custom_virtio`, `bridge_interface`) and applies `apple_placement::score` to each node's `apple`
   caps; nodes that report none are excluded for `vz` requests. Other backends keep the existing capacity, security and selector scoring.
-  Checked only on loopback with one real Mac and two fake registrations (section 14); `apple_placement_request` and the `vz`
-  filtering have no unit tests of their own.
+  Checked only on loopback with one real Mac and two fake registrations (section 14); `apple_placement_request` and the `vz` filtering have unit tests in `central.rs` (request parsing, skipping nodes without Apple capabilities, feature requirements, the two-macOS-guest limit).
 - **One Mac.** With one node, placement always picks it.
 
 ## 13. Version gates
@@ -569,7 +568,7 @@ One Apple M4, 16 GiB, macOS 27.2 (build 26B5101f), SIP on, no `sudo`, AMFI defau
 | Custom Virtio bulk queue (queue 1) | Verified with fix | `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack buffer (invalid with VMAP_STACK); the host saw the notification but `nextElement()` returned nil. With a heap buffer, `bulk-fill` of 1 B, 4 KiB, 64 KiB and 1 MiB passes, the guest checks the fill, and the CRC32 equals an independent computation. Zero, copy and crc32 operations are not exercised. Root cause not found |
 | Multi-Mac placement | Not run | No second Mac |
 
-Gaps: no unit tests for `apple_placement_request` or the `vz` filtering in central. `fluxvm-container-agent` and `fluxvm-containerd-shim` do not build on macOS (unrelated).
+Central's `apple_placement_request` and `vz` filtering have four unit tests (they do not replace a run on two real Macs). `fluxvm-container-agent` and `fluxvm-containerd-shim` do not build on macOS (unrelated).
 
 The hosted CI jobs for the `vz` pull requests have not all been green; see the pull requests for their state.
 
