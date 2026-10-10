@@ -77,6 +77,8 @@ struct Config: Decodable {
     let initrd: String?
     let cmdline: String?
     let root_read_only: Bool?
+    let root_caching: String?       // root/seed disk host caching: automatic | cached | uncached
+    let root_sync: String?          // root/seed disk flush mode: full | fsync | none
     let extra_disks: [ExtraDisk]?
     let networks: [PrivateNetwork]?
     let console_ports: [ConsolePort]?

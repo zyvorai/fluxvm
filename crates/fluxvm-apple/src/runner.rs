@@ -73,6 +73,8 @@ pub struct RunnerConfig {
     pub initrd: Option<PathBuf>,
     pub cmdline: Option<String>,
     pub root_read_only: bool,
+    pub root_caching: fluxvm_core::model::AppleDiskCaching,
+    pub root_sync: fluxvm_core::model::AppleDiskSync,
     pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
     /// Private networks: one more network card each, connected to the network's switch.
     pub networks: Vec<NetworkConfig>,
@@ -245,6 +247,8 @@ impl RunnerConfig {
             initrd: req.initrd.clone(),
             cmdline: req.kernel_args.clone(),
             root_read_only: apple.root_read_only,
+            root_caching: apple.root_caching,
+            root_sync: apple.root_sync,
             extra_disks: apple.extra_disks.clone(),
             networks: apple
                 .networks

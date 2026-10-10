@@ -634,6 +634,12 @@ pub struct AppleSpec {
     /// Attach the root disk read-only (OCI sandboxes boot an immutable image; writes go to tmpfs).
     #[serde(default)]
     pub root_read_only: bool,
+    /// Host caching of the root (and seed) disk image; `automatic` is VZ's default.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub root_caching: AppleDiskCaching,
+    /// Host flush behaviour of the root (and seed) disk image; `full` is VZ's default.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub root_sync: AppleDiskSync,
     /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
     #[serde(default)]
     pub extra_disks: Vec<AppleDisk>,
@@ -857,6 +863,8 @@ impl Default for AppleSpec {
             self_control: false,
             vsock_services: Vec::new(),
             root_read_only: false,
+            root_caching: AppleDiskCaching::default(),
+            root_sync: AppleDiskSync::default(),
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),
             init_config: None,
