@@ -15,6 +15,8 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 | `cargo test -p fluxvm-network --lib`, `-p fluxvm-storage --lib`, `-p fluxvm-guest-protocol --lib` | all passed (one Linux-only test is gated) |
 | `cargo test -p fluxvm-apple` | 16 passed (capability matrix and egress validation, control protocol, SSH helpers, snapshot files, backend supervision against a fake runner) |
 | `scripts/macos-live-test.sh` | **PASS**, end to end on a real Debian 13 guest: create through the API, address, SSH, TCP forwards (host and guest-to-guest), shared folders, pause/resume, stop/start, snapshot and restore, named images, `fluxctl run` (cold and warm), a two-service stack, sandboxes (exec, files, TTL, warm pool and its refresh after an image update, concurrent creates, offline, allow-listed egress, speculate and changesets), nothing left running |
+| `scripts/oci-live-test.sh` | **PASS** with the `oci-boot` CI artifacts: container exit codes, uid, read-only root, exec, distroless argv exec, offline, allow-list, a private network between two sandboxes, `linux/amd64` under Rosetta, a warm-pool claim, TTL |
+| `scripts/vz-devices-live-test.sh` | **PASS** on a Debian 13 guest: extra disks on virtio, NVMe and USB, a host block device, an NBD export, USB hot-attach and detach, a console port both ways, a 1600x900 Linux display |
 
 **Verified by hand only:** macOS guests (IPSW install, boot, clone, SSH; see "macOS guests"), not through the API or the live test. **Not verified:** multi-Mac clusters, Linux-only crates (`fluxvm-procbox`,
 `fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent), and any Intel Mac. The hosted CI jobs for the `vz` pull requests
@@ -215,7 +217,9 @@ network and no agent, for example a debug shell, a log pipe or a custom control 
 - **Guest:** each port appears as `/dev/virtio-ports/<name>` (udev creates the link; without udev, find the name in
   `/sys/class/virtio-ports/vport*/name`).
 - **Host:** the runner bridges each port to a unix socket, `/tmp/fluxvm-<uid>/<vm id>.port-<name>` (mode 0600). One client at a
-  time; a new client replaces the old one. Guest output while no client is connected is dropped.
+  time; a new client replaces the old one. Guest output while no client is connected is dropped, and so is host input while
+  no guest process has the port open: have one side announce itself before the other sends (the guest can keep one
+  descriptor for both directions, e.g. `exec 3<>/dev/virtio-ports/<name>`).
 - **Clients:** `fluxctl port-connect <vm> <name>` connects stdin and stdout (Ctrl-] detaches), locally or with `--server`. Over
   REST, the websocket `GET /v1/vms/{id}/ports/{name}` (admin) carries raw bytes both ways.
 - **Names:** 1-32 of `a-z`, `0-9`, `.`, `-` and `_`, starting with a letter or digit. Ports are fixed when the VM starts.
@@ -337,8 +341,8 @@ process starts.
   where it can.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
 - Private networks (`apple.networks`) are IPv4 /24s with static addresses: no DHCP, DNS or routing between networks. The switch runs
-  in user space, so it is slower than the NAT card. They have not been run on hardware yet.
-- Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`), take `linux/arm64` images (or `linux/amd64` under Rosetta), and
-  have not been run on hardware yet (`scripts/oci-live-test.sh`).
+  in user space, so it is slower than the NAT card.
+- Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`, or the `oci-boot` CI workflow's
+  artifacts) and take `linux/arm64` images (or `linux/amd64` under Rosetta).
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.
 - Memory is not enforced by FluxVM here; the Mac's own memory pressure applies. Plan for one or two small VMs on a 16 GB Mac.

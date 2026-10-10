@@ -320,8 +320,9 @@ Unit tests cover:
 
 CI builds the boot artifacts and runs `clippy -D warnings` and the tests for the init on Linux arm64.
 
-`scripts/oci-live-test.sh` covers the following on Apple silicon. It has **not been run on hardware yet**, so the cold-start time
-target (under 2 s with a cached rootfs) is not measured.
+`scripts/oci-live-test.sh` covers the following on Apple silicon and passes with the `oci-boot` CI artifacts. Measured with
+`alpine:3.22` cached: a cold start in about 1.75 s and a warm-pool claim in about 1.3 s, of which about 0.9 s is resolving
+the tag on Docker Hub.
 
 - exit codes, a read-only root with a writable `/tmp`, and uid 65534;
 - argv exec in a distroless image;
