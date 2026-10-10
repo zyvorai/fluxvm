@@ -199,6 +199,31 @@ allows two macOS VMs at a time per Mac.
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
 - **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
 
+## Private networks between guests
+
+On the Mac's NAT, Virtualization.framework keeps guests apart: each reaches only the Mac. `apple.networks` adds a second network card
+on a private layer-2 network that only the guests joining it share (Linux guests):
+
+```json
+{"backend": "vz", "apple": {"networks": [{"name": "shop"}, {"name": "lab", "address": "10.89.7.20/24"}]}}
+```
+
+- **Addresses:** each network name gets its own `10.89.N.0/24`. A guest gets the lowest free host address (`.2` and up) and a random
+  locally administered MAC, unless it asks for `address` or `mac`. Both are kept in the VM record, so they survive restarts. A
+  requested address must be in the network's subnet and free. At most 4 networks per guest; names are `a-z`, `0-9` and `-`.
+- **In the guest:** container sandboxes (`oci.networks`) get the address from init, matched by MAC, with no route and no DHCP on that
+  card. Full VMs get it through cloud-init: a systemd-networkd unit per card, and a `fluxvm-vznet.service` oneshot that sets the
+  same address with `ip` on guests without networkd.
+- **The switch:** each network is one `fluxvm-vz-switch` process (installed next to `fluxctl`, or `FLUXVM_VZ_SWITCH`), started on
+  demand and listening on `/tmp/fluxvm-<uid>/vznet-<name>.sock` (mode 0600). The runner hands it one end of a datagram socket pair
+  (`VZFileHandleNetworkDeviceAttachment`). The switch forwards by the MAC each port registered with, drops frames with any other
+  source MAC, floods broadcast and multicast, and drops unicast to unknown MACs. It exits 30 s after the last guest leaves; a runner
+  that loses its switch starts it again and reconnects.
+- **Isolation:** guests on different networks, or not on one, cannot reach each other. A network belongs to the tenant of the VMs
+  already on it. `networks` works with `network.mode = "none"` (an isolated cluster) but not with `egress_allow`, since another guest
+  could relay around the proxy.
+- **Listing:** `fluxctl vznet ls` and `GET /v1/vznets` show each network's subnet, members and whether its switch is running.
+
 ## Mac Studio options
 
 These compile against the macOS 27 SDK and are validated at admission, but have **not been verified on hardware** yet.
@@ -252,6 +277,8 @@ process starts.
 - Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
   where it can.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
+- Private networks (`apple.networks`) are IPv4 /24s with static addresses: no DHCP, DNS or routing between networks. The switch runs
+  in user space, so it is slower than the NAT card. They have not been run on hardware yet.
 - Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`), take `linux/arm64` images only, and
   have not been run on hardware yet (`scripts/oci-live-test.sh`).
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.

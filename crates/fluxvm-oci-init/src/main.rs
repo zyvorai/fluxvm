@@ -30,9 +30,10 @@ mod linux {
     use anyhow::{Context, Result, bail};
     use fluxvm_oci_init::config::{
         BLOBS_TAG, BootConfig, CONFIG_FILE, DEFAULT_PATH, EGRESS_PROXY_PORT, EGRESS_PROXY_URL,
-        EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, INIT_ERR, InitConfig, META_TAG, NetworkMode,
-        POWEROFF_VIA_INIT_ENV, ProcessSpec, SECRETS_FILE, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR,
-        UNPACK_OK, UnpackConfig, valid_env_name, valid_host_name, with_secrets,
+        EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, HostEntry, INIT_ERR, InitConfig, META_TAG,
+        NetworkMode, POWEROFF_VIA_INIT_ENV, PrivateNetwork, ProcessSpec, SECRETS_FILE, TOKEN_FILE,
+        TOOLS_DIR, UNPACK_ERR, UNPACK_OK, UnpackConfig, valid_env_name, valid_host_name,
+        with_secrets,
     };
     use fluxvm_oci_init::supervise::{
         HealthCheck, HealthEvent, HealthState, RestartPolicy, STOP_GRACE, health_line,
@@ -309,6 +310,27 @@ mod linux {
         writeln!(f, "{gw}\t{}", names.join(" ")).with_context(|| format!("writing {path}"))
     }
 
+    fn add_hosts(entries: &[HostEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let path = format!("{NEWROOT}/etc/hosts");
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {path}"))?;
+        for e in entries {
+            if let Some(bad) = e.names.iter().find(|n| !valid_host_name(n)) {
+                bail!("host {bad:?} is not a valid host name");
+            }
+            if !e.names.is_empty() {
+                writeln!(f, "{}\t{}", e.ip, e.names.join(" "))
+                    .with_context(|| format!("writing {path}"))?;
+            }
+        }
+        Ok(())
+    }
+
     fn boot_mode(b: &BootConfig) -> Result<()> {
         if b.read_only_root {
             mount_new(DISK, LOWER, "ext4", libc::MS_RDONLY, None)?;
@@ -362,8 +384,22 @@ mod linux {
         if let Err(e) = link_up("lo") {
             say(&format!("fluxvm-oci-init: loopback: {}", one_line(&e)));
         }
+        let private: Vec<[u8; 6]> = b
+            .networks
+            .iter()
+            .filter_map(|n| n.parse().ok().map(|(mac, _, _)| mac))
+            .collect();
+        if !b.networks.is_empty()
+            && let Err(e) = configure_private(&b.networks)
+        {
+            say(&format!(
+                "fluxvm-oci-init: private network: {}",
+                one_line(&e)
+            ));
+        }
+        add_hosts(&b.hosts)?;
         if b.network == NetworkMode::Dhcp {
-            match configure_dhcp() {
+            match configure_dhcp(&private) {
                 Ok(lease) => {
                     let mut servers = lease.dns.clone();
                     if servers.is_empty() {
@@ -897,26 +933,54 @@ mod linux {
         )
     }
 
-    fn first_nic() -> Result<(String, [u8; 6])> {
+    fn nics() -> Result<Vec<(String, [u8; 6])>> {
         let mut names: Vec<String> = fs::read_dir("/sys/class/net")?
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
             .filter(|n| n != "lo")
             .collect();
         names.sort();
-        let name = names.into_iter().next().context("no network interface")?;
-        let raw = fs::read_to_string(format!("/sys/class/net/{name}/address"))?;
-        let bytes: Vec<u8> = raw
-            .trim()
-            .split(':')
-            .map(|h| u8::from_str_radix(h, 16))
-            .collect::<Result<_, _>>()
-            .context("parsing MAC")?;
-        let mac: [u8; 6] = bytes.try_into().ok().context("MAC is not 6 bytes")?;
-        Ok((name, mac))
+        let mut out = Vec::new();
+        for name in names {
+            let raw = fs::read_to_string(format!("/sys/class/net/{name}/address"))?;
+            let bytes: Vec<u8> = raw
+                .trim()
+                .split(':')
+                .map(|h| u8::from_str_radix(h, 16))
+                .collect::<Result<_, _>>()
+                .context("parsing MAC")?;
+            let mac: [u8; 6] = bytes.try_into().ok().context("MAC is not 6 bytes")?;
+            out.push((name, mac));
+        }
+        Ok(out)
     }
 
-    fn configure_dhcp() -> Result<dhcp::Reply> {
-        let (name, mac) = first_nic()?;
+    /// The first card that is not on a private network.
+    fn first_nic(private: &[[u8; 6]]) -> Result<(String, [u8; 6])> {
+        nics()?
+            .into_iter()
+            .find(|(_, mac)| !private.contains(mac))
+            .context("no network interface")
+    }
+
+    fn configure_private(nets: &[PrivateNetwork]) -> Result<()> {
+        let cards = nics()?;
+        for n in nets {
+            let (mac, ip, len) = n.parse()?;
+            let Some((name, _)) = cards.iter().find(|(_, m)| *m == mac) else {
+                bail!("network {}: no card with MAC {}", n.name, n.mac);
+            };
+            link_up(name)?;
+            set_address(name, ip, u32::from(len), None)?;
+            say(&format!(
+                "fluxvm-oci-init: {name} {ip}/{len} (network {})",
+                n.name
+            ));
+        }
+        Ok(())
+    }
+
+    fn configure_dhcp(private: &[[u8; 6]]) -> Result<dhcp::Reply> {
+        let (name, mac) = first_nic(private)?;
         link_up(&name)?;
         let sock =
             UdpSocket::bind(("0.0.0.0", dhcp::CLIENT_PORT)).context("binding DHCP client port")?;
@@ -981,10 +1045,19 @@ mod linux {
     }
 
     fn apply_lease(name: &str, lease: &dhcp::Reply) -> Result<()> {
+        set_address(name, lease.address, lease.prefix_len(), lease.router)
+    }
+
+    fn set_address(
+        name: &str,
+        address: Ipv4Addr,
+        bits: u32,
+        router: Option<Ipv4Addr>,
+    ) -> Result<()> {
         let s = ctl_socket()?;
         let mut a = IfReqAddr {
             name: ifname(name)?,
-            addr: sin(lease.address),
+            addr: sin(address),
             _pad: [0; 8],
         };
         ioctl(
@@ -993,7 +1066,6 @@ mod linux {
             &mut a,
             "SIOCSIFADDR",
         )?;
-        let bits = lease.prefix_len();
         let mask = if bits == 0 {
             0
         } else {
@@ -1006,7 +1078,7 @@ mod linux {
             &mut a,
             "SIOCSIFNETMASK",
         )?;
-        if let Some(gw) = lease.router {
+        if let Some(gw) = router {
             let mut rt: libc::rtentry = unsafe { std::mem::zeroed() };
             rt.rt_dst = sa(Ipv4Addr::UNSPECIFIED);
             rt.rt_genmask = sa(Ipv4Addr::UNSPECIFIED);

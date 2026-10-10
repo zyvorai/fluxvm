@@ -48,6 +48,8 @@ pub trait VmApi {
     /// `POST /v1/sandboxes` (a container sandbox when the request has `oci`).
     async fn create_sandbox(&self, req: Value) -> Result<Uuid>;
     async fn sandbox_logs(&self, id: Uuid) -> Result<SandboxLogs>;
+    /// `GET /v1/vznets` items.
+    async fn vznets(&self) -> Result<Value>;
 }
 
 /// Console lines `sandbox_logs` returns; stacks only read the markers.
@@ -131,6 +133,9 @@ impl VmApi for Local<'_> {
     }
     async fn sandbox_logs(&self, id: Uuid) -> Result<SandboxLogs> {
         self.0.sandbox_logs(id, SANDBOX_LOG_LINES).await
+    }
+    async fn vznets(&self) -> Result<Value> {
+        Ok(serde_json::to_value(self.0.vznets(None).await)?)
     }
 }
 
@@ -241,6 +246,9 @@ impl VmApi for crate::remote::Remote {
         Ok(serde_json::from_value(
             self.call(reqwest::Method::GET, &path, None).await?,
         )?)
+    }
+    async fn vznets(&self) -> Result<Value> {
+        Ok(self.call(reqwest::Method::GET, "/v1/vznets", None).await?["items"].take())
     }
 }
 

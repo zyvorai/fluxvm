@@ -88,6 +88,12 @@ pub struct OciSandboxSpec {
     /// every API response, and stored only in a 0600 file in the VM's private meta share until the VM is deleted.
     #[serde(default, skip_serializing)]
     pub secret_env: BTreeMap<String, fluxvm_core::grants::Secret>,
+    /// Private VM-to-VM networks to join (`10.89.N.0/24`, see `apple.networks`); works with `offline` too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<fluxvm_core::model::AppleNetwork>,
+    /// Extra `/etc/hosts` entries, e.g. the private-network addresses of the other services in a stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<init::HostEntry>,
 }
 
 /// Most secrets per sandbox, and their combined size.
@@ -185,6 +191,23 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
     }
     if let Some(h) = &oci.healthcheck {
         h.validate().map_err(anyhow::Error::msg)?;
+    }
+    fluxvm_apple::vznet::validate(&oci.networks)?;
+    if !oci.networks.is_empty() && !req.allow_hosts.is_empty() {
+        bail!(
+            "networks cannot be combined with allow_hosts: another guest could relay around the proxy"
+        );
+    }
+    if oci.hosts.len() > 256 {
+        bail!("at most 256 hosts entries");
+    }
+    for e in &oci.hosts {
+        if e.names.is_empty() {
+            bail!("hosts entry {} has no names", e.ip);
+        }
+        if let Some(bad) = e.names.iter().find(|n| !init::valid_host_name(n)) {
+            bail!("host {bad:?} is not a valid host name");
+        }
     }
     if oci.secret_env.len() > MAX_SECRET_ENV {
         bail!("at most {MAX_SECRET_ENV} secret_env entries");
@@ -318,6 +341,8 @@ pub(crate) fn build_create(
         healthcheck: spec.healthcheck.clone(),
         mounts,
         gateway_hosts: spec.gateway_hosts.clone(),
+        networks: Vec::new(),
+        hosts: spec.hosts.clone(),
     });
     let mut create: CreateVmRequest = serde_json::from_value(serde_json::json!({
         "name": name,
@@ -335,6 +360,7 @@ pub(crate) fn build_create(
             "egress_allow": allow_hosts,
             "init_config": init_config,
             "tagged_shares": shares,
+            "networks": spec.networks,
         },
     }))
     .context("building the OCI sandbox VM request")?;
@@ -656,6 +682,67 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(online.network, NetworkSpec::User { .. }));
+    }
+
+    #[test]
+    fn private_networks_and_hosts_reach_the_vm_request() {
+        let boot = OciBoot {
+            kernel: "/k".into(),
+            initrd: "/i".into(),
+            cmdline: "console=hvc0".into(),
+        };
+        let process = init::ProcessSpec {
+            argv: vec!["/bin/sh".into()],
+            env: vec![],
+            cwd: "/".into(),
+            user: "0:0".into(),
+        };
+        let s = spec(serde_json::json!({
+            "image": "alpine",
+            "networks": [{"name": "stack-shop", "address": "10.89.4.10/24"}],
+            "hosts": [{"ip": "10.89.4.11", "names": ["db"]}],
+        }));
+        let c = build_create(
+            "web",
+            Path::new("/r"),
+            &boot,
+            process,
+            &s,
+            (1, 512),
+            true,
+            &[],
+            vec![],
+            (vec![], vec![]),
+        )
+        .unwrap();
+        let apple = c.apple.as_ref().unwrap();
+        assert_eq!(apple.networks[0].name, "stack-shop");
+        assert_eq!(apple.networks[0].address.as_deref(), Some("10.89.4.10/24"));
+        let init::InitConfig::Boot(b) =
+            serde_json::from_value(apple.init_config.clone().unwrap()).unwrap()
+        else {
+            panic!("not a boot config")
+        };
+        assert_eq!(b.hosts[0].names, ["db"]);
+        fluxvm_apple::validate_request(&c).unwrap();
+
+        let relay = sandbox(serde_json::json!({
+            "oci": {"image": "alpine", "networks": [{"name": "n"}]},
+            "allow_hosts": ["pypi.org"],
+        }));
+        assert!(validate(&relay).is_err());
+        let offline = sandbox(serde_json::json!({
+            "oci": {"image": "alpine", "networks": [{"name": "n"}]},
+            "offline": true,
+        }));
+        assert!(
+            validate(&offline).is_ok(),
+            "an offline sandbox may still join a private network"
+        );
+        let bad_host = sandbox(serde_json::json!({
+            "oci": {"image": "alpine", "hosts": [{"ip": "10.89.0.2", "names": ["a b"]}]},
+        }));
+        assert!(validate(&bad_host).is_err());
     }
 
     #[test]

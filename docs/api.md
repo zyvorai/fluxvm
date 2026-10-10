@@ -94,6 +94,7 @@ GET    /v1/oci/images                    # cached OCI rootfs images for vz sandb
 POST   /v1/oci/images                    # {"image": "alpine:3.22"}; admin; pull and build the rootfs
 DELETE /v1/oci/images/{digest|reference} # admin
 POST   /v1/oci/prune                     # admin; drop images no sandbox was started from, and unused blobs
+GET    /v1/vznets                        # private vz networks (apple.networks): subnet, members, switch_running; see macos.md
 POST   /v1/pools
 GET    /v1/pools
 GET    /v1/pools/{name}

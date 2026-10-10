@@ -64,6 +64,17 @@ pub struct RunnerConfig {
     pub cmdline: Option<String>,
     pub root_read_only: bool,
     pub extra_disks: Vec<fluxvm_core::model::AppleDisk>,
+    /// Private networks: one more network card each, connected to the network's switch.
+    pub networks: Vec<NetworkConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NetworkConfig {
+    pub name: String,
+    pub mac: String,
+    pub socket: PathBuf,
+    /// The switch binary, so the runner can restart a switch that died.
+    pub switch_bin: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,6 +182,21 @@ impl RunnerConfig {
             cmdline: req.kernel_args.clone(),
             root_read_only: apple.root_read_only,
             extra_disks: apple.extra_disks.clone(),
+            networks: apple
+                .networks
+                .iter()
+                .map(|n| {
+                    Ok(NetworkConfig {
+                        name: n.name.clone(),
+                        mac: n
+                            .mac
+                            .clone()
+                            .with_context(|| format!("network {} has no MAC assigned", n.name))?,
+                        socket: crate::vznet::socket_path(&n.name)?,
+                        switch_bin: PathBuf::new(),
+                    })
+                })
+                .collect::<Result<_>>()?,
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
             forwards: match &req.network {
@@ -213,7 +239,19 @@ pub fn write_oci_meta(req: &CreateVmRequest, workspace: &Path) -> Result<()> {
     let dir = oci_meta_dir(workspace);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-    fs::write(dir.join(CONFIG_FILE), serde_json::to_vec_pretty(init)?)?;
+    let mut init = init.clone();
+    if !apple.networks.is_empty() && init["mode"] == "boot" {
+        init["networks"] = serde_json::to_value(
+            apple
+                .networks
+                .iter()
+                .filter_map(|n| {
+                    Some(serde_json::json!({"name": n.name, "mac": n.mac.as_ref()?, "address": n.address.as_ref()?}))
+                })
+                .collect::<Vec<_>>(),
+        )?;
+    }
+    fs::write(dir.join(CONFIG_FILE), serde_json::to_vec_pretty(&init)?)?;
     // Only the creating launch carries secrets (they are never persisted); later boots keep the file it wrote.
     if !apple.secret_env.is_empty() {
         let values: std::collections::BTreeMap<&str, &str> = apple
@@ -302,7 +340,7 @@ pub fn adopt_macos_template(image: &Path, workspace: &Path) -> Result<bool> {
 }
 
 /// unix socket paths are limited to ~104 bytes on macOS, so sockets live under a short per-user directory.
-fn socket_dir() -> Result<PathBuf> {
+pub(crate) fn socket_dir() -> Result<PathBuf> {
     let uid = unsafe { libc::getuid() };
     let dir = PathBuf::from(format!("/tmp/fluxvm-{uid}"));
     fs::create_dir_all(&dir)?;

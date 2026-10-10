@@ -224,6 +224,18 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         if !(72..=300).contains(&apple.display_ppi) {
             bail!("apple.display_ppi must be 72..=300");
         }
+        crate::vznet::validate(&apple.networks)?;
+        if !apple.networks.is_empty() {
+            if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
+                bail!("apple.networks is for Linux guests");
+            }
+            if !apple.egress_allow.is_empty() {
+                bail!(
+                    "apple.networks cannot be combined with egress_allow: another guest on the network could relay \
+                     around the proxy"
+                );
+            }
+        }
         if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
             && (apple.rosetta || apple.nested_virtualization || apple.clipboard)
         {

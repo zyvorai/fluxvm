@@ -779,6 +779,8 @@ pub struct VmManager {
     sandbox_volume_lock: AsyncMutex<()>,
     /// Serialises GPU selection with the VM create that records it, so no GPU is handed out twice.
     sandbox_gpu_lock: AsyncMutex<()>,
+    /// Serialises private-network address assignment with the VM record write that reserves it.
+    vznet_lock: AsyncMutex<()>,
     /// Last activity timestamps for AutoPause / wake-on-request (sandbox id → UTC).
     activity: AsyncMutex<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>,
     /// A scheduled-snapshot pass can outlast a reaper tick (savevm is slow).
@@ -814,6 +816,7 @@ impl VmManager {
             template_lock: AsyncMutex::new(()),
             sandbox_volume_lock: AsyncMutex::new(()),
             sandbox_gpu_lock: AsyncMutex::new(()),
+            vznet_lock: AsyncMutex::new(()),
             activity: AsyncMutex::new(HashMap::new()),
             scheduled_snapshots_busy: std::sync::atomic::AtomicBool::new(false),
         }))
@@ -2222,6 +2225,45 @@ impl VmManager {
         if needs_cid && req.backend == BackendKind::Vz && !oci_init {
             vz_agent_token_via_cloud_init(&mut req);
         }
+        // Private-network addresses are decided and reserved (by the record's insert) under one lock.
+        let vznet_guard = match req.apple.as_mut() {
+            Some(apple) if req.backend == BackendKind::Vz && !apple.networks.is_empty() => {
+                let guard = self.vznet_lock.lock().await;
+                let records = self.store.list().await;
+                // A network belongs to the tenant of the VMs already on it.
+                for net in &apple.networks {
+                    if records.iter().any(|v| {
+                        v.request.tenant != req.tenant
+                            && v.request
+                                .apple
+                                .as_ref()
+                                .is_some_and(|a| a.networks.iter().any(|n| n.name == net.name))
+                    }) {
+                        anyhow::bail!("network {} is in use by another tenant", net.name);
+                    }
+                }
+                let existing: Vec<_> = records
+                    .into_iter()
+                    .filter_map(|v| v.request.apple)
+                    .flat_map(|a| a.networks)
+                    .collect();
+                fluxvm_apple::vznet::assign(&mut apple.networks, &existing)?;
+                if !oci_init {
+                    let (files, runcmd) = fluxvm_apple::vznet::cloud_init(&apple.networks);
+                    let ci = req.cloud_init.get_or_insert_with(Default::default);
+                    for (path, content, mode) in files {
+                        ci.write_files.push(fluxvm_core::model::CloudInitFile {
+                            path,
+                            content,
+                            permissions: Some(mode),
+                        });
+                    }
+                    ci.runcmd.extend(runcmd);
+                }
+                Some(guard)
+            }
+            _ => None,
+        };
 
         let placeholder = VmRecord {
             id,
@@ -2264,6 +2306,7 @@ impl VmManager {
             .store
             .insert_with_cid(placeholder, needs_cid, FIRST_GUEST_CID)
             .await?;
+        drop(vznet_guard);
         let guest_cid = record.guest_cid;
 
         if req.qga.as_ref().is_some_and(|q| q.enabled)
@@ -2538,6 +2581,25 @@ impl VmManager {
             ],
         );
         Ok(record)
+    }
+
+    /// The private `vz` networks in use, optionally only those with members of `tenant`.
+    pub async fn vznets(&self, tenant: Option<&str>) -> Vec<fluxvm_apple::vznet::NetworkSummary> {
+        let vms: Vec<VmRecord> = self
+            .store
+            .list()
+            .await
+            .into_iter()
+            .filter(|v| tenant.is_none() || v.request.tenant.as_deref() == tenant)
+            .collect();
+        fluxvm_apple::vznet::summarize(vms.iter().filter_map(|v| {
+            let nets = v.request.apple.as_ref()?.networks.as_slice();
+            let status = serde_json::to_value(v.status)
+                .ok()
+                .and_then(|s| s.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            Some((v.id, v.name.as_str(), status, nets))
+        }))
     }
 
     pub async fn list(&self) -> Vec<VmRecord> {

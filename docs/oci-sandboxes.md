@@ -80,6 +80,18 @@ after its DHCP lease. Host ports must be 1024 or higher (the daemon does not run
 and a host port another VM on this Mac already publishes is refused. Only TCP. Ports, `expose` and `gateway_hosts` need the
 network card, so they cannot be combined with `offline` or `allow_hosts`.
 
+### Private networks
+
+`networks: [{"name", "address"?}]` joins private networks shared only with the other guests on them (see "Private networks between
+guests" in [macos.md](macos.md)); init gives the card its `10.89.N.H/24` address by MAC. `hosts: [{"ip", "names"}]` adds
+`/etc/hosts` lines, for example the other members' names. Works with `offline` (the sandbox then reaches only the other guests on
+its networks), but not with `allow_hosts`.
+
+```bash
+curl -s -X POST localhost:7788/v1/sandboxes -d '{"offline": true, "oci": {"image": "redis:7-alpine", "networks": [{"name": "lab"}]}}'
+fluxctl vznet ls
+```
+
 ### Volumes
 
 `volumes: [{"name", "guest_path", "read_only"?}]` attaches named, persistent directories. They live in

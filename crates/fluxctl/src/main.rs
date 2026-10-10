@@ -702,6 +702,11 @@ enum Command {
         #[command(subcommand)]
         command: OciCommand,
     },
+    /// Private VM-to-VM networks between `vz` guests (`apple.networks`, `oci.networks`). See docs/macos.md.
+    Vznet {
+        #[command(subcommand)]
+        command: VznetCommand,
+    },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
     /// Show one catalog entry (machinectl `image-status` / `show-image`).
@@ -1602,6 +1607,62 @@ enum OciCommand {
 }
 
 #[derive(Subcommand)]
+enum VznetCommand {
+    /// Networks in use, their subnets and members (`--json` for the raw `GET /v1/vznets`).
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `fluxctl vznet ls` as a table.
+fn print_vznets(items: &serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(items)?);
+        return Ok(());
+    }
+    let nets = items.as_array().cloned().unwrap_or_default();
+    if nets.is_empty() {
+        println!("no private networks in use");
+        return Ok(());
+    }
+    println!("{:<24} {:<16} {:<8} MEMBERS", "NETWORK", "SUBNET", "SWITCH");
+    for n in nets {
+        let s = |k: &str| n[k].as_str().unwrap_or("").to_string();
+        let members: Vec<String> = n["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| {
+                format!(
+                    "{}={} ({})",
+                    m["vm_name"].as_str().unwrap_or(""),
+                    m["address"]
+                        .as_str()
+                        .unwrap_or("")
+                        .split('/')
+                        .next()
+                        .unwrap_or(""),
+                    m["status"].as_str().unwrap_or("")
+                )
+            })
+            .collect();
+        println!(
+            "{:<24} {:<16} {:<8} {}",
+            s("name"),
+            s("subnet"),
+            if n["switch_running"].as_bool() == Some(true) {
+                "up"
+            } else {
+                "idle"
+            },
+            members.join(", ")
+        );
+    }
+    Ok(())
+}
+
+#[derive(Subcommand)]
 enum CatalogCommand {
     /// Generate a fresh Ed25519 keypair for signing catalog entries. The
     /// private key is only ever printed here — store it yourself (this
@@ -2417,6 +2478,9 @@ async fn run_remote(
         Command::Get { id } | Command::Status { id: Some(id), .. } => {
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
+        Command::Vznet {
+            command: VznetCommand::Ls { json },
+        } => print_vznets(&r.call(Method::GET, "/v1/vznets", None).await?["items"], json)?,
         Command::Start { target } => bulk(target, "start").await?,
         Command::Stop { target } => bulk(target, "stop").await?,
         Command::Restart { target } => bulk(target, "restart").await?,
@@ -4467,6 +4531,9 @@ async fn main() -> Result<()> {
                 println!("{{\"deleted\":\"ok\"}}");
             }
         },
+        Command::Vznet {
+            command: VznetCommand::Ls { json },
+        } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::Oci { command } => {
             let out = match command {
                 OciCommand::Pull { image } => serde_json::to_value(m.oci_pull(&image).await?)?,

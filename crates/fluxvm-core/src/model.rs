@@ -614,6 +614,24 @@ pub struct AppleSpec {
     /// launch that creates the VM sees them; it writes them to a 0600 file in the meta share, which later boots reuse.
     #[serde(skip)]
     pub secret_env: std::collections::BTreeMap<String, crate::grants::Secret>,
+    /// Private networks between `vz` guests on this Mac: each one is an extra network card on a userspace switch, so
+    /// guests on the same network reach each other directly (any port, TCP and UDP). The daemon fills in `address` and
+    /// `mac` when they are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<AppleNetwork>,
+}
+
+/// One private network a `vz` guest joins (see [`AppleSpec::networks`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleNetwork {
+    /// `a-z`, `0-9` and `-`, 1-32 characters.
+    pub name: String,
+    /// `10.89.N.H/24`; must be in the network's subnet once the network exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
 }
 
 /// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
@@ -682,6 +700,7 @@ impl Default for AppleSpec {
             tagged_shares: Vec::new(),
             init_config: None,
             secret_env: std::collections::BTreeMap::new(),
+            networks: Vec::new(),
         }
     }
 }

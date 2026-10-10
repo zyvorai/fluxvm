@@ -12,6 +12,7 @@ build = "build.rs"
 [dependencies]
 fluxvm-core = { path = "../fluxvm-core" }
 fluxvm-oci-init = { path = "../fluxvm-oci-init" }
+fluxvm-vz-switch = { path = "../fluxvm-vz-switch" }
 anyhow = "1"
 async-trait = "0.1"
 libc = "0.2"

@@ -659,6 +659,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/images/catalog/clean", post(clean_catalog))
         .route("/v1/images/catalog", get(list_catalog))
         .route("/v1/oci/images", get(list_oci_images).post(pull_oci_image))
+        .route("/v1/vznets", get(list_vznets))
         .route("/v1/oci/images/{what}", delete(remove_oci_image))
         .route("/v1/oci/prune", post(prune_oci_images))
         .route("/v1/pools", post(create_pool).get(list_pools))
@@ -4222,6 +4223,15 @@ async fn clean_catalog(
     require_admin(role)?;
     let removed = m.clean_catalog_downloads().await?;
     Ok(Json(json!({"removed": removed})))
+}
+
+/// `GET /v1/vznets`: private VM-to-VM networks on this Mac, with their members.
+async fn list_vznets(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    Ok(Json(json!({"items": m.vznets(tenant.as_deref()).await})))
 }
 
 async fn list_oci_images(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {

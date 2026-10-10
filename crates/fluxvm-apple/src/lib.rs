@@ -12,6 +12,7 @@ mod control;
 pub mod macos_install;
 mod runner;
 pub mod ssh;
+pub mod vznet;
 
 pub use capability::{
     CAPABILITIES, Capability, validate_request, with_egress_forwarder, with_guest_reporting,
@@ -149,7 +150,11 @@ impl VmBackend for AppleBackend {
         }
         runner::write_oci_meta(req, &ctx.workspace)?;
         let runner = find_runner()?;
-        let conf = RunnerConfig::for_launch(req, ctx)?;
+        let mut conf = RunnerConfig::for_launch(req, ctx)?;
+        for net in &mut conf.networks {
+            net.socket = vznet::ensure_switch(&net.name).await?;
+            net.switch_bin = vznet::find_switch()?;
+        }
         let conf_path = conf.write(&ctx.workspace)?;
         if install {
             macos_install::run_install(&runner, &conf_path, &ctx.workspace).await?;

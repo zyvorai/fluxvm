@@ -67,6 +67,134 @@ struct Config: Decodable {
     let cmdline: String?
     let root_read_only: Bool?
     let extra_disks: [ExtraDisk]?
+    let networks: [PrivateNetwork]?
+}
+
+struct PrivateNetwork: Decodable {
+    let name: String
+    let mac: String
+    let socket: String
+    let switch_bin: String
+}
+
+/// One card on a private network: the guest's end of a datagram socketpair goes to Virtualization, the other end is
+/// handed to the network's `fluxvm-vz-switch` over its Unix socket (SCM_RIGHTS). The runner keeps its copy, so when the
+/// switch goes away it reconnects (restarting the switch) and hands the same socket over again.
+final class PrivateLink {
+    let net: PrivateNetwork
+    let vmID: String
+    let switchEnd: Int32
+    let attachment: VZFileHandleNetworkDeviceAttachment
+
+    init(_ net: PrivateNetwork, vmID: String) throws {
+        self.net = net
+        self.vmID = vmID
+        var fds: [Int32] = [0, 0]
+        guard socketpair(AF_UNIX, SOCK_DGRAM, 0, &fds) == 0 else {
+            throw NSError(domain: "fluxvm-vz", code: 1, userInfo: [NSLocalizedDescriptionKey: "socketpair: \(String(cString: strerror(errno)))"])
+        }
+        // Apple's guidance for file-handle networking: a receive buffer several times the send buffer.
+        for fd in fds {
+            var snd: Int32 = 1 << 20, rcv: Int32 = 4 << 20
+            setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, socklen_t(MemoryLayout<Int32>.size))
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, socklen_t(MemoryLayout<Int32>.size))
+        }
+        switchEnd = fds[1]
+        attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: FileHandle(fileDescriptor: fds[0], closeOnDealloc: true))
+    }
+
+    func start() {
+        let t = Thread { [self] in
+            var delay: UInt32 = 0
+            while true {
+                if delay > 0 { sleep(delay) }
+                delay = min(max(delay * 2, 1), 10)
+                guard let s = self.connect() else { continue }
+                delay = 0
+                FileHandle.standardError.write(Data("fluxvm-vz-runner: joined network \(self.net.name)\n".utf8))
+                // The switch holds the port while this stream is open; EOF means it went away.
+                var b: UInt8 = 0
+                while read(s, &b, 1) > 0 {}
+                close(s)
+                FileHandle.standardError.write(Data("fluxvm-vz-runner: lost the switch for network \(self.net.name); reconnecting\n".utf8))
+                delay = 1
+            }
+        }
+        t.start()
+    }
+
+    private func dial() -> Int32? {
+        let s = socket(AF_UNIX, SOCK_STREAM, 0)
+        if s < 0 { return nil }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let path = Array(net.socket.utf8)
+        guard path.count < MemoryLayout.size(ofValue: addr.sun_path) else { close(s); return nil }
+        withUnsafeMutableBytes(of: &addr.sun_path) { p in
+            for (i, b) in path.enumerated() { p[i] = b }
+            p[path.count] = 0
+        }
+        let ok = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        if ok != 0 { close(s); return nil }
+        return s
+    }
+
+    private func connect() -> Int32? {
+        var s = dial()
+        if s == nil {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: net.switch_bin)
+            p.arguments = ["--socket", net.socket]
+            p.standardInput = FileHandle.nullDevice
+            if let log = FileHandle(forWritingAtPath: net.socket + ".log") ?? {
+                FileManager.default.createFile(atPath: net.socket + ".log", contents: nil); return FileHandle(forWritingAtPath: net.socket + ".log") }() {
+                log.seekToEndOfFile()
+                p.standardOutput = log
+                p.standardError = log
+            }
+            try? p.run()
+            for _ in 0..<50 {
+                usleep(100_000)
+                if let c = dial() { s = c; break }
+            }
+        }
+        guard let s else { return nil }
+        let hello = (try? JSONSerialization.data(withJSONObject: ["vm": vmID, "mac": net.mac])) ?? Data()
+        var line = [UInt8](hello) + [UInt8(ascii: "\n")]
+        let space = Int(MemoryLayout<cmsghdr>.size + MemoryLayout<Int32>.size + 3) & ~3
+        var control = [UInt8](repeating: 0, count: space)
+        let sent: Int = line.withUnsafeMutableBytes { lp in
+            control.withUnsafeMutableBytes { cp in
+                var iov = iovec(iov_base: lp.baseAddress, iov_len: lp.count)
+                return withUnsafeMutablePointer(to: &iov) { iovp in
+                    var msg = msghdr()
+                    msg.msg_iov = iovp
+                    msg.msg_iovlen = 1
+                    msg.msg_control = cp.baseAddress
+                    msg.msg_controllen = socklen_t(space)
+                    let h = cp.baseAddress!.assumingMemoryBound(to: cmsghdr.self)
+                    h.pointee.cmsg_level = SOL_SOCKET
+                    h.pointee.cmsg_type = SCM_RIGHTS
+                    h.pointee.cmsg_len = socklen_t(MemoryLayout<cmsghdr>.size + MemoryLayout<Int32>.size)
+                    (cp.baseAddress! + MemoryLayout<cmsghdr>.size).storeBytes(of: switchEnd, as: Int32.self)
+                    return sendmsg(s, &msg, 0)
+                }
+            }
+        }
+        guard sent == line.count else { close(s); return nil }
+        // Keep our copy until the switch confirms: on macOS a descriptor closed while in flight can be lost.
+        var ack = [UInt8](repeating: 0, count: 3)
+        var got = 0
+        while got < 3 {
+            let n = ack.withUnsafeMutableBytes { read(s, $0.baseAddress! + got, 3 - got) }
+            if n <= 0 { close(s); return nil }
+            got += n
+        }
+        guard ack == Array("ok\n".utf8) else { close(s); return nil }
+        return s
+    }
 }
 
 struct ExtraDisk: Decodable {
@@ -122,6 +250,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     var signalSources: [DispatchSourceSignal] = []
     var vsockConnections: [VZVirtioSocketConnection] = []
     var lastConfiguration: VZVirtualMachineConfiguration?
+    var privateLinks: [String: PrivateLink] = [:]
 
     init(_ cfg: Config) { self.cfg = cfg; super.init() }
 
@@ -240,6 +369,22 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         if let m = cfg.mac, let mac = VZMACAddress(string: m) { net.macAddress = mac }
         // `network: none` means no network card, so the guest has nothing to route through.
         c.networkDevices = cfg.network_none == true ? [] : [net]
+        if cfg.guest_os == "linux" {
+            for p in cfg.networks ?? [] {
+                guard let mac = VZMACAddress(string: p.mac) else { throw err("network \(p.name): bad MAC \(p.mac)") }
+                // One socket pair per network for the life of the runner; later configurations reuse it.
+                let link: PrivateLink
+                if let l = privateLinks[p.name] { link = l } else {
+                    link = try PrivateLink(p, vmID: cfg.id)
+                    privateLinks[p.name] = link
+                    link.start()
+                }
+                let card = VZVirtioNetworkDeviceConfiguration()
+                card.attachment = link.attachment
+                card.macAddress = mac
+                c.networkDevices.append(card)
+            }
+        }
         if cfg.guest_os == "linux" {
             var fsDevices: [VZDirectorySharingDeviceConfiguration] = []
             for share in cfg.shares ?? [] {

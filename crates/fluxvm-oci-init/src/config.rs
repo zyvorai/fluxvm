@@ -96,6 +96,55 @@ pub struct BootConfig {
     /// Names that resolve to the DHCP router (the Mac's NAT gateway) in the container's `/etc/hosts`.
     #[serde(default)]
     pub gateway_hosts: Vec<String>,
+    /// Private VM-to-VM networks: the card with `mac` gets `address` statically (no DHCP, no route).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<PrivateNetwork>,
+    /// Extra `/etc/hosts` lines, e.g. the other containers of a stack on a private network.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<HostEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateNetwork {
+    pub name: String,
+    pub mac: String,
+    /// `a.b.c.d/len`.
+    pub address: String,
+}
+
+impl PrivateNetwork {
+    pub fn parse(&self) -> anyhow::Result<([u8; 6], std::net::Ipv4Addr, u8)> {
+        let bytes: Vec<u8> = self
+            .mac
+            .split(':')
+            .map(|h| u8::from_str_radix(h, 16))
+            .collect::<Result<_, _>>()
+            .map_err(|_| anyhow::anyhow!("network {}: bad MAC {:?}", self.name, self.mac))?;
+        let mac: [u8; 6] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("network {}: bad MAC {:?}", self.name, self.mac))?;
+        let (ip, len) = self
+            .address
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("network {}: address needs a /prefix", self.name))?;
+        let ip: std::net::Ipv4Addr = ip.parse().map_err(|_| {
+            anyhow::anyhow!("network {}: bad address {:?}", self.name, self.address)
+        })?;
+        let len: u8 = len
+            .parse()
+            .ok()
+            .filter(|l| (1..=30).contains(l))
+            .ok_or_else(|| {
+                anyhow::anyhow!("network {}: bad prefix {:?}", self.name, self.address)
+            })?;
+        Ok((mac, ip, len))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostEntry {
+    pub ip: std::net::Ipv4Addr,
+    pub names: Vec<String>,
 }
 
 /// An RFC 1123 host name: dot-separated labels of 1-63 letters, digits and inner hyphens, 253 characters at most.
@@ -342,6 +391,43 @@ mod tests {
         for bad in ["", "1A", "A-B", "A=B", "A B"] {
             assert!(!valid_env_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn private_networks_parse_their_mac_and_address() {
+        let n = PrivateNetwork {
+            name: "shop".into(),
+            mac: "02:aa:bb:cc:dd:0e".into(),
+            address: "10.89.3.7/24".into(),
+        };
+        assert_eq!(
+            n.parse().unwrap(),
+            (
+                [2, 0xaa, 0xbb, 0xcc, 0xdd, 0x0e],
+                std::net::Ipv4Addr::new(10, 89, 3, 7),
+                24
+            )
+        );
+        for (mac, address) in [
+            ("02:aa:bb:cc:dd", "10.89.3.7/24"),
+            ("02:aa:bb:cc:dd:0e", "10.89.3.7"),
+            ("02:aa:bb:cc:dd:0e", "10.89.3.7/0"),
+            ("02:aa:bb:cc:dd:0e", "host/24"),
+        ] {
+            let bad = PrivateNetwork {
+                mac: mac.into(),
+                address: address.into(),
+                ..n.clone()
+            };
+            assert!(bad.parse().is_err(), "{mac} {address}");
+        }
+        // Older host configs without the new fields still load.
+        let b: BootConfig = serde_json::from_value(serde_json::json!({
+            "hostname": "h",
+            "process": {"argv": ["/bin/sh"], "env": [], "cwd": "/", "user": "0:0"}
+        }))
+        .unwrap();
+        assert!(b.networks.is_empty() && b.hosts.is_empty());
     }
 
     #[test]

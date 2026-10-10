@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
-# Builds fluxctl and the signed Virtualization.framework runner and packs them for Homebrew / a GitHub release:
+# Builds fluxctl, fluxvm-vz-switch and the signed Virtualization.framework runner and packs them for Homebrew / a GitHub release:
 #   target/package/fluxvm-<version>-macos-arm64.tar.gz  (+ .sha256)
 #   scripts/package-macos.sh [--profile release|debug] [--version X.Y.Z]
 # Needs Apple silicon, the Xcode command line tools, Rust, and guestkit checked out next to this repo (fluxvm-image uses it).
@@ -20,7 +20,7 @@ done
 [[ "$PROFILE" == release || "$PROFILE" == debug ]] || { echo "--profile must be release or debug" >&2; exit 2; }
 [[ -n "$VERSION" ]] || { echo "could not work out the version" >&2; exit 2; }
 
-if [[ "$PROFILE" == release ]]; then cargo build --release -p fluxctl; else cargo build -p fluxctl; fi
+if [[ "$PROFILE" == release ]]; then cargo build --release -p fluxctl -p fluxvm-vz-switch; else cargo build -p fluxctl -p fluxvm-vz-switch; fi
 
 # build.rs of fluxvm-apple compiles and signs the runner into its OUT_DIR; take the newest one.
 RUNNER="$(find "target/$PROFILE/build" -path '*fluxvm-apple-*/out/fluxvm-vz-runner' -type f -print0 | xargs -0 ls -t | head -n1)"
@@ -33,6 +33,8 @@ OUT="target/package"; STAGE="$OUT/$NAME"
 rm -rf "$STAGE" "$OUT/$NAME.tar.gz" "$OUT/$NAME.tar.gz.sha256"
 mkdir -p "$STAGE/bin"
 cp "target/$PROFILE/fluxctl" "$STAGE/bin/fluxctl"
+# Private VM-to-VM networks: started on demand, one process per network (docs/macos.md).
+cp "target/$PROFILE/fluxvm-vz-switch" "$STAGE/bin/fluxvm-vz-switch"
 # Not stripped: stripping would invalidate the runner's signature, and the entitlement is what lets it start VMs.
 cp "$RUNNER" "$STAGE/bin/fluxvm-vz-runner"
 cp LICENSE NOTICE "$STAGE/" 2>/dev/null || cp LICENSE "$STAGE/"

@@ -2,6 +2,18 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: private networks between `vz` guests
+- **`apple.networks`** ([docs/macos.md](docs/macos.md#private-networks-between-guests)) adds a network card per private network
+  (`VZFileHandleNetworkDeviceAttachment`), backed by a new `fluxvm-vz-switch` process per network. It forwards by registered MAC,
+  drops spoofed source MACs and unknown unicast, and exits when idle. Each network gets a `10.89.N.0/24`; addresses and MACs are
+  assigned at create time under one lock and kept in the VM record. A network belongs to one tenant.
+- **Container sandboxes**: `oci.networks` and `oci.hosts`. Init configures the card by MAC without DHCP, and works with `offline`.
+  **Full VMs** get a systemd-networkd unit and a `fluxvm-vznet.service` fallback through cloud-init.
+- **Stacks**: `network = "private"` puts every service on `stack-<name>` with fixed addresses and direct `/etc/hosts` names, with no
+  gateway relay and no unique-port rule.
+- `fluxctl vznet ls` and `GET /v1/vznets`. The macOS package and Homebrew formula install `fluxvm-vz-switch`, and
+  `scripts/oci-live-test.sh` checks two sandboxes on one network.
+
 ### Added: container sandboxes on a Mac, one VM per container
 - **OCI images as sandboxes on `vz`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md)): `POST /v1/sandboxes` with
   `"oci": {"image", "command"?, "entrypoint"?, "env"?, "workdir"?, "user"?, "read_only_root"?, "exit_policy"?}` boots the image
