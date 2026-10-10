@@ -96,7 +96,7 @@ extension Runner {
     private func applyProvisioning(_ o: VZMacOSVirtualMachineStartOptions) {
         guard let user = cfg.provision_username, let full = cfg.provision_full_name,
               let pwFile = cfg.provision_password_file else { return }
-        #if compiler(>=6.3)
+        #if compiler(>=6.4)
         if #available(macOS 27.0, *) {
             do {
                 let pw = try String(contentsOfFile: pwFile, encoding: .utf8).trimmingCharacters(in: .newlines)
@@ -123,6 +123,7 @@ extension Runner {
             done([], "detach the hot-plugged USB disk(s) first (usb-detach): restoring a state saved with them crashes on macOS 27")
             return
         }
+        #if compiler(>=6.4)
         guard #available(macOS 27.0, *) else { done([], nil); return }
         var pending = vm.usbControllers.flatMap { c in
             c.usbDevices.compactMap { $0 as? VZUSBPassthroughDevice }.map { (c, $0) }
@@ -138,6 +139,9 @@ extension Runner {
             }
         }
         next()
+        #else
+        done([], nil)
+        #endif
     }
 
     func balloonControl(reclaimMiB: UInt64?) -> [String: Any] {
