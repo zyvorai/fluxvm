@@ -2104,6 +2104,41 @@ impl VmManager {
             .context("network flow reader panicked")?
     }
 
+    /// `apple.install` with the image name `macos` (in `apple.media`, or in `image` when `media` is unset) installs from
+    /// Apple's newest restore image: looked up, downloaded once and cached under `state_dir/images`. A file or path of
+    /// that name wins, and anything else is left for admission to judge.
+    async fn resolve_macos_ipsw(&self, req: &mut CreateVmRequest) -> Result<()> {
+        if !fluxvm_apple::macos_install::is_macos_install(req) {
+            return Ok(());
+        }
+        let media = fluxvm_apple::macos_install::install_media(req);
+        if media.as_os_str() != fluxvm_image::ipsw::IMAGE_NAME || media.exists() {
+            return Ok(());
+        }
+        let path = match fluxvm_apple::latest_ipsw().await {
+            Ok(info) => fluxvm_image::ipsw::ensure(&self.cfg, &info.url, &info.build_version)
+                .await
+                .with_context(|| {
+                    format!(
+                        "fetching macOS {} ({})",
+                        info.os_version, info.build_version
+                    )
+                })?,
+            Err(e) => match fluxvm_image::ipsw::newest_cached(&self.cfg) {
+                Some(p) => {
+                    tracing::warn!(error = %e, "cannot look up the latest macOS restore image; using the cached one");
+                    p
+                }
+                None => return Err(e).context("resolving image \"macos\""),
+            },
+        };
+        match req.apple.as_mut() {
+            Some(a) if a.media.is_some() => a.media = Some(path),
+            _ => req.image = path,
+        }
+        Ok(())
+    }
+
     pub async fn create(self: &Arc<Self>, mut req: CreateVmRequest) -> Result<VmRecord> {
         let started = std::time::Instant::now();
         // Resolve BackendKind::Auto before anything else — everything below
@@ -2111,6 +2146,7 @@ impl VmManager {
         // assumes a concrete backend and must never see Auto.
         req.backend = resolve_backend(&req, &self.cfg);
         if req.backend == BackendKind::Vz {
+            self.resolve_macos_ipsw(&mut req).await?;
             fluxvm_apple::validate_request(&req)?;
         }
         let requested_profile = req.security_profile;

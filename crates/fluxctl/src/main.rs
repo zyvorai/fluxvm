@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 mod compose;
 mod contexts;
+mod create;
 mod fleet_client;
 mod launch_agent;
 mod mcp;
@@ -201,11 +202,9 @@ enum Command {
         token: Option<String>,
     },
     #[command(next_help_heading = "Lifecycle Commands")]
-    /// Create a VM from a JSON spec file.
-    Create {
-        #[arg(long)]
-        spec: PathBuf,
-    },
+    /// Create a VM from a JSON spec file, or on the `vz` backend from `--name` and `--image` plus `apple.*` flags
+    /// (`--guest`, `--display`, `--rosetta`, `--provision-*`, ...); flags override a `--spec` file's fields.
+    Create(create::CreateArgs),
     /// List VMs. `-l env=dev,team!=x,gpu` filters by label selector.
     List {
         #[arg(short = 'l', long = "selector")]
@@ -1806,6 +1805,12 @@ enum OciCommand {
 enum VzCommand {
     /// What this Mac's Virtualization.framework offers (OS, vmnet, custom Virtio, Secure Boot, Rosetta).
     Host,
+    /// Apple's newest macOS restore image (what `--image macos --install` uses) and whether it is cached;
+    /// `--download` fetches it now (about 15 GB).
+    Ipsw {
+        #[arg(long)]
+        download: bool,
+    },
     /// EFI Secure Boot state of a running guest (the pre-boot snapshot while it runs).
     SecureBoot {
         #[arg(value_parser = output::parse_vm_ref)]
@@ -2930,8 +2935,8 @@ async fn run_remote(
             )
             .await?
         }
-        Command::Create { spec } => {
-            let body: serde_json::Value = serde_json::from_slice(&std::fs::read(spec)?)?;
+        Command::Create(args) => {
+            let body = create::create_body(&args)?;
             pretty(&r.call(Method::POST, "/v1/vms", Some(body)).await?)?
         }
         Command::VmTemplate { command } => match command {
@@ -3023,6 +3028,14 @@ async fn run_remote(
         }
         Command::Vz { command } => match command {
             VzCommand::Host => pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)?,
+            VzCommand::Ipsw { download } => pretty(
+                &r.call(
+                    if download { Method::POST } else { Method::GET },
+                    "/v1/host/apple/ipsw",
+                    download.then(|| json!({})),
+                )
+                .await?,
+            )?,
             VzCommand::SecureBoot { id } => pretty(
                 &r.call(Method::GET, &format!("/v1/vms/{id}/vz/secure-boot"), None)
                     .await?,
@@ -4013,8 +4026,8 @@ async fn main() -> Result<()> {
                 axum::serve(listener, app).await?;
             }
         }
-        Command::Create { spec } => {
-            let req: CreateVmRequest = serde_json::from_slice(&std::fs::read(spec)?)?;
+        Command::Create(args) => {
+            let req: CreateVmRequest = serde_json::from_value(create::create_body(&args)?)?;
             println!("{}", serde_json::to_string_pretty(&m.create(req).await?)?);
         }
         Command::List { selector, all } => {
@@ -4144,6 +4157,7 @@ async fn main() -> Result<()> {
         Command::Vz { command } => {
             let out = match command {
                 VzCommand::Host => fluxvm_scheduler::vz_devices::apple_host_capabilities().await?,
+                VzCommand::Ipsw { download } => m.macos_ipsw(download).await?,
                 VzCommand::SecureBoot { id } => m.vz_secure_boot_status(id).await?,
                 VzCommand::CustomVirtio { id, reset: true } => {
                     m.vz_custom_virtio_reset(id).await?;

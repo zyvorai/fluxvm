@@ -325,8 +325,8 @@ would otherwise invent a new one on every launch) and one MAC address (`vz-mac`)
 
 Two practical limits: restoring needs an **unlocked login session** (the saved state is encrypted with a Secure Enclave key that is
 unusable while the screen is locked; saving still works), and whether a restore survives a FluxVM runner upgrade has not been tested.
-In the runner, restore is wired for Linux guests; snapshots of macOS guests are implemented but not yet exercised on a real macOS
-guest ([macos.md](macos.md#snapshots-of-macos-guests)).
+In the runner, restore is wired for Linux and macOS guests. A macOS guest's save and restore were run once by hand; see
+[macos.md](macos.md#snapshots-of-macos-guests) for what was and was not checked.
 
 ## 8. Warm pool and why each slot has its own MAC
 
@@ -543,8 +543,9 @@ All hardware checks below ran on an Apple M4 with macOS 27.2 ([macos.md](macos.m
 | **Verified** | Extra disks on virtio, NVMe and USB, a host block device, an NBD export, USB hot-attach and detach, a console port both ways, a 1600x900 Linux display | `scripts/vz-devices-live-test.sh` |
 | **Verified** | Cloning a prepared macOS guest through the API, the reported address, SSH, delete | `scripts/macos-guest-live-test.sh` (needs your own template via `FLUXVM_MACOS_TEMPLATE`; CI does not run it) |
 | **Verified** | A Kairon `vz` Machine scheduled to the Mac and run through FluxVM | [macos-cluster.md](macos-cluster.md) |
+| **Verified by hand only** | Snapshot save and restore of a macOS 27.0.1 guest through the API (both returned 200, VM running with its address after restore; guest processes not checked) | one manual run, see [macos.md](macos.md#snapshots-of-macos-guests) |
 | **Verified by hand only** | macOS IPSW install with a macOS 27.0.1 guest; the FileVault-off template and key login on a fresh clone | manual runs ([macos.md](macos.md#macos-guests)) |
-| **Implemented, not verified on hardware** | Installing macOS through the API (`apple.install`); first-boot keys; snapshots of macOS guests; `provision_*`; vmnet; bridge; clipboard; multi-display; ASIF overlay; balloon reclaim; custom Virtio's bulk queue | unit tests, a fake runner, or admission checks only |
+| **Implemented, not verified on hardware** | Installing macOS through the API (`apple.install`); first-boot keys; `provision_*`; vmnet; bridge; clipboard; multi-display; ASIF overlay; balloon reclaim; custom Virtio's bulk queue | unit tests, a fake runner, or admission checks only |
 | **Implemented, not covered by a named live test** | Idle stages (balloon, pause, hibernate), memory-pressure admission, nested virtualization, Rosetta in full VMs, audio, `agent-micro` (built and booted by hand on an M4, where `scripts/e2e-smoke.sh` passed with the guest agent answering over vsock; never built or booted in CI) | |
 | **Unit-tested only** | Container published ports, volumes, restart and health checks, `secret_env`, stacks of containers, `--fleet` placement | |
 | **Not verified** | Multi-Mac clusters (placement was checked only on one Mac plus fake nodes, below), Thunderbolt RDMA, any Intel Mac, the Linux-only crates (`fluxvm-procbox`, `fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent) | |

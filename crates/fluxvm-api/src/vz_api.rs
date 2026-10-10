@@ -5,6 +5,7 @@
 //! `router()`.
 //!
 //! * `GET  /v1/host/apple`
+//! * `GET|POST /v1/host/apple/ipsw`
 //! * `GET  /v1/vms/{id}/vz/secure-boot`
 //! * `GET  /v1/vms/{id}/vz/custom-virtio`
 //! * `POST /v1/vms/{id}/vz/custom-virtio/reset`
@@ -28,6 +29,7 @@ use uuid::Uuid;
 pub(crate) fn routes() -> Router<Arc<VmManager>> {
     Router::new()
         .route("/v1/host/apple", get(host_apple))
+        .route("/v1/host/apple/ipsw", get(ipsw_status).post(ipsw_download))
         .route("/v1/vms/{id}/vz/secure-boot", get(secure_boot))
         .route("/v1/vms/{id}/vz/custom-virtio", get(custom_virtio))
         .route(
@@ -100,4 +102,25 @@ async fn usb_physical_attach(
     require_admin(role)?;
     let uuid = m.vz_usb_physical_attach(id, body.registry_id).await?;
     Ok(Json(json!({"uuid": uuid})))
+}
+
+fn ipsw_error(e: anyhow::Error) -> ApiError {
+    ApiError {
+        status: StatusCode::BAD_GATEWAY,
+        message: format!("{e:#}"),
+    }
+}
+
+/// The newest macOS restore image and whether it is cached; downloads nothing.
+async fn ipsw_status(State(m): State<Arc<VmManager>>) -> ApiResult<Json<Value>> {
+    Ok(Json(m.macos_ipsw(false).await.map_err(ipsw_error)?))
+}
+
+/// Downloads the newest macOS restore image into the cache (about 15 GB; admin-only).
+async fn ipsw_download(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<Value>> {
+    require_admin(role)?;
+    Ok(Json(m.macos_ipsw(true).await.map_err(ipsw_error)?))
 }

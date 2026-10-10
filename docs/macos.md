@@ -174,7 +174,10 @@ through the API):
 curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examples/macos-install.json
 ```
 
-- The IPSW is `apple.media`, or `image` when `media` is unset; it must be a local absolute path (URLs are refused, download first).
+- The IPSW is `apple.media`, or `image` when `media` is unset. Use a local absolute path, or the name `macos`: FluxVM asks Apple for
+  the newest restore image this Mac supports, downloads it once (about 15 GB, cached as `images/macos-<build>.ipsw`, older ones removed)
+  and installs from it. `fluxctl vz ipsw` shows which build that is and whether it is cached; `--download` fetches it ahead of time.
+  URLs are still refused. `fluxctl create --name mac --image macos --guest macos --install` is the one-line form.
 - FluxVM creates a sparse disk of `disk_size_gib` (default 64, minimum 40), runs `fluxvm-vz-runner install` to completion (progress
   events land in `vz-runner.log` in the VM workspace; the request returns only after the install, up to 3 hours), then boots the guest.
   A workspace marker (`macos-installed`) stops a restart from installing again; a failed install leaves no marker and is retried.
@@ -193,9 +196,13 @@ the key on first boot, and turns on Remote Login. FluxVM cannot run it inside th
 
 The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host); the snapshot also keeps the guest's NVRAM
 (`auxiliary.bin`). Earlier runners ignored the saved state of a macOS guest and cold-booted it; the runner now resumes it the same
-way as for Linux guests. Not yet exercised on a real macOS guest.
+way as for Linux guests. Exercised once on an Apple M4 (macOS 27.2 host) with a clone of an installed macOS 27.0.1 guest
+(4 vCPUs, 4 GiB, `usb_controller`): `POST /v1/vms/{id}/snapshot` returned 200 after 99 s on a USB-attached APFS drive, the VM stopped,
+and `POST /v1/vms/{id}/restore` returned 200 after 15 s with the VM running and its address reported again. Not checked: that processes
+inside the guest kept running across the restore (no SSH login was set up in that template).
 
-Not done: a `macos` image name, downloading an IPSW, and exec over vsock for macOS guests (they have no FluxVM guest agent). Apple
+Not done: exec over vsock for macOS guests (they have no FluxVM guest agent). The `macos` image name looks up and downloads the
+IPSW; that download path has not been run end to end (only Apple's metadata lookup was checked on an Apple silicon Mac). Apple
 allows two macOS VMs at a time per Mac.
 
 ## Display, audio, sharing and USB options
@@ -206,6 +213,17 @@ allows two macOS VMs at a time per Mac.
 {"backend": "vz", "apple": {"guest_os": "macos", "window": true, "display_width": 5120, "display_height": 2880,
  "display_ppi": 220, "audio_output": true, "microphone": false, "usb_controller": true}}
 ```
+
+The same options as flags, without a spec file:
+
+```sh
+fluxctl create --name mac --image ~/ipsw/UniversalMac.ipsw --guest macos --install \
+  --display 5120x2880@220 --window --usb-controller
+fluxctl create --name dev --image debian-13 --rosetta --clipboard --mute --vcpus 4
+```
+
+`--spec FILE` can be combined with these flags; a flag overrides the file's field. `--provision-full-name`,
+`--provision-username` and `--provision-password-file` set the macOS 27 first-boot account.
 
 - **Display:** `display_width` 800 to 5120 (default 2560), `display_height` 600 to 2880 (default 1600), `display_ppi` 72 to 300 (default 220).
   With `window: true` the guest follows the window as it is resized. Linux guests use `display_width` and `display_height` for

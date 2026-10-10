@@ -10,6 +10,7 @@
 mod capability;
 mod control;
 mod host_caps;
+pub mod ipsw;
 pub mod macos_install;
 mod runner;
 pub mod screen;
@@ -24,6 +25,7 @@ pub use capability::{
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use host_caps::{AppleHostCapabilities, host_capabilities};
+pub use ipsw::{IpswInfo, latest_ipsw};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SELF_CONTROL_PORT, SNAPSHOT_FILES,
     STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket, find_runner,

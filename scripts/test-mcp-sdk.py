@@ -73,6 +73,10 @@ class Fake(BaseHTTPRequestHandler):
             self.reply(200, VM)
         elif path == f"/v1/vms/{VM_ID}/logs":
             self.reply(200, b"Linux version 6.8\nlogin: ", "text/plain")
+        elif path == "/v1/host/apple":
+            self.reply(200, {"osVersion": "Version 27.2", "customVirtio": True, "efiSecureBoot": True})
+        elif m := re.fullmatch(rf"/v1/vms/{VM_ID}/vz/(secure-boot|custom-virtio|usb|usb/physical)", path):
+            self.reply(200, {"items": []} if m.group(1).startswith("usb") else {"enabled": False, "as_of": "boot"})
         elif m := re.fullmatch(rf"/v1/vms/{VM_ID}/network/([a-z-]+)", path):
             self.reply(200, {"kind": m.group(1), "items": [{"reason": "dns_deny", "packets": 3}]})
         else:
@@ -124,6 +128,14 @@ async def run(binary, base, allow_write):
                 check(not err and '"vcpus": 2' in text, "get_vm resolves by name")
                 err, text = await call(session, "host_status", {})
                 check(not err and '"running": 1' in text, "host_status counts VMs")
+                err, text = await call(session, "host_apple_capabilities", {})
+                check(not err and "efiSecureBoot" in text, "host_apple_capabilities returns the host report")
+                err, text = await call(session, "vm_vz_status", {"vm": "web", "what": "secure_boot"})
+                check(not err and '"as_of": "boot"' in text, "vm_vz_status reads Secure Boot state")
+                err, text = await call(session, "vm_vz_status", {"vm": "web", "what": "usb_physical"})
+                check(not err and '"items"' in text, "vm_vz_status lists physical USB")
+                err, text = await call(session, "vm_vz_status", {"vm": "web", "what": "bogus"})
+                check(err, "vm_vz_status rejects an unknown device kind")
                 err, text = await call(session, "vm_network", {"vm": "web", "kind": "drops", "limit": 5})
                 check(not err and "dns_deny" in text, "vm_network returns drops")
                 err, text = await call(session, "vm_network", {"vm": "web", "kind": "bogus"})
