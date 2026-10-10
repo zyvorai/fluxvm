@@ -91,8 +91,22 @@ pub struct StackFile {
     pub name: String,
     #[serde(default)]
     pub defaults: Defaults,
+    /// Where `up --fleet` puts the stack.
+    #[serde(default)]
+    pub placement: Placement,
     #[serde(default)]
     pub service: BTreeMap<String, Service>,
+}
+
+/// The whole stack lands on one fleet node: its services reach each other through that Mac's NAT gateway.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    /// This node, even when drained (cordoned).
+    pub node: Option<String>,
+    /// Only nodes carrying all of these labels (`fluxvm-agent node --label`).
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 fn valid_name(s: &str) -> bool {

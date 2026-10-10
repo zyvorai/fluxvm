@@ -34,6 +34,7 @@ mod remote;
 mod run;
 mod sandbox_run;
 mod stack;
+mod stack_fleet;
 mod status;
 mod styles;
 
@@ -88,6 +89,17 @@ struct Cli {
     context: Option<String>,
     #[command(subcommand)]
     command: Command,
+}
+
+/// Run a stack on a node of a `fluxvm-agent central` fleet. The node's own API is then called with `--server-token`.
+#[derive(clap::Args, Clone, Default)]
+struct StackFleet {
+    /// Base URL of the fleet registry, e.g. `http://fleet-registry:7799`.
+    #[arg(long)]
+    fleet: Option<String>,
+    /// Bearer token of the fleet registry.
+    #[arg(long, env = "FLUXVM_AGENT_TOKEN", hide_env_values = true)]
+    fleet_token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -445,6 +457,14 @@ enum Command {
         #[arg(short = 'f', long, default_value = "fluxvm.toml")]
         file: PathBuf,
         services: Vec<String>,
+        #[command(flatten)]
+        fleet: StackFleet,
+        /// With --fleet: this node (overrides `placement.node`; also a drained one).
+        #[arg(long, requires = "fleet")]
+        node: Option<String>,
+        /// With --fleet: only nodes with this label, `key=value` (added to `placement.labels`). Repeatable.
+        #[arg(long = "node-selector", value_parser = parse_label, requires = "fleet")]
+        node_selector: Vec<(String, String)>,
     },
     /// Delete the stack's VMs, last-started first (`--keep` only stops them).
     Down {
@@ -455,6 +475,8 @@ enum Command {
         stack: Option<String>,
         #[arg(long)]
         keep: bool,
+        #[command(flatten)]
+        fleet: StackFleet,
     },
     /// List the stack's VMs with status and address.
     Ps {
@@ -462,6 +484,8 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         stack: Option<String>,
+        #[command(flatten)]
+        fleet: StackFleet,
     },
     /// Convert a docker-compose.yml into a stack file of container services (printed, or written with -o). What
     /// cannot be carried over (bind mounts, UDP, build, …) is listed on stderr.
@@ -2244,6 +2268,74 @@ fn import_compose(file: &Path, name: Option<&str>, output: Option<&Path>) -> Res
 }
 
 /// The stack file when it exists; with `--stack NAME` a missing file is fine.
+/// `up|down|ps --fleet`: the stack's node is found (or, for `up`, chosen) through the registry, then driven over its
+/// own REST API like `--server`.
+async fn run_stack_on_fleet(
+    central: &str,
+    fleet_token: Option<String>,
+    node_token: Option<String>,
+    command: Command,
+) -> Result<()> {
+    let ft = fleet_token.as_deref();
+    let node_api = |n: &stack_fleet::Node| remote::Remote::new(&n.url, node_token.clone());
+    match command {
+        Command::Up {
+            file,
+            services,
+            node,
+            node_selector,
+            ..
+        } => {
+            let (f, dir) = load_stack_file(&file)?;
+            let only = (!services.is_empty()).then_some(services.as_slice());
+            let n =
+                stack_fleet::place(central, ft, &f, only, node.as_deref(), &node_selector).await?;
+            eprintln!("stack {} on node {} ({})", f.name, n.name, n.url);
+            stack::up(&node_api(&n), &f, &dir, only).await
+        }
+        Command::Down {
+            file,
+            stack: name,
+            keep,
+            ..
+        } => {
+            let f = stack_for(&file, name.as_deref())?;
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            let (nodes, holding, unknown) = stack_fleet::locate(central, ft, &name).await?;
+            for n in nodes.iter().filter(|n| holding.contains(&n.name)) {
+                eprintln!("node {}:", n.name);
+                stack::down(&node_api(n), &name, f.as_ref(), keep).await?;
+            }
+            if !unknown.is_empty() {
+                anyhow::bail!(
+                    "could not check {} for VMs of {name}",
+                    unknown.into_iter().collect::<Vec<_>>().join(", ")
+                );
+            }
+            Ok(())
+        }
+        Command::Ps {
+            file, stack: name, ..
+        } => {
+            let f = stack_for(&file, name.as_deref())?;
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            let (nodes, holding, unknown) = stack_fleet::locate(central, ft, &name).await?;
+            for n in nodes.iter().filter(|n| holding.contains(&n.name)) {
+                for [svc, vm, status, ip] in stack::ps(&node_api(n), &name).await? {
+                    println!("{svc:<16} {vm:<28} {status:<10} {ip:<16} {}", n.name);
+                }
+            }
+            for n in unknown {
+                eprintln!("warning: could not list the VMs on node {n}");
+            }
+            Ok(())
+        }
+        _ => unreachable!("only stack commands take --fleet"),
+    }
+}
+
 fn stack_for(file: &Path, name: Option<&str>) -> Result<Option<stack::StackFile>> {
     match load_stack_file(file) {
         Ok((f, _)) => Ok(Some(f)),
@@ -2713,17 +2805,17 @@ async fn run_remote(
                 .unwrap_or_else(|| "root".into());
             run::ssh_to(ip, &user, port, vm["backend"] == "vz", &ssh_args).await?;
         }
-        Command::Up { file, services } => {
+        Command::Up { file, services, .. } => {
             let (f, dir) = load_stack_file(&file)?;
             let only = (!services.is_empty()).then_some(services.as_slice());
             stack::up(r, &f, &dir, only).await?;
         }
-        Command::Down { file, stack: name, keep } => {
+        Command::Down { file, stack: name, keep, .. } => {
             let f = stack_for(&file, name.as_deref())?;
             let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
             stack::down(r, &name, f.as_ref(), keep).await?;
         }
-        Command::Ps { file, stack: name } => {
+        Command::Ps { file, stack: name, .. } => {
             let f = stack_for(&file, name.as_deref())?;
             let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
             for [svc, vm, status, ip] in stack::ps(r, &name).await? {
@@ -3004,6 +3096,18 @@ async fn main() -> Result<()> {
     }
     if let Command::Context { command } = cli.command {
         return run_context(command, format);
+    }
+    if let Command::Up { fleet, .. } | Command::Down { fleet, .. } | Command::Ps { fleet, .. } =
+        &cli.command
+        && let Some(central) = fleet.fleet.clone()
+    {
+        return run_stack_on_fleet(
+            &central,
+            fleet.fleet_token.clone(),
+            cli.server_token.clone(),
+            cli.command,
+        )
+        .await;
     }
     if !matches!(cli.command, Command::Serve)
         && let Some(r) = remote::endpoint(
@@ -3596,7 +3700,7 @@ async fn main() -> Result<()> {
                 run_console_session(&m, id, cols, rows).await?;
             }
         }
-        Command::Up { file, services } => {
+        Command::Up { file, services, .. } => {
             let (f, dir) = load_stack_file(&file)?;
             let only = (!services.is_empty()).then_some(services.as_slice());
             stack::up(&run::Local(&m), &f, &dir, only).await?;
@@ -3605,13 +3709,16 @@ async fn main() -> Result<()> {
             file,
             stack: name,
             keep,
+            ..
         } => {
             let f = stack_for(&file, name.as_deref())?;
             let name =
                 name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
             stack::down(&run::Local(&m), &name, f.as_ref(), keep).await?;
         }
-        Command::Ps { file, stack: name } => {
+        Command::Ps {
+            file, stack: name, ..
+        } => {
             let f = stack_for(&file, name.as_deref())?;
             let name =
                 name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
