@@ -1,6 +1,6 @@
 # virtio-flux Linux guest driver
 
-The macOS 27 VZ runner exposes custom Virtio device ID `0xff00` with queue 0 (control) and queue 1 (bulk DRAM operations). Build this module against the guest kernel, load `virtio_flux.ko`, and use `/dev/fluxvm` and `/dev/fluxvm-bulk`.
+The macOS 27 VZ runner exposes custom Virtio device ID `0x3f` (PCI 1af4:107f; an ID above 0x3f makes the PCI device ID leave the range Linux virtio-pci binds, so no guest driver can attach) with queue 0 (control) and queue 1 (bulk DRAM operations). Build this module against the guest kernel, load `virtio_flux.ko`, and use `/dev/fluxvm` and `/dev/fluxvm-bulk`.
 
 ```bash
 make

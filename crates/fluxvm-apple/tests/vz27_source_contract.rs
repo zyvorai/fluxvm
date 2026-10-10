@@ -14,7 +14,10 @@ fn custom_virtio_has_a_real_provider_and_queue_handler() {
         "readBytes(withExactLength:",
         "guestMemoryMapping(atPhysicalAddress:",
     ] {
-        assert!(src.contains(needle), "missing custom Virtio contract: {needle}");
+        assert!(
+            src.contains(needle),
+            "missing custom Virtio contract: {needle}"
+        );
     }
 }
 

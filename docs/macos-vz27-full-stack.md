@@ -4,7 +4,7 @@ This change closes the largest correctness gap in FluxVM's macOS 27 support: `ap
 
 ## What this PR implements
 
-- **Custom Virtio host device:** device `0xFF00`, two queues, provider/delegate lifecycle, queue draining, bounded JSON request/response protocol, ping/echo/capabilities/stats/map-probe operations.
+- **Custom Virtio host device:** device `0x3F`, two queues, provider/delegate lifecycle, queue draining, bounded JSON request/response protocol, ping/echo/capabilities/stats/map-probe operations.
 - **TOCTOU-safe queue handling:** every request buffer is consumed once with `readBytes(withExactLength:)`; every element is returned exactly once.
 - **Guest-memory mapping plumbing:** the host can validate whether a guest physical range is mappable without leaking a host pointer.
 - **vmnet broker primitives:** wrappers for Apple's supported `vmnet_network_copy_serialization` and `vmnet_network_create_with_serialization` XPC objects. These are the required primitives for the separate `fluxvm-vmnetd` process described in `docs/VMNET_BROKER.md`.

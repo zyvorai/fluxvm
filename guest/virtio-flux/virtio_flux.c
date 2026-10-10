@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 // Copyright 2026 Zyvor AI Labs
-// Linux guest driver for FluxVM's macOS 27 custom Virtio device (ID 0xff00).
+// Linux guest driver for FluxVM's macOS 27 custom Virtio device (ID 0x3f).
 #include <linux/completion.h>
 #include <linux/crc32.h>
 #include <linux/fs.h>
@@ -12,8 +12,10 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/virtio.h>
+#include <linux/version.h>
+#include <linux/virtio_config.h>
 
-#define VIRTIO_ID_FLUXVM 0xff00
+#define VIRTIO_ID_FLUXVM 0x3f
 #define FLUXVM_MAX_FRAME (1U << 20)
 #define FLUXVM_BULK_TEST_MAX (1U << 20)
 #define FLUXVM_IOC_MAGIC 0xF5
@@ -212,14 +214,21 @@ static const struct file_operations fluxvm_fops = {
     .read = fluxvm_read,
     .write = fluxvm_write,
     .unlocked_ioctl = fluxvm_ioctl,
-    .llseek = no_llseek,
+    .llseek = noop_llseek,
 };
 
 static int fluxvm_probe(struct virtio_device *vdev)
 {
     struct fluxvm_dev *d;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+    struct virtqueue_info vqs_info[] = {
+        { .name = "control", .callback = fluxvm_vq_done },
+        { .name = "bulk", .callback = fluxvm_vq_done },
+    };
+#else
     vq_callback_t *callbacks[] = { fluxvm_vq_done, fluxvm_vq_done };
     const char *names[] = { "control", "bulk" };
+#endif
     int ret;
 
     d = devm_kzalloc(&vdev->dev, sizeof(*d), GFP_KERNEL);
@@ -228,7 +237,11 @@ static int fluxvm_probe(struct virtio_device *vdev)
     d->vdev = vdev;
     mutex_init(&d->qlock[0]);
     mutex_init(&d->qlock[1]);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+    ret = virtio_find_vqs(vdev, 2, d->vq, vqs_info, NULL);
+#else
     ret = virtio_find_vqs(vdev, 2, d->vq, callbacks, names, NULL);
+#endif
     if (ret)
         return ret;
 
@@ -241,7 +254,7 @@ static int fluxvm_probe(struct virtio_device *vdev)
     ret = misc_register(&d->bulk.misc);
     if (ret) goto fail_ctrl;
     virtio_device_ready(vdev);
-    virtio_set_drvdata(vdev, d);
+    vdev->priv = d;
     dev_info(&vdev->dev, "FluxVM custom Virtio device ready\n");
     return 0;
 fail_ctrl:
@@ -253,7 +266,7 @@ fail_vqs:
 
 static void fluxvm_remove(struct virtio_device *vdev)
 {
-    struct fluxvm_dev *d = virtio_get_drvdata(vdev);
+    struct fluxvm_dev *d = vdev->priv;
     virtio_reset_device(vdev);
     misc_deregister(&d->bulk.misc);
     misc_deregister(&d->ctrl.misc);

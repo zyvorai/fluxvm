@@ -38,6 +38,6 @@ fn brokers_are_wired() {
 fn linux_guest_driver_is_shipped() {
     let p = root().join("../../guest/virtio-flux/virtio_flux.c");
     let s = fs::read_to_string(p).unwrap();
-    assert!(s.contains("VIRTIO_ID_FLUXVM 0xff00"));
+    assert!(s.contains("VIRTIO_ID_FLUXVM 0x3f"));
     assert!(s.contains("FLUXVM_IOC_BULK_TEST"));
 }
