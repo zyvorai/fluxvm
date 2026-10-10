@@ -47,6 +47,7 @@ pub mod shared_disk;
 pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
+mod vz_disks;
 pub mod vz_guest;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
@@ -3957,12 +3958,15 @@ impl VmManager {
     async fn qemu_vm_for_disks(&self, id: Uuid) -> Result<VmRecord> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu {
-            bail!("disk operations are supported for the QEMU backend only");
+            bail!("disk operations are supported for the QEMU and vz backends only");
         }
         Ok(vm)
     }
 
     pub async fn list_vm_disks(&self, id: Uuid) -> Result<Vec<fluxvm_core::model::VmDiskInfo>> {
+        if self.get(id).await?.backend == BackendKind::Vz {
+            return self.list_vz_disks(id).await;
+        }
         let vm = self.qemu_vm_for_disks(id).await?;
         fluxvm_qemu::disks::list(&self.cfg, &vm).await
     }
@@ -4082,6 +4086,9 @@ impl VmManager {
     }
 
     pub async fn detach_vm_disk(&self, id: Uuid, name: &str) -> Result<()> {
+        if self.get(id).await?.backend == BackendKind::Vz {
+            return self.detach_vz_disk(id, name).await;
+        }
         let vm = self.qemu_vm_for_disks(id).await?;
         fluxvm_qemu::disks::detach(&vm, name).await?;
         audit_event(

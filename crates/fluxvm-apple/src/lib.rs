@@ -15,8 +15,8 @@ pub mod ssh;
 pub mod vznet;
 
 pub use capability::{
-    CAPABILITIES, Capability, validate_request, with_egress_forwarder, with_guest_reporting,
-    with_shared_folder_mounts,
+    CAPABILITIES, Capability, validate_disk, validate_request, with_egress_forwarder,
+    with_guest_reporting, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use runner::{

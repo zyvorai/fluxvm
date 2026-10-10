@@ -198,8 +198,50 @@ final class PrivateLink {
 }
 
 struct ExtraDisk: Decodable {
+    let name: String?
     let path: String
     let read_only: Bool?
+    let kind: String?        // image | block | nbd
+    let url: String?         // nbd
+    let caching: String?     // automatic | cached | uncached (image)
+    let sync: String?        // full | fsync (image) | none
+    let controller: String?  // virtio | nvme | usb
+}
+
+/// The attachment and controller `d` asks for; block, NBD and NVMe need macOS 14.
+func extraDiskDevice(_ d: ExtraDisk) throws -> VZStorageDeviceConfiguration {
+    func err(_ m: String) -> NSError { NSError(domain: "fluxvm-vz", code: 1, userInfo: [NSLocalizedDescriptionKey: m]) }
+    let ro = d.read_only ?? false
+    let label = d.name ?? (d.path.isEmpty ? (d.url ?? "disk") : d.path)
+    let attachment: VZStorageDeviceAttachment
+    switch d.kind ?? "image" {
+    case "block":
+        guard #available(macOS 14.0, *) else { throw err("disk \(label): block devices need macOS 14 or later") }
+        let fd = open(d.path, (ro ? O_RDONLY : O_RDWR) | O_CLOEXEC)
+        guard fd >= 0 else { throw err("disk \(label): opening \(d.path): \(String(cString: strerror(errno)))") }
+        attachment = try VZDiskBlockDeviceStorageDeviceAttachment(
+            fileHandle: FileHandle(fileDescriptor: fd, closeOnDealloc: true), readOnly: ro,
+            synchronizationMode: d.sync == "none" ? .none : .full)
+    case "nbd":
+        guard #available(macOS 14.0, *) else { throw err("disk \(label): NBD needs macOS 14 or later") }
+        guard let s = d.url, let url = URL(string: s) else { throw err("disk \(label): bad nbd url") }
+        attachment = try VZNetworkBlockDeviceStorageDeviceAttachment(
+            url: url, timeout: 5, isForcedReadOnly: ro, synchronizationMode: d.sync == "none" ? .none : .full)
+    default:
+        let caching: VZDiskImageCachingMode = d.caching == "cached" ? .cached : d.caching == "uncached" ? .uncached : .automatic
+        let sync: VZDiskImageSynchronizationMode = d.sync == "none" ? .none : d.sync == "fsync" ? .fsync : .full
+        attachment = try VZDiskImageStorageDeviceAttachment(
+            url: URL(fileURLWithPath: d.path), readOnly: ro, cachingMode: caching, synchronizationMode: sync)
+    }
+    switch d.controller ?? "virtio" {
+    case "nvme":
+        guard #available(macOS 14.0, *) else { throw err("disk \(label): NVMe needs macOS 14 or later") }
+        return VZNVMExpressControllerDeviceConfiguration(attachment: attachment)
+    case "usb":
+        return VZUSBMassStorageDeviceConfiguration(attachment: attachment)
+    default:
+        return VZVirtioBlockDeviceConfiguration(attachment: attachment)
+    }
 }
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -359,7 +401,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 storage.append(VZUSBMassStorageDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: media), readOnly: true)))
             }
             for d in cfg.extra_disks ?? [] {
-                storage.append(VZVirtioBlockDeviceConfiguration(attachment: try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: d.path), readOnly: d.read_only ?? false)))
+                storage.append(try extraDiskDevice(d))
             }
         }
         c.storageDevices = storage

@@ -2,6 +2,15 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: `vz` storage options
+- **`apple.extra_disks`** ([docs/macos.md](docs/macos.md#extra-disks)) takes `kind` (`image`, `block` for a host device through
+  `VZDiskBlockDeviceStorageDeviceAttachment`, `nbd` for an NBD export through `VZNetworkBlockDeviceStorageDeviceAttachment`),
+  `caching` (`automatic`, `cached`, `uncached`), `sync` (`full`, `fsync`, `none`), `controller` (`virtio`, `nvme`, `usb`) and a
+  `name`. Combinations a kind cannot use are refused at create time.
+- **`fluxctl disk` / `/v1/vms/{id}/disks` work on `vz` VMs**: `ls`, `attach` (`--size-gib` makes a sparse image; `--path`,
+  `--url`, `--kind`, `--read-only`, `--caching`, `--sync`, `--controller`) and `detach`. Changes apply at the next start, and a USB
+  image disk is also hot-attached to a running guest.
+
 ### Added: warm pool for container sandboxes
 - **`apple.oci_warm_slots`** and **`apple.oci_warm_sizes`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#warm-pool)) keep
   pre-booted container VMs per size. Their init waits in the new `wait` mode with its DHCP lease. A matching sandbox gets its

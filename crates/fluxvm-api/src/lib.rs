@@ -2538,6 +2538,10 @@ struct DiskSizeRequest {
 /// Exactly one of `size_gib` (create a new qcow2), `path` (attach an
 /// existing image file or block device) or `backing` (a new qcow2 overlay
 /// on a shared image).
+///
+/// On a `vz` VM the disk goes into `apple.extra_disks` (see `AppleDisk`): `size_gib` makes a new sparse image, `path` is an
+/// image file or (with `kind: block`) a device, `url` an NBD export; `kind`, `read_only`, `caching`, `sync` and
+/// `controller` apply. It takes effect at the next start, or at once for a USB image disk.
 #[derive(Deserialize)]
 struct AttachDiskRequest {
     name: String,
@@ -2547,6 +2551,24 @@ struct AttachDiskRequest {
     path: Option<std::path::PathBuf>,
     #[serde(default)]
     backing: Option<std::path::PathBuf>,
+    #[serde(flatten)]
+    vz: VzDiskFields,
+}
+
+#[derive(Deserialize, Default)]
+struct VzDiskFields {
+    #[serde(default)]
+    kind: Option<fluxvm_core::model::AppleDiskKind>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    read_only: Option<bool>,
+    #[serde(default)]
+    caching: Option<fluxvm_core::model::AppleDiskCaching>,
+    #[serde(default)]
+    sync: Option<fluxvm_core::model::AppleDiskSync>,
+    #[serde(default)]
+    controller: Option<fluxvm_core::model::AppleDiskController>,
 }
 
 async fn attach_vm_disk(
@@ -2556,6 +2578,40 @@ async fn attach_vm_disk(
     Json(req): Json<AttachDiskRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
+    if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
+        if req.backing.is_some() {
+            return Err(anyhow::anyhow!(
+                "backing overlays are qcow2 (QEMU); a vz disk takes size_gib, path or url"
+            )
+            .into());
+        }
+        let v = req.vz;
+        let disk = fluxvm_core::model::AppleDisk {
+            name: None,
+            path: req.path.unwrap_or_default(),
+            read_only: v.read_only.unwrap_or(false),
+            kind: v.kind.unwrap_or_default(),
+            url: v.url,
+            caching: v.caching.unwrap_or_default(),
+            sync: v.sync.unwrap_or_default(),
+            controller: v.controller.unwrap_or_default(),
+        };
+        let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
+        return Ok((StatusCode::CREATED, Json(info)));
+    }
+    let v = &req.vz;
+    if v.kind.is_some()
+        || v.url.is_some()
+        || v.read_only.is_some()
+        || v.caching.is_some()
+        || v.sync.is_some()
+        || v.controller.is_some()
+    {
+        return Err(anyhow::anyhow!(
+            "kind, url, read_only, caching, sync and controller are vz disk options"
+        )
+        .into());
+    }
     let info = match (req.size_gib, req.path, req.backing) {
         (Some(size), None, None) => m.attach_vm_disk(id, &req.name, size).await?,
         (None, Some(path), None) => m.attach_existing_vm_disk(id, &req.name, &path).await?,

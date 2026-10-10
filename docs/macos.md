@@ -224,6 +224,40 @@ on a private layer-2 network that only the guests joining it share (Linux guests
   could relay around the proxy.
 - **Listing:** `fluxctl vznet ls` and `GET /v1/vznets` show each network's subnet, members and whether its switch is running.
 
+## Extra disks
+
+A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk attach` (`POST /v1/vms/{id}/disks`):
+
+```json
+"apple": {"extra_disks": [
+  {"name": "scratch", "path": "/Volumes/Fast/scratch.raw", "caching": "uncached", "sync": "none", "controller": "nvme"},
+  {"name": "raw", "kind": "block", "path": "/dev/disk4", "read_only": true},
+  {"name": "shared", "kind": "nbd", "url": "nbd://10.0.0.5:10809/vol1"}
+]}
+```
+
+| Field | Values |
+|-------|--------|
+| `kind` | `image` (a raw file, default), `block` (a host device, `/dev/diskN`), `nbd` (an NBD export in `url`) |
+| `caching` | `automatic` (default), `cached`, `uncached`; image files only |
+| `sync` | `full` (default), `fsync` (image files only), `none` (fastest; data can be lost if the host crashes) |
+| `controller` | `virtio` (default, `/dev/vdX`), `nvme` (`/dev/nvmeXn1`), `usb` (`/dev/sdX`) |
+
+- `block`, `nbd` and `nvme` need macOS 14. A block device must be readable (and, unless `read_only`, writable) by the user the
+  daemon runs as; FluxVM never changes device permissions. Image files and devices go through the same
+  `policy.allowed_image_dirs` check as QEMU data disks.
+- NBD URLs are `nbd://host:port/export`, `nbds://…` (TLS), or `nbd+unix:///export?socket=/path`. Virtualization.framework
+  reconnects when the server drops; a missing server fails the VM's start.
+- Virtualization.framework fixes a VM's devices when it starts, so `fluxctl disk attach` and `detach` apply at the next start. The
+  exception is a USB image disk on a running guest, which is also hot-attached at once (macOS 15).
+
+```bash
+fluxctl disk attach web scratch --size-gib 20 --controller nvme --caching uncached   # a new sparse image in the VM's workspace
+fluxctl disk attach web shared --url nbd://10.0.0.5:10809/vol1 --read-only
+fluxctl disk ls web
+fluxctl disk detach web scratch
+```
+
 ## Mac Studio options
 
 These compile against the macOS 27 SDK and are validated at admission, but have **not been verified on hardware** yet.

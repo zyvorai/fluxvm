@@ -1395,21 +1395,40 @@ enum DiskCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
-    /// Create a qcow2 data disk, attach an existing image file or block
-    /// device with --path, or overlay a shared image with --backing;
-    /// hot-added when the VM is running.
+    /// Create a data disk, attach an existing image file or block
+    /// device with --path, or overlay a shared image with --backing (QEMU);
+    /// hot-added when the VM is running. On vz the disk applies at the next
+    /// start (a USB image disk at once), and --url attaches an NBD export.
     Attach {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         name: String,
-        #[arg(long, required_unless_present_any = ["path", "backing"], conflicts_with_all = ["path", "backing"])]
+        #[arg(long, required_unless_present_any = ["path", "backing", "url"], conflicts_with_all = ["path", "backing", "url"])]
         size_gib: Option<u64>,
         /// Existing qcow2/raw file or block device; detach leaves it in place.
-        #[arg(long, conflicts_with = "backing")]
+        #[arg(long, conflicts_with_all = ["backing", "url"])]
         path: Option<PathBuf>,
         /// qcow2/raw image to put a new qcow2 overlay on; never written.
         #[arg(long)]
         backing: Option<PathBuf>,
+        /// vz: image (default), block (--path /dev/diskN) or nbd (--url).
+        #[arg(long, value_parser = ["image", "block", "nbd"])]
+        kind: Option<String>,
+        /// vz: nbd://host:port/export or nbd+unix:///export?socket=PATH.
+        #[arg(long, conflicts_with = "backing")]
+        url: Option<String>,
+        /// vz: attach read-only.
+        #[arg(long)]
+        read_only: bool,
+        /// vz: host caching of an image file.
+        #[arg(long, value_parser = ["automatic", "cached", "uncached"])]
+        caching: Option<String>,
+        /// vz: full (default), fsync (image files) or none.
+        #[arg(long, value_parser = ["full", "fsync", "none"])]
+        sync: Option<String>,
+        /// vz: virtio (default), nvme or usb.
+        #[arg(long, value_parser = ["virtio", "nvme", "usb"])]
+        controller: Option<String>,
     },
     /// Grow `root` or a data disk (live or stopped).
     Resize {
@@ -2485,7 +2504,10 @@ async fn run_remote(
         }
         Command::Vznet {
             command: VznetCommand::Ls { json },
-        } => print_vznets(&r.call(Method::GET, "/v1/vznets", None).await?["items"], json)?,
+        } => print_vznets(
+            &r.call(Method::GET, "/v1/vznets", None).await?["items"],
+            json,
+        )?,
         Command::Start { target } => bulk(target, "start").await?,
         Command::Stop { target } => bulk(target, "stop").await?,
         Command::Restart { target } => bulk(target, "restart").await?,
@@ -2622,14 +2644,27 @@ async fn run_remote(
                 size_gib,
                 path,
                 backing,
-            } => pretty(
-                &r.call(
-                    Method::POST,
-                    &format!("/v1/vms/{id}/disks"),
-                    Some(json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing})),
-                )
-                .await?,
-            )?,
+                kind,
+                url,
+                read_only,
+                caching,
+                sync,
+                controller,
+            } => {
+                let mut body =
+                    json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing});
+                let vz = json!({"kind": kind, "url": url, "read_only": read_only.then_some(true),
+                    "caching": caching, "sync": sync, "controller": controller});
+                for (k, v) in vz.as_object().into_iter().flatten() {
+                    if !v.is_null() {
+                        body[k] = v.clone();
+                    }
+                }
+                pretty(
+                    &r.call(Method::POST, &format!("/v1/vms/{id}/disks"), Some(body))
+                        .await?,
+                )?
+            }
             DiskCommand::Resize { id, name, size_gib } => pretty(
                 &r.call(
                     Method::PATCH,
@@ -2845,10 +2880,9 @@ async fn run_remote(
                     )
                     .await?,
                 )?,
-                SandboxCommand::Density => pretty(
-                    &r.call(Method::GET, "/v1/sandboxes/density", None)
-                        .await?,
-                )?,
+                SandboxCommand::Density => {
+                    pretty(&r.call(Method::GET, "/v1/sandboxes/density", None).await?)?
+                }
                 SandboxCommand::Run(args) => {
                     let code = sandbox_run::run(sandbox_run::Target::Remote(r), &args).await?;
                     std::process::exit(code);
@@ -2886,14 +2920,23 @@ async fn run_remote(
             let only = (!services.is_empty()).then_some(services.as_slice());
             stack::up(r, &f, &dir, only).await?;
         }
-        Command::Down { file, stack: name, keep, .. } => {
+        Command::Down {
+            file,
+            stack: name,
+            keep,
+            ..
+        } => {
             let f = stack_for(&file, name.as_deref())?;
-            let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
             stack::down(r, &name, f.as_ref(), keep).await?;
         }
-        Command::Ps { file, stack: name, .. } => {
+        Command::Ps {
+            file, stack: name, ..
+        } => {
             let f = stack_for(&file, name.as_deref())?;
-            let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
             for [svc, vm, status, ip] in stack::ps(r, &name).await? {
                 println!("{svc:<16} {vm:<28} {status:<10} {ip}");
             }
@@ -3439,7 +3482,27 @@ async fn main() -> Result<()> {
                 size_gib,
                 path,
                 backing,
+                kind,
+                url,
+                read_only,
+                caching,
+                sync,
+                controller,
             } => {
+                if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
+                    let disk: fluxvm_core::model::AppleDisk = serde_json::from_value(
+                        serde_json::json!({
+                            "path": path.unwrap_or_default(), "kind": kind.as_deref().unwrap_or("image"),
+                            "url": url, "read_only": read_only,
+                            "caching": caching.as_deref().unwrap_or("automatic"),
+                            "sync": sync.as_deref().unwrap_or("full"),
+                            "controller": controller.as_deref().unwrap_or("virtio"),
+                        }),
+                    )?;
+                    let info = m.attach_vz_disk(id, &name, disk, size_gib).await?;
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                    return Ok(());
+                }
                 let info = match (size_gib, path, backing) {
                     (_, Some(path), _) => m.attach_existing_vm_disk(id, &name, &path).await?,
                     (_, None, Some(backing)) => {

@@ -44,6 +44,8 @@ GET    /v1/vms/{uuid}/disks
 POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}, {"name": "pvc", "path": "/dev/rbd0"} or {"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"} (qcow2 overlay)
 PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
 DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file (or overlay); only unlinks a path-attached disk
+                                         # vz: also "kind" (image|block|nbd), "url", "read_only", "caching", "sync", "controller"
+                                         # (virtio|nvme|usb); applies at the next start (a USB image disk at once); see macos.md#extra-disks
 POST   /v1/vms/{uuid}/cdroms/{name}/eject # remove install media (live when running); the empty drive stays
 GET    /v1/vms/{uuid}/serial             # websocket, raw serial bytes (QEMU)
 POST   /v1/vms/{uuid}/stop
