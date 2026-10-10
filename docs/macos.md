@@ -145,6 +145,25 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
 Not done: installing through the REST API or `fluxctl`, a `macos` image name, shared folders and snapshots for macOS guests (the
 runner only sets those up for Linux), and a vsock proxy. Apple allows two macOS VMs at a time per Mac.
 
+## Display, audio, sharing and USB options
+
+`request.apple` takes these first-party Virtualization.framework options:
+
+```json
+{"backend": "vz", "apple": {"guest_os": "macos", "window": true, "display_width": 5120, "display_height": 2880,
+ "display_ppi": 220, "audio_output": true, "microphone": false, "usb_controller": true}}
+```
+
+- **Display:** `display_width` 800 to 5120 (default 2560), `display_height` 600 to 2880 (default 1600), `display_ppi` 72 to 300 (default 220).
+  With `window: true` the guest follows the window as it is resized.
+- **Audio:** output to the host's default device is on by default. `microphone` is off by default; turning it on makes macOS ask for
+  microphone access.
+- **Shared folders on macOS guests** (macOS 13+ host): all entries share one automount device, so they appear under
+  `/Volumes/My Shared Files`; two folders with the same name get a `-2` suffix. Linux guests keep the `fs0`, `fs1`, … tags.
+- **Linux only:** `rosetta: true` adds a Rosetta share (the guest still mounts it and registers binfmt); `nested_virtualization: true`
+  needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
+- **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
+
 ## Capability matrix
 
 | Supported | Not supported |

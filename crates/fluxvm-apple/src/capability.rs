@@ -42,7 +42,27 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     yes(
         "shared folders (virtiofs)",
-        "host directory mounted in the guest as tag fs0, fs1, …",
+        "Linux: tags fs0, fs1, …; macOS 13+: VZ macOS automount share",
+    ),
+    yes(
+        "Retina / dynamic display",
+        "configurable initial size up to 5K; VZVirtualMachineView reconfigures while resized",
+    ),
+    yes(
+        "audio output / microphone",
+        "Virtio sound; microphone is opt-in",
+    ),
+    yes(
+        "Linux Rosetta",
+        "optional VZLinuxRosettaDirectoryShare; host must have Rosetta available",
+    ),
+    yes(
+        "nested virtualization",
+        "Linux guests only, when VZGenericPlatformConfiguration reports support",
+    ),
+    yes(
+        "USB controller",
+        "XHCI controller configured for VZ USB mass-storage/passthrough hotplug",
     ),
     yes("serial console", "VM log and /v1/vms/{id}/serial"),
     yes("pause / resume", "Virtualization.framework"),
@@ -118,6 +138,22 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             {
                 bail!("egress_allow entry {h:?} is not a host name or *.suffix");
             }
+        }
+    }
+    if let Some(apple) = &req.apple {
+        if !(800..=5120).contains(&apple.display_width) {
+            bail!("apple.display_width must be 800..=5120");
+        }
+        if !(600..=2880).contains(&apple.display_height) {
+            bail!("apple.display_height must be 600..=2880");
+        }
+        if !(72..=300).contains(&apple.display_ppi) {
+            bail!("apple.display_ppi must be 72..=300");
+        }
+        if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
+            && (apple.rosetta || apple.nested_virtualization)
+        {
+            bail!("apple.rosetta and apple.nested_virtualization are Linux-guest features");
         }
     }
     match &req.network {
@@ -371,6 +407,50 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn apple_parity_defaults_are_safe_and_backwards_compatible() {
+        let r = req(r#""apple":{}"#);
+        let a = r.apple.expect("apple options");
+        assert_eq!(a.display_width, 2560);
+        assert_eq!(a.display_height, 1600);
+        assert_eq!(a.display_ppi, 220);
+        assert!(a.audio_output);
+        assert!(!a.microphone);
+        assert!(!a.rosetta);
+        assert!(!a.nested_virtualization);
+        // XHCI is macOS 15+ while the runner still targets macOS 14.
+        assert!(!a.usb_controller);
+    }
+
+    #[test]
+    fn apple_display_limits_are_rejected_at_admission() {
+        for json in [
+            r#""apple":{"display_width":799}"#,
+            r#""apple":{"display_width":5121}"#,
+            r#""apple":{"display_height":599}"#,
+            r#""apple":{"display_height":2881}"#,
+            r#""apple":{"display_ppi":71}"#,
+            r#""apple":{"display_ppi":301}"#,
+        ] {
+            assert!(validate_request(&req(json)).is_err(), "{json}");
+        }
+        assert!(
+            validate_request(&req(
+                r#""apple":{"display_width":5120,"display_height":2880,"display_ppi":220}"#
+            ))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn macos_guests_reject_linux_only_rosetta_and_nested_virtualization() {
+        for key in ["rosetta", "nested_virtualization"] {
+            let json = format!(r#""apple":{{"guest_os":"macos","{key}":true}}"#);
+            let err = validate_request(&req(&json)).expect_err(&json).to_string();
+            assert!(err.contains("Linux-guest"), "{err}");
+        }
     }
 
     #[test]

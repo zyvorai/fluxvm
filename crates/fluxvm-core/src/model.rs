@@ -457,7 +457,7 @@ pub enum AppleGuest {
 }
 
 /// Options for the Apple (`vz`) backend. Ignored by every other backend.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppleSpec {
     #[serde(default)]
     pub guest_os: AppleGuest,
@@ -467,10 +467,73 @@ pub struct AppleSpec {
     /// Open the guest's native console window (a `VZVirtualMachineView`).
     #[serde(default)]
     pub window: bool,
+    /// Initial guest display width. The VZ window still dynamically
+    /// reconfigures the guest display while it is resized.
+    #[serde(default = "default_apple_display_width")]
+    pub display_width: u32,
+    /// Initial guest display height.
+    #[serde(default = "default_apple_display_height")]
+    pub display_height: u32,
+    /// Guest display density. 220 is Retina-class; callers may request
+    /// larger displays (including 5K) without changing the host scale.
+    #[serde(default = "default_apple_display_ppi")]
+    pub display_ppi: u32,
+    /// Play guest audio through the host default output device.
+    #[serde(default = "default_true")]
+    pub audio_output: bool,
+    /// Expose the host microphone to the guest. Off by default because this
+    /// crosses a privacy boundary and macOS will request microphone access.
+    #[serde(default)]
+    pub microphone: bool,
+    /// Linux-on-Apple only: expose the host Rosetta runtime to the guest.
+    /// The guest still has to mount/register binfmt as documented by Apple.
+    #[serde(default)]
+    pub rosetta: bool,
+    /// Linux-on-Apple only: enable nested virtualization when the current
+    /// host/platform supports it. A request on an unsupported host fails.
+    #[serde(default)]
+    pub nested_virtualization: bool,
+    /// Add an XHCI controller so USB mass-storage/passthrough devices can be
+    /// attached with Virtualization.framework's hotplug API (macOS 15+).
+    /// Opt-in so hosts that still run the supported macOS 14 baseline do not regress.
+    #[serde(default)]
+    pub usb_controller: bool,
     /// Host names the guest may reach, through an HTTP(S) proxy the runner serves over vsock (`network.mode = "none"` only: the guest
     /// has no card, so the proxy is its only way out). `example.com` matches that host, `*.example.com` its subdomains; ports 80 and 443.
     #[serde(default)]
     pub egress_allow: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_apple_display_width() -> u32 {
+    2560
+}
+fn default_apple_display_height() -> u32 {
+    1600
+}
+fn default_apple_display_ppi() -> u32 {
+    220
+}
+
+impl Default for AppleSpec {
+    fn default() -> Self {
+        Self {
+            guest_os: AppleGuest::default(),
+            media: None,
+            window: false,
+            display_width: default_apple_display_width(),
+            display_height: default_apple_display_height(),
+            display_ppi: default_apple_display_ppi(),
+            audio_output: true,
+            microphone: false,
+            rosetta: false,
+            nested_virtualization: false,
+            usb_controller: false,
+            egress_allow: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
