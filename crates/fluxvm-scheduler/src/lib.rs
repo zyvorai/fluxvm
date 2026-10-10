@@ -50,6 +50,7 @@ pub mod templates;
 pub mod vm_restore;
 mod vz_disks;
 pub mod vz_guest;
+pub mod vz_screen;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 

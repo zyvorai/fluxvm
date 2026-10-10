@@ -344,6 +344,29 @@ enum Command {
         #[arg(long)]
         set_mib: Option<u64>,
     },
+    /// Save a screenshot of a running vz VM's display (Linux or macOS guest)
+    /// as a PNG. REST: `GET /v1/vms/{id}/screenshot`.
+    Screenshot {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long = "out", default_value = "screen.png")]
+        output: PathBuf,
+        /// Scale down to this many pixels wide.
+        #[arg(long)]
+        max_width: Option<u32>,
+    },
+    /// Send keyboard and mouse input to a running vz VM's display, e.g.
+    /// '{"action":"click","x":600,"y":400}' or '{"action":"key","key":"c","modifiers":["control"]}'.
+    /// Coordinates are screenshot pixels. REST: `POST /v1/vms/{id}/input`.
+    Input {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// JSON input actions, run in order.
+        actions: Vec<String>,
+        /// Type this text (US layout) after the actions; `\n` is Enter.
+        #[arg(long)]
+        text: Option<String>,
+    },
     /// Memory use of a VM's VMM process: PSS, private and shared pages, and
     /// balloon state. REST: `GET /v1/vms/{id}/memory`.
     Memory {
@@ -1355,6 +1378,26 @@ enum TemplateCommand {
         #[arg(long = "label", value_parser = parse_label_pair)]
         labels: Vec<(String, String)>,
     },
+}
+
+/// `fluxctl input` arguments as a JSON action list: each argument is one action object (or a list of them), then
+/// `--text` as a `type` action.
+fn input_actions(args: &[String], text: Option<String>) -> Result<Vec<serde_json::Value>> {
+    let mut out = Vec::new();
+    for a in args {
+        match serde_json::from_str(a).with_context(|| format!("not a JSON input action: {a}"))? {
+            serde_json::Value::Array(list) => out.extend(list),
+            v @ serde_json::Value::Object(_) => out.push(v),
+            _ => anyhow::bail!("an input action is a JSON object: {a}"),
+        }
+    }
+    if let Some(t) = text {
+        out.push(serde_json::json!({"action": "type", "text": t}));
+    }
+    if out.is_empty() {
+        anyhow::bail!("give at least one JSON action or --text");
+    }
+    Ok(out)
 }
 
 fn parse_label_pair(s: &str) -> Result<(String, String)> {
@@ -2845,6 +2888,34 @@ async fn run_remote(
                     .await?,
             )?,
         },
+        Command::Screenshot {
+            id,
+            output,
+            max_width,
+        } => {
+            let mut path = format!("/v1/vms/{id}/screenshot");
+            if let Some(w) = max_width {
+                path.push_str(&format!("?max_width={w}"));
+            }
+            let (status, body) = r.get_raw(&path).await?;
+            if !status.is_success() {
+                anyhow::bail!("screenshot: {status}: {}", String::from_utf8_lossy(&body));
+            }
+            std::fs::write(&output, &body)
+                .with_context(|| format!("writing {}", output.display()))?;
+            println!("{}", output.display());
+        }
+        Command::Input { id, actions, text } => {
+            let actions = input_actions(&actions, text)?;
+            pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/input"),
+                    Some(json!({"actions": actions})),
+                )
+                .await?,
+            )?
+        }
         Command::Memory { id } => pretty(
             &r.call(Method::GET, &format!("/v1/vms/{id}/memory"), None)
                 .await?,
@@ -3794,6 +3865,23 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&m.vm_memory_report(id).await?)?
             );
+        }
+        Command::Screenshot {
+            id,
+            output,
+            max_width,
+        } => {
+            let shot = m.vm_screenshot(id, max_width).await?;
+            std::fs::write(&output, &shot.png)
+                .with_context(|| format!("writing {}", output.display()))?;
+            println!("{}", output.display());
+        }
+        Command::Input { id, actions, text } => {
+            let actions: Vec<fluxvm_scheduler::vz_screen::InputAction> =
+                serde_json::from_value(serde_json::Value::Array(input_actions(&actions, text)?))
+                    .context("invalid input action")?;
+            let n = m.vm_input(id, &actions).await?;
+            println!("{}", serde_json::json!({"ok": true, "actions": n}));
         }
         Command::Hotplug { command } => match command {
             HotplugCommand::Cpu { id, add_vcpus } => {
@@ -6669,6 +6757,19 @@ mod tier2_cli_tests {
         assert!(matches!(
             cli(&["serial", &id]).unwrap().command,
             Command::Serial { .. }
+        ));
+        assert!(matches!(
+            cli(&["screenshot", &id, "--out", "s.png", "--max-width", "1280"])
+                .unwrap()
+                .command,
+            Command::Screenshot {
+                max_width: Some(1280),
+                ..
+            }
+        ));
+        assert!(matches!(
+            cli(&["input", &id, r#"{"action":"key","key":"enter"}"#, "--text", "ls"]).unwrap().command,
+            Command::Input { actions, text: Some(_), .. } if actions.len() == 1
         ));
         assert!(matches!(
             cli(&["port-connect", &id, "agent"]).unwrap().command,

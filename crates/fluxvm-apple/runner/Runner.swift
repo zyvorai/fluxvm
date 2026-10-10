@@ -479,6 +479,11 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     var lastConfiguration: VZVirtualMachineConfiguration?
     /// Secure Boot state read before start: a running VM holds efi.bin open.
     var secureBootAtBoot: [String: Any]?
+    /// Hidden display view for agent screenshots and input when no console window is open.
+    var agentView: VZVirtualMachineView?
+    var agentWindow: NSWindow?
+    var agentViewCreated: Date?
+    var agentCaptureNominal = false
     var privateLinks: [String: PrivateLink] = [:]
     var consoleBridges: [ConsolePortBridge] = []
     var serialLog: SerialLog?
@@ -956,6 +961,12 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 self.detachUSB(uuid: id) { response = $0; sem.signal() }
             case "usb-list":
                 response = self.listUSB()
+                sem.signal()
+            case "screenshot":
+                guard let path = o["path"] as? String else { response = ["ok": false, "error": "screenshot needs path"]; sem.signal(); break }
+                self.agentScreenshot(path: path, maxWidth: (o["max_width"] as? NSNumber)?.intValue) { response = $0; sem.signal() }
+            case "input":
+                response = self.agentInput(o)
                 sem.signal()
             case "usb-physical-list":
                 self.listPhysicalUSB { response = $0; sem.signal() }
