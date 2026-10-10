@@ -499,7 +499,9 @@ prefix (4+ hex chars). Ambiguous names/prefixes are rejected with the matching i
 | Backup root disk | `fluxctl backup <vm> [--compress] [--dest PATH]` | `POST /v1/vms/{id}/backup` `{"compress": true}` |
 | Backup root + data disks | `fluxctl backup <vm> --all-disks` | `POST /v1/vms/{id}/backup` `{"all_disks": true}` |
 | VM templates | `fluxctl vm-template save\|list\|show\|delete`, `fluxctl vm-template create <tpl> <vm> [--label k=v]` | `/v1/vm-templates[/{name}]`, `POST /v1/vm-templates/{name}/instantiate` |
-| Remote contexts | `fluxctl context add\|use\|list\|current\|unset\|delete` | — |
+| Remote contexts | `fluxctl context add\|use\|list\|current\|unset\|delete` (`--token-keychain SERVICE`) | — |
+| Web dashboard | `fluxctl dashboard` (opens `/console`) | `GET /console` (static page, no auth; it asks for a token) |
+| Daemon as a LaunchAgent (macOS) | `fluxctl [--config F] service install\|uninstall\|status` | — |
 | Scheduled snapshots | `fluxctl label <vm> fluxvm.io/snapshot-every=6h fluxvm.io/snapshot-keep=7` | same `PATCH` |
 | API description | — | `GET /v1/openapi.json` (no auth) |
 
@@ -610,6 +612,9 @@ exit with an error in remote mode.
 
 ```bash
 fluxctl context add lab --server http://10.0.0.5:7788 --token "$TOKEN"
+# or keep the token in the macOS Keychain (account = context name), not in the file:
+security add-generic-password -s fluxvm-api -a lab -w
+fluxctl context add lab --server http://10.0.0.5:7788 --token-keychain fluxvm-api
 fluxctl context use lab        # VM verbs now go to lab
 fluxctl --context prod list    # one-off
 fluxctl --context local list   # force local mode
@@ -620,7 +625,18 @@ The file is `$FLUXCTL_CONTEXTS`, else `$XDG_CONFIG_HOME/fluxctl/contexts.json`,
 else `~/.config/fluxctl/contexts.json`, written mode 0600 (it holds tokens;
 `context list` never prints them). Precedence: `--server`/`FLUXVM_URL`, then
 `--context`/`FLUXCTL_CONTEXT`, then the current context, then local.
-`fluxctl serve` always runs locally.
+`fluxctl serve` always runs locally. With `--token-keychain`, the token is read
+with `security find-generic-password -s SERVICE -a CONTEXT -w` each time the
+context is used; a context has either `--token` or `--token-keychain`.
+
+**Dashboard.** `GET /console` is a small web page (`fluxctl dashboard` opens it,
+for the current context or the local `listen` address). It lists VMs and
+container sandboxes grouped by stack, with start/stop/restart/delete and the
+console or container logs, and refreshes every 5 s. The page itself is static and
+served without auth; when the daemon has `[[auth.tokens]]` it asks for a token,
+keeps it in the tab's session storage and sends it as a bearer token. A
+read-only token can browse but not act. It is served with a strict
+Content-Security-Policy (no inline script, no framing).
 
 ## Resource control (cgroup v2)
 

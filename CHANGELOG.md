@@ -45,6 +45,26 @@
 - Fixed: OCI rootfs build locks are keyed by rootfs path, so `prune` in one state dir no longer skips blob cleanup while another
   state dir is building.
 
+### Added: secrets, fleet placement for stacks, a dashboard, and a LaunchAgent
+- **Write-only secrets** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#security-defaults)): `oci.secret_env` (`{"NAME": "value"}`)
+  reaches the container's process environment through a 0600 `secrets.json` on the read-only meta share. It is never stored in the
+  VM record or returned by the API (`env` and the agent token still are). `fluxctl sandbox run --secret-env NAME` reads the value
+  from its own environment.
+- **`secret_env` in stacks** ([docs/macos-stacks.md](docs/macos-stacks.md#secrets)): names whose values `up` takes from its
+  environment. Container services get them as above; VM services get `~/.config/fluxvm/secrets.env` (0600) over SSH, which
+  `after_up` sources. Only the names are part of the spec hash.
+- **Stacks on a fleet** ([docs/macos-stacks.md](docs/macos-stacks.md#running-a-stack-on-a-fleet)): `fluxctl up | down | ps --fleet URL`
+  puts the whole stack on one `fluxvm-agent central` node: where it already runs (also a drained node), else `--node` /
+  `placement.node`, else the healthy, undrained node with the `placement.labels` / `--node-selector` labels and the most free
+  capacity for the stack's total size.
+- **Dashboard** ([docs/operations.md](docs/operations.md)): `GET /console` now lists VMs and container sandboxes grouped by stack,
+  with start/stop/restart/delete, console and container logs, health and memory pressure. The static page is served without auth
+  under a strict CSP and asks for the API token, which it keeps in session storage. `fluxctl dashboard` opens it.
+- **`fluxctl service install | uninstall | status`** ([deploy/launchd-notes.md](deploy/launchd-notes.md)): writes and loads the
+  `dev.zyvor.fluxvm` LaunchAgent that runs `fluxctl serve` in the user's login session.
+- **API token from the macOS Keychain**: `fluxctl context add NAME --server URL --token-keychain SERVICE` reads the token with
+  `security find-generic-password` (account = context name) instead of storing it in `contexts.json`.
+
 ### Added: Mac Studio options, macOS guests through the API, and many small agent VMs per Mac
 - **Mac Studio options on `vz`** ([docs/macos.md](docs/macos.md)): up to eight displays, Linux clipboard (SPICE), bridged networking
   (`apple.bridge_interface`, needs the networking entitlement), vmnet networks on macOS 26+ (`apple.vmnet`: shared or host-only,

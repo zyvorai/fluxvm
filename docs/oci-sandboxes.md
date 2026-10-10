@@ -54,7 +54,8 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 | `image` | (required) | `alpine:3.22`, `ghcr.io/org/app:1.2`, `nginx@sha256:…`. Docker Hub names are expanded (`alpine` → `docker.io/library/alpine:latest`). |
 | `command` | the image's `Cmd` | Replaces `Cmd`. |
 | `entrypoint` | the image's `Entrypoint` | Replaces `Entrypoint` and drops the image's `Cmd`, as `docker run --entrypoint` does. |
-| `env` | `[]` | `KEY=value`, added to or replacing the image's `Env`. |
+| `env` | `[]` | `KEY=value`, added to or replacing the image's `Env`. Stored in the VM record and returned by `GET /v1/vms/{id}`. |
+| `secret_env` | `{}` | `{"NAME": "value"}` added to the process environment but never stored in the VM record or returned (write-only; at most 64 entries, 64 KiB). See [Security defaults](#security-defaults). |
 | `workdir` | the image's `WorkingDir`, else `/` | Created if missing. |
 | `user` | the image's `User`, else `65534:65534` | `uid[:gid]` or `name[:group]`, resolved against the image's `/etc/passwd` and `/etc/group`. |
 | `read_only_root` | `true` | `false` mounts the sandbox's own copy of the image read-write; it is kept until the sandbox is deleted. |
@@ -66,7 +67,7 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 | `max_restarts` | unlimited | Stop restarting after this many restarts. |
 | `healthcheck` | none | `{"command": [argv…], "interval_seconds": 30, "timeout_seconds": 5, "retries": 3, "start_period_seconds": 0}`. |
 
-`fluxctl sandbox run IMAGE [--profile P] [--offline | --allow-host H…] [-e K=V…] [-w DIR] [-u USER] [--entrypoint "…"]
+`fluxctl sandbox run IMAGE [--profile P] [--offline | --allow-host H…] [-e K=V…] [--secret-env NAME…] [-w DIR] [-u USER] [--entrypoint "…"]
 [--writable-root] [-p HOST:CONTAINER…] [-v NAME:/path[:ro]…] [--restart POLICY] [--max-restarts N] [--health-cmd "…"
 [--health-interval S]] [--rm] [--name N] -- CMD…` creates the sandbox with `exit_policy: poweroff`, prints its console as it goes
 and exits with the container's exit code. It works locally and with `--server`.
@@ -154,6 +155,11 @@ searched in the whole log; `log` is only the tail.
 - The builder VM never has a network card. Its blob share is read-only, and layer paths are joined securely (no `..`, no escape
   through symlinks).
 - Boot artifacts given as files are checked against their `.sha256` sidecars when present.
+- Secrets: the request, including `env` and the agent token, is part of the VM record that `GET /v1/vms/{id}` returns to any
+  token allowed to read the VM. Put credentials in `secret_env` instead: the daemon writes them to a 0600 `secrets.json` on the
+  read-only `fluxvm-meta` share and init adds them to the process environment; they are not in the record, the API or the logs.
+  The file stays in the VM's workspace, so later boots and restarts keep them, until the sandbox is deleted. `fluxctl sandbox run
+  --secret-env NAME` takes the value of `NAME` from its own environment.
 
 ## Managing images
 

@@ -25,6 +25,9 @@ volumes = ["./:/srv/app"]        # HOST:GUEST[:ro]; relative paths are relative 
 depends_on = ["db"]              # start order, and "recreate me if it is recreated"
 ready = "pg_isready"             # must succeed in the guest before dependents start
 after_up = ["…"]                 # run over SSH once all services are up, only for services created by this `up`
+secret_env = ["DB_PASSWORD"]     # values come from the shell running `up`, never from this file (see Secrets)
+[placement]                      # only for `up --fleet` (see Running a stack on a fleet)
+labels = { zone = "lab" }
 ```
 
 Unknown keys are errors. Names are `a-z`, `0-9` and `-`.
@@ -74,6 +77,47 @@ an error: build and push the image first. Service names are lower-cased and `_` 
 the Compose `name:`, or the directory. Review the result before `fluxctl up`; in particular, Compose services reach each other
 on any port, while here only `expose`d ports (1024 and up) are relayed.
 
+## Secrets
+
+`secret_env` lists environment variable names whose values `up` reads from its own environment, so they never sit in the stack
+file:
+
+```bash
+DB_PASSWORD="$(security find-generic-password -s shop-db -w)" fluxctl up
+```
+
+- `up` stops before creating anything if one of them is not set.
+- A container service gets them in its process environment. They are kept out of the VM record and every API response: the
+  daemon writes them to a 0600 file on the VM's read-only meta share, and init adds them when it starts the process (also after
+  restarts and reboots). `GET /v1/vms/{id}` does not show them, unlike `env`.
+- A VM service gets `~/.config/fluxvm/secrets.env` (mode 0600, `export NAME='value'` lines) over SSH, before `ready` runs and
+  every time `up` runs. `after_up` commands source it; your own units can too.
+- Only the names count towards "the definition changed". Changing a value does not recreate a container service; run
+  `down` and `up` for that service. A VM service gets the new values on the next `up`.
+
+## Running a stack on a fleet
+
+With several Macs registered with `fluxvm-agent central` ([macos-cluster.md](macos-cluster.md)), `--fleet` picks a node for
+the stack and then drives that node's API, as `--server` would:
+
+```bash
+fluxctl up --fleet http://fleet-registry:7799 [--node studio-2] [--node-selector zone=lab]
+fluxctl ps --fleet http://fleet-registry:7799     # adds the node name to each line
+fluxctl down --fleet http://fleet-registry:7799
+```
+
+- The whole stack goes to one node, because services reach each other through that Mac's NAT gateway.
+- A stack that already has VMs on a node stays there, also when that node has been drained (`fluxctl fleet cordon`): draining
+  stops new stacks from landing on it without touching running ones. Moving a stack means `down`, then `up --node`.
+- Otherwise the node is `--node` (or `placement.node`; may be a drained node), or else the healthy, undrained node that carries
+  every `placement.labels` / `--node-selector` label and has the most free capacity for the sum of the services' `cpus` and
+  `memory_mib`. Free capacity is the registry's estimate, so a node that looks full but is big enough is used as a last resort.
+- If the registry cannot list the VMs on some node, `up` refuses to choose automatically (the stack might already be there);
+  name a node with `--node`.
+- The registry token is `--fleet-token` / `FLUXVM_AGENT_TOKEN`; the node's own API token is `--server-token` / `FLUXVM_TOKEN`.
+- Container services only need the node's API. VM services also need SSH to the guest addresses, which are on that Mac's NAT,
+  so run `up` for stacks with VM services on that Mac or from a host that can route to it.
+
 ## How services find each other
 
 VMs on the Mac's NAT **cannot reach each other directly** (Virtualization.framework isolates them; each can reach only the Mac, at the
@@ -97,7 +141,7 @@ State lives in the daemon's VM labels, so it also works with `--server` and does
 ## Limits
 
 - Stack VMs cold-boot (about 10 s each; independent services start in parallel). They do not use the warm snapshots `fluxctl run` uses.
-- No secrets or build steps. Restarts and health checks are for container services only. `run` only runs at first boot; use
+- No build steps. Restarts and health checks are for container services only. `run` only runs at first boot; use
   `after_up` for steps that need other services.
 - A container service only resolves the names of the services it `depends_on`. The names are fixed when it is created.
 - Verified on an Apple M4 with the `vz` backend only.

@@ -148,7 +148,7 @@ GET    /v1/network/health
 GET    /v1/network/ipcache
 GET    /v1/network/ipam
 POST   /v1/network/refresh-dns
-GET    /console
+GET    /console                          # web dashboard (static, no auth; it asks for a token)
 ```
 
 Sandbox routes are the agent-sandbox surface on the FluxVm backend — see

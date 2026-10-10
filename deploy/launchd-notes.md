@@ -6,8 +6,10 @@ So on a headless Mac the daemon runs as a LaunchAgent of a logged-in user, not a
 1. Create a dedicated user (for example `fluxvm`) and turn on automatic login for it (System Settings > Users & Groups).
 2. Turn off the screen lock for that user (Lock Screen: "Require password after screen saver begins" set to never), and keep the
    display awake or attach a display emulator; Screen Sharing works for maintenance.
-3. Install the agent below as `~/Library/LaunchAgents/dev.zyvor.fluxvm.plist` for that user, then
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.zyvor.fluxvm.plist`.
+3. As that user, run `fluxctl --config ~/.config/fluxvm/fluxvm.toml service install`. It writes the agent below as
+   `~/Library/LaunchAgents/dev.zyvor.fluxvm.plist` (with the path of the `fluxctl` you ran and the config's absolute path) and
+   loads it with `launchctl bootstrap gui/$(id -u)`. Running it again replaces and reloads the agent, for example after moving
+   `fluxctl`. `fluxctl service status` shows whether it is loaded and its PID; `fluxctl service uninstall` unloads and deletes it.
 
 With Homebrew, `brew services start fluxvm` installs an equivalent LaunchAgent.
 
