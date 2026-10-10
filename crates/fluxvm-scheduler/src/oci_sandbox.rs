@@ -30,6 +30,8 @@ use uuid::Uuid;
 pub const OCI_IMAGE_LABEL: &str = "fluxvm.oci.image";
 pub const OCI_DEFAULT_VCPUS: u8 = 1;
 pub const OCI_DEFAULT_MEMORY_MIB: u64 = 512;
+/// vz refuses to start a VM with less.
+pub const OCI_MIN_MEMORY_MIB: u64 = 512;
 /// From VM start to the agent answering (or the process having already exited).
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -456,11 +458,8 @@ impl VmManager {
         if vcpus == 0 {
             bail!("vcpus must be at least 1");
         }
-        if memory < crate::sandbox::MIN_SANDBOX_MEMORY_MIB {
-            bail!(
-                "memory_mib must be at least {}",
-                crate::sandbox::MIN_SANDBOX_MEMORY_MIB
-            );
+        if memory < OCI_MIN_MEMORY_MIB {
+            bail!("memory_mib must be at least {OCI_MIN_MEMORY_MIB} for a container sandbox");
         }
         // Boot artifacts first: without them nothing below can work, and the pull may be large.
         let boot = fluxvm_image::oci_boot::resolve(&self.cfg).await?;
@@ -563,7 +562,7 @@ impl VmManager {
             init_error: init::init_error_from_log(&log),
             restarts: supervise::restarts_from_log(&log),
             health: supervise::health_from_log(&log),
-            log: oci_images::tail(&log, lines.max(1)),
+            log: oci_images::tail_text(&log, lines.max(1)),
         })
     }
 

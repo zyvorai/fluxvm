@@ -18,6 +18,7 @@
 //! private networks, at most four volumes, and an exact size match. Anything else, or any failure, cold-boots.
 
 use crate::VmManager;
+use crate::oci_sandbox::OCI_MIN_MEMORY_MIB;
 use anyhow::{Context, Result, bail};
 use fluxvm_core::agent_density::DensityReport;
 use fluxvm_core::model::{
@@ -67,12 +68,9 @@ pub fn parse_size(s: &str) -> Result<(u8, u64)> {
     let mib: u64 = m
         .parse()
         .ok()
-        .filter(|&m| m >= crate::sandbox::MIN_SANDBOX_MEMORY_MIB)
+        .filter(|&m| m >= OCI_MIN_MEMORY_MIB)
         .with_context(|| {
-            format!(
-                "warm size {s:?}: memory must be at least {} MiB",
-                crate::sandbox::MIN_SANDBOX_MEMORY_MIB
-            )
+            format!("warm size {s:?}: memory must be at least {OCI_MIN_MEMORY_MIB} MiB")
         })?;
     Ok((vcpus, mib))
 }
@@ -444,7 +442,9 @@ mod tests {
     fn sizes_parse() {
         assert_eq!(parse_size("1x512").unwrap(), (1, 512));
         assert_eq!(parse_size(" 2X1024 ").unwrap(), (2, 1024));
-        for bad in ["", "512", "0x512", "1x", "1x16", "ax512", "300x512"] {
+        for bad in [
+            "", "512", "0x512", "1x", "1x16", "1x256", "ax512", "300x512",
+        ] {
             assert!(parse_size(bad).is_err(), "{bad}");
         }
         assert_eq!(size_label(2, 1024), "2x1024");

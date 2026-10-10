@@ -262,8 +262,17 @@ async fn build_rootfs(cfg: &Config, image: &PulledImage, dest: &Path) -> Result<
 }
 
 pub(crate) fn tail(log: &str, lines: usize) -> String {
-    let v: Vec<&str> = log.lines().rev().take(lines).collect();
-    v.into_iter().rev().collect::<Vec<_>>().join(" | ")
+    tail_lines(log, lines).join(" | ")
+}
+
+/// The last `lines` lines of `log`, one per line, for clients that follow the console.
+pub(crate) fn tail_text(log: &str, lines: usize) -> String {
+    tail_lines(log, lines).join("\n")
+}
+
+fn tail_lines(log: &str, lines: usize) -> Vec<&str> {
+    let v: Vec<&str> = log.lines().collect();
+    v[v.len().saturating_sub(lines)..].to_vec()
 }
 
 fn allocated_bytes(p: &Path) -> u64 {
@@ -416,6 +425,13 @@ mod tests {
 
     fn digest(c: char) -> String {
         format!("sha256:{}", c.to_string().repeat(64))
+    }
+
+    #[test]
+    fn tails_keep_the_last_lines() {
+        assert_eq!(tail("a\nb\nc\n", 2), "b | c");
+        assert_eq!(tail_text("a\nb\nc\n", 2), "b\nc");
+        assert_eq!(tail_text("a", 5), "a");
     }
 
     #[tokio::test]

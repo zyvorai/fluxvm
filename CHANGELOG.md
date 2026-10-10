@@ -2,6 +2,14 @@
 
 ## 0.4.0 (unreleased)
 
+### Fixed: container sandboxes on `vz`
+- `GET /v1/sandboxes/{id}/logs` returns the console tail one line per line (it was joined with ` | `), so
+  `fluxctl sandbox run` and `sandbox logs` print the container's output as written. `sandbox run` sends init and agent
+  lines to stderr.
+- Container sandboxes and `apple.oci_warm_sizes` require at least 512 MiB, the `vz` minimum, and say so up front.
+- The `oci-boot` workflow builds the boot artifacts again: USB_PCI for the warm pool's XHCI, `gen_init_cpio` compiled
+  directly, and `musl-gcc` for zstd-sys.
+
 ### Changed: `vz` follow-ups
 - `fluxctl disk detach` unplugs a hot-attached USB disk from the running guest at once.
 - Warm-claimed container sandboxes are not hibernated until they restart (their root is on USB until then).

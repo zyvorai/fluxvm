@@ -242,6 +242,18 @@ impl Target<'_> {
     }
 }
 
+/// Console lines written by init, the guest agent, or as protocol markers rather than by the container.
+fn from_guest_system(line: &str) -> bool {
+    [
+        "fluxvm-oci-init",
+        "fluxvm-guest-agent",
+        "FLUXVM-",
+        "VELORA-IP ",
+    ]
+    .iter()
+    .any(|p| line.starts_with(p))
+}
+
 /// Lines of `now` not yet printed, given the `printed` lines of the previous poll's tail.
 fn unseen<'a>(printed: &[&str], now: &'a str) -> Vec<&'a str> {
     let now: Vec<&str> = now.lines().collect();
@@ -280,7 +292,11 @@ async fn follow(target: &Target<'_>, id: Uuid, timeout: Duration) -> Result<i32>
         {
             let printed: Vec<&str> = last.lines().collect();
             for line in unseen(&printed, &logs.log) {
-                println!("{line}");
+                if from_guest_system(line) {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
             }
         }
         last = logs.log;
@@ -317,6 +333,20 @@ mod tests {
         assert_eq!(unseen(&["a", "b"], "a\nb\nc"), ["c"]);
         assert_eq!(unseen(&["a", "b", "c"], "b\nc\nd\ne"), ["d", "e"]);
         assert!(unseen(&["a", "b"], "a\nb").is_empty());
+    }
+
+    #[test]
+    fn guest_system_lines_are_told_apart() {
+        for l in [
+            "fluxvm-oci-init: powering off",
+            "fluxvm-guest-agent listening on vsock port 17777",
+            "FLUXVM-EXIT 7",
+            "VELORA-IP 192.168.64.2",
+        ] {
+            assert!(from_guest_system(l), "{l}");
+        }
+        assert!(!from_guest_system("x86_64"));
+        assert!(!from_guest_system("uid=65534"));
     }
 
     #[test]

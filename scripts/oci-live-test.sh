@@ -32,7 +32,7 @@ oci_kernel = "$BOOT/oci-kernel"
 oci_initrd = "$BOOT/oci-initrd"
 # A size no other check uses, so they still measure cold starts.
 oci_warm_slots = 1
-oci_warm_sizes = ["1x256"]
+oci_warm_sizes = ["1x768"]
 EOT
 $FLUXCTL --config "$T/fluxvm.toml" serve > "$T/daemon.log" 2>&1 & DPID=$!
 for _ in $(seq 1 30); do curl -fs "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; sleep 1; done
@@ -77,7 +77,7 @@ LOGS="$(curl -fsS "$SB/$KID/logs?lines=50")"
 DL="$(create "{\"name\":\"distroless\",\"ttl_seconds\":600,\"oci\":{\"image\":\"$DISTROLESS\",\"command\":[\"-c\",\"import time; time.sleep(3600)\"]}}")" || bad "create $DISTROLESS"
 DID="$(json 'd["id"]' <<<"$DL")"
 ARGV="$(curl -fsS -X POST "$SB/$DID/process" -H 'Content-Type: application/json' -d '{"process":{"argv":["python3","-c","print(6*7)"]}}')"
-[[ "$(json 'd["exit_code"], d["stdout"].strip()' <<<"$ARGV")" == "(0, '42')" ]] && ok "distroless: exec with argv runs without a shell" || bad "argv exec: $ARGV"
+[[ "$(json 'd["exit_code"], d["stdout"].strip()' <<<"$ARGV")" == "0 42" ]] && ok "distroless: exec with argv runs without a shell" || bad "argv exec: $ARGV"
 NOSH="$(sexec "$DID" 'true' 2>/dev/null || echo '{}')"
 [[ "$(json 'd.get("exit_code")' <<<"$NOSH")" != 0 ]] && ok "distroless: a shell command fails, as there is no /bin/sh" || bad "distroless ran a shell command: $NOSH"
 
@@ -93,7 +93,7 @@ AID="$(json 'd["id"]' <<<"$AL")"
 P='http_proxy=http://127.0.0.1:3128'
 [[ "$(out "$AID" "$P wget -q -T 20 -O /dev/null http://example.com && echo reached || echo blocked")" == reached ]] && ok "allow-list: example.com is reachable through the proxy" || bad "allowed host unreachable"
 [[ "$(out "$AID" "$P wget -q -T 10 -O /dev/null http://www.debian.org && echo reached || echo blocked")" == blocked ]] && ok "allow-list: another host is refused" || bad "a host not on the list was reachable"
-[[ "$(out "$AID" 'wget -q -T 5 -O /dev/null http://example.com && echo reached || echo blocked')" == blocked ]] && ok "allow-list: going around the proxy reaches nothing" || bad "reached the network without the proxy"
+[[ "$(out "$AID" 'env -u http_proxy -u HTTP_PROXY wget -q -T 5 -O /dev/null http://example.com && echo reached || echo blocked')" == blocked ]] && ok "allow-list: going around the proxy reaches nothing" || bad "reached the network without the proxy"
 
 # Private network: two offline sandboxes reach each other on 10.89.N.0/24 and nothing else.
 N1="$(create "{\"name\":\"net-a\",\"offline\":true,\"ttl_seconds\":600,\"oci\":{\"image\":\"$ALPINE\",\"user\":\"0:0\",\"command\":[\"sleep\",\"3600\"],\"networks\":[{\"name\":\"live\"}]}}")" || bad "create net-a"
@@ -113,12 +113,12 @@ else
   echo "skip linux/amd64: Rosetta is not installed"
 fi
 
-# Warm pool: a 1x256 sandbox is served from a pre-booted slot (USB hot-attach needs macOS 15).
+# Warm pool: a 1x768 sandbox is served from a pre-booted slot (USB hot-attach needs macOS 15).
 WID=""
 if (( $(sw_vers -productVersion | cut -d. -f1) >= 15 )); then
   for _ in $(seq 1 60); do [[ "$(curl -fs "$SB/density" | json 'd["oci_warm_slots_ready"]')" -ge 1 ]] && break; sleep 2; done
   START_MS=$(python3 -c 'import time;print(int(time.time()*1000))')
-  W="$(create "{\"name\":\"warm\",\"vcpus\":1,\"memory_mib\":256,\"ttl_seconds\":600,\"oci\":{\"image\":\"$ALPINE\",\"command\":[\"sleep\",\"3600\"]}}")" || bad "create warm"
+  W="$(create "{\"name\":\"warm\",\"vcpus\":1,\"memory_mib\":768,\"ttl_seconds\":600,\"oci\":{\"image\":\"$ALPINE\",\"command\":[\"sleep\",\"3600\"]}}")" || bad "create warm"
   WARM_MS=$(( $(python3 -c 'import time;print(int(time.time()*1000))') - START_MS ))
   WID="$(json 'd["id"]' <<<"$W")"
   D="$(curl -fsS "$SB/density")"
