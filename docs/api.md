@@ -622,7 +622,7 @@ Guide: [memory-density.md](memory-density.md).
 ```
 
 `target_mib` is what was requested; `actual_mib` is what the guest driver has reached so far. Only a
-running VM on the flux-vm backend's KVM engine has a balloon; anything else returns 400, as does a
+running VM on the flux-vm backend's KVM engine or the vz backend has a balloon; anything else returns 400, as does a
 balloon that would leave the guest under 64 MiB.
 
 `GET /v1/vms/{uuid}/memory`:

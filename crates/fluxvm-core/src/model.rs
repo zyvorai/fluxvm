@@ -467,6 +467,31 @@ pub struct AppleSpec {
     /// Open the guest's native console window (a `VZVirtualMachineView`).
     #[serde(default)]
     pub window: bool,
+    /// Number of displays exposed to a macOS guest.
+    #[serde(default = "default_apple_display_count")]
+    pub display_count: u8,
+    /// Linux guest SPICE clipboard sharing. Guest needs spice-vdagent.
+    #[serde(default)]
+    pub clipboard: bool,
+    /// Host BSD interface (for example en0) for VZ bridged networking.
+    /// None keeps the current VZ NAT behavior.
+    #[serde(default)]
+    pub bridge_interface: Option<String>,
+    /// macOS 27+: use a sparse DiskImageKit ASIF overlay for guest writes.
+    #[serde(default)]
+    pub asif_overlay: bool,
+    /// macOS 27 first-boot automated provisioning. Password contents are read
+    /// from a one-shot file and are never serialized into the VM request.
+    #[serde(default)]
+    pub provision_full_name: Option<String>,
+    #[serde(default)]
+    pub provision_username: Option<String>,
+    #[serde(default)]
+    pub provision_password_file: Option<PathBuf>,
+    #[serde(default)]
+    pub provision_auto_login: bool,
+    #[serde(default)]
+    pub provision_remote_login: bool,
     /// Initial guest display width. The VZ window still dynamically
     /// reconfigures the guest display while it is resized.
     #[serde(default = "default_apple_display_width")]
@@ -507,6 +532,9 @@ pub struct AppleSpec {
 fn default_true() -> bool {
     true
 }
+fn default_apple_display_count() -> u8 {
+    1
+}
 fn default_apple_display_width() -> u32 {
     2560
 }
@@ -523,6 +551,15 @@ impl Default for AppleSpec {
             guest_os: AppleGuest::default(),
             media: None,
             window: false,
+            display_count: default_apple_display_count(),
+            clipboard: false,
+            bridge_interface: None,
+            asif_overlay: false,
+            provision_full_name: None,
+            provision_username: None,
+            provision_password_file: None,
+            provision_auto_login: false,
+            provision_remote_login: false,
             display_width: default_apple_display_width(),
             display_height: default_apple_display_height(),
             display_ppi: default_apple_display_ppi(),

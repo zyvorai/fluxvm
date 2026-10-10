@@ -29,7 +29,80 @@ use fluxvm_core::{
     config::Config,
     model::{AppleGuest, BackendKind, CreateVmRequest, VmRecord},
 };
+use serde::Deserialize;
 use std::time::Duration;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppleBalloonStatus {
+    pub memory_mib: u64,
+    pub target_mib: u64,
+    pub actual_mib: u64,
+}
+
+pub async fn balloon_control(
+    vm: &VmRecord,
+    balloon_mib: Option<u64>,
+) -> Result<AppleBalloonStatus> {
+    let sock = vm
+        .control_socket
+        .as_deref()
+        .context("VM has no runner control socket recorded")?;
+    let mut body = serde_json::json!({"cmd": "balloon"});
+    if let Some(v) = balloon_mib {
+        body["balloon_mib"] = serde_json::json!(v);
+    }
+    let reply = control_call_with(sock, body)
+        .await
+        .context("runner `balloon`")?;
+    if !reply.ok() {
+        bail!(
+            "runner refused `balloon`: {}",
+            reply.error().unwrap_or("unknown error")
+        );
+    }
+    serde_json::from_value(reply.0).context("decoding Apple balloon response")
+}
+
+pub async fn usb_attach(vm: &VmRecord, path: &std::path::Path, read_only: bool) -> Result<String> {
+    let sock = vm
+        .control_socket
+        .as_deref()
+        .context("VM has no runner control socket recorded")?;
+    let reply = control_call_with(
+        sock,
+        serde_json::json!({"cmd":"usb-attach","path":path,"read_only":read_only}),
+    )
+    .await?;
+    if !reply.ok() {
+        bail!(
+            "runner refused usb-attach: {}",
+            reply.error().unwrap_or("unknown error")
+        );
+    }
+    reply
+        .0
+        .get("uuid")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .context("usb-attach reply had no uuid")
+}
+
+pub async fn usb_detach(vm: &VmRecord, uuid: &str) -> Result<()> {
+    let sock = vm
+        .control_socket
+        .as_deref()
+        .context("VM has no runner control socket recorded")?;
+    let reply =
+        control_call_with(sock, serde_json::json!({"cmd":"usb-detach","uuid":uuid})).await?;
+    if reply.ok() {
+        Ok(())
+    } else {
+        bail!(
+            "runner refused usb-detach: {}",
+            reply.error().unwrap_or("unknown error")
+        )
+    }
+}
 
 /// How long `launch` waits for the runner to report a running guest.
 const START_TIMEOUT: Duration = Duration::from_secs(120);
@@ -203,6 +276,10 @@ pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
         }
         // The guest is paused, so these files match the saved memory exactly.
         clone_file(&vm.disk, &dir.join("disk.raw"))?;
+        let overlay = vm.workspace.join("disk-overlay.asif");
+        if overlay.is_file() {
+            clone_file(&overlay, &dir.join("disk-overlay.asif"))?;
+        }
         let efi = vm.workspace.join("efi.bin");
         if efi.is_file() {
             clone_file(&efi, &dir.join("efi.bin"))?;

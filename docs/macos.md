@@ -164,6 +164,31 @@ runner only sets those up for Linux), and a vsock proxy. Apple allows two macOS 
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
 - **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
 
+### Mac Studio options
+
+These are built and type-checked against the macOS 27 SDK, but none has been run on hardware yet. They all default to off, so an
+existing request behaves as before.
+
+- **`display_count`** (1 to 8, default 1): number of virtual displays on a macOS guest, each `display_width` x `display_height`.
+- **`clipboard: true`:** Linux guests only (refused for macOS). Adds a SPICE agent console port; the guest needs `spice-vdagent`.
+- **`bridge_interface`** (for example `"en0"`): bridges the guest to that host interface instead of NAT. Needs `network.mode = "user"`
+  with no `forwards` (port forwards are NAT-only). The runner needs the restricted `com.apple.vm.networking` entitlement, so build with
+  `FLUXVM_VZ_BRIDGE=1` to sign it with `runner/Entitlements.networking.plist`; the default build does not carry it.
+- **`asif_overlay: true`:** macOS 27+ host. The base `disk.raw` is opened read-only and guest writes go to a sparse
+  `disk-overlay.asif` in the VM workspace (DiskImageKit). Snapshots now copy the overlay too.
+- **`provision_full_name`, `provision_username`, `provision_password_file`, `provision_auto_login`, `provision_remote_login`:** macOS 27+
+  host and guest. First boot creates the account, optionally logs in automatically and enables Remote Login. Full name, username and
+  password file are all required. The runner reads the password from the file and deletes it; it is never sent in the VM request.
+- **Balloon:** the existing `GET`/`POST /v1/vms/<id>/balloon` (and the memory report and idle reclaim) now also work for `vz` VMs, through
+  the runner's Virtualization.framework balloon device. For `vz`, `target_mib` and `actual_mib` both report the memory taken from the guest,
+  as set on the host; the guest driver's progress is not read back.
+- **USB hotplug:** the runner control socket accepts `usb-attach` (`path`, optional `read_only`) and `usb-detach` (`uuid`) for a disk
+  image as USB mass storage. It needs `usb_controller: true` and macOS 15+. There is no HTTP route for these yet, only
+  `fluxvm_apple::usb_attach` / `usb_detach`.
+
+Unverified on hardware: bridged networking on a real NIC, multi-display boot, SPICE clipboard sync, balloon reclaim, USB attach and
+detach, ASIF overlay growth and snapshot/restore, and macOS 27 provisioning.
+
 ## Capability matrix
 
 | Supported | Not supported |
