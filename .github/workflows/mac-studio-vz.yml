@@ -27,7 +27,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all -- --check
+      - run: ./scripts/ci-fmt-check.sh
       - run: cargo test -p fluxvm-core
       - run: FLUXVM_SKIP_VZ_RUNNER=1 cargo test -p fluxvm-apple
       - run: cargo test -p fluxvm-scheduler density

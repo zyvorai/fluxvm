@@ -664,12 +664,12 @@ fn put_file(path: &str, content_base64: &str, mode: Option<u32>) -> AgentRespons
             ),
         };
     }
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return AgentResponse::Error {
-                message: format!("creating {}: {e}", parent.display()),
-            };
-        }
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return AgentResponse::Error {
+            message: format!("creating {}: {e}", parent.display()),
+        };
     }
     if let Err(e) = std::fs::write(path, &bytes) {
         return AgentResponse::Error {
