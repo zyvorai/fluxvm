@@ -46,6 +46,11 @@ jobs:
           repository: zyvorai/guestkit
           path: guestkit
       - uses: dtolnay/rust-toolchain@stable
+      - name: Use the newest Xcode (the VZ runner needs the macOS 27 SDK)
+        run: |
+          X="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          [ -n "$X" ] && sudo xcode-select -s "$X"
+          echo "$(xcode-select -p): SDK $(xcrun --show-sdk-version)"
       - run: cargo build -p fluxvm-apple
       - run: cargo test -p fluxvm-apple
       - run: |
