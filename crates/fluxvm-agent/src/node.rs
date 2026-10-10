@@ -173,6 +173,8 @@ async fn fetch_apple_caps(
         custom_virtio: caps.custom_virtio_queue_backend && caps.guest_memory_mapping,
         bridged_interfaces: caps.bridged_interfaces,
         macos_guests: local.macos_guests,
+        secure_boot: caps.efi_secure_boot,
+        rosetta: caps.rosetta == "installed",
     })
 }
 

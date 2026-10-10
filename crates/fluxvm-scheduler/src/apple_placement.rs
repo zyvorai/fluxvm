@@ -25,6 +25,12 @@ pub struct AppleHostCaps {
     /// Running macOS guests; Apple's licence allows two per host.
     #[serde(default)]
     pub macos_guests: u32,
+    /// macOS 27+ EFI Secure Boot for Linux guests.
+    #[serde(default)]
+    pub secure_boot: bool,
+    /// Rosetta for Linux is installed.
+    #[serde(default)]
+    pub rosetta: bool,
 }
 
 /// Apple's limit on concurrently running macOS guests per host.
@@ -38,6 +44,8 @@ pub struct ApplePlacementRequest {
     pub needs_nested: bool,
     pub needs_vmnet: bool,
     pub needs_custom_virtio: bool,
+    pub needs_secure_boot: bool,
+    pub needs_rosetta: bool,
     pub bridge_interface: Option<String>,
 }
 
@@ -51,6 +59,8 @@ impl ApplePlacementRequest {
             needs_nested: apple.nested_virtualization,
             needs_vmnet: apple.vmnet.is_some(),
             needs_custom_virtio: apple.custom_virtio,
+            needs_secure_boot: req.secure_boot == Some(true),
+            needs_rosetta: apple.rosetta,
             bridge_interface: apple.bridge_interface,
         }
     }
@@ -67,6 +77,8 @@ pub fn score(c: &AppleHostCaps, r: &ApplePlacementRequest) -> Option<i64> {
     if (r.needs_nested && !c.nested_virtualization)
         || (r.needs_vmnet && !c.vmnet)
         || (r.needs_custom_virtio && !c.custom_virtio)
+        || (r.needs_secure_boot && !c.secure_boot)
+        || (r.needs_rosetta && !c.rosetta)
     {
         return None;
     }
@@ -106,6 +118,8 @@ mod tests {
             custom_virtio: false,
             bridged_interfaces: vec!["en0".into()],
             macos_guests: 0,
+            secure_boot: true,
+            rosetta: false,
         }
     }
 
@@ -136,6 +150,21 @@ mod tests {
             ..small()
         };
         assert_eq!(score(&studio(), &r), None);
+        let r = ApplePlacementRequest {
+            needs_rosetta: true,
+            ..small()
+        };
+        assert_eq!(score(&studio(), &r), None);
+        let r = ApplePlacementRequest {
+            needs_secure_boot: true,
+            ..small()
+        };
+        assert!(score(&studio(), &r).is_some());
+        let old = AppleHostCaps {
+            secure_boot: false,
+            ..studio()
+        };
+        assert_eq!(score(&old, &r), None);
     }
 
     #[test]

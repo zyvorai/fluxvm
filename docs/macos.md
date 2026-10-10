@@ -18,13 +18,13 @@ On an Apple M4 running macOS 27.2 (Xcode 27, Rust 1.98):
 | `cargo test -p fluxvm-apple` / `-p fluxvm-agent --lib` | fluxvm-apple 49 unit tests (capability matrix and egress validation, control protocol, SSH helpers, snapshot files, host-capabilities decode) plus 1 `backend` test against a fake runner and 6 source-contract tests (they only grep Swift and C source, they run nothing); fluxvm-agent 55; all pass, and `cargo clippy -p fluxvm-apple -p fluxvm-agent -- -D warnings` is clean |
 | `fluxvm-vz-runner host-capabilities` | Printed the M4's real capabilities (macOS 27.2, 10 CPUs, 16 GiB, nested virtualization, vmnet, custom Virtio, USB API, bridged `en5` and `en0`); the Rust decode and the node heartbeat used it |
 | Fleet placement on loopback | `fluxvm-agent central` with one real `node` (heartbeat carried its `apple` caps) and two fake nodes: `vz` requests (plain, `custom_virtio`, `nested_virtualization`) landed on the real node, the fake nodes without those features or without Apple caps were excluded; a named shared vmnet request went to the only vmnet-capable node |
-| Custom Virtio guest bus | Debian 13 guest (kernel 6.12), `apple.custom_virtio: true`, device id `0x3F`: the driver binds, `/dev/fluxvm` appears, `fluxvm_virtioctl ping`, `echo`, `stats` and `capabilities` work, and `bulk-test` (bulk fill, up to 1 MiB, CRC checked) passes. See "Mac Studio options" for what is not exercised |
+| Custom Virtio guest bus | Debian 13 guest (kernel 6.12), `apple.custom_virtio: true`, device id `0x3F`: the driver binds, `/dev/fluxvm` appears, `fluxvm_virtioctl ping`, `echo`, `stats` and `capabilities` work, and all four bulk operations (fill, zero, copy, crc32; up to 1 MiB) pass. See "Mac Studio options" for what is not exercised |
 | `scripts/macos-live-test.sh` | **PASS**, end to end on a real Debian 13 guest: create through the API, address, SSH, TCP forwards (host and guest-to-guest), shared folders, pause/resume, stop/start, snapshot and restore, named images, `fluxctl run` (cold and warm), a two-service stack, sandboxes (exec, files, TTL, warm pool and its refresh after an image update, concurrent creates, offline, allow-listed egress, speculate and changesets), nothing left running |
 | `scripts/oci-live-test.sh` | **PASS** with the `oci-boot` CI artifacts: container exit codes, uid, read-only root, exec, distroless argv exec, offline, allow-list, a private network between two sandboxes, `linux/amd64` under Rosetta, a warm-pool claim, TTL |
 | `scripts/vz-devices-live-test.sh` | **PASS** on a Debian 13 guest: extra disks on virtio, NVMe and USB, a host block device, an NBD export, USB hot-attach and detach, a console port both ways, a 1600x900 Linux display |
 | `scripts/macos-guest-live-test.sh` | Clones a prepared macOS guest template through the API, checks the reported address and SSH, deletes it; needs your own template (`FLUXVM_MACOS_TEMPLATE`), so CI does not run it |
 
-**Verified by hand only:** the macOS IPSW install (see "macOS guests"); `apple.install` and `provision_*` have not run against a real IPSW through the API. **Not verified:** multi-Mac clusters (placement was only checked on loopback with one real Mac and fake nodes), the shared vmnet broker, physical USB passthrough, the custom Virtio bulk operations other than fill, Linux-only crates (`fluxvm-procbox`,
+**Verified by hand only:** the macOS IPSW install (see "macOS guests"); `apple.install` and `provision_*` have not run against a real IPSW through the API. **Not verified:** multi-Mac clusters (placement was only checked on loopback with one real Mac and fake nodes), the shared vmnet broker, physical USB passthrough, Linux-only crates (`fluxvm-procbox`,
 `fluxvm-container-*`, `fluxvm-microvm`, `fluxvm-kube`, the eBPF agent), and any Intel Mac. The hosted CI jobs for the `vz` pull requests
 have not all been green; see the pull requests for their state.
 
@@ -111,7 +111,9 @@ to the VM log, and records the guest's NAT address.
   disk read-only, and `apple.tagged_shares` adds virtiofs shares with fixed tags (other than `fsN` and `rosetta`). Container sandboxes
   use all three ([oci-sandboxes.md](oci-sandboxes.md)).
 - **Signing:** the runner is ad-hoc signed with `com.apple.security.virtualization` by `build.rs`.
-  Set `FLUXVM_VZ_RUNNER` to use another binary; `FLUXVM_SKIP_VZ_RUNNER=1` skips building it.
+  Set `FLUXVM_VZ_RUNNER` to use another binary; `FLUXVM_SKIP_VZ_RUNNER=1` skips building it. The runner needs the macOS 27 SDK
+  (Xcode 27). If Swift is installed but the runner does not compile or sign, the build fails and shows the swiftc errors; with no
+  Swift toolchain it only warns.
 
 ## Snapshots
 
@@ -188,7 +190,8 @@ the key on first boot, and turns on Remote Login. FluxVM cannot run it inside th
 ### Snapshots of macOS guests
 
 The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host); the snapshot also keeps the guest's NVRAM
-(`auxiliary.bin`). Not yet exercised on a real macOS guest.
+(`auxiliary.bin`). Earlier runners ignored the saved state of a macOS guest and cold-booted it; the runner now resumes it the same
+way as for Linux guests. Not yet exercised on a real macOS guest.
 
 Not done: a `macos` image name, downloading an IPSW, and exec over vsock for macOS guests (they have no FluxVM guest agent). Apple
 allows two macOS VMs at a time per Mac.
@@ -311,14 +314,45 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   "reserved_ip": "192.168.105.10", "forwards": [{"protocol": "tcp", "host_port": 8080, "guest_port": 80, "guest_ip": "192.168.105.10"}]}`
   gives the VM its own network with a stable DHCP reservation for its MAC and TCP/UDP host forwards. Admission checks that the mask is
   contiguous (/30 or wider) and that `reserved_ip` and each forward's `guest_ip` are inside the subnet. The SDK has no DHCP pool setter,
-  so the whole subnet is served and `dhcp_start`/`dhcp_end` are refused. Each runner owns its network unless the VMs name it: `vmnet.name` (macOS 26+) makes them share one network through the `fluxvm-vmnetd` broker over XPC
+  so the whole subnet is served and `dhcp_start`/`dhcp_end` are refused. The other vmnet settings are passed through:
+  `ipv6_prefix` (`"fd00:1::/64"`), `mtu` (1280-9000), `external_interface` (shared mode), and the switches `disable_dhcp`
+  (refused with `reserved_ip`), `disable_dns_proxy`, `disable_nat44`, `disable_nat66` and `disable_router_advertisement`; a named
+  network's fingerprint includes them. Each runner owns its network unless the VMs name it: `vmnet.name` (macOS 26+) makes them share one network through the `fluxvm-vmnetd` broker over XPC
   ([VMNET_BROKER.md](VMNET_BROKER.md)). **Not verified:** on the test Mac the ad-hoc signed broker was killed at launch (SIP on, `com.apple.vm.networking`), so two runners on one name have not run; with no broker a named VM fails with "vmnetd XPC connection failed". Exclusive with `bridge_interface`. IP discovery and the 127.0.0.1 `network.forwards`
   relay read the NAT lease file, so use `vmnet.forwards` instead.
-- **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`, PCI `1af4:107f`; an earlier id, `0xFF00`, was outside the range Linux binds) with a host-side provider. Queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is the bulk queue (`bulk_zero`, `fill`, `copy`, `crc32`, up to 64 MiB). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`, `fluxvm_virtioctl`). **Verified** on the M4 with a Debian 13 guest: `ping`, `echo`, `stats` and `capabilities`. `fluxvm_virtioctl bulk-test` (bulk-fill on queue 1, 1 B to 1 MiB, CRC checked against an independent computation) passes after the driver stopped using a stack buffer for its request; zero, copy and crc32 are not exercised; the root cause is not found. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
+- **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a vendor Virtio device (id `0x3F`, PCI `1af4:107f`; an earlier id, `0xFF00`, was outside the range Linux binds) with a host-side provider. Queue 0 is a bounded (1 MiB) versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is the bulk queue (`bulk_zero`, `fill`, `copy`, `crc32`, up to 64 MiB). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`, `fluxvm_virtioctl`). **Verified** on the M4 with a Debian 13 guest: `ping`, `echo`, `stats` and `capabilities`. `fluxvm_virtioctl bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` (queue 1, 1 B to 1 MiB) pass after the driver stopped using a stack buffer for its request; the 64 MiB host cap was not tried. See [macos-vz27-full-stack.md](macos-vz27-full-stack.md).
+  The device also handles DRIVER_OK, stop, pause, resume and reset, and saves its counters with a VM snapshot (the configuration sets
+  `supportsSaveRestore`; without it Virtualization refuses to save a VM with the device). **Verified** on the M4: snapshot, stop and
+  `start-from-snapshot` resumed the Debian guest without a reboot, `ping` and `echo` worked, and the counters continued. The control socket takes
+  `{"cmd":"virtio-status"}` (driver state and counters) and `{"cmd":"virtio-reset"}` (host-initiated reset: the device sets DEVICE_NEEDS_RESET, which Linux ignores unless the
+  driver handles it; `virtio_flux` resets the device, aborts requests still queued with `EIO`, and sets the queues up again. Needs
+  `CONFIG_PM_SLEEP`. **Verified** on the M4: after two resets in a row, `ping` and `bulk-test` worked);
+  `fluxvm_apple::vz27` wraps both.
+- **EFI Secure Boot (macOS 27+, Linux EFI guests):** top-level `secure_boot: true` enrolls Microsoft's KEK, UEFI CA and revocation list
+  and enables Secure Boot with Apple's platform key, so Microsoft-signed shims boot. `apple.efi_secure_boot` customises it:
+  `platform_key` (X.509, DER or PEM), `kek`/`db`/`dbx` (certificates, SHA-256 hashes or EFI signature lists),
+  `default_signatures: false` and `reset: true` (clear previously enrolled keys first). `secure_boot: false` turns it off and keeps the
+  keys; leaving it out does not touch `efi.bin`. Refused with direct kernel boot and for macOS guests. `{"cmd":"secure-boot-status"}` reports
+  the state and signature counts. **Verified** on the M4: enable with default keys (2 KEK, 2 db, 26 dbx), status, disable, and a stock Debian 13 cloud image booting through the API with `secure_boot: true` (guest efivars: `SecureBoot=1`, `SetupMode=0`). The guest kernel reports "Secure boot enabled" and runs in lockdown (integrity), so it loads only signed modules: an out-of-tree
+  module such as `virtio_flux.ko` must be signed with an enrolled key (for example a MOK) to load under Secure Boot. While the VM runs,
+  Virtualization keeps `efi.bin` locked, so `secure-boot-status` returns the state read just before start, marked `"as_of": "boot"`;
+  with the VM stopped it reads the store.
+- **Recovery (macOS guests):** `recovery: true` starts the guest in macOS Recovery.
+- **Rosetta cache (Linux guests):** with `rosetta: true`, `rosetta_cache` is `"default"`, a guest socket path or an abstract socket name for
+  `rosettad`'s AOT cache. A Mac without Rosetta fails at boot with a pointer to `fluxvm-vz-runner install-rosetta`.
+- **Disk serials:** an `extra_disks` entry on the virtio controller can set `block_device_id` (1-20 ASCII), shown in the guest as
+  `/dev/disk/by-id/virtio-<id>`.
+- **VM label (macOS 27+):** the runner sets `VZVirtualMachineConfiguration.label` to the VM's name (trimmed to 64 characters) so system
+  services show it; the console window uses `VZVirtualMachineViewAdaptor`.
+- **Events:** the runner log gets `network-disconnected` (a bridged or vmnet attachment went away), `nbd-connected` / `nbd-failed`,
+  `usb-passthrough-disconnected` (the host took a device back) and `secure-boot` lines.
 - **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
   the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.
 - **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts
   `{"cmd":"usb-attach","path":"/path/disk.img","read_only":false}` (returns a `uuid`) and `{"cmd":"usb-detach","uuid":"…"}` (macOS 15+).
+  `{"cmd":"usb-list"}` lists what is attached now. A snapshot is refused while a hot-attached USB disk is still attached: macOS 27 can
+  crash restoring such a state without the disk (177528319). Passed-through devices are detached before saving instead (174267926), and
+  the `save` reply lists them in `usb_detached`.
 - **Physical USB passthrough (macOS 27):** the runner's control socket also takes `{"cmd":"usb-physical-list"}` and
   `{"cmd":"usb-physical-attach","registry_id":…}`. It goes through Apple's Accessory Access consent, so it needs the `FluxVMUSBAccess` app
   signed with the `com.apple.developer.accessory-access.usb` entitlement (an Apple entitlement). There is no REST route or `fluxctl`
@@ -337,7 +371,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 - **Fleet placement for `vz`:** `fluxvm-agent node` puts these capabilities, with free CPU and memory and the macOS guest count, in its
   heartbeat (`apple`), and `fluxvm-agent central` scores nodes with `fluxvm_scheduler::apple_placement` for `backend: vz` requests. Nodes
   without Apple capabilities are excluded for `vz`; among nodes that fit, the tightest fit wins. **Verified** only on loopback: one real
-  M4 node plus two fake nodes registered by hand. No second Mac was used, and central's `vz` filtering has no unit tests yet.
+  M4 node plus two fake nodes registered by hand. No second Mac was used; central's `vz` filtering is unit-tested (request parsing, nodes without Apple capabilities, feature requirements, the two-macOS-guest limit).
 
 ## Capability matrix
 
@@ -345,7 +379,7 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 | --- | --- |
 | vCPUs, memory, raw disk, cloud-init, direct kernel boot (Linux guests) | tap / macvtap / netns / eBPF networking, UDP port forwards |
 | NAT networking, TCP port forwards, no-network mode, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
-| shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
+| shared folders (virtiofs), VM snapshots (memory + disk, Linux and macOS guests), pause / resume, graceful shutdown, force stop, EFI Secure Boot (macOS 27+, Linux) | TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug of CPU, memory and NICs; cdroms; firmware overrides |
 | macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
 | extra disks (image, block device, NBD; virtio, NVMe, USB), USB disk hot-attach and detach, private networks, console ports, bridged and vmnet networking, balloon, Rosetta, display, audio | (vmnet forwards may be UDP; NAT forwards are TCP only) |

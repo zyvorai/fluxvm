@@ -375,7 +375,7 @@ So each **slot** is an ordinary stopped VM with its own MAC and its own `warm` s
 | Clipboard | `clipboard: true` adds a SPICE agent port (Linux guests; the guest needs `spice-vdagent`). **Unverified on hardware** |
 | Console ports | `apple.console_ports` (Linux guests, up to 8) adds virtio console ports at `/dev/virtio-ports/<name>`; the runner bridges each to `/tmp/fluxvm-<uid>/<vm id>.port-<name>` (mode 0600). `fluxctl port-connect` or the websocket `GET /v1/vms/{id}/ports/{name}`. Covered by `scripts/vz-devices-live-test.sh`, both directions |
 | Serial console | A Linux guest's serial console goes to `console.log`, rotated to `console.log.1` past `serial_log_max_mib` (default 16) |
-| Custom Virtio | `custom_virtio: true` (macOS 27+, Linux guests) adds a vendor virtio device with device id `0x3F` (PCI `1af4:107f`) and two queues: 0 is a bounded JSON control plane (ping, echo, capabilities, stats), 1 is bulk guest-memory operations (zero, fill, copy, CRC32, up to 64 MiB) through `VZGuestMemoryMapping`. The Linux driver is in `guest/virtio-flux`. The id must be at most `0x3F`: Linux binds only PCI ids `0x1040` to `0x107f`, and the earlier `0xFF00` produced `1af4:0f40`, which nothing binds. Control requests work on hardware; `bulk-fill` verified, other bulk operations not exercised (section 14) |
+| Custom Virtio | `custom_virtio: true` (macOS 27+, Linux guests) adds a vendor virtio device with device id `0x3F` (PCI `1af4:107f`) and two queues: 0 is a bounded JSON control plane (ping, echo, capabilities, stats), 1 is bulk guest-memory operations (zero, fill, copy, CRC32, up to 64 MiB) through `VZGuestMemoryMapping`. The Linux driver is in `guest/virtio-flux`. The id must be at most `0x3F`: Linux binds only PCI ids `0x1040` to `0x107f`, and the earlier `0xFF00` produced `1af4:0f40`, which nothing binds. Control requests work on hardware; all four bulk operations verified (section 14) |
 
 ## 10. Agent sandboxes
 
@@ -511,8 +511,7 @@ Several Macs, each running `fluxctl serve`, can share bursts of sandboxes ([maco
 - **Placement in central.** For `POST /fleet/vms` with `backend: vz`, central builds the request from the body (`apple.guest_os`,
   `nested_virtualization`, `vmnet`, `custom_virtio`, `bridge_interface`) and applies `apple_placement::score` to each node's `apple`
   caps; nodes that report none are excluded for `vz` requests. Other backends keep the existing capacity, security and selector scoring.
-  Checked only on loopback with one real Mac and two fake registrations (section 14); `apple_placement_request` and the `vz`
-  filtering have no unit tests of their own.
+  Checked only on loopback with one real Mac and two fake registrations (section 14); `apple_placement_request` and the `vz` filtering have unit tests in `central.rs` (request parsing, skipping nodes without Apple capabilities, feature requirements, the two-macOS-guest limit).
 - **One Mac.** With one node, placement always picks it.
 
 ## 13. Version gates
@@ -566,10 +565,10 @@ One Apple M4, 16 GiB, macOS 27.2 (build 26B5101f), SIP on, no `sudo`, AMFI defau
 | Custom Virtio guest bus, as merged (id `0xFF00`) | Failed | Debian 13 (kernel 6.12.111+deb13-arm64) saw PCI `1af4:0f40` with no driver and no virtio device: the PCI id is `0x1040 + id` truncated to 16 bits, outside `0x1040` to `0x107f`. `virtio_flux` could never attach |
 | `virtio_flux.c` on kernel 6.12 | Verified with fix | Did not compile (missing `virtio_config.h` include, `no_llseek` removed, `virtio_find_vqs` now takes `struct virtqueue_info`, `virtio_set_drvdata` removed). Fixed in PR #200 |
 | Custom Virtio at id `0x3F` (PR #200) | Verified (queue 0) | PCI `1af4:107f` binds as virtio9; `/dev/fluxvm` and `/dev/fluxvm-bulk` appear; `fluxvm_virtioctl ping` returns pong with the VM id, `echo` echoes, `stats` returns counts, `capabilities` lists 2 queues, bulk zero/fill/copy/crc32, `bulk_max_bytes` 67108864, `guest_memory_mapping` true |
-| Custom Virtio bulk queue (queue 1) | Verified with fix | `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack buffer (invalid with VMAP_STACK); the host saw the notification but `nextElement()` returned nil. With a heap buffer, `bulk-fill` of 1 B, 4 KiB, 64 KiB and 1 MiB passes, the guest checks the fill, and the CRC32 equals an independent computation. Zero, copy and crc32 operations are not exercised. Root cause not found |
+| Custom Virtio bulk queue (queue 1) | Verified with fix | `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack buffer (invalid with VMAP_STACK); the host saw the notification but `nextElement()` returned nil. With a heap buffer all four operations pass at sizes from 1 B to 1 MiB: the guest checks the fill, the zeroing and the copy byte for byte, the host-computed CRC32 equals the guest's own, and the fill CRC equals zlib's. 8 bulk requests, 0 errors on the device. 64 MiB (the host cap) was not tried. Root cause not found |
 | Multi-Mac placement | Not run | No second Mac |
 
-Gaps: no unit tests for `apple_placement_request` or the `vz` filtering in central. `fluxvm-container-agent` and `fluxvm-containerd-shim` do not build on macOS (unrelated).
+Central's `apple_placement_request` and `vz` filtering have four unit tests (they do not replace a run on two real Macs). `fluxvm-container-agent` and `fluxvm-containerd-shim` do not build on macOS (unrelated).
 
 The hosted CI jobs for the `vz` pull requests have not all been green; see the pull requests for their state.
 

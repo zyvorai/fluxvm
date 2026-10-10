@@ -70,6 +70,16 @@ struct Config: Decodable {
     let networks: [PrivateNetwork]?
     let console_ports: [ConsolePort]?
     let serial_log_max_bytes: UInt64?
+    let label: String?              // macOS 27+ VZVirtualMachineConfiguration.label (the VM's name in system services)
+    let secure_boot: Bool?          // macOS 27+ EFI Secure Boot for Linux EFI guests; nil leaves efi.bin untouched
+    let secure_boot_reset: Bool?
+    let secure_boot_default_signatures: Bool?
+    let secure_boot_platform_key: String?
+    let secure_boot_kek: [String]?
+    let secure_boot_db: [String]?
+    let secure_boot_dbx: [String]?
+    let recovery: Bool?             // macOS guests: start up from macOS Recovery
+    let rosetta_cache: String?      // "default", a guest unix socket path (/...), or an abstract socket name
 }
 
 struct ConsolePort: Decodable {
@@ -347,6 +357,21 @@ struct ExtraDisk: Decodable {
     let caching: String?     // automatic | cached | uncached (image)
     let sync: String?        // full | fsync (image) | none
     let controller: String?  // virtio | nvme | usb
+    let block_device_id: String?  // virtio: the serial the guest sees (/dev/disk/by-id/virtio-<id>)
+}
+
+/// Reports an NBD export's connection state; the attachment holds its delegate weakly.
+@available(macOS 14.0, *)
+final class NBDObserver: NSObject, VZNetworkBlockDeviceStorageDeviceAttachmentDelegate {
+    static var all: [NBDObserver] = []
+    let disk: String
+    init(disk: String) { self.disk = disk }
+    func attachmentWasConnected(_ attachment: VZNetworkBlockDeviceStorageDeviceAttachment) {
+        emit(["event": "nbd-connected", "disk": disk])
+    }
+    func attachment(_ attachment: VZNetworkBlockDeviceStorageDeviceAttachment, didEncounterError error: Error) {
+        emit(["event": "nbd-failed", "disk": disk, "error": error.localizedDescription])
+    }
 }
 
 /// The attachment and controller `d` asks for; block, NBD and NVMe need macOS 14.
@@ -366,13 +391,20 @@ func extraDiskDevice(_ d: ExtraDisk) throws -> VZStorageDeviceConfiguration {
     case "nbd":
         guard #available(macOS 14.0, *) else { throw err("disk \(label): NBD needs macOS 14 or later") }
         guard let s = d.url, let url = URL(string: s) else { throw err("disk \(label): bad nbd url") }
-        attachment = try VZNetworkBlockDeviceStorageDeviceAttachment(
+        let nbd = try VZNetworkBlockDeviceStorageDeviceAttachment(
             url: url, timeout: 5, isForcedReadOnly: ro, synchronizationMode: d.sync == "none" ? .none : .full)
+        let observer = NBDObserver(disk: label)
+        NBDObserver.all.append(observer)
+        nbd.delegate = observer
+        attachment = nbd
     default:
         let caching: VZDiskImageCachingMode = d.caching == "cached" ? .cached : d.caching == "uncached" ? .uncached : .automatic
         let sync: VZDiskImageSynchronizationMode = d.sync == "none" ? .none : d.sync == "fsync" ? .fsync : .full
         attachment = try VZDiskImageStorageDeviceAttachment(
             url: URL(fileURLWithPath: d.path), readOnly: ro, cachingMode: caching, synchronizationMode: sync)
+    }
+    if d.block_device_id != nil && (d.controller ?? "virtio") != "virtio" {
+        throw err("disk \(label): block_device_id needs the virtio controller")
     }
     switch d.controller ?? "virtio" {
     case "nvme":
@@ -381,8 +413,20 @@ func extraDiskDevice(_ d: ExtraDisk) throws -> VZStorageDeviceConfiguration {
     case "usb":
         return VZUSBMassStorageDeviceConfiguration(attachment: attachment)
     default:
-        return VZVirtioBlockDeviceConfiguration(attachment: attachment)
+        let dev = VZVirtioBlockDeviceConfiguration(attachment: attachment)
+        if let id = d.block_device_id {
+            try VZVirtioBlockDeviceConfiguration.validateBlockDeviceIdentifier(id)
+            dev.blockDeviceIdentifier = id
+        }
+        return dev
     }
+}
+
+/// A `VZVirtualMachineConfiguration.label`: 1-64 characters with at least one that is not whitespace.
+func fluxVMLabel(_ wanted: String?, id: String) -> String {
+    let trimmed = (wanted ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    let label = trimmed.isEmpty ? "fluxvm-\(id.prefix(8))" : trimmed
+    return String(label.prefix(64)).trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -433,11 +477,18 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     var signalSources: [DispatchSourceSignal] = []
     var vsockConnections: [VZVirtioSocketConnection] = []
     var lastConfiguration: VZVirtualMachineConfiguration?
+    /// Secure Boot state read before start: a running VM holds efi.bin open.
+    var secureBootAtBoot: [String: Any]?
     var privateLinks: [String: PrivateLink] = [:]
     var consoleBridges: [ConsolePortBridge] = []
     var serialLog: SerialLog?
     /// Where this boot's console output starts in the log (reset when the log rotates).
     var serialBootOffset: UInt64 = 0
+    /// `check` mode: validate without changing the EFI variable store.
+    var dryRun = false
+    /// USB mass-storage devices hot-attached through the control socket (not part of the static configuration).
+    var hotplugUSB: Set<UUID> = []
+    var usbObserver: AnyObject?
 
     init(_ cfg: Config) { self.cfg = cfg; super.init() }
 
@@ -495,9 +546,12 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 c.bootLoader = boot
             } else {
                 let boot = VZEFIBootLoader()
-                boot.variableStore = FileManager.default.fileExists(atPath: file("efi.bin").path)
+                let store = FileManager.default.fileExists(atPath: file("efi.bin").path)
                     ? VZEFIVariableStore(url: file("efi.bin"))
                     : try VZEFIVariableStore(creatingVariableStoreAt: file("efi.bin"))
+                try self.configureSecureBoot(store)
+                if !self.dryRun { self.secureBootAtBoot = self.readSecureBoot(store) }
+                boot.variableStore = store
                 c.bootLoader = boot
             }
             // A saved VM state is tied to the machine identifier, and a generic platform invents a new one on every
@@ -592,8 +646,18 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 fsDevices.append(fs)
             }
             if cfg.rosetta == true {
+                switch VZLinuxRosettaDirectoryShare.availability {
+                case .notSupported: throw err("Rosetta for Linux is not supported on this Mac")
+                case .notInstalled: throw err("Rosetta is not installed; run `fluxvm-vz-runner install-rosetta`")
+                default: break
+                }
+                let share = try VZLinuxRosettaDirectoryShare()
+                if let cache = cfg.rosetta_cache {
+                    try share.setCachingOptions(cache == "default" ? .defaultUnixSocket
+                        : cache.hasPrefix("/") ? .unixSocket(cache) : .abstractSocket(cache))
+                }
                 let fs = VZVirtioFileSystemDeviceConfiguration(tag: "rosetta")
-                fs.share = try VZLinuxRosettaDirectoryShare()
+                fs.share = share
                 fsDevices.append(fs)
             }
             c.directorySharingDevices = fsDevices
@@ -656,6 +720,9 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         try self.configureCustomVirtio(c)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
+        #if compiler(>=6.4)
+        if #available(macOS 27.0, *) { c.label = fluxVMLabel(cfg.label, id: cfg.id) }
+        #endif
         try c.validate()
         lastConfiguration = c
         return c
@@ -668,9 +735,10 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             let machine = VZVirtualMachine(configuration: try configuration())
             machine.delegate = self
             vm = machine
+            observeUSBControllers(machine)
             state = "starting"
             if cfg.window == true { showWindow(machine) }
-            if let state = cfg.restore_state, cfg.guest_os == "linux" {
+            if let state = cfg.restore_state {
                 // Same configuration as when the state was saved; the machine comes back paused and is then resumed.
                 guard #available(macOS 14.0, *) else { fail("restoring a saved state needs macOS 14 or later") }
                 machine.restoreMachineStateFrom(url: URL(fileURLWithPath: state)) { error in
@@ -701,7 +769,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         let view = VZVirtualMachineView(frame: NSRect(
             x: 0, y: 0, width: initialWidth, height: initialWidth / aspect
         ))
+        #if compiler(>=6.4)
+        if #available(macOS 27.0, *) {
+            view.adaptor = VZVirtualMachineViewAdaptor(virtualMachine: machine)
+        } else {
+            view.virtualMachine = machine
+        }
+        #else
         view.virtualMachine = machine
+        #endif
         view.capturesSystemKeys = true
         view.automaticallyReconfiguresDisplay = true
         let w = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -751,7 +827,13 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     var installObservation: NSKeyValueObservation?
 
     func guestDidStop(_ virtualMachine: VZVirtualMachine) { state = "stopped"; emit(["event": "stopped"]); cleanupAndExit(0) }
-    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) { state = "error"; fail("guest stopped with an error: \(error.localizedDescription)") }
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) { state = "error"; fail("guest stopped with an error: \(fluxVZErrorDescription(error))") }
+    /// A bridged or vmnet attachment went away (interface down, network released); the card stays without a link.
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, networkDevice: VZNetworkDevice,
+                        attachmentWasDisconnectedWithError error: Error) {
+        let index = virtualMachine.networkDevices.firstIndex { $0 === networkDevice } ?? -1
+        emit(["event": "network-disconnected", "index": index, "error": error.localizedDescription])
+    }
 
     func cleanupAndExit(_ code: Int32) {
         unlink(cfg.control_socket)
@@ -818,21 +900,27 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     response = ["ok": false, "error": "this VM's devices cannot be saved: \(error.localizedDescription)"]; sem.signal(); break
                 }
                 let wasRunning = self.state == "running"
-                let write = {
-                    vm.saveMachineStateTo(url: URL(fileURLWithPath: path)) { error in
-                        if let error { response = ["ok": false, "error": error.localizedDescription] }
-                        else { self.state = "paused"; response = ["ok": true, "state": "paused", "was_running": wasRunning] }
-                        sem.signal()
-                    }
-                }
-                if wasRunning {
-                    vm.pause { r in
-                        switch r {
-                        case .success: write()
-                        case .failure(let e): response = ["ok": false, "error": e.localizedDescription]; sem.signal()
+                self.prepareUSBForSave { detached, usbError in
+                    if let usbError { response = ["ok": false, "error": usbError]; sem.signal(); return }
+                    let write = {
+                        vm.saveMachineStateTo(url: URL(fileURLWithPath: path)) { error in
+                            if let error { response = ["ok": false, "error": fluxVZErrorDescription(error)] }
+                            else {
+                                self.state = "paused"
+                                response = ["ok": true, "state": "paused", "was_running": wasRunning, "usb_detached": detached]
+                            }
+                            sem.signal()
                         }
                     }
-                } else { write() }
+                    if wasRunning {
+                        vm.pause { r in
+                            switch r {
+                            case .success: write()
+                            case .failure(let e): response = ["ok": false, "error": e.localizedDescription]; sem.signal()
+                            }
+                        }
+                    } else { write() }
+                }
             case "capabilities":
                 if let data = try? JSONEncoder().encode(fluxAppleHostCapabilities()),
                    var caps = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
@@ -845,12 +933,30 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             case "balloon":
                 response = self.balloonControl(reclaimMiB: (o["balloon_mib"] as? NSNumber)?.uint64Value)
                 sem.signal()
+            case "secure-boot-status":
+                response = self.secureBootStatus()
+                sem.signal()
+            case "virtio-reset", "virtio-status":
+                #if compiler(>=6.4)
+                if #available(macOS 27.0, *) {
+                    response = cmd == "virtio-reset" ? fluxVMCustomVirtioReset(vmID: self.cfg.id)
+                                                     : fluxVMCustomVirtioStatus(vmID: self.cfg.id)
+                } else {
+                    response = ["ok": false, "error": "custom Virtio devices need macOS 27+"]
+                }
+                #else
+                response = ["ok": false, "error": "this runner was built without the macOS 27 SDK"]
+                #endif
+                sem.signal()
             case "usb-attach":
                 guard let path = o["path"] as? String else { response = ["ok": false, "error": "usb-attach needs path"]; sem.signal(); break }
                 self.attachUSBMassStorage(path: path, readOnly: (o["read_only"] as? Bool) ?? false) { response = $0; sem.signal() }
             case "usb-detach":
                 guard let id = o["uuid"] as? String else { response = ["ok": false, "error": "usb-detach needs uuid"]; sem.signal(); break }
                 self.detachUSB(uuid: id) { response = $0; sem.signal() }
+            case "usb-list":
+                response = self.listUSB()
+                sem.signal()
             case "usb-physical-list":
                 self.listPhysicalUSB { response = $0; sem.signal() }
             case "usb-physical-attach":
@@ -1177,12 +1283,25 @@ if args.count == 2 && args[1] == "host-capabilities" {
         FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10])); exit(0)
     } catch { fail("cannot encode host capabilities: \(error.localizedDescription)", code: 2) }
 }
+if args.count == 2 && args[1] == "install-rosetta" {
+    switch VZLinuxRosettaDirectoryShare.availability {
+    case .installed: print("Rosetta is already installed"); exit(0)
+    case .notSupported: fail("Rosetta for Linux is not supported on this Mac", code: 2)
+    default:
+        VZLinuxRosettaDirectoryShare.installRosetta { error in
+            if let error { fail("installing Rosetta: \(error.localizedDescription)") }
+            print("Rosetta installed"); exit(0)
+        }
+        dispatchMain()
+    }
+}
 guard args.count == 4, ["run", "install", "check"].contains(args[1]), args[2] == "--config" else {
-    fail("usage: fluxvm-vz-runner host-capabilities | run|install|check --config <json>", code: 2)
+    fail("usage: fluxvm-vz-runner host-capabilities | install-rosetta | run|install|check --config <json>", code: 2)
 }
 guard let data = FileManager.default.contents(atPath: args[3]), let cfg = try? JSONDecoder().decode(Config.self, from: data) else { fail("cannot read config \(args[3])", code: 2) }
 let runner = Runner(cfg)
 if args[1] == "check" {
+    runner.dryRun = true
     do { _ = try runner.configuration(); print("configuration valid"); exit(0) } catch { fail(error.localizedDescription) }
 }
 let app = NSApplication.shared

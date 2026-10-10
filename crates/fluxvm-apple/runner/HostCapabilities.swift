@@ -18,6 +18,8 @@ struct FluxAppleHostCapabilities: Codable {
     let customVirtioQueueBackend: Bool
     let guestMemoryMapping: Bool
     let usbPassthroughAPI: Bool
+    let efiSecureBoot: Bool
+    let rosetta: String          // installed | not-installed | not-supported
 }
 
 func fluxAppleHostCapabilities() -> FluxAppleHostCapabilities {
@@ -52,6 +54,14 @@ func fluxAppleHostCapabilities() -> FluxAppleHostCapabilities {
         guestMemoryMapping: has27,
         // The API exists on 27; using it still requires an AccessoryAccess UI
         // broker and explicit user consent, so this is not a readiness flag.
-        usbPassthroughAPI: has27
+        usbPassthroughAPI: has27,
+        efiSecureBoot: has27,
+        rosetta: {
+            switch VZLinuxRosettaDirectoryShare.availability {
+            case .installed: return "installed"
+            case .notInstalled: return "not-installed"
+            default: return "not-supported"
+            }
+        }()
     )
 }

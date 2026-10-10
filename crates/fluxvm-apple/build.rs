@@ -38,41 +38,67 @@ fn main() {
         println!("cargo:rerun-if-changed={}", p.display());
     }
 
+    // A runner left over from an earlier build must not stand in for one that no longer compiles.
+    let _ = fs::remove_file(&out);
+    let has_swiftc = Command::new("xcrun")
+        .args(["--find", "swiftc"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !has_swiftc {
+        println!(
+            "cargo:warning=no Swift toolchain (install Xcode or the Command Line Tools); the vz backend will not launch VMs"
+        );
+        return;
+    }
+    // AccessoryAccess is new in the macOS 27 SDK. Weak-link it so a runner built with Xcode 27 still
+    // starts on the macOS 14-26 baseline when physical USB passthrough is not requested. Older SDKs
+    // (CI's Xcode 26.6) do not have it, so linking it would fail.
+    let sdk = Command::new("xcrun")
+        .args(["--show-sdk-path"])
+        .output()
+        .ok()
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()));
+    let has_accessory_access = sdk.is_some_and(|p| {
+        p.join("System/Library/Frameworks/AccessoryAccess.framework")
+            .exists()
+    });
+    let mut swiftc_args: Vec<&str> = vec![
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-O",
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-framework",
+        "AppKit",
+        "-framework",
+        "Virtualization",
+        "-framework",
+        "vmnet",
+    ];
+    if has_accessory_access {
+        swiftc_args.extend(["-Xlinker", "-weak_framework", "-Xlinker", "AccessoryAccess"]);
+    }
     let swiftc = Command::new("xcrun")
-        .args([
-            "swiftc",
-            "-swift-version",
-            "5",
-            "-O",
-            "-target",
-            "arm64-apple-macosx14.0",
-            "-framework",
-            "AppKit",
-            "-framework",
-            "Virtualization",
-            "-framework",
-            "vmnet",
-            // AccessoryAccess is new in the macOS 27 SDK. Weak-link it so a
-            // runner built with Xcode 27 still starts on the macOS 14-26
-            // baseline when physical USB passthrough is not requested.
-            "-Xlinker",
-            "-weak_framework",
-            "-Xlinker",
-            "AccessoryAccess",
-        ])
+        .args(&swiftc_args)
         .arg(&main_swift)
         .args(&extra)
         .arg("-o")
         .arg(&out)
-        .status();
+        .output();
     match swiftc {
-        Ok(s) if s.success() => {}
-        _ => {
-            println!(
-                "cargo:warning=could not compile the Swift runner (install Xcode/CLT); the vz backend will not launch VMs"
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            for line in stderr.lines().filter(|l| l.contains("error:")).take(20) {
+                println!("cargo:warning={line}");
+            }
+            panic!(
+                "the Swift runner does not compile (the runner needs the macOS 27 SDK, Xcode 27); \
+                 set FLUXVM_SKIP_VZ_RUNNER=1 to build without it\n{stderr}"
             );
-            return;
         }
+        Err(e) => panic!("could not run swiftc: {e}"),
     }
     let entitlement = if env::var_os("FLUXVM_VZ_BRIDGE").is_some() {
         manifest.join("runner/Entitlements.networking.plist")
@@ -85,10 +111,10 @@ fn main() {
         .arg(&out)
         .status();
     if !matches!(sign, Ok(s) if s.success()) {
-        println!(
-            "cargo:warning=could not sign the Swift runner; Virtualization.framework will refuse to start VMs"
+        let _ = fs::remove_file(&out);
+        panic!(
+            "could not sign the Swift runner; Virtualization.framework would refuse to start VMs"
         );
-        return;
     }
     println!("cargo:rustc-env=FLUXVM_VZ_RUNNER_BUILT={}", out.display());
 }

@@ -10,8 +10,47 @@ import AccessoryAccess
 
 private let fluxUSBService = "dev.zyvor.fluxvm.usbd"
 
+#if compiler(>=6.4)
+/// Reports a passthrough device the host took back (unplugged, or released from the Accessory Access menu).
+@available(macOS 27.0, *)
+final class FluxUSBControllerObserver: NSObject, VZUSBController.Delegate {
+    func usbController(_ usbController: VZUSBController,
+                       usbPassthroughDeviceDidDisconnect device: VZUSBPassthroughDevice) {
+        emit(["event": "usb-passthrough-disconnected", "uuid": device.uuid.uuidString])
+    }
+}
+#endif
+
 extension Runner {
+    /// Watches every USB controller for passthrough devices the framework detached on its own.
+    func observeUSBControllers(_ machine: VZVirtualMachine) {
+        #if compiler(>=6.4)
+        guard #available(macOS 27.0, *), !machine.usbControllers.isEmpty else { return }
+        let observer = FluxUSBControllerObserver()
+        for c in machine.usbControllers { c.delegate = observer }
+        usbObserver = observer
+        #endif
+    }
+
+    /// `usb-list`: the devices attached to the VM's USB controllers right now.
+    func listUSB() -> [String: Any] {
+        guard #available(macOS 15.0, *), let vm else { return ["ok": true, "items": []] }
+        var items: [[String: Any]] = []
+        for c in vm.usbControllers {
+            for d in c.usbDevices {
+                var kind = "mass-storage"
+                #if compiler(>=6.4)
+                if #available(macOS 27.0, *), d is VZUSBPassthroughDevice { kind = "passthrough" }
+                #endif
+                items.append(["uuid": d.uuid.uuidString, "kind": kind,
+                              "hotplugged": kind == "passthrough" || hotplugUSB.contains(d.uuid)])
+            }
+        }
+        return ["ok": true, "items": items]
+    }
+
     func listPhysicalUSB(completion: @escaping ([String: Any]) -> Void) {
+        #if compiler(>=6.4)
         guard #available(macOS 27.0, *) else {
             completion(["ok": false, "error": "physical USB passthrough needs macOS 27+"])
             return
@@ -32,9 +71,13 @@ extension Runner {
             }
             completion(["ok": true, "items": items])
         } catch { completion(["ok": false, "error": error.localizedDescription]) }
+        #else
+        completion(["ok": false, "error": "physical USB passthrough needs a runner built with the macOS 27 SDK"])
+        #endif
     }
 
     func attachPhysicalUSB(registryID: UInt64, completion: @escaping ([String: Any]) -> Void) {
+        #if compiler(>=6.4)
         guard #available(macOS 27.0, *) else {
             completion(["ok": false, "error": "physical USB passthrough needs macOS 27+"])
             return
@@ -61,6 +104,9 @@ extension Runner {
         } catch { completion(["ok": false, "error": error.localizedDescription]) }
         #else
         completion(["ok": false, "error": "runner was built without AccessoryAccess"])
+        #endif
+        #else
+        completion(["ok": false, "error": "physical USB passthrough needs a runner built with the macOS 27 SDK"])
         #endif
     }
 

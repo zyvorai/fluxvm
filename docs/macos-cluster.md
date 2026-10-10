@@ -66,8 +66,7 @@ best host:
 The fleet uses it. `fluxvm-agent node` sends the host's Apple capabilities (`fluxvm-vz-runner host-capabilities`) plus free CPU,
 memory and its macOS guest count in every heartbeat, and `fluxvm-agent central` runs `apple_placement` for requests with `backend: vz`.
 Nodes without Apple capabilities are excluded for those requests. This was checked only on loopback: one real M4 node and two fake
-nodes registered by hand (see [macos.md](macos.md#what-is-verified)); there are no unit tests for the `vz` filtering in central yet,
-and no second Mac has been used. A scheduler outside the registry, such as Kairon, can still call the scorer itself. Also note that
+nodes registered by hand (see [macos.md](macos.md#what-is-verified)); central's `vz` filtering has unit tests, but no second Mac has been used. A scheduler outside the registry, such as Kairon, can still call the scorer itself. Also note that
 sandboxes restored from warm slots keep the address they had when the slot was built, so on one Mac a slot whose address is in use is
 skipped and that sandbox cold-boots instead.
 
@@ -92,7 +91,7 @@ Create a VM with `"backend": "vz"` (or `"auto"`, which resolves to `vz` on a Mac
   lifecycle, forwards, shares, snapshots, `fluxctl run`, stacks and agent sandboxes; see [macos.md](macos.md)); a Kairon `vz` Machine
   scheduled to the Mac and run through FluxVM. Container sandboxes ([oci-sandboxes.md](oci-sandboxes.md)): `scripts/oci-live-test.sh` passes on the same Mac (exit codes, exec, offline
   and allow-listed network, a private network, `linux/amd64` under Rosetta, a warm-pool claim); `scripts/vz-devices-live-test.sh` passes (extra disks, USB hot-plug, console ports, display size). Published ports, volumes, health checks, stacks and `--fleet` placement are unit-tested only.
-- **Verified by hand only:** a macOS 27 guest installed from an IPSW, cloned and reached over SSH ([macos.md](macos.md#macos-guests)). **Implemented, not verified on hardware:** installing macOS guests through the API (`apple.install`), first-boot keys, and snapshots of macOS guests. **Verified on loopback only:** `vz` placement in `fluxvm-agent central` (one real node plus fake nodes). **Not verified:** multi-Mac clusters on real hardware, Thunderbolt RDMA, the shared vmnet broker, physical USB passthrough, the other custom Virtio bulk operations (zero, copy, crc32), any throughput figure on this page.
+- **Verified by hand only:** a macOS 27 guest installed from an IPSW, cloned and reached over SSH ([macos.md](macos.md#macos-guests)). **Implemented, not verified on hardware:** installing macOS guests through the API (`apple.install`), first-boot keys, and snapshots of macOS guests. **Verified on loopback only:** `vz` placement in `fluxvm-agent central` (one real node plus fake nodes). **Not verified:** multi-Mac clusters on real hardware, Thunderbolt RDMA, the shared vmnet broker, physical USB passthrough, any throughput figure on this page.
 - **Roadmap (not FluxVM's job, listed for the whole stack):** sharding one model across Macs (EXO or MLX distributed), a
   topology view of Thunderbolt links, per-node temperature and tok/s, and a benchmark command.
 

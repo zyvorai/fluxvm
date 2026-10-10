@@ -2,6 +2,12 @@
 
 ## 0.4.0 (2026-10-10)
 
+### Fixed: `secure_boot` on `vz`
+- `secure_boot: true` was rejected for the `vz` backend by the scheduler's backend check ("secure_boot requires backend qemu"), so the
+  Apple EFI Secure Boot support could not be used through the API. `vz` is now allowed (a TPM is still refused). Checked on an
+  Apple M4: a Debian 13 cloud image boots with Secure Boot on (`SecureBoot=1`, `SetupMode=0` in the guest) and the node heartbeat
+  reports `secure_boot` and `rosetta` host capabilities. `secure-boot-status` cannot read the store while the VM runs.
+
 ### Fixed: macOS 27 follow-ups after hardware testing (PR #200)
 - Custom Virtio device id is now `0x3F` (PCI `1af4:107f`). As merged (`0xFF00`) the PCI device id fell outside the range Linux
   binds (`0x1040..0x107f`), so a guest saw the device but never attached a driver.
@@ -14,7 +20,7 @@
   versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is a bulk queue
   (`bulk_zero`/`fill`/`copy`/`crc32`). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`,
   `fluxvm_virtioctl`). Verified on an Apple M4 with a Debian 13 guest (after #200): `ping`, `echo`, `stats` and `capabilities`.
-  **Bulk queue:** `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack request buffer; it now uses a heap buffer and `bulk-fill` of 1 B to 1 MiB passes with a CRC that matches an independent computation (zero, copy and crc32 are not exercised).
+  **Bulk queue:** `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack request buffer; it now uses a heap buffer and all four bulk operations (fill, zero, copy, crc32; 1 B to 1 MiB) pass on a Debian 13 guest, with the guest checking the result and the CRC32 matching an independent computation. `bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` in `fluxvm_virtioctl` drive them (the ioctl gained an `op` field).
 - **Shared vmnet broker** (`macos/vmnetd`, `fluxvm-vmnetd`): VMs that name the same network with `apple.vmnet.name` share it
   through a broker over XPC ([docs/VMNET_BROKER.md](docs/VMNET_BROKER.md)). Not verified: on the test host the ad-hoc signed
   broker (`com.apple.vm.networking`) was killed at launch (SIP on), so the two-runner test did not run. Without a broker a
@@ -27,8 +33,7 @@
 - **Apple placement in the fleet**: `fluxvm-agent node` heartbeats carry the host's `apple` capabilities, and `fluxvm-agent
   central` uses `apple_placement` for requests with backend `vz` (nodes without Apple capabilities are excluded for `vz`; a plain
   `vz` request prefers the tightest fit). Verified on loopback with one real M4 node plus two fake nodes registered by hand; a
-  request with a named shared vmnet was placed on the only vmnet-capable node. Not verified: more than one real Mac. There are
-  no unit tests yet for the `vz` filtering in `central.rs`.
+  request with a named shared vmnet was placed on the only vmnet-capable node. Not verified: more than one real Mac. Central's `vz` filtering now has four unit tests (request parsing, nodes without Apple capabilities, feature requirements, the two-macOS-guest limit).
 - **Capability decode fix**: the Rust decode of `maximumVmCPUs` and `usbPassthroughAPI` uses explicit serde renames; checked
   against the real M4 output.
 - Unit tests on the M4: `fluxvm-apple` 49 (plus 1 `backend` integration test and 6 source-contract tests, which only grep Swift

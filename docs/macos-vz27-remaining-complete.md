@@ -28,15 +28,41 @@ The runner control protocol adds:
 
 `fluxvm-agent node` now works as a Mac fleet heartbeat source: macOS memory comes from `hw.memsize`, the node queries the signed VZ runner's new `host-capabilities` mode, counts active macOS guests, and reports `AppleHostCaps`. Central placement applies `fluxvm_scheduler::apple_placement::score` for automatic `backend: vz` requests while retaining existing capacity/security/selector scoring for every other backend.
 
+## 5. API coverage against the macOS 27 SDK
+
+Checked against WWDC26 session 224, the macOS 27 SDK headers (Virtualization, vmnet) and the macOS 27 release notes.
+`tests/vz27_api_coverage_contract.rs` fails if the runner stops using any API below.
+
+| Area | API | Where | Hardware |
+|---|---|---|---|
+| Guest provisioning | `VZMacGuestProvisioningOptions`, `setGuestProvisioning`, `guestProvisioningInvalid*` errors | `ModernFeatures.swift`, `SecureBoot.swift` | earlier gate |
+| EFI Secure Boot | `enableSecureBoot(platformKey:)`, `enableSecureBootUsingDefaultPlatformKey`, `disableSecureBoot`, `resetSecureBoot`, `enrollDefaultSecureBootSignatures`, `enrollSecureBootSignatures`, `isSecureBootEnabled`, `enrolledSecureBootSignatures`, `VZEFISignatureList`, `efi*` errors | `SecureBoot.swift` | enable/status/disable verified on the M4 |
+| Custom Virtio | provider, `didCreateDevice`, notifications, `DidAcceptDriverOk`, `WillStop/Pause/Resume/Reset`, `SaveState(forRestore:)`, `ShouldRestore`, `requestReset`, `guestMemoryMapping` | `CustomVirtio.swift` | control, bulk operations, driver-ready/pause/resume/stop, save/restore and `requestReset` (with the driver's NEEDS_RESET handler) verified |
+| USB | `VZUSBPassthroughDevice`, `VZUSBController.Delegate` (`usbPassthroughDeviceDidDisconnect`) | `USBPassthrough.swift` | not run (no consent helper) |
+| Configuration and view | `VZVirtualMachineConfiguration.label`, `VZVirtualMachineViewAdaptor` | `Runner.swift` | label verified; window not opened |
+| DiskImageKit | `VZDiskImageStorageDeviceAttachment(diskImage:)` | `ModernFeatures.swift` | earlier gate |
+| vmnet (macOS 26) | subnet, DHCP reservation, port forwards, IPv6 prefix, MTU, external interface, disable DHCP/DNS proxy/NAT44/NAT66/RA, serialization | `AdvancedNetwork.swift`, `VmnetOptions.swift`, `vmnetd` | not run |
+| Earlier APIs | network `attachmentWasDisconnected`, NBD delegate, `blockDeviceIdentifier`, `startUpFromMacOSRecovery`, Rosetta availability/install/caching, save/restore for macOS guests | `Runner.swift`, `ModernFeatures.swift` | Rosetta availability verified |
+
+Not applicable: `VZCustomVirtioDevice` has no host interrupt call (completions interrupt the guest), and vmnet has no DHCP pool
+setter, so `dhcp_start`/`dhcp_end` stay refused. Release-note workarounds: passed-through USB devices are detached before
+`save` (174267926), and `save` is refused while a hot-plugged USB disk is attached (177528319).
+
 ## Hardware status (2026-10-10, one Apple M4, macOS 27.2)
 
 Details in [macos-architecture.md](macos-architecture.md#14-what-is-verified).
 
 1. Runner `host-capabilities`: verified. Compile of the vmnetd and USB helper: built, but both were killed at launch (SIGKILL) under ad-hoc signing on a SIP-on host.
-2. Linux guest with `virtio_flux.ko`: after PR #200 (id `0x3F`, kernel 6.12 build fixes), `ping`, `echo`, `stats` and `capabilities` work. `bulk-test` (queue 1, bulk-fill) passes after the driver stopped using a stack buffer for its request; the other bulk operations are not exercised.
+2. Linux guest with `virtio_flux.ko`: after PR #200 (id `0x3F`, kernel 6.12 build fixes), `ping`, `echo`, `stats` and `capabilities` work. all four bulk operations (queue 1) pass after the driver stopped using a stack buffer for its request; sizes up to 1 MiB.
 3. Two runners on one named vmnet network: not run (broker could not start).
 4. Accessory Access consent, USB list and attach: not run (helper could not start; no USB devices attached).
 5. Fleet placement: verified only on loopback with one real Mac and two fake nodes; no second Mac.
+6. EFI Secure Boot: verified with an EFI guest on an empty disk: default keys enrolled (2 KEK, 2 db, 26 dbx), `secure-boot-status`
+   reports enabled, `secure_boot: false` disables it and keeps the keys. Through the API, `secure_boot: true` for `vz` was rejected by the scheduler ("requires backend qemu"); fixed in the follow-up PR. After the fix a stock Debian 13 cloud image boots with Secure Boot on (the guest reads `SecureBoot=1`, `SetupMode=0` from efivars, and the runner emits a `secure-boot` event). `secure-boot-status` could not read the variable store while the VM was running ("EFI variable store is already in use"); it now
+   returns the state read just before start (`"as_of": "boot"`), verified on the same Debian guest (enabled, 2 KEK, 2 db, 26 dbx).
+7. Custom Virtio save/restore: Debian 13 guest with `virtio_flux.ko`, snapshot, stop, `start-from-snapshot`. The guest resumed without
+   a reboot, `ping` and `echo` answered, and the device counters continued from the saved values. Without `supportsSaveRestore` the
+   save failed with "Unsupported custom virtio device in configuration"; the runner now sets it.
 
 ## Production gates
 
