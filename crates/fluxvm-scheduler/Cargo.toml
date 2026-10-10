@@ -22,6 +22,7 @@ fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 fluxvm-vsock-client = { path = "../fluxvm-vsock-client" }
 fluxvm-cgroup = { path = "../fluxvm-cgroup" }
 fluxvm-procbox = { path = "../fluxvm-procbox" }
+fluxvm-oci-init = { path = "../fluxvm-oci-init" }
 anyhow = "1"
 base64 = "0.22"
 libc = "0.2"

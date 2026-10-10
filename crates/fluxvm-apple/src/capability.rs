@@ -363,6 +363,32 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                 );
             }
         }
+        if macos_guest && !apple.tagged_shares.is_empty() {
+            bail!("apple.tagged_shares is a Linux-guest feature");
+        }
+        let mut tags = std::collections::HashSet::new();
+        for s in &apple.tagged_shares {
+            // virtiofs tags are at most 36 bytes; `fsN` is taken by shared_folders.
+            let ok = !s.tag.is_empty()
+                && s.tag.len() <= 36
+                && s.tag
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                && !(s.tag.starts_with("fs") && s.tag[2..].bytes().all(|b| b.is_ascii_digit()))
+                && s.tag != "rosetta";
+            if !ok {
+                bail!("apple.tagged_shares tag {:?} is invalid or reserved", s.tag);
+            }
+            if !tags.insert(s.tag.as_str()) {
+                bail!("apple.tagged_shares tag {:?} is used twice", s.tag);
+            }
+            if !s.host_path.is_absolute() {
+                bail!(
+                    "apple.tagged_shares path {} must be absolute",
+                    s.host_path.display()
+                );
+            }
+        }
     }
     reject!(req.firmware.is_some(), "firmware overrides");
     reject!(
@@ -742,7 +768,7 @@ mod tests {
 
     #[test]
     fn direct_kernel_boot_is_for_linux_guests() {
-        let ok = r#""kernel":"/k/Image","initrd":"/k/initrd","kernel_args":"console=hvc0","apple":{"root_read_only":true,"extra_disks":[{"path":"/d/b.raw","read_only":true}]}"#;
+        let ok = r#""kernel":"/k/Image","initrd":"/k/initrd","kernel_args":"console=hvc0","apple":{"root_read_only":true,"extra_disks":[{"path":"/d/b.raw","read_only":true}],"tagged_shares":[{"tag":"fluxvm-meta","host_path":"/m","read_only":true}]}"#;
         assert!(validate_request(&req(ok)).is_ok());
         for (json, needle) in [
             (
@@ -759,6 +785,22 @@ mod tests {
             (
                 r#""apple":{"guest_os":"macos","extra_disks":[{"path":"/b.raw"}]}"#,
                 "Linux-guest",
+            ),
+            (
+                r#""apple":{"tagged_shares":[{"tag":"fs0","host_path":"/m"}]}"#,
+                "reserved",
+            ),
+            (
+                r#""apple":{"tagged_shares":[{"tag":"a b","host_path":"/m"}]}"#,
+                "invalid",
+            ),
+            (
+                r#""apple":{"tagged_shares":[{"tag":"m","host_path":"/m"},{"tag":"m","host_path":"/n"}]}"#,
+                "twice",
+            ),
+            (
+                r#""apple":{"tagged_shares":[{"tag":"fluxvm-meta","host_path":"meta"}]}"#,
+                "absolute",
             ),
         ] {
             let err = validate_request(&req(json)).expect_err(json).to_string();

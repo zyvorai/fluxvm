@@ -651,6 +651,9 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         )
         .route("/v1/images/catalog/clean", post(clean_catalog))
         .route("/v1/images/catalog", get(list_catalog))
+        .route("/v1/oci/images", get(list_oci_images).post(pull_oci_image))
+        .route("/v1/oci/images/{what}", delete(remove_oci_image))
+        .route("/v1/oci/prune", post(prune_oci_images))
         .route("/v1/pools", post(create_pool).get(list_pools))
         .route("/v1/pools/{name}", get(get_pool).delete(delete_pool))
         .route("/v1/pools/{name}/claim", post(claim_pool))
@@ -4204,6 +4207,41 @@ async fn clean_catalog(
     require_admin(role)?;
     let removed = m.clean_catalog_downloads().await?;
     Ok(Json(json!({"removed": removed})))
+}
+
+async fn list_oci_images(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(json!({"items": m.oci_list()?})))
+}
+
+#[derive(Deserialize)]
+struct OciPullRequest {
+    image: String,
+}
+
+async fn pull_oci_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Json(req): Json<OciPullRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.oci_pull(&req.image).await?)))
+}
+
+async fn remove_oci_image(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(what): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!({"removed": m.oci_remove(&what)?})))
+}
+
+async fn prune_oci_images(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.oci_prune().await?)))
 }
 
 async fn create_pool(

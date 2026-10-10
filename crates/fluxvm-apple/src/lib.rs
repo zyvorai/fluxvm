@@ -19,8 +19,8 @@ pub use capability::{
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use runner::{
-    ForwardConfig, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig, adopt_macos_template,
-    clone_file, find_runner, ip_file, read_guest_ip, snapshot_dir,
+    EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig,
+    adopt_macos_template, clone_file, find_runner, ip_file, read_guest_ip, snapshot_dir,
 };
 
 use anyhow::{Context, Result, bail};

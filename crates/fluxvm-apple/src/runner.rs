@@ -13,7 +13,7 @@ use std::{
 };
 
 /// JSON handed to `fluxvm-vz-runner --config`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RunnerConfig {
     pub id: String,
     pub workspace: PathBuf,
@@ -146,6 +146,11 @@ impl RunnerConfig {
                     host_path: f.host_path.clone(),
                     read_only: f.read_only,
                 })
+                .chain(apple.tagged_shares.iter().map(|s| ShareConfig {
+                    tag: s.tag.clone(),
+                    host_path: s.host_path.clone(),
+                    read_only: s.read_only,
+                }))
                 .chain(
                     (apple.guest_os == AppleGuest::Macos && apple.firstboot.is_some()).then(|| {
                         ShareConfig {
@@ -345,6 +350,127 @@ pub fn find_runner() -> Result<PathBuf> {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+/// A headless direct-boot Linux VM with no network card that runs until its guest powers off (the OCI rootfs builder).
+#[derive(Debug, Clone)]
+pub struct OneShotVm {
+    pub workspace: PathBuf,
+    pub disk: PathBuf,
+    pub kernel: PathBuf,
+    pub initrd: PathBuf,
+    pub cmdline: String,
+    pub cpus: u8,
+    pub memory_mib: u64,
+    pub shares: Vec<ShareConfig>,
+}
+
+impl OneShotVm {
+    pub fn runner_config(&self) -> Result<RunnerConfig> {
+        let id = uuid::Uuid::new_v4();
+        let id8: String = id.simple().to_string().chars().take(8).collect();
+        Ok(RunnerConfig {
+            id: id.to_string(),
+            workspace: self.workspace.clone(),
+            cpus: self.cpus,
+            memory_mib: self.memory_mib,
+            guest_os: "linux",
+            disk: self.disk.clone(),
+            mac: stable_mac(&self.workspace)?,
+            control_socket: control_socket_path(&id8)?,
+            serial_log: self.serial_log(),
+            ip_file: ip_file(&self.workspace),
+            display_count: 1,
+            display_width: 1280,
+            display_height: 800,
+            display_ppi: 220,
+            shares: self.shares.clone(),
+            network_none: true,
+            kernel: Some(self.kernel.clone()),
+            initrd: Some(self.initrd.clone()),
+            cmdline: Some(self.cmdline.clone()),
+            ..RunnerConfig::default()
+        })
+    }
+
+    pub fn serial_log(&self) -> PathBuf {
+        self.workspace.join("serial.log")
+    }
+
+    /// Boots the VM and waits for the runner to exit (the guest powered off), killing it after `timeout`.
+    /// Returns the guest's serial console output.
+    pub async fn run(&self, timeout: std::time::Duration) -> Result<String> {
+        let runner = find_runner()?;
+        let conf = self.runner_config()?;
+        let conf_path = conf.write(&self.workspace)?;
+        let log = open_runner_log(&self.workspace)?;
+        let mut child = tokio::process::Command::new(&runner)
+            .args(["run", "--config"])
+            .arg(&conf_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone().context("cloning the runner log")?)
+            .stderr(log)
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .with_context(|| format!("starting {}", runner.display()))?;
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(s) => s?,
+            Err(_) => {
+                let _ = child.kill().await;
+                bail!(
+                    "the VM did not power off within {}s: {}",
+                    timeout.as_secs(),
+                    tail_runner_log(&self.workspace)
+                );
+            }
+        };
+        let serial = fs::read_to_string(self.serial_log()).unwrap_or_default();
+        if !status.success() {
+            bail!(
+                "the Apple runner exited ({status}): {}",
+                tail_runner_log(&self.workspace)
+            );
+        }
+        Ok(serial)
+    }
+}
+
+#[cfg(test)]
+mod one_shot_tests {
+    use super::*;
+
+    #[test]
+    fn one_shot_vm_is_headless_offline_direct_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = OneShotVm {
+            workspace: dir.path().into(),
+            disk: dir.path().join("disk.raw"),
+            kernel: "/k/oci-kernel".into(),
+            initrd: "/k/oci-initrd".into(),
+            cmdline: "console=hvc0".into(),
+            cpus: 2,
+            memory_mib: 1024,
+            shares: vec![ShareConfig {
+                tag: "fluxvm-meta".into(),
+                host_path: dir.path().join("meta"),
+                read_only: true,
+            }],
+        };
+        let c = vm.runner_config().unwrap();
+        assert_eq!(c.guest_os, "linux");
+        assert!(
+            c.network_none && !c.window && c.vsock_socket.is_none() && c.egress_allow.is_empty()
+        );
+        assert_eq!(c.kernel.as_deref(), Some(Path::new("/k/oci-kernel")));
+        assert_eq!(c.shares[0].tag, "fluxvm-meta");
+        let json = serde_json::to_value(&c).unwrap();
+        assert_eq!(json["cmdline"], "console=hvc0");
+        assert_eq!(
+            json["serial_log"],
+            dir.path().join("serial.log").display().to_string()
+        );
+    }
 }
 
 #[cfg(test)]

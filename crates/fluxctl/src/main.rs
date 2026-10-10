@@ -634,6 +634,12 @@ enum Command {
         #[command(subcommand)]
         command: CatalogCommand,
     },
+    /// OCI images for `vz` sandboxes (macOS): each image's rootfs is built once per manifest digest and cached
+    /// under `<state_dir>/oci`. See docs/oci-sandboxes.md.
+    Oci {
+        #[command(subcommand)]
+        command: OciCommand,
+    },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
     /// Show one catalog entry (machinectl `image-status` / `show-image`).
@@ -1503,6 +1509,18 @@ enum GroupCommand {
     Delete {
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum OciCommand {
+    /// Pull an image (linux/arm64) and build its rootfs, e.g. `alpine:3.22` or `ghcr.io/org/app@sha256:…`.
+    Pull { image: String },
+    /// List cached images, most recently used first.
+    Ls,
+    /// Remove a cached image by digest, 12+ character digest prefix, or the reference it was pulled as.
+    Rm { image: String },
+    /// Remove every cached image no sandbox was started from, and every blob no remaining image needs.
+    Prune,
 }
 
 #[derive(Subcommand)]
@@ -4180,6 +4198,15 @@ async fn main() -> Result<()> {
                 println!("{{\"deleted\":\"ok\"}}");
             }
         },
+        Command::Oci { command } => {
+            let out = match command {
+                OciCommand::Pull { image } => serde_json::to_value(m.oci_pull(&image).await?)?,
+                OciCommand::Ls => serde_json::to_value(m.oci_list()?)?,
+                OciCommand::Rm { image } => serde_json::json!({"removed": m.oci_remove(&image)?}),
+                OciCommand::Prune => serde_json::to_value(m.oci_prune().await?)?,
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
+        }
         Command::Catalog { command } => match command {
             CatalogCommand::Keygen => {
                 let (private_b64, public_b64) = image::catalog::generate_keypair();

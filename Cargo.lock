@@ -2599,6 +2599,7 @@ dependencies = [
  "fluxvm-hypervisor",
  "fluxvm-image",
  "fluxvm-network",
+ "fluxvm-oci-init",
  "fluxvm-procbox",
  "fluxvm-qemu",
  "fluxvm-storage",

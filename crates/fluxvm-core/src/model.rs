@@ -602,6 +602,19 @@ pub struct AppleSpec {
     /// Extra raw disks after the root (and seed) disk, in order: `/dev/vdb`, `/dev/vdc`, … for a direct-boot guest.
     #[serde(default)]
     pub extra_disks: Vec<AppleDisk>,
+    /// virtiofs shares with fixed tags for a Linux guest's own init to mount (an OCI sandbox's `fluxvm-meta`),
+    /// alongside the positional `fs0`, `fs1`, … of `shared_folders`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tagged_shares: Vec<AppleShare>,
+}
+
+/// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleShare {
+    pub tag: String,
+    pub host_path: PathBuf,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 /// A raw disk image attached to a `vz` Linux guest as a virtio block device.
@@ -658,6 +671,7 @@ impl Default for AppleSpec {
             egress_allow: Vec::new(),
             root_read_only: false,
             extra_disks: Vec::new(),
+            tagged_shares: Vec::new(),
         }
     }
 }

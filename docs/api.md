@@ -90,6 +90,10 @@ POST   /v1/images/catalog/{name}/clone
 POST   /v1/images/catalog/{name}/export
 POST   /v1/images/catalog/{name}/read-only
 POST   /v1/images/catalog/clean
+GET    /v1/oci/images                    # cached OCI rootfs images for vz sandboxes; see oci-sandboxes.md
+POST   /v1/oci/images                    # {"image": "alpine:3.22"}; admin; pull and build the rootfs
+DELETE /v1/oci/images/{digest|reference} # admin
+POST   /v1/oci/prune                     # admin; drop images no sandbox was started from, and unused blobs
 POST   /v1/pools
 GET    /v1/pools
 GET    /v1/pools/{name}
