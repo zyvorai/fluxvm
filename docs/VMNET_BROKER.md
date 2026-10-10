@@ -18,6 +18,6 @@ The broker should own:
 Persist the network specification under `state_dir/apple-networks/*.json`.
 Do not attempt to turn the XPC serialization object into JSON/text.
 
-This bundle intentionally implements the per-VM network first and gives the
+FluxVM currently implements only the per-VM network (NOT shareable between VMs) and gives the
 exact broker contract for the next merge; the XPC transport itself must be
 compiled and hardware-tested on macOS 27 before being called production-ready.

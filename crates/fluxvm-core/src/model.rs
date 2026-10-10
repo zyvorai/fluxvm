@@ -492,7 +492,7 @@ fn default_vmnet_protocol() -> String {
     "tcp".into()
 }
 
-/// A per-VM vmnet network (macOS 26+). VMs sharing one network need the broker in `docs/vmnet-broker.md`.
+/// A per-VM vmnet network (macOS 26+). VMs sharing one network need the broker in `docs/VMNET_BROKER.md`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppleVmnetSpec {
     pub mode: AppleVmnetMode,
@@ -500,6 +500,11 @@ pub struct AppleVmnetSpec {
     pub subnet: String,
     /// IPv4 subnet mask, for example `255.255.255.0`. vmnet's DHCP serves the whole subnet.
     pub mask: String,
+    /// Accepted for wire compatibility and refused at admission: the vmnet SDK has no DHCP pool setter.
+    #[serde(default)]
+    pub dhcp_start: Option<String>,
+    #[serde(default)]
+    pub dhcp_end: Option<String>,
     /// Stable DHCP reservation for this VM's MAC address.
     #[serde(default)]
     pub reserved_ip: Option<String>,

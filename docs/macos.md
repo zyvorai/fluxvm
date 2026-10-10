@@ -205,9 +205,11 @@ These compile against the macOS 27 SDK and are validated at admission, but have 
   provisioning profile).
 - **vmnet networks (macOS 26+):** `vmnet: {"mode": "shared" | "host-only", "subnet": "192.168.105.0", "mask": "255.255.255.0",
   "reserved_ip": "192.168.105.10", "forwards": [{"protocol": "tcp", "host_port": 8080, "guest_port": 80, "guest_ip": "192.168.105.10"}]}`
-  gives the VM its own network with a stable DHCP reservation for its MAC and TCP/UDP host forwards. The SDK has no DHCP pool setter,
-  so the whole subnet is served. Each runner owns its network; VMs sharing one network need the broker in [vmnet-broker.md](vmnet-broker.md).
-  Exclusive with `bridge_interface`.
+  gives the VM its own network with a stable DHCP reservation for its MAC and TCP/UDP host forwards. Admission checks that the mask is
+  contiguous (/30 or wider) and that `reserved_ip` and each forward's `guest_ip` are inside the subnet. The SDK has no DHCP pool setter,
+  so the whole subnet is served and `dhcp_start`/`dhcp_end` are refused. Each runner owns its network; VMs sharing one network need the
+  broker in [VMNET_BROKER.md](VMNET_BROKER.md). Exclusive with `bridge_interface`. IP discovery and the 127.0.0.1 `network.forwards`
+  relay read the NAT lease file, so use `vmnet.forwards` instead.
 - **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a discoverable vendor Virtio device; a host-side provider is a follow-up.
 - **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
   the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.

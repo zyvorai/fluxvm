@@ -23,7 +23,7 @@ extension Runner {
         if let spec = cfg.vmnet {
             #if canImport(vmnet)
             if #available(macOS 26.0, *) {
-                return try FluxVMNetNetwork(spec: spec, macAddress: cfg.mac ?? "").attachment()
+                return try FluxVMNetNetwork(spec: spec, macAddress: cfg.mac).attachment()
             }
             #endif
             throw modernError("apple.vmnet needs a macOS 26+ host")
