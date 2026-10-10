@@ -9,6 +9,7 @@ pub mod oci;
 pub mod oci_boot;
 pub mod oci_registry;
 pub mod ova;
+mod qcow2;
 pub mod qga;
 pub mod raw_ext4;
 pub mod storage;
@@ -640,6 +641,18 @@ async fn convert_image(cfg: &Config, src: &Path, out: &Path, format: &str) -> Re
         })
         .await
         .context("VMDK conversion worker panicked")?;
+        match result {
+            Ok(vmdk::ConvertResult::Converted) => return Ok(()),
+            Ok(vmdk::ConvertResult::Unsupported) => {}
+            Err(err) => return Err(err),
+        }
+    }
+    if format == "raw" && qcow2::is_qcow2(src)? {
+        let source = src.to_owned();
+        let target = out.to_owned();
+        let result = tokio::task::spawn_blocking(move || qcow2::convert_to_raw(&source, &target))
+            .await
+            .context("qcow2 conversion worker panicked")?;
         match result {
             Ok(vmdk::ConvertResult::Converted) => return Ok(()),
             Ok(vmdk::ConvertResult::Unsupported) => {}
