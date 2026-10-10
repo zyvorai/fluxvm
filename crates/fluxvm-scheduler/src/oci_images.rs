@@ -154,22 +154,23 @@ async fn registry_password(c: &OciRegistryCredential) -> Result<String> {
     Ok(password)
 }
 
-static BUILD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+/// One lock per rootfs file, so state dirs (and tests) never share a lock.
+static BUILD_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn build_lock(digest: &str) -> Arc<tokio::sync::Mutex<()>> {
-    BUILD_LOCKS
+fn build_lock(cfg: &Config, digest: &str) -> Result<Arc<tokio::sync::Mutex<()>>> {
+    Ok(BUILD_LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entry(digest.to_string())
+        .entry(rootfs_path(cfg, digest)?)
         .or_default()
-        .clone()
+        .clone())
 }
 
 /// The cached rootfs for `image`, building it first if needed. Concurrent callers for one digest share one build.
 pub async fn ensure_rootfs(cfg: &Config, image: &PulledImage) -> Result<PathBuf> {
     let path = rootfs_path(cfg, &image.manifest_digest)?;
-    let lock = build_lock(&image.manifest_digest);
+    let lock = build_lock(cfg, &image.manifest_digest)?;
     let _held = lock.lock().await;
     if !path.is_file() {
         build_rootfs(cfg, image, &path).await?;
@@ -377,7 +378,7 @@ fn remove_entry(cfg: &Config, digest: &str) -> Result<u64> {
 /// Removes one cached rootfs. Running sandboxes keep their own clones and are not affected.
 pub fn remove(cfg: &Config, what: &str) -> Result<OciImageEntry> {
     let entry = find(cfg, what)?;
-    let lock = build_lock(&entry.manifest_digest);
+    let lock = build_lock(cfg, &entry.manifest_digest)?;
     let _held = lock
         .try_lock()
         .map_err(|_| anyhow::anyhow!("{what} is being built"))?;
@@ -390,7 +391,7 @@ pub fn prune(cfg: &Config, in_use: &HashSet<String>) -> Result<OciPruneReport> {
     let mut report = OciPruneReport::default();
     let mut keep_blobs: HashSet<String> = HashSet::new();
     for e in list(cfg)? {
-        let lock = build_lock(&e.manifest_digest);
+        let lock = build_lock(cfg, &e.manifest_digest)?;
         let busy = lock.try_lock().is_err();
         if in_use.contains(&e.manifest_digest) || busy {
             keep_blobs.insert(e.config_digest.clone());
@@ -401,11 +402,12 @@ pub fn prune(cfg: &Config, in_use: &HashSet<String>) -> Result<OciPruneReport> {
         report.removed_images.push(e.manifest_digest);
     }
     // A build in progress has no entry yet; its blobs must survive.
+    let dir = rootfs_dir(cfg);
     if BUILD_LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .values()
-        .any(|l| l.try_lock().is_err())
+        .iter()
+        .any(|(path, l)| path.starts_with(&dir) && l.try_lock().is_err())
     {
         return Ok(report);
     }

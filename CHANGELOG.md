@@ -26,6 +26,25 @@
   `apple.oci_kernel`, `oci_initrd`, `oci_cmdline` and `oci_builder_memory_mib`.
 - `scripts/oci-live-test.sh` is the hardware test (not yet run on a Mac).
 
+### Added: running services in container sandboxes
+- **Published ports**: `oci.ports` (`HOST:CONTAINER`; `fluxctl sandbox run -p`, MCP `oci_ports`) become runner forwards on the
+  Mac's `127.0.0.1`. Init prints `VELORA-IP <address>` after its DHCP lease so the runner can reach the container.
+  `oci.expose` relays ports to other guests at the NAT gateway, and `oci.gateway_hosts` names the gateway in the container's
+  `/etc/hosts`.
+- **Named volumes** for container sandboxes (`volumes`, `fluxctl sandbox run -v NAME:/path[:ro]`): virtiofs shares tagged
+  `fluxvm-vol<N>` that init mounts before switching into the image's root. Containers may mount them anywhere except the paths
+  init manages.
+- **Restart policy and health checks**: `oci.restart` (`no` | `on-failure` | `always`), `oci.max_restarts` and `oci.healthcheck`.
+  Init restarts with 1-60 s backoff and stops an unhealthy process when a policy is set. `/logs` reports `restarts` and `health`
+  (`FLUXVM-RESTART`, `FLUXVM-HEALTH` markers). `fluxctl sandbox run --restart --max-restarts --health-cmd --health-interval`.
+- **Registry passwords from the macOS Keychain**: `keychain_service` in `[[apple.oci_registry_credentials]]` reads the password
+  with `security find-generic-password` at pull time instead of storing it in the config.
+- **Container services in stacks** ([docs/macos-stacks.md](docs/macos-stacks.md#container-services)): `container = "IMAGE"` with
+  `command`, `entrypoint`, `env`, `restart`, named `volumes`, and `ready` as the health check that `up` waits for. They can be
+  mixed with VM services. **`fluxctl import-compose`** converts a `docker-compose.yml` and lists what it could not carry over.
+- Fixed: OCI rootfs build locks are keyed by rootfs path, so `prune` in one state dir no longer skips blob cleanup while another
+  state dir is building.
+
 ### Added: Mac Studio options, macOS guests through the API, and many small agent VMs per Mac
 - **Mac Studio options on `vz`** ([docs/macos.md](docs/macos.md)): up to eight displays, Linux clipboard (SPICE), bridged networking
   (`apple.bridge_interface`, needs the networking entitlement), vmnet networks on macOS 26+ (`apple.vmnet`: shared or host-only,

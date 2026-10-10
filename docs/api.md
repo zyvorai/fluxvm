@@ -100,13 +100,13 @@ GET    /v1/pools/{name}
 DELETE /v1/pools/{name}
 POST   /v1/pools/{name}/claim            # ?ready=exec adds first_command_ms + phases
 POST   /v1/pools/{name}/resize
-POST   /v1/sandboxes                     # optional volumes: [{name, guest_path, read_only}] (QEMU template); vz: "oci": {"image", ...} (oci-sandboxes.md)
+POST   /v1/sandboxes                     # optional volumes: [{name, guest_path, read_only}] (QEMU template or oci); vz: "oci": {"image", "ports"?, "restart"?, "healthcheck"?, ...} (oci-sandboxes.md)
 GET    /v1/sandboxes
 POST   /v1/sandboxes/{id}/snapshot
 POST   /v1/sandboxes/{id}/fs/read
 POST   /v1/sandboxes/{id}/fs/write
 POST   /v1/sandboxes/{id}/process        # {"command", "timeout_seconds"?, "policy"?} or {"process": {"argv", "env"?, "cwd"?}} (no shell; agent); see guest-exec-policy.md
-GET    /v1/sandboxes/{id}/logs           # ?lines=N (200); console tail + container exit_code / init_error
+GET    /v1/sandboxes/{id}/logs           # ?lines=N (200); console tail + container exit_code / init_error / restarts / health
 POST   /v1/sandboxes/{id}/dry-run        # {"command", "paths"}; procbox: workspace copy; flux-vm/qemu/firecracker: snapshot/restore
 POST   /v1/sandboxes/{id}/speculate      # {"command", "timeout_seconds"?, "paths"?, "ttl_seconds"?}; admin; returns a pending changeset
 GET    /v1/sandboxes/{id}/changesets     # {"items": [...]}, newest first

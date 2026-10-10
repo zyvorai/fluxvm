@@ -29,6 +29,51 @@ after_up = ["…"]                 # run over SSH once all services are up, only
 
 Unknown keys are errors. Names are `a-z`, `0-9` and `-`.
 
+## Container services
+
+A service with `container = "IMAGE"` runs that OCI image as a container sandbox: its own small VM, booted straight into the image,
+with no SSH and no cloud-init ([oci-sandboxes.md](oci-sandboxes.md)). Container and VM services can be mixed in one stack.
+
+```toml
+name = "shop"
+[service.db]
+container = "postgres:17"
+env = ["POSTGRES_PASSWORD=dev"]
+expose = [5432]                            # reachable by other services as db:5432
+volumes = ["pgdata:/var/lib/postgresql/data"]   # NAME:/path[:ro]: a named, persistent volume
+ready = "pg_isready -U postgres"           # health check inside the container; dependents wait for it
+restart = "always"                         # no (default), on-failure, always
+[service.web]
+container = "ghcr.io/acme/web:1"
+command = ["gunicorn", "app:app", "-b", "0.0.0.0:8000"]
+ports = ["8000:8000"]
+depends_on = ["db"]
+```
+
+- `command`, `entrypoint`, `env` and `restart` are for container services only; `image`, `user`, `packages`, `run` and `after_up`
+  are for VM services only. Mixing them is an error.
+- `volumes` are named volumes (`NAME:/path[:ro]`, kept in the daemon's volumes directory) rather than folders from your checkout.
+- `ready` becomes the container's health check, run as `/bin/sh -c "<ready>"` every 2 s; `up` waits until it reports healthy. An
+  image without `/bin/sh` cannot use `ready`.
+- The root filesystem is writable, as in Docker. `cpus` and `memory_mib` default to 1 and 512 MiB unless set here or in
+  `[defaults]`.
+- The services a container `depends_on` resolve by name inside it (both `db` and `shop-db`), through `/etc/hosts` entries init
+  writes. VM services get every service name through the `/etc/hosts` block described below, so they reach container services too.
+
+### Importing a docker-compose.yml
+
+```bash
+fluxctl import-compose docker-compose.yml --out fluxvm.toml   # or without --out to print it
+```
+
+`import-compose` converts the parts of Compose that map onto container services: `image`, `command`, `entrypoint`,
+`environment`, `ports`, `expose`, named `volumes`, `depends_on`, `restart` (`unless-stopped` becomes `always`), `healthcheck`
+(becomes `ready`), `cpus` and `mem_limit`. It prints a warning for everything it drops: bind mounts, UDP ports, ports bound to
+an address other than `127.0.0.1`, exposed ports below 1024, and keys it does not know (`privileged`, `secrets`, …). `build` is
+an error: build and push the image first. Service names are lower-cased and `_` becomes `-`. The stack name comes from `--name`,
+the Compose `name:`, or the directory. Review the result before `fluxctl up`; in particular, Compose services reach each other
+on any port, while here only `expose`d ports (1024 and up) are relayed.
+
 ## How services find each other
 
 VMs on the Mac's NAT **cannot reach each other directly** (Virtualization.framework isolates them; each can reach only the Mac, at the
@@ -52,5 +97,7 @@ State lives in the daemon's VM labels, so it also works with `--server` and does
 ## Limits
 
 - Stack VMs cold-boot (about 10 s each; independent services start in parallel). They do not use the warm snapshots `fluxctl run` uses.
-- No health-check restarts, secrets, or build steps. `run` only runs at first boot; use `after_up` for steps that need other services.
+- No secrets or build steps. Restarts and health checks are for container services only. `run` only runs at first boot; use
+  `after_up` for steps that need other services.
+- A container service only resolves the names of the services it `depends_on`. The names are fixed when it is created.
 - Verified on an Apple M4 with the `vz` backend only.

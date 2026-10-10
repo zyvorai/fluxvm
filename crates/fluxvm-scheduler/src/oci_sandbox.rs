@@ -406,7 +406,7 @@ impl VmManager {
         let forwards = forwards(&oci, &taken)?;
         let tenant = token_tenant.map(str::to_owned);
         let hosts = self
-            .resolve_volumes(tenant.as_deref(), &req.volumes)
+            .resolve_volumes(tenant.as_deref(), &req.volumes, true)
             .await?;
         let mut create = build_create(
             &name,

@@ -133,6 +133,9 @@ pub const MAX_SANDBOX_VOLUMES: usize = 4;
 /// is interpolated into generated cloud-init commands, so it is both
 /// character-restricted and kept away from system directories.
 const VOLUME_GUEST_ROOTS: &[&str] = &["home", "mnt", "data", "srv", "opt", "workspace", "root"];
+/// In a container sandbox init mounts volumes into the image's root itself (no cloud-init), so any path works except
+/// those init mounts over afterwards.
+const CONTAINER_RESERVED_ROOTS: &[&str] = &["proc", "sys", "dev", "tmp", "run", ".fluxvm"];
 
 fn valid_volume_component(s: &str) -> bool {
     let mut chars = s.chars();
@@ -143,7 +146,7 @@ fn valid_volume_component(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
-fn validate_volume(v: &SandboxVolume) -> Result<()> {
+fn validate_volume(v: &SandboxVolume, container: bool) -> Result<()> {
     if !valid_volume_component(&v.name) {
         bail!(
             "invalid volume name {:?}: use 1-63 characters from [a-z0-9._-], starting with a letter or digit",
@@ -167,6 +170,15 @@ fn validate_volume(v: &SandboxVolume) -> Result<()> {
         .any(|c| c.is_empty() || *c == "." || *c == "..")
     {
         bail!("invalid guest_path {path:?}: empty, '.' and '..' components are not allowed");
+    }
+    if container {
+        if CONTAINER_RESERVED_ROOTS.contains(&components[0]) {
+            bail!(
+                "guest_path {path:?}: /{} is managed by the sandbox's init",
+                components[0]
+            );
+        }
+        return Ok(());
     }
     if !VOLUME_GUEST_ROOTS.contains(&components[0]) {
         bail!(
@@ -528,7 +540,7 @@ impl VmManager {
             );
         }
         let hosts = self
-            .resolve_volumes(create.tenant.as_deref(), volumes)
+            .resolve_volumes(create.tenant.as_deref(), volumes, false)
             .await?;
         for (v, host) in volumes.iter().zip(hosts) {
             create
@@ -544,17 +556,18 @@ impl VmManager {
 
     /// The persistent host directory of each volume (`<volumes_dir>/<tenant>/<name>`, created on first use), after
     /// checking names, mount points and that no other VM has one of them attached (as a shared folder, or as a
-    /// container sandbox's volume share).
+    /// container sandbox's volume share). `container` relaxes where they may be mounted.
     pub(crate) async fn resolve_volumes(
         &self,
         tenant: Option<&str>,
         volumes: &[SandboxVolume],
+        container: bool,
     ) -> Result<Vec<PathBuf>> {
         if volumes.len() > MAX_SANDBOX_VOLUMES {
             bail!("at most {MAX_SANDBOX_VOLUMES} volumes per sandbox");
         }
         for (i, v) in volumes.iter().enumerate() {
-            validate_volume(v)?;
+            validate_volume(v, container)?;
             if volumes[..i]
                 .iter()
                 .any(|o| o.name == v.name || o.guest_path == v.guest_path)
@@ -965,7 +978,7 @@ mod tests {
             ("a", "/mnt/deep/er-path_1.2"),
             ("w", "/workspace"),
         ] {
-            validate_volume(&volume(n, p)).unwrap_or_else(|e| panic!("{n} {p}: {e}"));
+            validate_volume(&volume(n, p), false).unwrap_or_else(|e| panic!("{n} {p}: {e}"));
         }
     }
 
@@ -983,7 +996,7 @@ mod tests {
             &"x".repeat(64),
         ] {
             assert!(
-                validate_volume(&volume(n, "/home/a")).is_err(),
+                validate_volume(&volume(n, "/home/a"), false).is_err(),
                 "name {n:?}"
             );
         }
@@ -1011,7 +1024,30 @@ mod tests {
             "/home/$(id)",
             "/proc/x",
         ] {
-            assert!(validate_volume(&volume("v", p)).is_err(), "path {p:?}");
+            assert!(
+                validate_volume(&volume("v", p), false).is_err(),
+                "path {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_volumes_mount_anywhere_init_does_not_manage() {
+        for p in [
+            "/var/lib/postgresql/data",
+            "/etc/nginx/conf.d",
+            "/usr/share/nginx/html",
+            "/data",
+        ] {
+            validate_volume(&volume("v", p), true).unwrap_or_else(|e| panic!("{p}: {e}"));
+        }
+        for p in [
+            "/", "/proc/x", "/sys", "/dev/shm", "/tmp/a", "/run", "/.fluxvm", "/a/../b", "/a b",
+        ] {
+            assert!(
+                validate_volume(&volume("v", p), true).is_err(),
+                "path {p:?}"
+            );
         }
     }
 

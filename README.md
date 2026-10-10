@@ -41,7 +41,7 @@ From the 0.4.0 (unreleased) section of the [CHANGELOG](CHANGELOG.md) and recent 
 | **VM fork** | `POST /v1/vms/{id}/fork` / `fluxctl fork-vm`: snapshot a running FluxVM-engine VM once and restore N children with a shared read-only memory file and reflinked rootfs |
 | **VM import** | `POST /v1/images/import` / `fluxctl import-image`: OVA/OVF/VMDK/VHD(X)/qcow2 to raw disks, with offline GuestKit repair of the boot disk for virtio |
 | **Backups with quiesce** | Guest `fsfreeze` through QGA around the snapshot, plus list, delete and restore-backup |
-| **Container sandboxes on a Mac** | `"oci": {"image": "alpine:3.22"}` on `POST /v1/sandboxes`, or `fluxctl sandbox run IMAGE -- CMD`, boots the container in its own lightweight `vz` VM: direct kernel boot, a read-only root, uid 65534, no SSH, agent-only exec ([docs/oci-sandboxes.md](docs/oci-sandboxes.md)) |
+| **Container sandboxes on a Mac** | `"oci": {"image": "alpine:3.22"}` on `POST /v1/sandboxes`, or `fluxctl sandbox run IMAGE -- CMD`, boots the container in its own lightweight `vz` VM: direct kernel boot, a read-only root, uid 65534, no SSH, agent-only exec. Published ports, named volumes, restart policies and health checks; container services in `fluxctl up` stacks and `fluxctl import-compose` ([docs/oci-sandboxes.md](docs/oci-sandboxes.md)) |
 | **GPUs for sandboxes** | `gpus: N` on `POST /v1/sandboxes` passes free VFIO-bound GPUs to a QEMU-backed sandbox; supported in all three SDKs |
 | **Kairon VM edge, enforced** | Anti-spoof, learn-IP, DNS and SNI allow lists and an egress token bucket loaded into the VM's TC program |
 | **VM-edge packet capture** | A bounded `tcpdump` on the VM's dataplane interface with pcap download |

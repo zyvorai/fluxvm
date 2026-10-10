@@ -52,7 +52,7 @@ Write tools are offered only with `--allow-write`:
 | `backup_list` | Backups with source VM, size and quiesced flag | `GET /v1/backups` |
 | `backup_restore` | Restore a backup into a stopped VM in place | `POST /v1/vms/{id}/restore-backup` |
 | `pool_claim` | Claim a booted VM from a warm `pool` (optional `name`, `ttl_seconds`) | `POST /v1/pools/{name}/claim` |
-| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`, `offline`, `allow_hosts`), or on a Mac from a container image with `oci_image` (plus `oci_command`, `oci_env`); see [oci-sandboxes.md](oci-sandboxes.md) | `POST /v1/sandboxes` |
+| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`, `offline`, `allow_hosts`), or on a Mac from a container image with `oci_image` (plus `oci_command`, `oci_env`, `oci_ports`); see [oci-sandboxes.md](oci-sandboxes.md) | `POST /v1/sandboxes` |
 | `sandbox_exec` | Run `command` in a sandbox through the guest agent | `POST /v1/sandboxes/{id}/process` |
 | `sandbox_write_file` | Write UTF-8 `content` to `path` in a sandbox | `POST /v1/sandboxes/{id}/fs/write` |
 
