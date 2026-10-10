@@ -196,7 +196,10 @@ the key on first boot, and turns on Remote Login. FluxVM cannot run it inside th
 
 The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host); the snapshot also keeps the guest's NVRAM
 (`auxiliary.bin`). Earlier runners ignored the saved state of a macOS guest and cold-booted it; the runner now resumes it the same
-way as for Linux guests. Not yet exercised on a real macOS guest.
+way as for Linux guests. Exercised once on an Apple M4 (macOS 27.2 host) with a clone of an installed macOS 27.0.1 guest
+(4 vCPUs, 4 GiB, `usb_controller`): `POST /v1/vms/{id}/snapshot` returned 200 after 99 s on a USB-attached APFS drive, the VM stopped,
+and `POST /v1/vms/{id}/restore` returned 200 after 15 s with the VM running and its address reported again. Not checked: that processes
+inside the guest kept running across the restore (no SSH login was set up in that template).
 
 Not done: exec over vsock for macOS guests (they have no FluxVM guest agent). The `macos` image name looks up and downloads the
 IPSW; that download path has not been run end to end (only Apple's metadata lookup was checked on an Apple silicon Mac). Apple
