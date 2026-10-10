@@ -164,6 +164,35 @@ runner only sets those up for Linux), and a vsock proxy. Apple allows two macOS 
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
 - **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
 
+## Mac Studio options
+
+These compile against the macOS 27 SDK and are validated at admission, but have **not been verified on hardware** yet.
+
+- **Several displays (macOS guests):** `display_count` 1 to 8 (default 1), each `display_width` x `display_height`.
+- **Clipboard (Linux guests):** `clipboard: true` adds a SPICE agent port; the guest needs `spice-vdagent`. Refused for macOS guests.
+- **Bridged networking:** `bridge_interface: "en0"` puts the guest on the host's LAN (for example a Mac Studio's 10GbE) instead of NAT.
+  Needs `network.mode = "user"` with no `forwards`, and a runner signed with `com.apple.vm.networking`: build with
+  `FLUXVM_VZ_BRIDGE=1 cargo build -p fluxvm-apple` (ad-hoc signing of that entitlement only works with SIP/AMFI relaxed or a
+  provisioning profile).
+- **vmnet networks (macOS 26+):** `vmnet: {"mode": "shared" | "host-only", "subnet": "192.168.105.0", "mask": "255.255.255.0",
+  "reserved_ip": "192.168.105.10", "forwards": [{"protocol": "tcp", "host_port": 8080, "guest_port": 80, "guest_ip": "192.168.105.10"}]}`
+  gives the VM its own network with a stable DHCP reservation for its MAC and TCP/UDP host forwards. The SDK has no DHCP pool setter,
+  so the whole subnet is served. Each runner owns its network; VMs sharing one network need the broker in [vmnet-broker.md](vmnet-broker.md).
+  Exclusive with `bridge_interface`.
+- **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a discoverable vendor Virtio device; a host-side provider is a follow-up.
+- **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
+  the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.
+- **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts
+  `{"cmd":"usb-attach","path":"/path/disk.img","read_only":false}` (returns a `uuid`) and `{"cmd":"usb-detach","uuid":"…"}` (macOS 15+).
+  Physical accessories stay user-mediated through Apple's Accessory Access consent.
+- **ASIF overlay (macOS 27+):** `asif_overlay: true` keeps the base disk read-only and writes to a sparse `disk-overlay.asif`, which
+  snapshots include.
+- **Unattended first boot (macOS 27 guests):** `provision_full_name`, `provision_username`, `provision_password_file` (a one-shot file the
+  runner deletes after reading), `provision_auto_login`, `provision_remote_login` create the user and turn on Remote Login without Setup
+  Assistant.
+- **Host capabilities:** `{"cmd":"capabilities"}` on a runner's control socket reports CPU and memory limits, nested virtualization,
+  bridgeable interfaces, vmnet and custom-Virtio support; `fluxvm_scheduler::apple_placement` scores hosts from it.
+
 ## Capability matrix
 
 | Supported | Not supported |

@@ -55,6 +55,8 @@ struct Config: Decodable {
     let rosetta: Bool?
     let nested_virtualization: Bool?
     let usb_controller: Bool?
+    let vmnet: FluxVMNetSpec?       // macOS 26+ per-VM vmnet network (nil: NAT or bridge)
+    let custom_virtio: Bool?        // macOS 27+ custom Virtio device hook (Linux guests)
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
@@ -282,6 +284,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.usbControllers = [VZXHCIControllerConfiguration()]
         }
         try self.configureClipboard(c)
+        try self.configureCustomVirtio(c)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         try c.validate()
@@ -460,6 +463,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                         }
                     }
                 } else { write() }
+            case "capabilities":
+                if let data = try? JSONEncoder().encode(fluxAppleHostCapabilities()),
+                   var caps = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    caps["ok"] = true
+                    response = caps
+                } else {
+                    response = ["ok": false, "error": "cannot encode host capabilities"]
+                }
+                sem.signal()
             case "balloon":
                 response = self.balloonControl(reclaimMiB: (o["balloon_mib"] as? NSNumber)?.uint64Value)
                 sem.signal()

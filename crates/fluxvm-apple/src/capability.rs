@@ -54,6 +54,14 @@ pub const CAPABILITIES: &[Capability] = &[
     ),
     yes("Linux clipboard", "SPICE port; guest needs spice-vdagent"),
     yes(
+        "vmnet custom network",
+        "macOS 26+ shared/host-only network, DHCP reservation, TCP/UDP forwards; one network per VM until the broker lands",
+    ),
+    yes(
+        "custom Virtio device",
+        "macOS 27+ Linux guests; discoverable device, host provider is a follow-up",
+    ),
+    yes(
         "memory balloon",
         "runtime VZ balloon exposed through FluxVM balloon API",
     ),
@@ -187,6 +195,48 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             {
                 bail!("TCP host forwards are only supported with Apple NAT, not bridge mode");
             }
+        }
+        if let Some(v) = &apple.vmnet {
+            if apple.bridge_interface.is_some() {
+                bail!("apple.vmnet and apple.bridge_interface are mutually exclusive");
+            }
+            if matches!(req.network, NetworkSpec::None) {
+                bail!("apple.vmnet needs a network card; network.mode = \"none\" has none");
+            }
+            if let NetworkSpec::User { forwards } = &req.network
+                && !forwards.is_empty()
+            {
+                bail!("with apple.vmnet use apple.vmnet.forwards, not network.forwards");
+            }
+            let ipv4 = |s: &str| s.parse::<std::net::Ipv4Addr>().is_ok();
+            if !ipv4(&v.subnet) || !ipv4(&v.mask) {
+                bail!("apple.vmnet subnet and mask must be IPv4 addresses");
+            }
+            if v.reserved_ip.as_deref().is_some_and(|ip| !ipv4(ip)) {
+                bail!("apple.vmnet.reserved_ip must be an IPv4 address");
+            }
+            let mut seen = std::collections::HashSet::new();
+            for f in &v.forwards {
+                if !matches!(f.protocol.as_str(), "tcp" | "udp") {
+                    bail!("apple.vmnet forward protocol must be tcp or udp");
+                }
+                if !ipv4(&f.guest_ip) {
+                    bail!("apple.vmnet forward guest_ip must be an IPv4 address");
+                }
+                if f.host_port == 0 || f.guest_port == 0 {
+                    bail!("apple.vmnet forward ports must be non-zero");
+                }
+                if !seen.insert((f.protocol.clone(), f.host_port)) {
+                    bail!(
+                        "apple.vmnet forwards host port {}/{} more than once",
+                        f.host_port,
+                        f.protocol
+                    );
+                }
+            }
+        }
+        if apple.custom_virtio && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
+            bail!("apple.custom_virtio is a Linux-guest feature");
         }
         let any_provision = apple.provision_full_name.is_some()
             || apple.provision_username.is_some()
@@ -542,6 +592,48 @@ mod tests {
         let fwd = r#""network":{"mode":"user","forwards":[{"host_port":2222,"guest_port":22}]},"apple":{"bridge_interface":"en0"}"#;
         let err = validate_request(&req(fwd)).expect_err(fwd).to_string();
         assert!(err.contains("bridge"), "{err}");
+    }
+
+    #[test]
+    fn vmnet_spec_is_validated() {
+        let ok = r#""network":{"mode":"user"},"apple":{"vmnet":{"mode":"host-only","subnet":"192.168.105.0","mask":"255.255.255.0","reserved_ip":"192.168.105.10","forwards":[{"host_port":8080,"guest_port":80,"guest_ip":"192.168.105.10"},{"protocol":"udp","host_port":8080,"guest_port":53,"guest_ip":"192.168.105.10"}]}}"#;
+        assert!(validate_request(&req(ok)).is_ok());
+        for (json, needle) in [
+            (
+                r#""apple":{"bridge_interface":"en0","vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0"}}"#,
+                "mutually exclusive",
+            ),
+            (
+                r#""network":{"mode":"none"},"apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0"}}"#,
+                "network card",
+            ),
+            (
+                r#""apple":{"vmnet":{"mode":"shared","subnet":"10.0.0","mask":"255.0.0.0"}}"#,
+                "IPv4",
+            ),
+            (
+                r#""apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0","forwards":[{"protocol":"sctp","host_port":1,"guest_port":1,"guest_ip":"10.0.0.2"}]}}"#,
+                "tcp or udp",
+            ),
+            (
+                r#""apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0","forwards":[{"host_port":9000,"guest_port":1,"guest_ip":"10.0.0.2"},{"host_port":9000,"guest_port":2,"guest_ip":"10.0.0.3"}]}}"#,
+                "more than once",
+            ),
+            (
+                r#""network":{"mode":"user","forwards":[{"host_port":2222,"guest_port":22}]},"apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0"}}"#,
+                "apple.vmnet.forwards",
+            ),
+        ] {
+            let err = validate_request(&req(json)).expect_err(json).to_string();
+            assert!(err.contains(needle), "{json}: {err}");
+        }
+    }
+
+    #[test]
+    fn custom_virtio_is_linux_only() {
+        assert!(validate_request(&req(r#""apple":{"custom_virtio":true}"#)).is_ok());
+        let mac = r#""apple":{"guest_os":"macos","custom_virtio":true}"#;
+        assert!(validate_request(&req(mac)).is_err());
     }
 
     #[test]
