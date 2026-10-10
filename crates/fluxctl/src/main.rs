@@ -27,6 +27,7 @@ use uuid::Uuid;
 mod compose;
 mod contexts;
 mod fleet_client;
+mod launch_agent;
 mod mcp;
 mod output;
 mod remote;
@@ -90,6 +91,16 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum ServiceCommand {
+    /// Write ~/Library/LaunchAgents/dev.zyvor.fluxvm.plist (with the global --config, if given) and load it.
+    Install,
+    /// Unload and delete it.
+    Uninstall,
+    /// Whether it is installed and running.
+    Status,
+}
+
+#[derive(Subcommand)]
 enum McpCommand {
     /// Serve FluxVM tools over MCP stdio. Talks to the daemon over REST
     /// (`--server`/`FLUXVM_URL`, the current context, else `listen` from
@@ -106,6 +117,12 @@ enum Command {
     #[command(next_help_heading = "Basic Commands")]
     /// Start the FluxVM control-plane daemon (REST API).
     Serve,
+    /// Run `fluxctl serve` as a launchd LaunchAgent of the logged-in user (macOS): started at login, restarted if it
+    /// exits.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Display status. With no id: Cilium-style host panel. With an id:
     /// that VM's record (machinectl `status`/`show`).
     Status {
@@ -2953,6 +2970,20 @@ async fn main() -> Result<()> {
     if let Command::ImportCompose { file, name, output } = &cli.command {
         return import_compose(file, name.as_deref(), output.as_deref());
     }
+    if let Command::Service { command } = &cli.command {
+        let out = match command {
+            ServiceCommand::Install => {
+                let plist = launch_agent::install(cli.config.as_deref())?;
+                serde_json::json!({"ok": true, "plist": plist, "label": launch_agent::LABEL})
+            }
+            ServiceCommand::Uninstall => {
+                serde_json::json!({"ok": true, "removed": launch_agent::uninstall()?})
+            }
+            ServiceCommand::Status => launch_agent::status()?,
+        };
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
     let format = cli.output;
     if let Command::Mcp {
         command: McpCommand::Serve { allow_write },
@@ -3051,6 +3082,7 @@ async fn main() -> Result<()> {
         | Command::Completions { .. }
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
+        | Command::Service { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
