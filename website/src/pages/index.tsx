@@ -125,7 +125,7 @@ function MacSection() {
             Verified on an Apple M4 with macOS 27.2: Debian 13 boots, SSH,
             pause, resume, stop, start, delete through the REST API. Multi-Mac
             clusters are not yet verified.{' '}
-            <Link to="/docs/macos-cluster">Read the Mac guide →</Link>
+            <Link to="/mac">See FluxVM on Mac →</Link>{' · '}<Link to="/docs/macos-cluster">Mac guide</Link>
           </p>
         </Reveal>
       </div>

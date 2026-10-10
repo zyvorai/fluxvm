@@ -2,6 +2,13 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: a Mac section on the website, and an architecture guide
+- A `/mac` page on the docs site: measured numbers (one Apple M4, macOS 27.2), what runs on a Mac, how it works, which Mac to
+  choose (Apple's published specs, with FluxVM capacity guidance marked as estimates), what macOS 27 adds, and what is and is not
+  verified.
+- [docs/macos-architecture.md](docs/macos-architecture.md): the process model, control socket, vsock, guests, networking, storage,
+  warm pool, sandboxes and fleet in detail, with a verified / not-verified table.
+
 ### Fixed: container sandboxes on `vz`
 - `GET /v1/sandboxes/{id}/logs` returns the console tail one line per line (it was joined with ` | `), so
   `fluxctl sandbox run` and `sandbox logs` print the container's output as written. `sandbox run` sends init and agent
