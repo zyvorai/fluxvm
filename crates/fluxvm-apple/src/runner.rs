@@ -70,6 +70,23 @@ pub struct RunnerConfig {
     /// The console log is rotated to `<log>.1` past this size (the runner defaults to 16 MiB).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub serial_log_max_bytes: Option<u64>,
+    /// The VM's name in system services (macOS 27+); the runner trims it to 64 characters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// EFI Secure Boot (macOS 27+, Linux EFI guests). None leaves the variable store as it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secure_boot: Option<bool>,
+    pub secure_boot_reset: bool,
+    pub secure_boot_default_signatures: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secure_boot_platform_key: Option<PathBuf>,
+    pub secure_boot_kek: Vec<PathBuf>,
+    pub secure_boot_db: Vec<PathBuf>,
+    pub secure_boot_dbx: Vec<PathBuf>,
+    /// macOS guests: start up from macOS Recovery.
+    pub recovery: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rosetta_cache: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +127,7 @@ pub struct ForwardConfig {
 impl RunnerConfig {
     pub fn for_launch(req: &CreateVmRequest, ctx: &LaunchContext) -> Result<Self> {
         let apple = req.apple.clone().unwrap_or_default();
+        let sb = apple.efi_secure_boot.as_ref();
         let id8: String = ctx.id.simple().to_string().chars().take(8).collect();
         Ok(Self {
             id: ctx.id.to_string(),
@@ -223,6 +241,16 @@ impl RunnerConfig {
                 })
                 .collect::<Result<_>>()?,
             serial_log_max_bytes: None,
+            label: Some(req.name.clone()).filter(|n| !n.trim().is_empty()),
+            secure_boot: req.secure_boot,
+            secure_boot_reset: sb.is_some_and(|s| s.reset),
+            secure_boot_default_signatures: sb.is_none_or(|s| s.default_signatures),
+            secure_boot_platform_key: sb.and_then(|s| s.platform_key.clone()),
+            secure_boot_kek: sb.map(|s| s.kek.clone()).unwrap_or_default(),
+            secure_boot_db: sb.map(|s| s.db.clone()).unwrap_or_default(),
+            secure_boot_dbx: sb.map(|s| s.dbx.clone()).unwrap_or_default(),
+            recovery: apple.recovery,
+            rosetta_cache: apple.rosetta_cache.clone(),
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
             forwards: match &req.network {

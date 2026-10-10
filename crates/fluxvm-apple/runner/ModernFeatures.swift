@@ -71,14 +71,27 @@ extension Runner {
     }
 
     func startMachine(_ machine: VZVirtualMachine) {
-        guard cfg.guest_os == "macos", let user = cfg.provision_username,
-              let full = cfg.provision_full_name, let pwFile = cfg.provision_password_file else {
+        let provision = cfg.provision_username != nil && cfg.provision_full_name != nil && cfg.provision_password_file != nil
+        guard cfg.guest_os == "macos", provision || cfg.recovery == true else {
             machine.start { r in
                 switch r { case .success: self.state = "running"; emit(["event":"running"])
-                case .failure(let e): fail("start failed: \(e.localizedDescription)") }
+                case .failure(let e): fail("start failed: \(fluxVZErrorDescription(e))") }
             }
             return
         }
+        let o = VZMacOSVirtualMachineStartOptions()
+        o.startUpFromMacOSRecovery = cfg.recovery == true
+        if provision { applyProvisioning(o) }
+        machine.start(options: o) { e in
+            if let e { fail("macOS start failed: \(fluxVZErrorDescription(e))") }
+            self.state = "running"
+            emit(["event":"running","provisioned":provision,"recovery":o.startUpFromMacOSRecovery])
+        }
+    }
+
+    private func applyProvisioning(_ o: VZMacOSVirtualMachineStartOptions) {
+        guard let user = cfg.provision_username, let full = cfg.provision_full_name,
+              let pwFile = cfg.provision_password_file else { return }
         #if compiler(>=6.3)
         if #available(macOS 27.0, *) {
             do {
@@ -87,17 +100,40 @@ extension Runner {
                 let p = VZMacGuestProvisioningOptions(); p.fullName = full; p.username = user; p.password = pw
                 p.logsInAutomatically = cfg.provision_auto_login == true
                 p.enablesRemoteLogin = cfg.provision_remote_login == true
-                let o = VZMacOSVirtualMachineStartOptions(); try o.setGuestProvisioning(p)
+                try o.setGuestProvisioning(p)
                 try? FileManager.default.removeItem(atPath: pwFile)
-                machine.start(options: o) { e in
-                    if let e { fail("provisioned start failed: \(e.localizedDescription)") }
-                    self.state = "running"; emit(["event":"running","provisioned":true])
-                }
                 return
-            } catch { fail("macOS provisioning: \(error.localizedDescription)") }
+            } catch { fail("macOS provisioning: \(fluxVZErrorDescription(error))") }
         }
         #endif
         fail("automated macOS provisioning needs macOS 27/current SDK")
+    }
+
+    /// macOS 27 cannot save a VM with passed-through USB devices (174267926), so they go back to the host first.
+    /// A hot-plugged USB disk is refused instead: restoring without it can crash the VM (177528319), and a restore
+    /// cannot re-attach it before the guest resumes.
+    func prepareUSBForSave(_ done: @escaping (_ detached: [String], _ error: String?) -> Void) {
+        guard #available(macOS 15.0, *), let vm else { done([], nil); return }
+        let attached = Set(vm.usbControllers.flatMap { $0.usbDevices.map(\.uuid) })
+        if !hotplugUSB.intersection(attached).isEmpty {
+            done([], "detach the hot-plugged USB disk(s) first (usb-detach): restoring a state saved with them crashes on macOS 27")
+            return
+        }
+        guard #available(macOS 27.0, *) else { done([], nil); return }
+        var pending = vm.usbControllers.flatMap { c in
+            c.usbDevices.compactMap { $0 as? VZUSBPassthroughDevice }.map { (c, $0) }
+        }
+        var detached: [String] = []
+        func next() {
+            guard let (c, d) = pending.popLast() else { done(detached, nil); return }
+            c.detach(device: d) { e in
+                if let e { done(detached, "detaching USB passthrough device \(d.uuid): \(e.localizedDescription)"); return }
+                detached.append(d.uuid.uuidString)
+                emit(["event": "usb-passthrough-detached-for-save", "uuid": d.uuid.uuidString])
+                next()
+            }
+        }
+        next()
     }
 
     func balloonControl(reclaimMiB: UInt64?) -> [String: Any] {
@@ -120,7 +156,11 @@ extension Runner {
         do {
             let a = try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: path), readOnly: readOnly)
             let d = VZUSBMassStorageDevice(configuration: VZUSBMassStorageDeviceConfiguration(attachment: a))
-            c.attach(device: d) { e in e == nil ? completion(["ok":true,"uuid":d.uuid.uuidString]) : completion(["ok":false,"error":e!.localizedDescription]) }
+            c.attach(device: d) { e in
+                guard e == nil else { completion(["ok":false,"error":e!.localizedDescription]); return }
+                self.hotplugUSB.insert(d.uuid)
+                completion(["ok":true,"uuid":d.uuid.uuidString])
+            }
         } catch { completion(["ok":false,"error":error.localizedDescription]) }
     }
 
@@ -128,6 +168,10 @@ extension Runner {
         guard #available(macOS 15.0, *) else { completion(["ok":false,"error":"USB hotplug needs macOS 15+"]); return }
         guard let u = UUID(uuidString: uuid), let c = vm?.usbControllers.first,
               let d = c.usbDevices.first(where: { $0.uuid == u }) else { completion(["ok":false,"error":"USB device not attached"]); return }
-        c.detach(device: d) { e in e == nil ? completion(["ok":true,"uuid":uuid]) : completion(["ok":false,"error":e!.localizedDescription]) }
+        c.detach(device: d) { e in
+            guard e == nil else { completion(["ok":false,"error":e!.localizedDescription]); return }
+            self.hotplugUSB.remove(u)
+            completion(["ok":true,"uuid":uuid])
+        }
     }
 }

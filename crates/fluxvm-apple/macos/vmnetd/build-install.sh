@@ -2,7 +2,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT="${TMPDIR:-/tmp}/fluxvm-vmnetd"
-xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx26.0 "$ROOT/main.swift" -framework Foundation -framework vmnet -o "$OUT"
+xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx26.0 "$ROOT/main.swift" "$ROOT/../../runner/VmnetOptions.swift" \
+    -framework Foundation -framework vmnet -o "$OUT"
 codesign --force --sign - --entitlements "$ROOT/Entitlements.plist" "$OUT"
 sudo install -m 0755 "$OUT" /usr/local/libexec/fluxvm-vmnetd
 mkdir -p "$HOME/Library/LaunchAgents"

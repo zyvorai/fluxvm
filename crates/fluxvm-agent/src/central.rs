@@ -684,6 +684,11 @@ fn apple_placement_request(
             .and_then(|a| a.get("custom_virtio"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        needs_secure_boot: body.get("secure_boot").and_then(Value::as_bool) == Some(true),
+        needs_rosetta: apple
+            .and_then(|a| a.get("rosetta"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         bridge_interface: apple
             .and_then(|a| a.get("bridge_interface"))
             .and_then(Value::as_str)

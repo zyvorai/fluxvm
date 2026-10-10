@@ -28,6 +28,26 @@ The runner control protocol adds:
 
 `fluxvm-agent node` now works as a Mac fleet heartbeat source: macOS memory comes from `hw.memsize`, the node queries the signed VZ runner's new `host-capabilities` mode, counts active macOS guests, and reports `AppleHostCaps`. Central placement applies `fluxvm_scheduler::apple_placement::score` for automatic `backend: vz` requests while retaining existing capacity/security/selector scoring for every other backend.
 
+## 5. API coverage against the macOS 27 SDK
+
+Checked against WWDC26 session 224, the macOS 27 SDK headers (Virtualization, vmnet) and the macOS 27 release notes.
+`tests/vz27_api_coverage_contract.rs` fails if the runner stops using any API below.
+
+| Area | API | Where | Hardware |
+|---|---|---|---|
+| Guest provisioning | `VZMacGuestProvisioningOptions`, `setGuestProvisioning`, `guestProvisioningInvalid*` errors | `ModernFeatures.swift`, `SecureBoot.swift` | earlier gate |
+| EFI Secure Boot | `enableSecureBoot(platformKey:)`, `enableSecureBootUsingDefaultPlatformKey`, `disableSecureBoot`, `resetSecureBoot`, `enrollDefaultSecureBootSignatures`, `enrollSecureBootSignatures`, `isSecureBootEnabled`, `enrolledSecureBootSignatures`, `VZEFISignatureList`, `efi*` errors | `SecureBoot.swift` | enable/status/disable verified on the M4 |
+| Custom Virtio | provider, `didCreateDevice`, notifications, `DidAcceptDriverOk`, `WillStop/Pause/Resume/Reset`, `SaveState(forRestore:)`, `ShouldRestore`, `requestReset`, `guestMemoryMapping` | `CustomVirtio.swift` | control + bulk-fill verified; lifecycle and save/restore not yet |
+| USB | `VZUSBPassthroughDevice`, `VZUSBController.Delegate` (`usbPassthroughDeviceDidDisconnect`) | `USBPassthrough.swift` | not run (no consent helper) |
+| Configuration and view | `VZVirtualMachineConfiguration.label`, `VZVirtualMachineViewAdaptor` | `Runner.swift` | label verified; window not opened |
+| DiskImageKit | `VZDiskImageStorageDeviceAttachment(diskImage:)` | `ModernFeatures.swift` | earlier gate |
+| vmnet (macOS 26) | subnet, DHCP reservation, port forwards, IPv6 prefix, MTU, external interface, disable DHCP/DNS proxy/NAT44/NAT66/RA, serialization | `AdvancedNetwork.swift`, `VmnetOptions.swift`, `vmnetd` | not run |
+| Earlier APIs | network `attachmentWasDisconnected`, NBD delegate, `blockDeviceIdentifier`, `startUpFromMacOSRecovery`, Rosetta availability/install/caching, save/restore for macOS guests | `Runner.swift`, `ModernFeatures.swift` | Rosetta availability verified |
+
+Not applicable: `VZCustomVirtioDevice` has no host interrupt call (completions interrupt the guest), and vmnet has no DHCP pool
+setter, so `dhcp_start`/`dhcp_end` stay refused. Release-note workarounds: passed-through USB devices are detached before
+`save` (174267926), and `save` is refused while a hot-plugged USB disk is attached (177528319).
+
 ## Hardware status (2026-10-10, one Apple M4, macOS 27.2)
 
 Details in [macos-architecture.md](macos-architecture.md#14-what-is-verified).
@@ -37,6 +57,8 @@ Details in [macos-architecture.md](macos-architecture.md#14-what-is-verified).
 3. Two runners on one named vmnet network: not run (broker could not start).
 4. Accessory Access consent, USB list and attach: not run (helper could not start; no USB devices attached).
 5. Fleet placement: verified only on loopback with one real Mac and two fake nodes; no second Mac.
+6. EFI Secure Boot: verified with an EFI guest on an empty disk: default keys enrolled (2 KEK, 2 db, 26 dbx), `secure-boot-status`
+   reports enabled, `secure_boot: false` disables it and keeps the keys. Booting a signed distro under Secure Boot is not run.
 
 ## Production gates
 

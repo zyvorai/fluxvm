@@ -22,6 +22,14 @@ struct FluxVMNetSpec: Codable {
     let dhcp_end: String?
     let reserved_ip: String?
     let forwards: [FluxVMNetForward]?
+    let ipv6_prefix: String?     // "fd00:1::/64"
+    let mtu: UInt32?
+    let external_interface: String?
+    let disable_dhcp: Bool?
+    let disable_dns_proxy: Bool?
+    let disable_nat44: Bool?
+    let disable_nat66: Bool?
+    let disable_router_advertisement: Bool?
 }
 
 #if canImport(vmnet)
@@ -79,6 +87,13 @@ final class FluxVMNetNetwork {
             status = vmnet_network_configuration_add_dhcp_reservation(cfg, &mac, &a)
             guard status == .VMNET_SUCCESS else { throw Self.fail("add_dhcp_reservation failed", status) }
         }
+        try fluxVmnetApplyOptions(cfg, ipv6Prefix: spec.ipv6_prefix, mtu: spec.mtu,
+                                  externalInterface: spec.external_interface,
+                                  disableDHCP: spec.disable_dhcp == true,
+                                  disableDNSProxy: spec.disable_dns_proxy == true,
+                                  disableNAT44: spec.disable_nat44 == true,
+                                  disableNAT66: spec.disable_nat66 == true,
+                                  disableRouterAdvertisement: spec.disable_router_advertisement == true)
         for f in spec.forwards ?? [] {
             var a = try Self.addr(f.guest_ip, "forward guest_ip")
             let proto = f.protocol.lowercased() == "udp" ? UInt8(IPPROTO_UDP) : UInt8(IPPROTO_TCP)

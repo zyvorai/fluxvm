@@ -54,7 +54,8 @@ func mac(_ value: String) throws -> ether_addr_t {
 
 @available(macOS 26.0, *)
 func fingerprint(_ request: xpc_object_t) -> String {
-    let keys = ["mode", "subnet", "mask", "mac", "reserved_ip"]
+    let keys = ["mode", "subnet", "mask", "mac", "reserved_ip", "ipv6_prefix", "mtu", "external_interface",
+                "disable_dhcp", "disable_dns_proxy", "disable_nat44", "disable_nat66", "disable_router_advertisement"]
     var parts = keys.map { "\($0)=\(string(request, $0) ?? "")" }
     if let forwards = xpc_dictionary_get_value(request, "forwards"), xpc_get_type(forwards) == XPC_TYPE_ARRAY {
         xpc_array_apply(forwards) { index, raw in
@@ -98,6 +99,15 @@ func makeNetwork(_ request: xpc_object_t) throws -> vmnet_network_ref {
             throw NSError(domain: service, code: Int(status.rawValue), userInfo: [NSLocalizedDescriptionKey: "DHCP reservation failed"])
         }
     }
+
+    try fluxVmnetApplyOptions(config, ipv6Prefix: string(request, "ipv6_prefix"),
+                              mtu: string(request, "mtu").flatMap { UInt32($0) },
+                              externalInterface: string(request, "external_interface"),
+                              disableDHCP: string(request, "disable_dhcp") == "true",
+                              disableDNSProxy: string(request, "disable_dns_proxy") == "true",
+                              disableNAT44: string(request, "disable_nat44") == "true",
+                              disableNAT66: string(request, "disable_nat66") == "true",
+                              disableRouterAdvertisement: string(request, "disable_router_advertisement") == "true")
 
     if let forwards = xpc_dictionary_get_value(request, "forwards"), xpc_get_type(forwards) == XPC_TYPE_ARRAY {
         xpc_array_apply(forwards) { _, raw in

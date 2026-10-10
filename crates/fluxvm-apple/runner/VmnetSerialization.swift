@@ -48,6 +48,17 @@ final class FluxVmnetBrokerClient {
         xpc_dictionary_set_string(m, "mask", spec.mask)
         if let macAddress { xpc_dictionary_set_string(m, "mac", macAddress) }
         if let ip = spec.reserved_ip { xpc_dictionary_set_string(m, "reserved_ip", ip) }
+        // Strings, so the broker's fingerprint of a named network covers every option.
+        let options: [(String, String?)] = [
+            ("ipv6_prefix", spec.ipv6_prefix), ("mtu", spec.mtu.map(String.init)),
+            ("external_interface", spec.external_interface),
+            ("disable_dhcp", spec.disable_dhcp == true ? "true" : nil),
+            ("disable_dns_proxy", spec.disable_dns_proxy == true ? "true" : nil),
+            ("disable_nat44", spec.disable_nat44 == true ? "true" : nil),
+            ("disable_nat66", spec.disable_nat66 == true ? "true" : nil),
+            ("disable_router_advertisement", spec.disable_router_advertisement == true ? "true" : nil),
+        ]
+        for case let (key, value?) in options { xpc_dictionary_set_string(m, key, value) }
         if let forwards = spec.forwards, !forwards.isEmpty {
             let a = xpc_array_create(nil, 0)
             for f in forwards {

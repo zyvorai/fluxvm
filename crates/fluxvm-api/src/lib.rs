@@ -2602,6 +2602,7 @@ async fn attach_vm_disk(
             caching: v.caching.unwrap_or_default(),
             sync: v.sync.unwrap_or_default(),
             controller: v.controller.unwrap_or_default(),
+            block_device_id: None,
         };
         let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
         return Ok((StatusCode::CREATED, Json(info)));

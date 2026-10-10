@@ -514,6 +514,25 @@ pub struct AppleVmnetSpec {
     pub reserved_ip: Option<String>,
     #[serde(default)]
     pub forwards: Vec<AppleVmnetForward>,
+    /// IPv6 ULA prefix for the network, for example `fd00:1::/64`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+    /// Shared mode: the host interface (for example `en0`) the network NATs through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_interface: Option<String>,
+    /// Guests configure addresses themselves (no vmnet DHCP server).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_dhcp: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_dns_proxy: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_nat44: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_nat66: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub disable_router_advertisement: bool,
 }
 
 /// Options for the Apple (`vz`) backend. Ignored by every other backend.
@@ -627,6 +646,38 @@ pub struct AppleSpec {
     /// a unix socket, reached with `fluxctl port-connect` or the websocket `GET /v1/vms/{id}/ports/{name}`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub console_ports: Vec<String>,
+    /// macOS 27+ EFI Secure Boot keys for a Linux EFI guest; Secure Boot itself is the top-level `secure_boot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub efi_secure_boot: Option<AppleSecureBoot>,
+    /// macOS guests: start up from macOS Recovery.
+    #[serde(default)]
+    pub recovery: bool,
+    /// Linux Rosetta AOT cache: `default`, a guest unix socket path (`/run/rosettad/rosetta.sock`) or an abstract
+    /// socket name; the guest runs `rosettad` there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rosetta_cache: Option<String>,
+}
+
+/// Signatures and platform key for macOS 27 EFI Secure Boot (`VZEFIVariableStore`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleSecureBoot {
+    /// Enroll Microsoft's KEK, UEFI CA and revocation list, so Microsoft-signed shims boot.
+    #[serde(default = "default_true")]
+    pub default_signatures: bool,
+    /// X.509 platform key (DER or PEM). None uses Apple's managed platform key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key: Option<PathBuf>,
+    /// Signature files (certificate, SHA-256 hash or EFI signature list) appended to KEK, db and dbx.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kek: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub db: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dbx: Vec<PathBuf>,
+    /// Clear previously enrolled keys before applying these on each boot.
+    #[serde(default)]
+    pub reset: bool,
 }
 
 /// One private network a `vz` guest joins (see [`AppleSpec::networks`]).
@@ -676,6 +727,9 @@ pub struct AppleDisk {
     pub sync: AppleDiskSync,
     #[serde(default)]
     pub controller: AppleDiskController,
+    /// Virtio controller only: the serial the guest sees, for a stable `/dev/disk/by-id/virtio-<id>` (1-20 ASCII).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -776,6 +830,9 @@ impl Default for AppleSpec {
             secret_env: std::collections::BTreeMap::new(),
             networks: Vec::new(),
             console_ports: Vec::new(),
+            efi_secure_boot: None,
+            recovery: false,
+            rosetta_cache: None,
         }
     }
 }
