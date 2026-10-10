@@ -153,7 +153,9 @@ impl VmManager {
             }
             None => None,
         };
-        let balloon = if vm.backend == BackendKind::FluxVm && vm.status == VmStatus::Running {
+        let balloon = if matches!(vm.backend, BackendKind::FluxVm | BackendKind::Vz)
+            && vm.status == VmStatus::Running
+        {
             balloon_request(&vm, None).await.ok()
         } else {
             None
@@ -204,7 +206,7 @@ impl VmManager {
         let cutoff = Utc::now() - Duration::seconds(secs as i64);
         let mut changed = 0;
         for vm in self.list().await {
-            if vm.backend != BackendKind::FluxVm
+            if !matches!(vm.backend, BackendKind::FluxVm | BackendKind::Vz)
                 || vm.status != VmStatus::Running
                 || crate::procbox_sandbox::is_procbox(&vm)
             {
@@ -249,16 +251,24 @@ impl VmManager {
 }
 
 async fn balloon_request(vm: &VmRecord, balloon_mib: Option<u64>) -> Result<BalloonStatus> {
-    if vm.backend != BackendKind::FluxVm {
-        bail!(
-            "balloon control supports the flux-vm backend's KVM engine only (backend={:?})",
-            vm.backend
-        );
-    }
     if vm.status != VmStatus::Running {
         bail!(
             "balloon control needs a running VM (status={:?})",
             vm.status
+        );
+    }
+    if vm.backend == BackendKind::Vz {
+        let s = fluxvm_apple::balloon_control(vm, balloon_mib).await?;
+        return Ok(BalloonStatus {
+            memory_mib: s.memory_mib,
+            target_mib: s.target_mib,
+            actual_mib: s.actual_mib,
+        });
+    }
+    if vm.backend != BackendKind::FluxVm {
+        bail!(
+            "balloon control is unsupported for backend={:?}",
+            vm.backend
         );
     }
     let sock = vm

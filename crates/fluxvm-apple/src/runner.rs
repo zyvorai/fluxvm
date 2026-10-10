@@ -29,6 +29,15 @@ pub struct RunnerConfig {
     pub vsock_socket: Option<PathBuf>,
     pub ip_file: PathBuf,
     pub window: bool,
+    pub display_count: u8,
+    pub clipboard: bool,
+    pub bridge_interface: Option<String>,
+    pub asif_overlay: bool,
+    pub provision_full_name: Option<String>,
+    pub provision_username: Option<String>,
+    pub provision_password_file: Option<PathBuf>,
+    pub provision_auto_login: bool,
+    pub provision_remote_login: bool,
     pub display_width: u32,
     pub display_height: u32,
     pub display_ppi: u32,
@@ -93,6 +102,15 @@ impl RunnerConfig {
             )),
             ip_file: ip_file(&ctx.workspace),
             window: apple.window,
+            display_count: apple.display_count.clamp(1, 8),
+            clipboard: apple.clipboard,
+            bridge_interface: apple.bridge_interface.clone(),
+            asif_overlay: apple.asif_overlay,
+            provision_full_name: apple.provision_full_name.clone(),
+            provision_username: apple.provision_username.clone(),
+            provision_password_file: apple.provision_password_file.clone(),
+            provision_auto_login: apple.provision_auto_login,
+            provision_remote_login: apple.provision_remote_login,
             display_width: apple.display_width.clamp(800, 5120),
             display_height: apple.display_height.clamp(600, 2880),
             display_ppi: apple.display_ppi.clamp(72, 300),
@@ -144,7 +162,7 @@ pub const EGRESS_PORT: u32 = 3128;
 
 pub const STATE_FILE: &str = "state.vzvmsave";
 /// Files cloned alongside the saved state, so a restore gets the disk exactly as it was when the state was saved.
-pub const SNAPSHOT_FILES: &[&str] = &["disk.raw", "efi.bin"];
+pub const SNAPSHOT_FILES: &[&str] = &["disk.raw", "disk-overlay.asif", "efi.bin"];
 
 pub fn snapshot_dir(workspace: &Path, tag: &str) -> PathBuf {
     workspace.join("snapshots").join(tag)

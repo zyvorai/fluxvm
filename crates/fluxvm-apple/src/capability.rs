@@ -41,12 +41,27 @@ pub const CAPABILITIES: &[Capability] = &[
         "guest reachable by its address; TCP port forwards relay from 127.0.0.1",
     ),
     yes(
+        "bridged networking",
+        "VZ bridge to host interface; useful for Mac Studio 10GbE; needs com.apple.vm.networking",
+    ),
+    yes(
         "shared folders (virtiofs)",
         "Linux: tags fs0, fs1, …; macOS 13+: VZ macOS automount share",
     ),
     yes(
-        "Retina / dynamic display",
-        "configurable initial size up to 5K; VZVirtualMachineView reconfigures while resized",
+        "Retina / dynamic multi-display",
+        "1-8 macOS displays, configurable up to 5K each",
+    ),
+    yes("Linux clipboard", "SPICE port; guest needs spice-vdagent"),
+    yes(
+        "memory balloon",
+        "runtime VZ balloon exposed through FluxVM balloon API",
+    ),
+    yes("ASIF overlay", "macOS 27+ DiskImageKit sparse write layer"),
+    yes("USB mass-storage hotplug", "macOS 15+ XHCI attach/detach"),
+    yes(
+        "macOS 27 provisioning",
+        "first-boot user/autologin/Remote Login",
     ),
     yes(
         "audio output / microphone",
@@ -141,6 +156,9 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         }
     }
     if let Some(apple) = &req.apple {
+        if !(1..=8).contains(&apple.display_count) {
+            bail!("apple.display_count must be 1..=8");
+        }
         if !(800..=5120).contains(&apple.display_width) {
             bail!("apple.display_width must be 800..=5120");
         }
@@ -151,9 +169,46 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
             bail!("apple.display_ppi must be 72..=300");
         }
         if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
-            && (apple.rosetta || apple.nested_virtualization)
+            && (apple.rosetta || apple.nested_virtualization || apple.clipboard)
         {
-            bail!("apple.rosetta and apple.nested_virtualization are Linux-guest features");
+            bail!(
+                "apple.rosetta, apple.nested_virtualization and apple.clipboard are Linux-guest features"
+            );
+        }
+        if apple.bridge_interface.as_deref().is_some_and(str::is_empty) {
+            bail!("apple.bridge_interface cannot be empty");
+        }
+        if apple.bridge_interface.is_some() {
+            if !matches!(req.network, NetworkSpec::User { .. }) {
+                bail!("apple.bridge_interface requires network.mode = \"user\"");
+            }
+            if let NetworkSpec::User { forwards } = &req.network
+                && !forwards.is_empty()
+            {
+                bail!("TCP host forwards are only supported with Apple NAT, not bridge mode");
+            }
+        }
+        let any_provision = apple.provision_full_name.is_some()
+            || apple.provision_username.is_some()
+            || apple.provision_password_file.is_some()
+            || apple.provision_auto_login
+            || apple.provision_remote_login;
+        if any_provision {
+            if !matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
+                bail!("Apple automated provisioning is for macOS guests only");
+            }
+            if apple
+                .provision_username
+                .as_deref()
+                .is_none_or(str::is_empty)
+                || apple
+                    .provision_full_name
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+                || apple.provision_password_file.is_none()
+            {
+                bail!("macOS provisioning needs full name, username and provision_password_file");
+            }
         }
     }
     match &req.network {
@@ -442,6 +497,68 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn mac_studio_options_default_off() {
+        let a = req(r#""apple":{}"#).apple.expect("apple options");
+        assert_eq!(a.display_count, 1);
+        assert!(!a.clipboard);
+        assert!(a.bridge_interface.is_none());
+        assert!(!a.asif_overlay);
+        assert!(a.provision_username.is_none());
+        assert!(!a.provision_auto_login);
+        assert!(!a.provision_remote_login);
+    }
+
+    #[test]
+    fn display_count_is_one_to_eight() {
+        for n in [0, 9] {
+            let json = format!(r#""apple":{{"guest_os":"macos","display_count":{n}}}"#);
+            assert!(validate_request(&req(&json)).is_err(), "{json}");
+        }
+        for n in [1, 4, 8] {
+            let json = format!(r#""apple":{{"guest_os":"macos","display_count":{n}}}"#);
+            assert!(validate_request(&req(&json)).is_ok(), "{json}");
+        }
+    }
+
+    #[test]
+    fn clipboard_is_linux_only() {
+        let mac = r#""apple":{"guest_os":"macos","clipboard":true}"#;
+        let err = validate_request(&req(mac)).expect_err(mac).to_string();
+        assert!(err.contains("clipboard"), "{err}");
+        assert!(validate_request(&req(r#""apple":{"clipboard":true}"#)).is_ok());
+    }
+
+    #[test]
+    fn bridge_needs_nat_mode_without_host_forwards() {
+        let ok = r#""network":{"mode":"user"},"apple":{"bridge_interface":"en0"}"#;
+        assert!(validate_request(&req(ok)).is_ok());
+        let empty = r#""network":{"mode":"user"},"apple":{"bridge_interface":""}"#;
+        assert!(validate_request(&req(empty)).is_err());
+        let none = r#""network":{"mode":"none"},"apple":{"bridge_interface":"en0"}"#;
+        assert!(validate_request(&req(none)).is_err());
+        let fwd = r#""network":{"mode":"user","forwards":[{"host_port":2222,"guest_port":22}]},"apple":{"bridge_interface":"en0"}"#;
+        let err = validate_request(&req(fwd)).expect_err(fwd).to_string();
+        assert!(err.contains("bridge"), "{err}");
+    }
+
+    #[test]
+    fn provisioning_needs_name_user_and_password_file_on_macos() {
+        let full = r#""apple":{"guest_os":"macos","provision_full_name":"Flux","provision_username":"flux","provision_password_file":"/tmp/pw","provision_remote_login":true}"#;
+        assert!(validate_request(&req(full)).is_ok());
+        for json in [
+            r#""apple":{"guest_os":"macos","provision_username":"flux","provision_password_file":"/tmp/pw"}"#,
+            r#""apple":{"guest_os":"macos","provision_full_name":"Flux","provision_password_file":"/tmp/pw"}"#,
+            r#""apple":{"guest_os":"macos","provision_full_name":"Flux","provision_username":"flux"}"#,
+            r#""apple":{"guest_os":"macos","provision_remote_login":true}"#,
+        ] {
+            assert!(validate_request(&req(json)).is_err(), "{json}");
+        }
+        let linux = r#""apple":{"provision_full_name":"Flux","provision_username":"flux","provision_password_file":"/tmp/pw"}"#;
+        let err = validate_request(&req(linux)).expect_err(linux).to_string();
+        assert!(err.contains("macOS guests only"), "{err}");
     }
 
     #[test]

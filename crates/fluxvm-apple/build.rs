@@ -4,19 +4,44 @@
 // Compiles the Swift runner (runner/Runner.swift) into `fluxvm-vz-runner` and signs it with the
 // com.apple.security.virtualization entitlement. macOS only; elsewhere this crate builds without a runner.
 
-use std::{env, path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=runner/Runner.swift");
+    println!("cargo:rerun-if-changed=runner");
     println!("cargo:rerun-if-changed=runner/Entitlements.plist");
+    println!("cargo:rerun-if-changed=runner/Entitlements.networking.plist");
+    println!("cargo:rerun-if-env-changed=FLUXVM_VZ_BRIDGE");
     println!("cargo:rerun-if-env-changed=FLUXVM_SKIP_VZ_RUNNER");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
         || env::var_os("FLUXVM_SKIP_VZ_RUNNER").is_some()
     {
         return;
     }
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("fluxvm-vz-runner");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out = out_dir.join("fluxvm-vz-runner");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    // With more than one source file swiftc only accepts top-level code in a file named main.swift.
+    let main_swift = out_dir.join("main.swift");
+    let _ = fs::remove_file(&main_swift);
+    if std::os::unix::fs::symlink(manifest.join("runner/Runner.swift"), &main_swift).is_err() {
+        println!("cargo:warning=could not stage runner/Runner.swift as main.swift");
+        return;
+    }
+    let mut extra: Vec<PathBuf> = fs::read_dir(manifest.join("runner"))
+        .map(|d| {
+            d.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "swift")
+                        && p.file_name().is_some_and(|n| n != "Runner.swift")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    extra.sort();
+    for p in &extra {
+        println!("cargo:rerun-if-changed={}", p.display());
+    }
     let swiftc = Command::new("xcrun")
         .args([
             "swiftc",
@@ -30,7 +55,8 @@ fn main() {
             "-framework",
             "Virtualization",
         ])
-        .arg(manifest.join("runner/Runner.swift"))
+        .arg(&main_swift)
+        .args(&extra)
         .arg("-o")
         .arg(&out)
         .status();
@@ -43,9 +69,14 @@ fn main() {
             return;
         }
     }
+    let entitlement = if env::var_os("FLUXVM_VZ_BRIDGE").is_some() {
+        manifest.join("runner/Entitlements.networking.plist")
+    } else {
+        manifest.join("runner/Entitlements.plist")
+    };
     let sign = Command::new("codesign")
         .args(["--force", "--sign", "-", "--entitlements"])
-        .arg(manifest.join("runner/Entitlements.plist"))
+        .arg(entitlement)
         .arg(&out)
         .status();
     if !matches!(sign, Ok(s) if s.success()) {
