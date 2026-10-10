@@ -23,7 +23,8 @@ no profile and can claim a warm slot. See [examples/sandbox-tiny.json](../exampl
 
 Container sandboxes ([oci-sandboxes.md](oci-sandboxes.md)) are the lightest shape: a container image booted straight into its
 entrypoint with no systemd, cloud-init or sshd, 1 vCPU and 512 MiB unless a profile or size says otherwise. Profiles, admission,
-quotas and TTLs apply to them as to any sandbox; they do not use the warm pool yet.
+quotas and TTLs apply to them as to any sandbox. They have their own warm pool (`apple.oci_warm_slots`, off by default), separate
+from `sandbox.warm_slots`; see [below](#density-report-and-metrics) and [oci-sandboxes.md](oci-sandboxes.md#warm-pool).
 
 ## Admission on real memory pressure
 

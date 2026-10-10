@@ -37,7 +37,7 @@ Write tools are offered only with `--allow-write`:
 
 | Tool | Effect | API |
 | --- | --- | --- |
-| `vm_create` | Create a normal VM from a `CreateVmRequest` JSON object; optional `ready_exec` waits for command readiness | `POST /v1/vms[?ready=exec]` |
+| `vm_create` | Create a normal VM from a `CreateVmRequest` JSON object (`spec`; `backend: "vz"` with `apple.guest_os: "macos"` clones a prepared macOS template); optional `ready_exec` waits for command readiness | `POST /v1/vms[?ready=exec]` |
 | `vm_clone` | Clone a stopped VM under a new name | `POST /v1/vms/{id}/clone` |
 | `vm_exec` | Execute a command in a normal VM; VZ guests use the Apple SSH transport | `POST /v1/vms/{id}/agent` |
 | `vm_snapshot` | Save a named snapshot | `POST /v1/vms/{id}/snapshot` |
@@ -52,7 +52,7 @@ Write tools are offered only with `--allow-write`:
 | `backup_list` | Backups with source VM, size and quiesced flag | `GET /v1/backups` |
 | `backup_restore` | Restore a backup into a stopped VM in place | `POST /v1/vms/{id}/restore-backup` |
 | `pool_claim` | Claim a booted VM from a warm `pool` (optional `name`, `ttl_seconds`) | `POST /v1/pools/{name}/claim` |
-| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`, `offline`, `allow_hosts`), or on a Mac from a container image with `oci_image` (plus `oci_command`, `oci_env`, `oci_ports`); see [oci-sandboxes.md](oci-sandboxes.md) | `POST /v1/sandboxes` |
+| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`, `offline`, `allow_hosts`), or on a Mac from a container image with `oci_image` (plus `oci_platform`, `oci_command`, `oci_env`, `oci_ports`); see [oci-sandboxes.md](oci-sandboxes.md) | `POST /v1/sandboxes` |
 | `sandbox_exec` | Run `command` in a sandbox through the guest agent | `POST /v1/sandboxes/{id}/process` |
 | `sandbox_write_file` | Write UTF-8 `content` to `path` in a sandbox | `POST /v1/sandboxes/{id}/fs/write` |
 

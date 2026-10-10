@@ -20,6 +20,11 @@
 - `scripts/vz-devices-live-test.sh` also checks `fluxctl port-connect` both ways over the daemon's websocket.
   `scripts/macos-live-test.sh` prints the daemon log, the guest console or the HTTP response when a check fails.
 
+- A warm slot is never restored while a running VM holds the address it was built with. Slots are built one after another and the
+  NAT frees a stopped guest's address, so two slots could end up with the same one; a restored guest keeps it, which gave two
+  concurrent sandboxes one address. Each slot records its address in the `fluxvm.slot-ip` label, and a slot whose address is in use
+  is skipped, so that create cold-boots.
+
 ### Changed: `vz` follow-ups
 - `fluxctl disk detach` unplugs a hot-attached USB disk from the running guest at once.
 - Warm-claimed container sandboxes are not hibernated until they restart (their root is on USB until then).
@@ -164,6 +169,20 @@
   [deploy/launchd-notes.md](deploy/launchd-notes.md), [deploy/kairon-node-mac.md](deploy/kairon-node-mac.md).
 - Not verified on hardware: bridged and vmnet networking, macOS 27 features, macOS guest install and provisioning, USB attach,
   building and booting `agent-micro`, a multi-Mac fleet.
+
+### Added: macOS guest clones, VMPal-parity options, and MCP VM lifecycle tools
+- **Clone prepared macOS guests** ([docs/macos.md](docs/macos.md#macos-guests)): `POST /v1/vms` with `backend: "vz"`,
+  `apple: {guest_os: "macos"}` and `image` = a template's `disk.raw` clones the disk (APFS `cp -c`) and takes `hardware.bin` and
+  `auxiliary.bin` from beside it; every clone gets its own machine identifier. The runner reads the guest's address from the Mac's
+  DHCP lease file (`/var/db/dhcpd_leases`), since macOS guests have no systemd. Verified by hand on an Apple M4 (macOS 27.2 host,
+  macOS 27.0.1 guest). `scripts/macos-guest-live-test.sh` clones a template through the API and checks the address and SSH login.
+  If key login is refused on a fresh clone, FileVault is on in the template; turn it off there first (see the macOS guests section).
+- **Display, audio, sharing and USB options** on `apple`: `display_width`, `display_height`, `display_ppi`, `audio_output` (on by
+  default), `microphone` (off), macOS-guest shared folders under `/Volumes/My Shared Files`, and for Linux guests `rosetta` and
+  `nested_virtualization` (macOS 15, M3 or later); `usb_controller` adds an XHCI controller (macOS 15+).
+- **MCP VM lifecycle tools** ([docs/mcp.md](docs/mcp.md)): with `--allow-write`, `vm_create` (optional `ready_exec`), `vm_clone`,
+  `vm_exec`, `vm_snapshot`, `vm_snapshot_restore`, `vm_snapshot_delete` and `vm_delete`; `vm_snapshot_list` is always offered.
+  `vm_exec` reaches `vz` guests over the Apple SSH transport.
 
 ### Added: native macOS support (Apple silicon)
 - **`vz` backend** (`crates/fluxvm-apple`): runs ARM64 Linux guests on Apple's Virtualization.framework through a signed
