@@ -9,6 +9,7 @@
 
 mod capability;
 mod control;
+pub mod macos_install;
 mod runner;
 pub mod ssh;
 
@@ -130,17 +131,27 @@ impl VmBackend for AppleBackend {
             restore_files(&ctx.workspace, &ctx.disk, tag)?;
         }
         let guest = req.apple.as_ref().map(|a| a.guest_os).unwrap_or_default();
+        let installs_itself = macos_install::is_macos_install(req);
+        let install =
+            installs_itself && !ctx.workspace.join(macos_install::INSTALLED_MARKER).exists();
         if guest == AppleGuest::Macos
+            && !installs_itself
             && !ctx.workspace.join("hardware.bin").exists()
             && !adopt_macos_template(&req.image, &ctx.workspace)?
         {
             bail!(
-                "a macOS guest needs a prepared template: set `image` to the disk.raw of an installed guest (its hardware.bin and auxiliary.bin must sit beside it). Installing one from an IPSW is not available through the API yet"
+                "a macOS guest needs a prepared template (set `image` to the disk.raw of an installed guest, with its hardware.bin and auxiliary.bin beside it) or `apple.install: true` with an IPSW"
             );
+        }
+        if let Some(fb) = req.apple.as_ref().and_then(|a| a.firstboot.as_ref()) {
+            macos_install::write_firstboot(&ctx.workspace, fb)?;
         }
         let runner = find_runner()?;
         let conf = RunnerConfig::for_launch(req, ctx)?;
         let conf_path = conf.write(&ctx.workspace)?;
+        if install {
+            macos_install::run_install(&runner, &conf_path, &ctx.workspace).await?;
+        }
         // A restarted VM must not report the previous boot's address.
         // (A restore keeps it: the restored guest does not announce its address again.)
         if req.loadvm_tag.is_none() {
@@ -247,6 +258,25 @@ fn restore_files(workspace: &std::path::Path, disk: &std::path::Path, tag: &str)
     Ok(())
 }
 
+/// Clones the disk and every other present `SNAPSHOT_FILES` entry from the workspace into snapshot `dir`.
+fn save_files(
+    workspace: &std::path::Path,
+    disk: &std::path::Path,
+    dir: &std::path::Path,
+) -> Result<()> {
+    for name in SNAPSHOT_FILES {
+        let src = if *name == "disk.raw" {
+            disk.to_path_buf()
+        } else {
+            workspace.join(name)
+        };
+        if *name == "disk.raw" || src.is_file() {
+            clone_file(&src, &dir.join(name))?;
+        }
+    }
+    Ok(())
+}
+
 /// Saves the running guest's memory and device state plus a matching copy of its disk under
 /// `<workspace>/snapshots/<tag>/`. The guest is paused while both are taken, then continues if it was running.
 pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
@@ -275,16 +305,7 @@ pub async fn snapshot_save(vm: &VmRecord, tag: &str) -> Result<()> {
             );
         }
         // The guest is paused, so these files match the saved memory exactly.
-        clone_file(&vm.disk, &dir.join("disk.raw"))?;
-        let overlay = vm.workspace.join("disk-overlay.asif");
-        if overlay.is_file() {
-            clone_file(&overlay, &dir.join("disk-overlay.asif"))?;
-        }
-        let efi = vm.workspace.join("efi.bin");
-        if efi.is_file() {
-            clone_file(&efi, &dir.join("efi.bin"))?;
-        }
-        Ok(())
+        save_files(&vm.workspace, &vm.disk, &dir)
     })();
     if was_running {
         // Even after a failure, the guest must not be left paused.
@@ -316,6 +337,33 @@ mod snapshot_tests {
         assert_eq!(
             std::fs::read(ws.path().join("efi.bin")).unwrap(),
             b"efi at snapshot"
+        );
+    }
+
+    #[test]
+    fn restore_brings_back_the_asif_overlay_too() {
+        let ws = tempfile::tempdir().unwrap();
+        let dir = snapshot_dir(ws.path(), "s1");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(STATE_FILE), b"state").unwrap();
+        std::fs::write(dir.join("disk-overlay.asif"), b"overlay at snapshot").unwrap();
+        std::fs::write(ws.path().join("disk-overlay.asif"), b"overlay now").unwrap();
+        restore_files(ws.path(), &ws.path().join("disk.raw"), "s1").unwrap();
+        assert_eq!(
+            std::fs::read(ws.path().join("disk-overlay.asif")).unwrap(),
+            b"overlay at snapshot"
+        );
+    }
+
+    #[test]
+    fn runner_balloon_reply_decodes() {
+        let reply = ControlReply(serde_json::json!({
+            "ok": true, "memory_mib": 8192, "target_mib": 2048, "actual_mib": 2048
+        }));
+        let s: AppleBalloonStatus = serde_json::from_value(reply.0).unwrap();
+        assert_eq!(
+            (s.memory_mib, s.target_mib, s.actual_mib),
+            (8192, 2048, 2048)
         );
     }
 

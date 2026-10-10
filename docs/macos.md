@@ -142,8 +142,37 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
   when you prepare the template. We did not automate either.
 - **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
 
-Not done: installing through the REST API or `fluxctl`, a `macos` image name, shared folders and snapshots for macOS guests (the
-runner only sets those up for Linux), and a vsock proxy. Apple allows two macOS VMs at a time per Mac.
+### Installing through the API
+
+`apple.install: true` installs from an IPSW as part of `POST /v1/vms` (tested against a fake runner; not yet run against a real IPSW
+through the API):
+
+```bash
+curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examples/macos-install.json
+```
+
+- The IPSW is `apple.media`, or `image` when `media` is unset; it must be a local absolute path (URLs are refused, download first).
+- FluxVM creates a sparse disk of `disk_size_gib` (default 64, minimum 40), runs `fluxvm-vz-runner install` to completion (progress
+  events land in `vz-runner.log` in the VM workspace; the request returns only after the install, up to 3 hours), then boots the guest.
+  A workspace marker (`macos-installed`) stops a restart from installing again; a failed install leaves no marker and is retried.
+- The installed guest stops at Setup Assistant unless you use the macOS 27 `provision_*` options (see "Mac Studio options"). Stop the
+  VM afterwards and use its `root.raw` as a template for clones.
+
+### First-boot keys
+
+`apple.firstboot: {"ssh_public_keys": ["ssh-ed25519 …"], "enable_remote_login": true}` shares a read-only folder into the guest at
+`/Volumes/My Shared Files/firstboot` with `authorized_keys` and `firstboot.sh` (also in [`scripts/macos-firstboot-helper.sh`](../scripts/macos-firstboot-helper.sh)).
+Run it once in the template as an admin, or from a LaunchDaemon you bake in: it installs the keys as a root-owned
+`/etc/ssh/fluxvm_authorized_keys` (via `sshd_config.d`), which sshd reads before any home directory is unlocked, so fresh clones accept
+the key on first boot, and turns on Remote Login. FluxVM cannot run it inside the guest for you.
+
+### Snapshots of macOS guests
+
+The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host); the snapshot also keeps the guest's NVRAM
+(`auxiliary.bin`). Not yet exercised on a real macOS guest.
+
+Not done: a `macos` image name, downloading an IPSW, and exec over vsock for macOS guests (they have no FluxVM guest agent). Apple
+allows two macOS VMs at a time per Mac.
 
 ## Display, audio, sharing and USB options
 
@@ -164,54 +193,36 @@ runner only sets those up for Linux), and a vsock proxy. Apple allows two macOS 
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
 - **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
 
-### Mac Studio options
+## Mac Studio options
 
-These are built and type-checked against the macOS 27 SDK, but none has been run on hardware yet. They all default to off, so an
-existing request behaves as before.
+These compile against the macOS 27 SDK and are validated at admission, but have **not been verified on hardware** yet.
 
-- **`display_count`** (1 to 8, default 1): number of virtual displays on a macOS guest, each `display_width` x `display_height`.
-- **`clipboard: true`:** Linux guests only (refused for macOS). Adds a SPICE agent console port; the guest needs `spice-vdagent`.
-- **`bridge_interface`** (for example `"en0"`): bridges the guest to that host interface instead of NAT. Needs `network.mode = "user"`
-  with no `forwards` (port forwards are NAT-only). The runner needs the restricted `com.apple.vm.networking` entitlement, so build with
-  `FLUXVM_VZ_BRIDGE=1` to sign it with `runner/Entitlements.networking.plist`; the default build does not carry it.
-- **`asif_overlay: true`:** macOS 27+ host. The base `disk.raw` is opened read-only and guest writes go to a sparse
-  `disk-overlay.asif` in the VM workspace (DiskImageKit). Snapshots now copy the overlay too.
-- **`provision_full_name`, `provision_username`, `provision_password_file`, `provision_auto_login`, `provision_remote_login`:** macOS 27+
-  host and guest. First boot creates the account, optionally logs in automatically and enables Remote Login. Full name, username and
-  password file are all required. The runner reads the password from the file and deletes it; it is never sent in the VM request.
-- **Balloon:** the existing `GET`/`POST /v1/vms/<id>/balloon` (and the memory report and idle reclaim) now also work for `vz` VMs, through
-  the runner's Virtualization.framework balloon device. For `vz`, `target_mib` and `actual_mib` both report the memory taken from the guest,
-  as set on the host; the guest driver's progress is not read back.
-- **USB hotplug:** the runner control socket accepts `usb-attach` (`path`, optional `read_only`) and `usb-detach` (`uuid`) for a disk
-  image as USB mass storage. It needs `usb_controller: true` and macOS 15+. There is no HTTP route for these yet, only
-  `fluxvm_apple::usb_attach` / `usb_detach`.
-
-Unverified on hardware: bridged networking on a real NIC, multi-display boot, SPICE clipboard sync, balloon reclaim, USB attach and
-detach, ASIF overlay growth and snapshot/restore, and macOS 27 provisioning.
-
-### Custom vmnet networks and the Virtio hook
-
-Built and type-checked against the macOS 27 SDK (the runner compiles); **not run on hardware**. Both default to off.
-
-- **`apple.vmnet`** (macOS 26+): `{mode: "shared" | "host-only", subnet, mask, reserved_ip?, forwards?: [{protocol: "tcp" | "udp",
-  host_port, guest_port, guest_ip}]}`. The runner creates a `vmnet_network` and attaches the VM's NIC to it with
-  `VZVmnetNetworkDeviceAttachment`. Admission requires `network.mode = "user"`, refuses `bridge_interface`, and checks that the subnet,
-  mask (contiguous, /30 or wider), `reserved_ip` and forward `guest_ip` are valid IPv4 inside the subnet, that the protocol is tcp or
-  udp and that ports are nonzero. `reserved_ip` becomes a DHCP reservation for the VM's MAC. `dhcp_start`/`dhcp_end` are refused: the
-  SDK's network configuration has no DHCP pool setter.
-- **A vmnet network belongs to one runner process, so it belongs to one VM.** VZ refuses to start an interface on a network another
-  process created, and every `vz` VM is its own runner. Two VMs therefore cannot share an `apple.vmnet` network today. Sharing needs a
-  broker that owns named networks and hands them to runners via `vmnet_network_copy_serialization` over XPC; that is described in
-  `docs/VMNET_BROKER.md` and **is not built**.
-- The runner needs the vmnet networking entitlement (see the bridged-networking build note above); whether the default ad-hoc entitlement
-  set is enough has not been tried. IP discovery and the 127.0.0.1 `network.forwards` relay still read the macOS NAT lease file, so they are
-  not expected to see a guest on a custom subnet; use `apple.vmnet.forwards` instead.
-- **`apple.custom_virtio: true`** (Linux guests, macOS 27 host): adds one `VZCustomVirtioDeviceConfiguration` (device ID 0xFF00, two
-  queues) to `customVirtioDevices`. It has no provider or delegate, so it only exposes the device to the guest; no device logic is built,
-  and whether VZ accepts a provider-less device is untested.
-- **Placement:** `fluxvm_scheduler::apple_placement::score` is a pure scorer (capacity, nested, vmnet, custom Virtio and bridge-interface
-  filters, then tightest fit). Nothing calls it yet. The runner's `HostCapabilities.swift` can describe host capabilities as JSON, but
-  nothing invokes it yet.
+- **Several displays (macOS guests):** `display_count` 1 to 8 (default 1), each `display_width` x `display_height`.
+- **Clipboard (Linux guests):** `clipboard: true` adds a SPICE agent port; the guest needs `spice-vdagent`. Refused for macOS guests.
+- **Bridged networking:** `bridge_interface: "en0"` puts the guest on the host's LAN (for example a Mac Studio's 10GbE) instead of NAT.
+  Needs `network.mode = "user"` with no `forwards`, and a runner signed with `com.apple.vm.networking`: build with
+  `FLUXVM_VZ_BRIDGE=1 cargo build -p fluxvm-apple` (ad-hoc signing of that entitlement only works with SIP/AMFI relaxed or a
+  provisioning profile).
+- **vmnet networks (macOS 26+):** `vmnet: {"mode": "shared" | "host-only", "subnet": "192.168.105.0", "mask": "255.255.255.0",
+  "reserved_ip": "192.168.105.10", "forwards": [{"protocol": "tcp", "host_port": 8080, "guest_port": 80, "guest_ip": "192.168.105.10"}]}`
+  gives the VM its own network with a stable DHCP reservation for its MAC and TCP/UDP host forwards. Admission checks that the mask is
+  contiguous (/30 or wider) and that `reserved_ip` and each forward's `guest_ip` are inside the subnet. The SDK has no DHCP pool setter,
+  so the whole subnet is served and `dhcp_start`/`dhcp_end` are refused. Each runner owns its network; VMs sharing one network need the
+  broker in [VMNET_BROKER.md](VMNET_BROKER.md). Exclusive with `bridge_interface`. IP discovery and the 127.0.0.1 `network.forwards`
+  relay read the NAT lease file, so use `vmnet.forwards` instead.
+- **Custom Virtio (macOS 27+, Linux guests):** `custom_virtio: true` adds a discoverable vendor Virtio device; a host-side provider is a follow-up.
+- **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
+  the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.
+- **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts
+  `{"cmd":"usb-attach","path":"/path/disk.img","read_only":false}` (returns a `uuid`) and `{"cmd":"usb-detach","uuid":"…"}` (macOS 15+).
+  Physical accessories stay user-mediated through Apple's Accessory Access consent.
+- **ASIF overlay (macOS 27+):** `asif_overlay: true` keeps the base disk read-only and writes to a sparse `disk-overlay.asif`, which
+  snapshots include.
+- **Unattended first boot (macOS 27 guests):** `provision_full_name`, `provision_username`, `provision_password_file` (a one-shot file the
+  runner deletes after reading), `provision_auto_login`, `provision_remote_login` create the user and turn on Remote Login without Setup
+  Assistant.
+- **Host capabilities:** `{"cmd":"capabilities"}` on a runner's control socket reports CPU and memory limits, nested virtualization,
+  bridgeable interfaces, vmnet and custom-Virtio support; `fluxvm_scheduler::apple_placement` scores hosts from it.
 
 ## Capability matrix
 
@@ -221,7 +232,7 @@ Built and type-checked against the macOS 27 SDK (the runner compiles); **not run
 | NAT networking, TCP port forwards, no-network mode, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
 | shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug, data disks, cdroms |
-| macOS guests (installed by hand from an IPSW, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot |
+| macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
@@ -229,8 +240,9 @@ process starts.
 ## Honest limits
 
 - This is a preview-quality backend. Only Linux ARM64 guests have been booted.
-- macOS guests exist only as clones of a template you install and prepare by hand (see "macOS guests"); the API cannot install one. The
-  restore image is 26.6 GB and the installed disk about 24 GB, so plan for 55 GB or more free on the volume that holds them.
+- macOS guests are installed through the API or by hand, but finishing Setup Assistant still needs a person unless the host and guest
+  are on macOS 27 (`provision_*`). The restore image is 26.6 GB and the installed disk about 24 GB, so plan for 55 GB or more free on
+  the volume that holds them.
 - Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
   where it can.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.

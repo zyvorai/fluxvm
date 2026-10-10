@@ -15,6 +15,11 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path};
 const FAKE_RUNNER: &str = r#"#!/usr/bin/env python3
 import json, os, socket, sys
 cfg = json.load(open(sys.argv[3]))
+if sys.argv[1] == "install":
+    if os.environ.get("FAKE_INSTALL_FAIL"):
+        print("fake install failure: unsupported IPSW", file=sys.stderr); sys.exit(4)
+    open(os.path.join(cfg["workspace"], "installed-from"), "w").write(cfg["media"])
+    print(json.dumps({"event": "installed"})); sys.exit(0)
 if os.environ.get("FAKE_RUNNER_FAIL"):
     print("fake runner failure: no hypervisor", file=sys.stderr); sys.exit(3)
 state = {"s": "running"}
@@ -128,6 +133,56 @@ async fn backend_supervises_a_runner_over_its_control_socket() {
         .to_string();
     assert!(err.contains("fake runner failure"), "{err}");
     unsafe { std::env::remove_var("FAKE_RUNNER_FAIL") };
+
+    // apple.install: the installer runs to completion first, then the guest boots; a relaunch does not install again.
+    let mut mac: CreateVmRequest = serde_json::from_str(
+        r#"{"name":"mac","backend":"vz","image":"/ipsw/Restore.ipsw","vcpus":4,"memory_mib":8192,
+            "network":{"mode":"user"},
+            "apple":{"guest_os":"macos","install":true,"firstboot":{"ssh_public_keys":["ssh-ed25519 AAAA k"]}}}"#,
+    )
+    .unwrap();
+    let ctx3 = context(&dir.path().join("mac"));
+    let launched = AppleBackend
+        .launch(&Config::default(), &mac, &ctx3)
+        .await
+        .expect("install then boot");
+    assert_eq!(
+        fs::read_to_string(ctx3.workspace.join("installed-from")).unwrap(),
+        "/ipsw/Restore.ipsw"
+    );
+    assert!(ctx3.workspace.join("macos-installed").is_file());
+    assert!(ctx3.workspace.join("firstboot/authorized_keys").is_file());
+    let conf: serde_json::Value =
+        serde_json::from_slice(&fs::read(ctx3.workspace.join("vz-config.json")).unwrap()).unwrap();
+    assert_eq!(conf["guest_os"], "macos");
+    assert!(
+        conf["shares"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["tag"] == "firstboot" && s["read_only"] == true),
+        "{conf}"
+    );
+    let sock = launched.control_socket.unwrap();
+    control_call(&sock, "stop").await.unwrap();
+    fs::remove_file(ctx3.workspace.join("installed-from")).unwrap();
+    unsafe { std::env::set_var("FAKE_INSTALL_FAIL", "1") };
+    let relaunched = AppleBackend
+        .launch(&Config::default(), &mac, &ctx3)
+        .await
+        .expect("an installed guest boots without installing again");
+    assert!(!ctx3.workspace.join("installed-from").exists());
+    control_call(&relaunched.control_socket.unwrap(), "stop")
+        .await
+        .unwrap();
+    mac.name = "mac2".into();
+    let err = AppleBackend
+        .launch(&Config::default(), &mac, &context(&dir.path().join("mac2")))
+        .await
+        .expect_err("install failure")
+        .to_string();
+    assert!(err.contains("fake install failure"), "{err}");
+    unsafe { std::env::remove_var("FAKE_INSTALL_FAIL") };
 
     // Unsupported requests are refused before any process starts.
     let mut bad = request();

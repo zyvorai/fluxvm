@@ -1,0 +1,20 @@
+{
+  "name": "macos-27-template",
+  "backend": "vz",
+  "image": "/Users/Shared/ipsw/UniversalMac_27.0.1_Restore.ipsw",
+  "vcpus": 4,
+  "memory_mib": 8192,
+  "disk_size_gib": 64,
+  "network": { "mode": "user" },
+  "apple": {
+    "guest_os": "macos",
+    "install": true,
+    "window": true,
+    "display_width": 2560,
+    "display_height": 1600,
+    "firstboot": {
+      "ssh_public_keys": ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... you@example"],
+      "enable_remote_login": true
+    }
+  }
+}

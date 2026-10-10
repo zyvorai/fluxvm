@@ -2621,6 +2621,7 @@ dependencies = [
  "fluxvm-core",
  "fluxvm-guest-protocol",
  "libc",
+ "serde_json",
  "tokio",
 ]
 

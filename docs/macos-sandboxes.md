@@ -38,12 +38,17 @@ warm_slots = 4   # 0 turns the pool off
 Slots show up in `fluxctl list` as `sandbox-slot-…`. They cost disk (an APFS clone of the image plus a few hundred MB of saved memory
 each), and no memory while stopped. Restoring needs an unlocked login session.
 
+For many sandboxes on one Mac (sizes such as `"profile": "tiny"`, admission on macOS memory pressure, idle pause and hibernate,
+`POST /v1/sandboxes/warm` and `GET /v1/sandboxes/density`), see [agent-density.md](agent-density.md).
+
 ## How it differs from Linux
 
-- **SSH, not the vsock agent.** Linux sandboxes talk to a guest agent over vsock. `vz` guests run stock cloud images with no agent, so
-  the daemon uses SSH with its own key (`<state_dir>/sandbox_ed25519`, created on first use and authorised by cloud-init as user
-  `sandbox`). A file is moved with `cat`/`chmod`, so the limits are 32 MiB per file and a normal Linux userland in the guest.
-- **No per-exec policy.** `policy` (Landlock/seccomp confinement of one command) needs the agent and is refused on `vz`.
+- **SSH unless the image has the agent.** Linux sandboxes talk to a guest agent over vsock. Stock cloud images (`debian-13`) have no
+  agent, so the daemon uses SSH with its own key (`<state_dir>/sandbox_ed25519`, created on first use and authorised by cloud-init as
+  user `sandbox`). A file is moved with `cat`/`chmod`, so the limits are 32 MiB per file and a normal Linux userland in the guest.
+  Sandboxes on the `agent-micro` image use the agent over vsock and fall back to SSH; see [vsock-proxy.md](vsock-proxy.md).
+- **Per-exec policy only with the agent.** `policy` (Landlock/seccomp confinement of one command) needs the agent and is refused on
+  guests without it.
 - **Network is not isolated by default.** A sandbox on `network.mode = "user"` has full outbound access through the Mac's NAT, and
   Virtualization.framework gives no way to filter it.
 - **Offline sandboxes are.** `{"offline": true}` (MCP: `sandbox_create` with `offline`) attaches no network card at all, so there is

@@ -2,6 +2,35 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: Mac Studio options, macOS guests through the API, and many small agent VMs per Mac
+- **Mac Studio options on `vz`** ([docs/macos.md](docs/macos.md)): up to eight displays, Linux clipboard (SPICE), bridged networking
+  (`apple.bridge_interface`, needs the networking entitlement), vmnet networks on macOS 26+ (`apple.vmnet`: shared or host-only,
+  subnet, a DHCP reservation, port forwards), custom virtio devices on macOS 27, an ASIF disk overlay that snapshots with the VM,
+  macOS guest provisioning, balloon control and USB mass-storage attach. `apple_placement::pick` places macOS guests (two per Mac).
+- **macOS guests through the API**: `apple.install` installs from an IPSW into a new disk, then boots; `apple.firstboot` puts SSH keys
+  in place and turns on Remote Login on first boot. Examples in `examples/macos-install.json` and `macos-clone.json`.
+- **Agent density** ([docs/agent-density.md](docs/agent-density.md)): sandbox `profile` (`tiny` 1/512, `small` 1/1024, `standard`);
+  pressure admission on macOS (`vm_stat` and `kern.memorystatus_vm_pressure_level`, new `policy.deny_host_pressure_level`);
+  AutoPause and idle reclaim cover `vz` sandboxes (labelled `fluxvm.sandbox`); `sandbox.hibernate_idle_secs` saves an idle `vz`
+  sandbox's memory and stops it, and the next request restores it; `POST /v1/sandboxes/warm`, `GET /v1/sandboxes/density`,
+  `fluxctl sandbox warm | density`.
+- **Guest agent on `vz`** ([docs/vsock-agent.md](docs/vsock-agent.md), [docs/vsock-proxy.md](docs/vsock-proxy.md)): sandboxes with the
+  agent (the `agent-micro` image, or `agent.enabled`) run commands and move files over vsock through the runner, falling back to SSH;
+  the token travels by cloud-init. The runner's relays now close and release their connections when done (they used to stay open
+  for the VM's life).
+- **`agent-micro` image** ([docs/agent-micro.md](docs/agent-micro.md)): `scripts/build-agent-micro.sh` and
+  `build-and-publish-agent-micro.sh`; registered as a catalog entry; sandbox create takes `image`.
+- **Ballooning under pressure** ([docs/ballooning.md](docs/ballooning.md)): idle reclaim starts after 60 s while the host is at warn
+  or critical.
+- **Fleet** ([docs/kairon-mac-scheduling.md](docs/kairon-mac-scheduling.md), [docs/topology.md](docs/topology.md)): `fluxvm-agent node`
+  reports the density report; central placement skips nodes at critical pressure and prefers calm ones.
+- **Metrics**: `fluxvm_host_memory_pressure_level`, `fluxvm_host_mem_available_mib`, `fluxvm_sandbox_warm_hits_total` /
+  `_misses_total`, `fluxvm_sandbox_balloons_inflated`, `fluxvm_vz_agent_calls_total`, `fluxvm_vz_agent_ssh_fallbacks_total`.
+- Scripts: `scripts/density-smoke.sh`, `scripts/e2e-smoke.sh`; guides: [docs/integration.md](docs/integration.md),
+  [deploy/launchd-notes.md](deploy/launchd-notes.md), [deploy/kairon-node-mac.md](deploy/kairon-node-mac.md).
+- Not verified on hardware: bridged and vmnet networking, macOS 27 features, macOS guest install and provisioning, USB attach,
+  building and booting `agent-micro`, a multi-Mac fleet.
+
 ### Added: native macOS support (Apple silicon)
 - **`vz` backend** (`crates/fluxvm-apple`): runs ARM64 Linux guests on Apple's Virtualization.framework through a signed
   Swift helper (`fluxvm-vz-runner`) supervised over a unix control socket. REST lifecycle (create, start, stop, pause,

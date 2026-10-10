@@ -22,6 +22,10 @@ pub struct SandboxCreateRequest {
     pub template: Option<String>,
     #[serde(default)]
     pub spec: Option<CreateVmRequest>,
+    /// macOS, with neither `template` nor `spec`: the guest image instead of `debian-13`, for example `agent-micro`
+    /// (see `docs/agent-micro.md`). Another image cold-boots (warm slots are `debian-13`).
+    #[serde(default)]
+    pub image: Option<String>,
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
     /// Default guest port for `/sandbox/{id}/…` HTTP proxy (overrides config).
@@ -43,6 +47,10 @@ pub struct SandboxCreateRequest {
     /// `max_memory_mib` when it sets one.
     #[serde(default)]
     pub memory_mib: Option<u64>,
+    /// Named size (`tiny` 1 vCPU / 512 MiB, `small` 1 / 1024, `standard` 2 / 2048). Explicit
+    /// `vcpus` / `memory_mib` win. A non-standard profile cold-boots (warm slots are standard-sized).
+    #[serde(default)]
+    pub profile: Option<fluxvm_core::agent_density::AgentProfile>,
     /// `auto` uses a hardware-encrypted VM when the host can and otherwise runs a
     /// normal one; `required` refuses to run without one. See [`crate::confidential`].
     #[serde(default)]
@@ -236,13 +244,24 @@ impl VmManager {
         // fails before anything is created.
         let confidential =
             crate::confidential::resolve(req.confidential, &crate::confidential::detect())?;
+        let (vcpus, memory_mib) = fluxvm_core::agent_density::AgentProfile::resolve(
+            req.profile,
+            req.vcpus,
+            req.memory_mib,
+        );
         // The shape a warm slot has: nothing but defaults asked for, and no tenant to scope the VM to (token quotas were checked above).
+        if req.image.is_some() && (req.template.is_some() || req.spec.is_some()) {
+            bail!(
+                "`image` replaces the default spec; with `template` or `spec`, set the image there"
+            );
+        }
         let default_shape = cfg!(target_os = "macos")
             && req.template.is_none()
             && req.spec.is_none()
+            && req.image.is_none()
             && req.volumes.is_empty()
-            && req.vcpus.is_none()
-            && req.memory_mib.is_none()
+            && vcpus.is_none()
+            && memory_mib.is_none()
             && gpus == 0
             && !req.offline
             && req.allow_hosts.is_empty()
@@ -257,11 +276,15 @@ impl VmManager {
             spec
         } else if cfg!(target_os = "macos") {
             // Nothing asked for: a small Debian VM on the Mac's own hypervisor, so `sandbox_create {}` just works.
-            serde_json::from_value(crate::sandbox_pool::default_sandbox_spec())?
+            let mut spec = crate::sandbox_pool::default_sandbox_spec();
+            if let Some(image) = &req.image {
+                spec["image"] = serde_json::json!(image);
+            }
+            serde_json::from_value(spec)?
         } else {
             bail!("sandbox create requires `template` or `spec`");
         };
-        apply_resources(&mut create, req.vcpus, req.memory_mib)?;
+        apply_resources(&mut create, vcpus, memory_mib)?;
         enforce_sandbox_tenant(&mut create, token_tenant)?;
         create.created_by_token = created_by_token.map(String::from);
         // On a Mac the only backend that runs is Apple's (`vz`), so a spec that did not ask for another one gets it.
@@ -341,10 +364,16 @@ impl VmManager {
         } else {
             None
         };
+        if on_vz && default_shape {
+            fluxvm_core::agent_density::record_warm_claim(claimed.is_some());
+        }
         let mut record = match claimed {
             Some(vm) => vm,
             None => self.create(create).await?,
         };
+        if on_vz {
+            record = self.label_vz_sandbox(record.id).await?;
+        }
         if on_vz && default_shape {
             self.spawn_pool_fill();
         }
@@ -408,7 +437,7 @@ impl VmManager {
     /// vz guests have no vsock agent: exec and files go over SSH with the daemon's own key (see `vz_guest`), authorised through
     /// cloud-init for the sandbox user.
     pub(crate) fn prepare_vz_sandbox(&self, create: &mut CreateVmRequest) -> Result<()> {
-        create.agent = None;
+        create.agent = crate::vz_guest::vz_sandbox_agent(create);
         let (public_key, _) = self.sandbox_ssh_key()?;
         let ci = create.cloud_init.get_or_insert_with(Default::default);
         ci.user
@@ -678,12 +707,13 @@ impl VmManager {
         }
     }
 
-    /// AutoPause: pause Running FluxVm sandboxes idle longer than configured.
+    /// AutoPause: pause Running sandboxes (FluxVm, and labelled `vz` ones) idle longer than configured.
     pub async fn autopause_tick(self: &std::sync::Arc<Self>) -> Result<usize> {
-        // Idle reclaim (balloon inflate) runs on the same scan, before pausing.
+        // Idle reclaim (balloon inflate) runs on the same scan, before pausing; hibernate after.
         if let Err(e) = self.idle_reclaim_tick().await {
             tracing::warn!(error = %e, "idle reclaim tick failed");
         }
+        self.hibernate_tick().await;
         let idle = self.cfg.sandbox.autopause_idle_secs;
         if idle == 0 {
             return Ok(0);
@@ -691,10 +721,7 @@ impl VmManager {
         let cutoff = Utc::now() - Duration::seconds(idle as i64);
         let mut n = 0;
         for vm in self.list().await {
-            if vm.backend != BackendKind::FluxVm
-                || vm.status != VmStatus::Running
-                || crate::procbox_sandbox::is_procbox(&vm)
-            {
+            if !crate::sandbox_density::autopause_eligible(&vm) || vm.status != VmStatus::Running {
                 continue;
             }
             let last = self.last_activity(vm.id).await.unwrap_or(vm.created_at);
@@ -723,7 +750,10 @@ impl VmManager {
 
     pub fn spawn_autopause_loop(self: &std::sync::Arc<Self>) {
         let idle = self.cfg.sandbox.autopause_idle_secs;
-        if idle == 0 && self.cfg.sandbox.idle_balloon_secs == 0 {
+        if idle == 0
+            && self.cfg.sandbox.idle_balloon_secs == 0
+            && self.cfg.sandbox.hibernate_idle_secs == 0
+        {
             return;
         }
         let scan = std::cmp::max(1, self.cfg.sandbox.autopause_scan_secs);

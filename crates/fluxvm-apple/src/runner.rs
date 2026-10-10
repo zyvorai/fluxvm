@@ -90,7 +90,11 @@ impl RunnerConfig {
             },
             disk: ctx.disk.clone(),
             seed: ctx.seed_disk.clone(),
-            media: apple.media,
+            media: if crate::macos_install::is_macos_install(req) {
+                Some(crate::macos_install::install_media(req))
+            } else {
+                apple.media.clone()
+            },
             mac: stable_mac(&ctx.workspace)?,
             control_socket: control_socket_path(&id8)?,
             serial_log: ctx.log_path.clone(),
@@ -136,6 +140,15 @@ impl RunnerConfig {
                     host_path: f.host_path.clone(),
                     read_only: f.read_only,
                 })
+                .chain(
+                    (apple.guest_os == AppleGuest::Macos && apple.firstboot.is_some()).then(|| {
+                        ShareConfig {
+                            tag: crate::macos_install::FIRSTBOOT_DIR.into(),
+                            host_path: ctx.workspace.join(crate::macos_install::FIRSTBOOT_DIR),
+                            read_only: true,
+                        }
+                    }),
+                )
                 .collect(),
             network_none: matches!(req.network, NetworkSpec::None),
             egress_allow: apple.egress_allow.clone(),
@@ -166,7 +179,8 @@ pub const EGRESS_PORT: u32 = 3128;
 
 pub const STATE_FILE: &str = "state.vzvmsave";
 /// Files cloned alongside the saved state, so a restore gets the disk exactly as it was when the state was saved.
-pub const SNAPSHOT_FILES: &[&str] = &["disk.raw", "disk-overlay.asif", "efi.bin"];
+/// `auxiliary.bin` is a macOS guest's NVRAM.
+pub const SNAPSHOT_FILES: &[&str] = &["disk.raw", "disk-overlay.asif", "efi.bin", "auxiliary.bin"];
 
 pub fn snapshot_dir(workspace: &Path, tag: &str) -> PathBuf {
     workspace.join("snapshots").join(tag)

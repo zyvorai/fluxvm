@@ -7,7 +7,9 @@
 // between VMs needs the broker in docs/VMNET_BROKER.md, which is not built.
 import Foundation
 import Virtualization
+#if canImport(vmnet)
 import vmnet
+#endif
 
 struct FluxVMNetForward: Codable {
     let `protocol`: String
@@ -26,6 +28,7 @@ struct FluxVMNetSpec: Codable {
     let forwards: [FluxVMNetForward]?
 }
 
+#if canImport(vmnet)
 /// Keeps the network alive for the life of the runner process (the attachment does not retain it for us).
 var fluxVMNetNetworkKeepAlive: [Any] = []
 
@@ -94,6 +97,8 @@ final class FluxVMNetNetwork {
         VZVmnetNetworkDeviceAttachment(network: network)
     }
 }
+
+#endif
 
 @available(macOS 27.0, *)
 func fluxVMCustomVirtioConfiguration() -> VZCustomVirtioDeviceConfiguration {

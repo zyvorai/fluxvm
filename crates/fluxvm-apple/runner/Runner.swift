@@ -55,7 +55,7 @@ struct Config: Decodable {
     let rosetta: Bool?
     let nested_virtualization: Bool?
     let usb_controller: Bool?
-    let vmnet: FluxVMNetSpec?       // macOS 26+ custom vmnet network (per runner process)
+    let vmnet: FluxVMNetSpec?       // macOS 26+ per-VM vmnet network (nil: NAT or bridge)
     let custom_virtio: Bool?        // macOS 27+ custom Virtio device hook (Linux guests)
     let shares: [Share]?
     let forwards: [Forward]?
@@ -71,21 +71,31 @@ func fail(_ message: String, code: Int32 = 1) -> Never {
 
 /// Copies `from` to `to` until EOF, then half-closes `to`. Writes through `withUnsafeBytes`, because `&buf[i]` can
 /// hand `write` a pointer to a one-byte temporary instead of the array's storage.
-func pump(_ from: Int32, _ to: Int32) {
-    DispatchQueue.global().async {
-        var buf = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let n = read(from, &buf, buf.count)
-            if n <= 0 { break }
-            var off = 0
-            while off < n {
-                let w = buf.withUnsafeBytes { write(to, $0.baseAddress! + off, n - off) }
-                if w <= 0 { return }
-                off += w
+/// Copies both ways between two descriptors until both directions end, then runs `done` (which closes them) on the main
+/// queue. End of file half-closes the other side; an error shuts both down so the other direction cannot block forever.
+func splice(_ a: Int32, _ b: Int32, done: @escaping () -> Void) {
+    let group = DispatchGroup()
+    for (from, to) in [(a, b), (b, a)] {
+        group.enter()
+        DispatchQueue.global().async {
+            var buf = [UInt8](repeating: 0, count: 64 * 1024)
+            var failed = false
+            copy: while true {
+                let n = read(from, &buf, buf.count)
+                if n == 0 { break }
+                if n < 0 { if errno == EINTR { continue }; failed = true; break }
+                var off = 0
+                while off < n {
+                    let w = buf.withUnsafeBytes { write(to, $0.baseAddress! + off, n - off) }
+                    if w <= 0 { failed = true; break copy }
+                    off += w
+                }
             }
+            if failed { shutdown(a, SHUT_RDWR); shutdown(b, SHUT_RDWR) } else { shutdown(to, SHUT_WR) }
+            group.leave()
         }
-        shutdown(to, SHUT_WR)
     }
+    group.notify(queue: .main, execute: done)
 }
 
 func emit(_ object: [String: Any]) {
@@ -284,10 +294,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.usbControllers = [VZXHCIControllerConfiguration()]
         }
         try self.configureClipboard(c)
-        if cfg.custom_virtio == true {
-            guard #available(macOS 27.0, *) else { throw err("apple.custom_virtio needs macOS 27 or later") }
-            c.customVirtioDevices = [fluxVMCustomVirtioConfiguration()]
-        }
+        try self.configureCustomVirtio(c)
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         try c.validate()
@@ -466,6 +473,15 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                         }
                     }
                 } else { write() }
+            case "capabilities":
+                if let data = try? JSONEncoder().encode(fluxAppleHostCapabilities()),
+                   var caps = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                    caps["ok"] = true
+                    response = caps
+                } else {
+                    response = ["ok": false, "error": "cannot encode host capabilities"]
+                }
+                sem.signal()
             case "balloon":
                 response = self.balloonControl(reclaimMiB: (o["balloon_mib"] as? NSNumber)?.uint64Value)
                 sem.signal()
@@ -605,7 +621,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         addr.sin_addr.s_addr = inet_addr(ip)
         let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(g, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) } }
         guard g >= 0, ok == 0 else { if g >= 0 { close(g) }; close(c); return }
-        pump(c, g); pump(g, c)
+        splice(c, g) { close(c); close(g) }
     }
 
     // MARK: egress proxy (guest -> host over vsock, allow-listed HTTP CONNECT / plain HTTP)
@@ -622,7 +638,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             let delegate = EgressDelegate { conn in
                 self.vsockConnections.append(conn)
                 let fd = conn.fileDescriptor
-                DispatchQueue.global().async { self.serveEgress(fd, rules) }
+                DispatchQueue.global().async { self.serveEgress(fd, rules) { DispatchQueue.main.async { self.release(conn) } } }
             }
             let listener = VZVirtioSocketListener()
             listener.delegate = delegate
@@ -667,11 +683,12 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
         return nil
     }
 
-    func serveEgress(_ c: Int32, _ rules: [String]) {
+    /// The guest's side `c` belongs to a vsock connection; `finish` releases it.
+    func serveEgress(_ c: Int32, _ rules: [String], finish: @escaping () -> Void) {
         func reply(_ status: String, _ body: String) {
             let text = "HTTP/1.1 \(status)\r\nContent-Type: text/plain\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n\(body)"
             _ = text.withCString { write(c, $0, strlen($0)) }
-            close(c)
+            finish()
         }
         var head = Data()
         var byte: UInt8 = 0
@@ -680,7 +697,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             head.append(byte)
             if head.suffix(4) == end { break }
         }
-        guard head.suffix(4) == end, let text = String(data: head, encoding: .utf8) else { close(c); return }
+        guard head.suffix(4) == end, let text = String(data: head, encoding: .utf8) else { finish(); return }
         var lines = text.components(separatedBy: "\r\n")
         let first = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard first.count == 3 else { reply("400 Bad Request", "bad request\n"); return }
@@ -714,10 +731,16 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             let out = (["\(method) \(path) \(version)"] + kept + ["Connection: close", "", ""]).joined(separator: "\r\n")
             _ = out.withCString { write(up, $0, strlen($0)) }
         }
-        pump(c, up); pump(up, c)
+        splice(c, up) { close(up); finish() }
     }
 
     // MARK: vsock proxy ("CONNECT <port>\n" over a unix socket, like Firecracker's)
+
+    /// Closes a finished vsock connection and drops the reference that kept its descriptor open. Main queue.
+    func release(_ conn: VZVirtioSocketConnection) {
+        conn.close()
+        vsockConnections.removeAll { $0 === conn }
+    }
 
     func startVsockProxy() {
         guard let path = cfg.vsock_socket else { return }
@@ -755,7 +778,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     self.vsockConnections.append(conn)
                     let g = conn.fileDescriptor
                     if !quiet { _ = "OK \(port)\n".withCString { write(c, $0, strlen($0)) } }
-                    pump(c, g); pump(g, c)
+                    splice(c, g) { close(c); self.release(conn) }
                 }
             }
         }

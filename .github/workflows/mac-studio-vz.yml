@@ -1,0 +1,34 @@
+name: mac-studio-vz
+on:
+  pull_request:
+    paths:
+      - 'crates/fluxvm-core/**'
+      - 'crates/fluxvm-apple/**'
+      - 'crates/fluxvm-scheduler/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo test -p fluxvm-core
+      - run: FLUXVM_SKIP_VZ_RUNNER=1 cargo test -p fluxvm-apple
+      - run: cargo test -p fluxvm-scheduler density
+  apple:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build -p fluxvm-apple
+      - run: cargo test -p fluxvm-apple
+      - run: |
+          grep -q 'VZBridgedNetworkDeviceAttachment' crates/fluxvm-apple/runner/ModernFeatures.swift
+          grep -q 'VZSpiceAgentPortAttachment' crates/fluxvm-apple/runner/ModernFeatures.swift
+          grep -q 'targetVirtualMachineMemorySize' crates/fluxvm-apple/runner/ModernFeatures.swift
+          grep -q 'VZUSBMassStorageDevice' crates/fluxvm-apple/runner/ModernFeatures.swift

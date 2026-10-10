@@ -21,10 +21,12 @@ extension Runner {
 
     func networkAttachment() throws -> VZNetworkDeviceAttachment {
         if let spec = cfg.vmnet {
-            guard #available(macOS 26.0, *) else {
-                throw modernError("apple.vmnet needs macOS 26 or later (this host is older)")
+            #if canImport(vmnet)
+            if #available(macOS 26.0, *) {
+                return try FluxVMNetNetwork(spec: spec, macAddress: cfg.mac).attachment()
             }
-            return try FluxVMNetNetwork(spec: spec, macAddress: cfg.mac).attachment()
+            #endif
+            throw modernError("apple.vmnet needs a macOS 26+ host")
         }
         guard let name = cfg.bridge_interface, !name.isEmpty else { return VZNATNetworkDeviceAttachment() }
         guard let iface = VZBridgedNetworkInterface.networkInterfaces.first(where: { $0.identifier == name }) else {
@@ -32,6 +34,13 @@ extension Runner {
                 VZBridgedNetworkInterface.networkInterfaces.map { $0.identifier }.joined(separator: ", "))
         }
         return VZBridgedNetworkDeviceAttachment(interface: iface)
+    }
+
+    func configureCustomVirtio(_ c: VZVirtualMachineConfiguration) throws {
+        guard cfg.custom_virtio == true else { return }
+        guard cfg.guest_os == "linux" else { throw modernError("apple.custom_virtio is Linux-only") }
+        guard #available(macOS 27.0, *) else { throw modernError("apple.custom_virtio needs a macOS 27+ host") }
+        c.customVirtioDevices = [fluxVMCustomVirtioConfiguration()]
     }
 
     func configureClipboard(_ c: VZVirtualMachineConfiguration) throws {

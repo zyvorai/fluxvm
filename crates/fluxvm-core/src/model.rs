@@ -456,31 +456,51 @@ pub enum AppleGuest {
     Macos,
 }
 
-/// macOS 26+ vmnet network mode.
+/// First-boot material for a macOS guest. The guest runs `firstboot.sh` from the share (once, as an admin, or from a
+/// LaunchDaemon in the template): it installs the keys as a root-owned `AuthorizedKeysFile` outside any home directory, so
+/// fresh clones accept them before anyone has logged in, and turns on Remote Login.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppleFirstBoot {
+    #[serde(default)]
+    pub ssh_public_keys: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enable_remote_login: bool,
+}
+
+/// Mode of a macOS 26+ vmnet network.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppleVmnetMode {
+    /// NAT to the host's uplink.
     Shared,
+    /// Guests and host only, no uplink.
     HostOnly,
 }
 
-/// A host-to-guest port forwarding rule on a vmnet network.
+/// A TCP or UDP forward from a host port to a guest address on a vmnet network.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppleVmnetForward {
     /// `tcp` or `udp`.
+    #[serde(default = "default_vmnet_protocol")]
     pub protocol: String,
     pub host_port: u16,
     pub guest_port: u16,
     pub guest_ip: String,
 }
 
-/// A custom macOS 26+ vmnet network. The network object lives in the VM's runner process, so it is
-/// private to that VM; sharing one network between VMs needs a broker that is not built yet.
+fn default_vmnet_protocol() -> String {
+    "tcp".into()
+}
+
+/// A per-VM vmnet network (macOS 26+). VMs sharing one network need the broker in `docs/VMNET_BROKER.md`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppleVmnetSpec {
     pub mode: AppleVmnetMode,
+    /// IPv4 subnet address, for example `192.168.105.0`.
     pub subnet: String,
+    /// IPv4 subnet mask, for example `255.255.255.0`. vmnet's DHCP serves the whole subnet.
     pub mask: String,
+    /// Accepted for wire compatibility and refused at admission: the vmnet SDK has no DHCP pool setter.
     #[serde(default)]
     pub dhcp_start: Option<String>,
     #[serde(default)]
@@ -500,6 +520,13 @@ pub struct AppleSpec {
     /// macOS guests: the IPSW restore image. Linux guests: an optional installer ISO attached read-only.
     #[serde(default)]
     pub media: Option<PathBuf>,
+    /// macOS guests: install from the IPSW (`media`, or `image` when `media` is unset) onto a fresh sparse disk of
+    /// `disk_size_gib` before the first boot, instead of cloning a prepared template.
+    #[serde(default)]
+    pub install: bool,
+    /// macOS guests: files shared into the guest at `/Volumes/My Shared Files/firstboot` for a first-boot helper.
+    #[serde(default)]
+    pub firstboot: Option<AppleFirstBoot>,
     /// Open the guest's native console window (a `VZVirtualMachineView`).
     #[serde(default)]
     pub window: bool,
@@ -559,10 +586,10 @@ pub struct AppleSpec {
     /// Opt-in so hosts that still run the supported macOS 14 baseline do not regress.
     #[serde(default)]
     pub usb_controller: bool,
-    /// macOS 26+ custom vmnet network (needs `network.mode = "user"`; per-VM, not shared).
+    /// macOS 26+ custom vmnet network (shared or host-only) with its own DHCP pool, reservation and port forwards.
     #[serde(default)]
     pub vmnet: Option<AppleVmnetSpec>,
-    /// macOS 27+ custom Virtio device hook (Linux guests only).
+    /// macOS 27+ custom Virtio device hook for Linux guests.
     #[serde(default)]
     pub custom_virtio: bool,
     /// Host names the guest may reach, through an HTTP(S) proxy the runner serves over vsock (`network.mode = "none"` only: the guest
@@ -592,6 +619,8 @@ impl Default for AppleSpec {
         Self {
             guest_os: AppleGuest::default(),
             media: None,
+            install: false,
+            firstboot: None,
             window: false,
             display_count: default_apple_display_count(),
             clipboard: false,

@@ -38,12 +38,13 @@ mod migration_relay;
 pub mod procbox_sandbox;
 mod recovery;
 mod sandbox;
+pub mod sandbox_density;
 mod sandbox_pool;
 pub mod shared_disk;
 pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
-mod vz_guest;
+pub mod vz_guest;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 
@@ -375,6 +376,21 @@ fn secure_boot_or_tpm_backend_error(req: &CreateVmRequest) -> Option<String> {
         ));
     }
     None
+}
+
+/// Adds the guest agent's token file to a vz guest's cloud-init, replacing any earlier copy.
+fn vz_agent_token_via_cloud_init(req: &mut CreateVmRequest) {
+    let Some(token) = req.agent.as_ref().and_then(|a| a.token.clone()) else {
+        return;
+    };
+    let path = fluxvm_guest_protocol::TOKEN_FILE_PATH;
+    let ci = req.cloud_init.get_or_insert_with(Default::default);
+    ci.write_files.retain(|f| f.path != path);
+    ci.write_files.push(fluxvm_core::model::CloudInitFile {
+        path: path.to_owned(),
+        content: token,
+        permissions: Some("0600".to_owned()),
+    });
 }
 
 /// VM-state snapshot save/restore: QEMU (`savevm`/`-loadvm`), Cloud Hypervisor
@@ -815,6 +831,11 @@ impl VmManager {
         let mut vm = self.get(id).await?;
         if vm.status == VmStatus::Paused {
             vm = self.resume(id).await.context("AutoResume on request")?;
+        } else if crate::sandbox_density::is_hibernated(&vm) {
+            vm = self
+                .wake_sandbox(id)
+                .await
+                .context("waking hibernated sandbox")?;
         }
         self.touch_activity(id).await;
         Ok(vm)
@@ -2166,6 +2187,10 @@ impl VmManager {
                 agent.token = Some(Uuid::new_v4().to_string());
             }
         }
+        // guestkit cannot open a disk on macOS, so a vz guest gets its token from cloud-init instead.
+        if needs_cid && req.backend == BackendKind::Vz {
+            vz_agent_token_via_cloud_init(&mut req);
+        }
 
         let placeholder = VmRecord {
             id,
@@ -2243,20 +2268,40 @@ impl VmManager {
                 // Claimed before provisioning writes the agent token into it.
                 self.claim_shared_disk(&req.image, id, &[]).await?;
             }
-            let agent_token = req.agent.as_ref().and_then(|a| a.token.as_deref());
-            let provisioned = fluxvm_image::storage::provision(
-                &self.cfg,
-                &req.image,
-                req.backend,
-                req.storage,
-                &workspace,
-                &disk,
-                req.disk_size_gib,
-                id,
-                agent_token,
-            )
-            .await
-            .context("provisioning VM disk")?;
+            let agent_token = req
+                .agent
+                .as_ref()
+                .and_then(|a| a.token.as_deref())
+                .filter(|_| req.backend != BackendKind::Vz);
+            let provisioned = if req.backend == BackendKind::Vz
+                && fluxvm_apple::macos_install::is_macos_install(&req)
+            {
+                // `image` is the IPSW here: the installer writes a fresh disk instead of a clone.
+                if req.storage != StorageBackend::Default {
+                    bail!("apple.install needs the default storage backend");
+                }
+                fluxvm_apple::macos_install::create_install_disk(&disk, req.disk_size_gib)?;
+                fluxvm_image::storage::ProvisionedDisk {
+                    disk: disk.clone(),
+                    lvm_lv: None,
+                    nbd_export: None,
+                    nbd_pid: None,
+                }
+            } else {
+                fluxvm_image::storage::provision(
+                    &self.cfg,
+                    &req.image,
+                    req.backend,
+                    req.storage,
+                    &workspace,
+                    &disk,
+                    req.disk_size_gib,
+                    id,
+                    agent_token,
+                )
+                .await
+                .context("provisioning VM disk")?
+            };
             record.disk = provisioned.disk.clone();
             record.lvm_lv = provisioned.lvm_lv.clone();
             record.nbd_pid = provisioned.nbd_pid;
@@ -5073,6 +5118,26 @@ async fn wait_for_agent_ready(vm: &VmRecord) -> Result<()> {
 mod tests {
     use super::*;
     use fluxvm_core::model::NetworkSpec;
+
+    #[test]
+    fn vz_agent_token_is_written_by_cloud_init_once() {
+        let mut r = req(BackendKind::Vz, None, None);
+        vz_agent_token_via_cloud_init(&mut r);
+        assert!(r.cloud_init.is_none(), "no agent, nothing to write");
+        r.agent = Some(fluxvm_core::model::AgentSpec {
+            enabled: true,
+            port: fluxvm_guest_protocol::DEFAULT_PORT,
+            token: Some("t1".into()),
+        });
+        vz_agent_token_via_cloud_init(&mut r);
+        r.agent.as_mut().unwrap().token = Some("t2".into());
+        vz_agent_token_via_cloud_init(&mut r);
+        let files = &r.cloud_init.unwrap().write_files;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, fluxvm_guest_protocol::TOKEN_FILE_PATH);
+        assert_eq!(files[0].content, "t2");
+        assert_eq!(files[0].permissions.as_deref(), Some("0600"));
+    }
 
     fn req(backend: BackendKind, kernel: Option<&str>, firmware: Option<&str>) -> CreateVmRequest {
         CreateVmRequest {

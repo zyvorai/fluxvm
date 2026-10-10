@@ -1,16 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 //
-// Compiles the Swift runner (runner/Runner.swift plus the other runner/*.swift sources) into `fluxvm-vz-runner` and signs it with the
+// Compiles the Swift runner (runner/Runner.swift) into `fluxvm-vz-runner` and signs it with the
 // com.apple.security.virtualization entitlement. macOS only; elsewhere this crate builds without a runner.
 
-use std::{env, path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=runner/Runner.swift");
-    println!("cargo:rerun-if-changed=runner/ModernFeatures.swift");
-    println!("cargo:rerun-if-changed=runner/AdvancedNetwork.swift");
-    println!("cargo:rerun-if-changed=runner/HostCapabilities.swift");
+    println!("cargo:rerun-if-changed=runner");
     println!("cargo:rerun-if-changed=runner/Entitlements.plist");
     println!("cargo:rerun-if-changed=runner/Entitlements.networking.plist");
     println!("cargo:rerun-if-env-changed=FLUXVM_VZ_BRIDGE");
@@ -20,15 +18,29 @@ fn main() {
     {
         return;
     }
-    let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("fluxvm-vz-runner");
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out = out_dir.join("fluxvm-vz-runner");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    // swiftc only allows top-level code in a file named main.swift once there is more than one source file.
-    let main_swift = out.with_file_name("main.swift");
-    if std::fs::copy(manifest.join("runner/Runner.swift"), &main_swift).is_err() {
-        println!(
-            "cargo:warning=could not stage the Swift runner source; the vz backend will not launch VMs"
-        );
+    // With more than one source file swiftc only accepts top-level code in a file named main.swift.
+    let main_swift = out_dir.join("main.swift");
+    let _ = fs::remove_file(&main_swift);
+    if std::os::unix::fs::symlink(manifest.join("runner/Runner.swift"), &main_swift).is_err() {
+        println!("cargo:warning=could not stage runner/Runner.swift as main.swift");
         return;
+    }
+    let mut extra: Vec<PathBuf> = fs::read_dir(manifest.join("runner"))
+        .map(|d| {
+            d.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension().is_some_and(|x| x == "swift")
+                        && p.file_name().is_some_and(|n| n != "Runner.swift")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    extra.sort();
+    for p in &extra {
+        println!("cargo:rerun-if-changed={}", p.display());
     }
     let swiftc = Command::new("xcrun")
         .args([
@@ -44,9 +56,7 @@ fn main() {
             "Virtualization",
         ])
         .arg(&main_swift)
-        .arg(manifest.join("runner/ModernFeatures.swift"))
-        .arg(manifest.join("runner/AdvancedNetwork.swift"))
-        .arg(manifest.join("runner/HostCapabilities.swift"))
+        .args(&extra)
         .arg("-o")
         .arg(&out)
         .status();
@@ -59,8 +69,6 @@ fn main() {
             return;
         }
     }
-    // com.apple.vm.networking is a restricted entitlement: an ad-hoc signed runner that carries it is
-    // killed by AMFI unless the host allows it, so it is opt-in (FLUXVM_VZ_BRIDGE=1) for bridged networking.
     let entitlement = if env::var_os("FLUXVM_VZ_BRIDGE").is_some() {
         manifest.join("runner/Entitlements.networking.plist")
     } else {

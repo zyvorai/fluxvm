@@ -165,6 +165,11 @@ pub struct SandboxConfig {
     pub idle_balloon_secs: u64,
     /// Share of guest memory (percent, 1-90) an idle balloon reclaims.
     pub idle_balloon_percent: u8,
+    /// Idle seconds before a `vz` sandbox is hibernated: its memory is saved
+    /// to disk and the VM stopped, freeing all of its RAM. The next request to
+    /// it restores the saved state (0 = disabled). Should be longer than
+    /// `autopause_idle_secs`.
+    pub hibernate_idle_secs: u64,
     /// Domain allowlist for L7 egress (empty = no L7 filter).
     pub egress_allow_domains: Vec<String>,
     /// HTTP method/host/path rules for the L7 egress proxy, e.g.
@@ -300,6 +305,7 @@ impl Default for SandboxConfig {
             autopause_scan_secs: 10,
             idle_balloon_secs: 0,
             idle_balloon_percent: 50,
+            hibernate_idle_secs: 0,
             egress_allow_domains: Vec::new(),
             egress_http_rules: Vec::new(),
             egress_tls_intercept: false,
@@ -902,6 +908,10 @@ pub struct Policy {
     /// Refuse a create while memory PSI `full avg10` (percent) is above this.
     #[serde(default)]
     pub max_host_mem_psi_full_avg10: Option<f64>,
+    /// Refuse a create while the host's memory-pressure level is at or above
+    /// this (`"warn"` or `"critical"`). macOS only; Linux has no such level.
+    #[serde(default)]
+    pub deny_host_pressure_level: Option<crate::pressure_admission::PressureLevel>,
     /// How long a create may wait for pressure to clear before it is refused.
     /// 0 (default) refuses immediately.
     #[serde(default)]

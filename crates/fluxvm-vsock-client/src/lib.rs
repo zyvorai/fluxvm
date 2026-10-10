@@ -534,7 +534,7 @@ async fn open_shell_native(_cid: u32, _port: u32, _envelope: &Envelope) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     /// Stands in for a Cloud Hypervisor/Firecracker vsock proxy: accepts
@@ -585,6 +585,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A vz VM is reached through the runner's `CONNECT <port>` socket, the same way as Firecracker, with its token.
+    #[tokio::test]
+    async fn vz_calls_go_through_the_runner_proxy_with_the_token() {
+        let dir = std::env::temp_dir().join(format!("fvz-agent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("vsock.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut r = BufReader::new(r);
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "CONNECT 17777\n");
+            w.write_all(b"OK 17777\n").await.unwrap();
+            line.clear();
+            r.read_line(&mut line).await.unwrap();
+            let env: Envelope = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(env.token.as_deref(), Some("s3cret"));
+            assert!(matches!(env.request, AgentRequest::Ping));
+            w.write_all(encode_line(&AgentResponse::Pong).unwrap().as_bytes())
+                .await
+                .unwrap();
+        });
+        let vm: VmRecord = serde_json::from_value(serde_json::json!({
+            "id": uuid_nil(), "name": "vz", "backend": "vz", "status": "running", "pid": null,
+            "created_at": "2026-01-01T00:00:00Z", "expires_at": null, "workspace": dir,
+            "disk": dir.join("disk.raw"), "seed_disk": null, "tap_name": null, "control_socket": null,
+            "log_path": dir.join("console.log"), "error": null, "guest_cid": 3, "vsock_socket": path,
+            "request": {"name": "vz", "image": "/img", "vcpus": 1, "memory_mib": 512, "backend": "vz",
+                        "agent": {"enabled": true, "port": 17777, "token": "s3cret"}},
+        }))
+        .unwrap();
+        ping(&vm, Duration::from_secs(5)).await.unwrap();
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn uuid_nil() -> &'static str {
+        "00000000-0000-0000-0000-000000000000"
     }
 
     #[tokio::test]

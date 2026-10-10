@@ -14,3 +14,6 @@ fluxvm-guest-protocol = { path = "../fluxvm-guest-protocol" }
 anyhow = "1"
 libc = "0.2"
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+serde_json = "1"

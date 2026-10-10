@@ -1131,6 +1131,15 @@ enum SandboxCommand {
     /// List sandboxes (FluxVm backend or workspace with `sandbox-proxy.json`).
     /// REST: `GET /v1/sandboxes`.
     List,
+    /// Fill the warm `vz` sandbox pool to COUNT slots in the daemon's
+    /// background (macOS; needs --server). REST: `POST /v1/sandboxes/warm`.
+    Warm {
+        #[arg(long)]
+        count: usize,
+    },
+    /// Sandbox counts, warm-pool state and host memory pressure. REST:
+    /// `GET /v1/sandboxes/density`.
+    Density,
     /// Snapshot sandbox disk/state to a host path. REST:
     /// `POST /v1/sandboxes/{id}/snapshot`.
     Snapshot {
@@ -2545,9 +2554,21 @@ async fn run_remote(
                     )
                     .await?,
                 )?,
+                SandboxCommand::Warm { count } => pretty(
+                    &r.call(
+                        Method::POST,
+                        "/v1/sandboxes/warm",
+                        Some(json!({ "count": count })),
+                    )
+                    .await?,
+                )?,
+                SandboxCommand::Density => pretty(
+                    &r.call(Method::GET, "/v1/sandboxes/density", None)
+                        .await?,
+                )?,
                 _ => anyhow::bail!(
                     "this sandbox command is not available with --server; supported: speculate, \
-                     changesets, changeset, approve, reject, apply"
+                     changesets, changeset, approve, reject, apply, warm, density"
                 ),
             }
         }
@@ -3688,6 +3709,17 @@ async fn main() -> Result<()> {
                     })
                     .collect();
                 output::print_list(format, &items, output::VM_COLUMNS)?;
+            }
+            SandboxCommand::Warm { .. } => {
+                anyhow::bail!(
+                    "sandbox warm fills the pool in the daemon's background: use --server"
+                )
+            }
+            SandboxCommand::Density => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&m.sandbox_density().await)?
+                );
             }
             SandboxCommand::Snapshot { id, path } => {
                 m.snapshot_sandbox(id, &path).await?;

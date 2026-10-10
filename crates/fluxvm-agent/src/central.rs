@@ -18,6 +18,8 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
+use fluxvm_core::agent_density::DensityReport;
+use fluxvm_core::pressure_admission::PressureLevel;
 use fluxvm_core::security::{NodeSecurityCapabilities, SecurityProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -73,6 +75,10 @@ pub struct NodeInfo {
     /// Host security capabilities from the node's last heartbeat.
     #[serde(default)]
     pub security: NodeSecurityCapabilities,
+    /// The node's `GET /v1/sandboxes/density` from its last heartbeat: memory-pressure level, warm slots, sandbox counts.
+    /// `None` from a node agent that predates it, or a daemon that does not serve it.
+    #[serde(default)]
+    pub density: Option<DensityReport>,
 }
 
 impl NodeInfo {
@@ -112,7 +118,7 @@ impl NodeInfo {
         request_vcpus: u32,
         request_mem: u64,
     ) -> Option<(i64, i64, i64, String)> {
-        if !self.healthy() || self.cordoned {
+        if !self.healthy() || self.cordoned || self.pressure() == Some(PressureLevel::Critical) {
             return None;
         }
         if self.free_vcpus() < request_vcpus || self.free_memory_mib() < request_mem {
@@ -135,8 +141,17 @@ impl NodeInfo {
             (self.free_memory_mib() as i64 * 10_000) / self.memory_mib_total as i64
         };
         let residual = vcpu_frac.min(mem_frac);
-        // Sort key for max: residual desc, -vm_count, -name (via reverse min)
-        Some((residual, -(self.vm_count as i64), 0, self.name.clone()))
+        // Sort key for max: calmer memory pressure, residual desc, -vm_count, -name (via reverse min)
+        let calm = match self.pressure() {
+            Some(PressureLevel::Warn) => -1,
+            _ => 0,
+        };
+        Some((residual, -(self.vm_count as i64), calm, self.name.clone()))
+    }
+
+    /// The memory-pressure level the node last reported (macOS hosts report one; Linux hosts do not).
+    fn pressure(&self) -> Option<PressureLevel> {
+        self.density.as_ref().and_then(|d| d.host_pressure_level)
     }
 }
 
@@ -153,6 +168,8 @@ pub struct RegisterRequest {
     pub labels: HashMap<String, String>,
     #[serde(default)]
     pub security: NodeSecurityCapabilities,
+    #[serde(default)]
+    pub density: Option<DensityReport>,
 }
 
 #[derive(Debug)]
@@ -328,6 +345,7 @@ fn apply_register(nodes: &mut HashMap<String, NodeInfo>, req: RegisterRequest) {
             cordoned,
             labels: req.labels,
             security: req.security,
+            density: req.density,
         },
     );
 }
@@ -355,6 +373,7 @@ fn node_json(n: &NodeInfo) -> Value {
         "free_vcpus": n.free_vcpus(),
         "free_memory_mib": n.free_memory_mib(),
         "security": n.security,
+        "density": n.density,
     })
 }
 
@@ -547,7 +566,8 @@ fn pick_best_capacity_excluding(
                 .map(|score| (score, n))
         })
         .max_by(|(a, _), (b, _)| {
-            a.0.cmp(&b.0)
+            a.2.cmp(&b.2)
+                .then(a.0.cmp(&b.0))
                 .then(a.1.cmp(&b.1))
                 .then(a.3.cmp(&b.3).reverse())
         })
@@ -1066,7 +1086,62 @@ mod tests {
             cordoned: false,
             labels: HashMap::new(),
             security: NodeSecurityCapabilities::default(),
+            density: None,
         }
+    }
+
+    fn node_under(name: &str, vm_count: usize, level: Option<PressureLevel>) -> NodeInfo {
+        NodeInfo {
+            density: Some(DensityReport {
+                host_pressure_level: level,
+                ..DensityReport::default()
+            }),
+            ..node(name, vm_count, 0)
+        }
+    }
+
+    #[test]
+    fn placement_skips_critical_pressure_and_prefers_calm_nodes() {
+        let mut nodes = HashMap::new();
+        // The emptiest node is under critical pressure: never picked.
+        nodes.insert(
+            "a".into(),
+            node_under("a", 0, Some(PressureLevel::Critical)),
+        );
+        // Warn is picked only when nothing calmer fits, even with more room.
+        nodes.insert("b".into(), node_under("b", 1, Some(PressureLevel::Warn)));
+        nodes.insert("c".into(), node_under("c", 3, Some(PressureLevel::Normal)));
+        assert_eq!(pick_best_capacity(&nodes, 1, 512).unwrap().name, "c");
+        nodes.remove("c");
+        assert_eq!(pick_best_capacity(&nodes, 1, 512).unwrap().name, "b");
+        nodes.remove("b");
+        assert!(pick_best_capacity(&nodes, 1, 512).is_none());
+        // A node that reports no level (Linux, or an older agent) counts as calm.
+        nodes.insert("d".into(), node("d", 2, 0));
+        assert_eq!(pick_best_capacity(&nodes, 1, 512).unwrap().name, "d");
+    }
+
+    #[test]
+    fn heartbeat_density_is_kept_and_optional() {
+        let mut nodes = HashMap::new();
+        let old: RegisterRequest = serde_json::from_value(json!({
+            "name": "m", "fluxvm_url": "http://m", "vcpus_total": 10, "memory_mib_total": 65536, "vm_count": 0,
+        }))
+        .unwrap();
+        apply_register(&mut nodes, old);
+        assert!(nodes["m"].density.is_none());
+        let new: RegisterRequest = serde_json::from_value(json!({
+            "name": "m", "fluxvm_url": "http://m", "vcpus_total": 10, "memory_mib_total": 65536, "vm_count": 0,
+            "density": {"warm_slots_ready": 3, "host_pressure_level": "warn"},
+        }))
+        .unwrap();
+        apply_register(&mut nodes, new);
+        let d = nodes["m"].density.as_ref().unwrap();
+        assert_eq!(d.warm_slots_ready, 3);
+        assert_eq!(
+            node_json(&nodes["m"])["density"]["host_pressure_level"],
+            "warn"
+        );
     }
 
     fn labeled_node(name: &str, vm_count: usize, labels: &[(&str, &str)]) -> NodeInfo {
@@ -1090,6 +1165,7 @@ mod tests {
             cordoned: false,
             labels: HashMap::new(),
             security: NodeSecurityCapabilities::default(),
+            density: None,
         }
     }
 
@@ -1219,6 +1295,7 @@ mod tests {
                 vm_count: 1,
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
+                density: None,
             },
         );
         assert!(nodes["a"].cordoned);
@@ -1238,6 +1315,7 @@ mod tests {
                 vm_count: 0,
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
+                density: None,
             },
         );
         assert!(!nodes["new"].cordoned);
@@ -1491,6 +1569,7 @@ mod tests {
                 vm_count: 0,
                 labels: HashMap::new(),
                 security: NodeSecurityCapabilities::default(),
+                density: None,
             },
         );
         assert!(!nodes["a"].cordoned);
