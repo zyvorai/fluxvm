@@ -27,6 +27,8 @@ pub const POOL_VALUE: &str = "sandbox";
 const WARM_TAG: &str = "warm";
 /// Which build of the base image a slot was made from (see `fluxvm_image::builtin::current_id`).
 pub const IMAGE_LABEL: &str = "fluxvm.image-id";
+/// The address a slot's guest had when its snapshot was taken. A restored guest keeps it, whatever the NAT has handed out since.
+pub const SLOT_IP_LABEL: &str = "fluxvm.slot-ip";
 const POOL_IMAGE: &str = "debian-13";
 
 /// A slot is stale when the base image has been updated since it was built. Slots made before this label existed count as stale
@@ -87,12 +89,23 @@ impl VmManager {
         created_by_token: Option<&str>,
     ) -> Result<Option<VmRecord>> {
         let _guard = CLAIM_LOCK.lock().await;
-        for slot in self
-            .list()
-            .await
-            .into_iter()
-            .filter(|v| is_slot(v) && v.status == VmStatus::Stopped && !self.slot_is_stale(v))
-        {
+        let all = self.list().await;
+        // Slots are built one after another, and the NAT frees a stopped guest's address, so two slots can hold the same one.
+        // A restored guest cannot change it, so skip a slot whose address a running VM already uses (the caller cold-boots).
+        let in_use: std::collections::HashSet<String> = all
+            .iter()
+            .filter(|v| v.status != VmStatus::Stopped)
+            .filter_map(|v| v.guest_ip.clone())
+            .collect();
+        for slot in all.into_iter().filter(|v| {
+            is_slot(v)
+                && v.status == VmStatus::Stopped
+                && !self.slot_is_stale(v)
+                && !v
+                    .labels
+                    .get(SLOT_IP_LABEL)
+                    .is_some_and(|ip| in_use.contains(ip))
+        }) {
             if !self
                 .list_vm_snapshots(slot.id)
                 .await?
@@ -176,6 +189,10 @@ impl VmManager {
             labels.insert(IMAGE_LABEL.to_owned(), self.pool_image_id());
             self.patch(vm.id, VmPatch { name: None, labels }).await?;
             let guest = self.wait_vz_guest(vm.id, Duration::from_secs(120)).await?;
+            if let Some(ip) = self.get(vm.id).await?.guest_ip {
+                let labels = BTreeMap::from([(SLOT_IP_LABEL.to_owned(), Some(ip))]);
+                self.patch(vm.id, VmPatch { name: None, labels }).await?;
+            }
             // sshd answers before cloud-init is done; snapshot only once first-boot setup has finished.
             let _ = fluxvm_apple::ssh::exec(
                 &guest,
