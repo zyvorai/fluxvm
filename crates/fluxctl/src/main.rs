@@ -785,6 +785,12 @@ enum Command {
         #[command(subcommand)]
         command: VznetCommand,
     },
+    /// Virtualization.framework device state of a running `vz` VM, and the Mac's own capabilities. REST: `/v1/host/apple`
+    /// and `/v1/vms/{id}/vz/*`. See docs/macos.md.
+    Vz {
+        #[command(subcommand)]
+        command: VzCommand,
+    },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
     /// Show one catalog entry (machinectl `image-status` / `show-image`).
@@ -1794,6 +1800,34 @@ enum OciCommand {
     Rm { image: String },
     /// Remove every cached image no sandbox was started from, and every blob no remaining image needs.
     Prune,
+}
+
+#[derive(Subcommand)]
+enum VzCommand {
+    /// What this Mac's Virtualization.framework offers (OS, vmnet, custom Virtio, Secure Boot, Rosetta).
+    Host,
+    /// EFI Secure Boot state of a running guest (the pre-boot snapshot while it runs).
+    SecureBoot {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Driver state and counters of the custom Virtio device; `--reset` asks it to re-negotiate.
+    CustomVirtio {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        reset: bool,
+    },
+    /// USB devices on the VM's controllers. `--physical` lists host accessories granted to FluxVMUSBAccess.app;
+    /// `--attach <registry_id>` passes one through (needs `--physical`).
+    Usb {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long)]
+        physical: bool,
+        #[arg(long, requires = "physical")]
+        attach: Option<u64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2987,6 +3021,47 @@ async fn run_remote(
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
         }
+        Command::Vz { command } => match command {
+            VzCommand::Host => pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)?,
+            VzCommand::SecureBoot { id } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/secure-boot"), None)
+                    .await?,
+            )?,
+            VzCommand::CustomVirtio { id, reset: true } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/vz/custom-virtio/reset"),
+                    Some(json!({})),
+                )
+                .await?,
+            )?,
+            VzCommand::CustomVirtio { id, reset: false } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/custom-virtio"), None)
+                    .await?,
+            )?,
+            VzCommand::Usb {
+                id,
+                physical: true,
+                attach: Some(registry_id),
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/vz/usb/physical"),
+                    Some(json!({"registry_id": registry_id})),
+                )
+                .await?,
+            )?,
+            VzCommand::Usb {
+                id, physical: true, ..
+            } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/usb/physical"), None)
+                    .await?,
+            )?,
+            VzCommand::Usb { id, .. } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/vz/usb"), None)
+                    .await?,
+            )?,
+        },
         Command::Balloon { id, set_mib } => match set_mib {
             Some(mib) => pretty(
                 &r.call(
@@ -4065,6 +4140,31 @@ async fn main() -> Result<()> {
         }
         Command::Pressure { id } => {
             println!("{}", serde_json::to_string_pretty(&m.pressure(id).await?)?);
+        }
+        Command::Vz { command } => {
+            let out = match command {
+                VzCommand::Host => fluxvm_scheduler::vz_devices::apple_host_capabilities().await?,
+                VzCommand::SecureBoot { id } => m.vz_secure_boot_status(id).await?,
+                VzCommand::CustomVirtio { id, reset: true } => {
+                    m.vz_custom_virtio_reset(id).await?;
+                    serde_json::json!({"ok": true})
+                }
+                VzCommand::CustomVirtio { id, reset: false } => {
+                    m.vz_custom_virtio_status(id).await?
+                }
+                VzCommand::Usb {
+                    id,
+                    physical: true,
+                    attach: Some(registry_id),
+                } => {
+                    serde_json::json!({"uuid": m.vz_usb_physical_attach(id, registry_id).await?})
+                }
+                VzCommand::Usb {
+                    id, physical: true, ..
+                } => serde_json::json!({"items": m.vz_usb_physical_list(id).await?}),
+                VzCommand::Usb { id, .. } => serde_json::json!({"items": m.vz_usb_list(id).await?}),
+            };
+            println!("{}", serde_json::to_string_pretty(&out)?);
         }
         Command::Balloon { id, set_mib } => {
             println!(

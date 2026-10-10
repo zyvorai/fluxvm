@@ -2,6 +2,14 @@
 
 ## 0.4.0 (2026-10-10)
 
+### Added: runner-only `vz` device state reachable over REST, CLI and MCP
+- `GET /v1/host/apple` and `GET /v1/vms/{id}/vz/{secure-boot,custom-virtio,usb,usb/physical}`, plus
+  `POST .../vz/custom-virtio/reset` and `POST .../vz/usb/physical {"registry_id"}` (admin), with `fluxctl vz
+  host|secure-boot|custom-virtio|usb` and read-only MCP `host_apple_capabilities` and `vm_vz_status`. These runner commands
+  existed but had no route.
+- The capability matrix no longer says data disks are "not implemented" (use `apple.extra_disks`) or that vmnet is limited to
+  one network per VM; `disk attach` logs when a running `vz` VM will only see the disk at its next boot.
+
 ### Added: agents drive a `vz` VM's screen (PR #214)
 - `GET /v1/vms/{id}/screenshot` (PNG, scaled with `?max_width`) and `POST /v1/vms/{id}/input` (type, key with modifiers, move,
   click, double/right/middle click, drag, scroll; batches of up to 100 validated before anything is sent), with `fluxctl

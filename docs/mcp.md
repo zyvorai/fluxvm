@@ -32,6 +32,8 @@ Read tools are always offered:
 | `host_status` | `/readyz` (KVM, dataplane mode and BPF/Cilium health, secure containers) plus a count of VMs by status | `GET /readyz`, `GET /v1/vms` |
 | `vm_network` | `kind` = `status`, `effective`, `stats`, `flows`, `drops`, `drop-reasons`, `learned-ip`, `conntrack` or `capture`; `limit` for flows and drops | `GET /v1/vms/{id}/network/{kind}` |
 | `vm_logs` | The last `lines` (default 100, max 500) of the serial console log | `GET /v1/vms/{id}/logs` |
+| `host_apple_capabilities` | What this Mac's Virtualization.framework offers (macOS version, vmnet, custom Virtio, Secure Boot, Rosetta); Apple VZ hosts only | `GET /v1/host/apple` |
+| `vm_vz_status` | Device state of a running Apple VZ VM: `what` is `secure_boot`, `custom_virtio`, `usb` or `usb_physical` | `GET /v1/vms/{id}/vz/{secure-boot,custom-virtio,usb,usb/physical}` |
 | `vm_screenshot` | The display of a running Apple VZ VM (Linux or macOS guest) as an image, scaled to `max_width` (default 1280), with a caption giving its size | `GET /v1/vms/{id}/screenshot` |
 
 Write tools are offered only with `--allow-write`:
