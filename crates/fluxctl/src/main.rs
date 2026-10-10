@@ -1805,6 +1805,12 @@ enum OciCommand {
 enum VzCommand {
     /// What this Mac's Virtualization.framework offers (OS, vmnet, custom Virtio, Secure Boot, Rosetta).
     Host,
+    /// Apple's newest macOS restore image (what `--image macos --install` uses) and whether it is cached;
+    /// `--download` fetches it now (about 15 GB).
+    Ipsw {
+        #[arg(long)]
+        download: bool,
+    },
     /// EFI Secure Boot state of a running guest (the pre-boot snapshot while it runs).
     SecureBoot {
         #[arg(value_parser = output::parse_vm_ref)]
@@ -3022,6 +3028,14 @@ async fn run_remote(
         }
         Command::Vz { command } => match command {
             VzCommand::Host => pretty(&r.call(Method::GET, "/v1/host/apple", None).await?)?,
+            VzCommand::Ipsw { download } => pretty(
+                &r.call(
+                    if download { Method::POST } else { Method::GET },
+                    "/v1/host/apple/ipsw",
+                    download.then(|| json!({})),
+                )
+                .await?,
+            )?,
             VzCommand::SecureBoot { id } => pretty(
                 &r.call(Method::GET, &format!("/v1/vms/{id}/vz/secure-boot"), None)
                     .await?,
@@ -4143,6 +4157,7 @@ async fn main() -> Result<()> {
         Command::Vz { command } => {
             let out = match command {
                 VzCommand::Host => fluxvm_scheduler::vz_devices::apple_host_capabilities().await?,
+                VzCommand::Ipsw { download } => m.macos_ipsw(download).await?,
                 VzCommand::SecureBoot { id } => m.vz_secure_boot_status(id).await?,
                 VzCommand::CustomVirtio { id, reset: true } => {
                     m.vz_custom_virtio_reset(id).await?;

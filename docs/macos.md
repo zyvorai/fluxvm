@@ -174,7 +174,10 @@ through the API):
 curl -X POST localhost:7788/v1/vms -H 'Content-Type: application/json' -d @examples/macos-install.json
 ```
 
-- The IPSW is `apple.media`, or `image` when `media` is unset; it must be a local absolute path (URLs are refused, download first).
+- The IPSW is `apple.media`, or `image` when `media` is unset. Use a local absolute path, or the name `macos`: FluxVM asks Apple for
+  the newest restore image this Mac supports, downloads it once (about 15 GB, cached as `images/macos-<build>.ipsw`, older ones removed)
+  and installs from it. `fluxctl vz ipsw` shows which build that is and whether it is cached; `--download` fetches it ahead of time.
+  URLs are still refused. `fluxctl create --name mac --image macos --guest macos --install` is the one-line form.
 - FluxVM creates a sparse disk of `disk_size_gib` (default 64, minimum 40), runs `fluxvm-vz-runner install` to completion (progress
   events land in `vz-runner.log` in the VM workspace; the request returns only after the install, up to 3 hours), then boots the guest.
   A workspace marker (`macos-installed`) stops a restart from installing again; a failed install leaves no marker and is retried.
@@ -195,7 +198,8 @@ The same `snapshot` / `restore` endpoints work for macOS guests (macOS 14+ host)
 (`auxiliary.bin`). Earlier runners ignored the saved state of a macOS guest and cold-booted it; the runner now resumes it the same
 way as for Linux guests. Not yet exercised on a real macOS guest.
 
-Not done: a `macos` image name, downloading an IPSW, and exec over vsock for macOS guests (they have no FluxVM guest agent). Apple
+Not done: exec over vsock for macOS guests (they have no FluxVM guest agent). The `macos` image name looks up and downloads the
+IPSW; that download path has not been run end to end (only Apple's metadata lookup was checked on an Apple silicon Mac). Apple
 allows two macOS VMs at a time per Mac.
 
 ## Display, audio, sharing and USB options

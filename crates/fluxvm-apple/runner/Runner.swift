@@ -1337,6 +1337,27 @@ if args.count == 2 && args[1] == "host-capabilities" {
         FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10])); exit(0)
     } catch { fail("cannot encode host capabilities: \(error.localizedDescription)", code: 2) }
 }
+if args.count == 2 && args[1] == "latest-ipsw" {
+    // Apple's current restore image for this Mac: where to download it and what it needs.
+    VZMacOSRestoreImage.fetchLatestSupported { result in
+        switch result {
+        case .failure(let e): fail("could not look up the latest macOS restore image: \(e.localizedDescription)")
+        case .success(let image):
+            var out: [String: Any] = ["url": image.url.absoluteString, "build_version": image.buildVersion,
+                                      "os_version": "\(image.operatingSystemVersion.majorVersion).\(image.operatingSystemVersion.minorVersion).\(image.operatingSystemVersion.patchVersion)",
+                                      "supported": image.isSupported]
+            if let req = image.mostFeaturefulSupportedConfiguration {
+                out["min_cpus"] = req.minimumSupportedCPUCount
+                out["min_memory_bytes"] = req.minimumSupportedMemorySize
+            }
+            if let data = try? JSONSerialization.data(withJSONObject: out) {
+                FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10]))
+            }
+            exit(0)
+        }
+    }
+    dispatchMain()
+}
 if args.count == 2 && args[1] == "install-rosetta" {
     switch VZLinuxRosettaDirectoryShare.availability {
     case .installed: print("Rosetta is already installed"); exit(0)
@@ -1350,7 +1371,7 @@ if args.count == 2 && args[1] == "install-rosetta" {
     }
 }
 guard args.count == 4, ["run", "install", "check"].contains(args[1]), args[2] == "--config" else {
-    fail("usage: fluxvm-vz-runner host-capabilities | install-rosetta | run|install|check --config <json>", code: 2)
+    fail("usage: fluxvm-vz-runner host-capabilities | latest-ipsw | install-rosetta | run|install|check --config <json>", code: 2)
 }
 guard let data = FileManager.default.contents(atPath: args[3]), let cfg = try? JSONDecoder().decode(Config.self, from: data) else { fail("cannot read config \(args[3])", code: 2) }
 let runner = Runner(cfg)
