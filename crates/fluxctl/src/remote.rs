@@ -68,6 +68,10 @@ impl Remote {
         }
     }
 
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     pub async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {
         let url = format!("{}{path}", self.base);
         let mut req = self.http.request(method.clone(), &url);

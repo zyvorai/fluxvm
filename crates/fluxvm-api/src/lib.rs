@@ -101,7 +101,12 @@ async fn auth_middleware(State(auth): State<AuthState>, mut req: Request, next: 
     let method = req.method().clone();
     // Liveness/readiness probes must work without auth (Kubernetes convention);
     // the API description is public so tooling can fetch it before a token.
-    if path == "/healthz" || path == "/readyz" || path == "/v1/openapi.json" {
+    if path == "/healthz"
+        || path == "/readyz"
+        || path == "/v1/openapi.json"
+        || ((method == Method::GET || method == Method::HEAD)
+            && CONSOLE_PATHS.contains(&path.as_str()))
+    {
         return next.run(req).await;
     }
     let must = m.cfg.auth.must_authenticate(&m.cfg.listen);
@@ -633,6 +638,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/egress/nftables", get(egress_nftables))
         .route("/console", get(console_ui))
         .route("/console/", get(console_ui))
+        .route("/console/app.js", get(console_js))
         .route("/v1/images/build", post(build_image))
         .route("/v1/images/import", post(import_image))
         .route("/v1/images/catalog", post(add_catalog_entry))
@@ -1892,66 +1898,37 @@ async fn egress_nftables() -> impl IntoResponse {
     )
 }
 
-async fn console_ui() -> impl IntoResponse {
+/// The dashboard: static files only. They hold no data and no token, so they are served without auth; the page asks
+/// for a token and calls the API like any client.
+const CONSOLE_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; \
+     img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+fn console_file(content_type: &'static str, body: &'static str) -> Response {
     (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        CONSOLE_HTML,
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CONTENT_SECURITY_POLICY, CONSOLE_CSP),
+            (header::X_FRAME_OPTIONS, "DENY"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+            (header::REFERRER_POLICY, "no-referrer"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
     )
+        .into_response()
 }
 
-const CONSOLE_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<title>FluxVM console</title>
-<style>
-  :root { --bg:#0f1419; --fg:#e7ecf3; --muted:#8b98a8; --accent:#3d9cfd; }
-  body { margin:0; font-family: ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--fg); }
-  header { padding:1.25rem 1.5rem; border-bottom:1px solid #243044; }
-  h1 { margin:0; font-size:1.25rem; letter-spacing:-0.02em; }
-  p { color:var(--muted); margin:0.35rem 0 0; font-size:0.9rem; }
-  main { padding:1.5rem; display:grid; gap:1rem; max-width:960px; }
-  .card { background:#161d27; border:1px solid #243044; border-radius:10px; padding:1rem 1.1rem; }
-  label { display:block; font-size:0.75rem; color:var(--muted); margin-bottom:0.35rem; }
-  input, button { font:inherit; }
-  input { width:100%; box-sizing:border-box; background:#0f1419; border:1px solid #2c3a4f; color:var(--fg); border-radius:8px; padding:0.55rem 0.7rem; }
-  button { background:var(--accent); color:#041018; border:0; border-radius:8px; padding:0.55rem 0.9rem; font-weight:600; cursor:pointer; }
-  pre { background:#0b1016; border-radius:8px; padding:0.75rem; overflow:auto; min-height:12rem; font-size:0.8rem; }
-</style>
-</head>
-<body>
-<header>
-  <h1>FluxVM</h1>
-  <p>Sandbox console — list FluxVm sandboxes, templates, and health.</p>
-</header>
-<main>
-  <div class="card">
-    <label>API base</label>
-    <input id="base" value=""/>
-    <div style="margin-top:0.75rem; display:flex; gap:0.5rem;">
-      <button id="refresh">Refresh</button>
-    </div>
-  </div>
-  <div class="card"><label>Sandboxes</label><pre id="sandboxes">…</pre></div>
-  <div class="card"><label>Templates</label><pre id="templates">…</pre></div>
-</main>
-<script>
-const baseInput = document.getElementById('base');
-baseInput.value = location.origin;
-async function load() {
-  const base = baseInput.value.replace(/\/$/, '');
-  const [s, t] = await Promise.all([
-    fetch(base + '/v1/sandboxes').then(r => r.json()),
-    fetch(base + '/v1/templates').then(r => r.json()),
-  ]);
-  document.getElementById('sandboxes').textContent = JSON.stringify(s, null, 2);
-  document.getElementById('templates').textContent = JSON.stringify(t, null, 2);
+async fn console_ui() -> Response {
+    console_file("text/html; charset=utf-8", CONSOLE_HTML)
 }
-document.getElementById('refresh').onclick = () => load().catch(e => alert(e));
-load().catch(() => {});
-</script>
-</body>
-</html>"#;
+
+async fn console_js() -> Response {
+    console_file("text/javascript; charset=utf-8", CONSOLE_JS)
+}
+
+const CONSOLE_HTML: &str = include_str!("console.html");
+const CONSOLE_JS: &str = include_str!("console.js");
+const CONSOLE_PATHS: [&str; 3] = ["/console", "/console/", "/console/app.js"];
 
 // ZYVOR_RUNTIME_BOUNDARY_V1: stable node-runtime feature discovery for Fabric.
 async fn security_capabilities(
@@ -4764,6 +4741,52 @@ mod tests {
             assert_eq!(
                 status_for(app, "GET", "/v1/vms", None).await,
                 StatusCode::UNAUTHORIZED
+            );
+        }
+
+        #[tokio::test]
+        async fn the_dashboard_files_load_without_a_token_but_its_data_does_not() {
+            let auth = AuthConfig {
+                tokens: vec![ApiToken {
+                    token: "secret".into(),
+                    role: Role::Admin,
+                    name: None,
+                    tenant: None,
+                }],
+                ..Default::default()
+            };
+            let m = manager(auth);
+            for path in CONSOLE_PATHS {
+                let resp = router(m.clone())
+                    .oneshot(Request::get(path).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::OK, "{path}");
+                let csp = resp.headers()[header::CONTENT_SECURITY_POLICY]
+                    .to_str()
+                    .unwrap();
+                assert!(
+                    csp.contains("script-src 'self'") && csp.contains("frame-ancestors 'none'")
+                );
+            }
+            let post = Request::post("/console/app.js")
+                .body(Body::empty())
+                .unwrap();
+            assert_ne!(
+                router(m.clone()).oneshot(post).await.unwrap().status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                status_for(router(m), "GET", "/v1/vms", None).await,
+                StatusCode::UNAUTHORIZED
+            );
+            assert!(
+                !CONSOLE_HTML.contains("<script>"),
+                "inline script is blocked by the CSP"
+            );
+            assert!(
+                !CONSOLE_JS.contains("innerHTML"),
+                "API data is rendered as text"
             );
         }
 

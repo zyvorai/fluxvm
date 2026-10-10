@@ -129,6 +129,13 @@ enum Command {
     #[command(next_help_heading = "Basic Commands")]
     /// Start the FluxVM control-plane daemon (REST API).
     Serve,
+    /// Open the daemon's web dashboard (`/console`): VMs and containers by stack, power actions, logs. The page asks
+    /// for the API token itself; it is never put in the URL.
+    Dashboard {
+        /// Only print the URL.
+        #[arg(long)]
+        no_open: bool,
+    },
     /// Run `fluxctl serve` as a launchd LaunchAgent of the logged-in user (macOS): started at login, restarted if it
     /// exits.
     Service {
@@ -3097,6 +3104,27 @@ async fn main() -> Result<()> {
     if let Command::Context { command } = cli.command {
         return run_context(command, format);
     }
+    if let Command::Dashboard { no_open } = cli.command {
+        let base = match remote::endpoint(cli.server.clone(), None, cli.context.as_deref())? {
+            Some(r) => r.base().to_owned(),
+            None => {
+                let listen = Config::load(cli.config.as_deref())?.listen;
+                let listen = listen
+                    .replace("0.0.0.0", "127.0.0.1")
+                    .replace("[::]", "[::1]");
+                remote::Remote::new(&listen, None).base().to_owned()
+            }
+        };
+        let url = format!("{base}/console");
+        println!("{url}");
+        if !no_open && cfg!(target_os = "macos") {
+            std::process::Command::new("/usr/bin/open")
+                .arg(&url)
+                .status()
+                .context("opening the browser")?;
+        }
+        return Ok(());
+    }
     if let Command::Up { fleet, .. } | Command::Down { fleet, .. } | Command::Ps { fleet, .. } =
         &cli.command
         && let Some(central) = fleet.fleet.clone()
@@ -3187,6 +3215,7 @@ async fn main() -> Result<()> {
         | Command::VsockProxy { .. }
         | Command::ImportCompose { .. }
         | Command::Service { .. }
+        | Command::Dashboard { .. }
         | Command::Mcp { .. }
         | Command::Events { .. }
         | Command::Context { .. }
