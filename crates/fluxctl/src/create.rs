@@ -66,6 +66,9 @@ pub struct CreateArgs {
     /// Add an XHCI controller so USB devices can be hot-attached.
     #[arg(long)]
     pub usb_controller: bool,
+    /// Number of XHCI controllers (USB buses, 1-4); implies --usb-controller.
+    #[arg(long, value_name = "N")]
+    pub usb_controllers: Option<u8>,
     /// Sparse ASIF overlay for guest writes (macOS 27+).
     #[arg(long)]
     pub asif_overlay: bool,
@@ -154,6 +157,9 @@ pub fn create_body(a: &CreateArgs) -> Result<Value> {
         if let Some(p) = ppi {
             apple.insert("display_ppi".into(), json!(p));
         }
+    }
+    if let Some(n) = a.usb_controllers {
+        apple.insert("usb_controllers".into(), json!(n));
     }
     if let Some(n) = a.displays {
         apple.insert("display_count".into(), json!(n));

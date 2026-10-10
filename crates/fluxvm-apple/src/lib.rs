@@ -80,14 +80,19 @@ pub async fn balloon_control(
     serde_json::from_value(reply.0).context("decoding Apple balloon response")
 }
 
-pub async fn usb_attach(vm: &VmRecord, path: &std::path::Path, read_only: bool) -> Result<String> {
+pub async fn usb_attach(
+    vm: &VmRecord,
+    path: &std::path::Path,
+    read_only: bool,
+    bus: Option<u8>,
+) -> Result<String> {
     let sock = vm
         .control_socket
         .as_deref()
         .context("VM has no runner control socket recorded")?;
     let reply = control_call_with(
         sock,
-        serde_json::json!({"cmd":"usb-attach","path":path,"read_only":read_only}),
+        serde_json::json!({"cmd":"usb-attach","path":path,"read_only":read_only,"bus":bus.unwrap_or(0)}),
     )
     .await?;
     if !reply.ok() {

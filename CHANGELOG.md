@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added: `apple.usb_controllers` and `usb_bus` (several USB buses on a `vz` guest)
+- `"apple": {"usb_controllers": 2}` (or `fluxctl create --usb-controllers 2`; 1-4, implies `usb_controller`) gives the guest that
+  many XHCI controllers. A USB disk hot-attached with `"usb_bus": N` (`fluxctl disk attach --usb-bus N`) joins bus N (0-based);
+  detach now finds the device on whichever controller holds it (it only looked at the first before). Disks present at boot are
+  placed by Virtualization.framework. Verified on Debian 13 with `scripts/vz-usb-buses-live-test.sh`: two disks hot-attached on
+  different buses are both visible and sit on different USB buses; bus 2 of 2 and 9 controllers are refused. The guest lists one
+  more XHCI controller than configured (3 for 2). Physical USB passthrough still uses bus 0.
+
 ### Added: `apple.vsock_services` (guest→host vsock beyond the egress proxy and self-control)
 - `"apple": {"vsock_services": [{"port": 5001, "builtin": "metadata"}, {"port": 5002, "builtin": "telemetry"},
   {"port": 5003, "socket": "echo"}]}` (or `fluxctl create --vsock-service 5001=metadata --vsock-service 5003=socket:echo`).

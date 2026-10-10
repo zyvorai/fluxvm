@@ -457,6 +457,9 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
 - **Memory balloon:** `GET /v1/vms/{id}/balloon` and `POST /v1/vms/{id}/balloon {"balloon_mib": N}` work for `vz` VMs too (the runner sets
   the balloon target), and idle reclaim inflates idle `vz` sandboxes the same way as KVM ones.
 - **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts
+- **USB buses:** `apple.usb_controllers` (1-4, implies `usb_controller`) creates that many XHCI controllers. Give a hot-attached
+  USB disk `usb_bus` (`fluxctl disk attach --usb-bus N`) to choose its bus; the default is bus 0. Disks present at boot are placed by
+  Virtualization.framework, and physical USB passthrough uses bus 0. The guest shows one more XHCI controller than configured.
   `{"cmd":"usb-attach","path":"/path/disk.img","read_only":false}` (returns a `uuid`) and `{"cmd":"usb-detach","uuid":"…"}` (macOS 15+).
   `{"cmd":"usb-list"}` lists what is attached now. A snapshot is refused while a hot-attached USB disk is still attached: macOS 27 can
   crash restoring such a state without the disk (177528319). Passed-through devices are detached before saving instead (174267926), and

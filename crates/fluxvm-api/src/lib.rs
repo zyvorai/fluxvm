@@ -2589,6 +2589,8 @@ struct VzDiskFields {
     sync: Option<fluxvm_core::model::AppleDiskSync>,
     #[serde(default)]
     controller: Option<fluxvm_core::model::AppleDiskController>,
+    #[serde(default)]
+    usb_bus: Option<u8>,
 }
 
 async fn attach_vm_disk(
@@ -2616,6 +2618,7 @@ async fn attach_vm_disk(
             sync: v.sync.unwrap_or_default(),
             controller: v.controller.unwrap_or_default(),
             block_device_id: None,
+            usb_bus: v.usb_bus,
         };
         let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
         return Ok((StatusCode::CREATED, Json(info)));
@@ -2627,9 +2630,10 @@ async fn attach_vm_disk(
         || v.caching.is_some()
         || v.sync.is_some()
         || v.controller.is_some()
+        || v.usb_bus.is_some()
     {
         return Err(anyhow::anyhow!(
-            "kind, url, read_only, caching, sync and controller are vz disk options"
+            "kind, url, read_only, caching, sync, controller and usb_bus are vz disk options"
         )
         .into());
     }

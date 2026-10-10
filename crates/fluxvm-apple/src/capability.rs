@@ -393,6 +393,20 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
     }
     if let Some(apple) = &req.apple {
         validate_vsock_services(&apple.vsock_services)?;
+        if apple.usb_controllers > 4 {
+            bail!("apple.usb_controllers must be 0-4");
+        }
+        let buses = apple.usb_controllers.max(1);
+        for d in &apple.extra_disks {
+            if let Some(b) = d.usb_bus {
+                if d.controller != fluxvm_core::model::AppleDiskController::Usb {
+                    bail!("usb_bus applies to the usb controller only");
+                }
+                if b >= buses {
+                    bail!("usb_bus {b} needs apple.usb_controllers > {b}");
+                }
+            }
+        }
     }
     if let Some(apple) = &req.apple
         && !apple.egress_allow.is_empty()
