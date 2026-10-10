@@ -527,6 +527,29 @@ impl VmManager {
                 "volumes need a QEMU-backed template: the in-tree FluxVm backend has no virtiofs support"
             );
         }
+        let hosts = self
+            .resolve_volumes(create.tenant.as_deref(), volumes)
+            .await?;
+        for (v, host) in volumes.iter().zip(hosts) {
+            create
+                .shared_folders
+                .push(fluxvm_core::model::SharedFolder {
+                    host_path: host,
+                    guest_path: v.guest_path.clone(),
+                    read_only: v.read_only,
+                });
+        }
+        Ok(())
+    }
+
+    /// The persistent host directory of each volume (`<volumes_dir>/<tenant>/<name>`, created on first use), after
+    /// checking names, mount points and that no other VM has one of them attached (as a shared folder, or as a
+    /// container sandbox's volume share).
+    pub(crate) async fn resolve_volumes(
+        &self,
+        tenant: Option<&str>,
+        volumes: &[SandboxVolume],
+    ) -> Result<Vec<PathBuf>> {
         if volumes.len() > MAX_SANDBOX_VOLUMES {
             bail!("at most {MAX_SANDBOX_VOLUMES} volumes per sandbox");
         }
@@ -550,7 +573,7 @@ impl VmManager {
 
         let mut hosts = Vec::with_capacity(volumes.len());
         for v in volumes {
-            let path = volume_host_path(&root, create.tenant.as_deref(), &v.name)?;
+            let path = volume_host_path(&root, tenant, &v.name)?;
             tokio::fs::create_dir_all(&path).await?;
             // Refuse a volume directory that was replaced by a symlink out of the root.
             let resolved = tokio::fs::canonicalize(&path).await?;
@@ -565,23 +588,28 @@ impl VmManager {
             .await
             .into_iter()
             .filter(|vm| vm.status != VmStatus::Failed)
-            .flat_map(|vm| vm.request.shared_folders.into_iter().map(|s| s.host_path))
+            .flat_map(|vm| {
+                let tagged = vm
+                    .request
+                    .apple
+                    .map(|a| a.tagged_shares)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| s.host_path);
+                vm.request
+                    .shared_folders
+                    .into_iter()
+                    .map(|s| s.host_path)
+                    .chain(tagged)
+                    .collect::<Vec<_>>()
+            })
             .collect();
         for (v, host) in volumes.iter().zip(&hosts) {
             if attached.iter().any(|a| a == host) {
                 bail!("volume {:?} is already attached to another VM", v.name);
             }
         }
-        for (v, host) in volumes.iter().zip(hosts) {
-            create
-                .shared_folders
-                .push(fluxvm_core::model::SharedFolder {
-                    host_path: host,
-                    guest_path: v.guest_path.clone(),
-                    read_only: v.read_only,
-                });
-        }
-        Ok(())
+        Ok(hosts)
     }
 
     async fn load_template_spec(&self, name: &str) -> Result<CreateVmRequest> {

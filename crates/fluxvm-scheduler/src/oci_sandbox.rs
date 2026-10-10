@@ -9,17 +9,20 @@
 
 use crate::VmManager;
 use crate::oci_images;
-use crate::sandbox::SandboxCreateRequest;
+use crate::sandbox::{SandboxCreateRequest, SandboxVolume};
 use anyhow::{Context, Result, bail};
 use fluxvm_core::agent_density::AgentProfile;
-use fluxvm_core::model::{CreateVmRequest, NetworkSpec, VmPatch, VmRecord, VmStatus};
+use fluxvm_core::model::{
+    AppleShare, CreateVmRequest, NetworkSpec, PortForward, VmPatch, VmRecord, VmStatus,
+};
 use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
 use fluxvm_image::oci_boot::OciBoot;
 use fluxvm_image::oci_registry::PulledImage;
 use fluxvm_oci_init::config as init;
+use fluxvm_oci_init::supervise::{self, HealthCheck, RestartPolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -60,6 +63,50 @@ pub struct OciSandboxSpec {
     /// `keep` (default) leaves the VM up for exec after the process exits; `poweroff` stops it.
     #[serde(default)]
     pub exit_policy: init::ExitPolicy,
+    /// Published TCP ports, Docker's `HOST:CONTAINER` (or `PORT` for the same number on both sides): the Mac's
+    /// `127.0.0.1:HOST` reaches the container's `CONTAINER`. Host ports are 1024 and up. Not with `offline`/`allow_hosts`.
+    #[serde(default)]
+    pub ports: Vec<String>,
+    /// Also listen on the NAT gateway address so *other* sandboxes and VMs on this Mac reach the published ports
+    /// (`http://<gateway>:HOST`); used by stacks to connect services.
+    #[serde(default)]
+    pub publish_to_guests: bool,
+    /// `no` (default), `on-failure` or `always`; restarts back off from 1 s to 60 s.
+    #[serde(default)]
+    pub restart: RestartPolicy,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    /// A command run in the sandbox every `interval_seconds`; after `retries` failures the process is unhealthy, and
+    /// with a restart policy it is stopped and restarted.
+    #[serde(default)]
+    pub healthcheck: Option<HealthCheck>,
+}
+
+/// `HOST:CONTAINER`, `HOST:CONTAINER/tcp`, or `PORT`.
+pub fn parse_port(spec: &str) -> Result<(u16, u16)> {
+    let s = spec.trim();
+    let s = match s.split_once('/') {
+        Some((p, proto)) if proto.eq_ignore_ascii_case("tcp") => p,
+        Some((_, proto)) => bail!("port {spec:?}: only tcp can be published, not {proto}"),
+        None => s,
+    };
+    let num = |p: &str| -> Result<u16> {
+        match p.trim().parse::<u16>() {
+            Ok(n) if n > 0 => Ok(n),
+            _ => bail!("port {spec:?}: {p:?} is not a port number"),
+        }
+    };
+    let (host, guest) = match s.split_once(':') {
+        Some((h, g)) => (num(h)?, num(g)?),
+        None => {
+            let p = num(s)?;
+            (p, p)
+        }
+    };
+    if host < 1024 {
+        bail!("port {spec:?}: host ports below 1024 cannot be published on the Mac");
+    }
+    Ok((host, guest))
 }
 
 impl OciSandboxSpec {
@@ -87,14 +134,81 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
         (req.spec.is_some(), "spec"),
         (req.image.is_some(), "image"),
         (req.procbox.is_some(), "procbox"),
-        (!req.volumes.is_empty(), "volumes"),
         (req.gpus.unwrap_or(0) > 0, "gpus"),
         (req.confidential.is_some(), "confidential"),
     ];
     if let Some((_, what)) = clash.iter().find(|(set, _)| *set) {
         bail!("oci cannot be combined with {what}: the image is the whole sandbox");
     }
+    let mut seen = std::collections::HashSet::new();
+    for p in &oci.ports {
+        let (host, _) = parse_port(p)?;
+        if !seen.insert(host) {
+            bail!("host port {host} is published more than once");
+        }
+    }
+    if !oci.ports.is_empty() && (req.offline || !req.allow_hosts.is_empty()) {
+        bail!(
+            "ports need the sandbox's network card: they cannot be combined with offline or allow_hosts"
+        );
+    }
+    if oci.publish_to_guests && oci.ports.is_empty() {
+        bail!("publish_to_guests needs ports");
+    }
+    if let Some(h) = &oci.healthcheck {
+        h.validate().map_err(anyhow::Error::msg)?;
+    }
     Ok(())
+}
+
+/// The forwards for `ports`, refused when another VM on this Mac already uses one of the host ports.
+fn forwards(oci: &OciSandboxSpec, taken: &[(u16, bool)]) -> Result<Vec<PortForward>> {
+    let mut out = Vec::new();
+    for p in &oci.ports {
+        let (host_port, guest_port) = parse_port(p)?;
+        for guests in [false]
+            .into_iter()
+            .chain(oci.publish_to_guests.then_some(true))
+        {
+            if taken.contains(&(host_port, guests)) {
+                bail!("host port {host_port} is already published by another VM");
+            }
+            out.push(PortForward {
+                host_port,
+                guest_port,
+                protocol: "tcp".into(),
+                guests,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The volume shares and their mounts: share `fluxvm-vol<N>` is mounted at the volume's `guest_path`.
+fn volume_shares(
+    volumes: &[SandboxVolume],
+    hosts: &[PathBuf],
+) -> (Vec<AppleShare>, Vec<init::VolumeMount>) {
+    volumes
+        .iter()
+        .zip(hosts)
+        .enumerate()
+        .map(|(i, (v, host))| {
+            let tag = init::volume_tag(i);
+            (
+                AppleShare {
+                    tag: tag.clone(),
+                    host_path: host.clone(),
+                    read_only: v.read_only,
+                },
+                init::VolumeMount {
+                    tag,
+                    target: v.guest_path.clone(),
+                    read_only: v.read_only,
+                },
+            )
+        })
+        .unzip()
 }
 
 /// A DNS label from the sandbox name.
@@ -139,6 +253,8 @@ pub(crate) fn build_create(
     (vcpus, memory_mib): (u8, u64),
     offline: bool,
     allow_hosts: &[String],
+    forwards: Vec<PortForward>,
+    (shares, mounts): (Vec<AppleShare>, Vec<init::VolumeMount>),
 ) -> Result<CreateVmRequest> {
     let init_config = init::InitConfig::Boot(init::BootConfig {
         hostname: hostname_for(name),
@@ -152,6 +268,10 @@ pub(crate) fn build_create(
         egress_proxy: !allow_hosts.is_empty(),
         exit_policy: spec.exit_policy,
         agent_port: fluxvm_guest_protocol::DEFAULT_PORT,
+        restart: spec.restart,
+        max_restarts: spec.max_restarts,
+        healthcheck: spec.healthcheck.clone(),
+        mounts,
     });
     let mut create: CreateVmRequest = serde_json::from_value(serde_json::json!({
         "name": name,
@@ -168,12 +288,18 @@ pub(crate) fn build_create(
             "root_read_only": spec.read_only_root,
             "egress_allow": allow_hosts,
             "init_config": init_config,
+            "tagged_shares": shares,
         },
     }))
     .context("building the OCI sandbox VM request")?;
-    if offline {
-        create.network = NetworkSpec::None;
-    }
+    create.network = if offline {
+        if !forwards.is_empty() {
+            bail!("an offline sandbox has no network card to publish ports on");
+        }
+        NetworkSpec::None
+    } else {
+        NetworkSpec::User { forwards }
+    };
     Ok(create)
 }
 
@@ -186,6 +312,12 @@ pub struct SandboxLogs {
     pub oci: bool,
     pub exit_code: Option<i32>,
     pub init_error: Option<String>,
+    /// How many times init restarted the process (`restart` policy).
+    #[serde(default)]
+    pub restarts: u32,
+    /// `healthy` / `unhealthy` once a `healthcheck` has run.
+    #[serde(default)]
+    pub health: Option<String>,
     pub log: String,
 }
 
@@ -236,6 +368,24 @@ impl VmManager {
             .clone()
             .unwrap_or_else(|| format!("sandbox-{}", Uuid::new_v4()));
         let offline = req.offline || !req.allow_hosts.is_empty();
+        let taken: Vec<(u16, bool)> = self
+            .list()
+            .await
+            .into_iter()
+            .filter(|vm| vm.status != VmStatus::Failed)
+            .flat_map(|vm| match vm.request.network {
+                NetworkSpec::User { forwards } => forwards
+                    .into_iter()
+                    .map(|f| (f.host_port, f.guests))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let forwards = forwards(&oci, &taken)?;
+        let tenant = token_tenant.map(str::to_owned);
+        let hosts = self
+            .resolve_volumes(tenant.as_deref(), &req.volumes)
+            .await?;
         let mut create = build_create(
             &name,
             &rootfs,
@@ -245,6 +395,8 @@ impl VmManager {
             (vcpus, memory),
             offline,
             &req.allow_hosts,
+            forwards,
+            volume_shares(&req.volumes, &hosts),
         )?;
         create.ttl_seconds = req.ttl_seconds;
         crate::sandbox::enforce_sandbox_tenant(&mut create, token_tenant)?;
@@ -291,6 +443,8 @@ impl VmManager {
             oci: is_oci(&vm),
             exit_code: init::exit_code_from_log(&log),
             init_error: init::init_error_from_log(&log),
+            restarts: supervise::restarts_from_log(&log),
+            health: supervise::health_from_log(&log),
             log: oci_images::tail(&log, lines.max(1)),
         })
     }
@@ -366,7 +520,6 @@ mod tests {
             serde_json::json!({"image": "debian-13"}),
             serde_json::json!({"procbox": {}}),
             serde_json::json!({"gpus": 1}),
-            serde_json::json!({"volumes": [{"name": "v", "guest_path": "/data/v"}]}),
             serde_json::json!({"confidential": "auto"}),
         ] {
             let mut j = serde_json::json!({"oci": {"image": "alpine"}});
@@ -376,6 +529,13 @@ mod tests {
             assert!(validate(&sandbox(j.clone())).is_err(), "{j}");
         }
         assert!(validate(&sandbox(serde_json::json!({"oci": {"image": " "}}))).is_err());
+        assert!(
+            validate(&sandbox(serde_json::json!({
+                "oci": {"image": "alpine"}, "volumes": [{"name": "v", "guest_path": "/data/v"}],
+            })))
+            .is_ok(),
+            "volumes are persistent shares for container sandboxes"
+        );
     }
 
     #[test]
@@ -408,6 +568,8 @@ mod tests {
             (1, 512),
             true,
             &["pypi.org".to_string()],
+            vec![],
+            (vec![], vec![]),
         )
         .unwrap();
         assert_eq!(c.backend, fluxvm_core::model::BackendKind::Vz);
@@ -440,8 +602,107 @@ mod tests {
             (1, 512),
             false,
             &[],
+            vec![],
+            (vec![], vec![]),
         )
         .unwrap();
         assert!(matches!(online.network, NetworkSpec::User { .. }));
+    }
+
+    #[test]
+    fn ports_parse_like_docker() {
+        assert_eq!(parse_port("8080:80").unwrap(), (8080, 80));
+        assert_eq!(parse_port(" 8080:80/tcp ").unwrap(), (8080, 80));
+        assert_eq!(parse_port("5000").unwrap(), (5000, 5000));
+        for bad in ["80:80", "8080:80/udp", "x:80", "8080:0", "", "70000:1"] {
+            assert!(parse_port(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn ports_need_a_network_card_and_unique_host_ports() {
+        let ok = sandbox(serde_json::json!({"oci": {"image": "nginx", "ports": ["8080:80"]}}));
+        assert!(validate(&ok).is_ok());
+        for bad in [
+            serde_json::json!({"oci": {"image": "nginx", "ports": ["8080:80"]}, "offline": true}),
+            serde_json::json!({"oci": {"image": "nginx", "ports": ["8080:80"]}, "allow_hosts": ["a.com"]}),
+            serde_json::json!({"oci": {"image": "nginx", "ports": ["8080:80", "8080:81"]}}),
+            serde_json::json!({"oci": {"image": "nginx", "publish_to_guests": true}}),
+            serde_json::json!({"oci": {"image": "nginx", "healthcheck": {"command": []}}}),
+        ] {
+            assert!(validate(&sandbox(bad.clone())).is_err(), "{bad}");
+        }
+        let both = spec(
+            serde_json::json!({"image": "nginx", "ports": ["8080:80"], "publish_to_guests": true}),
+        );
+        let f = forwards(&both, &[]).unwrap();
+        assert_eq!(f.len(), 2);
+        assert!(f.iter().all(|f| f.host_port == 8080 && f.guest_port == 80));
+        assert!(f.iter().any(|f| f.guests) && f.iter().any(|f| !f.guests));
+        assert!(forwards(&both, &[(8080, false)]).is_err());
+        assert!(forwards(&both, &[(8080, true)]).is_err());
+        let local = spec(serde_json::json!({"image": "nginx", "ports": ["8080:80"]}));
+        assert!(forwards(&local, &[(8080, true)]).is_ok());
+    }
+
+    #[test]
+    fn volumes_become_tagged_shares_mounted_by_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let vols: Vec<SandboxVolume> = serde_json::from_value(serde_json::json!([
+            {"name": "data", "guest_path": "/data"},
+            {"name": "cfg", "guest_path": "/srv/cfg", "read_only": true},
+        ]))
+        .unwrap();
+        let hosts = vec![dir.path().to_path_buf(), dir.path().to_path_buf()];
+        let (shares, mounts) = volume_shares(&vols, &hosts);
+        assert_eq!(shares[1].tag, "fluxvm-vol1");
+        assert!(shares[1].read_only && !shares[0].read_only);
+        assert_eq!(mounts[1].target, "/srv/cfg");
+        assert!(mounts.iter().all(|m| m.validate().is_ok()));
+
+        let boot = OciBoot {
+            kernel: "/b/k".into(),
+            initrd: "/b/i".into(),
+            cmdline: "console=hvc0".into(),
+        };
+        let process = init::ProcessSpec {
+            argv: vec!["nginx".into()],
+            env: vec![],
+            cwd: "/".into(),
+            user: "0:0".into(),
+        };
+        let s = spec(serde_json::json!({
+            "image": "nginx", "ports": ["8080:80"], "restart": "on-failure", "max_restarts": 5,
+            "healthcheck": {"command": ["wget", "-q", "-O", "/dev/null", "http://127.0.0.1"], "interval_seconds": 10},
+        }));
+        let c = build_create(
+            "web",
+            Path::new("/r"),
+            &boot,
+            process,
+            &s,
+            (1, 512),
+            false,
+            &[],
+            forwards(&s, &[]).unwrap(),
+            (shares, mounts),
+        )
+        .unwrap();
+        let NetworkSpec::User { forwards } = &c.network else {
+            panic!("no network card")
+        };
+        assert_eq!((forwards[0].host_port, forwards[0].guest_port), (8080, 80));
+        let apple = c.apple.as_ref().unwrap();
+        assert_eq!(apple.tagged_shares.len(), 2);
+        let init::InitConfig::Boot(b) =
+            serde_json::from_value(apple.init_config.clone().unwrap()).unwrap()
+        else {
+            panic!("not a boot config")
+        };
+        assert_eq!(b.restart, RestartPolicy::OnFailure);
+        assert_eq!(b.max_restarts, Some(5));
+        assert_eq!(b.healthcheck.unwrap().interval_seconds, 10);
+        assert_eq!(b.mounts.len(), 2);
+        fluxvm_apple::validate_request(&c).unwrap();
     }
 }

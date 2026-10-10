@@ -1141,7 +1141,7 @@ enum SandboxCommand {
     /// Run a container image in its own lightweight VM (vz, macOS), print its
     /// console and exit with its exit code: `fluxctl sandbox run alpine:3.22 --rm -- echo hi`.
     /// REST: `POST /v1/sandboxes` with `oci`, then `GET /v1/sandboxes/{id}/logs`.
-    Run(sandbox_run::RunArgs),
+    Run(Box<sandbox_run::RunArgs>),
     /// A sandbox's console tail, with a container sandbox's exit code. REST:
     /// `GET /v1/sandboxes/{id}/logs`.
     Logs {

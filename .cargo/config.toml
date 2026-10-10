@@ -2,3 +2,8 @@
 # macOS (Apple silicon): Homebrew installs libhivex (needed by guestkit's registry support) under /opt/homebrew.
 [target.aarch64-apple-darwin]
 rustflags = ["-L", "/opt/homebrew/lib"]
+
+# fluxctl's clap tree is large enough that parsing it in a debug build can overflow the 2 MiB default stack of a test
+# thread (the binary's main thread has 8 MiB).
+[env]
+RUST_MIN_STACK = "8388608"

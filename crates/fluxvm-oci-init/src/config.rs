@@ -3,7 +3,7 @@
 
 //! The host-to-guest contract: `config.json` in the meta share, and the markers init prints on the console.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// virtiofs tag of the read-only share holding [`CONFIG_FILE`] and [`TOKEN_FILE`].
@@ -14,6 +14,8 @@ pub const CONFIG_FILE: &str = "config.json";
 pub const TOKEN_FILE: &str = "agent.token";
 /// Where the initramfs tools are visible inside the container after the root switch.
 pub const TOOLS_DIR: &str = "/.fluxvm";
+/// virtiofs tags of persistent volumes: `fluxvm-vol0`, `fluxvm-vol1`, …
+pub const VOLUME_TAG_PREFIX: &str = "fluxvm-vol";
 
 /// Console lines the host parses from the serial log.
 pub const UNPACK_OK: &str = "FLUXVM-UNPACK-OK";
@@ -21,6 +23,8 @@ pub const UNPACK_ERR: &str = "FLUXVM-UNPACK-ERR";
 pub const EXIT_MARKER: &str = "FLUXVM-EXIT";
 /// Init could not start the container (bad rootfs, unknown user, missing binary); the reason follows.
 pub const INIT_ERR: &str = "FLUXVM-INIT-ERR";
+/// The guest's DHCP address; the runner parses it to know where published ports go (same line as cloud-init guests).
+pub const GUEST_IP_MARKER: &str = "VELORA-IP";
 
 /// Tells the guest agent that `Shutdown` means "signal PID 1" (SIGUSR2), not the image's shutdown(8).
 pub const POWEROFF_VIA_INIT_ENV: &str = "FLUXVM_POWEROFF_VIA_INIT";
@@ -54,6 +58,55 @@ pub struct BootConfig {
     pub exit_policy: ExitPolicy,
     #[serde(default = "default_agent_port")]
     pub agent_port: u32,
+    #[serde(default)]
+    pub restart: crate::supervise::RestartPolicy,
+    /// Stop restarting after this many restarts (unlimited when absent).
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default)]
+    pub healthcheck: Option<crate::supervise::HealthCheck>,
+    /// Persistent volumes: virtiofs shares mounted into the root before the process starts.
+    #[serde(default)]
+    pub mounts: Vec<VolumeMount>,
+}
+
+/// A virtiofs share (tag `fluxvm-vol<N>`) mounted at `target` in the container's root.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeMount {
+    pub tag: String,
+    pub target: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// The tag of the `index`th volume share.
+pub fn volume_tag(index: usize) -> String {
+    format!("{VOLUME_TAG_PREFIX}{index}")
+}
+
+impl VolumeMount {
+    /// An absolute path below the root (not `/` itself, no `.` or `..` parts) and a `fluxvm-vol<N>` tag.
+    pub fn validate(&self) -> Result<()> {
+        let n = self
+            .tag
+            .strip_prefix(VOLUME_TAG_PREFIX)
+            .context("volume tag must start with fluxvm-vol")?;
+        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+            bail!("bad volume tag {:?}", self.tag);
+        }
+        let rel = self
+            .target
+            .strip_prefix('/')
+            .with_context(|| format!("volume target {:?} must be absolute", self.target))?;
+        if rel.is_empty()
+            || rel
+                .split('/')
+                .any(|c| c.is_empty() || c == "." || c == "..")
+        {
+            bail!("bad volume target {:?}", self.target);
+        }
+        Ok(())
+    }
 }
 
 fn default_agent_port() -> u32 {
@@ -226,6 +279,38 @@ pub fn unpack_result_from_log(log: &str) -> Option<Result<(), String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn volume_mounts_stay_inside_the_root() {
+        let m = |tag: &str, target: &str| VolumeMount {
+            tag: tag.into(),
+            target: target.into(),
+            read_only: false,
+        };
+        assert!(m(&volume_tag(0), "/data").validate().is_ok());
+        assert!(m("fluxvm-vol12", "/srv/app/cache").validate().is_ok());
+        for (tag, target) in [
+            ("fluxvm-vol0", "/"),
+            ("fluxvm-vol0", "data"),
+            ("fluxvm-vol0", "/data/../etc"),
+            ("fluxvm-vol0", "/data//x"),
+            ("fluxvm-volx", "/data"),
+            ("fluxvm-meta", "/data"),
+        ] {
+            assert!(m(tag, target).validate().is_err(), "{tag} {target}");
+        }
+    }
+
+    #[test]
+    fn older_boot_configs_still_parse() {
+        let b: BootConfig = serde_json::from_value(serde_json::json!({
+            "hostname": "h",
+            "process": {"argv": ["/bin/true"], "env": [], "cwd": "/", "user": "0:0"},
+        }))
+        .unwrap();
+        assert_eq!(b.restart, crate::supervise::RestartPolicy::No);
+        assert!(b.healthcheck.is_none() && b.mounts.is_empty() && b.max_restarts.is_none());
+    }
 
     fn image() -> ImageProcess {
         ImageProcess {
