@@ -66,11 +66,14 @@ impl Config {
     }
 }
 
+/// Each VM's registered VMM pid and vCPU thread ids.
+type Registrations = BTreeMap<Uuid, (u32, Vec<u32>)>;
+
 #[derive(Clone)]
 struct AppState {
     cfg: Arc<Config>,
     snapshots: Arc<RwLock<BTreeMap<Uuid, VmRuntimeSnapshot>>>,
-    registrations: Arc<RwLock<BTreeMap<Uuid, (u32, Vec<u32>)>>>,
+    registrations: Arc<RwLock<Registrations>>,
     probe: Arc<RwLock<FeatureProbe>>,
 }
 

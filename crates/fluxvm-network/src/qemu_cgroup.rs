@@ -84,10 +84,10 @@ fn collect_device_rules(vfio_devices: &[String]) -> Result<Vec<(u32, u32)>> {
         }
     }
     for bdf in vfio_devices {
-        if let Some(vfio_path) = resolve_vfio_group_device(bdf) {
-            if let Some(rule) = resolve_device(&vfio_path)? {
-                rules.push(rule);
-            }
+        if let Some(vfio_path) = resolve_vfio_group_device(bdf)
+            && let Some(rule) = resolve_device(&vfio_path)?
+        {
+            rules.push(rule);
         }
     }
     check_device_count(&rules)?;

@@ -50,13 +50,12 @@ unsafe impl Sync for GuestMemory {}
 
 impl GuestMemory {
     pub fn allocate(len: usize) -> Result<Self> {
-        if len == 0 || len % 4096 != 0 {
+        if len == 0 || !len.is_multiple_of(4096) {
             return Err(FluxError::Memory(
                 "size must be non-zero and 4 KiB aligned".into(),
             ));
         }
         let dense = std::env::var("FLUXVM_KVM_LOCK_MEM").ok().as_deref() == Some("1");
-        let huge = std::env::var("FLUXVM_HUGEPAGES").ok().as_deref() == Some("1");
         let mut flags = ffi::MAP_SHARED | ffi::MAP_ANONYMOUS;
         if dense {
             flags |= ffi::MAP_POPULATE;
@@ -65,7 +64,7 @@ impl GuestMemory {
         }
         // Firecracker-style optional hugepage backing.
         #[cfg(target_os = "linux")]
-        if huge {
+        if std::env::var("FLUXVM_HUGEPAGES").ok().as_deref() == Some("1") {
             flags |= libc::MAP_HUGETLB as i32;
         }
         let p = unsafe {
@@ -154,6 +153,10 @@ impl GuestMemory {
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
     pub fn host_ptr(&self) -> *mut u8 {
@@ -259,11 +262,10 @@ impl Clone for GuestMemory {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn read_at_rejects_overflowing_guest_address() {
         let mem = GuestMemory::allocate(4096).unwrap();

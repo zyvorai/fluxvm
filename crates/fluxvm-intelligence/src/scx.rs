@@ -8,7 +8,9 @@
 //! VM weight/slice/latency policy, and then opts only those TIDs into SCHED_EXT.
 //! No host-wide scheduler takeover is performed.
 
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(target_os = "linux")]
+use anyhow::anyhow;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -274,10 +276,10 @@ pub fn build_plan(
     {
         Ok(plan) => {
             for action in plan.actions {
-                if let SteeringAction::TaskAffinity { tid, new, .. } = action {
-                    if let Ok(cpu) = new.parse::<u32>() {
-                        cpu_for_tid.insert(tid, cpu);
-                    }
+                if let SteeringAction::TaskAffinity { tid, new, .. } = action
+                    && let Ok(cpu) = new.parse::<u32>()
+                {
+                    cpu_for_tid.insert(tid, cpu);
                 }
             }
             topology_source = "set8-topology-intelligence".to_string();

@@ -157,9 +157,10 @@ mod tests {
     use tempfile::tempdir;
 
     fn cfg_at(dir: &std::path::Path) -> Config {
-        let mut cfg = Config::default();
-        cfg.state_dir = dir.to_path_buf();
-        cfg
+        Config {
+            state_dir: dir.to_path_buf(),
+            ..Default::default()
+        }
     }
 
     #[test]

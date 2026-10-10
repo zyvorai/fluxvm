@@ -15,7 +15,6 @@ use fluxvm_core::config::Config;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    fs,
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -356,15 +355,14 @@ fn json_bytes(value: &Value) -> Result<Vec<u8>> {
             })
             .collect();
     }
-    if let Some(object) = value.as_object() {
-        if let Some(bytes) = object.get("bytes") {
-            return json_bytes(bytes);
-        }
+    if let Some(object) = value.as_object()
+        && let Some(bytes) = object.get("bytes")
+    {
+        return json_bytes(bytes);
     }
     if let Some(raw) = value.as_str() {
         return raw
-            .replace(':', " ")
-            .replace(',', " ")
+            .replace([':', ','], " ")
             .split_whitespace()
             .map(|v| {
                 u8::from_str_radix(v.trim_start_matches("0x"), 16)

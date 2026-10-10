@@ -36,7 +36,9 @@ fn verbose_io() -> bool {
     *VERBOSE.get_or_init(|| std::env::var_os("FLUXVM_VERBOSE_IO").is_some())
 }
 use std::mem::ManuallyDrop;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "linux")]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 /// virtio-mmio register offset of `QueueNotify`.
@@ -75,6 +77,7 @@ pub struct QueueService {
     /// Configured virtio-net queue pairs (1 unless multiqueue is on).
     net_max_pairs: u32,
     pub net_stats: virtio_net::NetStats,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     rx_scratch: Vec<u8>,
 }
 
@@ -128,6 +131,7 @@ impl QueueService {
 
     /// Tap fd the worker should poll for guest-bound frames, when the
     /// userspace datapath owns it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn rx_poll_fd(&self) -> Option<i32> {
         if self.net.is_none() || self.vhost_owns_tap() {
             return None;
@@ -135,6 +139,7 @@ impl QueueService {
         self.tap.as_ref().map(|t| t.fd)
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn vhost_owns_tap(&self) -> bool {
         self.vhost
             .as_ref()
@@ -267,6 +272,7 @@ impl QueueService {
     }
 
     /// Deliver pending tap frames into guest RX buffers (queue 0).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn net_rx(&mut self) -> Result<virtio_net::RxPump> {
         let (Some(net), Some(tap)) = (self.net.clone(), self.tap.as_ref()) else {
             return Ok(virtio_net::RxPump::NoBuffers);
@@ -294,6 +300,7 @@ impl QueueService {
         Ok(state)
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn net_stats_line(&self) -> String {
         let s = &self.net_stats;
         format!(
@@ -455,11 +462,9 @@ impl QueueService {
         match virtio_vsock::handle_notify(&mut self.mem, &mut st, q, self.vsock_backend.as_deref())
         {
             Ok(n) => {
-                if n > 0 {
-                    if verbose_io() {
-                        eprintln!("[vsock] processed q={q} pkts={n}");
-                    };
-                }
+                if n > 0 && verbose_io() {
+                    eprintln!("[vsock] processed q={q} pkts={n}");
+                };
                 drop(st);
                 vsock.raise_vring_interrupt();
             }
@@ -474,11 +479,9 @@ impl QueueService {
         let mut st = balloon.state.lock().unwrap();
         match virtio_balloon::handle_notify(&mut self.mem, &mut st, q) {
             Ok(n) => {
-                if n > 0 {
-                    if verbose_io() {
-                        eprintln!("[balloon] q={q} bufs={n}");
-                    };
-                }
+                if n > 0 && verbose_io() {
+                    eprintln!("[balloon] q={q} bufs={n}");
+                };
                 drop(st);
                 balloon.raise_vring_interrupt();
             }
@@ -491,11 +494,9 @@ impl QueueService {
         let mut st = rng.state.lock().unwrap();
         match virtio_rng::handle_notify(&mut self.mem, &mut st, q) {
             Ok(n) => {
-                if n > 0 {
-                    if verbose_io() {
-                        eprintln!("[rng] q={q} bufs={n}");
-                    };
-                }
+                if n > 0 && verbose_io() {
+                    eprintln!("[rng] q={q} bufs={n}");
+                };
                 drop(st);
                 rng.raise_vring_interrupt();
             }
@@ -522,6 +523,7 @@ impl QueueService {
 }
 
 /// One registered `(eventfd, device, queue)` binding.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct Binding {
     fd: i32,
     dev: Dev,

@@ -79,7 +79,7 @@ async fn share_image_size(dir: &Path) -> String {
         })
         .unwrap_or(512);
     // Leave headroom for ext4 metadata; never below 512M.
-    let sized = mb.saturating_mul(2).max(512).min(32 * 1024);
+    let sized = mb.saturating_mul(2).clamp(512, 32 * 1024);
     format!("{sized}M")
 }
 

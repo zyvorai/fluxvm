@@ -253,6 +253,7 @@ fn persist_nodes(path: &FsPath, lock_path: &FsPath, nodes: &HashMap<String, Node
     }
     let lock_file = match fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(lock_path)
     {
@@ -1468,8 +1469,10 @@ mod tests {
     #[test]
     fn automatic_placement_skips_nodes_that_cannot_satisfy_snp() {
         let mut nodes = HashMap::new();
-        let mut snp_cap = NodeSecurityCapabilities::default();
-        snp_cap.snp = true;
+        let snp_cap = NodeSecurityCapabilities {
+            snp: true,
+            ..Default::default()
+        };
         nodes.insert("snp".to_string(), node_with_security("snp", snp_cap));
         nodes.insert(
             "plain".to_string(),

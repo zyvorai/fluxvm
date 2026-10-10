@@ -304,8 +304,10 @@ mod tests {
 
     fn cfg() -> (Config, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let mut c = Config::default();
-        c.state_dir = dir.path().to_path_buf();
+        let c = Config {
+            state_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         (c, dir)
     }
 

@@ -34,6 +34,12 @@ pub struct VmState {
     pub guest: Option<GuestHandle>,
 }
 
+impl Default for VmState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VmState {
     pub fn new() -> Self {
         Self {

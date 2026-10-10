@@ -142,7 +142,7 @@ pub struct PodPolicyRule {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PodNetworkPolicy {
     /// 0/1 (or omitted): legacy Set 6S/13 exact-address/port ABI, unchanged.
-    /// >=2: this policy's `rules` are authoritative and the legacy
+    /// `>= 2`: this policy's `rules` are authoritative and the legacy
     /// `allow_addresses`/`allow_port_rules` fields are ignored by
     /// `configure_pod_maps`, even if still present for a rolling-upgrade
     /// reader.
@@ -1014,8 +1014,10 @@ mod tests {
     #[test]
     fn policy_round_trip_is_atomic_and_validated() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
         let id = Uuid::new_v4();
         let policy = VmNetworkPolicy {
             default_allow: false,
@@ -1035,8 +1037,10 @@ mod tests {
     #[test]
     fn pod_policy_round_trip_includes_port_rules() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
         let id = Uuid::new_v4();
         let policy = PodNetworkPolicy {
             default_deny: true,
@@ -1073,8 +1077,10 @@ mod tests {
     #[test]
     fn pod_policy_round_trip_includes_schema_v2_rules() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
         let id = Uuid::new_v4();
         let policy = PodNetworkPolicy {
             schema_version: 2,
@@ -1106,8 +1112,10 @@ mod tests {
     #[test]
     fn pod_policy_rejects_invalid_rule_direction() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
         let id = Uuid::new_v4();
         let policy = PodNetworkPolicy {
             schema_version: 2,
@@ -1127,8 +1135,10 @@ mod tests {
     #[test]
     fn bad_l4_policy_is_rejected_before_persist() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
         let id = Uuid::new_v4();
         let policy = VmNetworkPolicy {
             // Set 16 legitimately added VM-level "sctp/PORT" support, so

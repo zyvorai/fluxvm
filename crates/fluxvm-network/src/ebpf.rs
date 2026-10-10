@@ -1251,7 +1251,7 @@ pub fn flows(cfg: &DataplaneConfig, id: Uuid, limit: usize) -> Result<Vec<FlowRe
     let map = vm_pin_dir(&cfg.pin_root, id).join("maps/fluxvm_flows");
     let json = bpftool_json_dump(&map)?;
     let mut records = parse_flows_json(&json)?;
-    records.sort_by(|a, b| b.last_seen_ns.cmp(&a.last_seen_ns));
+    records.sort_by_key(|r| std::cmp::Reverse(r.last_seen_ns));
     records.truncate(limit.clamp(1, 4096));
     Ok(records)
 }
@@ -2257,6 +2257,7 @@ fn write_group_ids(map: &Path, ifindex: u32, ids: &[u32]) -> Result<()> {
     bpftool_map_update(map, &key, &value)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_iface_config(
     map: &Path,
     ifindex: u32,
@@ -2571,7 +2572,7 @@ fn json_bytes(v: &Value) -> Result<Vec<u8>> {
             .collect();
     }
     if let Some(s) = v.as_str() {
-        let normalized = s.replace(':', " ").replace(',', " ");
+        let normalized = s.replace([':', ','], " ");
         return normalized
             .split_whitespace()
             .map(|x| u8::from_str_radix(x.trim_start_matches("0x"), 16).context("invalid hex byte"))
@@ -2598,6 +2599,7 @@ fn parse_ip_cidr(raw: &str) -> Result<IpCidr> {
     }
 }
 
+#[cfg(test)]
 fn parse_ipv4_cidr(raw: &str) -> Result<Ipv4Cidr> {
     match parse_ip_cidr(raw)? {
         IpCidr::V4(cidr) => Ok(cidr),
@@ -2844,27 +2846,25 @@ fn detach_pod_ingress_filter_in_vm_dir(id: Uuid, vm_dir: &Path) {
         let out = crate::netns_scope::command("tc")
             .args(["filter", "show", "dev", &iface, "egress", "pref", "49153"])
             .output();
-        if let (Some(owned), Ok(out)) = (owned, out) {
-            if out.status.success()
-                && parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2)
-                    == Some(owned)
-            {
-                let _ = run(
-                    "tc",
-                    &[
-                        "filter".into(),
-                        "del".into(),
-                        "dev".into(),
-                        iface,
-                        "egress".into(),
-                        "pref".into(),
-                        "49153".into(),
-                        "handle".into(),
-                        "2".into(),
-                        "bpf".into(),
-                    ],
-                );
-            }
+        if let (Some(owned), Ok(out)) = (owned, out)
+            && out.status.success()
+            && parse_tc_program_id_handle(&String::from_utf8_lossy(&out.stdout), 2) == Some(owned)
+        {
+            let _ = run(
+                "tc",
+                &[
+                    "filter".into(),
+                    "del".into(),
+                    "dev".into(),
+                    iface,
+                    "egress".into(),
+                    "pref".into(),
+                    "49153".into(),
+                    "handle".into(),
+                    "2".into(),
+                    "bpf".into(),
+                ],
+            );
         }
     }
     // The pin lives under FluxVM's per-VM directory and is ours even if the
@@ -2967,10 +2967,8 @@ fn parse_tc_program_id(text: &str) -> Option<u32> {
                 program_id = pair[1].parse::<u32>().ok();
             }
         }
-        if handle_matches {
-            if let Some(id) = program_id {
-                return Some(id);
-            }
+        if handle_matches && let Some(id) = program_id {
+            return Some(id);
         }
     }
     None

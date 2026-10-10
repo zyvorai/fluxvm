@@ -134,7 +134,7 @@ fn convert_sparse_inner(
     let compression = u16::from_le_bytes(header[77..79].try_into().unwrap());
 
     let stream = compression == 1 && flags & 0x1_0000 != 0;
-    if !matches!(version, 1 | 2 | 3)
+    if !matches!(version, 1..=3)
         || flags & !0x3_0007 != 0
         || (!stream && (compression != 0 || flags & 0x3_0000 != 0))
         || (stream && extent_sectors.is_some())

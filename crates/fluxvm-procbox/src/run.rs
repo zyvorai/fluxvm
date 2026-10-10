@@ -369,9 +369,11 @@ mod tests {
 
     #[test]
     fn clean_env_keeps_only_a_minimal_path_and_explicit_vars() {
-        let mut p = Policy::default();
-        p.clean_env = true;
-        p.env = vec![("FOO".into(), "bar".into())];
+        let p = Policy {
+            clean_env: true,
+            env: vec![("FOO".into(), "bar".into())],
+            ..Default::default()
+        };
         let env = build_env(&p);
         assert!(env.iter().any(|(k, _)| k == "PATH"));
         assert!(env.contains(&("FOO".into(), "bar".into())));
@@ -380,8 +382,10 @@ mod tests {
 
     #[test]
     fn inherited_env_adds_only_explicit_vars() {
-        let mut p = Policy::default();
-        p.env = vec![("A".into(), "1".into())];
+        let p = Policy {
+            env: vec![("A".into(), "1".into())],
+            ..Default::default()
+        };
         assert_eq!(build_env(&p), vec![("A".to_string(), "1".to_string())]);
     }
 
@@ -406,9 +410,11 @@ mod tests {
         // An explicit, deliberate "no TCP restriction at all" (TcpRule::Any)
         // is the one case where these filters are skipped, matching the
         // long-standing "network is not restricted" semantics.
-        let mut p = Policy::default();
-        p.tcp_connect = TcpRule::Any;
-        p.tcp_bind = TcpRule::Any;
+        let p = Policy {
+            tcp_connect: TcpRule::Any,
+            tcp_bind: TcpRule::Any,
+            ..Default::default()
+        };
         let net = imp::net_deny_for(&p, false, false);
         assert!(!net.any());
     }

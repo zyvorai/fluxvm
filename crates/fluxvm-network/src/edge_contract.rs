@@ -430,7 +430,7 @@ pub fn attributed_drops(cfg: &Config, id: Uuid, limit: usize) -> Result<Vec<Drop
             });
         }
     }
-    events.sort_by(|a, b| b.packets.cmp(&a.packets));
+    events.sort_by_key(|e| std::cmp::Reverse(e.packets));
     events.truncate(limit);
     Ok(events)
 }
@@ -625,8 +625,10 @@ mod tests {
 
     fn test_cfg() -> (tempfile::TempDir, Config) {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = tmp.path().to_path_buf();
+        let mut cfg = Config {
+            state_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
         cfg.sandbox.dataplane.pin_root = tmp.path().join("bpf");
         (tmp, cfg)
     }

@@ -12,7 +12,9 @@
 //! refused with [`ProcboxError::Unsupported`]. See `docs/procbox-backend.md`.
 
 use crate::VmManager;
-use crate::changes::{ChangeSet, FingerprintMode, Manifest, diff_manifests, validate_paths};
+#[cfg(target_os = "linux")]
+use crate::changes::FingerprintMode;
+use crate::changes::{ChangeSet, Manifest, diff_manifests, validate_paths};
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use fluxvm_core::config::ProcboxConfig;
@@ -29,6 +31,7 @@ pub const FILES_DIR: &str = "files";
 
 /// Most files a manifest, size scan or copy will visit, so a workspace full of
 /// tiny files cannot pin a worker.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const MAX_WALK_ENTRIES: usize = 500_000;
 
 /// Read-only system locations a command needs to run a shell and common tools.
@@ -958,6 +961,10 @@ pub fn take_manifest(vm: &VmRecord, paths: &[String]) -> Result<Manifest> {
 
 impl VmManager {
     /// Create a procbox sandbox: workspace + marker + record, no VMM.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(unreachable_code, unused_variables, unused_mut)
+    )]
     pub(crate) async fn create_procbox_sandbox(
         self: &std::sync::Arc<Self>,
         req: crate::SandboxCreateRequest,

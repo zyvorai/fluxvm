@@ -230,12 +230,12 @@ async fn provision_lvm_thin(
         let _ = run_checked("lvremove", &["-f".into(), format!("{vg}/{snap}")]).await;
         return Err(e);
     }
-    if let Some(token) = agent_token {
-        if let Err(e) = crate::inject_guest_agent_token(&dev, token).await {
-            let _ = run_checked("lvchange", &["-an".into(), format!("{vg}/{snap}")]).await;
-            let _ = run_checked("lvremove", &["-f".into(), format!("{vg}/{snap}")]).await;
-            return Err(e);
-        }
+    if let Some(token) = agent_token
+        && let Err(e) = crate::inject_guest_agent_token(&dev, token).await
+    {
+        let _ = run_checked("lvchange", &["-an".into(), format!("{vg}/{snap}")]).await;
+        let _ = run_checked("lvremove", &["-f".into(), format!("{vg}/{snap}")]).await;
+        return Err(e);
     }
     Ok(ProvisionedDisk {
         disk: dev.clone(),
@@ -336,10 +336,10 @@ async fn provision_nbd(
 /// doesn't honor this ordering, not a live race in the version tested.
 async fn read_pid_file_retrying(path: &Path) -> Result<u32> {
     for _ in 0..30 {
-        if let Ok(s) = tokio::fs::read_to_string(path).await {
-            if let Ok(pid) = s.trim().parse::<u32>() {
-                return Ok(pid);
-            }
+        if let Ok(s) = tokio::fs::read_to_string(path).await
+            && let Ok(pid) = s.trim().parse::<u32>()
+        {
+            return Ok(pid);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }

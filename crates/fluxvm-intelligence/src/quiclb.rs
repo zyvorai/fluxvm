@@ -256,7 +256,7 @@ pub fn build_plan(spec: &QuicLbSpec) -> Result<QuicLbPlan> {
                 ifindex: bi,
                 mac: b.mac.to_lowercase(),
                 weight: b.weight,
-                state: b.state.clone(),
+                state: b.state,
                 address: b.address,
             });
         }
@@ -293,7 +293,7 @@ pub fn build_plan(spec: &QuicLbSpec) -> Result<QuicLbPlan> {
         instance_id: spec.instance_id,
         interface: spec.interface.clone(),
         ifindex: primary_ifindex,
-        mode: spec.mode.clone(),
+        mode: spec.mode,
         generation: 0,
         services: out,
         warnings,
@@ -390,14 +390,14 @@ pub fn apply(
     } else {
         None
     };
-    if let Some(o) = &old {
-        if o.interface != plan.interface || o.mode != plan.mode {
-            bail!(
-                "existing instance uses interface={} mode={}; remove it before changing attachment ownership",
-                o.interface,
-                o.mode.as_str()
-            )
-        }
+    if let Some(o) = &old
+        && (o.interface != plan.interface || o.mode != plan.mode)
+    {
+        bail!(
+            "existing instance uses interface={} mode={}; remove it before changing attachment ownership",
+            o.interface,
+            o.mode.as_str()
+        )
     }
     let generation = match old.as_ref() {
         Some(x) => x.generation.checked_add(1).ok_or_else(|| {
@@ -567,12 +567,11 @@ pub fn list_statuses(state_root: &Path) -> Result<Vec<QuicLbStatus>> {
         if p.extension().and_then(|x| x.to_str()) != Some("json") {
             continue;
         }
-        if let Some(stem) = p.file_stem().and_then(|x| x.to_str()) {
-            if let Ok(id) = stem.parse() {
-                if let Ok(s) = status(id, state_root) {
-                    out.push(s)
-                }
-            }
+        if let Some(stem) = p.file_stem().and_then(|x| x.to_str())
+            && let Ok(id) = stem.parse()
+            && let Ok(s) = status(id, state_root)
+        {
+            out.push(s)
         }
     }
     Ok(out)
@@ -693,7 +692,7 @@ pub fn import_affinity(id: Uuid, snap: &AffinitySnapshot, state_root: &Path) -> 
     Ok(n)
 }
 fn decode_hex(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         bail!("odd-length hex CID")
     }
     let mut out = Vec::with_capacity(s.len() / 2);

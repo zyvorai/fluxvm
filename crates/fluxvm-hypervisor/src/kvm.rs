@@ -359,9 +359,9 @@ impl KvmVm {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = id;
-            return Err(FluxError::Unsupported(
+            Err(FluxError::Unsupported(
                 "KVM create_vcpu is Linux-only".into(),
-            ));
+            ))
         }
         #[cfg(target_os = "linux")]
         {

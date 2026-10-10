@@ -224,10 +224,10 @@ pub async fn add_entry(
 pub fn remove_entry(cfg: &Config, name: &str) -> Result<()> {
     let path = catalog_path(cfg)?;
     let mut entries = load_catalog(path)?;
-    if let Some(entry) = entries.iter().find(|e| e.name == name) {
-        if entry.read_only {
-            bail!("catalog entry '{name}' is read-only; clear it first");
-        }
+    if let Some(entry) = entries.iter().find(|e| e.name == name)
+        && entry.read_only
+    {
+        bail!("catalog entry '{name}' is read-only; clear it first");
     }
     let before = entries.len();
     entries.retain(|e| e.name != name);
@@ -429,18 +429,6 @@ pub struct ResolvedImage {
     pub sha256: Option<String>,
 }
 
-/// Resolves `image_ref` against the configured catalog:
-/// - No `catalog.path` configured, or `image_ref` doesn't match any entry's
-///   `name` there → returned unchanged (a plain path/URL, the pre-catalog
-///   behavior — fully backward compatible).
-/// - A matching entry, `catalog.trusted_signers` non-empty → the entry
-///   *must* carry a valid signature from one of those keys, or this fails
-///   closed (no silent fallback to "unsigned is fine").
-/// - A matching entry (signature check passed or not required) → fetched
-///   (if a URL; cached the same way `build_image` already caches downloads)
-///   and its content re-verified against `sha256` — even a local `source`
-///   path is re-hashed here, so a file that changed after the catalog was
-///   authored is caught rather than silently trusted.
 /// True when `image_ref` is a catalog alias whose Ed25519 signature verifies
 /// against `catalog.trusted_signers`. Call **before** [`resolve`] overwrites
 /// `image_ref` with a filesystem path.
@@ -466,6 +454,18 @@ pub fn is_approved_signed_image(cfg: &Config, image_ref: &Path) -> bool {
     verify_signature(entry, &signers).is_ok()
 }
 
+/// Resolves `image_ref` against the configured catalog:
+/// - No `catalog.path` configured, or `image_ref` doesn't match any entry's
+///   `name` there → returned unchanged (a plain path/URL, the pre-catalog
+///   behavior — fully backward compatible).
+/// - A matching entry, `catalog.trusted_signers` non-empty → the entry
+///   *must* carry a valid signature from one of those keys, or this fails
+///   closed (no silent fallback to "unsigned is fine").
+/// - A matching entry (signature check passed or not required) → fetched
+///   (if a URL; cached the same way `build_image` already caches downloads)
+///   and its content re-verified against `sha256` — even a local `source`
+///   path is re-hashed here, so a file that changed after the catalog was
+///   authored is caught rather than silently trusted.
 pub async fn resolve(cfg: &Config, image_ref: &Path) -> Result<PathBuf> {
     Ok(resolve_with_provenance(cfg, image_ref).await?.path)
 }

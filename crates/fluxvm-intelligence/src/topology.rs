@@ -284,10 +284,11 @@ pub fn unregister(id: Uuid, _pid: u32, pin_root: &Path) -> Result<()> {
     let key = vm_key(id);
     let run = pin_root.join("maps/topo_vcpu_cpu");
     for row in dump_rows(&run).unwrap_or_default() {
-        if let Some(bytes) = value_bytes(row.get("key")) {
-            if bytes.len() >= 16 && u64::from_ne_bytes(bytes[0..8].try_into().unwrap()) == key {
-                let _ = delete_hex_key(&run, &bytes);
-            }
+        if let Some(bytes) = value_bytes(row.get("key"))
+            && bytes.len() >= 16
+            && u64::from_ne_bytes(bytes[0..8].try_into().unwrap()) == key
+        {
+            let _ = delete_hex_key(&run, &bytes);
         }
     }
     Ok(())
@@ -476,7 +477,7 @@ pub fn plan(snapshot: &TopologySnapshot) -> Result<SteeringPlan> {
 }
 
 pub fn apply_plan(plan: &SteeringPlan, state_root: &Path) -> Result<SteeringReceipt> {
-    if Path::new(&format!("/proc/{}", plan.pid)).exists() == false {
+    if !Path::new(&format!("/proc/{}", plan.pid)).exists() {
         bail!("VMM pid {} no longer exists", plan.pid);
     }
     for action in &plan.actions {
@@ -1122,9 +1123,6 @@ fn bpftool_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
         );
     }
     Ok(())
-}
-fn delete_u32(map: &Path, key: u32) -> Result<()> {
-    delete_hex_key(map, &key.to_ne_bytes())
 }
 fn delete_hex_key(map: &Path, key: &[u8]) -> Result<()> {
     let mut cmd = Command::new("bpftool");

@@ -122,12 +122,10 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             // before a TC hook sees them, so the redirect would silently never fire.
             if direct.mode == fluxvm_core::model::DirectMode::L2Uplink
                 && direct.netns_path.is_none()
-            {
-                if let Some(why) =
+                && let Some(why) =
                     direct::uplink_problem(std::path::Path::new("/sys/class/net"), &direct.outer)
-                {
-                    bail!("network.direct: {why}");
-                }
+            {
+                bail!("network.direct: {why}");
             }
             // No set_master and no default_bridge fallback: the whole point is
             // that nothing bridges this tap. A redirect program pairs it with
@@ -269,14 +267,12 @@ pub async fn prepare(cfg: &Config, id: Uuid, spec: &NetworkSpec) -> Result<Prepa
             }
             let bridge = bridge.clone().or_else(|| cfg.default_bridge.clone());
 
-            if let Err(e) = create_tap(&tap).await {
+            create_tap(&tap).await?;
+            if let Some(br) = &bridge
+                && let Err(e) = set_master(&tap, br).await
+            {
+                let _ = cleanup_tap(&tap).await;
                 return Err(e);
-            }
-            if let Some(br) = &bridge {
-                if let Err(e) = set_master(&tap, br).await {
-                    let _ = cleanup_tap(&tap).await;
-                    return Err(e);
-                }
             }
             let mut prepared_extra: Vec<ExtraNic> = Vec::with_capacity(extra.len());
             for (i, nic) in extra.iter().enumerate() {

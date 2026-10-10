@@ -18,7 +18,9 @@
 use anyhow::{Context, Result, bail};
 use fluxvm_core::{model::DirectSpec, process::run_checked};
 use serde::{Deserialize, Serialize};
-use std::{ffi::CString, fs::File, os::fd::AsRawFd, path::Path};
+use std::{ffi::CString, path::Path};
+#[cfg(target_os = "linux")]
+use std::{fs::File, os::fd::AsRawFd};
 use uuid::Uuid;
 
 const TUNSETIFF: libc::c_ulong = 0x4004_54ca;

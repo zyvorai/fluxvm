@@ -105,7 +105,7 @@ fn read_line_blocking(stream: &mut dyn Read) -> Result<String> {
     if bytes.len() > 64 * 1024 {
         bail!("stream handshake line too large");
     }
-    Ok(String::from_utf8(bytes).context("stream handshake is not UTF-8")?)
+    String::from_utf8(bytes).context("stream handshake is not UTF-8")
 }
 
 fn validate_stream_ack(line: &str) -> Result<()> {

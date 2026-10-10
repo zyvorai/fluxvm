@@ -99,8 +99,10 @@ mod tests {
 
     fn test_cfg() -> (Config, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = Config::default();
-        cfg.state_dir = dir.path().to_path_buf();
+        let cfg = Config {
+            state_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
         (cfg, dir)
     }
 

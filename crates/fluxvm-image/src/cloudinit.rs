@@ -116,7 +116,7 @@ pub async fn build_seed(
     #[cfg(target_os = "macos")]
     {
         // `cloud-localds` is a Linux package; macOS builds the same NoCloud ("cidata") ISO with hdiutil.
-        let _ = &args;
+        let _ = (&args, cfg);
         return build_seed_hdiutil(dir, &user_data, &meta_data, network_config.as_deref()).await;
     }
     #[cfg(not(target_os = "macos"))]

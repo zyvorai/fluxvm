@@ -78,6 +78,7 @@ impl Store {
         tokio::task::spawn_blocking(move || -> Result<T> {
             let lock_file = fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .open(&lock_path)
                 .context("opening store lock file")?;
@@ -110,6 +111,7 @@ impl Store {
         tokio::task::spawn_blocking(move || -> Result<T> {
             let lock_file = fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .open(&lock_path)
                 .context("opening store lock file")?;
@@ -288,6 +290,7 @@ impl Store {
         tokio::task::spawn_blocking(move || -> Result<()> {
             let lock_file = fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .open(&lock_path)
                 .context("opening store lock file")?;
@@ -497,6 +500,7 @@ impl PoolStore {
         tokio::task::spawn_blocking(move || -> Result<T> {
             let lock_file = fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .open(&lock_path)
                 .context("opening pool store lock file")?;
@@ -524,6 +528,7 @@ impl PoolStore {
         tokio::task::spawn_blocking(move || -> Result<T> {
             let lock_file = fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .open(&lock_path)
                 .context("opening pool store lock file")?;
@@ -1043,9 +1048,11 @@ mod tests {
         vm.request.vcpus = 2;
         vm.request.memory_mib = 512;
         store.insert(vm.clone()).await.unwrap();
-        let mut policy = fluxvm_core::config::Policy::default();
-        policy.max_vcpus_host = Some(4);
-        policy.max_memory_mib_host = Some(1024);
+        let policy = fluxvm_core::config::Policy {
+            max_vcpus_host: Some(4),
+            max_memory_mib_host: Some(1024),
+            ..Default::default()
+        };
         store.reserve_untracked_host(2, 512, &policy).await.unwrap();
         let ledger = store.quota_ledger().await.unwrap();
         assert_eq!(ledger.host.vms, 1);

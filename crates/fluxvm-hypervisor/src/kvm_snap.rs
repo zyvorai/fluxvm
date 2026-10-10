@@ -319,7 +319,7 @@ pub fn load_cpu(vmstate: &Path) -> Result<CpuSnapshot> {
     } else {
         (vec![VcpuState::default(); ncpus], None)
     };
-    let (regs, sregs) = all_vcpus[0].clone();
+    let (regs, sregs) = all_vcpus[0];
     Ok(CpuSnapshot {
         mem_len,
         regs,
@@ -371,7 +371,7 @@ pub fn restore_vcpus(kvm: &KvmVm, snap: &CpuSnapshot) -> Result<()> {
     let full = snap.version >= 5
         && snap.vcpu_states.len() == snap.all_vcpus.len()
         && snap.vcpu_states.iter().all(VcpuState::is_complete)
-        && snap.vm_state.as_ref().map_or(false, VmState::is_complete);
+        && snap.vm_state.as_ref().is_some_and(VmState::is_complete);
     if !full {
         eprintln!(
             "[kvm] vmstate v{} has no full-fidelity state: restoring registers only \
@@ -544,18 +544,22 @@ mod tests {
 
     #[test]
     fn virtio_v3_round_trip_bytes() {
-        let mut net = VirtioState::default();
-        net.device_id = VIRTIO_ID_NET;
-        net.status = 0xf;
+        let mut net = VirtioState {
+            device_id: VIRTIO_ID_NET,
+            status: 0xf,
+            ..Default::default()
+        };
         net.queues[0].desc = 0x1000;
         net.queues[0].avail = 0x2000;
         net.queues[0].used = 0x3000;
         net.queues[0].last_avail = 7;
         net.queues[0].ready = 1;
         net.queues[0].num = 256;
-        let mut blk = VirtioState::default();
-        blk.device_id = VIRTIO_ID_BLOCK;
-        blk.num_queues = 1;
+        let mut blk = VirtioState {
+            device_id: VIRTIO_ID_BLOCK,
+            num_queues: 1,
+            ..Default::default()
+        };
         blk.queues[0].desc = 0x4000;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.vmstate");

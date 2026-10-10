@@ -329,7 +329,7 @@ pub fn compile_full(
 /// `PR_SET_NO_NEW_PRIVS` (idempotent).
 pub fn apply(programs: &[BpfProgram]) -> io::Result<()> {
     for p in programs {
-        apply_filter(p).map_err(|e| io::Error::new(io::ErrorKind::Other, format!("{e}")))?;
+        apply_filter(p).map_err(|e| io::Error::other(format!("{e}")))?;
     }
     Ok(())
 }

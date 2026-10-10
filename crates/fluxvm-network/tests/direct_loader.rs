@@ -201,8 +201,10 @@ async fn direct_tap_is_wired_by_the_loader_and_carries_traffic() {
     }
 
     // ── daemon side: the same calls the scheduler makes ──
-    let mut cfg = Config::default();
-    cfg.state_dir = work.path().join("state");
+    let mut cfg = Config {
+        state_dir: work.path().join("state"),
+        ..Default::default()
+    };
     std::fs::create_dir_all(&cfg.state_dir).unwrap();
     cfg.sandbox.dataplane.mode = DataplaneMode::Ebpf;
     cfg.sandbox.dataplane.bpf_object = bpf_dir.join("fluxvm_tc.bpf.o");

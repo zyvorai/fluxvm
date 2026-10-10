@@ -257,10 +257,8 @@ pub async fn start(cfg: &BootConfig, workspace: &Path) -> Result<GuestHandle> {
             let _ = child.kill().await;
             bail!("Firecracker API socket not ready within {FC_API_TIMEOUT:?}");
         }
-        if api_sock.exists() {
-            if fc_request(&api_sock, "GET", "/", None).await.is_ok() {
-                break;
-            }
+        if api_sock.exists() && fc_request(&api_sock, "GET", "/", None).await.is_ok() {
+            break;
         }
         if let Ok(Some(status)) = child.try_wait() {
             bail!("Firecracker exited early: {status}");

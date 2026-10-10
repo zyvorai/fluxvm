@@ -4,7 +4,10 @@
 //! Firecracker-style jailer: drop privileges / isolate before KVM_RUN.
 //! Enabled when `FLUXVM_JAILER=1` or `BootConfig`/config `jailer=true`.
 
-use crate::error::{FluxError, Result};
+#[cfg(target_os = "linux")]
+use crate::error::FluxError;
+use crate::error::Result;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 #[derive(Debug, Clone, Default)]

@@ -249,11 +249,8 @@ fn fold_rules(out: &mut VmNetworkPolicy, rules: &[CnpRule], deny: bool) -> Resul
         cidrs.extend(rule.from_cidr.iter().cloned());
         for set in &rule.to_cidr_set {
             cidrs.push(set.cidr.clone());
-            if deny {
-                out.deny_cidrs.extend(set.except.iter().cloned());
-            } else {
-                out.deny_cidrs.extend(set.except.iter().cloned());
-            }
+            // An `except` carves addresses out of an allow and adds to a deny: either way they are denied.
+            out.deny_cidrs.extend(set.except.iter().cloned());
         }
         for ent in rule.to_entities.iter().chain(rule.from_entities.iter()) {
             let Some(name) = parse_entity(ent) else {

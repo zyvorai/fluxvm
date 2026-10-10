@@ -147,6 +147,7 @@ impl LockGuard {
 fn open_lock(path: &Path) -> Result<fs::File> {
     fs::OpenOptions::new()
         .create(true)
+        .truncate(false)
         .write(true)
         .open(path)
         .context("opening ipam lock file")

@@ -141,7 +141,7 @@ async fn dispatch(state: Arc<Mutex<VmState>>, req: ApiRequest, workspace: &Path)
         },
         ApiRequest::Boot(cfg) => {
             let mut st = state.lock().await;
-            match boot_inner(&mut st, cfg, workspace).await {
+            match boot_inner(&mut st, *cfg, workspace).await {
                 Ok(()) => ApiResponse::Ok {
                     message: "booted".into(),
                 },

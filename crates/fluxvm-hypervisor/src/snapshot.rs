@@ -34,7 +34,7 @@ pub fn preflight_restore(spec: &SnapshotSpec) -> Result<()> {
     if cpu.version >= 5 {
         let complete = cpu.vcpu_states.len() == cpu.all_vcpus.len()
             && cpu.vcpu_states.iter().all(|v| v.is_complete())
-            && cpu.vm_state.as_ref().map_or(false, |v| v.is_complete());
+            && cpu.vm_state.as_ref().is_some_and(|v| v.is_complete());
         if !complete {
             bail!("FLUXKVM1 v5 vmstate is missing vCPU or VM state sections");
         }

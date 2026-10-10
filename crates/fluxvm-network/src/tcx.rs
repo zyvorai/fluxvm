@@ -145,10 +145,10 @@ pub fn detach(link_pin: &Path) -> Result<()> {
 }
 
 fn helper() -> String {
-    if let Ok(path) = std::env::var("FLUXVM_TCX_HELPER") {
-        if !path.trim().is_empty() {
-            return path;
-        }
+    if let Ok(path) = std::env::var("FLUXVM_TCX_HELPER")
+        && !path.trim().is_empty()
+    {
+        return path;
     }
     let installed = "/usr/libexec/fluxvm/fluxvm-tcx";
     if Path::new(installed).exists() {

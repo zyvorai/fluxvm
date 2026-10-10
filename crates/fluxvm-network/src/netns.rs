@@ -396,10 +396,10 @@ pub async fn prepare(state_dir: &Path, id: Uuid, mac: Option<&str>) -> Result<Ne
 pub async fn cleanup(state_dir: &Path, id: Uuid, netns: &str) -> Result<()> {
     let nft_table = nft_table_name(&short_id(id));
     let dir = dhcp_dir(netns);
-    if let Ok(pid_str) = std::fs::read_to_string(dir.join("dnsmasq.pid")) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let _ = fluxvm_core::process::terminate_pid(pid).await;
-        }
+    if let Ok(pid_str) = std::fs::read_to_string(dir.join("dnsmasq.pid"))
+        && let Ok(pid) = pid_str.trim().parse::<u32>()
+    {
+        let _ = fluxvm_core::process::terminate_pid(pid).await;
     }
     let _ = std::fs::remove_dir_all(&dir);
     let _ = dataplane::remove_nft_table(&nft_table);

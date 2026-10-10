@@ -55,7 +55,7 @@ impl PciEcam {
         cfg[0x0b] = 0x02; // class code network
         cfg[0x0e] = 0x00; // header type 0
                           // BAR0: 32-bit memory, non-prefetch, initially sized via 0xffffffff probe
-        write_u32(&mut cfg, 0x10, (MMIO_WINDOW as u32) | 0x0);
+        write_u32(&mut cfg, 0x10, MMIO_WINDOW as u32);
         write_u32(&mut cfg, 0x14, 0);
         write_u32(&mut cfg, 0x18, 0);
         write_u32(&mut cfg, 0x1c, 0);
@@ -163,7 +163,7 @@ impl MmioDevice for PciEcam {
         if reg == 0x10 && data.len() >= 4 {
             let val = u32::from_le_bytes(data[..4].try_into().unwrap());
             if val == 0xffff_ffff {
-                write_u32(cfg.as_mut(), 0x10, (!(BAR0_SIZE - 1)) | 0x0);
+                write_u32(cfg.as_mut(), 0x10, !(BAR0_SIZE - 1));
                 return Ok(());
             }
             // Guest programmed BAR — keep low bits clear (memory BAR).
@@ -230,6 +230,7 @@ fn read_u16(buf: &[u8], off: usize) -> u16 {
     u16::from_le_bytes(buf[off..off + 2].try_into().unwrap())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_virtio_cap(
     cfg: &mut [u8],
     off: u8,

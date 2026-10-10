@@ -28,7 +28,9 @@ extern "C" {
     pub fn write(fd: c_int, buf: *const c_void, n: usize) -> isize;
 }
 
+/// Stand-ins for the C helpers when they are not built (`fluxvm_no_host_c`); they never touch memory and only fail.
 #[cfg(fluxvm_no_host_c)]
+#[allow(clippy::missing_safety_doc)]
 mod stubs {
     use super::*;
     pub unsafe fn flux_ioctl(_: c_int, _: c_ulong, _: *mut c_void) -> c_int {

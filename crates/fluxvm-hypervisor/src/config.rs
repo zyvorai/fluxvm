@@ -278,8 +278,10 @@ mod tests {
 
     #[test]
     fn vsock_requires_both_cid_and_socket_path() {
-        let mut cfg = VmConfig::default();
-        cfg.vsock_cid = Some(3);
+        let mut cfg = VmConfig {
+            vsock_cid: Some(3),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
         cfg.vsock_uds = Some(PathBuf::from("/tmp/fluxvm-vsock-test.sock"));
         assert!(cfg.validate().is_ok());
@@ -287,9 +289,11 @@ mod tests {
 
     #[test]
     fn max_cpus_must_cover_cpus_and_stay_within_mptable_cap() {
-        let mut cfg = VmConfig::default();
-        cfg.cpus = 2;
-        cfg.max_cpus = 4;
+        let mut cfg = VmConfig {
+            cpus: 2,
+            max_cpus: 4,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_ok(), "2..=4 headroom should be valid");
 
         cfg.max_cpus = 1; // below cpus

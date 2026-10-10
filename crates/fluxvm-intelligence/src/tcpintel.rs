@@ -170,7 +170,7 @@ pub fn snapshot(
     let mut latency = read_hist(&maps.join("fluxvm_tcp_hist"))?;
     latency.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.bucket.cmp(&b.bucket)));
     let mut flows = read_flows(&maps.join("fluxvm_tcp_flows"))?;
-    flows.sort_by(|a, b| b.last_seen_ns.cmp(&a.last_seen_ns));
+    flows.sort_by_key(|f| std::cmp::Reverse(f.last_seen_ns));
     flows.truncate(limit.clamp(1, 4096));
     let hp50 = quantile(&latency, "handshake", 0.50);
     let hp95 = quantile(&latency, "handshake", 0.95);

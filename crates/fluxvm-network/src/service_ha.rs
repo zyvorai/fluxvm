@@ -13,13 +13,15 @@ use fluxvm_core::config::Config;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    ffi::CString,
     os::fd::RawFd,
-    os::unix::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
+#[cfg(target_os = "linux")]
+use std::{ffi::CString, os::unix::ffi::OsStrExt};
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const BPF_OBJ_GET: libc::c_long = 7;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const BPF_MAP_LOOKUP_AND_DELETE_ELEM: libc::c_long = 21;
 const EVENT_SIZE: usize = 128;
 const EVENT_HEADER: usize = 24;
@@ -52,6 +54,7 @@ struct ParsedEvent {
 }
 
 #[repr(C)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct BpfObjGetAttr {
     pathname: u64,
     bpf_fd: u32,
@@ -60,6 +63,7 @@ struct BpfObjGetAttr {
 }
 
 #[repr(C)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct BpfMapElemAttr {
     map_fd: u32,
     pad: u32,

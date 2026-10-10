@@ -376,11 +376,8 @@ fn install_packages_with_dns(g: &mut guestkit::Guestfs, packages: &[String]) -> 
     let result = install_packages(g, packages);
 
     let _ = g.command(&["rm", "-f", "/etc/resolv.conf"]);
-    match &original {
-        Some(bytes) => {
-            let _ = g.write("/etc/resolv.conf", bytes);
-        }
-        None => {}
+    if let Some(bytes) = &original {
+        let _ = g.write("/etc/resolv.conf", bytes);
     }
     result
 }
