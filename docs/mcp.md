@@ -52,13 +52,14 @@ Write tools are offered only with `--allow-write`:
 | `backup_list` | Backups with source VM, size and quiesced flag | `GET /v1/backups` |
 | `backup_restore` | Restore a backup into a stopped VM in place | `POST /v1/vms/{id}/restore-backup` |
 | `pool_claim` | Claim a booted VM from a warm `pool` (optional `name`, `ttl_seconds`) | `POST /v1/pools/{name}/claim` |
-| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`) | `POST /v1/sandboxes` |
+| `sandbox_create` | Create an agent sandbox from a `template` (optional `name`, `ttl_seconds`, `offline`, `allow_hosts`), or on a Mac from a container image with `oci_image` (plus `oci_command`, `oci_env`); see [oci-sandboxes.md](oci-sandboxes.md) | `POST /v1/sandboxes` |
 | `sandbox_exec` | Run `command` in a sandbox through the guest agent | `POST /v1/sandboxes/{id}/process` |
 | `sandbox_write_file` | Write UTF-8 `content` to `path` in a sandbox | `POST /v1/sandboxes/{id}/fs/write` |
 
-`vm_snapshot_list` (`GET /v1/vms/{id}/snapshots`) and
-`sandbox_read_file` (`POST /v1/sandboxes/{id}/fs/read`) are read-only and
-always offered.
+`vm_snapshot_list` (`GET /v1/vms/{id}/snapshots`),
+`sandbox_read_file` (`POST /v1/sandboxes/{id}/fs/read`) and `sandbox_logs`
+(`GET /v1/sandboxes/{id}/logs`: the console tail and, for a container sandbox,
+the process's `exit_code` or `init_error`) are read-only and always offered.
 
 Migrate, and edge or policy changes are not exposed.
 

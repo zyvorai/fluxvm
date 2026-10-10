@@ -12,15 +12,19 @@ How `POST /v1/sandboxes/{id}/process`, `/fs/read`, `/fs/write` (and the MCP tool
    runner socket.
 
 An answer from the agent is final, including an error it reports (a missing file, a non-zero exit). Only a failure to reach it falls
-back. A per-exec `policy` (Landlock and seccomp confinement) needs the agent; without it the request is refused, as before.
+back. A per-exec `policy` (Landlock and seccomp confinement) and an argv `process` need the agent; without it the request is
+refused.
 
 ## Which sandboxes have the agent
 
 - `"image": "agent-micro"` (see [agent-micro.md](agent-micro.md)): enabled automatically.
 - A `spec` or `template` with `"agent": {"enabled": true}`: enabled with the caller's port.
+- A [container sandbox](oci-sandboxes.md) (`oci`): always, and **only** the agent. The image has no sshd, so there is no fallback;
+  an agent that does not answer is an error that says so. Readiness is an agent `ping`, not SSH.
 - Everything else, including the default `debian-13` and warm slots: SSH only.
 
-The daemon generates the token and cloud-init writes it to `/etc/fluxvm-guest-agent.token` in the guest. A warm or hibernated
+The daemon generates the token and cloud-init writes it to `/etc/fluxvm-guest-agent.token` in the guest (container sandboxes get it
+on their read-only `fluxvm-meta` share instead). A warm or hibernated
 sandbox keeps its agent running across the restore, so it answers at once.
 
 ## Metrics

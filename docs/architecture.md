@@ -54,7 +54,7 @@ Network Fabric dataplane diagrams (packet decision and control-plane sequence):
 
 ## Project layout
 
-A Cargo workspace of **24 crates** (plus the [`python/`](../python/README.md) and [`go/`](../go/README.md) SDKs), structured for FluxVM's multi-node architecture.
+A Cargo workspace of **26 crates** (plus the [`python/`](../python/README.md) and [`go/`](../go/README.md) SDKs), structured for FluxVM's multi-node architecture.
 
 <details>
 <summary><b>Show the crate map</b></summary>
@@ -71,6 +71,8 @@ crates/
 ├── fluxvm-cloud-hypervisor      Cloud Hypervisor backend
 ├── fluxvm-firecracker           Firecracker backend
 ├── fluxvm-hypervisor            in-tree microVMM + `FluxVmBackend` (`fluxvm-hypervisor` binary)
+├── fluxvm-apple                 macOS `vz` backend: supervises `fluxvm-vz-runner` (Virtualization.framework)
+├── fluxvm-oci-init              PID 1 of container sandboxes on `vz` (boot an OCI rootfs) and the layer unpacker
 ├── fluxvm-guest-protocol        wire types shared by the guest agent and its host client
 ├── fluxvm-guest-agent           in-guest AF_VSOCK agent binary (ping/exec/shutdown)
 ├── fluxvm-vsock-client          host-side vsock dialing (native for QEMU, UDS proxy for CH/Firecracker)

@@ -55,7 +55,9 @@ about 2 s from the warm pool.
 
 A project that needs several VMs can describe them in a `fluxvm.toml` and use `fluxctl up` / `down`; see [stacks](macos-stacks.md).
 
-An AI agent can get a disposable VM through the sandbox API or MCP; see [sandboxes](macos-sandboxes.md).
+An AI agent can get a disposable VM through the sandbox API or MCP; see [sandboxes](macos-sandboxes.md). A container image can be
+the sandbox too, one lightweight VM per container: `fluxctl sandbox run alpine:3.22 --rm -- echo hi`; see
+[container sandboxes](oci-sandboxes.md).
 
 Run the daemon yourself:
 
@@ -96,6 +98,10 @@ to the VM log, and records the guest's NAT address.
   the guest mounts them at `guest_path` via `/etc/fstab`, so they survive stop/start. `read_only` is enforced by the host.
 - **vsock:** every VM has a vsock proxy socket (`CONNECT <port>` over a unix socket). The daemon uses it to reach an offline sandbox's sshd
   (guest port 22), and the guest reaches a host-side egress proxy over it (guest to host, port 3128). See [sandboxes](macos-sandboxes.md).
+- **Direct kernel boot:** a Linux guest with `kernel` (and optionally `initrd`, `kernel_args`) boots through `VZLinuxBootLoader`
+  instead of EFI from the disk; both paths keep the generic platform, so snapshots work. `apple.root_read_only` attaches the root
+  disk read-only, and `apple.tagged_shares` adds virtiofs shares with fixed tags (other than `fsN` and `rosetta`). Container sandboxes
+  use all three ([oci-sandboxes.md](oci-sandboxes.md)).
 - **Signing:** the runner is ad-hoc signed with `com.apple.security.virtualization` by `build.rs`.
   Set `FLUXVM_VZ_RUNNER` to use another binary; `FLUXVM_SKIP_VZ_RUNNER=1` skips building it.
 
@@ -228,11 +234,11 @@ These compile against the macOS 27 SDK and are validated at admission, but have 
 
 | Supported | Not supported |
 | --- | --- |
-| vCPUs, memory, raw disk, cloud-init | tap / macvtap / netns / eBPF networking, UDP port forwards |
+| vCPUs, memory, raw disk, cloud-init, direct kernel boot (Linux guests) | tap / macvtap / netns / eBPF networking, UDP port forwards |
 | NAT networking, TCP port forwards, no-network mode, serial console | NUMA, hugepages, cpuset, VFIO / GPU passthrough |
 | shared folders (virtiofs), VM snapshots (memory + disk), pause / resume, graceful shutdown, force stop | secure boot, TPM, confidential profiles |
 | guest agent over vsock (proxied like Firecracker; needs the agent in the image) | hotplug, data disks, cdroms |
-| macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot |
+| macOS guests (installed from an IPSW through the API or by hand, then cloned; see above) | live migration, in-place restore of a running VM, direct kernel boot of macOS guests |
 
 The same table is encoded in `fluxvm_apple::CAPABILITIES`; unsupported requests are refused with a specific message before any
 process starts.
@@ -246,5 +252,7 @@ process starts.
 - Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
   where it can.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
+- Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`), take `linux/arm64` images only, and
+  have not been run on hardware yet (`scripts/oci-live-test.sh`).
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.
 - Memory is not enforced by FluxVM here; the Mac's own memory pressure applies. Plan for one or two small VMs on a 16 GB Mac.
