@@ -833,6 +833,20 @@ fn render_metrics(vms: &[VmRecord]) -> String {
         fluxvm_core::agent_density::warm_misses()
     ));
 
+    let (agent_calls, ssh_fallbacks) = fluxvm_scheduler::vz_guest::agent_counters();
+    out.push_str(
+        "# HELP fluxvm_vz_agent_calls_total vz sandbox requests answered by the vsock guest agent.\n",
+    );
+    out.push_str("# TYPE fluxvm_vz_agent_calls_total counter\n");
+    out.push_str(&format!("fluxvm_vz_agent_calls_total {agent_calls}\n"));
+    out.push_str(
+        "# HELP fluxvm_vz_agent_ssh_fallbacks_total vz sandbox requests that fell back to SSH because the agent did not answer.\n",
+    );
+    out.push_str("# TYPE fluxvm_vz_agent_ssh_fallbacks_total counter\n");
+    out.push_str(&format!(
+        "fluxvm_vz_agent_ssh_fallbacks_total {ssh_fallbacks}\n"
+    ));
+
     out.push_str("# HELP fluxvm_vm_create_total VM create operations completed successfully.\n");
     out.push_str("# TYPE fluxvm_vm_create_total counter\n");
     out.push_str(&format!(

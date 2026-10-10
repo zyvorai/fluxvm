@@ -44,7 +44,7 @@ pub mod shared_disk;
 pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
-mod vz_guest;
+pub mod vz_guest;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
 
