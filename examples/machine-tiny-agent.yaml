@@ -1,0 +1,17 @@
+# A Kairon Machine for one tiny agent sandbox on a Mac (illustrative: field names belong to Kairon and are not validated by FluxVM).
+# It maps to the FluxVM request in examples/sandbox-agent-micro.json; see docs/kairon-mac-scheduling.md.
+apiVersion: kairon.zyvor.dev/v1
+kind: Machine
+metadata:
+  name: tiny-agent-example
+  labels:
+    app: agent
+spec:
+  backend: vz
+  image: agent-micro
+  profile: tiny            # 1 vCPU, 512 MiB
+  ttlSeconds: 900
+  network:
+    mode: none             # FluxVM: "offline": true
+  nodeSelector:
+    kairon.zyvor.dev/backend.vz: "true"

@@ -38,7 +38,8 @@ plan one or two small VMs on a 16 GB Mac. Kairon's Mac Node reports allocatable 
 ![A private LLM cluster made of Macs](assets/macos/readme-home-cluster.jpg)
 
 - **Each Mac:** Velora (MLX runtime, OpenAI-compatible endpoints), `fluxctl serve` (VMs with `backend: vz`) and `kairon-node`
-  (registers the Mac as a Node with `kairon.zyvor.dev/backend.vz=true`).
+  (registers the Mac as a Node with `kairon.zyvor.dev/backend.vz=true`). What each Mac reports for placement (memory pressure, warm slots) and how
+  the built-in fleet registry uses it: [kairon-mac-scheduling.md](kairon-mac-scheduling.md).
 - **Network:** 10 GbE for management and the fleet; a Thunderbolt 5 mesh for model traffic when one model is sharded across
   Macs (roadmap, see below).
 - **What FluxVM adds:** real Linux VMs on the same hardware for the parts that are not models: gateways, vector databases,

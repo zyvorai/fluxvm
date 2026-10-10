@@ -57,8 +57,9 @@ impl AgentProfile {
     }
 }
 
-/// `GET /v1/sandboxes/density`.
+/// `GET /v1/sandboxes/density`. Missing fields default, so a fleet registry can read a report from an older or newer daemon.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DensityReport {
     /// `sandbox.warm_slots`.
     pub warm_slots_configured: usize,

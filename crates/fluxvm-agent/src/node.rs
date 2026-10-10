@@ -58,6 +58,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
         .unwrap_or(1);
     let memory_mib_total = total_memory_mib().unwrap_or(0);
     let security = fetch_node_security(http, &cfg.fluxvm_url).await;
+    let density = fetch_density(http, &cfg.fluxvm_url).await;
 
     let body = json!({
         "name": cfg.name,
@@ -67,6 +68,7 @@ async fn beat(http: &reqwest::Client, cfg: &NodeConfig) -> Result<()> {
         "vm_count": vm_count,
         "labels": cfg.labels,
         "security": security,
+        "density": density,
     });
     let mut req = http.post(format!("{}/fleet/register", cfg.central_url));
     if let Some(t) = &cfg.token {
@@ -91,6 +93,22 @@ async fn fetch_node_security(http: &reqwest::Client, fluxvm_url: &str) -> NodeSe
         },
         _ => NodeSecurityCapabilities::standard_only(),
     }
+}
+
+/// Memory pressure, warm slots and sandbox counts for fleet placement; `None` when the daemon does not serve them.
+async fn fetch_density(
+    http: &reqwest::Client,
+    fluxvm_url: &str,
+) -> Option<fluxvm_core::agent_density::DensityReport> {
+    let resp = http
+        .get(format!("{fluxvm_url}/v1/sandboxes/density"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    resp.json().await.ok()
 }
 
 async fn local_vm_count(http: &reqwest::Client, fluxvm_url: &str) -> Result<usize> {
