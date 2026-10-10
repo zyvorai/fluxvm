@@ -4532,6 +4532,9 @@ impl VmManager {
             }
         }
         if vm.workspace.exists() {
+            if vm.backend == BackendKind::Vz {
+                fluxvm_apple::release_mac(&vm.workspace);
+            }
             fs::remove_dir_all(vm.workspace)?;
         }
         // Firecracker-jailer VMs place resources under a separate chroot

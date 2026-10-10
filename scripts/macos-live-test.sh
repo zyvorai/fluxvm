@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 T="$(mktemp -d "${TMPDIR:-/tmp}/fluxvm-live.XXXXXX")"; PORT="${FLUXVM_LIVE_PORT:-7799}"
 cleanup() { [[ -n "${DPID:-}" ]] && kill "$DPID" 2>/dev/null || true; pkill -f "fluxvm-vz-runner run --config $T" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
-ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; exit 1; }
+ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; [[ -f "$T/daemon.log" ]] && tail -8 "$T/daemon.log"; exit 1; }
 
 cargo build -p fluxctl -j 4 2>&1 | tail -1
 # Default: the built-in name `debian-13`, which FluxVM downloads and checksum-verifies itself (~400 MB, cached).
@@ -33,7 +33,7 @@ field() { curl -fs "$V" | python3 -c "import sys,json;print(json.load(sys.stdin)
 [[ "$(field status)" == running ]] && ok "VM created and running through the vz backend" || bad "status $(field status)"
 ip_wait() { local ip=""; for _ in $(seq 1 60); do ip="$(field guest_ip)"; [[ -n "$ip" ]] && break; sleep 3; done; echo "$ip"; }
 sshc() { ssh -i "$T/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=8 "velora@$1" "$2"; }
-IP="$(ip_wait)"; [[ -n "$IP" ]] && ok "guest address reported by the API: $IP" || bad "no guest_ip"
+IP="$(ip_wait)"; [[ -n "$IP" ]] && ok "guest address reported by the API: $IP" || bad "no guest_ip; console: $(tail -c 1500 "$(curl -fs "$V" | python3 -c 'import sys,json;print(json.load(sys.stdin)["log_path"])')" 2>&1)"
 for _ in $(seq 1 20); do sshc "$IP" hostname >/dev/null 2>&1 && break; sleep 3; done
 [[ "$(sshc "$IP" hostname)" == live ]] && ok "SSH into the guest works (hostname from cloud-init)" || bad "ssh failed"
 
@@ -137,7 +137,11 @@ curl -fs -X POST "$SB/$OFFID/fs/write" -H 'Content-Type: application/json' -d "{
 # and only touch the sandbox when the changeset is approved and applied.
 SP="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"ttl_seconds":600}')" || bad "speculate sandbox create failed"
 SPID="$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<<"$SP")"
-spexec() { curl -fs -X POST "$SB/$SPID/process" -H 'Content-Type: application/json' -d "{\"command\":\"$1\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["stdout"],end="")'; }
+spexec() {
+  local r; r="$(curl -sS -w '\n%{http_code}' -X POST "$SB/$SPID/process" -H 'Content-Type: application/json' -d "{\"command\":\"$1\"}")"
+  [[ "${r##*$'\n'}" == 200 ]] || { echo "exec failed: ${r//$'\n'/ }"; return; }
+  python3 -c 'import sys,json;print(json.load(sys.stdin)["stdout"],end="")' <<<"${r%$'\n'*}"
+}
 spexec 'mkdir -p /tmp/spec && echo base > /tmp/spec/base.txt && echo gone > /tmp/spec/gone.txt' >/dev/null
 SPIP="$(curl -fs "$B/$SPID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["guest_ip"])')"
 SPSTART=$SECONDS
@@ -147,7 +151,8 @@ python3 -c 'import sys,json;d=json.loads(sys.argv[1]);c=d["changes"];assert d["s
 [[ "$(spexec 'echo $(cat /tmp/spec/base.txt) $(ls /tmp/spec)')" == "base base.txt gone.txt" ]] && ok "speculate: the sandbox itself was not changed" || bad "speculate leaked into the sandbox: $(spexec 'echo $(ls /tmp/spec)')"
 [[ "$(curl -fs "$B/$SPID" | python3 -c 'import sys,json;print(json.load(sys.stdin)["guest_ip"])')" == "$SPIP" ]] && ok "speculate: the sandbox kept its address" || bad "speculate changed the sandbox address"
 curl -fs -X POST "$SB/$SPID/changesets/$CSID/apply" >/dev/null 2>&1 && bad "applied a changeset that was not approved" || ok "speculate: an unapproved changeset cannot be applied"
-curl -fs -X POST "$SB/$SPID/changesets/$CSID/approve" >/dev/null && curl -fs -X POST "$SB/$SPID/changesets/$CSID/apply" >/dev/null || bad "approve/apply failed"
+APPROVE="$(curl -sS -w ' HTTP %{http_code}' -X POST "$SB/$SPID/changesets/$CSID/approve")"; [[ "$APPROVE" == *"HTTP 200" ]] || bad "approve: $APPROVE"
+APPLY="$(curl -sS -w ' HTTP %{http_code}' -X POST "$SB/$SPID/changesets/$CSID/apply")"; [[ "$APPLY" == *"HTTP 200" ]] || bad "apply: $APPLY"
 [[ "$(spexec 'echo $(cat /tmp/spec/base.txt /tmp/spec/new.txt) $(ls /tmp/spec)')" == "changed new base.txt new.txt" ]] && ok "speculate: approve and apply put the changes into the sandbox" || bad "after apply: $(spexec 'echo $(ls /tmp/spec)')"
 # A sandbox that may reach only example.com: no card, so the only way out is the proxy the runner serves over vsock.
 AL="$(curl -fs -X POST "$SB" -H 'Content-Type: application/json' -d '{"allow_hosts":["example.com"],"ttl_seconds":300}')" || bad "allow-listed sandbox create failed"

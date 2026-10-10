@@ -15,6 +15,10 @@
   3.6 s to 1.3 s, cold start 2.6 s to 1.75 s.
 - `scripts/vz-devices-live-test.sh` (with `scripts/nbd-test-server.py`) checks extra disks of every kind and controller,
   USB hot-plug, console ports and the Linux display size on hardware; it passes on a Debian 13 guest.
+- A deleted `vz` VM's MAC address goes to the next new VM, so it gets the old DHCP lease back. The Mac keeps a lease
+  per MAC for a day, and a fresh MAC per VM filled `/var/db/dhcpd_leases` (253 entries after a day of live tests).
+- `scripts/vz-devices-live-test.sh` also checks `fluxctl port-connect` both ways over the daemon's websocket.
+  `scripts/macos-live-test.sh` prints the daemon log, the guest console or the HTTP response when a check fails.
 
 ### Changed: `vz` follow-ups
 - `fluxctl disk detach` unplugs a hot-attached USB disk from the running guest at once.
