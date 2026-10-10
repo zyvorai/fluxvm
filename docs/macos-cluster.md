@@ -66,8 +66,7 @@ best host:
 The fleet uses it. `fluxvm-agent node` sends the host's Apple capabilities (`fluxvm-vz-runner host-capabilities`) plus free CPU,
 memory and its macOS guest count in every heartbeat, and `fluxvm-agent central` runs `apple_placement` for requests with `backend: vz`.
 Nodes without Apple capabilities are excluded for those requests. This was checked only on loopback: one real M4 node and two fake
-nodes registered by hand (see [macos.md](macos.md#what-is-verified)); there are no unit tests for the `vz` filtering in central yet,
-and no second Mac has been used. A scheduler outside the registry, such as Kairon, can still call the scorer itself. Also note that
+nodes registered by hand (see [macos.md](macos.md#what-is-verified)); central's `vz` filtering has unit tests, but no second Mac has been used. A scheduler outside the registry, such as Kairon, can still call the scorer itself. Also note that
 sandboxes restored from warm slots keep the address they had when the slot was built, so on one Mac a slot whose address is in use is
 skipped and that sandbox cold-boots instead.
 
