@@ -15,4 +15,4 @@ Built and tested on Debian 13 (kernel 6.12.111): `ping`, `echo`, `stats` and `ca
 
 `bulk-test` allocates guest memory in the kernel, passes its guest physical address to the host through queue 1, asks the VZ host backend to fill it through `VZGuestMemoryMapping`, verifies every byte in the guest and reports CRC32.
 
-**Known issue:** on the one hardware run so far, `bulk-test 65536 90` (queue 1) never completes. The guest blocks in `wait_for_completion`, and afterwards even control requests hang. The root cause is not found, so treat the bulk path as unverified.
+**Verified on hardware:** on a Debian 13 guest (kernel 6.12.111, Apple M4, macOS 27.2), `bulk-test` with 1 B, 4 KiB, 64 KiB and 1 MiB passes and the CRC32 matches an independent computation. Only the `bulk-fill` operation is exercised; zero, copy and crc32 are not. Earlier it hung because the request was built in a kernel-stack buffer, which is not valid virtqueue memory (virtqueue buffers must be linearly mapped).
