@@ -136,6 +136,10 @@ Verified by hand on an Apple M4 running macOS 27.2 with macOS 27.0.1 (26A434) as
   the template, or the "clone" is a full copy of a 20+ GB disk.
 - **Address.** A macOS guest has no systemd, so the runner reads the Mac's DHCP leases (`/var/db/dhcpd_leases`) for the MAC the guest's
   card was given and reports it as `guest_ip`. (The ARP table is not an option: macOS shows it empty to a spawned process.)
+- **Key login on a fresh clone.** In the guest we prepared, sshd refused the public key on a new clone (home directory not yet readable)
+  until one password login had happened; after that the key worked. Two ways round it: log in once with the password, or put the key
+  in a file outside the home directory (`AuthorizedKeysFile /etc/ssh/fluxvm_authorized_keys` in `/etc/ssh/sshd_config.d/`, root-owned)
+  when you prepare the template. We did not automate either.
 - **First boot of a clone** is slow on a USB drive (about 5 minutes to SSH at 37 MB/s) and restarts sshd once, so retry SSH for a minute.
 
 Not done: installing through the REST API or `fluxctl`, a `macos` image name, shared folders and snapshots for macOS guests (the
