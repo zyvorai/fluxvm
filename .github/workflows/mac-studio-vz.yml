@@ -5,14 +5,25 @@ on:
       - 'crates/fluxvm-core/**'
       - 'crates/fluxvm-apple/**'
       - 'crates/fluxvm-scheduler/**'
+      - '.github/workflows/mac-studio-vz.yml'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   rust:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fluxvm
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      # fluxvm-image depends on the sibling guestkit project through a relative path.
+      - uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -22,8 +33,17 @@ jobs:
       - run: cargo test -p fluxvm-scheduler density
   apple:
     runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: fluxvm
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: fluxvm
+      - uses: actions/checkout@v4
+        with:
+          repository: zyvorai/guestkit
+          path: guestkit
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build -p fluxvm-apple
       - run: cargo test -p fluxvm-apple
