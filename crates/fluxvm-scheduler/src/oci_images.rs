@@ -6,7 +6,7 @@
 //! Sandboxes boot APFS clones of the cached disk, so a second sandbox of the same image costs no copy.
 
 use anyhow::{Context, Result, bail};
-use fluxvm_core::config::Config;
+use fluxvm_core::config::{Config, OciRegistryCredential};
 use fluxvm_image::oci_registry::{
     BlobStore, Credentials, ImageConfig, ImageRef, Layer, PulledImage, Puller,
 };
@@ -92,20 +92,66 @@ pub fn rootfs_size_bytes(image: &PulledImage) -> u64 {
 /// Pulls `reference` (anonymously, or with a matching `apple.oci_registry_credentials` entry) into the blob store.
 pub async fn pull(cfg: &Config, reference: &str) -> Result<PulledImage> {
     let registry = ImageRef::parse(reference)?.registry;
-    let creds = cfg
+    let creds = match cfg
         .apple
         .oci_registry_credentials
         .iter()
         .find(|c| c.registry == registry)
-        .map(|c| Credentials {
+    {
+        Some(c) => Some(Credentials {
             username: c.username.clone(),
-            password: c.password.clone(),
-        });
+            password: registry_password(c).await?,
+        }),
+        None => None,
+    };
     Puller::new(BlobStore::for_state_dir(&cfg.state_dir))?
         .with_credentials(creds)
         .pull(reference)
         .await
         .with_context(|| format!("pulling {reference}"))
+}
+
+/// The inline password, or the one stored in the login Keychain under `keychain_service` / `username`.
+async fn registry_password(c: &OciRegistryCredential) -> Result<String> {
+    let service = match (&c.keychain_service, c.password.is_empty()) {
+        (None, _) => return Ok(c.password.clone()),
+        (Some(_), false) => bail!(
+            "registry credential for {} sets both password and keychain_service",
+            c.registry
+        ),
+        (Some(s), true) => s,
+    };
+    let out = tokio::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            service,
+            "-a",
+            &c.username,
+            "-w",
+        ])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("running /usr/bin/security")?;
+    if !out.status.success() {
+        bail!(
+            "no Keychain password for service {service:?}, account {:?} ({}); add it with \
+             `security add-generic-password -s {service} -a {} -w`",
+            c.username,
+            String::from_utf8_lossy(&out.stderr).trim(),
+            c.username
+        );
+    }
+    let password = String::from_utf8(out.stdout)
+        .context("Keychain password is not UTF-8")?
+        .trim_end_matches('\n')
+        .to_string();
+    if password.is_empty() {
+        bail!("Keychain item for service {service:?} has an empty password");
+    }
+    Ok(password)
 }
 
 static BUILD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
@@ -385,6 +431,29 @@ mod tests {
 
     fn digest(c: char) -> String {
         format!("sha256:{}", c.to_string().repeat(64))
+    }
+
+    #[tokio::test]
+    async fn registry_passwords_come_inline_or_from_one_keychain_item() {
+        let parsed: OciRegistryCredential = serde_json::from_str(
+            r#"{"registry":"ghcr.io","username":"me","keychain_service":"fluxvm-ghcr"}"#,
+        )
+        .unwrap();
+        assert!(parsed.password.is_empty());
+        assert_eq!(parsed.keychain_service.as_deref(), Some("fluxvm-ghcr"));
+
+        let inline = OciRegistryCredential {
+            registry: "ghcr.io".into(),
+            username: "me".into(),
+            password: "tok".into(),
+            keychain_service: None,
+        };
+        assert_eq!(registry_password(&inline).await.unwrap(), "tok");
+        let both = OciRegistryCredential {
+            keychain_service: Some("fluxvm-ghcr".into()),
+            ..inline
+        };
+        assert!(registry_password(&both).await.is_err());
     }
 
     fn image(m: char) -> PulledImage {
