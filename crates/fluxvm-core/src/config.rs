@@ -92,6 +92,11 @@ pub struct AppleConfig {
     pub oci_builder_memory_mib: u64,
     /// Registry logins for private images (public images need none).
     pub oci_registry_credentials: Vec<OciRegistryCredential>,
+    /// Pre-booted OCI sandbox VMs kept waiting per size in `oci_warm_sizes`; a matching sandbox gets its image
+    /// hot-attached to one instead of cold-booting. 0 turns the pool off.
+    pub oci_warm_slots: usize,
+    /// `VCPUSxMEMORY_MIB` shapes the pool keeps warm, e.g. `["1x512", "2x1024"]`.
+    pub oci_warm_sizes: Vec<String>,
 }
 
 impl Default for AppleConfig {
@@ -102,6 +107,8 @@ impl Default for AppleConfig {
             oci_cmdline: "console=hvc0 loglevel=4 panic=-1".into(),
             oci_builder_memory_mib: 1024,
             oci_registry_credentials: Vec::new(),
+            oci_warm_slots: 0,
+            oci_warm_sizes: vec!["1x512".into()],
         }
     }
 }

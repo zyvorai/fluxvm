@@ -770,6 +770,7 @@ impl VmManager {
             tracing::warn!(error = %e, "idle reclaim tick failed");
         }
         self.hibernate_tick().await;
+        self.spawn_oci_pool_fill();
         let idle = self.cfg.sandbox.autopause_idle_secs;
         if idle == 0 {
             return Ok(0);
@@ -809,6 +810,7 @@ impl VmManager {
         if idle == 0
             && self.cfg.sandbox.idle_balloon_secs == 0
             && self.cfg.sandbox.hibernate_idle_secs == 0
+            && self.cfg.apple.oci_warm_slots == 0
         {
             return;
         }

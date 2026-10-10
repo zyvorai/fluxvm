@@ -50,6 +50,8 @@ pub struct Service {
     pub env: Vec<String>,
     /// Container services: `no` (default), `on-failure` or `always`.
     pub restart: Option<String>,
+    /// Container services: `linux/arm64` (default) or `linux/amd64`, which runs under Rosetta.
+    pub platform: Option<String>,
     /// Environment variables whose values come from the shell running `fluxctl up`, never from this file. A container
     /// gets them in its process environment (write-only, see oci-sandboxes.md); a VM gets `~/.config/fluxvm/secrets.env`
     /// (mode 0600), which `after_up` sources. Only the names count towards "the definition changed".
@@ -94,8 +96,89 @@ pub struct StackFile {
     /// Where `up --fleet` puts the stack.
     #[serde(default)]
     pub placement: Placement,
+    /// `gateway` (default): services reach each other through ports relayed by the Mac (`expose`). `private`: every
+    /// service joins the stack's own private network (`stack-<name>`, `vz` only) and the others' names resolve to
+    /// their addresses there, so every port is reachable directly and nothing is relayed.
+    #[serde(default)]
+    pub network: StackNetwork,
     #[serde(default)]
     pub service: BTreeMap<String, Service>,
+    /// Filled in by `up` for `network = "private"`.
+    #[serde(skip)]
+    pub private: Option<PrivateNet>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StackNetwork {
+    #[default]
+    Gateway,
+    Private,
+}
+
+/// The stack's private network and each service's address on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateNet {
+    pub name: String,
+    /// service -> `10.89.N.H/24`.
+    pub addresses: BTreeMap<String, String>,
+}
+
+impl PrivateNet {
+    fn ip(&self, service: &str) -> &str {
+        self.addresses[service].split('/').next().unwrap_or("")
+    }
+
+    /// `/etc/hosts` entries for every service but `except`: the short and the VM name.
+    fn hosts(&self, stack: &str, except: &str) -> Vec<Value> {
+        self.addresses
+            .keys()
+            .filter(|s| s.as_str() != except)
+            .map(|s| json!({"ip": self.ip(s), "names": [s, vm_name(stack, s)]}))
+            .collect()
+    }
+}
+
+/// First host address on a stack network; services get consecutive ones in name order, so they are stable across `up`s.
+const FIRST_SERVICE_HOST: usize = 10;
+
+/// The stack's network name and addresses. `vznets` is `GET /v1/vznets`: an existing `stack-<name>` keeps its subnet,
+/// otherwise the lowest one no network uses.
+pub fn plan_private(f: &StackFile, vznets: &Value) -> Result<PrivateNet> {
+    let name = format!("stack-{}", f.name);
+    let items = vznets.as_array().cloned().unwrap_or_default();
+    let third = |subnet: &str| -> Option<u8> { subnet.split('.').nth(2)?.parse().ok() };
+    let subnet = match items.iter().find(|n| n["name"] == name.as_str()) {
+        Some(n) => third(n["subnet"].as_str().unwrap_or(""))
+            .with_context(|| format!("network {name} has no usable subnet"))?,
+        None => {
+            let used: BTreeSet<u8> = items
+                .iter()
+                .filter_map(|n| third(n["subnet"].as_str()?))
+                .collect();
+            (0..=255u8)
+                .find(|n| !used.contains(n))
+                .context("all 256 private networks are in use")?
+        }
+    };
+    if f.service.len() > 254 - FIRST_SERVICE_HOST {
+        bail!(
+            "a private stack network holds at most {} services",
+            254 - FIRST_SERVICE_HOST
+        );
+    }
+    let addresses = f
+        .service
+        .keys()
+        .enumerate()
+        .map(|(i, s)| {
+            (
+                s.clone(),
+                format!("10.89.{subnet}.{}/24", FIRST_SERVICE_HOST + i),
+            )
+        })
+        .collect();
+    Ok(PrivateNet { name, addresses })
 }
 
 /// The whole stack lands on one fleet node: its services reach each other through that Mac's NAT gateway.
@@ -198,6 +281,7 @@ fn check_kind(name: &str, svc: &Service) -> Result<()> {
                 (svc.entrypoint.is_some(), "entrypoint"),
                 (!svc.env.is_empty(), "env"),
                 (svc.restart.is_some(), "restart"),
+                (svc.platform.is_some(), "platform"),
             ],
             "a VM service (set container = \"IMAGE\" for a container)",
         )
@@ -215,6 +299,10 @@ fn check_kind(name: &str, svc: &Service) -> Result<()> {
         }
     }
     if svc.container.is_some() {
+        if let Some(p) = &svc.platform {
+            fluxvm_image::oci_registry::Arch::parse(p)
+                .with_context(|| format!("service {name}"))?;
+        }
         for p in &svc.ports {
             fluxvm_scheduler::oci_sandbox::parse_port(p)
                 .with_context(|| format!("service {name}"))?;
@@ -347,7 +435,7 @@ pub fn service_spec(
         .clone()
         .or_else(|| f.defaults.user.clone())
         .unwrap_or_else(|| default_user.to_owned());
-    Ok(json!({
+    let mut spec = json!({
         "name": vm_name(&f.name, name),
         "backend": "auto",
         "image": svc.image.clone().or_else(|| f.defaults.image.clone()).unwrap_or_else(|| "debian-13".into()),
@@ -362,7 +450,12 @@ pub fn service_spec(
             "packages": svc.packages,
             "runcmd": svc.run,
         },
-    }))
+    });
+    if let Some(p) = &f.private {
+        spec["backend"] = json!("vz");
+        spec["apple"] = json!({"networks": [{"name": p.name, "address": p.addresses[name]}]});
+    }
+    Ok(spec)
 }
 
 /// The `POST /v1/sandboxes` request for a container service. The services it depends on resolve to the NAT gateway,
@@ -373,11 +466,14 @@ pub fn container_spec(f: &StackFile, name: &str) -> Result<Value> {
         .container
         .as_deref()
         .context("not a container service")?;
-    let gateway_hosts: BTreeSet<String> = svc
-        .depends_on
-        .iter()
-        .flat_map(|d| [d.clone(), vm_name(&f.name, d)])
-        .collect();
+    let gateway_hosts: BTreeSet<String> = if f.private.is_some() {
+        BTreeSet::new()
+    } else {
+        svc.depends_on
+            .iter()
+            .flat_map(|d| [d.clone(), vm_name(&f.name, d)])
+            .collect()
+    };
     let mut oci = json!({
         "image": image,
         "env": svc.env,
@@ -386,10 +482,15 @@ pub fn container_spec(f: &StackFile, name: &str) -> Result<Value> {
         "gateway_hosts": gateway_hosts,
         "read_only_root": false,
     });
+    if let Some(p) = &f.private {
+        oci["networks"] = json!([{"name": p.name, "address": p.addresses[name]}]);
+        oci["hosts"] = json!(p.hosts(&f.name, name));
+    }
     for (k, v) in [
         ("command", json!(svc.command)),
         ("entrypoint", json!(svc.entrypoint)),
         ("restart", json!(svc.restart)),
+        ("platform", json!(svc.platform)),
     ] {
         if !v.is_null() {
             oci[k] = v;
@@ -474,15 +575,12 @@ pub fn gateway_of(guest_ip: &str) -> Option<String> {
     (o.len() == 4).then(|| format!("{}.{}.{}.1", o[0], o[1], o[2]))
 }
 
-/// The managed `/etc/hosts` block. Guests cannot reach each other directly, so every service name points at the Mac
-/// (`gateway`), which relays each service's exposed ports; both the VM name and the short name are listed.
-pub fn render_hosts(stack: &str, gateway: &str, services: &[String]) -> String {
+/// The managed `/etc/hosts` block: (service, address) pairs, listing both the VM name and the short name. On the NAT
+/// every address is the Mac's gateway, which relays each service's exposed ports; on a private network each service's own.
+pub fn render_hosts(stack: &str, entries: &[(String, String)]) -> String {
     let mut s = String::from("# BEGIN fluxvm-stack\n");
-    for service in services {
-        s.push_str(&format!(
-            "{gateway} {} {service}\n",
-            vm_name(stack, service)
-        ));
+    for (service, ip) in entries {
+        s.push_str(&format!("{ip} {} {service}\n", vm_name(stack, service)));
     }
     s.push_str("# END fluxvm-stack\n");
     s
@@ -666,6 +764,14 @@ pub async fn up<A: VmApi>(
     let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
     let default_user = std::env::var("USER").unwrap_or_else(|_| "fluxvm".into());
     let (pubkey, identity) = run::ssh_key(&home)?;
+    let mut planned;
+    let f = if f.network == StackNetwork::Private {
+        planned = f.clone();
+        planned.private = Some(plan_private(f, &api.vznets().await?)?);
+        &planned
+    } else {
+        f
+    };
     let existing: BTreeMap<String, StackVm> = api
         .list_stack(&f.name)
         .await?
@@ -718,11 +824,23 @@ pub async fn up<A: VmApi>(
         eprintln!("stack {} is up", f.name);
         return Ok(());
     }
-    let gateway = vms
-        .iter()
-        .find_map(|r| gateway_of(&r.ip))
-        .context("could not work out the NAT gateway address")?;
-    let script = hosts_script(&render_hosts(&f.name, &gateway, &services));
+    let entries: Vec<(String, String)> = match &f.private {
+        Some(p) => services
+            .iter()
+            .map(|s| (s.clone(), p.ip(s).to_owned()))
+            .collect(),
+        None => {
+            let gateway = vms
+                .iter()
+                .find_map(|r| gateway_of(&r.ip))
+                .context("could not work out the NAT gateway address")?;
+            services
+                .iter()
+                .map(|s| (s.clone(), gateway.clone()))
+                .collect()
+        }
+    };
+    let script = hosts_script(&render_hosts(&f.name, &entries));
     try_join_all(vms.iter().map(|r| async {
         let (ok, out) = ssh_script(&r.ip, &r.user, &identity, &script).await?;
         if !ok {
@@ -860,6 +978,58 @@ depends_on = ["db", "app"]
         );
         let only = levels(&f, Some(&["c".to_string()])).unwrap();
         assert_eq!(only, vec![vec!["a".to_string()], vec!["c".to_string()]]);
+    }
+
+    #[test]
+    fn a_private_stack_gets_stable_addresses_and_direct_host_names() {
+        let text = r#"
+name = "shop"
+network = "private"
+[service.db]
+container = "postgres:17"
+[service.web]
+container = "nginx"
+depends_on = ["db"]
+[service.app]
+packages = ["curl"]
+"#;
+        let mut f = parse(text).unwrap();
+        assert_eq!(f.network, StackNetwork::Private);
+        let others = json!([{"name": "lab", "subnet": "10.89.0.0/24"}]);
+        let p = plan_private(&f, &others).unwrap();
+        assert_eq!(p.name, "stack-shop");
+        assert_eq!(p.addresses["app"], "10.89.1.10/24");
+        assert_eq!(p.addresses["db"], "10.89.1.11/24");
+        assert_eq!(p.addresses["web"], "10.89.1.12/24");
+        let existing = json!([{"name": "stack-shop", "subnet": "10.89.7.0/24"}]);
+        assert_eq!(
+            plan_private(&f, &existing).unwrap().addresses["db"],
+            "10.89.7.11/24"
+        );
+
+        f.private = Some(p);
+        let web = container_spec(&f, "web").unwrap();
+        assert_eq!(
+            web["oci"]["networks"],
+            json!([{"name": "stack-shop", "address": "10.89.1.12/24"}])
+        );
+        assert_eq!(web["oci"]["gateway_hosts"], json!([]));
+        let hosts = web["oci"]["hosts"].as_array().unwrap();
+        assert!(hosts.contains(&json!({"ip": "10.89.1.11", "names": ["db", "shop-db"]})));
+        assert!(!hosts.iter().any(|h| h["ip"] == "10.89.1.12"), "not itself");
+
+        let dir = tempfile::tempdir().unwrap();
+        let app =
+            service_spec(&f, "app", dir.path(), dir.path(), "dev", "ssh-ed25519 AAA").unwrap();
+        assert_eq!(app["backend"], "vz");
+        assert_eq!(app["apple"]["networks"][0]["address"], "10.89.1.10/24");
+        assert!(
+            format!(
+                "{:#}",
+                parse("name = \"s\"\nnetwork = \"mesh\"\n[service.a]\n").unwrap_err()
+            )
+            .contains("unknown variant")
+        );
     }
 
     #[test]
@@ -1047,7 +1217,13 @@ depends_on = ["db"]
             Some("192.168.64.1")
         );
         assert_eq!(gateway_of("nope"), None);
-        let block = render_hosts("myapp", "192.168.64.1", &["db".into(), "app".into()]);
+        let block = render_hosts(
+            "myapp",
+            &[
+                ("db".into(), "192.168.64.1".into()),
+                ("app".into(), "192.168.64.1".into()),
+            ],
+        );
         assert_eq!(
             block,
             "# BEGIN fluxvm-stack\n192.168.64.1 myapp-db db\n192.168.64.1 myapp-app app\n# END fluxvm-stack\n"

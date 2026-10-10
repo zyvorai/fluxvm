@@ -614,6 +614,28 @@ pub struct AppleSpec {
     /// launch that creates the VM sees them; it writes them to a 0600 file in the meta share, which later boots reuse.
     #[serde(skip)]
     pub secret_env: std::collections::BTreeMap<String, crate::grants::Secret>,
+    /// Private networks between `vz` guests on this Mac: each one is an extra network card on a userspace switch, so
+    /// guests on the same network reach each other directly (any port, TCP and UDP). The daemon fills in `address` and
+    /// `mac` when they are left out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<AppleNetwork>,
+    /// Named virtio console ports (Linux guests): each appears in the guest as `/dev/virtio-ports/<name>` and on the host as
+    /// a unix socket, reached with `fluxctl port-connect` or the websocket `GET /v1/vms/{id}/ports/{name}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub console_ports: Vec<String>,
+}
+
+/// One private network a `vz` guest joins (see [`AppleSpec::networks`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AppleNetwork {
+    /// `a-z`, `0-9` and `-`, 1-32 characters.
+    pub name: String,
+    /// `10.89.N.H/24`; must be in the network's subnet once the network exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
 }
 
 /// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
@@ -625,12 +647,78 @@ pub struct AppleShare {
     pub read_only: bool,
 }
 
-/// A raw disk image attached to a `vz` Linux guest as a virtio block device.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// An extra disk for a `vz` Linux guest: a raw image file (default), a host block device, or a network block device
+/// export, on a virtio, NVMe or USB controller.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AppleDisk {
+    /// Name for `fluxctl disk detach`; `disk<N>` when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The image file (`kind: image`) or the device, e.g. `/dev/disk4` (`kind: block`).
+    #[serde(default)]
     pub path: PathBuf,
     #[serde(default)]
     pub read_only: bool,
+    #[serde(default)]
+    pub kind: AppleDiskKind,
+    /// `nbd://host:port/export` or `nbd+unix:///export?socket=/path` (`kind: nbd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Host caching of an image file.
+    #[serde(default)]
+    pub caching: AppleDiskCaching,
+    /// When writes reach stable storage: `full` (default), `fsync` (image files only) or `none`.
+    #[serde(default)]
+    pub sync: AppleDiskSync,
+    #[serde(default)]
+    pub controller: AppleDiskController,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskKind {
+    #[default]
+    Image,
+    /// `VZDiskBlockDeviceStorageDeviceAttachment` (macOS 14); the daemon's user must be able to open the device.
+    Block,
+    /// `VZNetworkBlockDeviceStorageDeviceAttachment` (macOS 14).
+    Nbd,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskCaching {
+    #[default]
+    Automatic,
+    Cached,
+    Uncached,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskSync {
+    #[default]
+    Full,
+    Fsync,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AppleDiskController {
+    #[default]
+    Virtio,
+    /// `VZNVMExpressControllerDeviceConfiguration` (macOS 14).
+    Nvme,
+    /// `VZUSBMassStorageDeviceConfiguration`; can also be hot-attached to a running guest (macOS 15).
+    Usb,
+}
+
+impl AppleDisk {
+    /// The disk's name: its own, or `disk<index>`.
+    pub fn name_at(&self, index: usize) -> String {
+        self.name.clone().unwrap_or_else(|| format!("disk{index}"))
+    }
 }
 
 fn default_true() -> bool {
@@ -682,6 +770,8 @@ impl Default for AppleSpec {
             tagged_shares: Vec::new(),
             init_config: None,
             secret_env: std::collections::BTreeMap::new(),
+            networks: Vec::new(),
+            console_ports: Vec::new(),
         }
     }
 }

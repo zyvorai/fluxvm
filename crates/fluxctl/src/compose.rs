@@ -135,6 +135,15 @@ pub fn convert(yaml: &str, stack_name: &str) -> Result<Converted> {
                         Toml::Integer((n.ceil() as i64).clamp(1, 255)),
                     );
                 }
+                "platform" => {
+                    let p = scalar(v, k)?;
+                    match fluxvm_image::oci_registry::Arch::parse(&p) {
+                        Ok(a) => {
+                            t.insert("platform".into(), Toml::String(a.platform()));
+                        }
+                        Err(e) => warn(format!("platform skipped: {e:#}")),
+                    }
+                }
                 "mem_limit" => {
                     t.insert(
                         "memory_mib".into(),
@@ -461,6 +470,31 @@ volumes:
             assert!(w.contains(needle), "{needle}: {w}");
         }
         assert!(!w.contains("networks"), "{w}");
+    }
+
+    #[test]
+    fn compose_platform_becomes_the_service_platform() {
+        let c = convert(
+            "services:\n  a:\n    image: x\n    platform: linux/amd64\n  b:\n    image: y\n    platform: windows/amd64\n",
+            "s",
+        )
+        .unwrap();
+        let f = crate::stack::parse(&c.toml).unwrap();
+        assert_eq!(f.service["a"].platform.as_deref(), Some("linux/amd64"));
+        assert!(f.service["b"].platform.is_none());
+        assert!(c.warnings.join("\n").contains("platform skipped"));
+        assert_eq!(
+            crate::stack::container_spec(&f, "a").unwrap()["oci"]["platform"],
+            "linux/amd64"
+        );
+        assert!(
+            format!(
+                "{:#}",
+                crate::stack::parse("name = \"s\"\n[service.a]\nplatform = \"linux/amd64\"\n")
+                    .unwrap_err()
+            )
+            .contains("platform is not used by a VM service")
+        );
     }
 
     #[test]

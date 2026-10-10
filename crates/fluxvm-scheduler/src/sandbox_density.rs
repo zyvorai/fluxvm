@@ -157,7 +157,9 @@ impl VmManager {
     }
 
     pub async fn sandbox_density(&self) -> DensityReport {
-        let mut r = summarize(&self.list().await, self.cfg.sandbox.warm_slots);
+        let vms = self.list().await;
+        let mut r = summarize(&vms, self.cfg.sandbox.warm_slots);
+        crate::oci_pool::summarize(&vms, self.oci_warm_configured(), &mut r);
         let host = fluxvm_core::pressure_admission::sample_host();
         r.host_mem_available_mib = host.mem_available_mib;
         r.host_mem_total_mib = host.mem_total_mib;

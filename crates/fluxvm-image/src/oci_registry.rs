@@ -235,6 +235,10 @@ pub struct Layer {
     pub diff_id: String,
 }
 
+fn default_architecture() -> String {
+    Arch::Arm64.as_str().into()
+}
+
 /// A pulled image: everything needed to build its rootfs and start its process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PulledImage {
@@ -244,6 +248,9 @@ pub struct PulledImage {
     pub config_digest: String,
     pub config: ImageConfig,
     pub layers: Vec<Layer>,
+    /// The image's OCI architecture, `arm64` or `amd64`.
+    #[serde(default = "default_architecture")]
+    pub architecture: String,
 }
 
 impl PulledImage {
@@ -304,6 +311,40 @@ impl BlobStore {
     }
 }
 
+/// CPU architecture of a Linux image. `amd64` images run under Rosetta on Apple silicon.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Arch {
+    #[default]
+    Arm64,
+    Amd64,
+}
+
+impl Arch {
+    /// `linux/arm64`, `linux/arm64/v8`, `arm64`, `aarch64`, `linux/amd64`, `amd64` or `x86_64`.
+    pub fn parse(platform: &str) -> Result<Self> {
+        let p = platform.trim().to_ascii_lowercase();
+        let rest = p.strip_prefix("linux/").unwrap_or(&p);
+        match rest {
+            "arm64" | "arm64/v8" | "aarch64" => Ok(Self::Arm64),
+            "amd64" | "x86_64" | "x86-64" => Ok(Self::Amd64),
+            _ => bail!("platform {platform:?}: use linux/arm64 or linux/amd64"),
+        }
+    }
+
+    /// The OCI `architecture` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Arm64 => "arm64",
+            Self::Amd64 => "amd64",
+        }
+    }
+
+    pub fn platform(self) -> String {
+        format!("linux/{}", self.as_str())
+    }
+}
+
 /// Registry credentials (`Basic` to the token endpoint). Anonymous when absent.
 #[derive(Debug, Clone, Default)]
 pub struct Credentials {
@@ -361,7 +402,7 @@ impl Puller {
                     d.platform.as_ref().is_some_and(|p| {
                         &p.architecture == arch
                             && &p.os == os
-                            && p.variant.as_deref().is_none_or(|v| v == "v8")
+                            && (arch != "arm64" || p.variant.as_deref().is_none_or(|v| v == "v8"))
                     })
                 })
                 .with_context(|| format!("{r} has no {os}/{arch} image"))?
@@ -410,6 +451,7 @@ impl Puller {
             config_digest: cfg_desc.digest,
             config: cfg.config.unwrap_or_default(),
             layers,
+            architecture: self.platform.0.clone(),
         })
     }
 
@@ -818,6 +860,7 @@ mod tests {
         assert_eq!(img.config.user.as_deref(), Some("1000:1000"));
         assert_eq!(img.layers.len(), 1);
         assert_eq!(img.layers[0].compression, Compression::Gzip);
+        assert_eq!(img.architecture, "arm64");
         assert!(store.has(&img.layers[0].digest));
         assert!(hits.lock().unwrap().iter().any(|h| h.starts_with("/token")));
 
@@ -851,6 +894,42 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains("part"))
             .collect();
         assert!(leftovers.is_empty());
+    }
+
+    #[test]
+    fn platforms_parse_to_an_architecture() {
+        for p in [
+            "linux/arm64",
+            "linux/arm64/v8",
+            "arm64",
+            "aarch64",
+            "LINUX/ARM64",
+        ] {
+            assert_eq!(Arch::parse(p).unwrap(), Arch::Arm64, "{p}");
+        }
+        for p in ["linux/amd64", "amd64", "x86_64"] {
+            assert_eq!(Arch::parse(p).unwrap(), Arch::Amd64, "{p}");
+        }
+        for p in ["linux/riscv64", "windows/amd64", "linux/arm/v7", ""] {
+            assert!(Arch::parse(p).is_err(), "{p}");
+        }
+        assert_eq!(Arch::Amd64.platform(), "linux/amd64");
+    }
+
+    #[tokio::test]
+    async fn amd64_selects_the_amd64_manifest() {
+        let (mock, _) = fixture(false);
+        let (addr, hits) = serve(mock).await;
+        let dir = tempfile::tempdir().unwrap();
+        // The fixture's amd64 entry points at a manifest the registry does not have.
+        let _ = Puller::new(BlobStore::new(dir.path()))
+            .unwrap()
+            .with_platform(Arch::Amd64.as_str(), "linux")
+            .pull(&format!("{addr}/app:1.0"))
+            .await
+            .unwrap_err();
+        let zero = format!("/v2/app/manifests/sha256:{}", "0".repeat(64));
+        assert!(hits.lock().unwrap().contains(&zero));
     }
 
     #[tokio::test]

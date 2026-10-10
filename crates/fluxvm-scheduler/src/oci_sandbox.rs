@@ -17,7 +17,7 @@ use fluxvm_core::model::{
 };
 use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
 use fluxvm_image::oci_boot::OciBoot;
-use fluxvm_image::oci_registry::PulledImage;
+use fluxvm_image::oci_registry::{Arch, PulledImage};
 use fluxvm_oci_init::config as init;
 use fluxvm_oci_init::supervise::{self, HealthCheck, RestartPolicy};
 use serde::{Deserialize, Serialize};
@@ -40,8 +40,12 @@ fn default_true() -> bool {
 /// `SandboxCreateRequest.oci`: run a container image as the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OciSandboxSpec {
-    /// linux/arm64 image, e.g. `alpine:3.22`, `ghcr.io/org/app:1.2`, `nginx@sha256:…`.
+    /// e.g. `alpine:3.22`, `ghcr.io/org/app:1.2`, `nginx@sha256:…`.
     pub image: String,
+    /// `linux/arm64` (default) or `linux/amd64`, which runs under Rosetta (installed with
+    /// `softwareupdate --install-rosetta --agree-to-license`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// Replaces the image's `Cmd`.
     #[serde(default)]
     pub command: Option<Vec<String>>,
@@ -88,6 +92,12 @@ pub struct OciSandboxSpec {
     /// every API response, and stored only in a 0600 file in the VM's private meta share until the VM is deleted.
     #[serde(default, skip_serializing)]
     pub secret_env: BTreeMap<String, fluxvm_core::grants::Secret>,
+    /// Private VM-to-VM networks to join (`10.89.N.0/24`, see `apple.networks`); works with `offline` too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<fluxvm_core::model::AppleNetwork>,
+    /// Extra `/etc/hosts` entries, e.g. the private-network addresses of the other services in a stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<init::HostEntry>,
 }
 
 /// Most secrets per sandbox, and their combined size.
@@ -122,6 +132,14 @@ pub fn parse_port(spec: &str) -> Result<(u16, u16)> {
 }
 
 impl OciSandboxSpec {
+    pub fn arch(&self) -> Result<Arch> {
+        self.platform
+            .as_deref()
+            .map(Arch::parse)
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
     fn overrides(&self) -> init::ProcessOverrides {
         init::ProcessOverrides {
             entrypoint: self.entrypoint.clone(),
@@ -141,6 +159,7 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
     if oci.image.trim().is_empty() {
         bail!("oci.image is empty");
     }
+    oci.arch()?;
     let clash = [
         (req.template.is_some(), "template"),
         (req.spec.is_some(), "spec"),
@@ -185,6 +204,23 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
     }
     if let Some(h) = &oci.healthcheck {
         h.validate().map_err(anyhow::Error::msg)?;
+    }
+    fluxvm_apple::vznet::validate(&oci.networks)?;
+    if !oci.networks.is_empty() && !req.allow_hosts.is_empty() {
+        bail!(
+            "networks cannot be combined with allow_hosts: another guest could relay around the proxy"
+        );
+    }
+    if oci.hosts.len() > 256 {
+        bail!("at most 256 hosts entries");
+    }
+    for e in &oci.hosts {
+        if e.names.is_empty() {
+            bail!("hosts entry {} has no names", e.ip);
+        }
+        if let Some(bad) = e.names.iter().find(|n| !init::valid_host_name(n)) {
+            bail!("host {bad:?} is not a valid host name");
+        }
     }
     if oci.secret_env.len() > MAX_SECRET_ENV {
         bail!("at most {MAX_SECRET_ENV} secret_env entries");
@@ -318,6 +354,9 @@ pub(crate) fn build_create(
         healthcheck: spec.healthcheck.clone(),
         mounts,
         gateway_hosts: spec.gateway_hosts.clone(),
+        networks: Vec::new(),
+        hosts: spec.hosts.clone(),
+        rosetta: spec.arch()? == Arch::Amd64,
     });
     let mut create: CreateVmRequest = serde_json::from_value(serde_json::json!({
         "name": name,
@@ -335,6 +374,8 @@ pub(crate) fn build_create(
             "egress_allow": allow_hosts,
             "init_config": init_config,
             "tagged_shares": shares,
+            "networks": spec.networks,
+            "rosetta": spec.arch()? == Arch::Amd64,
         },
     }))
     .context("building the OCI sandbox VM request")?;
@@ -408,7 +449,13 @@ impl VmManager {
         }
         // Boot artifacts first: without them nothing below can work, and the pull may be large.
         let boot = fluxvm_image::oci_boot::resolve(&self.cfg).await?;
-        let image = oci_images::pull(&self.cfg, &oci.image).await?;
+        let arch = oci.arch()?;
+        if arch == Arch::Amd64 && !fluxvm_apple::rosetta_installed() {
+            bail!(
+                "linux/amd64 images run under Rosetta, which is not installed: run `softwareupdate --install-rosetta --agree-to-license`"
+            );
+        }
+        let image = oci_images::pull(&self.cfg, &oci.image, arch).await?;
         let process = init::resolve_process(&image_process(&image), &oci.overrides())?;
         let rootfs = oci_images::ensure_rootfs(&self.cfg, &image).await?;
 
@@ -452,7 +499,13 @@ impl VmManager {
         create.created_by_token = created_by_token.map(String::from);
         self.enforce_token_quotas(created_by_token, &create).await?;
 
-        let record = self.create(create).await?;
+        let started = Instant::now();
+        let warm = self.claim_oci_warm(&create, &rootfs).await;
+        let claimed = warm.is_some();
+        let record = match warm {
+            Some(vm) => vm,
+            None => self.create(create).await?,
+        };
         let id = record.id;
         let labelled = async {
             self.label_vz_sandbox(id).await?;
@@ -470,6 +523,11 @@ impl VmManager {
         if let Err(e) = labelled {
             let _ = self.delete(id).await;
             return Err(e.context("starting the OCI sandbox"));
+        }
+        if claimed {
+            crate::oci_pool::record_claim_time(started.elapsed().as_millis() as u64);
+        } else {
+            self.spawn_oci_pool_fill();
         }
         let record = self.get(id).await?;
         self.write_sandbox_proxy_meta(&record, req.http_proxy_port, &req.http_proxy_ports)
@@ -656,6 +714,121 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(online.network, NetworkSpec::User { .. }));
+    }
+
+    #[test]
+    fn amd64_images_get_the_rosetta_share_and_registration() {
+        let boot = OciBoot {
+            kernel: "/k".into(),
+            initrd: "/i".into(),
+            cmdline: "console=hvc0".into(),
+        };
+        let process = init::ProcessSpec {
+            argv: vec!["/bin/sh".into()],
+            env: vec![],
+            cwd: "/".into(),
+            user: "0:0".into(),
+        };
+        let build = |s: &OciSandboxSpec| {
+            build_create(
+                "x",
+                Path::new("/r"),
+                &boot,
+                process.clone(),
+                s,
+                (1, 512),
+                true,
+                &[],
+                vec![],
+                (vec![], vec![]),
+            )
+            .unwrap()
+        };
+        let boot_cfg = |c: &CreateVmRequest| -> init::BootConfig {
+            let init::InitConfig::Boot(b) =
+                serde_json::from_value(c.apple.as_ref().unwrap().init_config.clone().unwrap())
+                    .unwrap()
+            else {
+                panic!("not a boot config")
+            };
+            b
+        };
+        let amd = build(&spec(
+            serde_json::json!({"image": "x", "platform": "linux/amd64"}),
+        ));
+        assert!(amd.apple.as_ref().unwrap().rosetta);
+        assert!(boot_cfg(&amd).rosetta);
+        fluxvm_apple::validate_request(&amd).unwrap();
+        let arm = build(&spec(serde_json::json!({"image": "x"})));
+        assert!(!arm.apple.as_ref().unwrap().rosetta);
+        assert!(!boot_cfg(&arm).rosetta);
+        assert!(
+            validate(&sandbox(
+                serde_json::json!({"oci": {"image": "x", "platform": "linux/s390x"}})
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn private_networks_and_hosts_reach_the_vm_request() {
+        let boot = OciBoot {
+            kernel: "/k".into(),
+            initrd: "/i".into(),
+            cmdline: "console=hvc0".into(),
+        };
+        let process = init::ProcessSpec {
+            argv: vec!["/bin/sh".into()],
+            env: vec![],
+            cwd: "/".into(),
+            user: "0:0".into(),
+        };
+        let s = spec(serde_json::json!({
+            "image": "alpine",
+            "networks": [{"name": "stack-shop", "address": "10.89.4.10/24"}],
+            "hosts": [{"ip": "10.89.4.11", "names": ["db"]}],
+        }));
+        let c = build_create(
+            "web",
+            Path::new("/r"),
+            &boot,
+            process,
+            &s,
+            (1, 512),
+            true,
+            &[],
+            vec![],
+            (vec![], vec![]),
+        )
+        .unwrap();
+        let apple = c.apple.as_ref().unwrap();
+        assert_eq!(apple.networks[0].name, "stack-shop");
+        assert_eq!(apple.networks[0].address.as_deref(), Some("10.89.4.10/24"));
+        let init::InitConfig::Boot(b) =
+            serde_json::from_value(apple.init_config.clone().unwrap()).unwrap()
+        else {
+            panic!("not a boot config")
+        };
+        assert_eq!(b.hosts[0].names, ["db"]);
+        fluxvm_apple::validate_request(&c).unwrap();
+
+        let relay = sandbox(serde_json::json!({
+            "oci": {"image": "alpine", "networks": [{"name": "n"}]},
+            "allow_hosts": ["pypi.org"],
+        }));
+        assert!(validate(&relay).is_err());
+        let offline = sandbox(serde_json::json!({
+            "oci": {"image": "alpine", "networks": [{"name": "n"}]},
+            "offline": true,
+        }));
+        assert!(
+            validate(&offline).is_ok(),
+            "an offline sandbox may still join a private network"
+        );
+        let bad_host = sandbox(serde_json::json!({
+            "oci": {"image": "alpine", "hosts": [{"ip": "10.89.0.2", "names": ["a b"]}]},
+        }));
+        assert!(validate(&bad_host).is_err());
     }
 
     #[test]

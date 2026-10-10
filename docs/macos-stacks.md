@@ -131,6 +131,31 @@ NAT gateway, `192.168.64.1`). So FluxVM relays through the Mac:
   exposed ports are reachable. The `/etc/hosts` block is rewritten on every `up`, so it stays correct when addresses change.
 - If the macOS application firewall is on, it may ask to allow incoming connections for `fluxvm-vz-runner` the first time.
 
+A container service may set `platform = "linux/amd64"` to run an x86-64 image under Rosetta (see
+[oci-sandboxes.md](oci-sandboxes.md#x86-64-images-rosetta)); a compose service's `platform:` is carried over.
+
+### Private stack networks
+
+With `network = "private"` at the top of the file, the stack gets its own private network, `stack-<name>` (see "Private networks
+between guests" in [macos.md](macos.md)), and nothing is relayed:
+
+```toml
+name = "shop"
+network = "private"
+[service.db]
+container = "postgres:17"
+[service.web]
+container = "nginx"
+depends_on = ["db"]
+```
+
+- Each service gets a fixed address, `10.89.N.10` and up in service-name order, so addresses stay the same across `up`s. An
+  existing `stack-<name>` network keeps its subnet; otherwise `up` takes the lowest free one.
+- Every name points at the service's own address: in a container's `/etc/hosts` from the moment it starts, in a VM's `/etc/hosts`
+  block after `up`. Every port is reachable, not only `expose`d ones, and port numbers need not be unique.
+- VM services are created on `vz` explicitly. The other services' traffic never leaves the private network; each service still has
+  its NAT card for the internet and published `ports`.
+
 ## What `up` does on a second run
 
 Each VM carries labels `fluxvm.stack`, `fluxvm.service` and `fluxvm.spec-hash` (a hash of the service's resolved definition). `up`:
@@ -143,5 +168,6 @@ State lives in the daemon's VM labels, so it also works with `--server` and does
 - Stack VMs cold-boot (about 10 s each; independent services start in parallel). They do not use the warm snapshots `fluxctl run` uses.
 - No build steps. Restarts and health checks are for container services only. `run` only runs at first boot; use
   `after_up` for steps that need other services.
-- A container service only resolves the names of the services it `depends_on`. The names are fixed when it is created.
+- On the NAT (the default), a container service only resolves the names of the services it `depends_on`, and the names are fixed
+  when it is created. With `network = "private"` every service resolves every other.
 - Verified on an Apple M4 with the `vz` backend only.

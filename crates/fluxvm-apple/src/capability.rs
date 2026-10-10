@@ -183,6 +183,76 @@ fn validate_vmnet(v: &fluxvm_core::model::AppleVmnetSpec) -> Result<()> {
 }
 
 /// Rejects, with a specific message, any request feature the Apple backend cannot honour.
+/// Virtio console ports per VM (one console device holds them all).
+pub const MAX_CONSOLE_PORTS: usize = 8;
+
+/// A console port name: it becomes `/dev/virtio-ports/<name>` in the guest and part of a socket path on the host.
+pub fn valid_console_port(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_')
+        })
+}
+
+/// One `apple.extra_disks` entry: the fields its `kind` needs and nothing it cannot use.
+pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
+    use fluxvm_core::model::{AppleDiskCaching, AppleDiskKind, AppleDiskSync};
+    if let Some(n) = &d.name {
+        let ok = !n.is_empty()
+            && n.len() <= 32
+            && n != "root"
+            && n.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+        if !ok {
+            bail!("disk name {n:?}: 1-32 of a-z, 0-9, - and _, and not \"root\"");
+        }
+    }
+    match d.kind {
+        AppleDiskKind::Image => {
+            if !d.path.is_absolute() {
+                bail!(
+                    "apple.extra_disks path {} must be absolute",
+                    d.path.display()
+                );
+            }
+        }
+        AppleDiskKind::Block => {
+            if !d.path.starts_with("/dev") || d.path.components().count() != 3 {
+                bail!(
+                    "a block disk's path must be a device such as /dev/disk4, not {}",
+                    d.path.display()
+                );
+            }
+        }
+        AppleDiskKind::Nbd => {
+            let url = d.url.as_deref().unwrap_or("");
+            let scheme = url.split_once("://").map(|(s, _)| s);
+            if !matches!(scheme, Some("nbd" | "nbds" | "nbd+unix" | "nbds+unix")) {
+                bail!(
+                    "an nbd disk needs url nbd://host:port/export (or nbds, nbd+unix, nbds+unix), not {url:?}"
+                );
+            }
+            if !d.path.as_os_str().is_empty() {
+                bail!("an nbd disk takes url, not path");
+            }
+        }
+    }
+    if d.kind != AppleDiskKind::Nbd && d.url.is_some() {
+        bail!("url is for nbd disks");
+    }
+    if d.kind != AppleDiskKind::Image {
+        if d.caching != AppleDiskCaching::Automatic {
+            bail!("caching applies to image disks only");
+        }
+        if d.sync == AppleDiskSync::Fsync {
+            bail!("sync fsync applies to image disks only; use full or none");
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
     macro_rules! reject {
         ($cond:expr, $msg:expr) => {
@@ -223,6 +293,18 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         }
         if !(72..=300).contains(&apple.display_ppi) {
             bail!("apple.display_ppi must be 72..=300");
+        }
+        crate::vznet::validate(&apple.networks)?;
+        if !apple.networks.is_empty() {
+            if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos) {
+                bail!("apple.networks is for Linux guests");
+            }
+            if !apple.egress_allow.is_empty() {
+                bail!(
+                    "apple.networks cannot be combined with egress_allow: another guest on the network could relay \
+                     around the proxy"
+                );
+            }
         }
         if matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
             && (apple.rosetta || apple.nested_virtualization || apple.clipboard)
@@ -355,12 +437,28 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         if apple.root_read_only && apple.asif_overlay {
             bail!("apple.root_read_only cannot be combined with apple.asif_overlay");
         }
-        for d in &apple.extra_disks {
-            if !d.path.is_absolute() {
+        if macos_guest && !apple.console_ports.is_empty() {
+            bail!("apple.console_ports is a Linux-guest feature");
+        }
+        if apple.console_ports.len() > MAX_CONSOLE_PORTS {
+            bail!("at most {MAX_CONSOLE_PORTS} apple.console_ports");
+        }
+        let mut ports = std::collections::HashSet::new();
+        for p in &apple.console_ports {
+            if !valid_console_port(p) {
                 bail!(
-                    "apple.extra_disks path {} must be absolute",
-                    d.path.display()
+                    "console port {p:?}: 1-32 of a-z, 0-9, '.', '-' and '_', starting with a letter or digit"
                 );
+            }
+            if !ports.insert(p) {
+                bail!("console port {p} is listed twice");
+            }
+        }
+        let mut names = std::collections::HashSet::new();
+        for (i, d) in apple.extra_disks.iter().enumerate() {
+            validate_disk(d)?;
+            if !names.insert(d.name_at(i)) {
+                bail!("apple.extra_disks name {} is used twice", d.name_at(i));
             }
         }
         if macos_guest && !apple.tagged_shares.is_empty() {
@@ -963,5 +1061,68 @@ mod tests {
                 .iter()
                 .any(|c| c.contains("systemctl enable --now fluxvm-report-ip.service"))
         );
+    }
+
+    #[test]
+    fn extra_disks_take_only_what_their_kind_uses() {
+        let ok = [
+            r#"{"path":"/d/a.raw","caching":"uncached","sync":"fsync","controller":"nvme"}"#,
+            r#"{"name":"data","kind":"block","path":"/dev/disk4","sync":"none","controller":"usb"}"#,
+            r#"{"kind":"nbd","url":"nbd://10.0.0.5:10809/vol","read_only":true}"#,
+            r#"{"kind":"nbd","url":"nbd+unix:///vol?socket=/tmp/nbd.sock"}"#,
+        ];
+        for d in ok {
+            let r = req(&format!(r#""apple":{{"extra_disks":[{d}]}}"#));
+            validate_request(&r).unwrap_or_else(|e| panic!("{d}: {e:#}"));
+        }
+        for (d, needle) in [
+            (r#"{"path":"a.raw"}"#, "absolute"),
+            (r#"{"kind":"block","path":"/tmp/x"}"#, "device"),
+            (
+                r#"{"kind":"block","path":"/dev/disk4","caching":"cached"}"#,
+                "caching",
+            ),
+            (
+                r#"{"kind":"block","path":"/dev/disk4","sync":"fsync"}"#,
+                "fsync",
+            ),
+            (r#"{"kind":"nbd","url":"http://x/y"}"#, "nbd://"),
+            (
+                r#"{"kind":"nbd","url":"nbd://x/y","path":"/d/a.raw"}"#,
+                "not path",
+            ),
+            (r#"{"path":"/d/a.raw","url":"nbd://x/y"}"#, "nbd disks"),
+            (r#"{"name":"root","path":"/d/a.raw"}"#, "root"),
+            (r#"{"name":"Big Disk","path":"/d/a.raw"}"#, "a-z"),
+        ] {
+            let r = req(&format!(r#""apple":{{"extra_disks":[{d}]}}"#));
+            let err = format!("{:#}", validate_request(&r).expect_err(d));
+            assert!(err.contains(needle), "{d}: {err}");
+        }
+        let twice =
+            req(r#""apple":{"extra_disks":[{"path":"/a.raw"},{"name":"disk0","path":"/b.raw"}]}"#);
+        assert!(format!("{:#}", validate_request(&twice).unwrap_err()).contains("twice"));
+    }
+
+    #[test]
+    fn console_ports_are_named_and_linux_only() {
+        assert!(validate_request(&req(r#""apple":{"console_ports":["agent","log.v1"]}"#)).is_ok());
+        for (json, needle) in [
+            (r#""apple":{"console_ports":["Agent"]}"#, "a-z"),
+            (r#""apple":{"console_ports":["../x"]}"#, "a-z"),
+            (r#""apple":{"console_ports":[".x"]}"#, "a-z"),
+            (r#""apple":{"console_ports":["a","a"]}"#, "twice"),
+            (
+                r#""apple":{"console_ports":["a","b","c","d","e","f","g","h","i"]}"#,
+                "at most",
+            ),
+            (
+                r#""apple":{"guest_os":"macos","console_ports":["a"]}"#,
+                "Linux",
+            ),
+        ] {
+            let err = format!("{:#}", validate_request(&req(json)).expect_err(json));
+            assert!(err.contains(needle), "{json}: {err}");
+        }
     }
 }

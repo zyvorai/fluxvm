@@ -457,6 +457,13 @@ enum Command {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
+    /// Connect stdin/stdout to a vz VM's named console port (`apple.console_ports`, `/dev/virtio-ports/<name>` in the
+    /// guest). Ctrl-] detaches. REST: websocket `GET /v1/vms/{id}/ports/{name}`.
+    PortConnect {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        name: String,
+    },
     /// Bring up the VMs described in `fluxvm.toml`: create what is missing, start what is stopped, recreate what
     /// changed, in dependency order, and make the services reachable by name. Naming a service brings up only it and
     /// what it depends on.
@@ -701,6 +708,11 @@ enum Command {
     Oci {
         #[command(subcommand)]
         command: OciCommand,
+    },
+    /// Private VM-to-VM networks between `vz` guests (`apple.networks`, `oci.networks`). See docs/macos.md.
+    Vznet {
+        #[command(subcommand)]
+        command: VznetCommand,
     },
     /// List image catalog entries (machinectl `list-images`).
     ListImages,
@@ -1390,21 +1402,40 @@ enum DiskCommand {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
     },
-    /// Create a qcow2 data disk, attach an existing image file or block
-    /// device with --path, or overlay a shared image with --backing;
-    /// hot-added when the VM is running.
+    /// Create a data disk, attach an existing image file or block
+    /// device with --path, or overlay a shared image with --backing (QEMU);
+    /// hot-added when the VM is running. On vz the disk applies at the next
+    /// start (a USB image disk at once), and --url attaches an NBD export.
     Attach {
         #[arg(value_parser = output::parse_vm_ref)]
         id: Uuid,
         name: String,
-        #[arg(long, required_unless_present_any = ["path", "backing"], conflicts_with_all = ["path", "backing"])]
+        #[arg(long, required_unless_present_any = ["path", "backing", "url"], conflicts_with_all = ["path", "backing", "url"])]
         size_gib: Option<u64>,
         /// Existing qcow2/raw file or block device; detach leaves it in place.
-        #[arg(long, conflicts_with = "backing")]
+        #[arg(long, conflicts_with_all = ["backing", "url"])]
         path: Option<PathBuf>,
         /// qcow2/raw image to put a new qcow2 overlay on; never written.
         #[arg(long)]
         backing: Option<PathBuf>,
+        /// vz: image (default), block (--path /dev/diskN) or nbd (--url).
+        #[arg(long, value_parser = ["image", "block", "nbd"])]
+        kind: Option<String>,
+        /// vz: nbd://host:port/export or nbd+unix:///export?socket=PATH.
+        #[arg(long, conflicts_with = "backing")]
+        url: Option<String>,
+        /// vz: attach read-only.
+        #[arg(long)]
+        read_only: bool,
+        /// vz: host caching of an image file.
+        #[arg(long, value_parser = ["automatic", "cached", "uncached"])]
+        caching: Option<String>,
+        /// vz: full (default), fsync (image files) or none.
+        #[arg(long, value_parser = ["full", "fsync", "none"])]
+        sync: Option<String>,
+        /// vz: virtio (default), nvme or usb.
+        #[arg(long, value_parser = ["virtio", "nvme", "usb"])]
+        controller: Option<String>,
     },
     /// Grow `root` or a data disk (live or stopped).
     Resize {
@@ -1591,14 +1622,75 @@ enum GroupCommand {
 
 #[derive(Subcommand)]
 enum OciCommand {
-    /// Pull an image (linux/arm64) and build its rootfs, e.g. `alpine:3.22` or `ghcr.io/org/app@sha256:…`.
-    Pull { image: String },
+    /// Pull an image and build its rootfs, e.g. `alpine:3.22` or `ghcr.io/org/app@sha256:…`.
+    Pull {
+        image: String,
+        /// `linux/arm64` (default) or `linux/amd64` (runs under Rosetta).
+        #[arg(long)]
+        platform: Option<String>,
+    },
     /// List cached images, most recently used first.
     Ls,
     /// Remove a cached image by digest, 12+ character digest prefix, or the reference it was pulled as.
     Rm { image: String },
     /// Remove every cached image no sandbox was started from, and every blob no remaining image needs.
     Prune,
+}
+
+#[derive(Subcommand)]
+enum VznetCommand {
+    /// Networks in use, their subnets and members (`--json` for the raw `GET /v1/vznets`).
+    Ls {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `fluxctl vznet ls` as a table.
+fn print_vznets(items: &serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(items)?);
+        return Ok(());
+    }
+    let nets = items.as_array().cloned().unwrap_or_default();
+    if nets.is_empty() {
+        println!("no private networks in use");
+        return Ok(());
+    }
+    println!("{:<24} {:<16} {:<8} MEMBERS", "NETWORK", "SUBNET", "SWITCH");
+    for n in nets {
+        let s = |k: &str| n[k].as_str().unwrap_or("").to_string();
+        let members: Vec<String> = n["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| {
+                format!(
+                    "{}={} ({})",
+                    m["vm_name"].as_str().unwrap_or(""),
+                    m["address"]
+                        .as_str()
+                        .unwrap_or("")
+                        .split('/')
+                        .next()
+                        .unwrap_or(""),
+                    m["status"].as_str().unwrap_or("")
+                )
+            })
+            .collect();
+        println!(
+            "{:<24} {:<16} {:<8} {}",
+            s("name"),
+            s("subnet"),
+            if n["switch_running"].as_bool() == Some(true) {
+                "up"
+            } else {
+                "idle"
+            },
+            members.join(", ")
+        );
+    }
+    Ok(())
 }
 
 #[derive(Subcommand)]
@@ -1835,11 +1927,14 @@ async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> R
 const SERIAL_ESCAPE: u8 = 0x1d;
 
 async fn run_serial_session(m: &VmManager, id: Uuid) -> Result<()> {
+    run_stream_session(m.open_serial(id).await?, &format!("{id} serial console")).await
+}
+
+async fn run_stream_session(stream: tokio::net::UnixStream, what: &str) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let stream = m.open_serial(id).await?;
     let interactive = std::io::stdin().is_terminal();
     if interactive {
-        eprintln!("Connected to {id} serial console. Escape: Ctrl-]\r");
+        eprintln!("Connected to {what}. Escape: Ctrl-]\r");
     }
     let _raw = RawTerminal::enter()?;
     let (mut reader, mut writer) = stream.into_split();
@@ -1882,13 +1977,22 @@ async fn run_serial_session(m: &VmManager, id: Uuid) -> Result<()> {
 
 /// [`run_serial_session`] over the daemon's `/v1/vms/{id}/serial` websocket.
 async fn run_remote_serial(r: &remote::Remote, id: Uuid) -> Result<()> {
+    run_remote_stream(
+        r,
+        &format!("/v1/vms/{id}/serial"),
+        &format!("{id} serial console"),
+    )
+    .await
+}
+
+async fn run_remote_stream(r: &remote::Remote, path: &str, what: &str) -> Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message;
-    let ws = r.websocket(&format!("/v1/vms/{id}/serial")).await?;
+    let ws = r.websocket(path).await?;
     let interactive = std::io::stdin().is_terminal();
     if interactive {
-        eprintln!("Connected to {id} serial console. Escape: Ctrl-]\r");
+        eprintln!("Connected to {what}. Escape: Ctrl-]\r");
     }
     let _raw = RawTerminal::enter()?;
     let (mut tx, mut rx) = ws.split();
@@ -2417,6 +2521,12 @@ async fn run_remote(
         Command::Get { id } | Command::Status { id: Some(id), .. } => {
             pretty(&r.call(Method::GET, &format!("/v1/vms/{id}"), None).await?)?
         }
+        Command::Vznet {
+            command: VznetCommand::Ls { json },
+        } => print_vznets(
+            &r.call(Method::GET, "/v1/vznets", None).await?["items"],
+            json,
+        )?,
         Command::Start { target } => bulk(target, "start").await?,
         Command::Stop { target } => bulk(target, "stop").await?,
         Command::Restart { target } => bulk(target, "restart").await?,
@@ -2553,14 +2663,27 @@ async fn run_remote(
                 size_gib,
                 path,
                 backing,
-            } => pretty(
-                &r.call(
-                    Method::POST,
-                    &format!("/v1/vms/{id}/disks"),
-                    Some(json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing})),
-                )
-                .await?,
-            )?,
+                kind,
+                url,
+                read_only,
+                caching,
+                sync,
+                controller,
+            } => {
+                let mut body =
+                    json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing});
+                let vz = json!({"kind": kind, "url": url, "read_only": read_only.then_some(true),
+                    "caching": caching, "sync": sync, "controller": controller});
+                for (k, v) in vz.as_object().into_iter().flatten() {
+                    if !v.is_null() {
+                        body[k] = v.clone();
+                    }
+                }
+                pretty(
+                    &r.call(Method::POST, &format!("/v1/vms/{id}/disks"), Some(body))
+                        .await?,
+                )?
+            }
             DiskCommand::Resize { id, name, size_gib } => pretty(
                 &r.call(
                     Method::PATCH,
@@ -2604,6 +2727,14 @@ async fn run_remote(
             }
         }
         Command::Serial { id } => run_remote_serial(r, id).await?,
+        Command::PortConnect { id, name } => {
+            run_remote_stream(
+                r,
+                &format!("/v1/vms/{id}/ports/{name}"),
+                &format!("{id} port {name}"),
+            )
+            .await?
+        }
         Command::Create { spec } => {
             let body: serde_json::Value = serde_json::from_slice(&std::fs::read(spec)?)?;
             pretty(&r.call(Method::POST, "/v1/vms", Some(body)).await?)?
@@ -2776,10 +2907,9 @@ async fn run_remote(
                     )
                     .await?,
                 )?,
-                SandboxCommand::Density => pretty(
-                    &r.call(Method::GET, "/v1/sandboxes/density", None)
-                        .await?,
-                )?,
+                SandboxCommand::Density => {
+                    pretty(&r.call(Method::GET, "/v1/sandboxes/density", None).await?)?
+                }
                 SandboxCommand::Run(args) => {
                     let code = sandbox_run::run(sandbox_run::Target::Remote(r), &args).await?;
                     std::process::exit(code);
@@ -2817,14 +2947,23 @@ async fn run_remote(
             let only = (!services.is_empty()).then_some(services.as_slice());
             stack::up(r, &f, &dir, only).await?;
         }
-        Command::Down { file, stack: name, keep, .. } => {
+        Command::Down {
+            file,
+            stack: name,
+            keep,
+            ..
+        } => {
             let f = stack_for(&file, name.as_deref())?;
-            let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
             stack::down(r, &name, f.as_ref(), keep).await?;
         }
-        Command::Ps { file, stack: name, .. } => {
+        Command::Ps {
+            file, stack: name, ..
+        } => {
             let f = stack_for(&file, name.as_deref())?;
-            let name = name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
+            let name =
+                name.unwrap_or_else(|| f.as_ref().map(|f| f.name.clone()).unwrap_or_default());
             for [svc, vm, status, ip] in stack::ps(r, &name).await? {
                 println!("{svc:<16} {vm:<28} {status:<10} {ip}");
             }
@@ -3277,6 +3416,13 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::json!({"ok": true, "deleted": tag}));
         }
         Command::Serial { id } => run_serial_session(&m, id).await?,
+        Command::PortConnect { id, name } => {
+            run_stream_session(
+                m.open_console_port(id, &name).await?,
+                &format!("{id} port {name}"),
+            )
+            .await?
+        }
         Command::VmTemplate { command } => match command {
             TemplateCommand::List => {
                 output::print_list(format, &m.list_vm_templates()?, output::TEMPLATE_COLUMNS)?
@@ -3370,7 +3516,27 @@ async fn main() -> Result<()> {
                 size_gib,
                 path,
                 backing,
+                kind,
+                url,
+                read_only,
+                caching,
+                sync,
+                controller,
             } => {
+                if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
+                    let disk: fluxvm_core::model::AppleDisk = serde_json::from_value(
+                        serde_json::json!({
+                            "path": path.unwrap_or_default(), "kind": kind.as_deref().unwrap_or("image"),
+                            "url": url, "read_only": read_only,
+                            "caching": caching.as_deref().unwrap_or("automatic"),
+                            "sync": sync.as_deref().unwrap_or("full"),
+                            "controller": controller.as_deref().unwrap_or("virtio"),
+                        }),
+                    )?;
+                    let info = m.attach_vz_disk(id, &name, disk, size_gib).await?;
+                    println!("{}", serde_json::to_string_pretty(&info)?);
+                    return Ok(());
+                }
                 let info = match (size_gib, path, backing) {
                     (_, Some(path), _) => m.attach_existing_vm_disk(id, &name, &path).await?,
                     (_, None, Some(backing)) => {
@@ -4467,9 +4633,14 @@ async fn main() -> Result<()> {
                 println!("{{\"deleted\":\"ok\"}}");
             }
         },
+        Command::Vznet {
+            command: VznetCommand::Ls { json },
+        } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::Oci { command } => {
             let out = match command {
-                OciCommand::Pull { image } => serde_json::to_value(m.oci_pull(&image).await?)?,
+                OciCommand::Pull { image, platform } => {
+                    serde_json::to_value(m.oci_pull(&image, platform.as_deref()).await?)?
+                }
                 OciCommand::Ls => serde_json::to_value(m.oci_list()?)?,
                 OciCommand::Rm { image } => serde_json::json!({"removed": m.oci_remove(&image)?}),
                 OciCommand::Prune => serde_json::to_value(m.oci_prune().await?)?,
@@ -6489,6 +6660,10 @@ mod tier2_cli_tests {
         assert!(matches!(
             cli(&["serial", &id]).unwrap().command,
             Command::Serial { .. }
+        ));
+        assert!(matches!(
+            cli(&["port-connect", &id, "agent"]).unwrap().command,
+            Command::PortConnect { name, .. } if name == "agent"
         ));
         assert!(matches!(
             cli(&["backup", &id, "--compress"]).unwrap().command,

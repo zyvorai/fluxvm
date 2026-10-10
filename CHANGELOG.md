@@ -2,6 +2,52 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: `vz` developer conveniences
+- **Named console ports**: `apple.console_ports` ([docs/macos.md](docs/macos.md#named-console-ports)) adds
+  `VZVirtioConsolePortConfiguration` ports. A Linux guest sees `/dev/virtio-ports/<name>`, and the runner bridges each port to a
+  unix socket. Connect with `fluxctl port-connect <vm> <name>` or the websocket `GET /v1/vms/{id}/ports/{name}`.
+- **Linux display size**: Linux guests now use `display_width` and `display_height` for their scanout instead of a fixed
+  1280x800. The defaults are the same as for macOS guests (2560x1600).
+- **Serial log rotation**: the runner moves `console.log` to `console.log.1` past 16 MiB, keeping one old file.
+
+### Added: `vz` storage options
+- **`apple.extra_disks`** ([docs/macos.md](docs/macos.md#extra-disks)) takes `kind` (`image`, `block` for a host device through
+  `VZDiskBlockDeviceStorageDeviceAttachment`, `nbd` for an NBD export through `VZNetworkBlockDeviceStorageDeviceAttachment`),
+  `caching` (`automatic`, `cached`, `uncached`), `sync` (`full`, `fsync`, `none`), `controller` (`virtio`, `nvme`, `usb`) and a
+  `name`. Combinations a kind cannot use are refused at create time.
+- **`fluxctl disk` / `/v1/vms/{id}/disks` work on `vz` VMs**: `ls`, `attach` (`--size-gib` makes a sparse image; `--path`,
+  `--url`, `--kind`, `--read-only`, `--caching`, `--sync`, `--controller`) and `detach`. Changes apply at the next start, and a USB
+  image disk is also hot-attached to a running guest.
+
+### Added: warm pool for container sandboxes
+- **`apple.oci_warm_slots`** and **`apple.oci_warm_sizes`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#warm-pool)) keep
+  pre-booted container VMs per size. Their init waits in the new `wait` mode with its DHCP lease. A matching sandbox gets its
+  rootfs hot-attached over USB (macOS 15) and its volumes swapped in with the new runner `share-set` command. The claim goes over
+  vsock, and init continues as on a cold boot. Any failure cold-boots instead.
+- `GET /v1/sandboxes/density` adds `oci_warm_slots_configured`, `oci_warm_slots_ready`, `oci_warm_slots_booting`,
+  `oci_warm_resident_mib`, `oci_warm_hits`, `oci_warm_misses` and `oci_warm_last_claim_ms`.
+- The OCI kernel fragment enables XHCI and USB mass storage. `scripts/oci-live-test.sh` checks a warm claim on macOS 15.
+
+### Added: x86-64 container images under Rosetta
+- **`oci.platform: "linux/amd64"`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#x86-64-images-rosetta)) pulls the amd64
+  variant and runs it under Rosetta for Linux. The VM gets the Rosetta share, and init registers it with `binfmt_misc` (flags `F`
+  and `C`) before the container starts; the kernel now has `CONFIG_BINFMT_MISC`. Without Rosetta, create fails with the
+  `softwareupdate --install-rosetta` hint. Cached rootfs entries record their `architecture`.
+- Available as `fluxctl sandbox run --platform`, `fluxctl oci pull --platform`, `POST /v1/oci/images` `platform`, a stack
+  service's `platform` (also imported from compose), and MCP `oci_platform`.
+
+### Added: private networks between `vz` guests
+- **`apple.networks`** ([docs/macos.md](docs/macos.md#private-networks-between-guests)) adds a network card per private network
+  (`VZFileHandleNetworkDeviceAttachment`), backed by a new `fluxvm-vz-switch` process per network. It forwards by registered MAC,
+  drops spoofed source MACs and unknown unicast, and exits when idle. Each network gets a `10.89.N.0/24`; addresses and MACs are
+  assigned at create time under one lock and kept in the VM record. A network belongs to one tenant.
+- **Container sandboxes**: `oci.networks` and `oci.hosts`. Init configures the card by MAC without DHCP, and works with `offline`.
+  **Full VMs** get a systemd-networkd unit and a `fluxvm-vznet.service` fallback through cloud-init.
+- **Stacks**: `network = "private"` puts every service on `stack-<name>` with fixed addresses and direct `/etc/hosts` names, with no
+  gateway relay and no unique-port rule.
+- `fluxctl vznet ls` and `GET /v1/vznets`. The macOS package and Homebrew formula install `fluxvm-vz-switch`, and
+  `scripts/oci-live-test.sh` checks two sandboxes on one network.
+
 ### Added: container sandboxes on a Mac, one VM per container
 - **OCI images as sandboxes on `vz`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md)): `POST /v1/sandboxes` with
   `"oci": {"image", "command"?, "entrypoint"?, "env"?, "workdir"?, "user"?, "read_only_root"?, "exit_policy"?}` boots the image

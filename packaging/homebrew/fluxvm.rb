@@ -14,7 +14,7 @@ class Fluxvm < Formula
 
   def install
     # The runner must sit next to fluxctl: that is where the daemon looks for it first.
-    bin.install "bin/fluxctl", "bin/fluxvm-vz-runner"
+    bin.install "bin/fluxctl", "bin/fluxvm-vz-runner", "bin/fluxvm-vz-switch"
     pkgshare.install "config.example.toml"
   end
 
@@ -38,6 +38,7 @@ class Fluxvm < Formula
   test do
     assert_match version.to_s, shell_output("#{bin}/fluxctl --version")
     assert_predicate bin/"fluxvm-vz-runner", :executable?
+    assert_predicate bin/"fluxvm-vz-switch", :executable?
     assert_match "com.apple.security.virtualization",
                  shell_output("codesign -d --entitlements - #{bin}/fluxvm-vz-runner 2>&1")
   end

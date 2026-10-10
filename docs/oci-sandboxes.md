@@ -52,6 +52,7 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 | Field | Default | Meaning |
 |---|---|---|
 | `image` | (required) | `alpine:3.22`, `ghcr.io/org/app:1.2`, `nginx@sha256:…`. Docker Hub names are expanded (`alpine` → `docker.io/library/alpine:latest`). |
+| `platform` | `linux/arm64` | `linux/amd64` runs an x86-64 image under Rosetta. See [x86-64 images](#x86-64-images-rosetta). |
 | `command` | the image's `Cmd` | Replaces `Cmd`. |
 | `entrypoint` | the image's `Entrypoint` | Replaces `Entrypoint` and drops the image's `Cmd`, as `docker run --entrypoint` does. |
 | `env` | `[]` | `KEY=value`, added to or replacing the image's `Env`. Stored in the VM record and returned by `GET /v1/vms/{id}`. |
@@ -67,7 +68,7 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 | `max_restarts` | unlimited | Stop restarting after this many restarts. |
 | `healthcheck` | none | `{"command": [argv…], "interval_seconds": 30, "timeout_seconds": 5, "retries": 3, "start_period_seconds": 0}`. |
 
-`fluxctl sandbox run IMAGE [--profile P] [--offline | --allow-host H…] [-e K=V…] [--secret-env NAME…] [-w DIR] [-u USER] [--entrypoint "…"]
+`fluxctl sandbox run IMAGE [--platform linux/amd64] [--profile P] [--offline | --allow-host H…] [-e K=V…] [--secret-env NAME…] [-w DIR] [-u USER] [--entrypoint "…"]
 [--writable-root] [-p HOST:CONTAINER…] [-v NAME:/path[:ro]…] [--restart POLICY] [--max-restarts N] [--health-cmd "…"
 [--health-interval S]] [--rm] [--name N] -- CMD…` creates the sandbox with `exit_policy: poweroff`, prints its console as it goes
 and exits with the container's exit code. It works locally and with `--server`.
@@ -79,6 +80,38 @@ to the container's port. The runner learns the container's address from init, wh
 after its DHCP lease. Host ports must be 1024 or higher (the daemon does not run as root), each host port may be published once,
 and a host port another VM on this Mac already publishes is refused. Only TCP. Ports, `expose` and `gateway_hosts` need the
 network card, so they cannot be combined with `offline` or `allow_hosts`.
+
+### x86-64 images (Rosetta)
+
+`"platform": "linux/amd64"` (`fluxctl sandbox run --platform linux/amd64`, `fluxctl oci pull --platform linux/amd64`, `platform` in
+a stack file or a compose service, MCP `oci_platform`) pulls the image's amd64 variant and runs it under Rosetta for Linux:
+
+```bash
+fluxctl sandbox run --platform linux/amd64 alpine:3.22 --rm -- uname -m   # x86_64
+```
+
+- The VM gets the runner's Rosetta share (`apple.rosetta`). Before the container starts, init mounts it at `/fluxvm/rosetta` (seen
+  as `/.fluxvm/rosetta` in the container) and registers it with `binfmt_misc` for x86-64 ELF files, with the `F` flag (the
+  interpreter is opened at registration, so it works in any mount namespace) and `C` (credentials from the binary). The kernel and
+  init are still arm64; only the image's binaries are translated.
+- The amd64 and arm64 variants of one tag have different manifest digests, so each gets its own cached rootfs, and
+  `fluxctl oci ls` shows each entry's `architecture`.
+- Rosetta must be installed on the Mac: `softwareupdate --install-rosetta --agree-to-license`. Without it, create fails with that
+  hint before anything is pulled.
+- Translated code is slower than native, and Rosetta's ahead-of-time cache (`rosettad`) is not set up yet, so each process translates
+  on first run. Images that need AVX-512 or other x86 instructions Rosetta does not translate will not run.
+
+### Private networks
+
+`networks: [{"name", "address"?}]` joins private networks shared only with the other guests on them (see "Private networks between
+guests" in [macos.md](macos.md)); init gives the card its `10.89.N.H/24` address by MAC. `hosts: [{"ip", "names"}]` adds
+`/etc/hosts` lines, for example the other members' names. Works with `offline` (the sandbox then reaches only the other guests on
+its networks), but not with `allow_hosts`.
+
+```bash
+curl -s -X POST localhost:7788/v1/sandboxes -d '{"offline": true, "oci": {"image": "redis:7-alpine", "networks": [{"name": "lab"}]}}'
+fluxctl vznet ls
+```
 
 ### Volumes
 
@@ -108,7 +141,7 @@ They do not inherit the image's `Env` or the proxy settings.
 
 ## How it boots
 
-1. **Pull** (host, pure Rust): resolve the reference, pick `linux/arm64` from an index, and download the manifest, config and layers
+1. **Pull** (host, pure Rust): resolve the reference, pick `linux/arm64` (or `linux/amd64`) from an index, and download the manifest, config and layers
    into `state_dir/oci/blobs/sha256/`. Every blob is checked against its digest. Anonymous token auth is used by default;
    `[[apple.oci_registry_credentials]]` adds per-registry credentials.
 2. **Build the rootfs once per manifest digest**: a short-lived *builder VM* boots the same kernel and initramfs in `unpack` mode.
@@ -139,6 +172,45 @@ They do not inherit the image's `Env` or the proxy settings.
 
 `GET /v1/sandboxes/{id}/logs?lines=N` returns `{status, oci, exit_code, init_error, restarts, health, log}`. The markers are
 searched in the whole log; `log` is only the tail.
+
+## Warm pool
+
+With `apple.oci_warm_slots` above 0, the daemon keeps that many container VMs per size in `apple.oci_warm_sizes` booted and
+waiting. A matching sandbox takes one instead of cold-booting:
+
+```toml
+[apple]
+oci_warm_slots = 2
+oci_warm_sizes = ["1x512", "2x1024"]   # VCPUSxMEMORY_MIB
+```
+
+- **A slot** is a running VM whose init is in `wait` mode. The kernel has booted, the network card holds its DHCP lease, and init
+  listens on vsock port 1026 and prints `FLUXVM-WARM-READY`. Its root disk is a 1 MiB placeholder, it has a USB controller, and its
+  four volume shares (`fluxvm-vol0..3`) point at an empty directory. Slots are labelled `fluxvm.oci-warm=<size>` and have the
+  Rosetta share when Rosetta is installed.
+- **Claiming** happens when a create matches a ready slot's size:
+  1. The daemon clones the image's rootfs into the slot's workspace and writes the sandbox's boot config, under a new file name,
+     and its secrets to the meta share.
+  2. It points each volume share at the volume (`share-set` on the runner's control socket).
+  3. It hot-attaches the rootfs as USB mass storage.
+  4. It sends `{"config", "disk": "/dev/sda"}` over vsock. Init mounts the disk and continues exactly as on a cold boot.
+  5. The VM record is rewritten as an ordinary sandbox whose disk is the rootfs, so a restart cold-boots it normally.
+- **Eligible sandboxes**: the NAT network with no `ports` or `expose`, no `allow_hosts`, no `offline`, no private `networks`,
+  at most four volumes, and the exact size. `linux/amd64` needs a slot built with Rosetta. Anything else cold-boots, and so does a
+  create when no slot is ready.
+- **Failures**: if a claim fails (for example a kernel built without USB storage), the slot is deleted, the sandbox cold-boots,
+  and the pool is not refilled for 10 minutes.
+- **Refill**: after each claim or miss, and on the AutoPause scan (`sandbox.autopause_scan_secs`). Slots that stopped, for
+  example after a daemon restart, are replaced.
+- **Needs** macOS 15 for USB hot-attach, and a kernel with the USB options in `oci-vz.config.fragment` (built by
+  `scripts/build-oci-boot.sh` from this release on).
+
+`GET /v1/sandboxes/density` reports `oci_warm_slots_ready`, `oci_warm_slots_booting`, `oci_warm_resident_mib`, `oci_warm_hits`,
+`oci_warm_misses` and `oci_warm_last_claim_ms` (picking the slot to the container's agent answering). Each waiting slot holds its
+memory, so size the pool to what you create in bursts.
+
+Hibernating a claimed sandbox saves a VM whose root is on USB. If the saved state does not restore, waking falls back to a cold
+boot from the same rootfs.
 
 ## Security defaults
 
@@ -180,6 +252,8 @@ oci_kernel = "oci-kernel"            # catalog name, absolute path, or a file in
 oci_initrd = "oci-initrd"
 oci_cmdline = "console=hvc0 loglevel=4 panic=-1"
 oci_builder_memory_mib = 1024
+oci_warm_slots = 0                   # pre-booted VMs per size; see "Warm pool"
+oci_warm_sizes = ["1x512"]
 
 [[apple.oci_registry_credentials]]
 registry = "ghcr.io"
@@ -202,7 +276,8 @@ cached rootfs path.
 file. The `oci-boot` CI workflow on `ubuntu-24.04-arm` builds and uploads them.
 
 - **Kernel**: Linux 6.12 built from `crates/fluxvm-hypervisor/guest/oci-vz.config.fragment`, starting from `allnoconfig`. It
-  includes virtio-pci, vsock, virtio-fs, ext4, overlayfs, cgroups, namespaces, seccomp and the PL031 clock, with no modules.
+  includes virtio-pci, vsock, virtio-fs, ext4, overlayfs, cgroups, namespaces, seccomp, the PL031 clock, `binfmt_misc` and
+  XHCI with USB mass storage (for the warm pool), with no modules.
   The script fails if any requested `=y` option does not survive Kconfig.
 - **Initramfs**: zstd-compressed, containing:
   - static musl builds of `fluxvm-oci-init` (as `/init`) and `fluxvm-guest-agent`;
@@ -214,15 +289,15 @@ at them.
 
 ## Limits
 
-- `linux/arm64` images only; there is no x86 emulation for containers.
+- `linux/arm64` and `linux/amd64` (under Rosetta) only; no 32-bit or other architectures.
 - No image building (`docker build`); pull images built elsewhere.
-- No GPUs or Rosetta. Only TCP ports can be published, on the Mac's `127.0.0.1`; a server is also reachable through
+- No GPUs. Only TCP ports can be published, on the Mac's `127.0.0.1`; a server is also reachable through
   `/v1/sandboxes/{id}/http/{port}/…`, as for other sandboxes.
 - Volumes are named directories managed by FluxVM; there are no bind mounts of arbitrary Mac paths into a container.
 - The first use of an image pulls it and builds its rootfs (seconds to minutes, depending on its size). Later sandboxes from the
   same digest only clone it.
-- There is no warm pool for container sandboxes yet; each one cold-boots. Hibernation uses the generic `vz` path and has not been
-  tested on container sandboxes.
+- The warm pool serves only plain NAT sandboxes of a configured size (see [Warm pool](#warm-pool)); the rest cold-boot.
+  Hibernation uses the generic `vz` path and has not been tested on container sandboxes.
 - A process's output beyond 10,000 lines between two polls is skipped by `fluxctl sandbox run`. The full console stays in the VM's
   `console.log` until the sandbox is deleted.
 - Exec does not inherit the image's environment (see above).

@@ -29,10 +29,11 @@ mod linux {
 
     use anyhow::{Context, Result, bail};
     use fluxvm_oci_init::config::{
-        BLOBS_TAG, BootConfig, CONFIG_FILE, DEFAULT_PATH, EGRESS_PROXY_PORT, EGRESS_PROXY_URL,
-        EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, INIT_ERR, InitConfig, META_TAG, NetworkMode,
-        POWEROFF_VIA_INIT_ENV, ProcessSpec, SECRETS_FILE, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR,
-        UNPACK_OK, UnpackConfig, valid_env_name, valid_host_name, with_secrets,
+        BLOBS_TAG, BootConfig, CONFIG_FILE, Claim, DEFAULT_PATH, EGRESS_PROXY_PORT,
+        EGRESS_PROXY_URL, EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, HostEntry, INIT_ERR,
+        InitConfig, META_TAG, NetworkMode, POWEROFF_VIA_INIT_ENV, PrivateNetwork, ProcessSpec,
+        ROSETTA_DIR, ROSETTA_TAG, SECRETS_FILE, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR, UNPACK_OK,
+        UnpackConfig, WARM_READY, WaitConfig, valid_env_name, valid_host_name, with_secrets,
     };
     use fluxvm_oci_init::supervise::{
         HealthCheck, HealthEvent, HealthState, RestartPolicy, STOP_GRACE, health_line,
@@ -69,7 +70,7 @@ mod linux {
             std::process::exit(1);
         }
         install_signal_handlers();
-        let cfg = early_mounts().and_then(|()| read_config());
+        let cfg = early_mounts().and_then(|()| read_config(CONFIG_FILE));
         match cfg {
             Ok(InitConfig::Unpack(u)) => {
                 match unpack_mode(&u) {
@@ -79,7 +80,13 @@ mod linux {
                 poweroff();
             }
             Ok(InitConfig::Boot(b)) => {
-                if let Err(e) = boot_mode(&b) {
+                if let Err(e) = boot_mode(&b, DISK, None) {
+                    say(&format!("{INIT_ERR} {}", one_line(&e)));
+                    poweroff();
+                }
+            }
+            Ok(InitConfig::Wait(w)) => {
+                if let Err(e) = wait_mode(&w) {
                     say(&format!("{INIT_ERR} {}", one_line(&e)));
                     poweroff();
                 }
@@ -190,9 +197,10 @@ mod linux {
         )
     }
 
-    /// `config.json`, with the secrets file (when the host wrote one) merged into the process environment.
-    fn read_config() -> Result<InitConfig> {
-        let path = format!("{META_DIR}/{CONFIG_FILE}");
+    /// A config file from the meta share, with the secrets file (when the host wrote one) merged into the process
+    /// environment.
+    fn read_config(name: &str) -> Result<InitConfig> {
+        let path = format!("{META_DIR}/{name}");
         let raw = fs::read(&path).with_context(|| format!("reading {path}"))?;
         let mut cfg: InitConfig =
             serde_json::from_slice(&raw).with_context(|| format!("parsing {path}"))?;
@@ -309,9 +317,154 @@ mod linux {
         writeln!(f, "{gw}\t{}", names.join(" ")).with_context(|| format!("writing {path}"))
     }
 
-    fn boot_mode(b: &BootConfig) -> Result<()> {
+    /// Mounts the Rosetta share and registers it for x86-64 ELF binaries (kernel-wide, so it also covers the container).
+    fn register_rosetta() -> Result<()> {
+        mount_new(
+            ROSETTA_TAG,
+            ROSETTA_DIR,
+            "virtiofs",
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+            None,
+        )?;
+        let binfmt = "/proc/sys/fs/binfmt_misc";
+        if !Path::new(&format!("{binfmt}/register")).exists() {
+            mount(
+                "binfmt_misc",
+                binfmt,
+                Some("binfmt_misc"),
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                None,
+            )?;
+        }
+        fs::write(
+            format!("{binfmt}/register"),
+            fluxvm_oci_init::config::rosetta_binfmt(),
+        )
+        .context("registering Rosetta with binfmt_misc")?;
+        say("fluxvm-oci-init: rosetta registered for x86-64 binaries");
+        Ok(())
+    }
+
+    fn add_hosts(entries: &[HostEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let path = format!("{NEWROOT}/etc/hosts");
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {path}"))?;
+        for e in entries {
+            if let Some(bad) = e.names.iter().find(|n| !valid_host_name(n)) {
+                bail!("host {bad:?} is not a valid host name");
+            }
+            if !e.names.is_empty() {
+                writeln!(f, "{}\t{}", e.ip, e.names.join(" "))
+                    .with_context(|| format!("writing {path}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Bring up a waiting warm-pool VM: loopback and the lease now, then block until the host claims it.
+    fn wait_mode(w: &WaitConfig) -> Result<()> {
+        if let Err(e) = link_up("lo") {
+            say(&format!("fluxvm-oci-init: loopback: {}", one_line(&e)));
+        }
+        let lease = match w.network {
+            NetworkMode::Dhcp => match configure_dhcp(&[]) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    say(&format!("fluxvm-oci-init: network: {}", one_line(&e)));
+                    None
+                }
+            },
+            NetworkMode::None => None,
+        };
+        let listener = vsock_listen(w.port)?;
+        say(WARM_READY);
+        loop {
+            let fd = unsafe {
+                libc::accept4(
+                    listener.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    libc::SOCK_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e).context("accepting a warm-pool claim");
+            }
+            let mut conn = unsafe { fs::File::from_raw_fd(fd) };
+            match read_claim(&conn) {
+                Ok((b, disk)) => {
+                    let _ = conn.write_all(b"ok\n");
+                    drop(conn);
+                    drop(listener);
+                    return boot_mode(&b, &disk, lease);
+                }
+                Err(e) => {
+                    let _ = writeln!(conn, "error {}", one_line(&e));
+                }
+            }
+        }
+    }
+
+    fn read_claim(conn: &fs::File) -> Result<(BootConfig, String)> {
+        use std::io::{BufRead, Read};
+        let mut line = String::new();
+        io::BufReader::new(conn.take(4096))
+            .read_line(&mut line)
+            .context("reading the claim")?;
+        let claim: Claim = serde_json::from_str(line.trim()).context("parsing the claim")?;
+        claim.validate()?;
+        let InitConfig::Boot(b) = read_config(&claim.config)? else {
+            bail!("{} is not a boot config", claim.config);
+        };
+        // The host attaches the disk before it claims; udev-less devtmpfs still takes a moment to show it.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !Path::new(&claim.disk).exists() {
+            if Instant::now() > deadline {
+                bail!("{} did not appear", claim.disk);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Ok((b, claim.disk))
+    }
+
+    fn vsock_listen(port: u32) -> Result<fs::File> {
+        unsafe {
+            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return Err(io::Error::last_os_error()).context("socket(AF_VSOCK)");
+            }
+            let file = fs::File::from_raw_fd(fd);
+            let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+            addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+            addr.svm_cid = libc::VMADDR_CID_ANY;
+            addr.svm_port = port;
+            if libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_vm as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
+            ) != 0
+                || libc::listen(fd, 4) != 0
+            {
+                return Err(io::Error::last_os_error())
+                    .with_context(|| format!("listening on vsock port {port}"));
+            }
+            Ok(file)
+        }
+    }
+
+    /// `disk` is the root block device; `lease` is a DHCP lease a warm-pool VM already holds.
+    fn boot_mode(b: &BootConfig, disk: &str, lease: Option<dhcp::Reply>) -> Result<()> {
         if b.read_only_root {
-            mount_new(DISK, LOWER, "ext4", libc::MS_RDONLY, None)?;
+            mount_new(disk, LOWER, "ext4", libc::MS_RDONLY, None)?;
             mount_new("tmpfs", UPPER, "tmpfs", 0, Some("mode=0755"))?;
             fs::create_dir_all(format!("{UPPER}/u"))?;
             fs::create_dir_all(format!("{UPPER}/w"))?;
@@ -325,7 +478,7 @@ mod linux {
                 )),
             )?;
         } else {
-            mount_new(DISK, NEWROOT, "ext4", 0, None)?;
+            mount_new(disk, NEWROOT, "ext4", 0, None)?;
         }
 
         // Everything that must exist in the root is made now, before it turns read-only.
@@ -362,8 +515,26 @@ mod linux {
         if let Err(e) = link_up("lo") {
             say(&format!("fluxvm-oci-init: loopback: {}", one_line(&e)));
         }
+        // Before the tools directory is bound into the root, so the share shows up there too.
+        if b.rosetta {
+            register_rosetta().context("setting up Rosetta for linux/amd64")?;
+        }
+        let private: Vec<[u8; 6]> = b
+            .networks
+            .iter()
+            .filter_map(|n| n.parse().ok().map(|(mac, _, _)| mac))
+            .collect();
+        if !b.networks.is_empty()
+            && let Err(e) = configure_private(&b.networks)
+        {
+            say(&format!(
+                "fluxvm-oci-init: private network: {}",
+                one_line(&e)
+            ));
+        }
+        add_hosts(&b.hosts)?;
         if b.network == NetworkMode::Dhcp {
-            match configure_dhcp() {
+            match lease.map_or_else(|| configure_dhcp(&private), Ok) {
                 Ok(lease) => {
                     let mut servers = lease.dns.clone();
                     if servers.is_empty() {
@@ -897,26 +1068,54 @@ mod linux {
         )
     }
 
-    fn first_nic() -> Result<(String, [u8; 6])> {
+    fn nics() -> Result<Vec<(String, [u8; 6])>> {
         let mut names: Vec<String> = fs::read_dir("/sys/class/net")?
             .filter_map(|e| e.ok()?.file_name().into_string().ok())
             .filter(|n| n != "lo")
             .collect();
         names.sort();
-        let name = names.into_iter().next().context("no network interface")?;
-        let raw = fs::read_to_string(format!("/sys/class/net/{name}/address"))?;
-        let bytes: Vec<u8> = raw
-            .trim()
-            .split(':')
-            .map(|h| u8::from_str_radix(h, 16))
-            .collect::<Result<_, _>>()
-            .context("parsing MAC")?;
-        let mac: [u8; 6] = bytes.try_into().ok().context("MAC is not 6 bytes")?;
-        Ok((name, mac))
+        let mut out = Vec::new();
+        for name in names {
+            let raw = fs::read_to_string(format!("/sys/class/net/{name}/address"))?;
+            let bytes: Vec<u8> = raw
+                .trim()
+                .split(':')
+                .map(|h| u8::from_str_radix(h, 16))
+                .collect::<Result<_, _>>()
+                .context("parsing MAC")?;
+            let mac: [u8; 6] = bytes.try_into().ok().context("MAC is not 6 bytes")?;
+            out.push((name, mac));
+        }
+        Ok(out)
     }
 
-    fn configure_dhcp() -> Result<dhcp::Reply> {
-        let (name, mac) = first_nic()?;
+    /// The first card that is not on a private network.
+    fn first_nic(private: &[[u8; 6]]) -> Result<(String, [u8; 6])> {
+        nics()?
+            .into_iter()
+            .find(|(_, mac)| !private.contains(mac))
+            .context("no network interface")
+    }
+
+    fn configure_private(nets: &[PrivateNetwork]) -> Result<()> {
+        let cards = nics()?;
+        for n in nets {
+            let (mac, ip, len) = n.parse()?;
+            let Some((name, _)) = cards.iter().find(|(_, m)| *m == mac) else {
+                bail!("network {}: no card with MAC {}", n.name, n.mac);
+            };
+            link_up(name)?;
+            set_address(name, ip, u32::from(len), None)?;
+            say(&format!(
+                "fluxvm-oci-init: {name} {ip}/{len} (network {})",
+                n.name
+            ));
+        }
+        Ok(())
+    }
+
+    fn configure_dhcp(private: &[[u8; 6]]) -> Result<dhcp::Reply> {
+        let (name, mac) = first_nic(private)?;
         link_up(&name)?;
         let sock =
             UdpSocket::bind(("0.0.0.0", dhcp::CLIENT_PORT)).context("binding DHCP client port")?;
@@ -981,10 +1180,19 @@ mod linux {
     }
 
     fn apply_lease(name: &str, lease: &dhcp::Reply) -> Result<()> {
+        set_address(name, lease.address, lease.prefix_len(), lease.router)
+    }
+
+    fn set_address(
+        name: &str,
+        address: Ipv4Addr,
+        bits: u32,
+        router: Option<Ipv4Addr>,
+    ) -> Result<()> {
         let s = ctl_socket()?;
         let mut a = IfReqAddr {
             name: ifname(name)?,
-            addr: sin(lease.address),
+            addr: sin(address),
             _pad: [0; 8],
         };
         ioctl(
@@ -993,7 +1201,6 @@ mod linux {
             &mut a,
             "SIOCSIFADDR",
         )?;
-        let bits = lease.prefix_len();
         let mask = if bits == 0 {
             0
         } else {
@@ -1006,7 +1213,7 @@ mod linux {
             &mut a,
             "SIOCSIFNETMASK",
         )?;
-        if let Some(gw) = lease.router {
+        if let Some(gw) = router {
             let mut rt: libc::rtentry = unsafe { std::mem::zeroed() };
             rt.rt_dst = sa(Ipv4Addr::UNSPECIFIED);
             rt.rt_genmask = sa(Ipv4Addr::UNSPECIFIED);

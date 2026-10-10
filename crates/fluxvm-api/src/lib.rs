@@ -589,6 +589,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
         .route("/v1/vms/{id}/console", get(agent_console))
         .route("/v1/vms/{id}/serial", get(serial_console))
+        .route("/v1/vms/{id}/ports/{name}", get(console_port))
         .route("/v1/vms/{id}/qga/ping", post(qga_ping))
         .route(
             "/v1/vms/{id}/qga/network-interfaces",
@@ -659,6 +660,7 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/images/catalog/clean", post(clean_catalog))
         .route("/v1/images/catalog", get(list_catalog))
         .route("/v1/oci/images", get(list_oci_images).post(pull_oci_image))
+        .route("/v1/vznets", get(list_vznets))
         .route("/v1/oci/images/{what}", delete(remove_oci_image))
         .route("/v1/oci/prune", post(prune_oci_images))
         .route("/v1/pools", post(create_pool).get(list_pools))
@@ -2537,6 +2539,10 @@ struct DiskSizeRequest {
 /// Exactly one of `size_gib` (create a new qcow2), `path` (attach an
 /// existing image file or block device) or `backing` (a new qcow2 overlay
 /// on a shared image).
+///
+/// On a `vz` VM the disk goes into `apple.extra_disks` (see `AppleDisk`): `size_gib` makes a new sparse image, `path` is an
+/// image file or (with `kind: block`) a device, `url` an NBD export; `kind`, `read_only`, `caching`, `sync` and
+/// `controller` apply. It takes effect at the next start, or at once for a USB image disk.
 #[derive(Deserialize)]
 struct AttachDiskRequest {
     name: String,
@@ -2546,6 +2552,24 @@ struct AttachDiskRequest {
     path: Option<std::path::PathBuf>,
     #[serde(default)]
     backing: Option<std::path::PathBuf>,
+    #[serde(flatten)]
+    vz: VzDiskFields,
+}
+
+#[derive(Deserialize, Default)]
+struct VzDiskFields {
+    #[serde(default)]
+    kind: Option<fluxvm_core::model::AppleDiskKind>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    read_only: Option<bool>,
+    #[serde(default)]
+    caching: Option<fluxvm_core::model::AppleDiskCaching>,
+    #[serde(default)]
+    sync: Option<fluxvm_core::model::AppleDiskSync>,
+    #[serde(default)]
+    controller: Option<fluxvm_core::model::AppleDiskController>,
 }
 
 async fn attach_vm_disk(
@@ -2555,6 +2579,40 @@ async fn attach_vm_disk(
     Json(req): Json<AttachDiskRequest>,
 ) -> ApiResult<impl IntoResponse> {
     require_admin(role)?;
+    if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
+        if req.backing.is_some() {
+            return Err(anyhow::anyhow!(
+                "backing overlays are qcow2 (QEMU); a vz disk takes size_gib, path or url"
+            )
+            .into());
+        }
+        let v = req.vz;
+        let disk = fluxvm_core::model::AppleDisk {
+            name: None,
+            path: req.path.unwrap_or_default(),
+            read_only: v.read_only.unwrap_or(false),
+            kind: v.kind.unwrap_or_default(),
+            url: v.url,
+            caching: v.caching.unwrap_or_default(),
+            sync: v.sync.unwrap_or_default(),
+            controller: v.controller.unwrap_or_default(),
+        };
+        let info = m.attach_vz_disk(id, &req.name, disk, req.size_gib).await?;
+        return Ok((StatusCode::CREATED, Json(info)));
+    }
+    let v = &req.vz;
+    if v.kind.is_some()
+        || v.url.is_some()
+        || v.read_only.is_some()
+        || v.caching.is_some()
+        || v.sync.is_some()
+        || v.controller.is_some()
+    {
+        return Err(anyhow::anyhow!(
+            "kind, url, read_only, caching, sync and controller are vz disk options"
+        )
+        .into());
+    }
     let info = match (req.size_gib, req.path, req.backing) {
         (Some(size), None, None) => m.attach_vm_disk(id, &req.name, size).await?,
         (None, Some(path), None) => m.attach_existing_vm_disk(id, &req.name, &path).await?,
@@ -3988,6 +4046,19 @@ async fn serial_console(
     Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
 }
 
+/// Raw bytes to and from a `vz` VM's named console port (`apple.console_ports`). Binary and text frames are both written
+/// verbatim; a new connection replaces the previous one.
+async fn console_port(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path((id, name)): Path<(Uuid, String)>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let stream = m.open_console_port(id, &name).await?;
+    Ok(ws.on_upgrade(move |socket| relay_serial(socket, stream)))
+}
+
 /// Bytes of existing console output replayed before following new output.
 const SERIAL_LOG_REPLAY_BYTES: u64 = 64 * 1024;
 
@@ -4224,6 +4295,15 @@ async fn clean_catalog(
     Ok(Json(json!({"removed": removed})))
 }
 
+/// `GET /v1/vznets`: private VM-to-VM networks on this Mac, with their members.
+async fn list_vznets(
+    State(m): State<Arc<VmManager>>,
+    token_tenant: Option<Extension<TokenTenant>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let tenant = token_tenant.map(|Extension(TokenTenant(t))| t);
+    Ok(Json(json!({"items": m.vznets(tenant.as_deref()).await})))
+}
+
 async fn list_oci_images(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(json!({"items": m.oci_list()?})))
 }
@@ -4231,6 +4311,9 @@ async fn list_oci_images(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serd
 #[derive(Deserialize)]
 struct OciPullRequest {
     image: String,
+    /// `linux/arm64` (default) or `linux/amd64`.
+    #[serde(default)]
+    platform: Option<String>,
 }
 
 async fn pull_oci_image(
@@ -4239,7 +4322,9 @@ async fn pull_oci_image(
     Json(req): Json<OciPullRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    Ok(Json(json!(m.oci_pull(&req.image).await?)))
+    Ok(Json(json!(
+        m.oci_pull(&req.image, req.platform.as_deref()).await?
+    )))
 }
 
 async fn remove_oci_image(

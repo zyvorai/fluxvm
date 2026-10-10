@@ -32,7 +32,7 @@ jobs:
       - run: brew install hivex
       - name: Build the buildable subset (Linux-only crates are not built on macOS)
         working-directory: fluxvm
-        run: cargo build -p fluxctl -p fluxvm-apple
+        run: cargo build -p fluxctl -p fluxvm-apple -p fluxvm-vz-switch
       - name: Unit tests that do not need KVM or root
         working-directory: fluxvm
         run: |
@@ -43,5 +43,6 @@ jobs:
           cargo test -p fluxvm-storage --lib
           cargo test -p fluxvm-guest-protocol --lib
           cargo test -p fluxvm-apple
+          cargo test -p fluxvm-vz-switch
       # Booting a real VM needs Virtualization.framework, which hosted runners do not provide (no nested virtualization).
       # Run scripts/macos-live-test.sh on a physical Mac instead.

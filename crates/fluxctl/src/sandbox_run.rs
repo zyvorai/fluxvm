@@ -20,8 +20,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, clap::Args)]
 pub struct RunArgs {
-    /// linux/arm64 image, e.g. `alpine:3.22`.
+    /// Image, e.g. `alpine:3.22`.
     pub image: String,
+    /// `linux/arm64` (default) or `linux/amd64`, which runs under Rosetta.
+    #[arg(long)]
+    pub platform: Option<String>,
     #[arg(long)]
     pub name: Option<String>,
     /// Sandbox size: tiny (1 vCPU, 512 MiB), small or standard; see docs/agent-density.md.
@@ -94,6 +97,9 @@ impl RunArgs {
         });
         if !self.command.is_empty() {
             oci["command"] = json!(self.command);
+        }
+        if let Some(p) = &self.platform {
+            oci["platform"] = json!(p);
         }
         if let Some(ep) = &self.entrypoint {
             oci["entrypoint"] = json!(ep.split_whitespace().collect::<Vec<_>>());
@@ -325,6 +331,7 @@ mod tests {
     fn run_requests_poweroff_and_a_read_only_root() {
         let args = RunArgs {
             image: "alpine:3.22".into(),
+            platform: Some("linux/amd64".into()),
             name: Some("t".into()),
             profile: None,
             vcpus: None,
@@ -351,6 +358,7 @@ mod tests {
         let oci = req.oci.unwrap();
         assert_eq!(oci.command.unwrap(), ["echo", "hi"]);
         assert_eq!(oci.entrypoint.unwrap(), ["/bin/sh", "-c"]);
+        assert_eq!(oci.platform.as_deref(), Some("linux/amd64"));
         assert!(oci.read_only_root);
         assert_eq!(
             serde_json::to_value(oci.exit_policy).unwrap(),

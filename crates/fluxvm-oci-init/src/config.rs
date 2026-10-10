@@ -65,6 +65,68 @@ pub const DEFAULT_USER: &str = "65534:65534";
 pub enum InitConfig {
     Boot(BootConfig),
     Unpack(UnpackConfig),
+    /// A warm-pool VM: boot, take a lease, then wait on vsock for a [`Claim`] naming the real boot config and the
+    /// root disk the host hot-attaches over USB.
+    Wait(WaitConfig),
+}
+
+/// Default vsock port a waiting init accepts its claim on.
+pub const WARM_PORT: u32 = 1026;
+/// Printed once a waiting init is ready to be claimed.
+pub const WARM_READY: &str = "FLUXVM-WARM-READY";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitConfig {
+    #[serde(default = "default_warm_port")]
+    pub port: u32,
+    /// The NIC is configured before the claim, so a claimed container starts with its address.
+    #[serde(default)]
+    pub network: NetworkMode,
+}
+
+fn default_warm_port() -> u32 {
+    WARM_PORT
+}
+
+/// The one JSON line the host sends a waiting init; init answers `ok` or `error <reason>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Claim {
+    /// A file in the meta share holding a `boot` [`InitConfig`] (a new name, so no cached copy is read).
+    pub config: String,
+    /// The hot-attached root disk, e.g. `/dev/sda`.
+    pub disk: String,
+}
+
+impl Claim {
+    pub fn validate(&self) -> Result<()> {
+        let c = &self.config;
+        if c.is_empty()
+            || c.len() > 64
+            || c.contains('/')
+            || c.starts_with('.')
+            || !c.ends_with(".json")
+        {
+            bail!("claim config {c:?} must be a .json file name in the meta share");
+        }
+        let dev = self.disk.strip_prefix("/dev/").unwrap_or("");
+        if dev.is_empty()
+            || dev.len() > 16
+            || !dev
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        {
+            bail!(
+                "claim disk {:?} must be a /dev/<name> block device",
+                self.disk
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Whether the console shows a waiting init ready for a claim.
+pub fn warm_ready_in_log(log: &str) -> bool {
+    log.lines().any(|l| l.trim_end() == WARM_READY)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +158,71 @@ pub struct BootConfig {
     /// Names that resolve to the DHCP router (the Mac's NAT gateway) in the container's `/etc/hosts`.
     #[serde(default)]
     pub gateway_hosts: Vec<String>,
+    /// Private VM-to-VM networks: the card with `mac` gets `address` statically (no DHCP, no route).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub networks: Vec<PrivateNetwork>,
+    /// Extra `/etc/hosts` lines, e.g. the other containers of a stack on a private network.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<HostEntry>,
+    /// Register the Rosetta share (virtiofs tag [`ROSETTA_TAG`]) for x86-64 binaries, so a `linux/amd64` image runs.
+    #[serde(default)]
+    pub rosetta: bool,
+}
+
+/// The runner's Rosetta share tag (`apple.rosetta`).
+pub const ROSETTA_TAG: &str = "rosetta";
+/// Where init mounts it; visible in the container as `/.fluxvm/rosetta`.
+pub const ROSETTA_DIR: &str = "/fluxvm/rosetta";
+
+/// The `binfmt_misc` registration for Rosetta: x86-64 ELF executables, with `F` (the interpreter is opened now, so it need
+/// not exist in the container) and `C` (credentials from the binary, so setuid works as on x86).
+pub fn rosetta_binfmt() -> String {
+    format!(
+        r":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:{ROSETTA_DIR}/rosetta:CF"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateNetwork {
+    pub name: String,
+    pub mac: String,
+    /// `a.b.c.d/len`.
+    pub address: String,
+}
+
+impl PrivateNetwork {
+    pub fn parse(&self) -> anyhow::Result<([u8; 6], std::net::Ipv4Addr, u8)> {
+        let bytes: Vec<u8> = self
+            .mac
+            .split(':')
+            .map(|h| u8::from_str_radix(h, 16))
+            .collect::<Result<_, _>>()
+            .map_err(|_| anyhow::anyhow!("network {}: bad MAC {:?}", self.name, self.mac))?;
+        let mac: [u8; 6] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("network {}: bad MAC {:?}", self.name, self.mac))?;
+        let (ip, len) = self
+            .address
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("network {}: address needs a /prefix", self.name))?;
+        let ip: std::net::Ipv4Addr = ip.parse().map_err(|_| {
+            anyhow::anyhow!("network {}: bad address {:?}", self.name, self.address)
+        })?;
+        let len: u8 = len
+            .parse()
+            .ok()
+            .filter(|l| (1..=30).contains(l))
+            .ok_or_else(|| {
+                anyhow::anyhow!("network {}: bad prefix {:?}", self.name, self.address)
+            })?;
+        Ok((mac, ip, len))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostEntry {
+    pub ip: std::net::Ipv4Addr,
+    pub names: Vec<String>,
 }
 
 /// An RFC 1123 host name: dot-separated labels of 1-63 letters, digits and inner hyphens, 253 characters at most.
@@ -342,6 +469,92 @@ mod tests {
         for bad in ["", "1A", "A-B", "A=B", "A B"] {
             assert!(!valid_env_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn claims_name_a_meta_file_and_a_block_device() {
+        let ok = Claim {
+            config: "claim-1a2b.json".into(),
+            disk: "/dev/sda".into(),
+        };
+        ok.validate().unwrap();
+        for (config, disk) in [
+            ("../config.json", "/dev/sda"),
+            ("a/b.json", "/dev/sda"),
+            (".hidden.json", "/dev/sda"),
+            ("claim.txt", "/dev/sda"),
+            ("claim.json", "/dev/../etc"),
+            ("claim.json", "/tmp/sda"),
+            ("claim.json", "/dev/"),
+        ] {
+            let c = Claim {
+                config: config.into(),
+                disk: disk.into(),
+            };
+            assert!(c.validate().is_err(), "{config} {disk}");
+        }
+        let w: InitConfig = serde_json::from_str(r#"{"mode": "wait"}"#).unwrap();
+        assert_eq!(
+            w,
+            InitConfig::Wait(WaitConfig {
+                port: WARM_PORT,
+                network: NetworkMode::default()
+            })
+        );
+        assert!(warm_ready_in_log("boot\nFLUXVM-WARM-READY\n"));
+        assert!(!warm_ready_in_log("FLUXVM-WARM-READY-ish"));
+    }
+
+    #[test]
+    fn the_rosetta_registration_matches_x86_64_elf_with_fix_binary() {
+        let r = rosetta_binfmt();
+        let fields: Vec<&str> = r.split(':').collect();
+        // :name:type:offset:magic:mask:interpreter:flags
+        assert_eq!(fields.len(), 8, "{r}");
+        assert_eq!((fields[1], fields[2]), ("rosetta", "M"));
+        assert!(fields[4].starts_with(r"\x7fELF\x02") && fields[4].ends_with(r"\x3e\x00"));
+        let bytes = |s: &str| s.len() - 3 * s.matches(r"\x").count();
+        assert_eq!(bytes(fields[4]), 20);
+        assert_eq!(bytes(fields[5]), 20, "magic and mask are the same length");
+        assert_eq!(fields[6], "/fluxvm/rosetta/rosetta");
+        assert_eq!(fields[7], "CF");
+    }
+
+    #[test]
+    fn private_networks_parse_their_mac_and_address() {
+        let n = PrivateNetwork {
+            name: "shop".into(),
+            mac: "02:aa:bb:cc:dd:0e".into(),
+            address: "10.89.3.7/24".into(),
+        };
+        assert_eq!(
+            n.parse().unwrap(),
+            (
+                [2, 0xaa, 0xbb, 0xcc, 0xdd, 0x0e],
+                std::net::Ipv4Addr::new(10, 89, 3, 7),
+                24
+            )
+        );
+        for (mac, address) in [
+            ("02:aa:bb:cc:dd", "10.89.3.7/24"),
+            ("02:aa:bb:cc:dd:0e", "10.89.3.7"),
+            ("02:aa:bb:cc:dd:0e", "10.89.3.7/0"),
+            ("02:aa:bb:cc:dd:0e", "host/24"),
+        ] {
+            let bad = PrivateNetwork {
+                mac: mac.into(),
+                address: address.into(),
+                ..n.clone()
+            };
+            assert!(bad.parse().is_err(), "{mac} {address}");
+        }
+        // Older host configs without the new fields still load.
+        let b: BootConfig = serde_json::from_value(serde_json::json!({
+            "hostname": "h",
+            "process": {"argv": ["/bin/sh"], "env": [], "cwd": "/", "user": "0:0"}
+        }))
+        .unwrap();
+        assert!(b.networks.is_empty() && b.hosts.is_empty());
     }
 
     #[test]

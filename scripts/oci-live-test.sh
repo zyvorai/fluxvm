@@ -20,7 +20,7 @@ trap cleanup EXIT
 ok() { echo "ok   $*"; }; bad() { echo "FAIL $*"; [[ -f "$T/daemon.log" ]] && tail -5 "$T/daemon.log"; exit 1; }
 json() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
-cargo build -p fluxctl -j 4 2>&1 | tail -1
+cargo build -p fluxctl -p fluxvm-vz-switch -j 4 2>&1 | tail -1
 FLUXCTL=./target/debug/fluxctl
 cat > "$T/fluxvm.toml" <<EOT
 listen = "127.0.0.1:$PORT"
@@ -30,6 +30,9 @@ run_dir = "/tmp/fluxvm-run-oci-live"
 [apple]
 oci_kernel = "$BOOT/oci-kernel"
 oci_initrd = "$BOOT/oci-initrd"
+# A size no other check uses, so they still measure cold starts.
+oci_warm_slots = 1
+oci_warm_sizes = ["1x256"]
 EOT
 $FLUXCTL --config "$T/fluxvm.toml" serve > "$T/daemon.log" 2>&1 & DPID=$!
 for _ in $(seq 1 30); do curl -fs "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1 && break; sleep 1; done
@@ -92,12 +95,45 @@ P='http_proxy=http://127.0.0.1:3128'
 [[ "$(out "$AID" "$P wget -q -T 10 -O /dev/null http://www.debian.org && echo reached || echo blocked")" == blocked ]] && ok "allow-list: another host is refused" || bad "a host not on the list was reachable"
 [[ "$(out "$AID" 'wget -q -T 5 -O /dev/null http://example.com && echo reached || echo blocked')" == blocked ]] && ok "allow-list: going around the proxy reaches nothing" || bad "reached the network without the proxy"
 
+# Private network: two offline sandboxes reach each other on 10.89.N.0/24 and nothing else.
+N1="$(create "{\"name\":\"net-a\",\"offline\":true,\"ttl_seconds\":600,\"oci\":{\"image\":\"$ALPINE\",\"user\":\"0:0\",\"command\":[\"sleep\",\"3600\"],\"networks\":[{\"name\":\"live\"}]}}")" || bad "create net-a"
+N1ID="$(json 'd["id"]' <<<"$N1")"
+N1IP="$(curl -fsS "$B/$N1ID" | json 'd["request"]["apple"]["networks"][0]["address"].split("/")[0]')"
+N2="$(create "{\"name\":\"net-b\",\"offline\":true,\"ttl_seconds\":600,\"oci\":{\"image\":\"$ALPINE\",\"user\":\"0:0\",\"command\":[\"sleep\",\"3600\"],\"networks\":[{\"name\":\"live\"}],\"hosts\":[{\"ip\":\"$N1IP\",\"names\":[\"peer\"]}]}}")" || bad "create net-b"
+N2ID="$(json 'd["id"]' <<<"$N2")"
+[[ "$(out "$N2ID" 'ping -c 2 -W 2 peer >/dev/null && echo reached || echo blocked')" == reached ]] && ok "private network: net-b pings net-a ($N1IP) by name" || bad "private network: peer unreachable; $(out "$N2ID" 'ip addr 2>&1 | tail -8')"
+[[ "$(out "$N2ID" 'wget -q -T 4 -O /dev/null http://example.com && echo reached || echo blocked')" == blocked ]] && ok "private network: still no internet" || bad "an offline sandbox on a private network reached the internet"
+pgrep -f "fluxvm-vz-switch --socket" >/dev/null && ok "the network's switch is running" || bad "no switch process"
+
+# linux/amd64 under Rosetta (skipped when Rosetta is not installed).
+if [[ -e /Library/Apple/usr/libexec/oah/libRosettaRuntime ]]; then
+  ARCH="$($FLUXCTL --server "$SERVER" sandbox run --platform linux/amd64 "$ALPINE" --rm -- uname -m 2>/dev/null | tr -d '\r' | tail -1)"
+  [[ "$ARCH" == x86_64 ]] && ok "linux/amd64: the image's binaries run under Rosetta (uname -m = x86_64)" || bad "amd64 sandbox reported '$ARCH'"
+else
+  echo "skip linux/amd64: Rosetta is not installed"
+fi
+
+# Warm pool: a 1x256 sandbox is served from a pre-booted slot (USB hot-attach needs macOS 15).
+WID=""
+if (( $(sw_vers -productVersion | cut -d. -f1) >= 15 )); then
+  for _ in $(seq 1 60); do [[ "$(curl -fs "$SB/density" | json 'd["oci_warm_slots_ready"]')" -ge 1 ]] && break; sleep 2; done
+  START_MS=$(python3 -c 'import time;print(int(time.time()*1000))')
+  W="$(create "{\"name\":\"warm\",\"vcpus\":1,\"memory_mib\":256,\"ttl_seconds\":600,\"oci\":{\"image\":\"$ALPINE\",\"command\":[\"sleep\",\"3600\"]}}")" || bad "create warm"
+  WARM_MS=$(( $(python3 -c 'import time;print(int(time.time()*1000))') - START_MS ))
+  WID="$(json 'd["id"]' <<<"$W")"
+  D="$(curl -fsS "$SB/density")"
+  [[ "$(json 'd["oci_warm_hits"]' <<<"$D")" == 1 ]] && ok "warm pool: claimed a pre-booted slot in ${WARM_MS} ms (cold ${COLD_MS} ms; claim-to-agent $(json 'd["oci_warm_last_claim_ms"]' <<<"$D") ms)" || bad "warm pool missed: $D"
+  [[ "$(out "$WID" 'echo warm-ok; touch / 2>&1 | grep -c Read-only')" == $'warm-ok\n1' ]] && ok "warm pool: exec works and the root is read-only" || bad "warm sandbox exec: $(out "$WID" 'mount | head -3')"
+else
+  echo "skip warm pool: USB hot-attach needs macOS 15"
+fi
+
 # TTL: a short-lived sandbox goes away on its own.
 TT="$(create "{\"name\":\"ttl\",\"ttl_seconds\":20,\"oci\":{\"image\":\"$ALPINE\",\"command\":[\"sleep\",\"3600\"]}}")" || bad "create ttl"
 TID="$(json 'd["id"]' <<<"$TT")"
 for _ in $(seq 1 30); do curl -fs "$B/$TID" >/dev/null 2>&1 || break; sleep 3; done
 curl -fs "$B/$TID" >/dev/null 2>&1 && bad "sandbox still present after its TTL" || ok "TTL: the sandbox was removed"
 
-for id in "$KID" "$DID" "$OID" "$AID"; do curl -fs -X DELETE "$B/$id" >/dev/null || true; done
+for id in "$KID" "$DID" "$OID" "$AID" "$N1ID" "$N2ID" $WID; do curl -fs -X DELETE "$B/$id" >/dev/null || true; done
 curl -fsS "$SERVER/v1/oci/images" | json 'len(d.get("items",d))' > "$T/n"; ok "cached images: $(cat "$T/n")"
 echo "all container sandbox checks passed (cold start ${COLD_MS} ms)"

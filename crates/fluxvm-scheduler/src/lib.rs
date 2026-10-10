@@ -36,6 +36,7 @@ pub mod journal;
 pub mod live_migration;
 mod migration_relay;
 pub mod oci_images;
+mod oci_pool;
 pub mod oci_sandbox;
 pub mod procbox_sandbox;
 mod recovery;
@@ -46,6 +47,7 @@ pub mod shared_disk;
 pub mod speculate;
 pub mod templates;
 pub mod vm_restore;
+mod vz_disks;
 pub mod vz_guest;
 pub use events::{EventFilter, VmEvent};
 pub use sandbox::{SandboxCreateRequest, TemplateInfo};
@@ -779,6 +781,8 @@ pub struct VmManager {
     sandbox_volume_lock: AsyncMutex<()>,
     /// Serialises GPU selection with the VM create that records it, so no GPU is handed out twice.
     sandbox_gpu_lock: AsyncMutex<()>,
+    /// Serialises private-network address assignment with the VM record write that reserves it.
+    vznet_lock: AsyncMutex<()>,
     /// Last activity timestamps for AutoPause / wake-on-request (sandbox id → UTC).
     activity: AsyncMutex<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>,
     /// A scheduled-snapshot pass can outlast a reaper tick (savevm is slow).
@@ -814,6 +818,7 @@ impl VmManager {
             template_lock: AsyncMutex::new(()),
             sandbox_volume_lock: AsyncMutex::new(()),
             sandbox_gpu_lock: AsyncMutex::new(()),
+            vznet_lock: AsyncMutex::new(()),
             activity: AsyncMutex::new(HashMap::new()),
             scheduled_snapshots_busy: std::sync::atomic::AtomicBool::new(false),
         }))
@@ -905,9 +910,18 @@ impl VmManager {
         fluxvm_image::catalog::clean_downloads(&self.cfg)
     }
 
-    /// Pull an OCI image and build its `vz` sandbox rootfs (cached by manifest digest).
-    pub async fn oci_pull(&self, reference: &str) -> Result<oci_images::OciImageEntry> {
-        let image = oci_images::pull(&self.cfg, reference).await?;
+    /// Pull an OCI image (`platform`: `linux/arm64` by default, or `linux/amd64`) and build its `vz` sandbox rootfs (cached
+    /// by manifest digest).
+    pub async fn oci_pull(
+        &self,
+        reference: &str,
+        platform: Option<&str>,
+    ) -> Result<oci_images::OciImageEntry> {
+        let arch = platform
+            .map(fluxvm_image::oci_registry::Arch::parse)
+            .transpose()?
+            .unwrap_or_default();
+        let image = oci_images::pull(&self.cfg, reference, arch).await?;
         oci_images::ensure_rootfs(&self.cfg, &image).await?;
         oci_images::find(&self.cfg, &image.manifest_digest)
     }
@@ -2222,6 +2236,45 @@ impl VmManager {
         if needs_cid && req.backend == BackendKind::Vz && !oci_init {
             vz_agent_token_via_cloud_init(&mut req);
         }
+        // Private-network addresses are decided and reserved (by the record's insert) under one lock.
+        let vznet_guard = match req.apple.as_mut() {
+            Some(apple) if req.backend == BackendKind::Vz && !apple.networks.is_empty() => {
+                let guard = self.vznet_lock.lock().await;
+                let records = self.store.list().await;
+                // A network belongs to the tenant of the VMs already on it.
+                for net in &apple.networks {
+                    if records.iter().any(|v| {
+                        v.request.tenant != req.tenant
+                            && v.request
+                                .apple
+                                .as_ref()
+                                .is_some_and(|a| a.networks.iter().any(|n| n.name == net.name))
+                    }) {
+                        anyhow::bail!("network {} is in use by another tenant", net.name);
+                    }
+                }
+                let existing: Vec<_> = records
+                    .into_iter()
+                    .filter_map(|v| v.request.apple)
+                    .flat_map(|a| a.networks)
+                    .collect();
+                fluxvm_apple::vznet::assign(&mut apple.networks, &existing)?;
+                if !oci_init {
+                    let (files, runcmd) = fluxvm_apple::vznet::cloud_init(&apple.networks);
+                    let ci = req.cloud_init.get_or_insert_with(Default::default);
+                    for (path, content, mode) in files {
+                        ci.write_files.push(fluxvm_core::model::CloudInitFile {
+                            path,
+                            content,
+                            permissions: Some(mode),
+                        });
+                    }
+                    ci.runcmd.extend(runcmd);
+                }
+                Some(guard)
+            }
+            _ => None,
+        };
 
         let placeholder = VmRecord {
             id,
@@ -2264,6 +2317,7 @@ impl VmManager {
             .store
             .insert_with_cid(placeholder, needs_cid, FIRST_GUEST_CID)
             .await?;
+        drop(vznet_guard);
         let guest_cid = record.guest_cid;
 
         if req.qga.as_ref().is_some_and(|q| q.enabled)
@@ -2538,6 +2592,25 @@ impl VmManager {
             ],
         );
         Ok(record)
+    }
+
+    /// The private `vz` networks in use, optionally only those with members of `tenant`.
+    pub async fn vznets(&self, tenant: Option<&str>) -> Vec<fluxvm_apple::vznet::NetworkSummary> {
+        let vms: Vec<VmRecord> = self
+            .store
+            .list()
+            .await
+            .into_iter()
+            .filter(|v| tenant.is_none() || v.request.tenant.as_deref() == tenant)
+            .collect();
+        fluxvm_apple::vznet::summarize(vms.iter().filter_map(|v| {
+            let nets = v.request.apple.as_ref()?.networks.as_slice();
+            let status = serde_json::to_value(v.status)
+                .ok()
+                .and_then(|s| s.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            Some((v.id, v.name.as_str(), status, nets))
+        }))
     }
 
     pub async fn list(&self) -> Vec<VmRecord> {
@@ -3863,6 +3936,29 @@ impl VmManager {
     }
 
     /// Connect to a running QEMU VM's serial socket.
+    /// Connects to `vz` VM `id`'s console port `name` (`apple.console_ports`); the runner serves one client at a time.
+    pub async fn open_console_port(&self, id: Uuid, name: &str) -> Result<tokio::net::UnixStream> {
+        let vm = self.get(id).await?;
+        if vm.backend != BackendKind::Vz {
+            bail!("console ports are a vz feature");
+        }
+        if !vm
+            .request
+            .apple
+            .as_ref()
+            .is_some_and(|a| a.console_ports.iter().any(|p| p == name))
+        {
+            bail!("VM {id} has no console port {name:?}");
+        }
+        if !matches!(vm.status, VmStatus::Running | VmStatus::Paused) {
+            bail!("VM {id} is not running (status={:?})", vm.status);
+        }
+        let path = fluxvm_apple::console_port_socket(id, name)?;
+        tokio::net::UnixStream::connect(&path)
+            .await
+            .with_context(|| format!("connecting {}", path.display()))
+    }
+
     pub async fn open_serial(&self, id: Uuid) -> Result<tokio::net::UnixStream> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu {
@@ -3885,12 +3981,15 @@ impl VmManager {
     async fn qemu_vm_for_disks(&self, id: Uuid) -> Result<VmRecord> {
         let vm = self.get(id).await?;
         if vm.backend != BackendKind::Qemu {
-            bail!("disk operations are supported for the QEMU backend only");
+            bail!("disk operations are supported for the QEMU and vz backends only");
         }
         Ok(vm)
     }
 
     pub async fn list_vm_disks(&self, id: Uuid) -> Result<Vec<fluxvm_core::model::VmDiskInfo>> {
+        if self.get(id).await?.backend == BackendKind::Vz {
+            return self.list_vz_disks(id).await;
+        }
         let vm = self.qemu_vm_for_disks(id).await?;
         fluxvm_qemu::disks::list(&self.cfg, &vm).await
     }
@@ -4010,6 +4109,9 @@ impl VmManager {
     }
 
     pub async fn detach_vm_disk(&self, id: Uuid, name: &str) -> Result<()> {
+        if self.get(id).await?.backend == BackendKind::Vz {
+            return self.detach_vz_disk(id, name).await;
+        }
         let vm = self.qemu_vm_for_disks(id).await?;
         fluxvm_qemu::disks::detach(&vm, name).await?;
         audit_event(

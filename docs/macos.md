@@ -190,7 +190,8 @@ allows two macOS VMs at a time per Mac.
 ```
 
 - **Display:** `display_width` 800 to 5120 (default 2560), `display_height` 600 to 2880 (default 1600), `display_ppi` 72 to 300 (default 220).
-  With `window: true` the guest follows the window as it is resized.
+  With `window: true` the guest follows the window as it is resized. Linux guests use `display_width` and `display_height` for
+  their virtio-gpu scanout too (they used a fixed 1280x800 before).
 - **Audio:** output to the host's default device is on by default. `microphone` is off by default; turning it on makes macOS ask for
   microphone access.
 - **Shared folders on macOS guests** (macOS 13+ host): all entries share one automount device, so they appear under
@@ -198,6 +199,85 @@ allows two macOS VMs at a time per Mac.
 - **Linux only:** `rosetta: true` adds a Rosetta share (the guest still mounts it and registers binfmt); `nested_virtualization: true`
   needs macOS 15 and an M3 or later, and fails clearly otherwise. Both are refused for macOS guests.
 - **USB:** `usb_controller: true` adds an XHCI controller (macOS 15+). Choosing and attaching a physical device is not built.
+- **Console log:** a Linux guest's serial console goes to the VM's `console.log`. Past 16 MiB the runner moves it to
+  `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the disk. `GET
+  /v1/vms/{id}/serial` and `sandbox logs` read the current file only.
+
+### Named console ports
+
+`apple.console_ports` (Linux guests, up to 8) adds virtio console ports for a byte stream between host and guest that needs no
+network and no agent, for example a debug shell, a log pipe or a custom control channel:
+
+```json
+"apple": {"console_ports": ["agent", "debug"]}
+```
+
+- **Guest:** each port appears as `/dev/virtio-ports/<name>` (udev creates the link; without udev, find the name in
+  `/sys/class/virtio-ports/vport*/name`).
+- **Host:** the runner bridges each port to a unix socket, `/tmp/fluxvm-<uid>/<vm id>.port-<name>` (mode 0600). One client at a
+  time; a new client replaces the old one. Guest output while no client is connected is dropped.
+- **Clients:** `fluxctl port-connect <vm> <name>` connects stdin and stdout (Ctrl-] detaches), locally or with `--server`. Over
+  REST, the websocket `GET /v1/vms/{id}/ports/{name}` (admin) carries raw bytes both ways.
+- **Names:** 1-32 of `a-z`, `0-9`, `.`, `-` and `_`, starting with a letter or digit. Ports are fixed when the VM starts.
+
+## Private networks between guests
+
+On the Mac's NAT, Virtualization.framework keeps guests apart: each reaches only the Mac. `apple.networks` adds a second network card
+on a private layer-2 network that only the guests joining it share (Linux guests):
+
+```json
+{"backend": "vz", "apple": {"networks": [{"name": "shop"}, {"name": "lab", "address": "10.89.7.20/24"}]}}
+```
+
+- **Addresses:** each network name gets its own `10.89.N.0/24`. A guest gets the lowest free host address (`.2` and up) and a random
+  locally administered MAC, unless it asks for `address` or `mac`. Both are kept in the VM record, so they survive restarts. A
+  requested address must be in the network's subnet and free. At most 4 networks per guest; names are `a-z`, `0-9` and `-`.
+- **In the guest:** container sandboxes (`oci.networks`) get the address from init, matched by MAC, with no route and no DHCP on that
+  card. Full VMs get it through cloud-init: a systemd-networkd unit per card, and a `fluxvm-vznet.service` oneshot that sets the
+  same address with `ip` on guests without networkd.
+- **The switch:** each network is one `fluxvm-vz-switch` process (installed next to `fluxctl`, or `FLUXVM_VZ_SWITCH`), started on
+  demand and listening on `/tmp/fluxvm-<uid>/vznet-<name>.sock` (mode 0600). The runner hands it one end of a datagram socket pair
+  (`VZFileHandleNetworkDeviceAttachment`). The switch forwards by the MAC each port registered with, drops frames with any other
+  source MAC, floods broadcast and multicast, and drops unicast to unknown MACs. It exits 30 s after the last guest leaves; a runner
+  that loses its switch starts it again and reconnects.
+- **Isolation:** guests on different networks, or not on one, cannot reach each other. A network belongs to the tenant of the VMs
+  already on it. `networks` works with `network.mode = "none"` (an isolated cluster) but not with `egress_allow`, since another guest
+  could relay around the proxy.
+- **Listing:** `fluxctl vznet ls` and `GET /v1/vznets` show each network's subnet, members and whether its switch is running.
+
+## Extra disks
+
+A Linux guest takes extra disks in `apple.extra_disks`, or with `fluxctl disk attach` (`POST /v1/vms/{id}/disks`):
+
+```json
+"apple": {"extra_disks": [
+  {"name": "scratch", "path": "/Volumes/Fast/scratch.raw", "caching": "uncached", "sync": "none", "controller": "nvme"},
+  {"name": "raw", "kind": "block", "path": "/dev/disk4", "read_only": true},
+  {"name": "shared", "kind": "nbd", "url": "nbd://10.0.0.5:10809/vol1"}
+]}
+```
+
+| Field | Values |
+|-------|--------|
+| `kind` | `image` (a raw file, default), `block` (a host device, `/dev/diskN`), `nbd` (an NBD export in `url`) |
+| `caching` | `automatic` (default), `cached`, `uncached`; image files only |
+| `sync` | `full` (default), `fsync` (image files only), `none` (fastest; data can be lost if the host crashes) |
+| `controller` | `virtio` (default, `/dev/vdX`), `nvme` (`/dev/nvmeXn1`), `usb` (`/dev/sdX`) |
+
+- `block`, `nbd` and `nvme` need macOS 14. A block device must be readable (and, unless `read_only`, writable) by the user the
+  daemon runs as; FluxVM never changes device permissions. Image files and devices go through the same
+  `policy.allowed_image_dirs` check as QEMU data disks.
+- NBD URLs are `nbd://host:port/export`, `nbds://…` (TLS), or `nbd+unix:///export?socket=/path`. Virtualization.framework
+  reconnects when the server drops; a missing server fails the VM's start.
+- Virtualization.framework fixes a VM's devices when it starts, so `fluxctl disk attach` and `detach` apply at the next start. The
+  exception is a USB image disk on a running guest, which is also hot-attached at once (macOS 15).
+
+```bash
+fluxctl disk attach web scratch --size-gib 20 --controller nvme --caching uncached   # a new sparse image in the VM's workspace
+fluxctl disk attach web shared --url nbd://10.0.0.5:10809/vol1 --read-only
+fluxctl disk ls web
+fluxctl disk detach web scratch
+```
 
 ## Mac Studio options
 
@@ -222,6 +302,9 @@ These compile against the macOS 27 SDK and are validated at admission, but have 
 - **USB disk hotplug:** with `usb_controller: true`, the runner's control socket accepts
   `{"cmd":"usb-attach","path":"/path/disk.img","read_only":false}` (returns a `uuid`) and `{"cmd":"usb-detach","uuid":"…"}` (macOS 15+).
   Physical accessories stay user-mediated through Apple's Accessory Access consent.
+- **Share swap:** `{"cmd":"share-set","tag":"fluxvm-vol0","path":"/dir","read_only":false}` points a running guest's virtiofs share at
+  another directory. The container sandbox warm pool ([oci-sandboxes.md](oci-sandboxes.md#warm-pool)) uses it with USB hot-attach
+  to hand a pre-booted VM its rootfs and volumes.
 - **ASIF overlay (macOS 27+):** `asif_overlay: true` keeps the base disk read-only and writes to a sparse `disk-overlay.asif`, which
   snapshots include.
 - **Unattended first boot (macOS 27 guests):** `provision_full_name`, `provision_username`, `provision_password_file` (a one-shot file the
@@ -252,7 +335,9 @@ process starts.
 - Restoring a snapshot (warm starts, the warm sandbox pool, speculate) needs an unlocked login session; each path falls back to a cold boot
   where it can.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
-- Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`), take `linux/arm64` images only, and
+- Private networks (`apple.networks`) are IPv4 /24s with static addresses: no DHCP, DNS or routing between networks. The switch runs
+  in user space, so it is slower than the NAT card. They have not been run on hardware yet.
+- Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`), take `linux/arm64` images (or `linux/amd64` under Rosetta), and
   have not been run on hardware yet (`scripts/oci-live-test.sh`).
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.
 - Memory is not enforced by FluxVM here; the Mac's own memory pressure applies. Plan for one or two small VMs on a 16 GB Mac.

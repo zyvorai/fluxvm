@@ -44,8 +44,11 @@ GET    /v1/vms/{uuid}/disks
 POST   /v1/vms/{uuid}/disks              # {"name": "data", "size_gib": 10}, {"name": "pvc", "path": "/dev/rbd0"} or {"name": "disk1", "backing": "/var/lib/fluxvm/images/imported/web01/disk1.raw"} (qcow2 overlay)
 PATCH  /v1/vms/{uuid}/disks/{name}       # {"size_gib": 20}; name "root" = boot disk
 DELETE /v1/vms/{uuid}/disks/{name}       # deletes the file (or overlay); only unlinks a path-attached disk
+                                         # vz: also "kind" (image|block|nbd), "url", "read_only", "caching", "sync", "controller"
+                                         # (virtio|nvme|usb); applies at the next start (a USB image disk at once); see macos.md#extra-disks
 POST   /v1/vms/{uuid}/cdroms/{name}/eject # remove install media (live when running); the empty drive stays
 GET    /v1/vms/{uuid}/serial             # websocket, raw serial bytes (QEMU)
+GET    /v1/vms/{uuid}/ports/{name}       # websocket, raw bytes to and from a vz console port (apple.console_ports; admin)
 POST   /v1/vms/{uuid}/stop
 POST   /v1/vms/{uuid}/pause
 POST   /v1/vms/{uuid}/resume
@@ -91,9 +94,10 @@ POST   /v1/images/catalog/{name}/export
 POST   /v1/images/catalog/{name}/read-only
 POST   /v1/images/catalog/clean
 GET    /v1/oci/images                    # cached OCI rootfs images for vz sandboxes; see oci-sandboxes.md
-POST   /v1/oci/images                    # {"image": "alpine:3.22"}; admin; pull and build the rootfs
+POST   /v1/oci/images                    # {"image": "alpine:3.22", "platform"?: "linux/amd64"}; admin; pull and build the rootfs
 DELETE /v1/oci/images/{digest|reference} # admin
 POST   /v1/oci/prune                     # admin; drop images no sandbox was started from, and unused blobs
+GET    /v1/vznets                        # private vz networks (apple.networks): subnet, members, switch_running; see macos.md
 POST   /v1/pools
 GET    /v1/pools
 GET    /v1/pools/{name}
