@@ -50,6 +50,8 @@ pub struct Service {
     pub env: Vec<String>,
     /// Container services: `no` (default), `on-failure` or `always`.
     pub restart: Option<String>,
+    /// Container services: `linux/arm64` (default) or `linux/amd64`, which runs under Rosetta.
+    pub platform: Option<String>,
     /// Environment variables whose values come from the shell running `fluxctl up`, never from this file. A container
     /// gets them in its process environment (write-only, see oci-sandboxes.md); a VM gets `~/.config/fluxvm/secrets.env`
     /// (mode 0600), which `after_up` sources. Only the names count towards "the definition changed".
@@ -279,6 +281,7 @@ fn check_kind(name: &str, svc: &Service) -> Result<()> {
                 (svc.entrypoint.is_some(), "entrypoint"),
                 (!svc.env.is_empty(), "env"),
                 (svc.restart.is_some(), "restart"),
+                (svc.platform.is_some(), "platform"),
             ],
             "a VM service (set container = \"IMAGE\" for a container)",
         )
@@ -296,6 +299,10 @@ fn check_kind(name: &str, svc: &Service) -> Result<()> {
         }
     }
     if svc.container.is_some() {
+        if let Some(p) = &svc.platform {
+            fluxvm_image::oci_registry::Arch::parse(p)
+                .with_context(|| format!("service {name}"))?;
+        }
         for p in &svc.ports {
             fluxvm_scheduler::oci_sandbox::parse_port(p)
                 .with_context(|| format!("service {name}"))?;
@@ -483,6 +490,7 @@ pub fn container_spec(f: &StackFile, name: &str) -> Result<Value> {
         ("command", json!(svc.command)),
         ("entrypoint", json!(svc.entrypoint)),
         ("restart", json!(svc.restart)),
+        ("platform", json!(svc.platform)),
     ] {
         if !v.is_null() {
             oci[k] = v;

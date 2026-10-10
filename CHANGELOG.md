@@ -2,6 +2,14 @@
 
 ## 0.4.0 (unreleased)
 
+### Added: x86-64 container images under Rosetta
+- **`oci.platform: "linux/amd64"`** ([docs/oci-sandboxes.md](docs/oci-sandboxes.md#x86-64-images-rosetta)) pulls the amd64
+  variant and runs it under Rosetta for Linux. The VM gets the Rosetta share, and init registers it with `binfmt_misc` (flags `F`
+  and `C`) before the container starts; the kernel now has `CONFIG_BINFMT_MISC`. Without Rosetta, create fails with the
+  `softwareupdate --install-rosetta` hint. Cached rootfs entries record their `architecture`.
+- Available as `fluxctl sandbox run --platform`, `fluxctl oci pull --platform`, `POST /v1/oci/images` `platform`, a stack
+  service's `platform` (also imported from compose), and MCP `oci_platform`.
+
 ### Added: private networks between `vz` guests
 - **`apple.networks`** ([docs/macos.md](docs/macos.md#private-networks-between-guests)) adds a network card per private network
   (`VZFileHandleNetworkDeviceAttachment`), backed by a new `fluxvm-vz-switch` process per network. It forwards by registered MAC,

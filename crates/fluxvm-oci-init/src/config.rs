@@ -102,6 +102,22 @@ pub struct BootConfig {
     /// Extra `/etc/hosts` lines, e.g. the other containers of a stack on a private network.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hosts: Vec<HostEntry>,
+    /// Register the Rosetta share (virtiofs tag [`ROSETTA_TAG`]) for x86-64 binaries, so a `linux/amd64` image runs.
+    #[serde(default)]
+    pub rosetta: bool,
+}
+
+/// The runner's Rosetta share tag (`apple.rosetta`).
+pub const ROSETTA_TAG: &str = "rosetta";
+/// Where init mounts it; visible in the container as `/.fluxvm/rosetta`.
+pub const ROSETTA_DIR: &str = "/fluxvm/rosetta";
+
+/// The `binfmt_misc` registration for Rosetta: x86-64 ELF executables, with `F` (the interpreter is opened now, so it need
+/// not exist in the container) and `C` (credentials from the binary, so setuid works as on x86).
+pub fn rosetta_binfmt() -> String {
+    format!(
+        r":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:{ROSETTA_DIR}/rosetta:CF"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,6 +407,21 @@ mod tests {
         for bad in ["", "1A", "A-B", "A=B", "A B"] {
             assert!(!valid_env_name(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_rosetta_registration_matches_x86_64_elf_with_fix_binary() {
+        let r = rosetta_binfmt();
+        let fields: Vec<&str> = r.split(':').collect();
+        // :name:type:offset:magic:mask:interpreter:flags
+        assert_eq!(fields.len(), 8, "{r}");
+        assert_eq!((fields[1], fields[2]), ("rosetta", "M"));
+        assert!(fields[4].starts_with(r"\x7fELF\x02") && fields[4].ends_with(r"\x3e\x00"));
+        let bytes = |s: &str| s.len() - 3 * s.matches(r"\x").count();
+        assert_eq!(bytes(fields[4]), 20);
+        assert_eq!(bytes(fields[5]), 20, "magic and mask are the same length");
+        assert_eq!(fields[6], "/fluxvm/rosetta/rosetta");
+        assert_eq!(fields[7], "CF");
     }
 
     #[test]

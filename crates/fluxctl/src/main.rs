@@ -1596,8 +1596,13 @@ enum GroupCommand {
 
 #[derive(Subcommand)]
 enum OciCommand {
-    /// Pull an image (linux/arm64) and build its rootfs, e.g. `alpine:3.22` or `ghcr.io/org/app@sha256:…`.
-    Pull { image: String },
+    /// Pull an image and build its rootfs, e.g. `alpine:3.22` or `ghcr.io/org/app@sha256:…`.
+    Pull {
+        image: String,
+        /// `linux/arm64` (default) or `linux/amd64` (runs under Rosetta).
+        #[arg(long)]
+        platform: Option<String>,
+    },
     /// List cached images, most recently used first.
     Ls,
     /// Remove a cached image by digest, 12+ character digest prefix, or the reference it was pulled as.
@@ -4536,7 +4541,9 @@ async fn main() -> Result<()> {
         } => print_vznets(&serde_json::to_value(m.vznets(None).await)?, json)?,
         Command::Oci { command } => {
             let out = match command {
-                OciCommand::Pull { image } => serde_json::to_value(m.oci_pull(&image).await?)?,
+                OciCommand::Pull { image, platform } => {
+                    serde_json::to_value(m.oci_pull(&image, platform.as_deref()).await?)?
+                }
                 OciCommand::Ls => serde_json::to_value(m.oci_list()?)?,
                 OciCommand::Rm { image } => serde_json::json!({"removed": m.oci_remove(&image)?}),
                 OciCommand::Prune => serde_json::to_value(m.oci_prune().await?)?,

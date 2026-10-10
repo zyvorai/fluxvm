@@ -908,9 +908,18 @@ impl VmManager {
         fluxvm_image::catalog::clean_downloads(&self.cfg)
     }
 
-    /// Pull an OCI image and build its `vz` sandbox rootfs (cached by manifest digest).
-    pub async fn oci_pull(&self, reference: &str) -> Result<oci_images::OciImageEntry> {
-        let image = oci_images::pull(&self.cfg, reference).await?;
+    /// Pull an OCI image (`platform`: `linux/arm64` by default, or `linux/amd64`) and build its `vz` sandbox rootfs (cached
+    /// by manifest digest).
+    pub async fn oci_pull(
+        &self,
+        reference: &str,
+        platform: Option<&str>,
+    ) -> Result<oci_images::OciImageEntry> {
+        let arch = platform
+            .map(fluxvm_image::oci_registry::Arch::parse)
+            .transpose()?
+            .unwrap_or_default();
+        let image = oci_images::pull(&self.cfg, reference, arch).await?;
         oci_images::ensure_rootfs(&self.cfg, &image).await?;
         oci_images::find(&self.cfg, &image.manifest_digest)
     }

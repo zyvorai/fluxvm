@@ -31,9 +31,9 @@ mod linux {
     use fluxvm_oci_init::config::{
         BLOBS_TAG, BootConfig, CONFIG_FILE, DEFAULT_PATH, EGRESS_PROXY_PORT, EGRESS_PROXY_URL,
         EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, HostEntry, INIT_ERR, InitConfig, META_TAG,
-        NetworkMode, POWEROFF_VIA_INIT_ENV, PrivateNetwork, ProcessSpec, SECRETS_FILE, TOKEN_FILE,
-        TOOLS_DIR, UNPACK_ERR, UNPACK_OK, UnpackConfig, valid_env_name, valid_host_name,
-        with_secrets,
+        NetworkMode, POWEROFF_VIA_INIT_ENV, PrivateNetwork, ProcessSpec, ROSETTA_DIR, ROSETTA_TAG,
+        SECRETS_FILE, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR, UNPACK_OK, UnpackConfig, valid_env_name,
+        valid_host_name, with_secrets,
     };
     use fluxvm_oci_init::supervise::{
         HealthCheck, HealthEvent, HealthState, RestartPolicy, STOP_GRACE, health_line,
@@ -310,6 +310,34 @@ mod linux {
         writeln!(f, "{gw}\t{}", names.join(" ")).with_context(|| format!("writing {path}"))
     }
 
+    /// Mounts the Rosetta share and registers it for x86-64 ELF binaries (kernel-wide, so it also covers the container).
+    fn register_rosetta() -> Result<()> {
+        mount_new(
+            ROSETTA_TAG,
+            ROSETTA_DIR,
+            "virtiofs",
+            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+            None,
+        )?;
+        let binfmt = "/proc/sys/fs/binfmt_misc";
+        if !Path::new(&format!("{binfmt}/register")).exists() {
+            mount(
+                "binfmt_misc",
+                binfmt,
+                Some("binfmt_misc"),
+                libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                None,
+            )?;
+        }
+        fs::write(
+            format!("{binfmt}/register"),
+            fluxvm_oci_init::config::rosetta_binfmt(),
+        )
+        .context("registering Rosetta with binfmt_misc")?;
+        say("fluxvm-oci-init: rosetta registered for x86-64 binaries");
+        Ok(())
+    }
+
     fn add_hosts(entries: &[HostEntry]) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
@@ -383,6 +411,10 @@ mod linux {
         )?;
         if let Err(e) = link_up("lo") {
             say(&format!("fluxvm-oci-init: loopback: {}", one_line(&e)));
+        }
+        // Before the tools directory is bound into the root, so the share shows up there too.
+        if b.rosetta {
+            register_rosetta().context("setting up Rosetta for linux/amd64")?;
         }
         let private: Vec<[u8; 6]> = b
             .networks

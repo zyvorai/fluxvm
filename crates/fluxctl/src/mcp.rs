@@ -882,7 +882,8 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             object(
                 json!({
                     "template": {"type": "string", "description": "sandbox template name"},
-                    "oci_image": {"type": "string", "description": "macOS only: run this linux/arm64 container image (alpine:3.22, ghcr.io/org/app:1.2) as the sandbox instead of a template. The first use of an image pulls it and builds its root filesystem (up to a few minutes)."},
+                    "oci_platform": {"type": "string", "enum": ["linux/arm64", "linux/amd64"], "description": "with oci_image: linux/amd64 runs an x86-64 image under Rosetta (default linux/arm64)"},
+                    "oci_image": {"type": "string", "description": "macOS only: run this container image (alpine:3.22, ghcr.io/org/app:1.2) as the sandbox instead of a template. The first use of an image pulls it and builds its root filesystem (up to a few minutes)."},
                     "oci_command": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: argv replacing the image's Cmd"},
                     "oci_env": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: KEY=value entries"},
                     "oci_ports": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: published TCP ports, HOST:CONTAINER (the Mac's 127.0.0.1:HOST reaches the container)"},
@@ -898,6 +899,9 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             |r, args| async move {
                 let oci = str_arg(&args, "oci_image").map(|image| {
                     let mut oci = json!({"image": image});
+                    if let Some(p) = str_arg(&args, "oci_platform") {
+                        oci["platform"] = json!(p);
+                    }
                     for (from, to) in [
                         ("oci_command", "command"),
                         ("oci_env", "env"),

@@ -17,7 +17,7 @@ use fluxvm_core::model::{
 };
 use fluxvm_guest_protocol::{AgentRequest, AgentResponse};
 use fluxvm_image::oci_boot::OciBoot;
-use fluxvm_image::oci_registry::PulledImage;
+use fluxvm_image::oci_registry::{Arch, PulledImage};
 use fluxvm_oci_init::config as init;
 use fluxvm_oci_init::supervise::{self, HealthCheck, RestartPolicy};
 use serde::{Deserialize, Serialize};
@@ -40,8 +40,12 @@ fn default_true() -> bool {
 /// `SandboxCreateRequest.oci`: run a container image as the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OciSandboxSpec {
-    /// linux/arm64 image, e.g. `alpine:3.22`, `ghcr.io/org/app:1.2`, `nginx@sha256:…`.
+    /// e.g. `alpine:3.22`, `ghcr.io/org/app:1.2`, `nginx@sha256:…`.
     pub image: String,
+    /// `linux/arm64` (default) or `linux/amd64`, which runs under Rosetta (installed with
+    /// `softwareupdate --install-rosetta --agree-to-license`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// Replaces the image's `Cmd`.
     #[serde(default)]
     pub command: Option<Vec<String>>,
@@ -128,6 +132,14 @@ pub fn parse_port(spec: &str) -> Result<(u16, u16)> {
 }
 
 impl OciSandboxSpec {
+    pub fn arch(&self) -> Result<Arch> {
+        self.platform
+            .as_deref()
+            .map(Arch::parse)
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
     fn overrides(&self) -> init::ProcessOverrides {
         init::ProcessOverrides {
             entrypoint: self.entrypoint.clone(),
@@ -147,6 +159,7 @@ pub(crate) fn validate(req: &SandboxCreateRequest) -> Result<()> {
     if oci.image.trim().is_empty() {
         bail!("oci.image is empty");
     }
+    oci.arch()?;
     let clash = [
         (req.template.is_some(), "template"),
         (req.spec.is_some(), "spec"),
@@ -343,6 +356,7 @@ pub(crate) fn build_create(
         gateway_hosts: spec.gateway_hosts.clone(),
         networks: Vec::new(),
         hosts: spec.hosts.clone(),
+        rosetta: spec.arch()? == Arch::Amd64,
     });
     let mut create: CreateVmRequest = serde_json::from_value(serde_json::json!({
         "name": name,
@@ -361,6 +375,7 @@ pub(crate) fn build_create(
             "init_config": init_config,
             "tagged_shares": shares,
             "networks": spec.networks,
+            "rosetta": spec.arch()? == Arch::Amd64,
         },
     }))
     .context("building the OCI sandbox VM request")?;
@@ -434,7 +449,13 @@ impl VmManager {
         }
         // Boot artifacts first: without them nothing below can work, and the pull may be large.
         let boot = fluxvm_image::oci_boot::resolve(&self.cfg).await?;
-        let image = oci_images::pull(&self.cfg, &oci.image).await?;
+        let arch = oci.arch()?;
+        if arch == Arch::Amd64 && !fluxvm_apple::rosetta_installed() {
+            bail!(
+                "linux/amd64 images run under Rosetta, which is not installed: run `softwareupdate --install-rosetta --agree-to-license`"
+            );
+        }
+        let image = oci_images::pull(&self.cfg, &oci.image, arch).await?;
         let process = init::resolve_process(&image_process(&image), &oci.overrides())?;
         let rootfs = oci_images::ensure_rootfs(&self.cfg, &image).await?;
 
@@ -682,6 +703,60 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(online.network, NetworkSpec::User { .. }));
+    }
+
+    #[test]
+    fn amd64_images_get_the_rosetta_share_and_registration() {
+        let boot = OciBoot {
+            kernel: "/k".into(),
+            initrd: "/i".into(),
+            cmdline: "console=hvc0".into(),
+        };
+        let process = init::ProcessSpec {
+            argv: vec!["/bin/sh".into()],
+            env: vec![],
+            cwd: "/".into(),
+            user: "0:0".into(),
+        };
+        let build = |s: &OciSandboxSpec| {
+            build_create(
+                "x",
+                Path::new("/r"),
+                &boot,
+                process.clone(),
+                s,
+                (1, 512),
+                true,
+                &[],
+                vec![],
+                (vec![], vec![]),
+            )
+            .unwrap()
+        };
+        let boot_cfg = |c: &CreateVmRequest| -> init::BootConfig {
+            let init::InitConfig::Boot(b) =
+                serde_json::from_value(c.apple.as_ref().unwrap().init_config.clone().unwrap())
+                    .unwrap()
+            else {
+                panic!("not a boot config")
+            };
+            b
+        };
+        let amd = build(&spec(
+            serde_json::json!({"image": "x", "platform": "linux/amd64"}),
+        ));
+        assert!(amd.apple.as_ref().unwrap().rosetta);
+        assert!(boot_cfg(&amd).rosetta);
+        fluxvm_apple::validate_request(&amd).unwrap();
+        let arm = build(&spec(serde_json::json!({"image": "x"})));
+        assert!(!arm.apple.as_ref().unwrap().rosetta);
+        assert!(!boot_cfg(&arm).rosetta);
+        assert!(
+            validate(&sandbox(
+                serde_json::json!({"oci": {"image": "x", "platform": "linux/s390x"}})
+            ))
+            .is_err()
+        );
     }
 
     #[test]

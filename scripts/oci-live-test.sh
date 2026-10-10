@@ -102,6 +102,14 @@ N2ID="$(json 'd["id"]' <<<"$N2")"
 [[ "$(out "$N2ID" 'wget -q -T 4 -O /dev/null http://example.com && echo reached || echo blocked')" == blocked ]] && ok "private network: still no internet" || bad "an offline sandbox on a private network reached the internet"
 pgrep -f "fluxvm-vz-switch --socket" >/dev/null && ok "the network's switch is running" || bad "no switch process"
 
+# linux/amd64 under Rosetta (skipped when Rosetta is not installed).
+if [[ -e /Library/Apple/usr/libexec/oah/libRosettaRuntime ]]; then
+  ARCH="$($FLUXCTL --server "$SERVER" sandbox run --platform linux/amd64 "$ALPINE" --rm -- uname -m 2>/dev/null | tr -d '\r' | tail -1)"
+  [[ "$ARCH" == x86_64 ]] && ok "linux/amd64: the image's binaries run under Rosetta (uname -m = x86_64)" || bad "amd64 sandbox reported '$ARCH'"
+else
+  echo "skip linux/amd64: Rosetta is not installed"
+fi
+
 # TTL: a short-lived sandbox goes away on its own.
 TT="$(create "{\"name\":\"ttl\",\"ttl_seconds\":20,\"oci\":{\"image\":\"$ALPINE\",\"command\":[\"sleep\",\"3600\"]}}")" || bad "create ttl"
 TID="$(json 'd["id"]' <<<"$TT")"

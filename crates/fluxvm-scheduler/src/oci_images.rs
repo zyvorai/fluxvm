@@ -8,7 +8,7 @@
 use anyhow::{Context, Result, bail};
 use fluxvm_core::config::{Config, OciRegistryCredential};
 use fluxvm_image::oci_registry::{
-    BlobStore, Credentials, ImageConfig, ImageRef, Layer, PulledImage, Puller,
+    Arch, BlobStore, Credentials, ImageConfig, ImageRef, Layer, PulledImage, Puller,
 };
 use fluxvm_oci_init::config as init;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,9 @@ pub struct OciImageEntry {
     pub config_digest: String,
     pub config: ImageConfig,
     pub layers: Vec<Layer>,
+    /// `arm64`, or `amd64` for an image that runs under Rosetta.
+    #[serde(default = "arm64")]
+    pub architecture: String,
     /// Apparent size of the ext4 image (sparse; see `disk_bytes`).
     pub size_bytes: u64,
     /// Bytes actually allocated on the host.
@@ -46,6 +49,10 @@ pub struct OciPruneReport {
     pub removed_images: Vec<String>,
     pub removed_blobs: usize,
     pub freed_bytes: u64,
+}
+
+fn arm64() -> String {
+    Arch::Arm64.as_str().into()
 }
 
 fn now() -> u64 {
@@ -89,8 +96,9 @@ pub fn rootfs_size_bytes(image: &PulledImage) -> u64 {
     want.max(1024 * MIB).div_ceil(MIB) * MIB
 }
 
-/// Pulls `reference` (anonymously, or with a matching `apple.oci_registry_credentials` entry) into the blob store.
-pub async fn pull(cfg: &Config, reference: &str) -> Result<PulledImage> {
+/// Pulls `reference` for `arch` (anonymously, or with a matching `apple.oci_registry_credentials` entry) into the blob
+/// store.
+pub async fn pull(cfg: &Config, reference: &str, arch: Arch) -> Result<PulledImage> {
     let registry = ImageRef::parse(reference)?.registry;
     let creds = match cfg
         .apple
@@ -106,6 +114,7 @@ pub async fn pull(cfg: &Config, reference: &str) -> Result<PulledImage> {
     };
     Puller::new(BlobStore::for_state_dir(&cfg.state_dir))?
         .with_credentials(creds)
+        .with_platform(arch.as_str(), "linux")
         .pull(reference)
         .await
         .with_context(|| format!("pulling {reference}"))
@@ -274,6 +283,7 @@ fn record_use(cfg: &Config, image: &PulledImage, rootfs: &Path) -> Result<()> {
             config_digest: image.config_digest.clone(),
             config: image.config.clone(),
             layers: image.layers.clone(),
+            architecture: image.architecture.clone(),
             size_bytes: 0,
             disk_bytes: 0,
             built_at: t,
@@ -443,6 +453,7 @@ mod tests {
                 compression: Compression::Gzip,
                 diff_id: digest('2'),
             }],
+            architecture: "arm64".into(),
         }
     }
 

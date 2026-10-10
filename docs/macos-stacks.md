@@ -131,6 +131,9 @@ NAT gateway, `192.168.64.1`). So FluxVM relays through the Mac:
   exposed ports are reachable. The `/etc/hosts` block is rewritten on every `up`, so it stays correct when addresses change.
 - If the macOS application firewall is on, it may ask to allow incoming connections for `fluxvm-vz-runner` the first time.
 
+A container service may set `platform = "linux/amd64"` to run an x86-64 image under Rosetta (see
+[oci-sandboxes.md](oci-sandboxes.md#x86-64-images-rosetta)); a compose service's `platform:` is carried over.
+
 ### Private stack networks
 
 With `network = "private"` at the top of the file, the stack gets its own private network, `stack-<name>` (see "Private networks

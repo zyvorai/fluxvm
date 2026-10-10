@@ -35,6 +35,11 @@ use fluxvm_core::{
 use serde::Deserialize;
 use std::time::Duration;
 
+/// Whether Rosetta is installed on this Mac (`softwareupdate --install-rosetta`); `apple.rosetta` fails without it.
+pub fn rosetta_installed() -> bool {
+    std::path::Path::new("/Library/Apple/usr/libexec/oah/libRosettaRuntime").exists()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppleBalloonStatus {
     pub memory_mib: u64,

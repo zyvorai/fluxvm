@@ -279,7 +279,7 @@ process starts.
 - A sandbox that has a network card is on an unfiltered NAT; only offline and allow-listed sandboxes are isolated.
 - Private networks (`apple.networks`) are IPv4 /24s with static addresses: no DHCP, DNS or routing between networks. The switch runs
   in user space, so it is slower than the NAT card. They have not been run on hardware yet.
-- Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`), take `linux/arm64` images only, and
+- Container sandboxes need boot artifacts built on Linux arm64 (`scripts/build-oci-boot.sh`), take `linux/arm64` images (or `linux/amd64` under Rosetta), and
   have not been run on hardware yet (`scripts/oci-live-test.sh`).
 - Several Linux-only crates still do not build on macOS; CI builds and tests the supported subset by package.
 - Memory is not enforced by FluxVM here; the Mac's own memory pressure applies. Plan for one or two small VMs on a 16 GB Mac.

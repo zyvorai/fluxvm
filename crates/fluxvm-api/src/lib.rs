@@ -4241,6 +4241,9 @@ async fn list_oci_images(State(m): State<Arc<VmManager>>) -> ApiResult<Json<serd
 #[derive(Deserialize)]
 struct OciPullRequest {
     image: String,
+    /// `linux/arm64` (default) or `linux/amd64`.
+    #[serde(default)]
+    platform: Option<String>,
 }
 
 async fn pull_oci_image(
@@ -4249,7 +4252,9 @@ async fn pull_oci_image(
     Json(req): Json<OciPullRequest>,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(role)?;
-    Ok(Json(json!(m.oci_pull(&req.image).await?)))
+    Ok(Json(json!(
+        m.oci_pull(&req.image, req.platform.as_deref()).await?
+    )))
 }
 
 async fn remove_oci_image(
