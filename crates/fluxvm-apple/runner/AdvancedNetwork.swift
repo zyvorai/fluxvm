@@ -119,7 +119,9 @@ final class FluxVMNetNetwork {
 }
 #endif
 
+#if compiler(>=6.4)
 @available(macOS 27.0, *)
 func fluxVMCustomVirtioConfiguration(vmID: String) -> VZCustomVirtioDeviceConfiguration {
     fluxVMCustomVirtioConfigurationImpl(vmID: vmID)
 }
+#endif

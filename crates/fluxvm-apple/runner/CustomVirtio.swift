@@ -4,7 +4,7 @@
 // macOS 27 custom Virtio device implementation for Linux guests.
 // Queue 0: bounded JSON request/response control plane.
 // Queue 1: guest-DRAM bulk operations using VZGuestMemoryMapping.
-#if os(macOS)
+#if os(macOS) && compiler(>=6.4)
 import Foundation
 import Virtualization
 
