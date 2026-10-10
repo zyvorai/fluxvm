@@ -154,8 +154,10 @@ connection per command does not exhaust descriptors. The same relay carries the 
   `apple.root_read_only` attaches the root disk read-only.
 - **cloud-init.** A NoCloud ISO built with `hdiutil`, with a MAC-based DHCP identity so the address stays stable. FluxVM also adds
   small systemd units through it (address reporting, the egress forwarder, shared-folder mounts).
-- **Named images.** `debian-13` (also `debian-12`, `ubuntu-24.04`) is downloaded over HTTPS, checked against the vendor's published
-  SHA file and cached under `<state_dir>/images`. Ubuntu ships qcow2, so it is converted to raw once. Named images are not catalog
+- **Named images.** `debian-13` (also `debian-12`, `ubuntu-24.04`, `ubuntu-26.04`, `fedora-44`, `centos-stream-10`, `almalinux-10`, `rocky-10`, `kali`) is downloaded over HTTPS, checked against the vendor's published
+  SHA file (GNU or BSD style; a `*` in the file name follows versioned releases) and cached under `<state_dir>/images`. qcow2
+  downloads are converted to raw once by a native reader (deflate or zstd clusters; qemu-img only for backing files or
+  encryption), skipping zero clusters so the image stays sparse. Named images are not catalog
   images, so `policy.require_catalog_names` rejects them.
 
 ### macOS guests

@@ -90,9 +90,10 @@ to the VM log, and records the guest's NAT address.
 
 - **Disk:** raw images are cloned instantly (APFS `cp -c`). A qcow2 image is converted to raw while cloning, which needs
   `qemu-img` (`brew install qemu`).
-- **Named images:** `"image": "debian-13"` (also `debian-12`, `ubuntu-24.04`) downloads the ARM64 cloud image over HTTPS, checks it against
-  the vendor's published SHA file, and caches it under `<state_dir>/images`. Ubuntu ships qcow2, so it is converted to raw once. A
-  file of the same name, or a catalog entry, wins. Named images are not catalog images, so `policy.require_catalog_names` rejects them.
+- **Named images:** `"image": "debian-13"` (also `debian-12`, `ubuntu-24.04`, `ubuntu-26.04`, `fedora-44`, `centos-stream-10`, `almalinux-10`, `rocky-10`, `kali`) downloads the ARM64 cloud image over HTTPS, checks it against
+  the vendor's published SHA file, and caches it under `<state_dir>/images`. qcow2 downloads are converted to raw once by
+  FluxVM itself (no qemu-img needed), and every image is kept sparse. `kali` follows Kali's current rolling build. Vendor root
+  disks are small (Ubuntu's is about 3.5 GiB), so set `disk_size_gib` for real work. A file of the same name, or a catalog entry, wins. Named images are not catalog images, so `policy.require_catalog_names` rejects them.
 - **Cloud-init:** a NoCloud ISO built with `hdiutil`, with a MAC-based DHCP identity so the address stays stable.
 - **Guest address:** macOS offers no usable DHCP-lease or ARP view to a spawned process, so FluxVM adds a small systemd
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner

@@ -557,7 +557,8 @@ enum Command {
     /// `fluxctl run` on a Mac uses the built-in `debian-13`; elsewhere pass an image.
     /// Everything after `--` runs in the guest instead of a shell.
     Run {
-        /// Image name or path (default on macOS: debian-13; also debian-12, ubuntu-24.04).
+        /// Image name or path (default on macOS: debian-13; also debian-12, ubuntu-24.04, ubuntu-26.04,
+        /// fedora-44, centos-stream-10, almalinux-10, rocky-10, kali).
         image: Option<String>,
         #[arg(long)]
         name: Option<String>,
