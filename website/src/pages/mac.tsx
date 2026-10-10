@@ -107,8 +107,8 @@ const MACOS27 = [
   },
   {
     title: 'Custom Virtio devices',
-    body: 'A vendor Virtio device with a host-side provider and a guest driver. Ping, echo, stats, capabilities and a bulk fill through guest memory work on a Debian 13 guest.',
-    tag: 'Verified on M4 (control plane and bulk fill)',
+    body: 'A vendor Virtio device with a host-side provider and a guest driver. Ping, echo, stats, capabilities and bulk fill, zero, copy and CRC through guest memory work on a Debian 13 guest.',
+    tag: 'Verified on M4 (control plane and bulk operations)',
   },
   {
     title: 'Shared vmnet networks and physical USB',
@@ -388,9 +388,9 @@ function Honest(): ReactNode {
               </li>
               <li>
                 Mac Studio options (displays, bridging, vmnet, balloon, ASIF, provisioning) are
-                implemented but mostly not yet verified on hardware. The custom Virtio control channel,
-                host capabilities and fleet placement are the exceptions; the vmnet broker, physical USB
-                and the other Virtio bulk operations are not verified.
+                implemented but mostly not yet verified on hardware. The custom Virtio guest bus (control and bulk),
+                host capabilities and fleet placement are the exceptions; the vmnet broker and physical
+                USB are not verified.
               </li>
               <li>
                 The fleet registry now places <code>vz</code> requests with the Apple scorer, using the

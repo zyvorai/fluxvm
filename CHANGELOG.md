@@ -14,7 +14,7 @@
   versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is a bulk queue
   (`bulk_zero`/`fill`/`copy`/`crc32`). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`,
   `fluxvm_virtioctl`). Verified on an Apple M4 with a Debian 13 guest (after #200): `ping`, `echo`, `stats` and `capabilities`.
-  **Bulk queue:** `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack request buffer; it now uses a heap buffer and `bulk-fill` of 1 B to 1 MiB passes with a CRC that matches an independent computation (zero, copy and crc32 are not exercised).
+  **Bulk queue:** `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack request buffer; it now uses a heap buffer and all four bulk operations (fill, zero, copy, crc32; 1 B to 1 MiB) pass on a Debian 13 guest, with the guest checking the result and the CRC32 matching an independent computation. `bulk-test`, `bulk-zero-test`, `bulk-copy-test` and `bulk-crc-test` in `fluxvm_virtioctl` drive them (the ioctl gained an `op` field).
 - **Shared vmnet broker** (`macos/vmnetd`, `fluxvm-vmnetd`): VMs that name the same network with `apple.vmnet.name` share it
   through a broker over XPC ([docs/VMNET_BROKER.md](docs/VMNET_BROKER.md)). Not verified: on the test host the ad-hoc signed
   broker (`com.apple.vm.networking`) was killed at launch (SIP on), so the two-runner test did not run. Without a broker a

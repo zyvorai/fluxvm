@@ -20,10 +20,13 @@
 #define FLUXVM_BULK_TEST_MAX (1U << 20)
 #define FLUXVM_IOC_MAGIC 0xF5
 
+/* op: 0 fill (the default, and the only operation before op existed), 1 zero, 2 copy, 3 crc32. */
+enum { FLUXVM_BULK_FILL, FLUXVM_BULK_ZERO, FLUXVM_BULK_COPY, FLUXVM_BULK_CRC32 };
 struct fluxvm_bulk_test {
     __u32 length;
     __u8 value;
-    __u8 reserved[3];
+    __u8 op;
+    __u8 reserved[2];
     __u32 crc32;
 };
 #define FLUXVM_IOC_BULK_TEST _IOWR(FLUXVM_IOC_MAGIC, 1, struct fluxvm_bulk_test)
@@ -169,12 +172,19 @@ static ssize_t fluxvm_read(struct file *file, char __user *buf, size_t count, lo
     return n;
 }
 
+static void fluxvm_pattern(u8 *p, size_t n, u8 seed)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        p[i] = (u8)(i * 131 + seed);
+}
+
 static long fluxvm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     struct fluxvm_file *ctx = file->private_data;
     struct fluxvm_bulk_test t;
-    u8 *area, *reply;
-    char *request;
+    u8 *area = NULL, *area2 = NULL, *reply = NULL;
+    char *request = NULL;
     size_t used = 0;
     int ret, n;
     u32 crc;
@@ -183,29 +193,85 @@ static long fluxvm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         return -ENOTTY;
     if (copy_from_user(&t, (void __user *)arg, sizeof(t)))
         return -EFAULT;
-    if (!t.length || t.length > FLUXVM_BULK_TEST_MAX)
+    if (!t.length || t.length > FLUXVM_BULK_TEST_MAX || t.op > FLUXVM_BULK_CRC32)
         return -EINVAL;
 
     area = kmalloc(t.length, GFP_KERNEL | __GFP_ZERO);
+    area2 = kzalloc(t.op == FLUXVM_BULK_COPY ? t.length : 1, GFP_KERNEL);
     reply = kzalloc(4096, GFP_KERNEL);
     /* Virtqueue buffers must be linearly mapped: a stack buffer (vmalloc'd with
      * VMAP_STACK) gives the device a bogus address, so the request is heap-allocated. */
-    request = kzalloc(256, GFP_KERNEL);
-    if (!area || !reply || !request) { kfree(area); kfree(reply); kfree(request); return -ENOMEM; }
-    n = scnprintf(request, 256,
-        "{\"version\":1,\"request_id\":\"bulk-test\",\"operation\":\"bulk-fill\","
-        "\"payload\":{\"physical_address\":\"%llu\",\"length\":\"%u\",\"value\":\"%u\"}}",
-        (unsigned long long)virt_to_phys(area), t.length, t.value);
-    ret = fluxvm_call(ctx->channel, request, n, reply, 4096, &used);
+    request = kzalloc(384, GFP_KERNEL);
+    if (!area || !area2 || !reply || !request) { ret = -ENOMEM; goto out; }
+
+    switch (t.op) {
+    case FLUXVM_BULK_FILL:
+        n = scnprintf(request, 384,
+            "{\"version\":1,\"request_id\":\"bulk-test\",\"operation\":\"bulk-fill\","
+            "\"payload\":{\"physical_address\":\"%llu\",\"length\":\"%u\",\"value\":\"%u\"}}",
+            (unsigned long long)virt_to_phys(area), t.length, t.value);
+        break;
+    case FLUXVM_BULK_ZERO:
+        memset(area, 0xa5, t.length);
+        n = scnprintf(request, 384,
+            "{\"version\":1,\"request_id\":\"bulk-test\",\"operation\":\"bulk-zero\","
+            "\"payload\":{\"physical_address\":\"%llu\",\"length\":\"%u\"}}",
+            (unsigned long long)virt_to_phys(area), t.length);
+        break;
+    case FLUXVM_BULK_COPY:
+        fluxvm_pattern(area, t.length, t.value);
+        n = scnprintf(request, 384,
+            "{\"version\":1,\"request_id\":\"bulk-test\",\"operation\":\"bulk-copy\","
+            "\"payload\":{\"src_physical_address\":\"%llu\",\"src_length\":\"%u\","
+            "\"dst_physical_address\":\"%llu\",\"dst_length\":\"%u\"}}",
+            (unsigned long long)virt_to_phys(area), t.length,
+            (unsigned long long)virt_to_phys(area2), t.length);
+        break;
+    default: /* FLUXVM_BULK_CRC32 */
+        fluxvm_pattern(area, t.length, t.value);
+        n = scnprintf(request, 384,
+            "{\"version\":1,\"request_id\":\"bulk-test\",\"operation\":\"bulk-crc32\","
+            "\"payload\":{\"physical_address\":\"%llu\",\"length\":\"%u\"}}",
+            (unsigned long long)virt_to_phys(area), t.length);
+        break;
+    }
+    ret = fluxvm_call(ctx->channel, request, n, reply, 4095, &used);
     if (ret)
         goto out;
-    if (memchr_inv(area, t.value, t.length)) { ret = -EIO; goto out; }
-    crc = crc32_le(~0U, area, t.length) ^ ~0U;
+    reply[min_t(size_t, used, 4095)] = 0;
+    if (!strstr((char *)reply, "\"ok\":true")) { ret = -EIO; goto out; }
+
+    switch (t.op) {
+    case FLUXVM_BULK_FILL:
+        if (memchr_inv(area, t.value, t.length)) { ret = -EIO; goto out; }
+        break;
+    case FLUXVM_BULK_ZERO:
+        if (memchr_inv(area, 0, t.length)) { ret = -EIO; goto out; }
+        break;
+    case FLUXVM_BULK_COPY:
+        if (memcmp(area, area2, t.length)) { ret = -EIO; goto out; }
+        break;
+    default: { /* CRC32: the host's answer must equal the guest's own */
+        char *p = strstr((char *)reply, "\"crc32\":\"");
+        u32 host_crc;
+        char hex[9];
+        if (!p) { ret = -EIO; goto out; }
+        p += strlen("\"crc32\":\"");
+        memcpy(hex, p, 8);
+        hex[8] = 0;
+        if (kstrtou32(hex, 16, &host_crc)) { ret = -EIO; goto out; }
+        crc = crc32_le(~0U, area, t.length) ^ ~0U;
+        if (host_crc != crc) { ret = -EIO; goto out; }
+        break;
+    }
+    }
+    crc = crc32_le(~0U, t.op == FLUXVM_BULK_COPY ? area2 : area, t.length) ^ ~0U;
     t.crc32 = crc;
     if (copy_to_user((void __user *)arg, &t, sizeof(t)))
         ret = -EFAULT;
 out:
     kfree(area);
+    kfree(area2);
     kfree(reply);
     kfree(request);
     return ret;
