@@ -189,6 +189,30 @@ existing request behaves as before.
 Unverified on hardware: bridged networking on a real NIC, multi-display boot, SPICE clipboard sync, balloon reclaim, USB attach and
 detach, ASIF overlay growth and snapshot/restore, and macOS 27 provisioning.
 
+### Custom vmnet networks and the Virtio hook
+
+Built and type-checked against the macOS 27 SDK (the runner compiles); **not run on hardware**. Both default to off.
+
+- **`apple.vmnet`** (macOS 26+): `{mode: "shared" | "host-only", subnet, mask, reserved_ip?, forwards?: [{protocol: "tcp" | "udp",
+  host_port, guest_port, guest_ip}]}`. The runner creates a `vmnet_network` and attaches the VM's NIC to it with
+  `VZVmnetNetworkDeviceAttachment`. Admission requires `network.mode = "user"`, refuses `bridge_interface`, and checks that the subnet,
+  mask (contiguous, /30 or wider), `reserved_ip` and forward `guest_ip` are valid IPv4 inside the subnet, that the protocol is tcp or
+  udp and that ports are nonzero. `reserved_ip` becomes a DHCP reservation for the VM's MAC. `dhcp_start`/`dhcp_end` are refused: the
+  SDK's network configuration has no DHCP pool setter.
+- **A vmnet network belongs to one runner process, so it belongs to one VM.** VZ refuses to start an interface on a network another
+  process created, and every `vz` VM is its own runner. Two VMs therefore cannot share an `apple.vmnet` network today. Sharing needs a
+  broker that owns named networks and hands them to runners via `vmnet_network_copy_serialization` over XPC; that is described in
+  `docs/VMNET_BROKER.md` and **is not built**.
+- The runner needs the vmnet networking entitlement (see the bridged-networking build note above); whether the default ad-hoc entitlement
+  set is enough has not been tried. IP discovery and the 127.0.0.1 `network.forwards` relay still read the macOS NAT lease file, so they are
+  not expected to see a guest on a custom subnet; use `apple.vmnet.forwards` instead.
+- **`apple.custom_virtio: true`** (Linux guests, macOS 27 host): adds one `VZCustomVirtioDeviceConfiguration` (device ID 0xFF00, two
+  queues) to `customVirtioDevices`. It has no provider or delegate, so it only exposes the device to the guest; no device logic is built,
+  and whether VZ accepts a provider-less device is untested.
+- **Placement:** `fluxvm_scheduler::apple_placement::score` is a pure scorer (capacity, nested, vmnet, custom Virtio and bridge-interface
+  filters, then tightest fit). Nothing calls it yet. The runner's `HostCapabilities.swift` can describe host capabilities as JSON, but
+  nothing invokes it yet.
+
 ## Capability matrix
 
 | Supported | Not supported |

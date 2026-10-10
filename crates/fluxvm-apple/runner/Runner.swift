@@ -55,6 +55,8 @@ struct Config: Decodable {
     let rosetta: Bool?
     let nested_virtualization: Bool?
     let usb_controller: Bool?
+    let vmnet: FluxVMNetSpec?       // macOS 26+ custom vmnet network (per runner process)
+    let custom_virtio: Bool?        // macOS 27+ custom Virtio device hook (Linux guests)
     let shares: [Share]?
     let forwards: [Forward]?
     let network_none: Bool?         // attach no network device at all
@@ -282,6 +284,10 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             c.usbControllers = [VZXHCIControllerConfiguration()]
         }
         try self.configureClipboard(c)
+        if cfg.custom_virtio == true {
+            guard #available(macOS 27.0, *) else { throw err("apple.custom_virtio needs macOS 27 or later") }
+            c.customVirtioDevices = [fluxVMCustomVirtioConfiguration()]
+        }
         c.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
         c.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
         try c.validate()

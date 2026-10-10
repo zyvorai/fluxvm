@@ -1,7 +1,7 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 //
-// Compiles the Swift runner (runner/Runner.swift) into `fluxvm-vz-runner` and signs it with the
+// Compiles the Swift runner (runner/Runner.swift plus the other runner/*.swift sources) into `fluxvm-vz-runner` and signs it with the
 // com.apple.security.virtualization entitlement. macOS only; elsewhere this crate builds without a runner.
 
 use std::{env, path::PathBuf, process::Command};
@@ -9,6 +9,8 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     println!("cargo:rerun-if-changed=runner/Runner.swift");
     println!("cargo:rerun-if-changed=runner/ModernFeatures.swift");
+    println!("cargo:rerun-if-changed=runner/AdvancedNetwork.swift");
+    println!("cargo:rerun-if-changed=runner/HostCapabilities.swift");
     println!("cargo:rerun-if-changed=runner/Entitlements.plist");
     println!("cargo:rerun-if-changed=runner/Entitlements.networking.plist");
     println!("cargo:rerun-if-env-changed=FLUXVM_VZ_BRIDGE");
@@ -43,6 +45,8 @@ fn main() {
         ])
         .arg(&main_swift)
         .arg(manifest.join("runner/ModernFeatures.swift"))
+        .arg(manifest.join("runner/AdvancedNetwork.swift"))
+        .arg(manifest.join("runner/HostCapabilities.swift"))
         .arg("-o")
         .arg(&out)
         .status();

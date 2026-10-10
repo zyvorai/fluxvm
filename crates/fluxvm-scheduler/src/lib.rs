@@ -22,6 +22,7 @@ use std::{collections::HashMap, fs, sync::Arc};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
+pub mod apple_placement;
 pub mod backup;
 pub mod changes;
 pub mod confidential;

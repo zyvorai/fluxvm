@@ -20,6 +20,12 @@ extension Runner {
     }
 
     func networkAttachment() throws -> VZNetworkDeviceAttachment {
+        if let spec = cfg.vmnet {
+            guard #available(macOS 26.0, *) else {
+                throw modernError("apple.vmnet needs macOS 26 or later (this host is older)")
+            }
+            return try FluxVMNetNetwork(spec: spec, macAddress: cfg.mac).attachment()
+        }
         guard let name = cfg.bridge_interface, !name.isEmpty else { return VZNATNetworkDeviceAttachment() }
         guard let iface = VZBridgedNetworkInterface.networkInterfaces.first(where: { $0.identifier == name }) else {
             throw modernError("bridge interface \(name) not found; available: " +
