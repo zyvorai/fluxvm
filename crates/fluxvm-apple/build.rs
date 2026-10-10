@@ -50,28 +50,37 @@ fn main() {
         );
         return;
     }
+    // AccessoryAccess is new in the macOS 27 SDK. Weak-link it so a runner built with Xcode 27 still
+    // starts on the macOS 14-26 baseline when physical USB passthrough is not requested. Older SDKs
+    // (CI's Xcode 26.6) do not have it, so linking it would fail.
+    let sdk = Command::new("xcrun")
+        .args(["--show-sdk-path"])
+        .output()
+        .ok()
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim().to_string()));
+    let has_accessory_access = sdk.is_some_and(|p| {
+        p.join("System/Library/Frameworks/AccessoryAccess.framework")
+            .exists()
+    });
+    let mut swiftc_args: Vec<&str> = vec![
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-O",
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-framework",
+        "AppKit",
+        "-framework",
+        "Virtualization",
+        "-framework",
+        "vmnet",
+    ];
+    if has_accessory_access {
+        swiftc_args.extend(["-Xlinker", "-weak_framework", "-Xlinker", "AccessoryAccess"]);
+    }
     let swiftc = Command::new("xcrun")
-        .args([
-            "swiftc",
-            "-swift-version",
-            "5",
-            "-O",
-            "-target",
-            "arm64-apple-macosx14.0",
-            "-framework",
-            "AppKit",
-            "-framework",
-            "Virtualization",
-            "-framework",
-            "vmnet",
-            // AccessoryAccess is new in the macOS 27 SDK. Weak-link it so a
-            // runner built with Xcode 27 still starts on the macOS 14-26
-            // baseline when physical USB passthrough is not requested.
-            "-Xlinker",
-            "-weak_framework",
-            "-Xlinker",
-            "AccessoryAccess",
-        ])
+        .args(&swiftc_args)
         .arg(&main_swift)
         .args(&extra)
         .arg("-o")

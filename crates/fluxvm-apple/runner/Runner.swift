@@ -937,12 +937,16 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 response = self.secureBootStatus()
                 sem.signal()
             case "virtio-reset", "virtio-status":
+                #if compiler(>=6.4)
                 if #available(macOS 27.0, *) {
                     response = cmd == "virtio-reset" ? fluxVMCustomVirtioReset(vmID: self.cfg.id)
                                                      : fluxVMCustomVirtioStatus(vmID: self.cfg.id)
                 } else {
                     response = ["ok": false, "error": "custom Virtio devices need macOS 27+"]
                 }
+                #else
+                response = ["ok": false, "error": "this runner was built without the macOS 27 SDK"]
+                #endif
                 sem.signal()
             case "usb-attach":
                 guard let path = o["path"] as? String else { response = ["ok": false, "error": "usb-attach needs path"]; sem.signal(); break }
