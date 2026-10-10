@@ -606,6 +606,10 @@ pub struct AppleSpec {
     /// alongside the positional `fs0`, `fs1`, … of `shared_folders`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tagged_shares: Vec<AppleShare>,
+    /// OCI sandbox: the guest's PID 1 is fluxvm-oci-init, and this is its `config.json`. At launch it is written with the
+    /// agent token to `<workspace>/meta`, shared read-only under the `fluxvm-meta` tag. Needs direct boot (`kernel`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_config: Option<serde_json::Value>,
 }
 
 /// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
@@ -672,6 +676,7 @@ impl Default for AppleSpec {
             root_read_only: false,
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),
+            init_config: None,
         }
     }
 }

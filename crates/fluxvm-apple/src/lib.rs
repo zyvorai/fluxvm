@@ -20,7 +20,8 @@ pub use capability::{
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig,
-    adopt_macos_template, clone_file, find_runner, ip_file, read_guest_ip, snapshot_dir,
+    adopt_macos_template, clone_file, find_runner, ip_file, oci_meta_dir, read_guest_ip,
+    snapshot_dir,
 };
 
 use anyhow::{Context, Result, bail};
@@ -146,6 +147,7 @@ impl VmBackend for AppleBackend {
         if let Some(fb) = req.apple.as_ref().and_then(|a| a.firstboot.as_ref()) {
             macos_install::write_firstboot(&ctx.workspace, fb)?;
         }
+        runner::write_oci_meta(req, &ctx.workspace)?;
         let runner = find_runner()?;
         let conf = RunnerConfig::for_launch(req, ctx)?;
         let conf_path = conf.write(&ctx.workspace)?;

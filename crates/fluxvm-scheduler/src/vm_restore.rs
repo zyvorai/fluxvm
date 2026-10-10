@@ -214,7 +214,12 @@ impl VmManager {
     pub(crate) async fn wait_for_agent(self: &Arc<Self>, id: Uuid) -> Result<std::time::Duration> {
         let started = std::time::Instant::now();
         // vz guests have no agent: "ready" means sshd answers (see `vz_guest`).
-        if self.get(id).await?.backend == BackendKind::Vz {
+        let vm = self.get(id).await?;
+        if crate::oci_sandbox::is_oci(&vm) {
+            self.wait_oci_ready(id, AGENT_READY_DEADLINE).await?;
+            return Ok(started.elapsed());
+        }
+        if vm.backend == BackendKind::Vz {
             self.wait_vz_guest(id, AGENT_READY_DEADLINE).await?;
             return Ok(started.elapsed());
         }

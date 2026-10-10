@@ -116,7 +116,14 @@ pub fn parse(buf: &[u8], xid: u32, mac: [u8; 6]) -> Option<Reply> {
             (53, 1) => r.message_type = v[0],
             (1, 4) => r.netmask = Some(ip(v)),
             (3, l) if l >= 4 => r.router = Some(ip(v)),
-            (6, l) if l >= 4 => r.dns = v.as_chunks::<4>().0.iter().map(|c| Ipv4Addr::from(*c)).collect(),
+            (6, l) if l >= 4 => {
+                r.dns = v
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|c| Ipv4Addr::from(*c))
+                    .collect()
+            }
             (51, 4) => r.lease_seconds = Some(u32::from_be_bytes([v[0], v[1], v[2], v[3]])),
             (54, 4) => r.server_id = Some(ip(v)),
             _ => {}

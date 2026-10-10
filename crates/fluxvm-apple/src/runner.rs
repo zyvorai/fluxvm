@@ -151,6 +151,11 @@ impl RunnerConfig {
                     host_path: s.host_path.clone(),
                     read_only: s.read_only,
                 }))
+                .chain(apple.init_config.is_some().then(|| ShareConfig {
+                    tag: fluxvm_oci_init::config::META_TAG.into(),
+                    host_path: oci_meta_dir(&ctx.workspace),
+                    read_only: true,
+                }))
                 .chain(
                     (apple.guest_os == AppleGuest::Macos && apple.firstboot.is_some()).then(|| {
                         ShareConfig {
@@ -188,6 +193,40 @@ impl RunnerConfig {
             .with_context(|| format!("writing {}", p.display()))?;
         Ok(p)
     }
+}
+
+/// Where an OCI sandbox's `config.json` and agent token live (shared into the guest as `fluxvm-meta`).
+pub fn oci_meta_dir(workspace: &Path) -> PathBuf {
+    workspace.join("meta")
+}
+
+/// Writes `apple.init_config` and the agent token into [`oci_meta_dir`], replacing what a previous boot left.
+pub fn write_oci_meta(req: &CreateVmRequest, workspace: &Path) -> Result<()> {
+    use fluxvm_oci_init::config::{CONFIG_FILE, TOKEN_FILE};
+    use std::os::unix::fs::PermissionsExt;
+    let Some(init) = req.apple.as_ref().and_then(|a| a.init_config.as_ref()) else {
+        return Ok(());
+    };
+    let dir = oci_meta_dir(workspace);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    fs::write(dir.join(CONFIG_FILE), serde_json::to_vec_pretty(init)?)?;
+    let token_path = dir.join(TOKEN_FILE);
+    match req
+        .agent
+        .as_ref()
+        .filter(|a| a.enabled)
+        .and_then(|a| a.token.as_deref())
+    {
+        Some(token) => {
+            fs::write(&token_path, token)?;
+            fs::set_permissions(&token_path, fs::Permissions::from_mode(0o600))?;
+        }
+        None => {
+            let _ = fs::remove_file(&token_path);
+        }
+    }
+    Ok(())
 }
 
 /// The vsock port the runner's egress proxy listens on (guest to host); the guest forwards 127.0.0.1:3128 to it.
@@ -470,6 +509,55 @@ mod one_shot_tests {
             json["serial_log"],
             dir.path().join("serial.log").display().to_string()
         );
+    }
+
+    #[test]
+    fn oci_sandbox_meta_holds_config_and_token() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let req: CreateVmRequest = serde_json::from_value(serde_json::json!({
+            "name": "s", "backend": "vz", "image": "/r.ext4", "kernel": "/k",
+            "agent": {"enabled": true, "port": 17777, "token": "t0k"},
+            "apple": {"init_config": {"mode": "boot", "hostname": "s"}},
+        }))
+        .unwrap();
+        write_oci_meta(&req, dir.path()).unwrap();
+        let meta = oci_meta_dir(dir.path());
+        let cfg: serde_json::Value =
+            serde_json::from_slice(&fs::read(meta.join("config.json")).unwrap()).unwrap();
+        assert_eq!(cfg["hostname"], "s");
+        assert_eq!(fs::read_to_string(meta.join("agent.token")).unwrap(), "t0k");
+        let mode = fs::metadata(meta.join("agent.token"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let ctx = fluxvm_core::backend::LaunchContext {
+            id: uuid::Uuid::new_v4(),
+            workspace: dir.path().into(),
+            disk: dir.path().join("root.raw"),
+            seed_disk: None,
+            log_path: dir.path().join("console.log"),
+            network: fluxvm_core::backend::PreparedNetwork {
+                spec: NetworkSpec::None,
+                tap_name: None,
+                tap_fd: None,
+                netns: None,
+                dhcp_leasefile: None,
+                guest_ip: None,
+                guest_cidr: None,
+                gateway: None,
+                extra_tap_fds: vec![],
+            },
+            guest_cid: Some(3),
+            vsock_socket: None,
+            disk_format: "raw".into(),
+            nbd_export: None,
+        };
+        let conf = RunnerConfig::for_launch(&req, &ctx).unwrap();
+        let share = conf.shares.iter().find(|s| s.tag == "fluxvm-meta").unwrap();
+        assert!(share.read_only && share.host_path == meta);
     }
 }
 

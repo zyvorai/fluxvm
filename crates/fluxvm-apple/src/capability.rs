@@ -389,6 +389,19 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
                 );
             }
         }
+        if apple.init_config.is_some() {
+            if macos_guest || req.kernel.is_none() {
+                bail!(
+                    "apple.init_config (an OCI sandbox) needs a Linux guest booted directly from `kernel`"
+                );
+            }
+            if tags.contains(fluxvm_oci_init::config::META_TAG) {
+                bail!(
+                    "the {} share tag is reserved for apple.init_config",
+                    fluxvm_oci_init::config::META_TAG
+                );
+            }
+        }
     }
     reject!(req.firmware.is_some(), "firmware overrides");
     reject!(
@@ -801,6 +814,11 @@ mod tests {
             (
                 r#""apple":{"tagged_shares":[{"tag":"fluxvm-meta","host_path":"meta"}]}"#,
                 "absolute",
+            ),
+            (r#""apple":{"init_config":{"mode":"boot"}}"#, "kernel"),
+            (
+                r#""kernel":"/k","apple":{"init_config":{},"tagged_shares":[{"tag":"fluxvm-meta","host_path":"/m"}]}"#,
+                "reserved",
             ),
         ] {
             let err = validate_request(&req(json)).expect_err(json).to_string();

@@ -3,7 +3,8 @@
 
 //! Sandbox exec and file access for `vz` guests. A guest with the agent enabled (the `agent-micro` image, or a spec that asks
 //! for it) is reached over vsock through the runner's `CONNECT` proxy first; when the agent does not answer, and always for
-//! other guests, over SSH (see `fluxvm_apple::ssh`).
+//! other guests, over SSH (see `fluxvm_apple::ssh`). Container (OCI) sandboxes run no sshd: they are reached only through
+//! the agent.
 
 use crate::VmManager;
 use anyhow::{Context, Result, bail};
@@ -95,6 +96,20 @@ impl VmManager {
         })
     }
 
+    /// Asks the agent of a container sandbox, which has no SSH to fall back to.
+    async fn oci_agent(
+        &self,
+        vm: &VmRecord,
+        request: AgentRequest,
+        timeout: Duration,
+    ) -> Result<AgentResponse> {
+        let r = fluxvm_vsock_client::call(vm, request, timeout + AGENT_GRACE)
+            .await
+            .context("the container sandbox's guest agent did not answer (container sandboxes have no SSH fallback)")?;
+        AGENT_CALLS.fetch_add(1, Ordering::Relaxed);
+        Ok(r)
+    }
+
     /// Asks the guest agent; `None` means "use SSH".
     async fn vz_agent(
         &self,
@@ -131,6 +146,9 @@ impl VmManager {
             policy: policy.clone(),
             process: None,
         };
+        if crate::oci_sandbox::is_oci(vm) {
+            return self.oci_agent(vm, request, Duration::from_secs(secs)).await;
+        }
         if let Some(r) = self.vz_agent(vm, request, Duration::from_secs(secs)).await {
             return Ok(r);
         }
@@ -148,6 +166,11 @@ impl VmManager {
 
     pub(crate) async fn vz_get_file(&self, vm: &VmRecord, path: String) -> Result<AgentResponse> {
         let request = AgentRequest::GetFile { path: path.clone() };
+        if crate::oci_sandbox::is_oci(vm) {
+            return self
+                .oci_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
+                .await;
+        }
         if let Some(r) = self
             .vz_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
             .await
@@ -176,6 +199,11 @@ impl VmManager {
             content_base64,
             mode,
         };
+        if crate::oci_sandbox::is_oci(vm) {
+            return self
+                .oci_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
+                .await;
+        }
         if let Some(r) = self
             .vz_agent(vm, request, fluxvm_vsock_client::DEFAULT_CALL_TIMEOUT)
             .await

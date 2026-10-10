@@ -36,6 +36,7 @@ pub mod journal;
 pub mod live_migration;
 mod migration_relay;
 pub mod oci_images;
+pub mod oci_sandbox;
 pub mod procbox_sandbox;
 mod recovery;
 mod sandbox;
@@ -2216,7 +2217,9 @@ impl VmManager {
             }
         }
         // guestkit cannot open a disk on macOS, so a vz guest gets its token from cloud-init instead.
-        if needs_cid && req.backend == BackendKind::Vz {
+        // An OCI sandbox has no cloud-init: its token goes in the meta share (`fluxvm_apple::oci_meta_dir`).
+        let oci_init = req.apple.as_ref().is_some_and(|a| a.init_config.is_some());
+        if needs_cid && req.backend == BackendKind::Vz && !oci_init {
             vz_agent_token_via_cloud_init(&mut req);
         }
 
