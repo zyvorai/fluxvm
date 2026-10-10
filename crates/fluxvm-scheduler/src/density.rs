@@ -17,7 +17,7 @@ use crate::{VmManager, audit_event};
 use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
-use fluxvm_core::pressure_admission::{check_pressure, is_enabled, sample_host};
+use fluxvm_core::pressure_admission::{PressureLevel, check_pressure, is_enabled, sample_host};
 use fluxvm_hypervisor::balloon_ctl::{BalloonStatus, MIN_GUEST_MIB};
 use serde::Serialize;
 use std::collections::HashSet;
@@ -195,11 +195,12 @@ impl VmManager {
         }
     }
 
-    /// Idle reclaim: inflate the balloon of KVM-engine sandboxes idle longer
-    /// than `sandbox.idle_balloon_secs`, deflate it again once they are active.
+    /// Idle reclaim: inflate the balloon of sandboxes (KVM engine, and labelled
+    /// `vz` ones) idle longer than `sandbox.idle_balloon_secs`, sooner while the
+    /// host reports memory pressure, and deflate it again once they are active.
     /// Returns how many VMs changed. Off when `idle_balloon_secs` is 0.
     pub async fn idle_reclaim_tick(&self) -> Result<usize> {
-        let secs = self.cfg.sandbox.idle_balloon_secs;
+        let secs = reclaim_after_secs(self.cfg.sandbox.idle_balloon_secs, sample_host().level);
         if secs == 0 {
             return Ok(0);
         }
@@ -247,6 +248,27 @@ impl VmManager {
     }
 }
 
+/// Under host memory pressure an idle sandbox is ballooned after this long, if `idle_balloon_secs` is longer.
+pub const PRESSURE_RECLAIM_SECS: u64 = 60;
+
+/// How long a sandbox must be idle before its balloon is inflated. 0 (idle reclaim off) stays off.
+pub fn reclaim_after_secs(idle_balloon_secs: u64, level: Option<PressureLevel>) -> u64 {
+    match level {
+        Some(PressureLevel::Warn | PressureLevel::Critical) => {
+            idle_balloon_secs.min(PRESSURE_RECLAIM_SECS)
+        }
+        _ => idle_balloon_secs,
+    }
+}
+
+/// Sandboxes whose balloon idle reclaim currently holds inflated.
+pub fn inflated_balloons() -> usize {
+    inflated_set()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .len()
+}
+
 async fn balloon_request(vm: &VmRecord, balloon_mib: Option<u64>) -> Result<BalloonStatus> {
     if vm.status != VmStatus::Running {
         bail!(
@@ -285,6 +307,16 @@ async fn balloon_request(vm: &VmRecord, balloon_mib: Option<u64>) -> Result<Ball
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pressure_brings_idle_reclaim_forward_but_never_turns_it_on() {
+        assert_eq!(reclaim_after_secs(300, None), 300);
+        assert_eq!(reclaim_after_secs(300, Some(PressureLevel::Normal)), 300);
+        assert_eq!(reclaim_after_secs(300, Some(PressureLevel::Warn)), 60);
+        assert_eq!(reclaim_after_secs(300, Some(PressureLevel::Critical)), 60);
+        assert_eq!(reclaim_after_secs(30, Some(PressureLevel::Critical)), 30);
+        assert_eq!(reclaim_after_secs(0, Some(PressureLevel::Critical)), 0);
+    }
 
     const SMAPS: &str = "\
 00400000-7ffd1234 ---p 00000000 00:00 0                                  [rollup]

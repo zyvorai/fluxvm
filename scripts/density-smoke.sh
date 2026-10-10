@@ -9,10 +9,10 @@ URL="${FLUXVM_URL:-http://127.0.0.1:7788}"
 AUTH=()
 [[ -n "${FLUXVM_TOKEN:-}" ]] && AUTH=(-H "Authorization: Bearer ${FLUXVM_TOKEN}")
 
-call() { curl -sf "${AUTH[@]}" -H 'Content-Type: application/json' "$@"; }
+call() { curl -sf ${AUTH[@]+"${AUTH[@]}"} -H 'Content-Type: application/json' "$@"; }
 
 ids=()
-cleanup() { for id in "${ids[@]}"; do call -X DELETE "$URL/v1/vms/$id" >/dev/null || true; done; }
+cleanup() { for id in ${ids[@]+"${ids[@]}"}; do call -X DELETE "$URL/v1/vms/$id" >/dev/null || true; done; }
 trap cleanup EXIT
 
 echo "creating $COUNT $PROFILE sandboxes"

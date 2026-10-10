@@ -833,6 +833,33 @@ fn render_metrics(vms: &[VmRecord]) -> String {
         fluxvm_core::agent_density::warm_misses()
     ));
 
+    let host = fluxvm_core::pressure_admission::sample_host();
+    if let Some(level) = host.level {
+        out.push_str(
+            "# HELP fluxvm_host_memory_pressure_level Host memory-pressure level (0 normal, 1 warn, 2 critical; macOS).\n",
+        );
+        out.push_str("# TYPE fluxvm_host_memory_pressure_level gauge\n");
+        out.push_str(&format!(
+            "fluxvm_host_memory_pressure_level {}\n",
+            level as u8
+        ));
+    }
+    if let Some(mib) = host.mem_available_mib {
+        out.push_str(
+            "# HELP fluxvm_host_mem_available_mib Host memory available without swapping, MiB.\n",
+        );
+        out.push_str("# TYPE fluxvm_host_mem_available_mib gauge\n");
+        out.push_str(&format!("fluxvm_host_mem_available_mib {mib}\n"));
+    }
+    out.push_str(
+        "# HELP fluxvm_sandbox_balloons_inflated Sandboxes whose balloon idle reclaim holds inflated.\n",
+    );
+    out.push_str("# TYPE fluxvm_sandbox_balloons_inflated gauge\n");
+    out.push_str(&format!(
+        "fluxvm_sandbox_balloons_inflated {}\n",
+        fluxvm_scheduler::density::inflated_balloons()
+    ));
+
     let (agent_calls, ssh_fallbacks) = fluxvm_scheduler::vz_guest::agent_counters();
     out.push_str(
         "# HELP fluxvm_vz_agent_calls_total vz sandbox requests answered by the vsock guest agent.\n",
@@ -5119,6 +5146,87 @@ mod tests {
             let resp = app.oneshot(b.body(body).unwrap()).await.unwrap();
             let status = resp.status();
             (status, body_string(resp).await)
+        }
+
+        fn density_tokens() -> AuthConfig {
+            let mut auth = tenant_tokens();
+            auth.tokens.push(ApiToken {
+                token: "ops".into(),
+                role: Role::Admin,
+                name: Some("ops".into()),
+                tenant: None,
+            });
+            auth
+        }
+
+        #[tokio::test]
+        async fn density_and_warm_are_host_wide() {
+            let m = manager(density_tokens());
+            let (st, body) = call(
+                router(m.clone()),
+                "GET",
+                "/v1/sandboxes/density",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{body}");
+            let report: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert!(report["warm_slots_configured"].is_u64(), "{body}");
+            assert_eq!(report["active_sandboxes"], 0);
+            let (st, _) = call(
+                router(m.clone()),
+                "GET",
+                "/v1/sandboxes/density",
+                "acme",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, _) = call(
+                router(m.clone()),
+                "POST",
+                "/v1/sandboxes/warm",
+                "acme",
+                Some(r#"{"count":2}"#),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+            let (st, body) = call(
+                router(m),
+                "POST",
+                "/v1/sandboxes/warm",
+                "ops",
+                Some(r#"{"count":0}"#),
+            )
+            .await;
+            assert!(st.is_client_error() || st.is_server_error(), "{st} {body}");
+        }
+
+        #[tokio::test]
+        async fn metrics_report_density_and_agent_counters() {
+            let (st, body) = call(
+                router(manager(density_tokens())),
+                "GET",
+                "/metrics",
+                "ops",
+                None,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+            for name in [
+                "fluxvm_sandbox_warm_hits_total",
+                "fluxvm_sandbox_warm_misses_total",
+                "fluxvm_sandbox_balloons_inflated",
+                "fluxvm_vz_agent_calls_total",
+                "fluxvm_vz_agent_ssh_fallbacks_total",
+            ] {
+                assert!(body.contains(&format!("\n{name} ")), "{name} missing");
+            }
+            if cfg!(target_os = "macos") {
+                assert!(body.contains("\nfluxvm_host_memory_pressure_level "));
+                assert!(body.contains("\nfluxvm_host_mem_available_mib "));
+            }
         }
 
         #[tokio::test]

@@ -1,0 +1,6 @@
+# Node labels for one Mac Studio of a Thunderbolt-connected pair (docs/topology.md); passed as `fluxvm-agent node --label k=v`.
+kairon.zyvor.dev/backend.vz: "true"
+kairon.zyvor.dev/topology: tb5-mesh
+kairon.zyvor.dev/rack: studio-pair-1
+kairon.zyvor.dev/chip: m4-max
+kairon.zyvor.dev/memory-gib: "64"
