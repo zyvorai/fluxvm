@@ -36,6 +36,7 @@ struct Config: Decodable {
     let control_socket: String
     let serial_log: String
     let vsock_socket: String?
+    let self_socket: String?        // daemon socket for guest self-control; guest connections on vsock 7790 are relayed to it
     let ip_file: String
     let window: Bool?
     let display_count: Int?
@@ -763,6 +764,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             if cfg.vsock_socket != nil { startVsockProxy() }
             for b in consoleBridges { b.start() }
             if let allow = cfg.egress_allow, !allow.isEmpty { startEgressProxy(allow) }
+            if let path = cfg.self_socket { startSelfControl(path) }
             for f in cfg.forwards ?? [] where f.guests != true { startForward(f, bind: "127.0.0.1", fatal: true) }
             setupSignals()
         } catch { fail(error.localizedDescription) }
@@ -1136,6 +1138,47 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             device.setSocketListener(listener, forPort: 3128)
             self.egressListener = listener
             self.egressDelegate = delegate
+        }
+    }
+
+    // MARK: self-control (guest -> daemon over vsock, scoped to this VM)
+
+    // The preamble names the VM from the host side, so the guest cannot act on any other VM.
+    var selfListener: VZVirtioSocketListener?
+    var selfDelegate: EgressDelegate?
+
+    func startSelfControl(_ path: String) {
+        DispatchQueue.main.async {
+            guard let device = self.vm?.socketDevices.first as? VZVirtioSocketDevice else { return }
+            let delegate = EgressDelegate { conn in
+                self.vsockConnections.append(conn)
+                let fd = conn.fileDescriptor
+                DispatchQueue.global().async {
+                    let u = socket(AF_UNIX, SOCK_STREAM, 0)
+                    var addr = sockaddr_un()
+                    addr.sun_family = sa_family_t(AF_UNIX)
+                    let ok = u >= 0 && withUnsafeMutableBytes(of: &addr.sun_path) { raw -> Bool in
+                        let bytes = Array(path.utf8)
+                        guard bytes.count < raw.count else { return false }
+                        raw.copyBytes(from: bytes)
+                        return true
+                    } && withUnsafePointer(to: &addr) {
+                        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(u, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+                    } == 0
+                    let preamble = Array("FLUXVM-SELF \(self.cfg.id)\n".utf8)
+                    guard ok, preamble.withUnsafeBytes({ write(u, $0.baseAddress!, preamble.count) }) == preamble.count else {
+                        if u >= 0 { close(u) }
+                        DispatchQueue.main.async { self.release(conn) }
+                        return
+                    }
+                    splice(fd, u) { close(u); self.release(conn) }
+                }
+            }
+            let listener = VZVirtioSocketListener()
+            listener.delegate = delegate
+            device.setSocketListener(listener, forPort: 7790)
+            self.selfListener = listener
+            self.selfDelegate = delegate
         }
     }
 

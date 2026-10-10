@@ -418,7 +418,7 @@ fn snapshot_backend_error(backend: BackendKind) -> Option<String> {
 
 /// Admission check for `cfg.policy`, run once resolved (see `resolve_backend`)
 /// but before any disk/network work — a rejected request should be cheap.
-fn audit_event(event: &str, pairs: &[(&str, &str)]) {
+pub fn audit_event(event: &str, pairs: &[(&str, &str)]) {
     let record = fluxvm_core::policy::format_audit_record(event, pairs);
     tracing::info!(target: "fluxvm_audit", record = %record, "audit");
     events::record(event, pairs);
@@ -1085,15 +1085,24 @@ impl VmManager {
     /// attached to the guest but never actually reachable inside it.
     fn effective_cloud_init(req: &CreateVmRequest) -> Option<CloudInitSpec> {
         if req.backend == BackendKind::Vz {
-            // Shares need the in-guest mount, so they imply a cloud-init even when the caller gave none.
-            let ci = match (&req.cloud_init, req.shared_folders.is_empty()) {
+            // Shares need the in-guest mount, and self-control its relay, so they imply a cloud-init even when the caller gave none.
+            let self_control = req.apple.as_ref().is_some_and(|a| a.self_control);
+            let ci = match (
+                &req.cloud_init,
+                req.shared_folders.is_empty() && !self_control,
+            ) {
                 (None, true) => return None,
                 (ci, _) => ci.clone().unwrap_or_default(),
             };
-            return Some(fluxvm_apple::with_shared_folder_mounts(
+            let ci = fluxvm_apple::with_shared_folder_mounts(
                 fluxvm_apple::with_guest_reporting(ci),
                 &req.shared_folders,
-            ));
+            );
+            return Some(if self_control {
+                fluxvm_apple::with_self_control_forwarder(ci)
+            } else {
+                ci
+            });
         }
         if req.shared_folders.is_empty() {
             return req.cloud_init.clone();

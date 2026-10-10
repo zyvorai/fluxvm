@@ -109,6 +109,12 @@ The daemon is chosen like any remote `fluxctl` command: `--server` or
 `vm_network` with `conntrack` or `capture`, which need `admin`; the write
 tools need `admin`.
 
+## From inside a VM
+
+A `vz` guest created with `apple.self_control` gets its own MCP server at
+`http://127.0.0.1:7790/mcp` with `self_*` tools that snapshot, restore and
+restart that VM only; see [macOS: guest self-control](macos.md#guest-self-control).
+
 ## Installing into a client
 
 `fluxctl mcp install <client>` adds a `fluxvm` server to the client's own

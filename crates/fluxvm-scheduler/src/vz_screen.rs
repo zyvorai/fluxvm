@@ -8,6 +8,7 @@
 use crate::VmManager;
 use anyhow::{Context, Result, bail};
 pub use fluxvm_apple::screen::{InputAction, Screenshot};
+pub use fluxvm_apple::{self_control_socket_path, set_self_control_socket};
 use fluxvm_core::model::{BackendKind, VmRecord, VmStatus};
 use uuid::Uuid;
 

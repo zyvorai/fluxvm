@@ -251,6 +251,32 @@ tools are `vm_screenshot` and `vm_input` ([mcp.md](mcp.md)).
 - **Verified** on macOS 27.2 (M4) with a Debian 13 guest: console login by typing, Ctrl+C, and left/right/middle clicks, drag and
   scroll checked with evdev in the guest, before and after a guest reboot and a stop/start.
 
+### Guest self-control
+
+With `"apple": {"self_control": true}` (Linux guests), software inside the VM, such as a coding agent, can snapshot,
+restore and restart the VM it runs in through an MCP server at `http://127.0.0.1:7790/mcp` in the guest:
+
+```sh
+# inside the guest
+claude mcp add --transport http fluxvm http://127.0.0.1:7790/mcp
+```
+
+| Tool | Does |
+| --- | --- |
+| `self_info` | id, name, status, vCPUs, memory, snapshots, and the outcome of the last snapshot, restore or restart |
+| `self_snapshot_list` | snapshots (tag, time, size) |
+| `self_snapshot` | saves memory and disk under `tag`; the VM pauses briefly |
+| `self_snapshot_restore` | rewinds the VM, including the calling program, to `tag` |
+| `self_snapshot_delete` | removes `tag` |
+| `self_restart` | stops and starts the VM |
+
+cloud-init installs a small relay (`fluxvm-self.service`) from that port to vsock; the runner passes each connection to the
+daemon and names the VM itself, so a guest can only act on its own VM, with no network card, token or host port involved.
+Snapshot, restore and restart start about a second after they answer, so the reply reaches the guest before it is paused,
+rewound or rebooted; `self_info` then shows whether it worked, and a second one is refused while the first is still running.
+Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapshot` was back to its old content after
+`self_snapshot_restore` (same boot id: memory was restored, not rebooted), and `self_restart` gave a new boot id.
+
 ### Stored sign-in
 
 `fluxctl signin` keeps a guest username and password in the host's login Keychain (service `dev.zyvor.fluxvm.vm-signin`,
