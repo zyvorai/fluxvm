@@ -12,6 +12,7 @@ mod control;
 mod host_caps;
 pub mod macos_install;
 mod runner;
+pub mod screen;
 pub mod ssh;
 mod usb_passthrough;
 pub mod vz27;
@@ -19,14 +20,15 @@ pub mod vznet;
 
 pub use capability::{
     CAPABILITIES, Capability, validate_disk, validate_request, with_egress_forwarder,
-    with_guest_reporting, with_shared_folder_mounts,
+    with_guest_reporting, with_self_control_forwarder, with_shared_folder_mounts,
 };
 pub use control::{ControlReply, call as control_call, call_with as control_call_with};
 pub use host_caps::{AppleHostCapabilities, host_capabilities};
 pub use runner::{
-    EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig,
-    adopt_macos_template, clone_file, console_port_socket, find_runner, ip_file, oci_meta_dir,
-    read_guest_ip, release_mac, snapshot_dir, write_oci_meta_as,
+    EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SELF_CONTROL_PORT, SNAPSHOT_FILES,
+    STATE_FILE, ShareConfig, adopt_macos_template, clone_file, console_port_socket, find_runner,
+    ip_file, oci_meta_dir, read_guest_ip, release_mac, self_control_socket_path,
+    set_self_control_socket, snapshot_dir, write_oci_meta_as,
 };
 pub use usb_passthrough::{physical_usb_attach, physical_usb_list};
 

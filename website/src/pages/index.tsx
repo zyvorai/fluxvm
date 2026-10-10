@@ -1,199 +1,262 @@
 import type {ReactNode} from 'react';
 import clsx from 'clsx';
 import Link from '@docusaurus/Link';
-import useBaseUrl from '@docusaurus/useBaseUrl';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
-import FeatureHighlights from '@site/src/components/FeatureHighlights';
+import MacCloud from '@site/src/components/MacCloud';
+import MacHardware from '@site/src/components/MacHardware';
 import Reveal from '@site/src/components/Reveal';
 
 import styles from './index.module.css';
 
-function HomepageHeader() {
+const REPO = 'https://github.com/zyvorai/zyvor-fluxvm';
+
+function Chevron({children, to, href}: {children: ReactNode; to?: string; href?: string}) {
   return (
-    <header className={clsx('hero hero--primary', styles.heroBanner)}>
-      <div className="container">
-        <div className={clsx(styles.heroGridSingle, 'text--center')}>
-          <Heading as="h1" className="hero__title">
-            FluxVM
-          </Heading>
-          <p className="hero__subtitle">
-            Secure, isolated virtual machines — via Firecracker, Cloud
-            Hypervisor, QEMU/KVM, or the in-tree FluxVM hypervisor — from one
-            Rust-native control plane with a real REST API. Run it standalone
-            as a libvirt replacement, or as the VM engine under another Zyvor
-            product. Use optional TTL and CoW when you want disposable
-            compute; longer-lived guests use the same API.
-          </p>
-          <div className={styles.buttons}>
-            <Link
-              className="button button--secondary button--lg"
-              href="https://github.com/zyvorai/fluxvm#quick-start">
-              Get Started
-            </Link>
-            <Link
-              className="button button--outline button--lg button--secondary"
-              to="https://github.com/zyvorai/fluxvm">
-              View on GitHub
-            </Link>
-          </div>
+    <Link className={styles.chevron} to={to} href={href}>
+      {children}
+      <span aria-hidden="true"> &rsaquo;</span>
+    </Link>
+  );
+}
+
+function Hero() {
+  return (
+    <header className={styles.hero}>
+      <div className={styles.heroInner}>
+        <p className={styles.eyebrow}>FluxVM</p>
+        <Heading as="h1" className={styles.heroTitle}>
+          Real VMs.
+          <br />
+          <span className={styles.gradient}>Real API.</span>
+        </Heading>
+        <p className={styles.heroSub}>
+          One Rust control plane for every hypervisor. Now with a Mac cloud.
+        </p>
+        <div className={styles.heroCtas}>
+          <Link className={styles.pillPrimary} to="/mac">
+            Explore Mac
+          </Link>
+          <Link className={styles.pillGhost} href={`${REPO}#quickstart`}>
+            Get started
+          </Link>
         </div>
+      </div>
+      <div className={styles.heroArt}>
+        <MacCloud />
       </div>
     </header>
   );
 }
 
-function ProblemStatement() {
+function ProductTiles() {
   return (
-    <section className={styles.problem}>
-      <div className="container">
-        <Reveal className="row">
-          <div className="col col--8 col--offset-2 text--center">
-            <Heading as="h2" className={styles.sectionHeading}>
-              Why FluxVM
-            </Heading>
-            <p>
-              Teams that need a host-local VM control plane — CI runners,
-              sandboxed code execution, per-branch environments, Kubernetes
-              VM workloads, or longer-lived guests — are usually stuck
-              choosing between manual libvirt/virsh scripting (XML, no REST
-              API, no built-in TTL cleanup), a full private-cloud platform
-              (disproportionate overhead when you only need a solid VM API),
-              or container-only isolation (fine until the workload needs a
-              real kernel boundary).
-            </p>
-            <p>
-              FluxVM fills that gap: a Rust-native control plane with a real
-              API, no libvirtd, no XML domain definitions —{' '}
-              <code>fluxctl create</code> ≈{' '}
-              <code>virsh define</code>+<code>start</code>,{' '}
-              <code>fluxctl delete</code> ≈ <code>virsh destroy</code>, plus
-              optional TTL-guaranteed cleanup when you want disposable
-              compute.
-            </p>
-          </div>
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
-function MacSection() {
-  return (
-    <section className={styles.macs}>
-      <div className="container">
-        <Reveal>
-          <div className="text--center">
-            <Heading as="h2" className={styles.sectionHeading}>
-              Now on your Mac: Mac mini to Mac Studio cluster
-            </Heading>
-            <p className={styles.enterpriseCopy}>
-              FluxVM's daemon, REST API and <code>fluxctl</code> run natively
-              on Apple silicon with a <code>vz</code> backend on Apple's
-              Virtualization.framework. Linux VMs over the same API on a Mac
-              mini at home, a Mac Studio for a team, or a MacBook Pro, next to
-              a private LLM endpoint from Velora.
-            </p>
-          </div>
-          <img
-            className={styles.macImg}
-            src={useBaseUrl('/img/macos/readme-macs.jpg')}
-            alt="Mac mini for home, Mac Studio for a team, MacBook Pro for development"
-            loading="lazy"
-          />
-          <div className={styles.macGrid}>
-            <div className={styles.macCard}>
-              <Heading as="h3">Home, low cost</Heading>
-              <p>A Mac mini runs a private chat endpoint and one or two Linux VMs. Silent, always on.</p>
-            </div>
-            <div className={styles.macCard}>
-              <Heading as="h3">Team</Heading>
-              <p>A Mac Studio holds larger models in unified memory and runs VMs for CI and dev.</p>
-            </div>
-            <div className={styles.macCard}>
-              <Heading as="h3">On-premise cluster</Heading>
-              <p>Two to four Mac Studios, scheduled as Kairon Nodes, VMs through FluxVM on each.</p>
-            </div>
-          </div>
-          <img
-            className={styles.macImg}
-            src={useBaseUrl('/img/macos/readme-home-cluster.jpg')}
-            alt="A private LLM cluster made of Mac Studios joined by Thunderbolt 5"
-            loading="lazy"
-          />
-          <p className="text--center">
-            Verified on an Apple M4 with macOS 27.2: Debian 13 boots, SSH,
-            pause, resume, stop, start, delete through the REST API. Multi-Mac
-            clusters are not yet verified.{' '}
-            <Link to="/mac">See FluxVM on Mac →</Link>{' · '}<Link to="/docs/macos-cluster">Mac guide</Link>
-          </p>
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
-function TrustBand() {
-  return (
-    <section className={styles.trust}>
-      <div className="container">
-        <Reveal className={styles.trustGrid}>
-          <div>
-            <Heading as="h3" className={styles.sectionHeading}>
-              Open, and honest about its limits
-            </Heading>
-            <p>
-              Apache-2.0, entire repository, no dual licensing. This is a
-              complete MVP/control-plane skeleton, not yet a finished
-              multi-tenant security boundary — the jailer, cgroup v2
-              control, and per-VM network namespaces are implemented;
-              seccomp/AppArmor/SELinux policy, quotas, and audit logging
-              still need adding before exposing it to untrusted tenants.
-              Network Fabric is GA. Secure Containers is developer preview.
-            </p>
-            <Link to="https://github.com/zyvorai/fluxvm#maturity-whats-real-today">
-              Read the full maturity caveat →
-            </Link>
-          </div>
-          <div className={styles.trustBadges}>
-            <img
-              src="https://github.com/zyvorai/fluxvm/actions/workflows/ci.yml/badge.svg"
-              alt="CI status"
-            />
-            <img
-              src="https://img.shields.io/github/license/zyvorai/fluxvm"
-              alt="Apache 2.0 license"
-            />
-          </div>
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
-function EnterpriseCTA() {
-  return (
-    <section className={styles.enterprise}>
-      <div className="container text--center">
-        <Reveal>
-          <Heading as="h2" className={styles.sectionHeading}>
-            Standalone, or part of the Zyvor platform
+    <section className={styles.tiles}>
+      <Reveal className={clsx(styles.tile, styles.tileDark)}>
+        <div className={styles.tileCopy}>
+          <Heading as="h2" className={styles.tileTitle}>
+            Mac mini
           </Heading>
-          <p className={styles.enterpriseCopy}>
-            FluxVM itself is Apache-2.0 with no commercial tier — adopt it
-            directly with no other Zyvor product required. It's also the VM
-            engine under{' '}
-            <Link to="https://github.com/zyvorai/fabric">Zyvor Fabric</Link>{' '}
-            and Ragnarok, which do offer production support and SLAs, for
-            teams that want the orchestration/UX layer on top.
+          <p className={styles.tileSub}>A quiet host for a lot of VMs.</p>
+          <div className={styles.tileLinks}>
+            <Chevron to="/mac">Learn more</Chevron>
+            <Chevron to="/docs/mac-cloud">Set one up</Chevron>
+          </div>
+        </div>
+        <MacHardware kind="mini" className={styles.hardware} />
+        <p className={styles.tileFoot}>Agent sandboxes &middot; container VMs &middot; Linux dev boxes</p>
+      </Reveal>
+      <Reveal className={clsx(styles.tile, styles.tileStudio)} delay={120}>
+        <div className={styles.tileCopy}>
+          <Heading as="h2" className={styles.tileTitle}>
+            Mac Studio
+          </Heading>
+          <p className={styles.tileSub}>A cloud on your desk.</p>
+          <div className={styles.tileLinks}>
+            <Chevron to="/mac-cloud">Build a Mac cloud</Chevron>
+            <Chevron to="/docs/macos#macos-guests">macOS guests</Chevron>
+          </div>
+        </div>
+        <MacHardware kind="studio" className={styles.hardware} />
+        <p className={styles.tileFoot}>Xcode CI on macOS guests &middot; many VMs next to large models</p>
+      </Reveal>
+      <Reveal className={clsx(styles.tile, styles.tileLight)}>
+        <div className={styles.tileCopy}>
+          <Heading as="h2" className={styles.tileTitle}>
+            Agent sandboxes
+          </Heading>
+          <p className={styles.tileSub}>A clean machine for every task.</p>
+          <div className={styles.tileLinks}>
+            <Chevron to="/docs/macos-sandboxes">Learn more</Chevron>
+            <Chevron to="/docs/mcp">Use with MCP</Chevron>
+          </div>
+        </div>
+        <div className={styles.term}>
+          <div className={styles.termBar}>
+            <span />
+            <span />
+            <span />
+          </div>
+          <pre>
+            <span className={styles.ok}>$</span> fluxctl sandbox create --ttl 15m --offline{'\n'}
+            <span className={styles.dim}>  ready in 2.1 s (warm pool)</span>
+            {'\n'}
+            <span className={styles.ok}>$</span> fluxctl exec sb1 -- make test{'\n'}
+            <span className={styles.ok}>  &#10003; 128 passed</span>
+          </pre>
+        </div>
+      </Reveal>
+      <Reveal className={clsx(styles.tile, styles.tileBlue)} delay={120}>
+        <div className={styles.tileCopy}>
+          <Heading as="h2" className={styles.tileTitle}>
+            Every hypervisor
+          </Heading>
+          <p className={styles.tileSub}>One spec. One API. Five backends.</p>
+          <div className={styles.tileLinks}>
+            <Chevron to="/docs/PRODUCT_OVERVIEW">Learn more</Chevron>
+            <Chevron to="/docs/api">See the API</Chevron>
+          </div>
+        </div>
+        <div className={styles.backends}>
+          {['Firecracker', 'Cloud Hypervisor', 'QEMU / KVM', 'FluxVM hypervisor', 'vz on Mac'].map((b, i) => (
+            <span key={b} className={clsx(styles.backend, i === 4 && styles.backendMac)}>
+              {b}
+            </span>
+          ))}
+        </div>
+      </Reveal>
+    </section>
+  );
+}
+
+function Statement() {
+  return (
+    <section className={styles.statement}>
+      <Reveal>
+        <p className={styles.statementText}>
+          No libvirtd. No XML.{' '}
+          <span className={styles.gradient}>Just a JSON spec, a REST API and a vsock agent</span>{' '}
+          that does the same thing on a Linux server and on the Mac on your desk.
+        </p>
+      </Reveal>
+    </section>
+  );
+}
+
+const NUMBERS = [
+  {value: '~2 s', label: 'Warm start on a Mac', note: 'restore a saved VM instead of booting'},
+  {value: '0.7 s', label: 'Snapshot', note: 'a running VM, APFS-cloned disk'},
+  {value: '5', label: 'Backends', note: 'four on Linux, vz on a Mac'},
+  {value: '3', label: 'SDKs', note: 'Python, Go and TypeScript'},
+];
+
+function Numbers() {
+  return (
+    <section className={styles.numbers}>
+      <Reveal>
+        <div className={styles.numberGrid}>
+          {NUMBERS.map((n) => (
+            <div key={n.label} className={styles.number}>
+              <span className={styles.numberValue}>{n.value}</span>
+              <span className={styles.numberLabel}>{n.label}</span>
+              <span className={styles.numberNote}>{n.note}</span>
+            </div>
+          ))}
+        </div>
+        <p className={styles.numbersFoot}>
+          Mac figures measured on one Apple M4 with macOS 27.2.{' '}
+          <Link to="/docs/macos#what-is-verified">What is verified</Link>
+        </p>
+      </Reveal>
+    </section>
+  );
+}
+
+const MAC_LOVES = [
+  {t: 'Apple silicon native', d: 'A signed Swift runner per VM. No QEMU, no emulation.'},
+  {t: 'Rosetta inside Linux', d: 'x86_64 binaries and linux/amd64 images in arm64 guests.'},
+  {t: 'APFS clones', d: 'Copy-on-write disks. A throwaway VM costs almost nothing.'},
+  {t: 'Keychain sign-in', d: 'Guest passwords live in your login Keychain, never the API.'},
+  {t: 'Shared folders', d: 'Edit on macOS, build in Linux, over virtiofs.'},
+  {t: 'launchd service', d: 'fluxctl service install. Up after every reboot.'},
+];
+
+function MacLoves() {
+  return (
+    <section className={styles.loves}>
+      <Reveal>
+        <p className={styles.eyebrowBlue}>Built for Mac people</p>
+        <Heading as="h2" className={styles.lovesTitle}>
+          Feels right at home on macOS.
+        </Heading>
+        <div className={styles.lovesGrid}>
+          {MAC_LOVES.map((l) => (
+            <div key={l.t} className={styles.love}>
+              <Heading as="h3">{l.t}</Heading>
+              <p>{l.d}</p>
+            </div>
+          ))}
+        </div>
+        <div className={styles.lovesCta}>
+          <Chevron to="/mac">Everything FluxVM does on a Mac</Chevron>
+        </div>
+      </Reveal>
+    </section>
+  );
+}
+
+function Platform() {
+  return (
+    <section className={styles.platform}>
+      <Reveal className={styles.platformGrid}>
+        <div className={styles.platformCard}>
+          <Heading as="h3">On Linux</Heading>
+          <p>
+            Native eBPF networking, Secure Containers (GA), a Kubernetes operator without KubeVirt, live
+            backups and a fleet registry.
           </p>
-          <Link
-            className="button button--primary button--lg"
-            href="mailto:sales@zyvor.dev">
-            Contact sales@zyvor.dev
+          <Chevron to="/docs/network-fabric">Network Fabric</Chevron>
+        </div>
+        <div className={styles.platformCard}>
+          <Heading as="h3">For AI agents</Heading>
+          <p>
+            An MCP server, egress allow-lists on method, host and path, file change-sets and VM fork for
+            disposable machines.
+          </p>
+          <Chevron to="/docs/mcp">MCP server</Chevron>
+        </div>
+        <div className={styles.platformCard}>
+          <Heading as="h3">Open source</Heading>
+          <p>
+            Apache-2.0, the whole repository. Every claim on this site links to what has and has not been
+            verified.
+          </p>
+          <Chevron href={REPO}>GitHub</Chevron>
+        </div>
+      </Reveal>
+    </section>
+  );
+}
+
+function Closing() {
+  return (
+    <section className={styles.closing}>
+      <Reveal>
+        <MacHardware kind="mini" className={styles.closingArt} />
+        <Heading as="h2" className={styles.closingTitle}>
+          Your Mac cloud starts
+          <br />
+          with one Mac.
+        </Heading>
+        <div className={styles.heroCtas}>
+          <Link className={styles.pillPrimary} href={`${REPO}#your-own-mac-cloud`}>
+            Get started
           </Link>
-        </Reveal>
-      </div>
+          <Link className={styles.pillGhost} href="mailto:sales@zyvor.dev">
+            Talk to Zyvor
+          </Link>
+        </div>
+      </Reveal>
     </section>
   );
 }
@@ -201,17 +264,16 @@ function EnterpriseCTA() {
 export default function Home(): ReactNode {
   return (
     <Layout
-      title="FluxVM — Rust-native VM control plane"
-      description="Secure, isolated virtual machines via Firecracker, Cloud Hypervisor, QEMU/KVM, and the in-tree FluxVM hypervisor, from one Rust-native control plane. Optional TTL/CoW for disposable workloads.">
-      <HomepageHeader />
-      <main>
-        <ProblemStatement />
-        <Reveal>
-          <FeatureHighlights />
-        </Reveal>
-        <MacSection />
-        <TrustBand />
-        <EnterpriseCTA />
+      title="FluxVM: real VMs, real API, your own Mac cloud"
+      description="One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM, the FluxVM hypervisor and Apple's Virtualization.framework. Linux VMs, macOS guests and agent sandboxes on a Mac mini or Mac Studio.">
+      <Hero />
+      <main className={styles.main}>
+        <ProductTiles />
+        <Statement />
+        <Numbers />
+        <MacLoves />
+        <Platform />
+        <Closing />
       </main>
     </Layout>
   );

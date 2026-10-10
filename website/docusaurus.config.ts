@@ -57,6 +57,11 @@ const config: Config = {
   ],
 
   themeConfig: {
+    image: 'img/fluxvm-share-card.png',
+    metadata: [
+      {name: 'keywords', content: 'FluxVM, Mac cloud, Mac mini, Mac Studio, Virtualization.framework, vz, macOS virtualization, VM API'},
+      {name: 'twitter:card', content: 'summary_large_image'},
+    ],
     colorMode: {
       defaultMode: 'dark',
       respectPrefersColorScheme: false,
@@ -70,6 +75,7 @@ const config: Config = {
       hideOnScroll: false,
       items: [
         {to: '/mac', label: 'Mac', position: 'right'},
+        {to: '/mac-cloud', label: 'Mac cloud', position: 'right'},
         {
           type: 'docSidebar',
           sidebarId: 'docsSidebar',
@@ -91,6 +97,8 @@ const config: Config = {
           items: [
             {label: 'Quick start', href: 'https://github.com/zyvorai/zyvor-fluxvm#quick-start'},
             {label: 'FluxVM on Mac', to: '/mac'},
+            {label: 'Build a Mac cloud', to: '/mac-cloud'},
+            {label: 'Mac cloud guide', to: '/docs/mac-cloud'},
             {label: 'How it works on a Mac', to: '/docs/macos-architecture'},
             {label: 'Use cases', to: '/docs/use-cases'},
             {label: 'Product overview', to: '/docs/PRODUCT_OVERVIEW'},

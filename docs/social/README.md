@@ -9,7 +9,9 @@ FluxVM hypervisor card; the Zyvor logo file keeps its brand colour.
 |---|---|---|
 | `../assets/social-preview.svg` / `.png` / `@2x.png` | 1280x640 README hero, light | `python3 docs/social/build-social-svg.py docs/assets` then `rsvg-convert -w 1280 docs/assets/social-preview.svg -o docs/assets/social-preview.png` (`-w 2560` for `@2x`) |
 | `../assets/social-preview-dark.svg` / `.png` / `@2x.png` | Same card for GitHub's dark theme | same, with `social-preview-dark` |
-| `fluxvm-share-card.png` | 1200x630 Open Graph / repository social preview | `./docs/social/build-social-card.sh` |
+| `fluxvm-share-card.png` | 1200x630 Open Graph / repository social preview; copied to `website/static/img/` as the site's `themeConfig.image` | `./docs/social/build-social-card.sh`, then `cp docs/social/fluxvm-share-card.png website/static/img/` |
+| `fluxvm-hero-dark.html` / `.jpg` | 2400x1260 README hero (five backends, including `vz`) | `./docs/social/build-hero-dark.sh` |
+| `../assets/mac-cloud.svg` | Animated Mac cloud illustration (README, website, share card); same file as `website/static/img/mac-cloud.svg` | Hand-written SVG; edit one and copy it over the other |
 | `fluxvm-social-card.html` / `.jpg` | 1600x900 LinkedIn / X | same script |
 
 `build-social-svg.py` holds the light and dark palettes and generates both SVGs from one layout, so

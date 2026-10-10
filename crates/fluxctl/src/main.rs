@@ -29,6 +29,7 @@ mod contexts;
 mod fleet_client;
 mod launch_agent;
 mod mcp;
+mod mcp_install;
 mod output;
 mod remote;
 mod run;
@@ -121,6 +122,43 @@ enum McpCommand {
         /// Also offer tools that change state (VM power, packet capture).
         #[arg(long)]
         allow_write: bool,
+    },
+    /// Register `fluxctl mcp serve` with an MCP client (Claude Code, Cursor, Claude Desktop, Codex, VS Code,
+    /// Windsurf, Gemini CLI) by editing its config file. `--server`, `--context` and `--config` are carried over.
+    Install {
+        #[arg(value_enum)]
+        client: mcp_install::Client,
+        /// Write the project's config in the current directory instead of the user-wide one.
+        #[arg(long)]
+        project: bool,
+        /// Let the client use write tools (VM power, input, sign-in, snapshots).
+        #[arg(long)]
+        allow_write: bool,
+        /// Also store `--server-token` in the config file (plain text).
+        #[arg(long)]
+        with_token: bool,
+        /// Server name in the client's config.
+        #[arg(long, default_value = "fluxvm")]
+        name: String,
+        /// Print the entry and the file it would go in without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove the entry added by `mcp install`.
+    Uninstall {
+        #[arg(value_enum)]
+        client: mcp_install::Client,
+        #[arg(long)]
+        project: bool,
+        #[arg(long, default_value = "fluxvm")]
+        name: String,
+    },
+    /// Which clients have FluxVM configured.
+    Status {
+        #[arg(long)]
+        project: bool,
+        #[arg(long, default_value = "fluxvm")]
+        name: String,
     },
 }
 
@@ -344,6 +382,35 @@ enum Command {
         #[arg(long)]
         set_mib: Option<u64>,
     },
+    /// Save a screenshot of a running vz VM's display (Linux or macOS guest)
+    /// as a PNG. REST: `GET /v1/vms/{id}/screenshot`.
+    Screenshot {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        #[arg(long = "out", default_value = "screen.png")]
+        output: PathBuf,
+        /// Scale down to this many pixels wide.
+        #[arg(long)]
+        max_width: Option<u32>,
+    },
+    /// Send keyboard and mouse input to a running vz VM's display, e.g.
+    /// '{"action":"click","x":600,"y":400}' or '{"action":"key","key":"c","modifiers":["control"]}'.
+    /// Coordinates are screenshot pixels. REST: `POST /v1/vms/{id}/input`.
+    Input {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// JSON input actions, run in order.
+        actions: Vec<String>,
+        /// Type this text (US layout) after the actions; `\n` is Enter.
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// Per-VM guest sign-in kept in the host's login Keychain, typed into the
+    /// guest's login screen on request. REST: `/v1/vms/{id}/signin`.
+    Signin {
+        #[command(subcommand)]
+        command: SigninCommand,
+    },
     /// Memory use of a VM's VMM process: PSS, private and shared pages, and
     /// balloon state. REST: `GET /v1/vms/{id}/memory`.
     Memory {
@@ -528,7 +595,8 @@ enum Command {
     /// `fluxctl run` on a Mac uses the built-in `debian-13`; elsewhere pass an image.
     /// Everything after `--` runs in the guest instead of a shell.
     Run {
-        /// Image name or path (default on macOS: debian-13; also debian-12, ubuntu-24.04).
+        /// Image name or path (default on macOS: debian-13; also debian-12, ubuntu-24.04, ubuntu-26.04,
+        /// fedora-44, centos-stream-10, almalinux-10, rocky-10, kali).
         image: Option<String>,
         #[arg(long)]
         name: Option<String>,
@@ -1002,6 +1070,40 @@ enum FleetCommand {
 }
 
 #[derive(Subcommand)]
+enum SigninCommand {
+    /// Store the sign-in; the password is prompted for (echo off) or read
+    /// from stdin when it isn't a terminal.
+    Set {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// Username typed before the password by `--mode username`/`username_tab`.
+        #[arg(long = "user")]
+        username: Option<String>,
+    },
+    /// Whether a sign-in is stored, and its username (never the password).
+    Status {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Remove the stored sign-in.
+    Clear {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+    },
+    /// Type the stored sign-in into the VM's display.
+    Type {
+        #[arg(value_parser = output::parse_vm_ref)]
+        id: Uuid,
+        /// password, username (username, Enter, password) or username_tab.
+        #[arg(long, default_value = "password")]
+        mode: String,
+        /// Don't press Enter after the password.
+        #[arg(long)]
+        no_submit: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum QgaCommand {
     /// guest-ping over the VM's QGA unix socket.
     Ping {
@@ -1355,6 +1457,60 @@ enum TemplateCommand {
         #[arg(long = "label", value_parser = parse_label_pair)]
         labels: Vec<(String, String)>,
     },
+}
+
+/// `fluxctl input` arguments as a JSON action list: each argument is one action object (or a list of them), then
+/// `--text` as a `type` action.
+/// Reads a secret from the terminal with echo off, or the first line of stdin when it isn't a terminal.
+fn read_secret(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    if stdin.is_terminal() {
+        eprint!("{prompt}");
+        std::io::stderr().flush().ok();
+        let fd = libc::STDIN_FILENO;
+        // SAFETY: termios is plain data filled in by tcgetattr on a valid fd.
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(fd, &mut saved) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("reading terminal mode");
+        }
+        let mut quiet = saved;
+        quiet.c_lflag &= !libc::ECHO;
+        quiet.c_lflag |= libc::ECHONL;
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &quiet) };
+        let read = stdin.lock().read_line(&mut line);
+        unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
+        read.context("reading password")?;
+    } else {
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .context("reading password from stdin")?;
+    }
+    let secret = line.trim_end_matches(['\r', '\n']).to_string();
+    if secret.is_empty() {
+        anyhow::bail!("empty password");
+    }
+    Ok(secret)
+}
+
+fn input_actions(args: &[String], text: Option<String>) -> Result<Vec<serde_json::Value>> {
+    let mut out = Vec::new();
+    for a in args {
+        match serde_json::from_str(a).with_context(|| format!("not a JSON input action: {a}"))? {
+            serde_json::Value::Array(list) => out.extend(list),
+            v @ serde_json::Value::Object(_) => out.push(v),
+            _ => anyhow::bail!("an input action is a JSON object: {a}"),
+        }
+    }
+    if let Some(t) = text {
+        out.push(serde_json::json!({"action": "type", "text": t}));
+    }
+    if out.is_empty() {
+        anyhow::bail!("give at least one JSON action or --text");
+    }
+    Ok(out)
 }
 
 fn parse_label_pair(s: &str) -> Result<(String, String)> {
@@ -2845,6 +3001,67 @@ async fn run_remote(
                     .await?,
             )?,
         },
+        Command::Screenshot {
+            id,
+            output,
+            max_width,
+        } => {
+            let mut path = format!("/v1/vms/{id}/screenshot");
+            if let Some(w) = max_width {
+                path.push_str(&format!("?max_width={w}"));
+            }
+            let (status, body) = r.get_raw(&path).await?;
+            if !status.is_success() {
+                anyhow::bail!("screenshot: {status}: {}", String::from_utf8_lossy(&body));
+            }
+            std::fs::write(&output, &body)
+                .with_context(|| format!("writing {}", output.display()))?;
+            println!("{}", output.display());
+        }
+        Command::Input { id, actions, text } => {
+            let actions = input_actions(&actions, text)?;
+            pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/input"),
+                    Some(json!({"actions": actions})),
+                )
+                .await?,
+            )?
+        }
+        Command::Signin { command } => match command {
+            SigninCommand::Set { id, username } => {
+                let password = read_secret("password: ")?;
+                pretty(
+                    &r.call(
+                        Method::PUT,
+                        &format!("/v1/vms/{id}/signin"),
+                        Some(json!({"username": username, "password": password})),
+                    )
+                    .await?,
+                )?
+            }
+            SigninCommand::Status { id } => pretty(
+                &r.call(Method::GET, &format!("/v1/vms/{id}/signin"), None)
+                    .await?,
+            )?,
+            SigninCommand::Clear { id } => pretty(
+                &r.call(Method::DELETE, &format!("/v1/vms/{id}/signin"), None)
+                    .await?,
+            )?,
+            SigninCommand::Type {
+                id,
+                mode,
+                no_submit,
+            } => pretty(
+                &r.call(
+                    Method::POST,
+                    &format!("/v1/vms/{id}/signin"),
+                    Some(json!({"mode": mode, "submit": !no_submit})),
+                )
+                .await?,
+            )?,
+        },
         Command::Memory { id } => pretty(
             &r.call(Method::GET, &format!("/v1/vms/{id}/memory"), None)
                 .await?,
@@ -3212,6 +3429,70 @@ async fn main() -> Result<()> {
     }
     if let Command::ImportCompose { file, name, output } = &cli.command {
         return import_compose(file, name.as_deref(), output.as_deref());
+    }
+    if let Command::Mcp { command } = &cli.command {
+        let out = match command {
+            McpCommand::Serve { .. } => None,
+            McpCommand::Install {
+                client,
+                project,
+                allow_write,
+                with_token,
+                name,
+                dry_run,
+            } => {
+                let exe = std::env::current_exe().context("locating fluxctl")?;
+                let exe = exe.canonicalize().unwrap_or(exe);
+                let mut args = Vec::new();
+                if let Some(c) = &cli.context {
+                    args.extend(["--context".to_owned(), c.clone()]);
+                }
+                args.extend(["mcp".to_owned(), "serve".to_owned()]);
+                if *allow_write {
+                    args.push("--allow-write".into());
+                }
+                let mut env = Vec::new();
+                if let Some(s) = &cli.server {
+                    env.push(("FLUXVM_URL".to_owned(), s.clone()));
+                }
+                if let Some(c) = &cli.config {
+                    let c = c.canonicalize().unwrap_or_else(|_| c.clone());
+                    env.push(("FLUXVM_CONFIG".to_owned(), c.display().to_string()));
+                }
+                if *with_token {
+                    let t = cli
+                        .server_token
+                        .clone()
+                        .context("--with-token needs --server-token or FLUXVM_TOKEN")?;
+                    env.push(("FLUXVM_TOKEN".to_owned(), t));
+                }
+                let entry = mcp_install::Entry {
+                    command: exe.display().to_string(),
+                    args,
+                    env,
+                };
+                Some(mcp_install::install(
+                    *client, *project, name, &entry, *dry_run,
+                )?)
+            }
+            McpCommand::Uninstall {
+                client,
+                project,
+                name,
+            } => Some(mcp_install::uninstall(*client, *project, name)?),
+            McpCommand::Status { project, name } => Some(mcp_install::status(*project, name)?),
+        };
+        if let Some(out) = out {
+            if let (McpCommand::Install { dry_run: true, .. }, Some(snippet)) =
+                (command, out.get("entry").and_then(|v| v.as_str()))
+            {
+                eprintln!("# {}", out["path"].as_str().unwrap_or_default());
+                println!("{snippet}");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+            return Ok(());
+        }
     }
     if let Command::Service { command } = &cli.command {
         let out = match command {
@@ -3626,6 +3907,8 @@ async fn main() -> Result<()> {
                     }
                 });
             }
+            #[cfg(target_os = "macos")]
+            api::self_control::spawn(m.clone(), &cfg.state_dir);
             let app = api::router(m);
             if cfg.tls.enabled() {
                 // rustls 0.23: select a process-wide CryptoProvider (ring) before
@@ -3794,6 +4077,50 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&m.vm_memory_report(id).await?)?
             );
+        }
+        Command::Screenshot {
+            id,
+            output,
+            max_width,
+        } => {
+            let shot = m.vm_screenshot(id, max_width).await?;
+            std::fs::write(&output, &shot.png)
+                .with_context(|| format!("writing {}", output.display()))?;
+            println!("{}", output.display());
+        }
+        Command::Signin { command } => {
+            let v = match command {
+                SigninCommand::Set { id, username } => {
+                    let password = read_secret("password: ")?;
+                    serde_json::to_value(m.set_vm_signin(id, username, password).await?)?
+                }
+                SigninCommand::Status { id } => {
+                    serde_json::to_value(m.vm_signin_status(id).await?)?
+                }
+                SigninCommand::Clear { id } => {
+                    m.get(id).await?;
+                    serde_json::json!({"deleted": m.delete_vm_signin(id).await?})
+                }
+                SigninCommand::Type {
+                    id,
+                    mode,
+                    no_submit,
+                } => {
+                    let mode: fluxvm_scheduler::vz_screen::SigninMode =
+                        serde_json::from_value(serde_json::Value::String(mode))
+                            .context("--mode must be password, username or username_tab")?;
+                    m.vm_signin(id, mode, !no_submit).await?;
+                    serde_json::json!({"ok": true})
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&v)?);
+        }
+        Command::Input { id, actions, text } => {
+            let actions: Vec<fluxvm_scheduler::vz_screen::InputAction> =
+                serde_json::from_value(serde_json::Value::Array(input_actions(&actions, text)?))
+                    .context("invalid input action")?;
+            let n = m.vm_input(id, &actions).await?;
+            println!("{}", serde_json::json!({"ok": true, "actions": n}));
         }
         Command::Hotplug { command } => match command {
             HotplugCommand::Cpu { id, add_vcpus } => {
@@ -6669,6 +6996,19 @@ mod tier2_cli_tests {
         assert!(matches!(
             cli(&["serial", &id]).unwrap().command,
             Command::Serial { .. }
+        ));
+        assert!(matches!(
+            cli(&["screenshot", &id, "--out", "s.png", "--max-width", "1280"])
+                .unwrap()
+                .command,
+            Command::Screenshot {
+                max_width: Some(1280),
+                ..
+            }
+        ));
+        assert!(matches!(
+            cli(&["input", &id, r#"{"action":"key","key":"enter"}"#, "--text", "ls"]).unwrap().command,
+            Command::Input { actions, text: Some(_), .. } if actions.len() == 1
         ));
         assert!(matches!(
             cli(&["port-connect", &id, "agent"]).unwrap().command,

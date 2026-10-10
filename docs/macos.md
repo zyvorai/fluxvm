@@ -5,6 +5,7 @@ FluxVM's control plane (daemon, REST API, `fluxctl`, scheduler) builds and runs 
 Linux backends: no KVM, TAP, eBPF, cgroups or network namespaces.
 
 For how the pieces fit together (runner per VM, control socket, vsock, warm pool, networking), see [macos-architecture.md](macos-architecture.md).
+To run several Mac minis and Mac Studios as one VM API, see [mac-cloud.md](mac-cloud.md).
 
 ## What is verified
 
@@ -90,9 +91,10 @@ to the VM log, and records the guest's NAT address.
 
 - **Disk:** raw images are cloned instantly (APFS `cp -c`). A qcow2 image is converted to raw while cloning, which needs
   `qemu-img` (`brew install qemu`).
-- **Named images:** `"image": "debian-13"` (also `debian-12`, `ubuntu-24.04`) downloads the ARM64 cloud image over HTTPS, checks it against
-  the vendor's published SHA file, and caches it under `<state_dir>/images`. Ubuntu ships qcow2, so it is converted to raw once. A
-  file of the same name, or a catalog entry, wins. Named images are not catalog images, so `policy.require_catalog_names` rejects them.
+- **Named images:** `"image": "debian-13"` (also `debian-12`, `ubuntu-24.04`, `ubuntu-26.04`, `fedora-44`, `centos-stream-10`, `almalinux-10`, `rocky-10`, `kali`) downloads the ARM64 cloud image over HTTPS, checks it against
+  the vendor's published SHA file, and caches it under `<state_dir>/images`. qcow2 downloads are converted to raw once by
+  FluxVM itself (no qemu-img needed), and every image is kept sparse. `kali` follows Kali's current rolling build. Vendor root
+  disks are small (Ubuntu's is about 3.5 GiB), so set `disk_size_gib` for real work. A file of the same name, or a catalog entry, wins. Named images are not catalog images, so `policy.require_catalog_names` rejects them.
 - **Cloud-init:** a NoCloud ISO built with `hdiutil`, with a MAC-based DHCP identity so the address stays stable.
 - **Guest address:** macOS offers no usable DHCP-lease or ARP view to a spawned process, so FluxVM adds a small systemd
   service to the cloud-init (when a `cloud_init` is given) that prints `VELORA-IP <addr>` on the serial console; the runner
@@ -219,6 +221,79 @@ allows two macOS VMs at a time per Mac.
 - **Console log:** a Linux guest's serial console goes to the VM's `console.log`. Past `serial_log_max_mib` (default 16; a key
   of the `[apple]` table in `fluxvm.toml`, not a request field) the runner moves it to `console.log.1`, replacing the previous one, and starts a new file, so a chatty guest cannot fill the
   disk. `sandbox logs` reads both files; `GET /v1/vms/{id}/serial` follows the current one.
+
+### Agent screen and input
+
+An agent can see and drive the display of any running `vz` VM, Linux or macOS guest, with no console window and no Screen
+Recording or Accessibility permission on the host: the runner renders the display into a hidden window of its own and sends
+keyboard and mouse events to it.
+
+```sh
+fluxctl screenshot web --out screen.png --max-width 1280
+fluxctl input web '{"action":"click","x":600,"y":400}' --text 'ls -la
+'
+fluxctl input web '{"action":"key","key":"c","modifiers":["control"]}'
+```
+
+The REST routes are `GET /v1/vms/{id}/screenshot` and `POST /v1/vms/{id}/input` (admin only, see [api.md](api.md)); the MCP
+tools are `vm_screenshot` and `vm_input` ([mcp.md](mcp.md)).
+
+- **Size:** a display 1920 pixels or wider is captured at half its pixels (a 2560x1600 display gives 1280x800, the size macOS
+  shows it at on a Retina screen); a smaller one at its own size. `max_width` scales down further.
+- **Coordinates** are screenshot pixels from the top left. After scaling with `max_width`, pass the same number as
+  `screen_width`.
+- **Typing** uses a US layout and covers printable ASCII, newline and tab. Keys: a character, `enter`, `tab`, `escape`,
+  `backspace`, `delete`, arrows, `home`, `end`, `page_up`, `page_down`, `f1`-`f12`; modifiers `shift`, `control`, `option`,
+  `command`.
+- **Pointer:** the guest gets absolute positions (a Linux guest's USB screen-coordinate digitizer, a macOS guest's trackpad), so a
+  click lands where the screenshot shows it; `right_click` and `middle_click` send those buttons, and `scroll` moves by wheel
+  notches.
+- **Verified** on macOS 27.2 (M4) with a Debian 13 guest: console login by typing, Ctrl+C, and left/right/middle clicks, drag and
+  scroll checked with evdev in the guest, before and after a guest reboot and a stop/start.
+
+### Guest self-control
+
+With `"apple": {"self_control": true}` (Linux guests), software inside the VM, such as a coding agent, can snapshot,
+restore and restart the VM it runs in through an MCP server at `http://127.0.0.1:7790/mcp` in the guest:
+
+```sh
+# inside the guest
+claude mcp add --transport http fluxvm http://127.0.0.1:7790/mcp
+```
+
+| Tool | Does |
+| --- | --- |
+| `self_info` | id, name, status, vCPUs, memory, snapshots, and the outcome of the last snapshot, restore or restart |
+| `self_snapshot_list` | snapshots (tag, time, size) |
+| `self_snapshot` | saves memory and disk under `tag`; the VM pauses briefly |
+| `self_snapshot_restore` | rewinds the VM, including the calling program, to `tag` |
+| `self_snapshot_delete` | removes `tag` |
+| `self_restart` | stops and starts the VM |
+
+cloud-init installs a small relay (`fluxvm-self.service`) from that port to vsock; the runner passes each connection to the
+daemon and names the VM itself, so a guest can only act on its own VM, with no network card, token or host port involved.
+Snapshot, restore and restart start about a second after they answer, so the reply reaches the guest before it is paused,
+rewound or rebooted; `self_info` then shows whether it worked, and a second one is refused while the first is still running.
+Verified on macOS 27.2 with a Debian 13 guest: a file changed after `self_snapshot` was back to its old content after
+`self_snapshot_restore` (same boot id: memory was restored, not rebooted), and `self_restart` gave a new boot id.
+
+### Stored sign-in
+
+`fluxctl signin` keeps a guest username and password in the host's login Keychain (service `dev.zyvor.fluxvm.vm-signin`,
+account: the VM id) and types them into the display, so you, a script or an agent (MCP `vm_sign_in`) can get past a login
+screen without handling the password:
+
+```sh
+fluxctl signin set web --user velora        # prompts for the password with echo off, or reads it from stdin
+fluxctl signin type web --mode username     # username, Enter, password, Enter: a text console login
+fluxctl signin type web                     # just the password, e.g. a macOS lock screen
+fluxctl signin status web                   # {"configured": true, "username": "velora"}
+fluxctl signin clear web
+```
+
+`--mode username_tab` types the username, Tab and the password for a graphical form; `--no-submit` leaves out the final Enter.
+The password is never returned by the API, the CLI or MCP, and deleting the VM removes the item. Verified on macOS 27.2 with a
+Debian 13 guest's tty1 login.
 
 ### Named console ports
 

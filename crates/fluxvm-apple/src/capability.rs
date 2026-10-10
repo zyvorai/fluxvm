@@ -341,6 +341,14 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         };
     }
     if let Some(apple) = &req.apple
+        && apple.self_control
+        && matches!(apple.guest_os, fluxvm_core::model::AppleGuest::Macos)
+    {
+        bail!(
+            "apple.self_control needs a Linux guest (the in-guest relay is installed by cloud-init)"
+        );
+    }
+    if let Some(apple) = &req.apple
         && !apple.egress_allow.is_empty()
     {
         if !matches!(req.network, NetworkSpec::None) {
@@ -715,12 +723,11 @@ pub fn with_guest_reporting(mut ci: CloudInitSpec) -> CloudInitSpec {
     ci
 }
 
-/// For a guest with no network card and an `egress_allow` list: a forwarder from `127.0.0.1:3128` to the runner's proxy on the
-/// host (vsock CID 2), and the proxy settings that make shells, apt and curl use it. The host decides what gets through.
-pub fn with_egress_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
-    let port = crate::runner::EGRESS_PORT;
+/// A forwarder from guest `127.0.0.1:<port>` to the same vsock port on the host (CID 2), as a systemd service named `name`.
+/// Python, because cloud-init itself needs python3, so every guest that runs these files has it.
+fn push_vsock_forwarder(ci: &mut CloudInitSpec, name: &str, description: &str, port: u32) {
     ci.write_files.push(CloudInitFile {
-        path: "/usr/local/sbin/fluxvm-egress".into(),
+        path: format!("/usr/local/sbin/{name}"),
         content: format!(
             concat!(
                 "#!/usr/bin/python3\n",
@@ -757,10 +764,27 @@ pub fn with_egress_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
         permissions: Some("0755".into()),
     });
     ci.write_files.push(CloudInitFile {
-        path: "/etc/systemd/system/fluxvm-egress.service".into(),
-        content: "[Unit]\nDescription=Forward to the FluxVM host's egress proxy\n[Service]\nExecStart=/usr/local/sbin/fluxvm-egress\nRestart=always\n[Install]\nWantedBy=multi-user.target\n".into(),
+        path: format!("/etc/systemd/system/{name}.service"),
+        content: format!(
+            "[Unit]\nDescription={description}\n[Service]\nExecStart=/usr/local/sbin/{name}\nRestart=always\n[Install]\nWantedBy=multi-user.target\n"
+        ),
         permissions: Some("0644".into()),
     });
+    ci.runcmd.push(format!(
+        "systemctl daemon-reload && systemctl enable --now {name}.service"
+    ));
+}
+
+/// For a guest with no network card and an `egress_allow` list: a forwarder from `127.0.0.1:3128` to the runner's proxy on the
+/// host (vsock CID 2), and the proxy settings that make shells, apt and curl use it. The host decides what gets through.
+pub fn with_egress_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
+    let port = crate::runner::EGRESS_PORT;
+    push_vsock_forwarder(
+        &mut ci,
+        "fluxvm-egress",
+        "Forward to the FluxVM host's egress proxy",
+        port,
+    );
     let url = format!("http://127.0.0.1:{port}");
     ci.write_files.push(CloudInitFile {
         path: "/etc/environment".into(),
@@ -774,14 +798,44 @@ pub fn with_egress_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
         content: format!("Acquire::http::Proxy \"{url}\";\nAcquire::https::Proxy \"{url}\";\n"),
         permissions: Some("0644".into()),
     });
-    ci.runcmd
-        .push("systemctl daemon-reload && systemctl enable --now fluxvm-egress.service".into());
+    ci
+}
+
+/// For a `self_control` VM: `http://127.0.0.1:7790/mcp` in the guest reaches the host's MCP server for this VM over vsock.
+pub fn with_self_control_forwarder(mut ci: CloudInitSpec) -> CloudInitSpec {
+    push_vsock_forwarder(
+        &mut ci,
+        "fluxvm-self",
+        "Forward to the FluxVM host's self-control MCP server",
+        crate::runner::SELF_CONTROL_PORT,
+    );
     ci
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_control_is_for_linux_guests_and_installs_the_relay() {
+        assert!(validate_request(&req(r#""apple":{"self_control":true}"#)).is_ok());
+        assert!(
+            validate_request(&req(r#""apple":{"self_control":true,"guest_os":"macos"}"#)).is_err()
+        );
+        let ci = with_self_control_forwarder(CloudInitSpec::default());
+        let relay = ci
+            .write_files
+            .iter()
+            .find(|f| f.path == "/usr/local/sbin/fluxvm-self")
+            .unwrap();
+        assert!(relay.content.contains("v.connect((2, 7790))"));
+        assert!(relay.content.contains("s.bind(('127.0.0.1', 7790))"));
+        assert!(
+            ci.runcmd
+                .iter()
+                .any(|c| c.contains("enable --now fluxvm-self.service"))
+        );
+    }
 
     #[test]
     fn egress_needs_no_network_card_and_sane_names() {

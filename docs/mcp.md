@@ -32,6 +32,7 @@ Read tools are always offered:
 | `host_status` | `/readyz` (KVM, dataplane mode and BPF/Cilium health, secure containers) plus a count of VMs by status | `GET /readyz`, `GET /v1/vms` |
 | `vm_network` | `kind` = `status`, `effective`, `stats`, `flows`, `drops`, `drop-reasons`, `learned-ip`, `conntrack` or `capture`; `limit` for flows and drops | `GET /v1/vms/{id}/network/{kind}` |
 | `vm_logs` | The last `lines` (default 100, max 500) of the serial console log | `GET /v1/vms/{id}/logs` |
+| `vm_screenshot` | The display of a running Apple VZ VM (Linux or macOS guest) as an image, scaled to `max_width` (default 1280), with a caption giving its size | `GET /v1/vms/{id}/screenshot` |
 
 Write tools are offered only with `--allow-write`:
 
@@ -44,6 +45,8 @@ Write tools are offered only with `--allow-write`:
 | `vm_snapshot_restore` | Restore a named snapshot | `POST /v1/vms/{id}/restore` |
 | `vm_snapshot_delete` | Delete a named snapshot | `DELETE /v1/vms/{id}/snapshots/{tag}` |
 | `vm_delete` | Delete a VM | `DELETE /v1/vms/{id}` |
+| `vm_input` | Keyboard and mouse input for a running Apple VZ VM's display: one `action` (`type`, `key`, `move`, `click`, `double_click`, `right_click`, `middle_click`, `down`, `up`, `drag`, `scroll`) or a list of `actions`; coordinates are `vm_screenshot` pixels with `screen_width` set to its width; `screenshot: true` returns the display afterwards | `POST /v1/vms/{id}/input` |
+| `vm_sign_in` | Types the sign-in stored with `fluxctl signin set` into an Apple VZ VM's login screen (`mode`: `password`, `username`, `username_tab`; `submit`); the password never passes through the agent; `screenshot: true` returns the display afterwards | `POST /v1/vms/{id}/signin` |
 | `vm_power` | `op` = `start`, `stop`, `pause`, `resume` or `restart` | `POST /v1/vms/{id}/{op}` |
 | `vm_capture` | A 1-30 s tcpdump capture (optional `filter`). With `output`, waits and writes the pcap to that path on the machine running fluxctl; otherwise returns the token | `POST` / `GET /v1/vms/{id}/network/capture[/{token}]` |
 | `vm_fork` | Fork a running flux-vm VM into `count` (1-32) running children sharing its memory snapshot | `POST /v1/vms/{id}/fork` |
@@ -105,6 +108,46 @@ The daemon is chosen like any remote `fluxctl` command: `--server` or
 `auth.require` on, a `read-only` token covers the read tools except
 `vm_network` with `conntrack` or `capture`, which need `admin`; the write
 tools need `admin`.
+
+## From inside a VM
+
+A `vz` guest created with `apple.self_control` gets its own MCP server at
+`http://127.0.0.1:7790/mcp` with `self_*` tools that snapshot, restore and
+restart that VM only; see [macOS: guest self-control](macos.md#guest-self-control).
+
+## Installing into a client
+
+`fluxctl mcp install <client>` adds a `fluxvm` server to the client's own
+config file, pointing at the running `fluxctl` binary, and leaves every
+other entry alone (Codex's TOML keeps its comments and layout):
+
+```sh
+fluxctl mcp install claude-code                 # ~/.claude.json
+fluxctl mcp install cursor --allow-write        # ~/.cursor/mcp.json, with write tools
+fluxctl --server http://mac:7788 mcp install codex   # ~/.codex/config.toml, FLUXVM_URL set
+fluxctl mcp install vscode --project            # ./.vscode/mcp.json
+fluxctl mcp install gemini --dry-run            # print the entry and the file, write nothing
+fluxctl mcp status                              # which clients have it
+fluxctl mcp uninstall cursor
+```
+
+| Client | User-wide | `--project` (current directory) |
+| --- | --- | --- |
+| `claude-code` | `~/.claude.json` | `.mcp.json` |
+| `cursor` | `~/.cursor/mcp.json` | `.cursor/mcp.json` |
+| `claude-desktop` | `~/Library/Application Support/Claude/claude_desktop_config.json` (Linux: `~/.config/Claude/`) | — |
+| `codex` | `~/.codex/config.toml` | `.codex/config.toml` |
+| `vscode` | — (kept in the VS Code profile) | `.vscode/mcp.json` |
+| `windsurf` | `~/.codeium/windsurf/mcp_config.json` | — |
+| `gemini` | `~/.gemini/settings.json` | `.gemini/settings.json` |
+
+`--server`/`FLUXVM_URL` and `--config` become the entry's `FLUXVM_URL` and
+`FLUXVM_CONFIG`, and `--context` its first arguments. The token is only
+written with `--with-token`, since these files are plain text. A JSON file
+with comments is refused rather than rewritten without them; `--dry-run`
+prints what to paste. Restart the client, or reload its MCP servers,
+afterwards. Verified with Claude Code (`claude mcp list` connects), Codex
+(`codex mcp list`) and Cursor's agent.
 
 ## Other MCP clients
 

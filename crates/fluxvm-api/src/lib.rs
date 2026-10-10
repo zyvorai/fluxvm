@@ -36,6 +36,8 @@ mod idempotency;
 mod oidc;
 mod openapi;
 mod rate_limit;
+#[cfg(target_os = "macos")]
+pub mod self_control;
 mod speculate_api;
 
 #[derive(Clone)]
@@ -585,6 +587,15 @@ pub fn router(manager: Arc<VmManager>) -> Router {
         .route("/v1/vms/{id}/pressure", get(vm_pressure))
         .route("/v1/vms/{id}/logs", get(vm_logs))
         .route("/v1/vms/{id}/agent", post(agent_exec))
+        .route("/v1/vms/{id}/screenshot", get(vm_screenshot))
+        .route("/v1/vms/{id}/input", post(vm_input))
+        .route(
+            "/v1/vms/{id}/signin",
+            get(vm_signin_status)
+                .put(set_vm_signin)
+                .delete(delete_vm_signin)
+                .post(vm_signin),
+        )
         .route("/v1/vms/{id}/agent/ping", post(agent_ping))
         .route("/v1/vms/{id}/agent/put-file", post(agent_put_file))
         .route("/v1/vms/{id}/agent/get-file", post(agent_get_file))
@@ -3713,6 +3724,134 @@ async fn agent_exec(
         .exec_with_policy(id, req.command, req.timeout_seconds, req.policy)
         .await?;
     Ok(Json(json!(response)))
+}
+
+#[derive(Deserialize)]
+struct ScreenshotQuery {
+    max_width: Option<u32>,
+}
+
+/// `GET /v1/vms/{id}/screenshot[?max_width=N]` — the guest display of a running `vz` VM as a PNG. The size is in the
+/// `x-fluxvm-screen-width`/`-height` headers; `x-fluxvm-screen-blank: true` means nothing is drawn yet. Admin-only: the
+/// screen can show anything the guest does.
+async fn vm_screenshot(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<ScreenshotQuery>,
+) -> ApiResult<Response> {
+    require_admin(role)?;
+    let shot = m.vm_screenshot(id, q.max_width).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png".to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-width"),
+                shot.width.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-height"),
+                shot.height.to_string(),
+            ),
+            (
+                header::HeaderName::from_static("x-fluxvm-screen-blank"),
+                shot.blank.to_string(),
+            ),
+        ],
+        shot.png,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InputRequest {
+    Batch {
+        actions: Vec<fluxvm_scheduler::vz_screen::InputAction>,
+    },
+    One(fluxvm_scheduler::vz_screen::InputAction),
+}
+
+/// `POST /v1/vms/{id}/input` — keyboard and mouse input for a running `vz` VM's display: one action
+/// (`{"action": "click", "x": 10, "y": 20}`) or `{"actions": [...]}` run in order. Admin-only, like `agent_exec`.
+async fn vm_input(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<InputRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let actions = match req {
+        InputRequest::Batch { actions } => actions,
+        InputRequest::One(a) => vec![a],
+    };
+    let n = m.vm_input(id, &actions).await?;
+    Ok(Json(json!({"ok": true, "actions": n})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SetSigninRequest {
+    username: Option<String>,
+    password: String,
+}
+
+/// `PUT /v1/vms/{id}/signin` — stores the sign-in for a `vz` VM in the host's login Keychain. Admin-only; the reply
+/// and every later read leave the password out.
+async fn set_vm_signin(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetSigninRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let status = m.set_vm_signin(id, req.username, req.password).await?;
+    Ok(Json(json!(status)))
+}
+
+/// `GET /v1/vms/{id}/signin` — `{"configured", "username"?}`.
+async fn vm_signin_status(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    Ok(Json(json!(m.vm_signin_status(id).await?)))
+}
+
+/// `DELETE /v1/vms/{id}/signin`.
+async fn delete_vm_signin(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    m.get(id).await?;
+    Ok(Json(json!({"deleted": m.delete_vm_signin(id).await?})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct SigninRequest {
+    #[serde(default)]
+    mode: fluxvm_scheduler::vz_screen::SigninMode,
+    submit: Option<bool>,
+}
+
+/// `POST /v1/vms/{id}/signin` — types the stored sign-in into the guest display (`mode`: `password`, `username`
+/// or `username_tab`; `submit` presses Enter, default true). Admin-only.
+async fn vm_signin(
+    State(m): State<Arc<VmManager>>,
+    Extension(role): Extension<Role>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<SigninRequest>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    require_admin(role)?;
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    m.vm_signin(id, req.mode, req.submit.unwrap_or(true))
+        .await?;
+    Ok(Json(json!({"ok": true})))
 }
 
 /// `POST /v1/vms/{id}/agent/ping` — health-checks the vsock guest agent

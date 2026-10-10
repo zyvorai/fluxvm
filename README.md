@@ -21,15 +21,43 @@
 default; nftables is an explicit compatibility mode. Before upgrading configs
 that omit the dataplane mode, follow the [eBPF upgrade guide](docs/primary-ebpf.md).
 
-**One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the in-tree FluxVM hypervisor.** No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend, with a vsock guest agent instead of SSH.
+**One Rust control plane for Firecracker, Cloud Hypervisor, QEMU/KVM and the in-tree FluxVM hypervisor, plus Apple's Virtualization.framework (`vz`) on a Mac.** No libvirtd. No XML. A REST API and a CLI that do the same thing on every backend, with a vsock guest agent instead of SSH.
 
-**4 VM backends, one API** · **No libvirtd, no XML** · **Native KVM, no QEMU** · **SDKs: Python, Go, TypeScript** · **Operator verified on real k3s**
+**4 Linux backends + `vz` on Mac, one API** · **No libvirtd, no XML** · **Native KVM, no QEMU** · **SDKs: Python, Go, TypeScript** · **Operator verified on real k3s**
 
-[**Quickstart**](#quickstart) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
+[**Quickstart**](#quickstart) · [**Mac cloud**](#your-own-mac-cloud) · [**Proof**](#maturity-whats-real-today) · [**Docs**](docs/index.md) · [**API**](docs/api.md) · [**Talk to Zyvor**](https://zyvor.dev/?utm_source=github&utm_medium=fluxvm&utm_campaign=readme_hero)
 
 </div>
 
 ---
+
+## Your own Mac cloud
+
+<img src="docs/assets/mac-cloud.svg" alt="A FluxVM control plane placing vz VMs on Mac Studios and Mac minis: a macOS guest, an agent sandbox, a container VM and a Debian guest with Rosetta" width="100%">
+
+FluxVM runs natively on Apple silicon. Its `vz` backend drives Apple's **Virtualization.framework**, the hypervisor behind macOS's own virtual machines. One Mac gets Linux VMs, macOS guests, agent sandboxes and container VMs over the same REST API, `fluxctl` and MCP server as Linux. A shelf of Mac minis and Mac Studios becomes one fleet: `fluxvm-agent central` places each `vz` request on the Mac that fits.
+
+| Built for Mac people | |
+|---|---|
+| **Apple silicon native** | Daemon, API and a signed Swift runner per VM (`fluxvm-vz-runner`); no QEMU, no emulation |
+| **macOS guests** | Install from an IPSW, prepare a template once, clone it with APFS in an instant for Xcode CI (two at a time per Mac, Apple's limit) |
+| **Rosetta** | x86_64 Linux binaries and `linux/amd64` container images run in arm64 guests |
+| **APFS clones and warm starts** | Copy-on-write disks and snapshots; a saved VM restores in about 2 s instead of a 10 s boot |
+| **Shared folders** | `fluxctl run -v ~/src:/mnt/src`: edit on macOS, build in Linux (virtiofs) |
+| **Keychain sign-in** | `fluxctl signin` keeps a guest password in your login Keychain and types it; the API never returns it |
+| **launchd** | `fluxctl service install` writes a LaunchAgent, so a headless Mac mini serves VMs after every reboot |
+| **Agents see the screen** | Screenshots, keyboard and mouse for any `vz` guest, with no Screen Recording permission on the host |
+
+```bash
+xcode-select --install && brew install hivex
+cargo build -p fluxctl                              # builds and signs the vz runner
+fluxctl run                                         # a throwaway Debian 13 VM and a shell
+fluxctl sandbox run alpine:3.22 --rm -- echo hi     # a container in its own VM
+```
+
+[**FluxVM on Mac**](https://zyvorai.github.io/zyvor-fluxvm/mac) · [**Build a Mac cloud**](https://zyvorai.github.io/zyvor-fluxvm/mac-cloud) · [Mac guide](docs/macos.md) · [Mac cloud guide](docs/mac-cloud.md) · [Architecture](docs/macos-architecture.md)
+
+Measured on one Apple M4 with macOS 27.2. Multi-Mac fleets are not yet verified on real hardware; see [Native macOS](#native-macos-apple-silicon) below for the full list.
 
 ## What's new
 
@@ -201,7 +229,7 @@ Every one maps onto what is implemented today. [All eleven](docs/index.md#use-ca
 | REST API, auth/RBAC and the VM JSON contract | [docs/api.md](docs/api.md) |
 | Day-2 operations | [docs/operations.md](docs/operations.md) |
 | Native KVM, no QEMU | [docs/native-kvm-no-qemu.md](docs/native-kvm-no-qemu.md) |
-| Native macOS: the `vz` backend, sandboxes, container sandboxes | [docs/macos.md](docs/macos.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
+| Native macOS: the `vz` backend, sandboxes, container sandboxes, a Mac cloud | [docs/macos.md](docs/macos.md) · [docs/mac-cloud.md](docs/mac-cloud.md) · [docs/macos-sandboxes.md](docs/macos-sandboxes.md) · [docs/oci-sandboxes.md](docs/oci-sandboxes.md) |
 | Agent sandboxes, procbox and the SDKs | [docs/agent-sandbox-gaps.md](docs/agent-sandbox-gaps.md) · [python/](python/README.md) · [go/](go/README.md) · [typescript/](typescript/README.md) |
 | Network Fabric and Service Fabric | [docs/network-fabric.md](docs/network-fabric.md) · [docs/service-fabric.md](docs/service-fabric.md) |
 | Secure Containers and MicroVM | [docs/secure-containers.md](docs/secure-containers.md) · [docs/microvm.md](docs/microvm.md) |

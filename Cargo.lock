@@ -2196,6 +2196,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -2362,6 +2363,7 @@ dependencies = [
  "chrono",
  "fluxvm-cgroup",
  "libc",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2451,6 +2453,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

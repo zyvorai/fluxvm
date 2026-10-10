@@ -81,7 +81,8 @@
  * always dark regardless of the page's light/dark theme.
  * ------------------------------------------------------------------- */
 .navbar {
-  height: 4.5rem;
+  height: 3.25rem;
+  font-size: 0.9rem;
   box-shadow: none;
   border-bottom: 1px solid rgba(255, 255, 255, 0.12);
   backdrop-filter: saturate(180%) blur(12px);
@@ -196,4 +197,86 @@ article .markdown li {
 
 .theme-doc-markdown {
   max-width: 46rem;
+}
+
+/* ---------------------------------------------------------------------
+ * macOS touches: window controls on code blocks, system selection
+ * colour, smooth scrolling and visible focus rings.
+ * ------------------------------------------------------------------- */
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+::selection {
+  background: rgba(10, 132, 255, 0.3);
+}
+
+:focus-visible {
+  outline: 3px solid rgba(10, 132, 255, 0.6);
+  outline-offset: 2px;
+}
+
+.theme-code-block {
+  position: relative;
+  border-radius: 12px;
+  padding-top: 28px;
+  background: var(--prism-background-color);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+
+.theme-code-block::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: 14px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ff5f57;
+  box-shadow: 16px 0 0 #febc2e, 32px 0 0 #28c840;
+}
+
+.theme-code-block > div:first-child[class*='codeBlockTitle'] {
+  margin-top: -28px;
+  padding-left: 60px;
+}
+
+.button {
+  border-radius: 980px;
+}
+
+.mac-led {
+  animation: mac-led 2.4s ease-in-out infinite;
+}
+
+@keyframes mac-led {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mac-led {
+    animation: none;
+  }
+}
+
+/* Footer: apple.com's quiet small-print footer, on the site's dark palette. */
+.footer--dark {
+  --ifm-footer-background-color: #1d1d1f;
+  --ifm-footer-color: #86868b;
+  --ifm-footer-link-color: #d2d2d7;
+  --ifm-footer-title-color: #f5f5f7;
+  border-top: 1px solid #424245;
+  font-size: 0.8rem;
+}
+
+.footer--dark .footer__link-item:hover {
+  color: #fff;
 }

@@ -27,6 +27,8 @@ pub struct RunnerConfig {
     pub control_socket: PathBuf,
     pub serial_log: PathBuf,
     pub vsock_socket: Option<PathBuf>,
+    /// The daemon's self-control socket; the runner relays guest connections on vsock `SELF_CONTROL_PORT` to it.
+    pub self_socket: Option<PathBuf>,
     pub ip_file: PathBuf,
     pub window: bool,
     pub display_count: u8,
@@ -156,6 +158,11 @@ impl RunnerConfig {
                     .clone()
                     .unwrap_or_else(|| ctx.workspace.join("vsock.sock")),
             )),
+            self_socket: if apple.self_control {
+                SELF_CONTROL_SOCKET.get().cloned()
+            } else {
+                None
+            },
             ip_file: ip_file(&ctx.workspace),
             window: apple.window,
             display_count: apple.display_count.clamp(1, 8),
@@ -353,6 +360,25 @@ pub fn write_oci_meta_as(req: &CreateVmRequest, workspace: &Path, config_name: &
 
 /// The vsock port the runner's egress proxy listens on (guest to host); the guest forwards 127.0.0.1:3128 to it.
 pub const EGRESS_PORT: u32 = 3128;
+
+/// The vsock port (and guest-local TCP port) of a `self_control` VM's MCP server.
+pub const SELF_CONTROL_PORT: u32 = 7790;
+
+static SELF_CONTROL_SOCKET: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Where this daemon serves self-control, unique per state directory so several daemons of one user do not collide.
+pub fn self_control_socket_path(state_dir: &Path) -> Result<PathBuf> {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in state_dir.as_os_str().as_encoded_bytes() {
+        h = (h ^ u64::from(*b)).wrapping_mul(0x100_0000_01b3);
+    }
+    Ok(socket_dir()?.join(format!("self-{:08x}.sock", h as u32)))
+}
+
+/// Called once the daemon listens on `path`; VMs launched afterwards with `self_control` get the relay.
+pub fn set_self_control_socket(path: PathBuf) {
+    let _ = SELF_CONTROL_SOCKET.set(path);
+}
 
 pub const STATE_FILE: &str = "state.vzvmsave";
 /// Files cloned alongside the saved state, so a restore gets the disk exactly as it was when the state was saved.
