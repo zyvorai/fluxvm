@@ -28,6 +28,10 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
+/// Set by fluxvm-oci-init (`fluxvm_oci_init::config::POWEROFF_VIA_INIT_ENV`).
+#[cfg(target_os = "linux")]
+const POWEROFF_VIA_INIT_ENV: &str = "FLUXVM_POWEROFF_VIA_INIT";
+
 #[derive(Parser)]
 #[command(
     name = "fluxvm-guest-agent",
@@ -38,36 +42,37 @@ struct Cli {
     /// AF_VSOCK port to listen on.
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u32,
+    /// Shared-secret token file (an OCI sandbox keeps it outside the image's read-only root).
+    #[arg(long, default_value = fluxvm_guest_protocol::TOKEN_FILE_PATH)]
+    token_file: String,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    run_server(cli.port)
+    run_server(cli.port, &cli.token_file)
 }
 
 #[cfg(target_os = "linux")]
-fn run_server(port: u32) -> Result<()> {
+fn run_server(port: u32, token_file: &str) -> Result<()> {
     use std::os::fd::FromRawFd;
 
     let expected_token: Arc<Option<String>> = Arc::new(
-        std::fs::read_to_string(TOKEN_FILE_PATH)
+        std::fs::read_to_string(token_file)
             .ok()
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty()),
     );
     if expected_token.is_some() {
-        eprintln!(
-            "fluxvm-guest-agent: token found at {TOKEN_FILE_PATH}, requests must authenticate"
-        );
+        eprintln!("fluxvm-guest-agent: token found at {token_file}, requests must authenticate");
     } else if exec_policy::insecure_opt_in(std::env::var(exec_policy::INSECURE_ENV).ok().as_deref())
     {
         eprintln!(
-            "fluxvm-guest-agent: WARNING no token at {TOKEN_FILE_PATH} and {} is set — running unauthenticated, any vsock caller can run commands as root",
+            "fluxvm-guest-agent: WARNING no token at {token_file} and {} is set — running unauthenticated, any vsock caller can run commands as root",
             exec_policy::INSECURE_ENV
         );
     } else {
         eprintln!(
-            "fluxvm-guest-agent: ERROR no token at {TOKEN_FILE_PATH} — refusing every request (fail closed); provision the token, or set {}=1 to run unauthenticated",
+            "fluxvm-guest-agent: ERROR no token at {token_file} — refusing every request (fail closed); provision the token, or set {}=1 to run unauthenticated",
             exec_policy::INSECURE_ENV
         );
     }
@@ -121,7 +126,7 @@ fn run_server(port: u32) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn run_server(_port: u32) -> Result<()> {
+fn run_server(_port: u32, _token_file: &str) -> Result<()> {
     anyhow::bail!("fluxvm-guest-agent only supports Linux (AF_VSOCK)")
 }
 
@@ -208,7 +213,15 @@ fn handle_connection(
         AgentRequest::Shutdown => {
             writer.write_all(encode_line(&AgentResponse::ShuttingDown)?.as_bytes())?;
             writer.flush()?;
-            let _ = Command::new("shutdown").args(["-h", "now"]).spawn();
+            // Under fluxvm-oci-init the image's shutdown(8), if any, cannot stop the VM: PID 1 powers off on SIGUSR2.
+            if std::env::var_os(POWEROFF_VIA_INIT_ENV).is_some()
+                || Command::new("shutdown")
+                    .args(["-h", "now"])
+                    .spawn()
+                    .is_err()
+            {
+                unsafe { libc::kill(1, libc::SIGUSR2) };
+            }
             return Ok(());
         }
         AgentRequest::ResetIdentity {
@@ -554,15 +567,7 @@ fn exec_process(process: &fluxvm_guest_protocol::ExecProcess, timeout: Duration)
         cmd.current_dir(cwd);
     }
     if let Some(user) = process.user {
-        // Drop supplementary groups first: setgid/setuid alone keep root's.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setgroups(0, std::ptr::null()) != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        // std drops root's supplementary groups (setgroups(0)) before setuid; pre_exec would run too late.
         cmd.gid(user.gid).uid(user.uid);
     }
     run_with_timeout(cmd, timeout)

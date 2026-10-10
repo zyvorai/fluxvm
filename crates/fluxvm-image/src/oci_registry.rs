@@ -46,7 +46,7 @@ impl ImageRef {
         } else {
             // A colon after the last slash is a tag; one before it is a registry port.
             match s.rfind(':') {
-                Some(i) if i > s.rfind('/').map_or(0, |j| j) && !s[..i].is_empty() => {
+                Some(i) if i > s.rfind('/').unwrap_or(0) && !s[..i].is_empty() => {
                     (&s[..i], s[i + 1..].to_string())
                 }
                 _ => (s, "latest".to_string()),

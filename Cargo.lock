@@ -2540,6 +2540,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluxvm-oci-init"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
 name = "fluxvm-procbox"
 version = "0.3.0"
 dependencies = [
