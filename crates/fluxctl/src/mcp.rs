@@ -885,6 +885,7 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
                     "oci_image": {"type": "string", "description": "macOS only: run this linux/arm64 container image (alpine:3.22, ghcr.io/org/app:1.2) as the sandbox instead of a template. The first use of an image pulls it and builds its root filesystem (up to a few minutes)."},
                     "oci_command": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: argv replacing the image's Cmd"},
                     "oci_env": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: KEY=value entries"},
+                    "oci_ports": {"type": "array", "items": {"type": "string"}, "description": "with oci_image: published TCP ports, HOST:CONTAINER (the Mac's 127.0.0.1:HOST reaches the container)"},
                     "name": {"type": "string"},
                     "ttl_seconds": {"type": "integer", "minimum": 1},
                     "offline": {"type": "boolean", "description": "macOS only: no network card at all, so the sandbox cannot reach anything; commands and files still work. Slower to start (about 10 s)."},
@@ -897,7 +898,11 @@ pub fn tools(remote: Arc<Remote>) -> Vec<Tool> {
             |r, args| async move {
                 let oci = str_arg(&args, "oci_image").map(|image| {
                     let mut oci = json!({"image": image});
-                    for (from, to) in [("oci_command", "command"), ("oci_env", "env")] {
+                    for (from, to) in [
+                        ("oci_command", "command"),
+                        ("oci_env", "env"),
+                        ("oci_ports", "ports"),
+                    ] {
                         if let Some(v) = args.get(from).filter(|v| v.is_array()) {
                             oci[to] = v.clone();
                         }

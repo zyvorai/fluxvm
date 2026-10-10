@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>FluxVM</title>
+<style>
+  :root { --bg:#0f1419; --card:#161d27; --line:#243044; --fg:#e7ecf3; --muted:#8b98a8; --accent:#3d9cfd;
+          --ok:#3ccf8e; --warn:#f5b84a; --bad:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 ui-sans-serif, system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:1rem; padding:0.9rem 1.5rem; border-bottom:1px solid var(--line); }
+  h1 { margin:0; font-size:1.15rem; letter-spacing:-0.02em; }
+  h2 { margin:0 0 0.6rem; font-size:0.95rem; }
+  .muted { color:var(--muted); }
+  .grow { flex:1; }
+  main { padding:1.25rem 1.5rem; display:grid; gap:1rem; max-width:1200px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:0.9rem 1.1rem; }
+  .stats { display:flex; flex-wrap:wrap; gap:1.5rem; }
+  .stat b { display:block; font-size:1.25rem; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:0.4rem 0.5rem; border-top:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; font-size:0.8rem; border-top:0; }
+  td.actions { white-space:nowrap; text-align:right; }
+  code { font:12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .pill { display:inline-block; padding:0 0.45rem; border-radius:999px; font-size:0.78rem; border:1px solid currentColor; }
+  .running, .healthy { color:var(--ok); } .creating, .paused, .starting { color:var(--warn); }
+  .failed, .unhealthy { color:var(--bad); } .stopped { color:var(--muted); }
+  button { font:inherit; font-size:0.8rem; background:#223047; color:var(--fg); border:1px solid #2c3a4f; border-radius:6px;
+           padding:0.2rem 0.55rem; cursor:pointer; margin-left:0.25rem; }
+  button:hover { border-color:var(--accent); } button.danger:hover { border-color:var(--bad); color:var(--bad); }
+  button.primary { background:var(--accent); color:#041018; border:0; font-weight:600; }
+  input { font:inherit; background:#0f1419; border:1px solid #2c3a4f; color:var(--fg); border-radius:6px; padding:0.35rem 0.6rem; }
+  pre { background:#0b1016; border-radius:8px; padding:0.75rem; overflow:auto; max-height:28rem; font-size:12px; margin:0.5rem 0 0; white-space:pre-wrap; }
+  #error { color:var(--bad); }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>FluxVM</h1>
+  <span id="host" class="muted"></span>
+  <span class="grow"></span>
+  <span id="error"></span>
+  <label class="muted"><input type="checkbox" id="auto" checked/> auto-refresh</label>
+  <button id="refresh">Refresh</button>
+  <button id="logout" hidden>Forget token</button>
+</header>
+<main>
+  <section class="card" id="login" hidden>
+    <h2>API token</h2>
+    <p class="muted">This daemon requires a bearer token (<code>[[auth.tokens]]</code> in its config). It is kept in this
+      tab's session storage only.</p>
+    <form id="login-form"><input id="token" type="password" autocomplete="off" size="48"/>
+      <button class="primary" type="submit">Use token</button></form>
+  </section>
+  <section class="card" id="summary"><div class="stats" id="stats"></div></section>
+  <div id="groups"></div>
+  <section class="card" id="logs" hidden>
+    <h2><span id="logs-title"></span> <button id="logs-reload">Reload</button> <button id="logs-close">Close</button></h2>
+    <div id="logs-meta" class="muted"></div>
+    <pre id="logs-body"></pre>
+  </section>
+</main>
+<script src="/console/app.js"></script>
+</body>
+</html>

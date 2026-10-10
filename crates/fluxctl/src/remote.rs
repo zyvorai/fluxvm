@@ -44,9 +44,14 @@ pub fn endpoint(
     if context == Some(LOCAL_CONTEXT) {
         return Ok(None);
     }
-    Ok(crate::contexts::Contexts::load()?
-        .resolve(context)?
-        .map(|(_, ep)| Remote::new(&ep.server, token.or(ep.token))))
+    let Some((name, ep)) = crate::contexts::Contexts::load()?.resolve(context)? else {
+        return Ok(None);
+    };
+    let token = match token {
+        Some(t) => Some(t),
+        None => ep.resolve_token(&name)?,
+    };
+    Ok(Some(Remote::new(&ep.server, token)))
 }
 
 impl Remote {
@@ -61,6 +66,10 @@ impl Remote {
             token: token.filter(|t| !t.is_empty()),
             http: reqwest::Client::new(),
         }
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
     }
 
     pub async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Result<Value> {

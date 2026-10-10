@@ -40,6 +40,10 @@ pub struct RunArgs {
     /// `KEY=value` (repeatable).
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
+    /// Pass this variable from your environment as a write-only secret (repeatable): it is never stored in the VM
+    /// record or shown by the API.
+    #[arg(long = "secret-env")]
+    pub secret_env: Vec<String>,
     #[arg(short = 'w', long)]
     pub workdir: Option<String>,
     /// `uid[:gid]` or `name[:group]`.
@@ -51,6 +55,22 @@ pub struct RunArgs {
     /// Mount the sandbox's own copy of the image read-write (default: read-only; `/tmp` and `/run` are tmpfs either way).
     #[arg(long)]
     pub writable_root: bool,
+    /// Publish a TCP port, `HOST:CONTAINER` (repeatable): the Mac's 127.0.0.1:HOST reaches the container.
+    #[arg(short = 'p', long = "publish")]
+    pub publish: Vec<String>,
+    /// Persistent named volume, `NAME:/path[:ro]` (repeatable); it survives the sandbox.
+    #[arg(short = 'v', long = "volume")]
+    pub volumes: Vec<String>,
+    /// Restart the process: no, on-failure or always.
+    #[arg(long)]
+    pub restart: Option<String>,
+    #[arg(long)]
+    pub max_restarts: Option<u32>,
+    /// Health check command, run without a shell (space-separated argv).
+    #[arg(long)]
+    pub health_cmd: Option<String>,
+    #[arg(long, requires = "health_cmd")]
+    pub health_interval: Option<u64>,
     /// Delete the sandbox when the process has exited.
     #[arg(long)]
     pub rm: bool,
@@ -63,7 +83,7 @@ pub struct RunArgs {
 }
 
 impl RunArgs {
-    pub fn request(&self) -> Value {
+    pub fn request(&self) -> Result<Value> {
         let mut oci = json!({
             "image": self.image,
             "env": self.env,
@@ -78,6 +98,31 @@ impl RunArgs {
         if let Some(ep) = &self.entrypoint {
             oci["entrypoint"] = json!(ep.split_whitespace().collect::<Vec<_>>());
         }
+        if !self.publish.is_empty() {
+            oci["ports"] = json!(self.publish);
+        }
+        if let Some(r) = &self.restart {
+            oci["restart"] = json!(r);
+        }
+        if !self.secret_env.is_empty() {
+            let mut secrets = serde_json::Map::new();
+            for name in &self.secret_env {
+                let value = std::env::var(name)
+                    .with_context(|| format!("--secret-env {name}: it is not set in this shell"))?;
+                secrets.insert(name.clone(), json!(value));
+            }
+            oci["secret_env"] = Value::Object(secrets);
+        }
+        if let Some(n) = self.max_restarts {
+            oci["max_restarts"] = json!(n);
+        }
+        if let Some(cmd) = &self.health_cmd {
+            let mut hc = json!({"command": cmd.split_whitespace().collect::<Vec<_>>()});
+            if let Some(i) = self.health_interval {
+                hc["interval_seconds"] = json!(i);
+            }
+            oci["healthcheck"] = hc;
+        }
         let mut req = json!({
             "name": self.name.clone().unwrap_or_else(|| default_name(&self.image)),
             "oci": oci,
@@ -88,13 +133,35 @@ impl RunArgs {
             ("profile", json!(self.profile)),
             ("vcpus", json!(self.vcpus)),
             ("memory_mib", json!(self.memory_mib)),
+            ("volumes", volumes_json(&self.volumes)?),
         ] {
             if !v.is_null() {
                 req[k] = v;
             }
         }
-        req
+        Ok(req)
     }
+}
+
+/// `NAME:/path[:ro]` → `{"name", "guest_path", "read_only"}`; `null` when there are none.
+pub(crate) fn volumes_json(specs: &[String]) -> Result<Value> {
+    if specs.is_empty() {
+        return Ok(Value::Null);
+    }
+    let mut out = Vec::new();
+    for v in specs {
+        let mut parts = v.splitn(3, ':');
+        let (Some(name), Some(path)) = (parts.next(), parts.next()) else {
+            bail!("volume {v:?}: use NAME:/path[:ro]");
+        };
+        let read_only = match parts.next() {
+            None | Some("rw") => false,
+            Some("ro") => true,
+            Some(o) => bail!("volume {v:?}: unknown option {o:?} (ro or rw)"),
+        };
+        out.push(json!({"name": name, "guest_path": path, "read_only": read_only}));
+    }
+    Ok(Value::Array(out))
 }
 
 /// `alpine:3.22` → `alpine-1a2b3c`: the image's last path segment and a short random suffix.
@@ -187,7 +254,7 @@ fn unseen<'a>(printed: &[&str], now: &'a str) -> Vec<&'a str> {
 
 /// Creates the sandbox, follows its console until the process exits, and returns the process's exit code.
 pub async fn run(target: Target<'_>, args: &RunArgs) -> Result<i32> {
-    let id = target.create(args.request()).await?;
+    let id = target.create(args.request()?).await?;
     eprintln!("sandbox {id} started from {}", args.image);
     let outcome = follow(&target, id, Duration::from_secs(args.timeout_seconds)).await;
     if args.rm
@@ -262,18 +329,25 @@ mod tests {
             profile: None,
             vcpus: None,
             memory_mib: Some(256),
-            offline: true,
+            offline: false,
             allow_hosts: vec![],
             env: vec!["A=1".into()],
+            secret_env: vec!["PATH".into()],
             workdir: None,
             user: None,
             entrypoint: Some("/bin/sh -c".into()),
             writable_root: false,
+            publish: vec!["8080:80".into()],
+            volumes: vec!["data:/data".into(), "cfg:/srv/cfg:ro".into()],
+            restart: Some("on-failure".into()),
+            max_restarts: Some(2),
+            health_cmd: Some("wget -q -O /dev/null http://127.0.0.1".into()),
+            health_interval: Some(5),
             rm: true,
             timeout_seconds: 10,
             command: vec!["echo".into(), "hi".into()],
         };
-        let req: SandboxCreateRequest = serde_json::from_value(args.request()).unwrap();
+        let req: SandboxCreateRequest = serde_json::from_value(args.request().unwrap()).unwrap();
         let oci = req.oci.unwrap();
         assert_eq!(oci.command.unwrap(), ["echo", "hi"]);
         assert_eq!(oci.entrypoint.unwrap(), ["/bin/sh", "-c"]);
@@ -282,7 +356,17 @@ mod tests {
             serde_json::to_value(oci.exit_policy).unwrap(),
             json!("poweroff")
         );
-        assert!(req.offline);
+        assert_eq!(oci.ports, ["8080:80"]);
+        assert_eq!(
+            oci.secret_env["PATH"].expose(),
+            std::env::var("PATH").unwrap()
+        );
+        assert_eq!(oci.max_restarts, Some(2));
+        assert_eq!(oci.healthcheck.unwrap().interval_seconds, 5);
+        assert_eq!(req.volumes.len(), 2);
+        assert!(req.volumes[1].read_only && req.volumes[1].guest_path == "/srv/cfg");
         assert_eq!(req.memory_mib, Some(256));
+        assert!(volumes_json(&["bad".into()]).is_err());
+        assert!(volumes_json(&["a:/b:xx".into()]).is_err());
     }
 }

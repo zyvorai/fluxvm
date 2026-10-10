@@ -6,7 +6,7 @@
 //! Sandboxes boot APFS clones of the cached disk, so a second sandbox of the same image costs no copy.
 
 use anyhow::{Context, Result, bail};
-use fluxvm_core::config::Config;
+use fluxvm_core::config::{Config, OciRegistryCredential};
 use fluxvm_image::oci_registry::{
     BlobStore, Credentials, ImageConfig, ImageRef, Layer, PulledImage, Puller,
 };
@@ -92,15 +92,18 @@ pub fn rootfs_size_bytes(image: &PulledImage) -> u64 {
 /// Pulls `reference` (anonymously, or with a matching `apple.oci_registry_credentials` entry) into the blob store.
 pub async fn pull(cfg: &Config, reference: &str) -> Result<PulledImage> {
     let registry = ImageRef::parse(reference)?.registry;
-    let creds = cfg
+    let creds = match cfg
         .apple
         .oci_registry_credentials
         .iter()
         .find(|c| c.registry == registry)
-        .map(|c| Credentials {
+    {
+        Some(c) => Some(Credentials {
             username: c.username.clone(),
-            password: c.password.clone(),
-        });
+            password: registry_password(c).await?,
+        }),
+        None => None,
+    };
     Puller::new(BlobStore::for_state_dir(&cfg.state_dir))?
         .with_credentials(creds)
         .pull(reference)
@@ -108,22 +111,39 @@ pub async fn pull(cfg: &Config, reference: &str) -> Result<PulledImage> {
         .with_context(|| format!("pulling {reference}"))
 }
 
-static BUILD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+/// The inline password, or the one stored in the login Keychain under `keychain_service` / `username`.
+async fn registry_password(c: &OciRegistryCredential) -> Result<String> {
+    let service = match (&c.keychain_service, c.password.is_empty()) {
+        (None, _) => return Ok(c.password.clone()),
+        (Some(_), false) => bail!(
+            "registry credential for {} sets both password and keychain_service",
+            c.registry
+        ),
+        (Some(s), true) => s.clone(),
+    };
+    let account = c.username.clone();
+    tokio::task::spawn_blocking(move || fluxvm_core::keychain::read_password(&service, &account))
+        .await
+        .context("reading the Keychain")?
+}
+
+/// One lock per rootfs file, so state dirs (and tests) never share a lock.
+static BUILD_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn build_lock(digest: &str) -> Arc<tokio::sync::Mutex<()>> {
-    BUILD_LOCKS
+fn build_lock(cfg: &Config, digest: &str) -> Result<Arc<tokio::sync::Mutex<()>>> {
+    Ok(BUILD_LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .entry(digest.to_string())
+        .entry(rootfs_path(cfg, digest)?)
         .or_default()
-        .clone()
+        .clone())
 }
 
 /// The cached rootfs for `image`, building it first if needed. Concurrent callers for one digest share one build.
 pub async fn ensure_rootfs(cfg: &Config, image: &PulledImage) -> Result<PathBuf> {
     let path = rootfs_path(cfg, &image.manifest_digest)?;
-    let lock = build_lock(&image.manifest_digest);
+    let lock = build_lock(cfg, &image.manifest_digest)?;
     let _held = lock.lock().await;
     if !path.is_file() {
         build_rootfs(cfg, image, &path).await?;
@@ -331,7 +351,7 @@ fn remove_entry(cfg: &Config, digest: &str) -> Result<u64> {
 /// Removes one cached rootfs. Running sandboxes keep their own clones and are not affected.
 pub fn remove(cfg: &Config, what: &str) -> Result<OciImageEntry> {
     let entry = find(cfg, what)?;
-    let lock = build_lock(&entry.manifest_digest);
+    let lock = build_lock(cfg, &entry.manifest_digest)?;
     let _held = lock
         .try_lock()
         .map_err(|_| anyhow::anyhow!("{what} is being built"))?;
@@ -344,7 +364,7 @@ pub fn prune(cfg: &Config, in_use: &HashSet<String>) -> Result<OciPruneReport> {
     let mut report = OciPruneReport::default();
     let mut keep_blobs: HashSet<String> = HashSet::new();
     for e in list(cfg)? {
-        let lock = build_lock(&e.manifest_digest);
+        let lock = build_lock(cfg, &e.manifest_digest)?;
         let busy = lock.try_lock().is_err();
         if in_use.contains(&e.manifest_digest) || busy {
             keep_blobs.insert(e.config_digest.clone());
@@ -355,11 +375,12 @@ pub fn prune(cfg: &Config, in_use: &HashSet<String>) -> Result<OciPruneReport> {
         report.removed_images.push(e.manifest_digest);
     }
     // A build in progress has no entry yet; its blobs must survive.
+    let dir = rootfs_dir(cfg);
     if BUILD_LOCKS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .values()
-        .any(|l| l.try_lock().is_err())
+        .iter()
+        .any(|(path, l)| path.starts_with(&dir) && l.try_lock().is_err())
     {
         return Ok(report);
     }
@@ -385,6 +406,29 @@ mod tests {
 
     fn digest(c: char) -> String {
         format!("sha256:{}", c.to_string().repeat(64))
+    }
+
+    #[tokio::test]
+    async fn registry_passwords_come_inline_or_from_one_keychain_item() {
+        let parsed: OciRegistryCredential = serde_json::from_str(
+            r#"{"registry":"ghcr.io","username":"me","keychain_service":"fluxvm-ghcr"}"#,
+        )
+        .unwrap();
+        assert!(parsed.password.is_empty());
+        assert_eq!(parsed.keychain_service.as_deref(), Some("fluxvm-ghcr"));
+
+        let inline = OciRegistryCredential {
+            registry: "ghcr.io".into(),
+            username: "me".into(),
+            password: "tok".into(),
+            keychain_service: None,
+        };
+        assert_eq!(registry_password(&inline).await.unwrap(), "tok");
+        let both = OciRegistryCredential {
+            keychain_service: Some("fluxvm-ghcr".into()),
+            ..inline
+        };
+        assert!(registry_password(&both).await.is_err());
     }
 
     fn image(m: char) -> PulledImage {

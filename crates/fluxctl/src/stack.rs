@@ -8,6 +8,7 @@
 
 use crate::run::{self, VmApi};
 use anyhow::{Context, Result, bail};
+use fluxvm_core::model::VmStatus;
 use futures_util::future::try_join_all;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -36,6 +37,24 @@ pub struct Defaults {
 #[serde(deny_unknown_fields)]
 pub struct Service {
     pub image: Option<String>,
+    /// Run this OCI image as a container sandbox (its own small VM, no SSH) instead of a full VM. `volumes` are then
+    /// named volumes (`NAME:/path[:ro]`), `ready` runs inside the container as its health check, and the services it
+    /// `depends_on` resolve by name.
+    pub container: Option<String>,
+    /// Container services: replaces the image's `Cmd`.
+    pub command: Option<Vec<String>>,
+    /// Container services: replaces the image's `Entrypoint`.
+    pub entrypoint: Option<Vec<String>>,
+    /// Container services: `KEY=value`.
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// Container services: `no` (default), `on-failure` or `always`.
+    pub restart: Option<String>,
+    /// Environment variables whose values come from the shell running `fluxctl up`, never from this file. A container
+    /// gets them in its process environment (write-only, see oci-sandboxes.md); a VM gets `~/.config/fluxvm/secrets.env`
+    /// (mode 0600), which `after_up` sources. Only the names count towards "the definition changed".
+    #[serde(default)]
+    pub secret_env: Vec<String>,
     pub cpus: Option<u8>,
     pub memory_mib: Option<u64>,
     pub user: Option<String>,
@@ -72,8 +91,22 @@ pub struct StackFile {
     pub name: String,
     #[serde(default)]
     pub defaults: Defaults,
+    /// Where `up --fleet` puts the stack.
+    #[serde(default)]
+    pub placement: Placement,
     #[serde(default)]
     pub service: BTreeMap<String, Service>,
+}
+
+/// The whole stack lands on one fleet node: its services reach each other through that Mac's NAT gateway.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    /// This node, even when drained (cordoned).
+    pub node: Option<String>,
+    /// Only nodes carrying all of these labels (`fluxvm-agent node --label`).
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 fn valid_name(s: &str) -> bool {
@@ -83,6 +116,113 @@ fn valid_name(s: &str) -> bool {
         && !s.ends_with('-')
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn env_name(s: &str) -> bool {
+    let mut b = s.bytes();
+    matches!(b.next(), Some(c) if c.is_ascii_alphabetic() || c == b'_')
+        && b.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+}
+
+/// The values of every `secret_env` the services in `levels` name, from this process's environment. Read before
+/// anything is created, so a missing one stops `up` early.
+pub fn secret_values(
+    f: &StackFile,
+    levels: &[Vec<String>],
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    let mut missing = BTreeSet::new();
+    for name in levels.iter().flatten() {
+        for s in &f.service[name].secret_env {
+            match lookup(s) {
+                Some(v) => {
+                    out.insert(s.clone(), v);
+                }
+                None => {
+                    missing.insert(s.as_str());
+                }
+            }
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "set {} in the environment: the stack's secret_env values come from the shell running `fluxctl up`",
+            missing.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(out)
+}
+
+/// The definition hash: the resolved spec, plus the secret names (never their values).
+fn service_hash(spec: &Value, secret_names: &[String]) -> String {
+    if secret_names.is_empty() {
+        spec_hash(spec)
+    } else {
+        spec_hash(&json!([spec, secret_names]))
+    }
+}
+
+/// `~/.config/fluxvm/secrets.env` for a VM service: `export NAME='value'` lines, written with a private umask.
+/// The file travels base64-encoded, so no value can end the script's quoting.
+fn secrets_script(names: &[String], values: &BTreeMap<String, String>) -> String {
+    use base64::Engine;
+    let file: String = names
+        .iter()
+        .map(|n| format!("export {n}={}\n", crate::compose::shell_quote(&values[n])))
+        .collect();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(file);
+    format!(
+        "set -e\numask 077\nmkdir -p ~/.config/fluxvm\nprintf '%s' '{b64}' | base64 -d > ~/.config/fluxvm/secrets.env.tmp\n\
+         mv ~/.config/fluxvm/secrets.env.tmp ~/.config/fluxvm/secrets.env\n"
+    )
+}
+
+/// VM-only settings on a container service, or container-only settings on a VM service, are mistakes.
+fn check_kind(name: &str, svc: &Service) -> Result<()> {
+    let (wrong, kind): (&[(bool, &str)], &str) = if svc.container.is_some() {
+        (
+            &[
+                (svc.image.is_some(), "image"),
+                (svc.user.is_some(), "user"),
+                (!svc.packages.is_empty(), "packages"),
+                (!svc.run.is_empty(), "run"),
+                (!svc.after_up.is_empty(), "after_up"),
+            ],
+            "a container service",
+        )
+    } else {
+        (
+            &[
+                (svc.command.is_some(), "command"),
+                (svc.entrypoint.is_some(), "entrypoint"),
+                (!svc.env.is_empty(), "env"),
+                (svc.restart.is_some(), "restart"),
+            ],
+            "a VM service (set container = \"IMAGE\" for a container)",
+        )
+    };
+    if let Some((_, field)) = wrong.iter().find(|(set, _)| *set) {
+        bail!("service {name}: {field} is not used by {kind}");
+    }
+    let mut seen = BTreeSet::new();
+    for s in &svc.secret_env {
+        if !env_name(s) {
+            bail!("service {name}: secret_env {s:?} is not an environment variable name");
+        }
+        if !seen.insert(s) {
+            bail!("service {name}: secret_env {s} is listed twice");
+        }
+    }
+    if svc.container.is_some() {
+        for p in &svc.ports {
+            fluxvm_scheduler::oci_sandbox::parse_port(p)
+                .with_context(|| format!("service {name}"))?;
+        }
+        crate::sandbox_run::volumes_json(&svc.volumes)
+            .with_context(|| format!("service {name}"))?;
+    }
+    Ok(())
 }
 
 pub fn parse(text: &str) -> Result<StackFile> {
@@ -100,6 +240,7 @@ pub fn parse(text: &str) -> Result<StackFile> {
         if !valid_name(name) {
             bail!("service name {name:?} must be 1-32 characters of a-z, 0-9 and '-'");
         }
+        check_kind(name, svc)?;
         for d in &svc.depends_on {
             if d == name {
                 bail!("service {name} depends on itself");
@@ -224,6 +365,91 @@ pub fn service_spec(
     }))
 }
 
+/// The `POST /v1/sandboxes` request for a container service. The services it depends on resolve to the NAT gateway,
+/// which relays their exposed ports.
+pub fn container_spec(f: &StackFile, name: &str) -> Result<Value> {
+    let svc = &f.service[name];
+    let image = svc
+        .container
+        .as_deref()
+        .context("not a container service")?;
+    let gateway_hosts: BTreeSet<String> = svc
+        .depends_on
+        .iter()
+        .flat_map(|d| [d.clone(), vm_name(&f.name, d)])
+        .collect();
+    let mut oci = json!({
+        "image": image,
+        "env": svc.env,
+        "ports": svc.ports,
+        "expose": svc.expose,
+        "gateway_hosts": gateway_hosts,
+        "read_only_root": false,
+    });
+    for (k, v) in [
+        ("command", json!(svc.command)),
+        ("entrypoint", json!(svc.entrypoint)),
+        ("restart", json!(svc.restart)),
+    ] {
+        if !v.is_null() {
+            oci[k] = v;
+        }
+    }
+    if let Some(cmd) = &svc.ready {
+        oci["healthcheck"] = json!({
+            "command": ["/bin/sh", "-c", cmd],
+            "interval_seconds": 2,
+            "retries": 1,
+        });
+    }
+    let mut req = json!({"name": vm_name(&f.name, name), "oci": oci});
+    for (k, v) in [
+        ("vcpus", json!(svc.cpus.or(f.defaults.cpus))),
+        (
+            "memory_mib",
+            json!(svc.memory_mib.or(f.defaults.memory_mib)),
+        ),
+        ("volumes", crate::sandbox_run::volumes_json(&svc.volumes)?),
+    ] {
+        if !v.is_null() {
+            req[k] = v;
+        }
+    }
+    Ok(req)
+}
+
+/// Waits until a container service is running (and, with `ready`, healthy).
+async fn wait_container<A: VmApi>(
+    api: &A,
+    id: Uuid,
+    vm_name: &str,
+    healthcheck: bool,
+    fresh: bool,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let logs = api.sandbox_logs(id).await?;
+        if let Some(reason) = logs.init_error {
+            bail!("{vm_name} did not start: {reason}");
+        }
+        // An older boot's exit marker may still be in the console log of a restarted service.
+        if fresh && let Some(code) = logs.exit_code {
+            bail!("{vm_name} exited with code {code}");
+        }
+        match logs.status {
+            VmStatus::Running if !healthcheck || logs.health.as_deref() == Some("healthy") => {
+                return Ok(());
+            }
+            VmStatus::Stopped | VmStatus::Failed => bail!("{vm_name} stopped"),
+            _ => {}
+        }
+        if Instant::now() > deadline {
+            bail!("{vm_name} was not ready within 180s");
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
 pub fn spec_hash(spec: &Value) -> String {
     Sha256::digest(spec.to_string().as_bytes())
         .iter()
@@ -296,6 +522,8 @@ struct Ready {
     ip: String,
     user: String,
     created: bool,
+    /// A VM reached over SSH; container services have no SSH and get their names through `gateway_hosts`.
+    ssh: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -310,13 +538,28 @@ async fn ensure_service<A: VmApi>(
     default_user: &str,
     pubkey: &str,
     identity: &Option<PathBuf>,
+    secrets: &BTreeMap<String, String>,
 ) -> Result<Ready> {
-    let spec = service_spec(f, name, dir, home, default_user, pubkey)?;
+    let svc = &f.service[name];
+    let container = svc.container.is_some();
+    let mut spec = if container {
+        container_spec(f, name)?
+    } else {
+        service_spec(f, name, dir, home, default_user, pubkey)?
+    };
     let user = spec["cloud_init"]["user"]
         .as_str()
         .unwrap_or(default_user)
         .to_owned();
-    let hash = spec_hash(&spec);
+    let hash = service_hash(&spec, &svc.secret_env);
+    if container && !svc.secret_env.is_empty() {
+        let values: BTreeMap<&str, &str> = svc
+            .secret_env
+            .iter()
+            .map(|n| (n.as_str(), secrets[n].as_str()))
+            .collect();
+        spec["oci"]["secret_env"] = json!(values);
+    }
     let vm_name = vm_name(&f.name, name);
     let (id, created) = match existing.get(name) {
         Some(v) if v.hash == hash && !dependency_changed => {
@@ -342,10 +585,12 @@ async fn ensure_service<A: VmApi>(
             } else {
                 eprintln!("creating {vm_name}…");
             }
-            let id = api
-                .create(spec)
-                .await
-                .with_context(|| format!("creating {vm_name}"))?;
+            let id = if container {
+                api.create_sandbox(spec).await
+            } else {
+                api.create(spec).await
+            }
+            .with_context(|| format!("creating {vm_name}"))?;
             let labels = BTreeMap::from([
                 (L_STACK.to_owned(), f.name.clone()),
                 (L_SERVICE.to_owned(), name.to_owned()),
@@ -355,9 +600,35 @@ async fn ensure_service<A: VmApi>(
             (id, true)
         }
     };
+    if container {
+        wait_container(api, id, &vm_name, f.service[name].ready.is_some(), created).await?;
+        eprintln!("{vm_name} is up");
+        return Ok(Ready {
+            service: name.to_owned(),
+            ip: String::new(),
+            user,
+            created,
+            ssh: false,
+        });
+    }
     let ip = run::wait_ssh(api, id, &user, identity)
         .await
         .with_context(|| format!("waiting for {vm_name}"))?;
+    if !svc.secret_env.is_empty() {
+        let (ok, out) = ssh_script(
+            &ip,
+            &user,
+            identity,
+            &secrets_script(&svc.secret_env, secrets),
+        )
+        .await?;
+        if !ok {
+            bail!(
+                "could not write the secrets file in {vm_name}: {}",
+                out.trim()
+            );
+        }
+    }
     if let Some(cmd) = &f.service[name].ready {
         let deadline = Instant::now() + Duration::from_secs(180);
         loop {
@@ -380,6 +651,7 @@ async fn ensure_service<A: VmApi>(
         ip,
         user,
         created,
+        ssh: true,
     })
 }
 
@@ -408,9 +680,11 @@ pub async fn up<A: VmApi>(
             );
         }
     }
+    let order = levels(f, only)?;
+    let secrets = secret_values(f, &order, |n| std::env::var(n).ok())?;
     let mut changed: BTreeSet<String> = BTreeSet::new();
     let mut ready: Vec<Ready> = Vec::new();
-    for level in levels(f, only)? {
+    for level in order {
         let tasks = level.iter().map(|name| {
             let dep_changed = f.service[name]
                 .depends_on
@@ -427,6 +701,7 @@ pub async fn up<A: VmApi>(
                 &default_user,
                 &pubkey,
                 &identity,
+                &secrets,
             )
         });
         for r in try_join_all(tasks).await? {
@@ -438,12 +713,17 @@ pub async fn up<A: VmApi>(
     }
 
     let services: Vec<String> = ready.iter().map(|r| r.service.clone()).collect();
-    let gateway = ready
+    let vms: Vec<&Ready> = ready.iter().filter(|r| r.ssh).collect();
+    if vms.is_empty() {
+        eprintln!("stack {} is up", f.name);
+        return Ok(());
+    }
+    let gateway = vms
         .iter()
         .find_map(|r| gateway_of(&r.ip))
         .context("could not work out the NAT gateway address")?;
     let script = hosts_script(&render_hosts(&f.name, &gateway, &services));
-    try_join_all(ready.iter().map(|r| async {
+    try_join_all(vms.iter().map(|r| async {
         let (ok, out) = ssh_script(&r.ip, &r.user, &identity, &script).await?;
         if !ok {
             bail!(
@@ -456,13 +736,18 @@ pub async fn up<A: VmApi>(
     }))
     .await?;
 
-    for r in ready.iter().filter(|r| r.created) {
+    for r in vms.iter().filter(|r| r.created) {
         let cmds = &f.service[&r.service].after_up;
         if cmds.is_empty() {
             continue;
         }
         eprintln!("running after_up for {}…", vm_name(&f.name, &r.service));
-        let script = format!("set -e\n{}\n", cmds.join("\n"));
+        let load = if f.service[&r.service].secret_env.is_empty() {
+            ""
+        } else {
+            "set -a\n. ~/.config/fluxvm/secrets.env\nset +a\n"
+        };
+        let script = format!("set -e\n{load}{}\n", cmds.join("\n"));
         let (ok, out) = ssh_script(&r.ip, &r.user, &identity, &script).await?;
         if !ok {
             bail!(
@@ -626,6 +911,133 @@ depends_on = ["db", "app"]
         g.service.get_mut("db").unwrap().memory_mib = Some(4096);
         let changed = service_spec(&g, "db", dir.path(), home, "dev", "ssh-ed25519 AAA").unwrap();
         assert_ne!(spec_hash(&db), spec_hash(&changed));
+    }
+
+    #[test]
+    fn container_services_become_sandboxes_that_reach_their_dependencies() {
+        let f = parse(
+            r#"
+name = "shop"
+[service.db]
+container = "postgres:17"
+env = ["POSTGRES_PASSWORD=dev"]
+expose = [5432]
+volumes = ["pgdata:/var/lib/postgresql/data"]
+ready = "pg_isready -U postgres"
+restart = "always"
+[service.web]
+container = "ghcr.io/acme/web:1"
+ports = ["8080:80"]
+depends_on = ["db"]
+"#,
+        )
+        .unwrap();
+        let db = container_spec(&f, "db").unwrap();
+        let req: fluxvm_scheduler::SandboxCreateRequest =
+            serde_json::from_value(db.clone()).unwrap();
+        let oci = req.oci.unwrap();
+        assert_eq!(oci.expose, [5432]);
+        assert!(!oci.read_only_root);
+        assert_eq!(
+            oci.healthcheck.unwrap().command,
+            ["/bin/sh", "-c", "pg_isready -U postgres"]
+        );
+        assert_eq!(req.volumes[0].name, "pgdata");
+        assert!(db.get("vcpus").is_none());
+        let web = container_spec(&f, "web").unwrap();
+        assert_eq!(web["name"], "shop-web");
+        assert_eq!(web["oci"]["gateway_hosts"], json!(["db", "shop-db"]));
+        assert_eq!(web["oci"]["ports"], json!(["8080:80"]));
+        assert!(web["oci"].get("healthcheck").is_none());
+    }
+
+    #[test]
+    fn secrets_come_from_the_shell_and_only_their_names_are_hashed() {
+        let f = parse(
+            "name = \"s\"\n[service.db]\ncontainer = \"postgres\"\nsecret_env = [\"PGPW\"]\n[service.app]\nsecret_env = [\"API_KEY\", \"PGPW\"]\n",
+        )
+        .unwrap();
+        let order = levels(&f, None).unwrap();
+        let env = |n: &str| (n == "PGPW").then(|| "pw".to_string());
+        let err = format!("{:#}", secret_values(&f, &order, env).unwrap_err());
+        assert!(err.contains("API_KEY") && !err.contains("PGPW"), "{err}");
+        let all = secret_values(&f, &order, |n| Some(format!("v-{n}"))).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let spec = container_spec(&f, "db").unwrap();
+        assert!(spec["oci"].get("secret_env").is_none());
+        assert_ne!(
+            service_hash(&spec, &[]),
+            service_hash(&spec, &["PGPW".into()])
+        );
+        assert_eq!(service_hash(&spec, &[]), spec_hash(&spec));
+
+        for bad in ["secret_env = [\"A-B\"]", "secret_env = [\"A\", \"A\"]"] {
+            assert!(
+                parse(&format!("name = \"s\"\n[service.a]\n{bad}\n")).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_vm_secrets_file_survives_hostile_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let hostile = "a'b\nFLUXVM_SECRETS\n$(touch pwned)`id` \"q\"";
+        let values = BTreeMap::from([("TOKEN".to_string(), hostile.to_string())]);
+        let script = secrets_script(&["TOKEN".into()], &values);
+        assert!(!script.contains("pwned"));
+        let run = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{script}\nset -a\n. ~/.config/fluxvm/secrets.env\nprintf '%s' \"$TOKEN\""
+            ))
+            .env("HOME", dir.path())
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(String::from_utf8(run.stdout).unwrap(), hostile);
+        assert!(!dir.path().join("pwned").exists());
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.path().join(".config/fluxvm/secrets.env"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn container_and_vm_settings_do_not_mix() {
+        for (text, needle) in [
+            (
+                "name = \"s\"\n[service.a]\ncontainer = \"nginx\"\npackages = [\"x\"]\n",
+                "packages is not used by a container",
+            ),
+            (
+                "name = \"s\"\n[service.a]\ncontainer = \"nginx\"\nimage = \"debian-13\"\n",
+                "image is not used",
+            ),
+            (
+                "name = \"s\"\n[service.a]\nenv = [\"A=1\"]\n",
+                "env is not used by a VM",
+            ),
+            (
+                "name = \"s\"\n[service.a]\ncontainer = \"nginx\"\nports = [\"80:80\"]\n",
+                "below 1024",
+            ),
+            (
+                "name = \"s\"\n[service.a]\ncontainer = \"nginx\"\nvolumes = [\"./x\"]\n",
+                "NAME:/path",
+            ),
+        ] {
+            let err = format!("{:#}", parse(text).unwrap_err());
+            assert!(err.contains(needle), "{text:?}: {err}");
+        }
     }
 
     #[test]

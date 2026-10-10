@@ -610,6 +610,10 @@ pub struct AppleSpec {
     /// agent token to `<workspace>/meta`, shared read-only under the `fluxvm-meta` tag. Needs direct boot (`kernel`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub init_config: Option<serde_json::Value>,
+    /// OCI sandbox: environment variables kept out of `init_config`, the VM record and every API response. Only the
+    /// launch that creates the VM sees them; it writes them to a 0600 file in the meta share, which later boots reuse.
+    #[serde(skip)]
+    pub secret_env: std::collections::BTreeMap<String, crate::grants::Secret>,
 }
 
 /// A host directory shared into a `vz` Linux guest under a fixed virtiofs tag.
@@ -677,6 +681,7 @@ impl Default for AppleSpec {
             extra_disks: Vec::new(),
             tagged_shares: Vec::new(),
             init_config: None,
+            secret_env: std::collections::BTreeMap::new(),
         }
     }
 }

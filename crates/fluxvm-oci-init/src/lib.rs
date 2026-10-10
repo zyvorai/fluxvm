@@ -16,5 +16,6 @@
 
 pub mod config;
 pub mod dhcp;
+pub mod supervise;
 pub mod unpack;
 pub mod user;

@@ -30,9 +30,13 @@ mod linux {
     use anyhow::{Context, Result, bail};
     use fluxvm_oci_init::config::{
         BLOBS_TAG, BootConfig, CONFIG_FILE, DEFAULT_PATH, EGRESS_PROXY_PORT, EGRESS_PROXY_URL,
-        EXIT_MARKER, ExitPolicy, INIT_ERR, InitConfig, META_TAG, NetworkMode,
-        POWEROFF_VIA_INIT_ENV, ProcessSpec, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR, UNPACK_OK,
-        UnpackConfig,
+        EXIT_MARKER, ExitPolicy, GUEST_IP_MARKER, INIT_ERR, InitConfig, META_TAG, NetworkMode,
+        POWEROFF_VIA_INIT_ENV, ProcessSpec, SECRETS_FILE, TOKEN_FILE, TOOLS_DIR, UNPACK_ERR,
+        UNPACK_OK, UnpackConfig, valid_env_name, valid_host_name, with_secrets,
+    };
+    use fluxvm_oci_init::supervise::{
+        HealthCheck, HealthEvent, HealthState, RestartPolicy, STOP_GRACE, health_line,
+        restart_delay, restart_line,
     };
     use fluxvm_oci_init::{dhcp, unpack, user};
 
@@ -186,10 +190,24 @@ mod linux {
         )
     }
 
+    /// `config.json`, with the secrets file (when the host wrote one) merged into the process environment.
     fn read_config() -> Result<InitConfig> {
         let path = format!("{META_DIR}/{CONFIG_FILE}");
         let raw = fs::read(&path).with_context(|| format!("reading {path}"))?;
-        serde_json::from_slice(&raw).with_context(|| format!("parsing {path}"))
+        let mut cfg: InitConfig =
+            serde_json::from_slice(&raw).with_context(|| format!("parsing {path}"))?;
+        let secrets_path = format!("{META_DIR}/{SECRETS_FILE}");
+        if let InitConfig::Boot(b) = &mut cfg
+            && let Ok(raw) = fs::read(&secrets_path)
+        {
+            let secrets: std::collections::BTreeMap<String, String> =
+                serde_json::from_slice(&raw).with_context(|| format!("parsing {secrets_path}"))?;
+            if let Some(bad) = secrets.keys().find(|k| !valid_env_name(k)) {
+                bail!("{secrets_path}: {bad:?} is not an environment variable name");
+            }
+            b.process.env = with_secrets(&b.process.env, &secrets);
+        }
+        Ok(cfg)
     }
 
     fn run(program: &str, args: &[&str]) -> Result<()> {
@@ -271,6 +289,26 @@ mod linux {
         fs::write(path, contents).with_context(|| format!("writing {path}"))
     }
 
+    /// Appends `<router> name…` to the `/etc/hosts` written above.
+    fn add_gateway_hosts(names: &[String], router: Option<Ipv4Addr>) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let Some(gw) = router else {
+            say("fluxvm-oci-init: no gateway in the DHCP lease; gateway_hosts not added");
+            return Ok(());
+        };
+        if let Some(bad) = names.iter().find(|n| !valid_host_name(n)) {
+            bail!("gateway host {bad:?} is not a valid host name");
+        }
+        let path = format!("{NEWROOT}/etc/hosts");
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {path}"))?;
+        writeln!(f, "{gw}\t{}", names.join(" ")).with_context(|| format!("writing {path}"))
+    }
+
     fn boot_mode(b: &BootConfig) -> Result<()> {
         if b.read_only_root {
             mount_new(DISK, LOWER, "ext4", libc::MS_RDONLY, None)?;
@@ -294,6 +332,15 @@ mod linux {
         for d in ["proc", "sys", "dev", "tmp", "run", "etc", ".fluxvm"] {
             let p = unpack::secure_join(Path::new(NEWROOT), Path::new(d))?;
             fs::create_dir_all(&p).with_context(|| format!("mkdir {}", p.display()))?;
+        }
+        for m in &b.mounts {
+            m.validate()?;
+            let p = unpack::secure_join(
+                Path::new(NEWROOT),
+                Path::new(m.target.trim_start_matches('/')),
+            )?;
+            fs::create_dir_all(&p)
+                .with_context(|| format!("creating volume mount point {}", m.target))?;
         }
         let cwd = unpack::secure_join(Path::new(NEWROOT), Path::new(&b.process.cwd))?;
         fs::create_dir_all(&cwd)
@@ -327,6 +374,7 @@ mod linux {
                         .map(|s| format!("nameserver {s}\n"))
                         .collect();
                     write_fresh(&format!("{NEWROOT}/etc/resolv.conf"), &resolv)?;
+                    add_gateway_hosts(&b.gateway_hosts, lease.router)?;
                 }
                 Err(e) => say(&format!("fluxvm-oci-init: network: {}", one_line(&e))),
             }
@@ -394,6 +442,22 @@ mod linux {
             None,
         )?;
 
+        for m in &b.mounts {
+            let target = unpack::secure_join(
+                Path::new(NEWROOT),
+                Path::new(m.target.trim_start_matches('/')),
+            )?;
+            let ro = if m.read_only { libc::MS_RDONLY } else { 0 };
+            mount(
+                &m.tag,
+                &target.to_string_lossy(),
+                Some("virtiofs"),
+                libc::MS_NOSUID | libc::MS_NODEV | ro,
+                None,
+            )
+            .with_context(|| format!("mounting volume {} at {}", m.tag, m.target))?;
+        }
+
         switch_root()?;
 
         if b.egress_proxy {
@@ -406,7 +470,61 @@ mod linux {
         let mut agent = start_agent(b)
             .map_err(|e| say(&format!("fluxvm-oci-init: agent: {}", one_line(&e))))
             .ok();
-        let mut main_pid = match start_process(b) {
+        let mut main_pid = start_main(b);
+        let mut sup = Supervision::new(b);
+
+        loop {
+            if STOP.load(Ordering::SeqCst) {
+                poweroff();
+            }
+            loop {
+                let mut status = 0;
+                let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                if pid <= 0 {
+                    break;
+                }
+                let code = exit_code_of(status);
+                if Some(pid) == main_pid {
+                    let Some(code) = code else { continue };
+                    main_pid = None;
+                    sup.main_exited(b, code);
+                } else if Some(pid) == agent {
+                    say("fluxvm-oci-init: guest agent exited; restarting");
+                    std::thread::sleep(Duration::from_secs(1));
+                    agent = start_agent(b).ok();
+                } else if sup.check.is_some_and(|(c, _)| c == pid) {
+                    sup.check = None;
+                    sup.health_result(b, code == Some(0), main_pid);
+                }
+            }
+            let now = Instant::now();
+            if sup.restart_at.is_some_and(|at| now >= at) {
+                sup.restart_at = None;
+                main_pid = start_main(b);
+                sup.started(now);
+            }
+            sup.tick(b, now, main_pid);
+            if agent.is_none() {
+                agent = start_agent(b).ok();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Exit code of a reaped child: its status, or 128 + the signal that killed it.
+    fn exit_code_of(status: i32) -> Option<i32> {
+        if libc::WIFEXITED(status) {
+            Some(libc::WEXITSTATUS(status))
+        } else if libc::WIFSIGNALED(status) {
+            Some(128 + libc::WTERMSIG(status))
+        } else {
+            None
+        }
+    }
+
+    /// Starts the container's process; a failure is init's error (and the end, under `exit_policy: poweroff`).
+    fn start_main(b: &BootConfig) -> Option<i32> {
+        match spawn_in_container(b, &b.process.argv, false) {
             Ok(pid) => Some(pid),
             Err(e) => {
                 say(&format!("{INIT_ERR} {}", one_line(&e)));
@@ -415,42 +533,113 @@ mod linux {
                 }
                 None
             }
-        };
+        }
+    }
 
-        loop {
-            if STOP.load(Ordering::SeqCst) {
-                poweroff();
-            }
-            let mut status = 0;
-            let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
-            if pid < 0 {
-                if io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
-                    std::thread::sleep(Duration::from_secs(1));
-                    if agent.is_none() {
-                        agent = start_agent(b).ok();
-                    }
-                }
-                continue;
-            }
-            if Some(pid) == main_pid {
-                main_pid = None;
-                let code = if libc::WIFEXITED(status) {
-                    libc::WEXITSTATUS(status)
-                } else if libc::WIFSIGNALED(status) {
-                    128 + libc::WTERMSIG(status)
-                } else {
-                    continue;
-                };
-                say(&format!("{EXIT_MARKER} {code}"));
-                if b.exit_policy == ExitPolicy::Poweroff {
-                    poweroff();
-                }
-            } else if Some(pid) == agent {
-                say("fluxvm-oci-init: guest agent exited; restarting");
-                std::thread::sleep(Duration::from_secs(1));
-                agent = start_agent(b).ok();
+    /// Restarts and health checks of the container's process (decisions in `fluxvm_oci_init::supervise`).
+    struct Supervision {
+        restarts: u32,
+        restart_at: Option<Instant>,
+        started_at: Instant,
+        health: HealthState,
+        next_check: Option<Instant>,
+        /// A running health check: its pid and when it started.
+        check: Option<(i32, Instant)>,
+        /// When init sent SIGTERM to an unhealthy process.
+        stopping: Option<Instant>,
+        stopped_unhealthy: bool,
+    }
+
+    impl Supervision {
+        fn new(b: &BootConfig) -> Self {
+            let now = Instant::now();
+            Self {
+                restarts: 0,
+                restart_at: None,
+                started_at: now,
+                health: HealthState::default(),
+                next_check: b.healthcheck.as_ref().map(|h| now + interval(h)),
+                check: None,
+                stopping: None,
+                stopped_unhealthy: false,
             }
         }
+
+        fn started(&mut self, now: Instant) {
+            self.started_at = now;
+            self.health.reset();
+            self.stopping = None;
+        }
+
+        fn main_exited(&mut self, b: &BootConfig, code: i32) {
+            if let Some((c, _)) = self.check.take() {
+                unsafe { libc::kill(-c, libc::SIGKILL) };
+            }
+            self.stopping = None;
+            let unhealthy = std::mem::take(&mut self.stopped_unhealthy);
+            match restart_delay(b.restart, b.max_restarts, self.restarts, code, unhealthy) {
+                Some(delay) => {
+                    self.restarts += 1;
+                    say(&restart_line(self.restarts, code));
+                    self.restart_at = Some(Instant::now() + delay);
+                }
+                None => {
+                    say(&format!("{EXIT_MARKER} {code}"));
+                    if b.exit_policy == ExitPolicy::Poweroff {
+                        poweroff();
+                    }
+                }
+            }
+        }
+
+        fn health_result(&mut self, b: &BootConfig, ok: bool, main_pid: Option<i32>) {
+            let Some(hc) = &b.healthcheck else { return };
+            let counts = self.started_at.elapsed() >= Duration::from_secs(hc.start_period_seconds);
+            match self.health.record(ok, counts, hc.retries) {
+                HealthEvent::Unchanged => {}
+                HealthEvent::Healthy => say(&health_line(true)),
+                HealthEvent::Unhealthy => {
+                    say(&health_line(false));
+                    if b.restart != RestartPolicy::No
+                        && let Some(p) = main_pid
+                        && self.stopping.is_none()
+                    {
+                        unsafe { libc::kill(-p, libc::SIGTERM) };
+                        self.stopping = Some(Instant::now());
+                        self.stopped_unhealthy = true;
+                    }
+                }
+            }
+        }
+
+        fn tick(&mut self, b: &BootConfig, now: Instant, main_pid: Option<i32>) {
+            if let (Some(t), Some(p)) = (self.stopping, main_pid)
+                && now >= t + STOP_GRACE
+            {
+                unsafe { libc::kill(-p, libc::SIGKILL) };
+                self.stopping = None;
+            }
+            let Some(hc) = &b.healthcheck else { return };
+            if let Some((c, t0)) = self.check
+                && now >= t0 + Duration::from_secs(hc.timeout_seconds)
+            {
+                unsafe { libc::kill(-c, libc::SIGKILL) };
+            }
+            if self.check.is_none()
+                && main_pid.is_some()
+                && self.next_check.is_some_and(|n| now >= n)
+            {
+                self.next_check = Some(now + interval(hc));
+                match spawn_in_container(b, &hc.command, true) {
+                    Ok(pid) => self.check = Some((pid, now)),
+                    Err(_) => self.health_result(b, false, main_pid),
+                }
+            }
+        }
+    }
+
+    fn interval(h: &HealthCheck) -> Duration {
+        Duration::from_secs(h.interval_seconds)
     }
 
     /// Move the prepared root over the initramfs (pivot_root cannot leave rootfs) and enter it.
@@ -503,8 +692,13 @@ mod linux {
         Ok(cmd.spawn().context("starting the guest agent")?.id() as i32)
     }
 
-    fn start_process(b: &BootConfig) -> Result<i32> {
+    /// Runs `argv` as the container's process would run: its user, environment, directory, `no_new_privs`, and its own
+    /// session (so a signal to the group reaches its children). `quiet` discards the output (health checks).
+    fn spawn_in_container(b: &BootConfig, argv: &[String], quiet: bool) -> Result<i32> {
         let p: &ProcessSpec = &b.process;
+        let Some(program) = argv.first() else {
+            bail!("empty command");
+        };
         let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
         let group = fs::read_to_string("/etc/group").unwrap_or_default();
         let id = user::resolve_user(&p.user, &passwd, &group)?;
@@ -514,8 +708,8 @@ mod linux {
                 .any(|e| e.split_once('=').is_some_and(|(ek, _)| ek == k))
         };
 
-        let mut cmd = Command::new(&p.argv[0]);
-        cmd.args(&p.argv[1..]).env_clear();
+        let mut cmd = Command::new(program);
+        cmd.args(&argv[1..]).env_clear();
         for e in &p.env {
             if let Some((k, v)) = e.split_once('=') {
                 cmd.env(k, v);
@@ -530,10 +724,17 @@ mod linux {
         if b.egress_proxy {
             proxy_env(&mut cmd, &p.env);
         }
+        let out = || {
+            if quiet {
+                Stdio::null()
+            } else {
+                Stdio::inherit()
+            }
+        };
         cmd.current_dir(&p.cwd)
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
+            .stdout(out())
+            .stderr(out())
             .gid(id.gid)
             .uid(id.uid);
         unsafe {
@@ -549,7 +750,7 @@ mod linux {
         }
         let child = cmd
             .spawn()
-            .with_context(|| format!("starting {:?} as {}", p.argv[0], p.user))?;
+            .with_context(|| format!("starting {program:?} as {}", p.user))?;
         Ok(child.id() as i32)
     }
 
@@ -766,6 +967,7 @@ mod linux {
                 continue;
             }
             apply_lease(&name, &ack)?;
+            say(&format!("{GUEST_IP_MARKER} {}", ack.address));
             say(&format!(
                 "fluxvm-oci-init: {name} {}/{} via {}",
                 ack.address,

@@ -4,6 +4,7 @@
 //! `fluxctl run`: boot a throwaway VM, SSH into it, and delete it when the session ends.
 
 use anyhow::{Context, Result, bail};
+use fluxvm_scheduler::oci_sandbox::SandboxLogs;
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -44,7 +45,13 @@ pub trait VmApi {
     ) -> Result<()>;
     /// The VMs carrying `fluxvm.stack=<stack>`.
     async fn list_stack(&self, stack: &str) -> Result<Vec<crate::stack::StackVm>>;
+    /// `POST /v1/sandboxes` (a container sandbox when the request has `oci`).
+    async fn create_sandbox(&self, req: Value) -> Result<Uuid>;
+    async fn sandbox_logs(&self, id: Uuid) -> Result<SandboxLogs>;
 }
+
+/// Console lines `sandbox_logs` returns; stacks only read the markers.
+const SANDBOX_LOG_LINES: usize = 50;
 
 pub struct Local<'a>(pub &'a std::sync::Arc<fluxvm_scheduler::VmManager>);
 
@@ -114,6 +121,16 @@ impl VmApi for Local<'_> {
                 status: format!("{:?}", v.status).to_lowercase(),
             })
             .collect())
+    }
+    async fn create_sandbox(&self, req: Value) -> Result<Uuid> {
+        Ok(self
+            .0
+            .create_sandbox(serde_json::from_value(req)?, None, None)
+            .await?
+            .id)
+    }
+    async fn sandbox_logs(&self, id: Uuid) -> Result<SandboxLogs> {
+        self.0.sandbox_logs(id, SANDBOX_LOG_LINES).await
     }
 }
 
@@ -209,6 +226,21 @@ impl VmApi for crate::remote::Remote {
                 })
             })
             .collect())
+    }
+    async fn create_sandbox(&self, req: Value) -> Result<Uuid> {
+        let v = self
+            .call(reqwest::Method::POST, "/v1/sandboxes", Some(req))
+            .await?;
+        v["id"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .context("the daemon's sandbox response has no id")
+    }
+    async fn sandbox_logs(&self, id: Uuid) -> Result<SandboxLogs> {
+        let path = format!("/v1/sandboxes/{id}/logs?lines={SANDBOX_LOG_LINES}");
+        Ok(serde_json::from_value(
+            self.call(reqwest::Method::GET, &path, None).await?,
+        )?)
     }
 }
 

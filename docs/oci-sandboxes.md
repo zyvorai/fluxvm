@@ -16,8 +16,18 @@ curl -s -X POST localhost:7788/v1/sandboxes/$ID/process -d '{"command": "python3
 curl -s localhost:7788/v1/sandboxes/$ID/logs?lines=50        # console tail, exit_code once the process has exited
 ```
 
-MCP: `sandbox_create` with `oci_image` (plus optional `oci_command` and `oci_env`), then `sandbox_exec`, `sandbox_read_file` and
-`sandbox_write_file` as for any sandbox. `sandbox_logs` returns the console and the exit code.
+```bash
+# A web server with a published port, a persistent volume, restarts and a health check
+fluxctl sandbox run nginx:alpine -p 8080:80 -v site:/usr/share/nginx/html --restart always \
+  --health-cmd "wget -q -O /dev/null http://127.0.0.1" --health-interval 5
+curl localhost:8080
+```
+
+MCP: `sandbox_create` with `oci_image` (plus optional `oci_command`, `oci_env` and `oci_ports`), then `sandbox_exec`,
+`sandbox_read_file` and `sandbox_write_file` as for any sandbox. `sandbox_logs` returns the console and the exit code.
+
+Several containers that work together (a database and an app, say) are a stack: see
+[macos-stacks.md](macos-stacks.md#container-services), which can also import a `docker-compose.yml`.
 
 ## Compared with Apple's `container`
 
@@ -36,7 +46,7 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 ## Request
 
 `POST /v1/sandboxes` with an `oci` object. `ttl_seconds`, `profile`, `vcpus`, `memory_mib`, `offline`, `allow_hosts`,
-`http_proxy_port(s)` and `name` apply as for other sandboxes. `template`, `spec`, `image`, `procbox`, `volumes`, `gpus` and
+`http_proxy_port(s)`, `volumes` and `name` apply as for other sandboxes. `template`, `spec`, `image`, `procbox`, `gpus` and
 `confidential` are refused with `oci`. Without a profile or size the VM gets 1 vCPU and 512 MiB.
 
 | Field | Default | Meaning |
@@ -44,15 +54,53 @@ Apple's `container` tool also runs one Linux VM per container. FluxVM's differen
 | `image` | (required) | `alpine:3.22`, `ghcr.io/org/app:1.2`, `nginx@sha256:…`. Docker Hub names are expanded (`alpine` → `docker.io/library/alpine:latest`). |
 | `command` | the image's `Cmd` | Replaces `Cmd`. |
 | `entrypoint` | the image's `Entrypoint` | Replaces `Entrypoint` and drops the image's `Cmd`, as `docker run --entrypoint` does. |
-| `env` | `[]` | `KEY=value`, added to or replacing the image's `Env`. |
+| `env` | `[]` | `KEY=value`, added to or replacing the image's `Env`. Stored in the VM record and returned by `GET /v1/vms/{id}`. |
+| `secret_env` | `{}` | `{"NAME": "value"}` added to the process environment but never stored in the VM record or returned (write-only; at most 64 entries, 64 KiB). See [Security defaults](#security-defaults). |
 | `workdir` | the image's `WorkingDir`, else `/` | Created if missing. |
 | `user` | the image's `User`, else `65534:65534` | `uid[:gid]` or `name[:group]`, resolved against the image's `/etc/passwd` and `/etc/group`. |
 | `read_only_root` | `true` | `false` mounts the sandbox's own copy of the image read-write; it is kept until the sandbox is deleted. |
 | `exit_policy` | `keep` | `keep` leaves the VM up for exec after the process exits; `poweroff` stops it. `fluxctl sandbox run` uses `poweroff`. |
+| `ports` | `[]` | Published TCP ports, `HOST:CONTAINER` (or `PORT`, optionally `/tcp`): the Mac's `127.0.0.1:HOST` reaches the container. See [Published ports](#published-ports). |
+| `expose` | `[]` | Container ports other sandboxes and VMs on this Mac reach at the NAT gateway, same number on both sides. Used by stacks. |
+| `gateway_hosts` | `[]` | Host names written into the container's `/etc/hosts`, pointing at the NAT gateway. Used by stacks so `db` resolves. |
+| `restart` | `no` | `no`, `on-failure` or `always`. See [Restarts and health checks](#restarts-and-health-checks). |
+| `max_restarts` | unlimited | Stop restarting after this many restarts. |
+| `healthcheck` | none | `{"command": [argv…], "interval_seconds": 30, "timeout_seconds": 5, "retries": 3, "start_period_seconds": 0}`. |
 
-`fluxctl sandbox run IMAGE [--profile P] [--offline | --allow-host H…] [-e K=V…] [-w DIR] [-u USER] [--entrypoint "…"]
-[--writable-root] [--rm] [--name N] -- CMD…` creates the sandbox with `exit_policy: poweroff`, prints its console as it goes and
-exits with the container's exit code. It works locally and with `--server`.
+`fluxctl sandbox run IMAGE [--profile P] [--offline | --allow-host H…] [-e K=V…] [--secret-env NAME…] [-w DIR] [-u USER] [--entrypoint "…"]
+[--writable-root] [-p HOST:CONTAINER…] [-v NAME:/path[:ro]…] [--restart POLICY] [--max-restarts N] [--health-cmd "…"
+[--health-interval S]] [--rm] [--name N] -- CMD…` creates the sandbox with `exit_policy: poweroff`, prints its console as it goes
+and exits with the container's exit code. It works locally and with `--server`.
+
+### Published ports
+
+`ports` uses the same runner forwards as `fluxctl run -p` for VMs: the runner listens on `127.0.0.1:HOST` on the Mac and connects
+to the container's port. The runner learns the container's address from init, which prints `VELORA-IP <address>` on the console
+after its DHCP lease. Host ports must be 1024 or higher (the daemon does not run as root), each host port may be published once,
+and a host port another VM on this Mac already publishes is refused. Only TCP. Ports, `expose` and `gateway_hosts` need the
+network card, so they cannot be combined with `offline` or `allow_hosts`.
+
+### Volumes
+
+`volumes: [{"name", "guest_path", "read_only"?}]` attaches named, persistent directories. They live in
+`<volumes_dir or state_dir/volumes>/<tenant>/<name>` on the Mac and survive the sandbox. They are passed as virtiofs shares tagged
+`fluxvm-vol<N>`, which init mounts at `guest_path` (`nosuid,nodev`, plus `ro` when read-only) before it switches into the image's
+root, so no cloud-init is involved. Names follow the QEMU sandbox volume rules, with at most 4 per sandbox, and a volume attached
+to another VM is refused. Unlike VM volumes, `guest_path` may be anywhere in the image (`/var/lib/postgresql/data`,
+`/etc/nginx/conf.d`) except `/`, `/proc`, `/sys`, `/dev`, `/tmp`, `/run` and `/.fluxvm`, which init manages.
+
+### Restarts and health checks
+
+Init supervises the process. With `restart: on-failure` it starts the process again after a non-zero exit, a signal, or being
+stopped as unhealthy; with `always`, after any exit. Restarts back off from 1 s, doubling up to 60 s, and stop after
+`max_restarts`. Each restart prints `FLUXVM-RESTART <n> <exit code>`; `FLUXVM-EXIT` is printed only when the process will not be
+started again.
+
+A `healthcheck` command runs inside the container every `interval_seconds`, as the process's user with its environment, without a
+shell (use `["/bin/sh", "-c", "…"]` for one). A run that exceeds `timeout_seconds` fails. After `retries` consecutive failures
+(ignoring failures during `start_period_seconds` after a start) init prints `FLUXVM-HEALTH unhealthy`; the next success prints
+`FLUXVM-HEALTH healthy`. When the process is unhealthy and `restart` is not `no`, init sends `SIGTERM` to its process group,
+`SIGKILL` 10 s later, and restarts it under the policy.
 
 `POST /v1/sandboxes/{id}/process` takes `{"process": {"argv": [...], "env"?, "cwd"?}}` as well as `{"command": "..."}`, so commands
 run in images that have no `/bin/sh` (distroless). Commands run through the guest agent, as root, with the agent's environment.
@@ -78,17 +126,19 @@ They do not inherit the image's `Env` or the proxy settings.
    - Mounts the root. With `read_only_root`, this is an overlay of the read-only ext4 and a tmpfs, remounted read-only, so the
      image cannot be changed.
    - Sets the hostname and writes `/etc/hosts` and `/etc/resolv.conf`.
-   - Brings up `eth0` with its own DHCP client, unless the sandbox is offline.
+   - Brings up `eth0` with its own DHCP client, unless the sandbox is offline, prints `VELORA-IP <address>`, and adds the
+     `gateway_hosts` to `/etc/hosts`.
+   - Mounts the volumes.
    - Moves into the new root and starts the guest agent from `/.fluxvm` (a read-only bind of the initramfs tools).
    - Runs the process with the resolved user, supplementary groups dropped and `no_new_privs`. Its output goes to the
      console, which is the VM's log.
-   - Reaps zombies. When the process exits, it prints `FLUXVM-EXIT <code>`. A startup failure (unknown user, missing
-     binary) prints `FLUXVM-INIT-ERR <reason>` instead.
+   - Reaps zombies, runs the health check and applies the restart policy. When the process has exited for good, it prints
+     `FLUXVM-EXIT <code>`. A startup failure (unknown user, missing binary) prints `FLUXVM-INIT-ERR <reason>` instead.
 6. **Ready**: create returns when the guest agent answers a ping over vsock (port 17777), or when the process has already exited.
    An init error fails the create at once, and the VM is deleted.
 
-`GET /v1/sandboxes/{id}/logs?lines=N` returns `{status, oci, exit_code, init_error, log}`. The markers are searched in the whole log;
-`log` is only the tail.
+`GET /v1/sandboxes/{id}/logs?lines=N` returns `{status, oci, exit_code, init_error, restarts, health, log}`. The markers are
+searched in the whole log; `log` is only the tail.
 
 ## Security defaults
 
@@ -105,6 +155,11 @@ They do not inherit the image's `Env` or the proxy settings.
 - The builder VM never has a network card. Its blob share is read-only, and layer paths are joined securely (no `..`, no escape
   through symlinks).
 - Boot artifacts given as files are checked against their `.sha256` sidecars when present.
+- Secrets: the request, including `env` and the agent token, is part of the VM record that `GET /v1/vms/{id}` returns to any
+  token allowed to read the VM. Put credentials in `secret_env` instead: the daemon writes them to a 0600 `secrets.json` on the
+  read-only `fluxvm-meta` share and init adds them to the process environment; they are not in the record, the API or the logs.
+  The file stays in the VM's workspace, so later boots and restarts keep them, until the sandbox is deleted. `fluxctl sandbox run
+  --secret-env NAME` takes the value of `NAME` from its own environment.
 
 ## Managing images
 
@@ -129,8 +184,14 @@ oci_builder_memory_mib = 1024
 [[apple.oci_registry_credentials]]
 registry = "ghcr.io"
 username = "me"
-password = "…"
+keychain_service = "fluxvm-ghcr"     # or: password = "…"
 ```
+
+With `keychain_service`, the password is not stored in the config: the daemon reads it from the login Keychain at pull time with
+`security find-generic-password -s <service> -a <username> -w`. Store it once with
+`security add-generic-password -s fluxvm-ghcr -a me -w` (it prompts for the token). Setting both `password` and
+`keychain_service` is an error. The daemon runs as your user, so the login Keychain must be unlocked (it is while you are logged
+in); macOS may ask once to allow `security` to read the item.
 
 `policy.require_catalog_names` accepts only signed catalog names for VM images, so it refuses container sandboxes, whose root is a
 cached rootfs path.
@@ -155,8 +216,9 @@ at them.
 
 - `linux/arm64` images only; there is no x86 emulation for containers.
 - No image building (`docker build`); pull images built elsewhere.
-- No volumes, GPUs, Rosetta or port publishing yet. Reach a server in the sandbox with `/v1/sandboxes/{id}/http/{port}/…`, as for
-  other sandboxes.
+- No GPUs or Rosetta. Only TCP ports can be published, on the Mac's `127.0.0.1`; a server is also reachable through
+  `/v1/sandboxes/{id}/http/{port}/…`, as for other sandboxes.
+- Volumes are named directories managed by FluxVM; there are no bind mounts of arbitrary Mac paths into a container.
 - The first use of an image pulls it and builds its rootfs (seconds to minutes, depending on its size). Later sandboxes from the
   same digest only clone it.
 - There is no warm pool for container sandboxes yet; each one cold-boots. Hibernation uses the generic `vz` path and has not been
@@ -173,7 +235,8 @@ Unit tests cover:
 - layer application with whiteouts, opaque directories and diff_id checks;
 - user resolution and process resolution (Docker's entrypoint and cmd rules);
 - the DHCP message parser and the console markers;
-- the request validation and the VM request built for a container;
+- the restart backoff and health-check counting, volume mount targets and host names;
+- the request validation (ports, expose, volumes, health checks) and the VM request built for a container;
 - the capability rules for tagged shares and `init_config`;
 - the meta share contents.
 

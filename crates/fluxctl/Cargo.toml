@@ -29,6 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-pemfile = "2"
 serde_json = "1"
+serde_yaml = "0.9"
 sha2 = "0.10"
 toml = "0.8"
 tokio = { version = "1", features = ["full"] }

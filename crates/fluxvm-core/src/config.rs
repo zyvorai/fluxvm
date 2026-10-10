@@ -111,7 +111,13 @@ pub struct OciRegistryCredential {
     /// Registry host as in the image reference, e.g. `ghcr.io` (Docker Hub is `registry-1.docker.io`).
     pub registry: String,
     pub username: String,
+    /// Inline password or token; leave empty when `keychain_service` is set.
+    #[serde(default)]
     pub password: String,
+    /// macOS Keychain generic-password item (service name, account = `username`) holding the password, read at
+    /// pull time, e.g. after `security add-generic-password -s fluxvm-ghcr -a me -w`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keychain_service: Option<String>,
 }
 
 /// Which guest runner backs the FluxVM hypervisor control plane.
