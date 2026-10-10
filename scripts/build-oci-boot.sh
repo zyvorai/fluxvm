@@ -11,7 +11,7 @@
 # Env:   KERNEL_VERSION  kernel.org release to build (default 6.12)
 #        E2FSPROGS_VERSION (default 1.47.1)
 #        JOBS            parallel make jobs (default: nproc)
-# Needs: build-essential flex bison bc libelf-dev libssl-dev cpio zstd xz-utils curl,
+# Needs: build-essential flex bison bc libelf-dev libssl-dev cpio zstd xz-utils curl musl-tools,
 #        rustup target aarch64-unknown-linux-musl.
 #
 # Install on the Mac afterwards (or publish with `fluxctl catalog add` + `catalog sign`, see docs/oci-sandboxes.md):
@@ -80,6 +80,10 @@ fi
 file "${esrc}/misc/mke2fs" | grep -q 'statically linked' || { echo "mke2fs is not static" >&2; exit 1; }
 
 # ---- init and agent (static musl) ----
+# zstd-sys compiles C; cc-rs looks for aarch64-linux-musl-gcc, which distros ship as musl-gcc.
+if [ -z "${CC_aarch64_unknown_linux_musl:-}" ] && command -v musl-gcc >/dev/null; then
+  export CC_aarch64_unknown_linux_musl=musl-gcc
+fi
 (cd "$PROJECT_DIR" && cargo build --release --locked --target "$TARGET" -p fluxvm-oci-init -p fluxvm-guest-agent)
 bin="${CARGO_TARGET_DIR:-${PROJECT_DIR}/target}/${TARGET}/release"
 for b in fluxvm-oci-init fluxvm-guest-agent; do
