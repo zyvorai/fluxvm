@@ -349,7 +349,8 @@ pub fn resolve_backend(req: &CreateVmRequest, cfg: &Config) -> BackendKind {
 ///
 /// The two fields have different real scope, deliberately not treated the
 /// same:
-///  - `secure_boot` is QEMU-only. Cloud Hypervisor's own `--firmware` is a
+///  - `secure_boot` is QEMU and `vz` (Apple's EFI variable store, keys under
+///    `apple.efi_secure_boot`, validated by `fluxvm-apple`). Cloud Hypervisor's own `--firmware` is a
 ///    single opaque file with no documented persistent UEFI variable
 ///    store separate from it (confirmed against Cloud Hypervisor's own
 ///    `docs/uefi.md` and Windows-guest docs, which describe plain UEFI
@@ -363,9 +364,11 @@ pub fn resolve_backend(req: &CreateVmRequest, cfg: &Config) -> BackendKind {
 ///  - Firecracker has no firmware concept (always direct kernel boot) and
 ///    no TPM device -- both fields are rejected there.
 fn secure_boot_or_tpm_backend_error(req: &CreateVmRequest) -> Option<String> {
-    if req.secure_boot.unwrap_or(false) && req.backend != BackendKind::Qemu {
+    if req.secure_boot.unwrap_or(false)
+        && !matches!(req.backend, BackendKind::Qemu | BackendKind::Vz)
+    {
         return Some(format!(
-            "secure_boot requires backend qemu (OVMF split pflash + smm=on) -- Cloud Hypervisor has no documented persistent UEFI variable store to enroll keys into, and Firecracker has no firmware concept at all; got {:?}",
+            "secure_boot requires backend qemu (OVMF split pflash + smm=on) or vz (EFI variable store) -- Cloud Hypervisor has no documented persistent UEFI variable store to enroll keys into, and Firecracker has no firmware concept at all; got {:?}",
             req.backend
         ));
     }
@@ -5471,6 +5474,15 @@ mod tests {
         let mut r = req(BackendKind::CloudHypervisor, None, None);
         r.tpm = Some(true);
         assert!(secure_boot_or_tpm_backend_error(&r).is_none());
+    }
+
+    #[test]
+    fn secure_boot_is_allowed_on_vz_but_tpm_is_not() {
+        let mut r = req(BackendKind::Vz, None, None);
+        r.secure_boot = Some(true);
+        assert!(secure_boot_or_tpm_backend_error(&r).is_none());
+        r.tpm = Some(true);
+        assert!(secure_boot_or_tpm_backend_error(&r).is_some());
     }
 
     #[test]

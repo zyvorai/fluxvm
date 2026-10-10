@@ -19,7 +19,7 @@ the prerequisite Secure Boot needs. Cloud Hypervisor already wired
 | | QEMU | Cloud Hypervisor | Firecracker |
 |---|---|---|---|
 | `firmware` (plain UEFI boot) | Yes (this change) | Yes (already worked) | No firmware concept at all — always direct kernel boot |
-| `secure_boot` | Yes | **No — rejected at `create()`** | **No — rejected at `create()`** |
+| `secure_boot` | Yes (also `vz` on macOS 27, see [macos.md](macos.md)) | **No — rejected at `create()`** | **No — rejected at `create()`** |
 | `tpm` | Yes | **Yes** | **No — rejected at `create()`** |
 
 **Why `secure_boot` is QEMU-only, not "not implemented yet" on Cloud
