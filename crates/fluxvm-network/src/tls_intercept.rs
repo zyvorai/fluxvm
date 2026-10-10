@@ -207,13 +207,13 @@ fn write_new(path: &Path, data: &[u8], _mode: u32) -> Result<()> {
 #[cfg(unix)]
 fn warn_if_key_is_readable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.permissions().mode() & 0o077 != 0 {
-            tracing::warn!(
-                path = %path.display(),
-                "egress CA key is accessible to group/other; restrict it to mode 0600"
-            );
-        }
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.permissions().mode() & 0o077 != 0
+    {
+        tracing::warn!(
+            path = %path.display(),
+            "egress CA key is accessible to group/other; restrict it to mode 0600"
+        );
     }
 }
 
@@ -265,10 +265,10 @@ impl TlsIntercept {
         let host = host.to_ascii_lowercase();
         {
             let cache = self.cache.lock().unwrap();
-            if let Some((at, cfg)) = cache.map.get(&host) {
-                if at.elapsed() < LEAF_CACHE_TTL {
-                    return Ok(cfg.clone());
-                }
+            if let Some((at, cfg)) = cache.map.get(&host)
+                && at.elapsed() < LEAF_CACHE_TTL
+            {
+                return Ok(cfg.clone());
             }
         }
         let (cert, key) = self.ca.mint(&host)?;

@@ -117,10 +117,12 @@ impl VirtioMmio {
     }
 
     pub fn net(base: u64, mac: [u8; 6]) -> Self {
-        let mut st = VirtioState::default();
-        st.mac = mac;
-        st.irq = 5;
-        st.num_queues = 2;
+        let st = VirtioState {
+            mac,
+            irq: 5,
+            num_queues: 2,
+            ..Default::default()
+        };
         Self::new(base, st)
     }
 
@@ -132,9 +134,11 @@ impl VirtioMmio {
         if pairs <= 1 {
             return Self::net(base, mac);
         }
-        let mut st = VirtioState::default();
-        st.mac = mac;
-        st.irq = 5;
+        let mut st = VirtioState {
+            mac,
+            irq: 5,
+            ..Default::default()
+        };
         st.features |= VIRTIO_NET_F_CTRL_VQ | VIRTIO_NET_F_MQ;
         st.net_max_pairs = pairs;
         st.num_queues = 2 * pairs as u32 + 1;
@@ -142,9 +146,11 @@ impl VirtioMmio {
     }
 
     pub fn block(base: u64, capacity_sectors: u64, read_only: bool) -> Self {
-        let mut st = VirtioState::default();
-        st.device_id = VIRTIO_ID_BLOCK;
-        st.features = VIRTIO_F_VERSION_1;
+        let mut st = VirtioState {
+            device_id: VIRTIO_ID_BLOCK,
+            features: VIRTIO_F_VERSION_1,
+            ..Default::default()
+        };
         if read_only {
             st.features |= VIRTIO_BLK_F_RO;
         }
@@ -157,10 +163,12 @@ impl VirtioMmio {
 
     /// Firecracker virtio-vsock (3 queues: RX/TX/EVENT).
     pub fn vsock(base: u64, guest_cid: u32, irq: u32) -> Self {
-        let mut st = VirtioState::default();
-        st.device_id = VIRTIO_ID_VSOCK;
-        st.features = VIRTIO_F_VERSION_1;
-        st.guest_cid = guest_cid.max(3);
+        let mut st = VirtioState {
+            device_id: VIRTIO_ID_VSOCK,
+            features: VIRTIO_F_VERSION_1,
+            guest_cid: guest_cid.max(3),
+            ..Default::default()
+        };
         st.mac = [0; 6];
         st.irq = irq;
         st.num_queues = 3;
@@ -169,9 +177,11 @@ impl VirtioMmio {
 
     /// Firecracker virtio-balloon (inflate + deflate queues).
     pub fn balloon(base: u64, irq: u32) -> Self {
-        let mut st = VirtioState::default();
-        st.device_id = VIRTIO_ID_BALLOON;
-        st.features = VIRTIO_F_VERSION_1;
+        let mut st = VirtioState {
+            device_id: VIRTIO_ID_BALLOON,
+            features: VIRTIO_F_VERSION_1,
+            ..Default::default()
+        };
         st.mac = [0; 6];
         st.irq = irq;
         st.num_queues = 2;
@@ -180,9 +190,11 @@ impl VirtioMmio {
 
     /// Firecracker virtio-rng / entropy (1 queue).
     pub fn rng(base: u64, irq: u32) -> Self {
-        let mut st = VirtioState::default();
-        st.device_id = VIRTIO_ID_RNG;
-        st.features = VIRTIO_F_VERSION_1;
+        let mut st = VirtioState {
+            device_id: VIRTIO_ID_RNG,
+            features: VIRTIO_F_VERSION_1,
+            ..Default::default()
+        };
         st.mac = [0; 6];
         st.irq = irq;
         st.num_queues = 1;
@@ -192,9 +204,11 @@ impl VirtioMmio {
     /// Virtio-fs (vhost-user-fs). Guest sees tag in config; FUSE queues are
     /// serviced once DRIVER_OK and the host virtiofsd socket is attached.
     pub fn fs(base: u64, irq: u32, tag: &str) -> Result<Self> {
-        let mut st = VirtioState::default();
-        st.device_id = VIRTIO_ID_FS;
-        st.features = VIRTIO_F_VERSION_1;
+        let mut st = VirtioState {
+            device_id: VIRTIO_ID_FS,
+            features: VIRTIO_F_VERSION_1,
+            ..Default::default()
+        };
         st.mac = [0; 6];
         st.irq = irq;
         // hiprio + request queues (virtio-fs minimum).

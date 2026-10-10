@@ -233,7 +233,7 @@ unsafe fn probe_child(ids: Option<(u32, u32)>, userns: bool) -> (u8, u8) {
 unsafe fn probe_mounts() -> (u8, u8) {
     if libc::mount(
         std::ptr::null(),
-        b"/\0".as_ptr() as *const libc::c_char,
+        c"/".as_ptr(),
         std::ptr::null(),
         libc::MS_REC | libc::MS_PRIVATE,
         std::ptr::null(),
@@ -242,9 +242,9 @@ unsafe fn probe_mounts() -> (u8, u8) {
         return (4, errno());
     }
     if libc::mount(
-        b"tmpfs\0".as_ptr() as *const libc::c_char,
-        b"/tmp\0".as_ptr() as *const libc::c_char,
-        b"tmpfs\0".as_ptr() as *const libc::c_char,
+        c"tmpfs".as_ptr(),
+        c"/tmp".as_ptr(),
+        c"tmpfs".as_ptr(),
         0,
         std::ptr::null(),
     ) != 0
@@ -616,17 +616,17 @@ unsafe fn drop_capabilities(switch: Option<(u32, u32)>) -> io::Result<()> {
 unsafe fn build_root(p: &Prepared, ruleset_fd: Option<i32>) -> io::Result<()> {
     mnt(
         std::ptr::null(),
-        b"/\0".as_ptr() as *const libc::c_char,
+        c"/".as_ptr(),
         std::ptr::null(),
         libc::MS_REC | libc::MS_PRIVATE,
         std::ptr::null(),
     )?;
     mnt(
-        b"tmpfs\0".as_ptr() as *const libc::c_char,
+        c"tmpfs".as_ptr(),
         p.stage.as_ptr(),
-        b"tmpfs\0".as_ptr() as *const libc::c_char,
+        c"tmpfs".as_ptr(),
         libc::MS_NOSUID | libc::MS_NODEV,
-        b"mode=0755,size=4m\0".as_ptr() as *const libc::c_void,
+        c"mode=0755,size=4m".as_ptr() as *const libc::c_void,
     )?;
     for d in &p.dirs {
         if libc::mkdir(d.as_ptr(), 0o755) != 0 && *libc::__errno_location() != libc::EEXIST {
@@ -664,9 +664,9 @@ unsafe fn build_root(p: &Prepared, ruleset_fd: Option<i32>) -> io::Result<()> {
     }
     if let Some(proc_dst) = &p.proc_dst {
         mnt(
-            b"proc\0".as_ptr() as *const libc::c_char,
+            c"proc".as_ptr(),
             proc_dst.as_ptr(),
-            b"proc\0".as_ptr() as *const libc::c_char,
+            c"proc".as_ptr(),
             libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
             std::ptr::null(),
         )?;
@@ -675,14 +675,14 @@ unsafe fn build_root(p: &Prepared, ruleset_fd: Option<i32>) -> io::Result<()> {
     if libc::chdir(p.stage.as_ptr()) != 0 {
         return Err(last());
     }
-    let dot = b".\0".as_ptr() as *const libc::c_char;
+    let dot = c".".as_ptr();
     if libc::syscall(libc::SYS_pivot_root, dot, dot) != 0 {
         return Err(last());
     }
     if libc::umount2(dot, libc::MNT_DETACH) != 0 {
         return Err(last());
     }
-    if libc::chdir(b"/\0".as_ptr() as *const libc::c_char) != 0 {
+    if libc::chdir(c"/".as_ptr()) != 0 {
         return Err(last());
     }
     // The command's working directory, if the policy granted it.
@@ -779,11 +779,13 @@ mod tests {
         let file = ro.join("f.txt");
         std::fs::write(&file, "x").unwrap();
 
-        let mut p = Policy::default();
-        p.read = vec![ro.clone(), file.clone(), dir.path().join("missing")];
-        p.write = vec![rw.clone()];
-        p.tcp_connect = TcpRule::Deny;
-        p.tcp_bind = TcpRule::Deny;
+        let p = Policy {
+            read: vec![ro.clone(), file.clone(), dir.path().join("missing")],
+            write: vec![rw.clone()],
+            tcp_connect: TcpRule::Deny,
+            tcp_bind: TcpRule::Deny,
+            ..Default::default()
+        };
         let mut notes = Vec::new();
         let prepared = prepare(&p, 0, &mut notes).unwrap();
         let stage = prepared.stage_path().to_path_buf();
@@ -800,7 +802,7 @@ mod tests {
             .collect();
         assert!(depth.windows(2).all(|w| w[0] <= w[1]));
         // Read-only binds remount read-only; the writable bind does not.
-        let ro_flag = |b: &Bind| b.remount.map_or(false, |f| f & libc::MS_RDONLY != 0);
+        let ro_flag = |b: &Bind| b.remount.is_some_and(|f| f & libc::MS_RDONLY != 0);
         assert!(prepared.binds.iter().filter(|b| ro_flag(b)).count() == 2);
         drop(prepared);
         assert!(!stage.exists(), "staging dir must be removed on drop");
@@ -808,8 +810,10 @@ mod tests {
 
     #[test]
     fn relative_policy_paths_are_rejected() {
-        let mut p = Policy::default();
-        p.read = vec!["relative/path".into()];
+        let p = Policy {
+            read: vec!["relative/path".into()],
+            ..Default::default()
+        };
         let mut notes = Vec::new();
         assert!(prepare(&p, 0, &mut notes).is_err());
     }

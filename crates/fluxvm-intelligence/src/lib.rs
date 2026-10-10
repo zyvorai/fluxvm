@@ -20,12 +20,14 @@ use fluxvm_network::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     net::IpAddr,
     os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
 };
 use uuid::Uuid;
@@ -345,6 +347,7 @@ pub fn snapshot_raw(id: Uuid, pid: u32, pin_root: &Path) -> Result<VmRuntimeSnap
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_parts(
     id: Uuid,
     name: &str,
@@ -1074,10 +1077,10 @@ fn decode_scalar_or_hex_u64(v: Option<&Value>) -> Option<u64> {
     if let Some(n) = json_u64(v) {
         return Some(n);
     }
-    if let Some(Value::Object(o)) = v {
-        if let Some(n) = o.values().find_map(|x| json_u64(Some(x))) {
-            return Some(n);
-        }
+    if let Some(Value::Object(o)) = v
+        && let Some(n) = o.values().find_map(|x| json_u64(Some(x)))
+    {
+        return Some(n);
     }
     decode_hex_field(v).and_then(|b| le_u64(&b))
 }
@@ -1396,16 +1399,16 @@ fn explain_drop(
         }
     };
 
-    if let Some(ip) = dst {
-        if policy.deny_cidrs.iter().any(|cidr| ip_in_cidr(ip, cidr)) {
-            return mk(
-                "vm-policy/cidr-deny",
-                "explicit-deny",
-                "exact",
-                format!("{} matches an explicit deny CIDR.", flow.destination),
-                "Remove or narrow the deny CIDR only if this destination is intentionally permitted.",
-            );
-        }
+    if let Some(ip) = dst
+        && policy.deny_cidrs.iter().any(|cidr| ip_in_cidr(ip, cidr))
+    {
+        return mk(
+            "vm-policy/cidr-deny",
+            "explicit-deny",
+            "exact",
+            format!("{} matches an explicit deny CIDR.", flow.destination),
+            "Remove or narrow the deny CIDR only if this destination is intentionally permitted.",
+        );
     }
 
     if !policy.allow_cidrs.is_empty()

@@ -23,6 +23,7 @@ use http_body_util::{BodyExt, Full, Limited};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::json;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1470,27 +1471,28 @@ async fn connect_in_netns(
     pid: u32,
     addr: std::net::SocketAddr,
 ) -> std::io::Result<tokio::net::TcpStream> {
+    fn connect(pid: u32, addr: std::net::SocketAddr) -> std::io::Result<std::net::TcpStream> {
+        #[cfg(target_os = "linux")]
+        {
+            let ns_file = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
+            if unsafe { libc::setns(ns_file.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
+        }
+        // Network namespaces are a Linux kernel feature; a netns sandbox cannot exist elsewhere.
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (pid, addr);
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "network namespaces are only available on Linux",
+            ))
+        }
+    }
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
-        let result = (|| -> std::io::Result<std::net::TcpStream> {
-            #[cfg(target_os = "linux")]
-            {
-                let ns_file = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
-                if unsafe { libc::setns(ns_file.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5))
-            }
-            // Network namespaces are a Linux kernel feature; a netns sandbox cannot exist elsewhere.
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = (pid, addr);
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "network namespaces are only available on Linux",
-                ))
-            }
-        })();
+        let result = connect(pid, addr);
         // The receiver only drops early if the whole proxy request was
         // itself abandoned (e.g. the client disconnected) -- nothing to do.
         let _ = tx.send(result);

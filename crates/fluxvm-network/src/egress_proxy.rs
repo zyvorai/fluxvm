@@ -417,10 +417,10 @@ fn vet_tunnel_request(
     // Credential lookup and the legacy host path read the Host header; make
     // sure one is present (it is already known to equal the tunnel host).
     let mut hdrs = headers.clone();
-    if !hdrs.contains_key(header::HOST) {
-        if let Ok(v) = tunnel.host.parse() {
-            hdrs.insert(header::HOST, v);
-        }
+    if !hdrs.contains_key(header::HOST)
+        && let Ok(v) = tunnel.host.parse()
+    {
+        hdrs.insert(header::HOST, v);
     }
     let vetted = vet_request(cfg, acl, method, &abs, &hdrs)?;
     let url = vetted
@@ -639,11 +639,11 @@ fn broker_authorization(
     host: &str,
     fallback: Option<String>,
 ) -> Option<String> {
-    if let Some(ip) = peer {
-        if let Some(inj) = fluxvm_core::grants::global().resolve(ip, host, chrono::Utc::now()) {
-            fluxvm_core::grants::audit_use(&inj, host);
-            return Some(inj.authorization.expose().to_string());
-        }
+    if let Some(ip) = peer
+        && let Some(inj) = fluxvm_core::grants::global().resolve(ip, host, chrono::Utc::now())
+    {
+        fluxvm_core::grants::audit_use(&inj, host);
+        return Some(inj.authorization.expose().to_string());
     }
     fallback
 }
@@ -656,10 +656,10 @@ fn count_denied(status: StatusCode, method: &Method, target: &dyn std::fmt::Disp
 }
 
 async fn proxy(State(state): State<Arc<ProxyState>>, mut req: Request<Body>) -> Response {
-    if req.method() == Method::CONNECT {
-        if let Some(tls) = state.tls.clone() {
-            return connect(state, tls, &mut req).await;
-        }
+    if req.method() == Method::CONNECT
+        && let Some(tls) = state.tls.clone()
+    {
+        return connect(state, tls, &mut req).await;
     }
     handle_plain(&state, req.map(request_body), None).await
 }

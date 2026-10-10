@@ -752,7 +752,7 @@ mod tracer {
                         "could not determine the socket type for {ip}:{port}; assumed TCP"
                     ));
                 }
-                if ty.map_or(true, |t| t == SOCK_STREAM) {
+                if ty.is_none_or(|t| t == SOCK_STREAM) {
                     if connect {
                         obs.tcp_connect.insert(port);
                         obs.tcp_endpoints.insert(format!("{ip}:{port}"));

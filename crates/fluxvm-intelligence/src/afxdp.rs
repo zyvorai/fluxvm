@@ -1,11 +1,14 @@
 // Copyright 2026 Zyvor AI Labs · https://zyvor.dev
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(target_os = "linux")]
+use anyhow::anyhow;
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
 use std::{
-    collections::BTreeMap,
     env, fs,
     fs::File,
     path::{Path, PathBuf},
@@ -424,10 +427,10 @@ pub fn list_statuses(state_root: &Path) -> Result<Vec<AfxdpStatus>> {
     for e in fs::read_dir(state_root)? {
         let e = e?;
         let name = e.file_name().to_string_lossy().to_string();
-        if let Some(stem) = name.strip_suffix(".control.json") {
-            if let Ok(id) = stem.parse::<Uuid>() {
-                ids.push(id);
-            }
+        if let Some(stem) = name.strip_suffix(".control.json")
+            && let Ok(id) = stem.parse::<Uuid>()
+        {
+            ids.push(id);
         }
     }
     ids.sort();
@@ -588,21 +591,20 @@ fn read_xdp_stats(pin_root: &Path) -> Result<Vec<XdpQueueStat>> {
         let mut sums = [0u64; 5];
         if let Some(vals) = row.get("values").and_then(Value::as_array) {
             for cpu in vals {
-                if let Some(v) = bytes(cpu.get("value")) {
-                    if v.len() >= 40 {
-                        for (i, o) in [0usize, 8, 16, 24, 32].iter().enumerate() {
-                            sums[i] = sums[i].saturating_add(u64::from_ne_bytes(
-                                v[*o..*o + 8].try_into().unwrap(),
-                            ));
-                        }
+                if let Some(v) = bytes(cpu.get("value"))
+                    && v.len() >= 40
+                {
+                    for (i, o) in [0usize, 8, 16, 24, 32].iter().enumerate() {
+                        sums[i] = sums[i]
+                            .saturating_add(u64::from_ne_bytes(v[*o..*o + 8].try_into().unwrap()));
                     }
                 }
             }
-        } else if let Some(v) = bytes(row.get("value")) {
-            if v.len() >= 40 {
-                for (i, o) in [0usize, 8, 16, 24, 32].iter().enumerate() {
-                    sums[i] = u64::from_ne_bytes(v[*o..*o + 8].try_into().unwrap());
-                }
+        } else if let Some(v) = bytes(row.get("value"))
+            && v.len() >= 40
+        {
+            for (i, o) in [0usize, 8, 16, 24, 32].iter().enumerate() {
+                sums[i] = u64::from_ne_bytes(v[*o..*o + 8].try_into().unwrap());
             }
         }
         if sums.iter().all(|v| *v == 0) {
@@ -651,10 +653,9 @@ fn bytes(v: Option<&Value>) -> Option<Vec<u8>> {
     for x in a {
         if let Some(n) = x.as_u64() {
             out.push(n as u8);
-        } else if let Some(s) = x.as_str() {
-            out.push(u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()?);
         } else {
-            return None;
+            let s = x.as_str()?;
+            out.push(u8::from_str_radix(s.trim_start_matches("0x"), 16).ok()?);
         }
     }
     Some(out)
@@ -731,7 +732,7 @@ mod tests {
     }
     #[test]
     fn key_math() {
-        let key = 1 * 64 + 63;
+        let key = 64 + 63;
         assert_eq!(key / 64, 1);
         assert_eq!(key % 64, 63);
     }

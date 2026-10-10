@@ -310,13 +310,14 @@ pub fn snapshot(
             cgroup_stats.psi_full_avg10.unwrap_or(0.0)
         ));
     }
-    if let (Some(current), Some(max)) = (cgroup_stats.current_bytes, cgroup_stats.max_bytes) {
-        if max > 0 && current.saturating_mul(100) >= max.saturating_mul(90) {
-            findings.push(format!(
-                "memory.current is {:.1}% of memory.max",
-                current as f64 * 100.0 / max as f64
-            ));
-        }
+    if let (Some(current), Some(max)) = (cgroup_stats.current_bytes, cgroup_stats.max_bytes)
+        && max > 0
+        && current.saturating_mul(100) >= max.saturating_mul(90)
+    {
+        findings.push(format!(
+            "memory.current is {:.1}% of memory.max",
+            current as f64 * 100.0 / max as f64
+        ));
     }
     if let Some(error) = cgroup_error {
         findings.push(format!("cgroup-v2 memory telemetry unavailable: {error}"));
@@ -739,12 +740,11 @@ fn pressure(path: &Path) -> BTreeMap<String, f64> {
                 continue;
             };
             for field in parts {
-                if let Some((name, value)) = field.split_once('=') {
-                    if name == "avg10" {
-                        if let Ok(v) = value.parse() {
-                            out.insert(format!("{kind}.avg10"), v);
-                        }
-                    }
+                if let Some((name, value)) = field.split_once('=')
+                    && name == "avg10"
+                    && let Ok(v) = value.parse()
+                {
+                    out.insert(format!("{kind}.avg10"), v);
                 }
             }
         }

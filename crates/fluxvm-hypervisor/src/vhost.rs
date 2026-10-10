@@ -396,6 +396,7 @@ pub struct VhostNet {
     /// TAP fd to attach as backend once the rings are programmed.
     tap_fd: Option<i32>,
     tap_queues: u32,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     order: BindOrder,
     irq_relay: Option<IrqRelay>,
     queue_fds: Vec<VhostQueueFds>,

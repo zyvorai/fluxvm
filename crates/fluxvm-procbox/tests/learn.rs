@@ -353,8 +353,10 @@ fn cli_flags_override_profile_values() {
 #[test]
 fn profile_syscall_overrides_change_the_denylist() {
     need_abi!(3);
-    let mut p = Policy::default();
-    p.scope_ipc = false;
+    let mut p = Policy {
+        scope_ipc: false,
+        ..Default::default()
+    };
     // This test is about the seccomp `syscall_deny`/`syscall_allow`
     // overrides, not TCP port policy, so leave TCP unrestricted (the
     // deny-by-default policy would otherwise block `connect` at the

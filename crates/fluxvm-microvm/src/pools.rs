@@ -59,10 +59,10 @@ pub async fn run(client: Client, fluxvm: FluxVMClient, node_name: String) {
 }
 
 async fn reconcile(obj: Arc<MicroVMPool>, ctx: Arc<Context>) -> Result<Action, Error> {
-    if let Some(node) = obj.spec.node_name.as_deref() {
-        if node != ctx.node_name {
-            return Ok(Action::await_change());
-        }
+    if let Some(node) = obj.spec.node_name.as_deref()
+        && node != ctx.node_name
+    {
+        return Ok(Action::await_change());
     }
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let name = MicroVMSpec::fluxvm_pool_name(&ns, &obj.name_any());

@@ -1086,10 +1086,11 @@ pub fn gc_conntrack(cfg: &Config) -> Result<ConntrackGcReport> {
     for spec in list(cfg)? {
         let sid = service_id(&spec.name);
         for (idx, backend) in spec.backends.iter().enumerate() {
-            if backend.enabled && backend.state == BackendState::Draining {
-                if let Some(deadline) = backend.drain_until_unix_ms {
-                    draining.insert((sid, idx as u32), deadline);
-                }
+            if backend.enabled
+                && backend.state == BackendState::Draining
+                && let Some(deadline) = backend.drain_until_unix_ms
+            {
+                draining.insert((sid, idx as u32), deadline);
             }
         }
     }
@@ -1135,11 +1136,11 @@ pub fn gc_conntrack(cfg: &Config) -> Result<ConntrackGcReport> {
     let capacity = report.maps_scanned.saturating_mul(map_tier_conntrack_max(
         &cfg.sandbox.dataplane.service.map_tier,
     ));
-    report.pressure_percent = if capacity == 0 {
-        0
-    } else {
-        ((report.entries_remaining.saturating_mul(100) / capacity).min(100)) as u8
-    };
+    report.pressure_percent = report
+        .entries_remaining
+        .saturating_mul(100)
+        .checked_div(capacity)
+        .map_or(0, |p| p.min(100) as u8);
     Ok(report)
 }
 
@@ -1148,7 +1149,7 @@ fn bytes_hex(bytes: &[u8]) -> String {
 }
 
 fn decode_hex(raw: &str) -> Result<Vec<u8>> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         bail!("hex data must have even length");
     }
     (0..raw.len())
@@ -1812,7 +1813,7 @@ pub fn service_flows(cfg: &Config, limit: usize) -> Result<Vec<ServiceFlowRecord
         let map = host_pin_dir(cfg, iface).join("maps/fluxvm_sflows");
         out.extend(parse_flow_map(&format!("host:{iface}"), &map, &names)?);
     }
-    out.sort_by(|a, b| b.last_seen_ns.cmp(&a.last_seen_ns));
+    out.sort_by_key(|f| std::cmp::Reverse(f.last_seen_ns));
     out.truncate(limit.clamp(1, 16_384));
     Ok(out)
 }
@@ -2789,7 +2790,7 @@ fn resolve_tiered_service_object(
     let default_name = format!("{stem}.bpf.o");
     let default_path = PathBuf::from("/usr/lib/fluxvm/bpf").join(&default_name);
     // Custom operator path: respect as-is (no tier rewrite).
-    if configured != &default_path
+    if configured != default_path
         && configured.file_name().and_then(|n| n.to_str()) != Some(default_name.as_str())
     {
         return configured.to_path_buf();
@@ -3045,97 +3046,6 @@ fn populate_maps(map_dir: &Path, specs: &[ServiceSpec]) -> Result<()> {
     Ok(())
 }
 
-fn write_service(map_dir: &Path, spec: &ServiceSpec, sid: u32, table_size: u32) -> Result<()> {
-    // Must match struct svc_value in both TC and XDP objects (24 bytes).
-    let mut value = Vec::with_capacity(24);
-    value.extend_from_slice(&sid.to_ne_bytes());
-    value.extend_from_slice(&table_size.to_ne_bytes());
-    let rate_bytes_per_sec = match spec.max_egress_mbps {
-        Some(mbps) => u64::from(mbps)
-            .checked_mul(1_000_000)
-            .map(|v| v / 8)
-            .context("max_egress_mbps is too large")?,
-        None => 0,
-    };
-    value.extend_from_slice(&rate_bytes_per_sec.to_ne_bytes());
-    value.extend_from_slice(&spec.flow_sample_rate.to_ne_bytes());
-    value.push(spec.mode.wire());
-    value.push(if spec.host_routing {
-        SERVICE_F_HOST_ROUTING
-    } else {
-        0
-    });
-    value.extend_from_slice(&0u16.to_ne_bytes());
-
-    match spec.vip {
-        IpAddr::V4(ip) => {
-            let mut key = Vec::with_capacity(8);
-            key.extend_from_slice(&ip.octets());
-            key.extend_from_slice(&spec.port.to_ne_bytes());
-            key.push(spec.protocol.ip_proto());
-            key.push(0);
-            map_update(&map_dir.join("fluxvm_svc4"), &key, &value)
-        }
-        IpAddr::V6(ip) => {
-            let mut key = Vec::with_capacity(20);
-            key.extend_from_slice(&ip.octets());
-            key.extend_from_slice(&spec.port.to_ne_bytes());
-            key.push(spec.protocol.ip_proto());
-            key.push(0);
-            map_update(&map_dir.join("fluxvm_svc6"), &key, &value)
-        }
-    }
-}
-
-fn write_backends(map_dir: &Path, spec: &ServiceSpec, sid: u32) -> Result<()> {
-    for (idx, backend) in spec.backends.iter().enumerate() {
-        if !backend.enabled {
-            continue;
-        }
-        let mut key = Vec::with_capacity(8);
-        key.extend_from_slice(&sid.to_ne_bytes());
-        key.extend_from_slice(&(idx as u32).to_ne_bytes());
-        match backend.address {
-            IpAddr::V4(ip) => {
-                let mut value = Vec::with_capacity(8);
-                value.extend_from_slice(&ip.octets());
-                value.extend_from_slice(&backend.port.to_ne_bytes());
-                value.extend_from_slice(&backend.state.wire_flags().to_ne_bytes());
-                map_update(&map_dir.join("fluxvm_backend4"), &key, &value)?;
-            }
-            IpAddr::V6(ip) => {
-                let mut value = Vec::with_capacity(20);
-                value.extend_from_slice(&ip.octets());
-                value.extend_from_slice(&backend.port.to_ne_bytes());
-                value.extend_from_slice(&backend.state.wire_flags().to_ne_bytes());
-                map_update(&map_dir.join("fluxvm_backend6"), &key, &value)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn write_snat(map_dir: &Path, spec: &ServiceSpec, sid: u32) -> Result<()> {
-    let Some(snat) = spec.snat_address else {
-        return Ok(());
-    };
-    let key = sid.to_ne_bytes();
-    match snat {
-        IpAddr::V4(ip) => {
-            let mut value = Vec::with_capacity(8);
-            value.extend_from_slice(&ip.octets());
-            value.extend_from_slice(&1u32.to_ne_bytes());
-            map_update(&map_dir.join("fluxvm_snat4"), &key, &value)
-        }
-        IpAddr::V6(ip) => {
-            let mut value = Vec::with_capacity(20);
-            value.extend_from_slice(&ip.octets());
-            value.extend_from_slice(&1u32.to_ne_bytes());
-            map_update(&map_dir.join("fluxvm_snat6"), &key, &value)
-        }
-    }
-}
-
 fn attach_service_filters(iface: &str, ingress_prog: &Path, reverse_prog: &Path) -> Result<()> {
     // `replace` is scoped to FluxVM's dedicated service priority/handle.
     // Ingress creates service/NAT state; egress consumes that same map state
@@ -3187,27 +3097,6 @@ fn ensure_clsact(iface: &str) -> Result<()> {
         return Ok(());
     }
     bail!("tc qdisc add clsact on {iface} failed: {stderr}");
-}
-
-fn clear_map(map: &Path) -> Result<()> {
-    let root = bpftool_json_dump(map)?;
-    let entries = root
-        .as_array()
-        .context("bpftool map dump must be an array")?;
-    for entry in entries {
-        let key = json_bytes(&entry["key"])?;
-        let mut args = vec![
-            "map".into(),
-            "delete".into(),
-            "pinned".into(),
-            map.display().to_string(),
-            "key".into(),
-            "hex".into(),
-        ];
-        args.extend(hex_args(&key));
-        run("bpftool", &args)?;
-    }
-    Ok(())
 }
 
 fn map_update(map: &Path, key: &[u8], value: &[u8]) -> Result<()> {
@@ -3266,8 +3155,7 @@ fn json_bytes(v: &Value) -> Result<Vec<u8>> {
     }
     if let Some(text) = v.as_str() {
         return text
-            .replace(':', " ")
-            .replace(',', " ")
+            .replace([':', ','], " ")
             .split_whitespace()
             .map(|x| {
                 u8::from_str_radix(x.trim_start_matches("0x"), 16)
@@ -3368,6 +3256,84 @@ fn run(program: &str, args: &[String]) -> Result<()> {
         args.join(" "),
         String::from_utf8_lossy(&out.stderr)
     )
+}
+
+// ZYVOR_SERVICE_FABRIC_V6_HA_INGEST
+/// Append one event-assisted mutation into the same durable v5 sequence/ack
+/// journal. `known` is updated simultaneously so the next snapshot refresh
+/// does not duplicate the same transition.
+pub fn append_ha_delta_event(
+    cfg: &Config,
+    name: &str,
+    operation: HaDeltaOperation,
+    map: &str,
+    key_hex: &str,
+    value_hex: Option<&str>,
+) -> Result<HaJournalStatus> {
+    if !matches!(
+        map,
+        "fluxvm_fct4" | "fluxvm_fct6" | "fluxvm_nat4" | "fluxvm_nat6"
+    ) {
+        bail!("forbidden BPF map in event-assisted HA journal: {map}");
+    }
+    let spec = get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
+    let sid = service_id(&spec.name);
+    let mut state = load_ha_journal(cfg, name, sid)?;
+    let identity = format!("{map}|{key_hex}");
+    let changed = match operation {
+        HaDeltaOperation::Upsert => {
+            let value = value_hex.context("HA upsert event requires value_hex")?;
+            if state.known.get(&identity).map(String::as_str) == Some(value) {
+                false
+            } else {
+                append_delta(
+                    &mut state,
+                    HaDeltaOperation::Upsert,
+                    map.to_string(),
+                    key_hex.to_string(),
+                    Some(value.to_string()),
+                );
+                state.known.insert(identity, value.to_string());
+                true
+            }
+        }
+        HaDeltaOperation::Delete => {
+            if state.known.remove(&identity).is_some() {
+                append_delta(
+                    &mut state,
+                    HaDeltaOperation::Delete,
+                    map.to_string(),
+                    key_hex.to_string(),
+                    None,
+                );
+                true
+            } else {
+                false
+            }
+        }
+    };
+    if changed {
+        if state.journal.len() > HA_JOURNAL_MAX_ENTRIES {
+            let remove = state.journal.len() - HA_JOURNAL_MAX_ENTRIES;
+            state.journal.drain(0..remove);
+        }
+        let acked = state.acked_seq;
+        state.journal.retain(|entry| entry.seq > acked);
+        save_ha_journal(cfg, &state)?;
+    }
+    let last_seq = state.next_seq.saturating_sub(1);
+    Ok(HaJournalStatus {
+        service: name.to_string(),
+        service_id: sid,
+        last_seq,
+        acked_seq: state.acked_seq,
+        first_available_seq: state
+            .journal
+            .first()
+            .map(|e| e.seq)
+            .unwrap_or(last_seq.saturating_add(1)),
+        retained_entries: state.journal.len(),
+    })
 }
 
 #[cfg(test)]
@@ -3505,7 +3471,7 @@ mod tests {
 
     #[test]
     fn v5_delta_batch_is_replay_ordered() {
-        let entries = vec![
+        let entries = [
             ConntrackDeltaEntry {
                 seq: 11,
                 operation: HaDeltaOperation::Upsert,
@@ -3539,82 +3505,4 @@ mod tests {
         let maps = desired_intent_maps(&[s]).unwrap();
         assert_eq!(maps.get("fluxvm_backend4").unwrap().len(), 3);
     }
-}
-
-// ZYVOR_SERVICE_FABRIC_V6_HA_INGEST
-/// Append one event-assisted mutation into the same durable v5 sequence/ack
-/// journal. `known` is updated simultaneously so the next snapshot refresh
-/// does not duplicate the same transition.
-pub fn append_ha_delta_event(
-    cfg: &Config,
-    name: &str,
-    operation: HaDeltaOperation,
-    map: &str,
-    key_hex: &str,
-    value_hex: Option<&str>,
-) -> Result<HaJournalStatus> {
-    if !matches!(
-        map,
-        "fluxvm_fct4" | "fluxvm_fct6" | "fluxvm_nat4" | "fluxvm_nat6"
-    ) {
-        bail!("forbidden BPF map in event-assisted HA journal: {map}");
-    }
-    let spec = get(cfg, name)?.with_context(|| format!("service {name:?} not found"))?;
-    let sid = service_id(&spec.name);
-    let mut state = load_ha_journal(cfg, name, sid)?;
-    let identity = format!("{map}|{key_hex}");
-    let changed = match operation {
-        HaDeltaOperation::Upsert => {
-            let value = value_hex.context("HA upsert event requires value_hex")?;
-            if state.known.get(&identity).map(String::as_str) == Some(value) {
-                false
-            } else {
-                append_delta(
-                    &mut state,
-                    HaDeltaOperation::Upsert,
-                    map.to_string(),
-                    key_hex.to_string(),
-                    Some(value.to_string()),
-                );
-                state.known.insert(identity, value.to_string());
-                true
-            }
-        }
-        HaDeltaOperation::Delete => {
-            if state.known.remove(&identity).is_some() {
-                append_delta(
-                    &mut state,
-                    HaDeltaOperation::Delete,
-                    map.to_string(),
-                    key_hex.to_string(),
-                    None,
-                );
-                true
-            } else {
-                false
-            }
-        }
-    };
-    if changed {
-        if state.journal.len() > HA_JOURNAL_MAX_ENTRIES {
-            let remove = state.journal.len() - HA_JOURNAL_MAX_ENTRIES;
-            state.journal.drain(0..remove);
-        }
-        let acked = state.acked_seq;
-        state.journal.retain(|entry| entry.seq > acked);
-        save_ha_journal(cfg, &state)?;
-    }
-    let last_seq = state.next_seq.saturating_sub(1);
-    Ok(HaJournalStatus {
-        service: name.to_string(),
-        service_id: sid,
-        last_seq,
-        acked_seq: state.acked_seq,
-        first_available_seq: state
-            .journal
-            .first()
-            .map(|e| e.seq)
-            .unwrap_or(last_seq.saturating_add(1)),
-        retained_entries: state.journal.len(),
-    })
 }

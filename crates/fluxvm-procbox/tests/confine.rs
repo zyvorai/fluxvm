@@ -29,8 +29,10 @@ macro_rules! need_abi {
 
 /// Read access to what a dynamically linked helper needs, no scoping.
 fn base() -> Policy {
-    let mut p = Policy::default();
-    p.scope_ipc = false;
+    let mut p = Policy {
+        scope_ipc: false,
+        ..Default::default()
+    };
     for d in ["/usr", "/lib", "/lib64", "/bin", "/etc"] {
         if Path::new(d).exists() {
             p.read.push(d.into());
@@ -130,8 +132,10 @@ fn unlisted_directory_is_unreadable() {
 #[test]
 fn a_command_outside_the_allowed_paths_does_not_start() {
     need_abi!(3);
-    let mut p = Policy::default();
-    p.scope_ipc = false;
+    let p = Policy {
+        scope_ipc: false,
+        ..Default::default()
+    };
     let err = run(
         &p,
         &["/bin/true".to_string()],

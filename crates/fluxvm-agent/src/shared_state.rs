@@ -22,7 +22,7 @@ pub struct SandboxIndexEntry {
 #[derive(Clone)]
 enum Backend {
     Local(Arc<RwLock<HashMap<String, SandboxIndexEntry>>>),
-    Redis(redis::aio::ConnectionManager),
+    Redis(Box<redis::aio::ConnectionManager>),
 }
 
 #[derive(Clone)]
@@ -52,7 +52,7 @@ impl SharedSandboxIndex {
                     .context("connect Redis")?;
                 tracing::info!(%url, "sandbox shared state using Redis");
                 Ok(Self {
-                    backend: Backend::Redis(mgr),
+                    backend: Backend::Redis(Box::new(mgr)),
                 })
             }
             _ => Ok(Self::new()),
@@ -66,7 +66,7 @@ impl SharedSandboxIndex {
                 Ok(())
             }
             Backend::Redis(mgr) => {
-                let mut conn = mgr.clone();
+                let mut conn = (**mgr).clone();
                 let key = format!("fluxvm:sandbox:{}", entry.id);
                 let val = serde_json::to_string(&entry)?;
                 redis::cmd("SET")
@@ -93,7 +93,7 @@ impl SharedSandboxIndex {
                 Ok(())
             }
             Backend::Redis(mgr) => {
-                let mut conn = mgr.clone();
+                let mut conn = (**mgr).clone();
                 let key = format!("fluxvm:sandbox:{id}");
                 let _: () = redis::cmd("DEL").arg(&key).query_async(&mut conn).await?;
                 let _: () = redis::cmd("SREM")
@@ -110,7 +110,7 @@ impl SharedSandboxIndex {
         match &self.backend {
             Backend::Local(map) => Ok(map.read().await.values().cloned().collect()),
             Backend::Redis(mgr) => {
-                let mut conn = mgr.clone();
+                let mut conn = (**mgr).clone();
                 let ids: Vec<String> = redis::cmd("SMEMBERS")
                     .arg("fluxvm:sandboxes")
                     .query_async(&mut conn)
@@ -131,7 +131,7 @@ impl SharedSandboxIndex {
         match &self.backend {
             Backend::Local(map) => Ok(map.read().await.get(id).cloned()),
             Backend::Redis(mgr) => {
-                let mut conn = mgr.clone();
+                let mut conn = (**mgr).clone();
                 let key = format!("fluxvm:sandbox:{id}");
                 let val: Option<String> = redis::cmd("GET")
                     .arg(&key)

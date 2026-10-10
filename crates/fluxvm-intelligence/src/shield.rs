@@ -133,13 +133,13 @@ pub fn apply_policy(
     let ifindex = read_ifindex(interface)?;
     let pin_dir = vm_pin_dir(pin_root, id);
     let old = read_state(id, state_root).ok();
-    if let Some(ref state) = old {
-        if state.interface != interface {
-            bail!(
-                "shield for {id} is attached to {}; remove it before moving to {interface}",
-                state.interface
-            );
-        }
+    if let Some(ref state) = old
+        && state.interface != interface
+    {
+        bail!(
+            "shield for {id} is attached to {}; remove it before moving to {interface}",
+            state.interface
+        );
     }
     let attach_mode = if pin_dir.join("program").exists() {
         old.as_ref()
@@ -697,9 +697,11 @@ mod tests {
     }
     #[test]
     fn policy_rejects_unbounded_rates() {
-        let mut p = ShieldPolicy::default();
-        p.protect_all = true;
-        p.syn_pps = MAX_PPS + 1;
+        let p = ShieldPolicy {
+            protect_all: true,
+            syn_pps: MAX_PPS + 1,
+            ..Default::default()
+        };
         assert!(validate_policy(&p).is_err());
     }
 }

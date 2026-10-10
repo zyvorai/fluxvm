@@ -875,9 +875,9 @@ mod tests {
     /// runners intermittently return ETXTBSY (os error 26) when parallel
     /// tokio tests exec freshly written shell scripts; holding this for the
     /// whole test body serializes those execs.
-    fn hotplug_fake_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    async fn hotplug_fake_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        LOCK.lock().await
     }
 
     /// Writes an executable fake `ch-remote` for `hotplug_cpu`/
@@ -922,7 +922,7 @@ mod tests {
 
     #[tokio::test]
     async fn hotplug_cpu_resizes_to_current_plus_add() {
-        let _lock = hotplug_fake_lock();
+        let _lock = hotplug_fake_lock().await;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();
@@ -944,7 +944,7 @@ mod tests {
 
     #[tokio::test]
     async fn hotplug_cpu_rejects_exceeding_max_vcpus_headroom() {
-        let _lock = hotplug_fake_lock();
+        let _lock = hotplug_fake_lock().await;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();
@@ -977,7 +977,7 @@ mod tests {
 
     #[tokio::test]
     async fn hotplug_cpu_propagates_a_real_resize_failure() {
-        let _lock = hotplug_fake_lock();
+        let _lock = hotplug_fake_lock().await;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();
@@ -994,7 +994,7 @@ mod tests {
 
     #[tokio::test]
     async fn hotplug_memory_resizes_to_current_plus_add() {
-        let _lock = hotplug_fake_lock();
+        let _lock = hotplug_fake_lock().await;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("resize.log");
         let mut cfg = cfg();

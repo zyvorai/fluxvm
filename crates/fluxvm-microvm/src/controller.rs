@@ -117,10 +117,10 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
             status.message = Some("waiting for kube-scheduler".into());
         }
     }
-    if obj.spec.service {
-        if let Some(ip) = status.guest_ip.clone() {
-            ensure_endpointslice(&ctx.client, obj, &ip).await?;
-        }
+    if obj.spec.service
+        && let Some(ip) = status.guest_ip.clone()
+    {
+        ensure_endpointslice(&ctx.client, obj, &ip).await?;
     }
     if prev_phase != "Scheduled" && status.phase == "Scheduled" {
         if let Some(created) = obj.meta().creation_timestamp.as_ref() {

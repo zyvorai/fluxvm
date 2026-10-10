@@ -206,7 +206,7 @@ pub fn after_help() -> String {
         let _ = write!(out, "\n\n{header}{group}{header:#}\n");
         for (name, about) in *cmds {
             let pad = " ".repeat(14usize.saturating_sub(name.len()));
-            let _ = write!(out, "  {literal}{name}{literal:#}{pad} {about}\n");
+            let _ = writeln!(out, "  {literal}{name}{literal:#}{pad} {about}");
         }
     }
 

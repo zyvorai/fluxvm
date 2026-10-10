@@ -169,14 +169,14 @@ full avg10=0.00 avg60=0.00 avg300=0.00 total=0
         let p = PathBuf::from("/test/io.pressure");
         let content = "\
 some avg10=10.25 avg60=5.50 avg300=1.75 total=999999
-full avg10=3.14 avg60=2.71 avg300=1.41 total=500000
+full avg10=3.25 avg60=2.75 avg300=1.41 total=500000
 ";
         let stats = parse_pressure(&p, content).unwrap();
         assert!((stats.some.avg10 - 10.25).abs() < f64::EPSILON);
         assert!((stats.some.avg60 - 5.50).abs() < f64::EPSILON);
         assert_eq!(stats.some.total, 999999);
         let full = stats.full.unwrap();
-        assert!((full.avg10 - 3.14).abs() < f64::EPSILON);
+        assert!((full.avg10 - 3.25).abs() < f64::EPSILON);
         assert_eq!(full.total, 500000);
     }
 }

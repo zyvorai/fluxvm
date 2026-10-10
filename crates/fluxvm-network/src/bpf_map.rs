@@ -16,6 +16,7 @@ pub(crate) struct MapLayout {
 }
 
 impl MapLayout {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn validate(self, key: &[u8], value: &[u8]) -> io::Result<()> {
         if key.len() != self.key_size as usize || value.len() != self.value_size as usize {
             return Err(io::Error::new(

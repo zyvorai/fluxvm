@@ -31,17 +31,16 @@ async fn main() -> Result<()> {
         .to_string();
     let client = reqwest::Client::new();
     let mut request = client.get(format!("{api}/v1/vms/{id}/network/stats"));
-    if let Ok(token) = env::var("FLUXVM_API_TOKEN") {
-        if !token.is_empty() {
-            request = request.bearer_auth(token);
-        }
+    if let Ok(token) = env::var("FLUXVM_API_TOKEN")
+        && !token.is_empty()
+    {
+        request = request.bearer_auth(token);
     }
-    if let Ok(response) = request.send().await {
-        if response.status().is_success() {
-            if let Ok(stats) = response.json::<fluxvm_intelligence::NetworkVmStats>().await {
-                snapshot.network = Some(stats);
-            }
-        }
+    if let Ok(response) = request.send().await
+        && response.status().is_success()
+        && let Ok(stats) = response.json::<fluxvm_intelligence::NetworkVmStats>().await
+    {
+        snapshot.network = Some(stats);
     }
     let cgroup = qos::cgroup_for_pid(pid)?;
     let assessment = qos::assess(&snapshot, &cgroup)?;

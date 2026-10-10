@@ -179,7 +179,7 @@ fn valid_io_request(
         };
         total = next;
     }
-    if total % SECTOR_SIZE != 0 || total > u64::from(u32::MAX - 1) {
+    if !total.is_multiple_of(SECTOR_SIZE) || total > u64::from(u32::MAX - 1) {
         return false;
     }
     matches!(
@@ -218,17 +218,17 @@ fn process_request(
     let mut status = VIRTIO_BLK_S_OK;
     let mut bytes_written_to_guest = 0u32;
 
-    if req_type == VIRTIO_BLK_T_IN || req_type == VIRTIO_BLK_T_OUT {
-        if !valid_io_request(
+    if (req_type == VIRTIO_BLK_T_IN || req_type == VIRTIO_BLK_T_OUT)
+        && !valid_io_request(
             mem,
             backend,
             data_parts,
             sector,
             req_type == VIRTIO_BLK_T_IN,
-        ) {
-            mem.write_at(status_gpa, &[VIRTIO_BLK_S_IOERR])?;
-            return Ok(1);
-        }
+        )
+    {
+        mem.write_at(status_gpa, &[VIRTIO_BLK_S_IOERR])?;
+        return Ok(1);
     }
 
     match req_type {
@@ -348,6 +348,7 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn process_request(
         mem: &mut GuestMemory,
         backend: &BlockBackend,

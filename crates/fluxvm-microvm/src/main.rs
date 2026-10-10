@@ -81,10 +81,10 @@ async fn main() -> Result<()> {
             let base_url =
                 std::env::var("FLUXVM_URL").unwrap_or_else(|_| "http://127.0.0.1:7788".into());
             let token = std::env::var("FLUXVM_TOKEN").ok();
-            if kvm_slots > 0 {
-                if let Err(e) = capacity::advertise(&client, &node_name, kvm_slots).await {
-                    tracing::warn!(error = %e, "failed to advertise fluxvm.dev/kvm");
-                }
+            if kvm_slots > 0
+                && let Err(e) = capacity::advertise(&client, &node_name, kvm_slots).await
+            {
+                tracing::warn!(error = %e, "failed to advertise fluxvm.dev/kvm");
             }
             let fluxvm = FluxVMClient::new(base_url, token);
             let c1 = client.clone();

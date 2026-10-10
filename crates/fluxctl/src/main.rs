@@ -1696,6 +1696,8 @@ fn print_vznets(items: &serde_json::Value, json: bool) -> Result<()> {
     Ok(())
 }
 
+// Parsed once per invocation, so the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum CatalogCommand {
     /// Generate a fresh Ed25519 keypair for signing catalog entries. The
@@ -1878,19 +1880,19 @@ async fn run_console_session(m: &VmManager, id: Uuid, cols: u16, rows: u16) -> R
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change())?;
         let mut last = (cols, rows);
         while winch.recv().await.is_some() {
-            if let Some(size) = terminal_size() {
-                if size != last {
-                    last = size;
-                    if resize_tx
-                        .send(PtyFrame::Resize {
-                            cols: size.0,
-                            rows: size.1,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+            if let Some(size) = terminal_size()
+                && size != last
+            {
+                last = size;
+                if resize_tx
+                    .send(PtyFrame::Resize {
+                        cols: size.0,
+                        rows: size.1,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
             }
         }
@@ -4950,7 +4952,7 @@ async fn build_mtls_config(
     key: &Path,
     client_ca: &Path,
 ) -> Result<axum_server::tls_rustls::RustlsConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::pki_types::CertificateDer;
     use rustls::server::WebPkiClientVerifier;
     use rustls::{RootCertStore, ServerConfig};
     use std::fs::File;
@@ -4979,7 +4981,7 @@ async fn build_mtls_config(
 
     let mut config = ServerConfig::builder()
         .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, PrivateKeyDer::from(key))
+        .with_single_cert(certs, key)
         .context("build rustls ServerConfig")?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 

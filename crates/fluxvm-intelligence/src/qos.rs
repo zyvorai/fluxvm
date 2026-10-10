@@ -135,7 +135,7 @@ pub fn cgroup_for_pid(pid: u32) -> Result<PathBuf> {
 }
 
 fn boost(current: u32) -> u32 {
-    let step = ((current as u64 * 5 + 3) / 4) as u32;
+    let step = (current as u64 * 5).div_ceil(4) as u32;
     step.max(current.saturating_add(25)).clamp(100, 1000)
 }
 fn read_weight(path: &Path) -> Option<u32> {

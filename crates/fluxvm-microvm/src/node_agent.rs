@@ -199,12 +199,11 @@ async fn apply(obj: &MicroVM, api: &Api<MicroVM>, ctx: &Context) -> Result<Actio
             .as_ref()
             .and_then(|a| a.get("microvm.fluxvm.zyvor.io/scheduled-at"))
         {
-            if let Ok(secs) = sched_at.parse::<i64>() {
-                if let Some(then) = chrono::DateTime::from_timestamp(secs, 0) {
-                    if let Ok(sd) = chrono::Utc::now().signed_duration_since(then).to_std() {
-                        crate::metrics::observe_schedule_to_running(sd);
-                    }
-                }
+            if let Ok(secs) = sched_at.parse::<i64>()
+                && let Some(then) = chrono::DateTime::from_timestamp(secs, 0)
+                && let Ok(sd) = chrono::Utc::now().signed_duration_since(then).to_std()
+            {
+                crate::metrics::observe_schedule_to_running(sd);
             }
         } else if let Some(created) = obj.meta().creation_timestamp.as_ref() {
             // Fallback when annotation missing (agent saw create before controller).

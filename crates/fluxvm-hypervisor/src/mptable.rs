@@ -108,7 +108,7 @@ fn as_bytes<T>(v: &T) -> &[u8] {
 /// processors (clamped to 1..=8), with `local_apic_id: i` matching the
 /// initial APIC ID each real KVM vCPU is created with (see kvm.rs).
 pub fn write_mptable(mem: &mut GuestMemory, num_cpus: u8) -> Result<()> {
-    let cpus = num_cpus.max(1).min(8);
+    let cpus = num_cpus.clamp(1, 8);
     let mut table: Vec<u8> = Vec::with_capacity(256);
 
     let header_placeholder = MpConfigTableHeader {
@@ -166,7 +166,7 @@ pub fn write_mptable(mem: &mut GuestMemory, num_cpus: u8) -> Result<()> {
         if irq == 2 {
             continue;
         }
-        let pin = if irq < 2 { irq } else { irq };
+        let pin = irq;
         let ent = MpIoInterrupt {
             entry_type: 3,
             interrupt_type: 0,

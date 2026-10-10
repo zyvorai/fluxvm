@@ -527,7 +527,7 @@ pub fn canon_host(s: &str) -> Result<String, String> {
     } else {
         match s.rsplit_once(':') {
             Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
-            Some((_, port)) if port.is_empty() => &s[..s.len() - 1],
+            Some((_, "")) => &s[..s.len() - 1],
             _ => s,
         }
     };

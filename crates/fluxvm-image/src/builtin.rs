@@ -36,8 +36,6 @@ pub struct BuiltinImage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
-    /// Already a raw disk image.
-    Raw,
     /// qcow2, converted once with `qemu-img`.
     Qcow2,
     /// A tarball holding `disk.raw` (Debian's cloud images; about a tenth of the raw download).
@@ -190,7 +188,6 @@ pub async fn ensure(cfg: &Config, img: &BuiltinImage) -> Result<PathBuf> {
     let part = dir.join(format!("{}-{tag}.raw.part", img.name));
     let _ = fs::remove_file(&part);
     match img.kind {
-        Kind::Raw => fs::rename(&download, &part)?,
         Kind::Qcow2 => crate::convert_image(cfg, &download, &part, "raw")
             .await
             .with_context(|| {

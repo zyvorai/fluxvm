@@ -700,7 +700,7 @@ mod tests {
         q.last_avail = 0xfffe;
         mem.write_u16(USED + 2, 0xfffe).unwrap();
         for k in 0..4u16 {
-            let head = k as u16;
+            let head = k;
             set_desc(
                 &mut mem,
                 head,
@@ -901,9 +901,11 @@ mod tests {
     #[test]
     fn ctrl_queue_sets_pairs_and_refuses_what_it_cannot_serve() {
         let (mut mem, q) = setup();
-        let mut st = VirtioState::default();
-        st.net_max_pairs = 4;
-        st.num_queues = 9;
+        let mut st = VirtioState {
+            net_max_pairs: 4,
+            num_queues: 9,
+            ..Default::default()
+        };
         st.queues[8] = q;
         // Command in descriptor 0 (class, cmd, le16 pairs), ack byte in 1.
         let cmd = |pairs: u16| {

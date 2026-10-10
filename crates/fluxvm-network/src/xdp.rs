@@ -443,7 +443,7 @@ fn json_bytes(v: &Value) -> Result<Vec<u8>> {
             .collect();
     }
     if let Some(s) = v.as_str() {
-        let normalized = s.replace(':', " ").replace(',', " ");
+        let normalized = s.replace([':', ','], " ");
         return normalized
             .split_whitespace()
             .map(|x| u8::from_str_radix(x.trim_start_matches("0x"), 16).context("invalid hex byte"))

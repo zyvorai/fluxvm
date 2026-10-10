@@ -295,9 +295,11 @@ mod tests {
 
     #[test]
     fn policy_round_trips_through_json() {
-        let mut p = Policy::default();
-        p.tcp_connect = TcpRule::Ports(vec![443]);
-        p.max_memory = Some(1 << 28);
+        let p = Policy {
+            tcp_connect: TcpRule::Ports(vec![443]),
+            max_memory: Some(1 << 28),
+            ..Default::default()
+        };
         let j = serde_json::to_string(&p).unwrap();
         let back: Policy = serde_json::from_str(&j).unwrap();
         assert_eq!(back.tcp_connect, TcpRule::Ports(vec![443]));

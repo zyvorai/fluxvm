@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum ApiRequest {
-    Boot(BootConfig),
+    Boot(Box<BootConfig>),
     Pause,
     Resume,
     Shutdown,

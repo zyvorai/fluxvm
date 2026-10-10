@@ -129,13 +129,13 @@ fn lookup_endpoint_by_ip(ip: &str) -> Result<Option<AgentIdentity>> {
         if !hit {
             continue;
         }
-        if let Some(ident) = ep.identity {
-            if let Some(id) = ident.id {
-                return Ok(Some(AgentIdentity {
-                    id: id as u32,
-                    labels: ident.labels,
-                }));
-            }
+        if let Some(ident) = ep.identity
+            && let Some(id) = ident.id
+        {
+            return Ok(Some(AgentIdentity {
+                id: id as u32,
+                labels: ident.labels,
+            }));
         }
         if let Some(id) = ep.id {
             return Ok(Some(AgentIdentity {

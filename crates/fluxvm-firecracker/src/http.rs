@@ -42,7 +42,7 @@ async fn request_inner(
         .with_context(|| format!("connecting to Firecracker API socket {}", socket.display()))?;
 
     let body_bytes = body
-        .map(|b| serde_json::to_vec(b))
+        .map(serde_json::to_vec)
         .transpose()?
         .unwrap_or_default();
     let mut request = format!(

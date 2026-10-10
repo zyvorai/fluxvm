@@ -9,7 +9,6 @@
 use fluxvm_core::config::{CredentialInject, SandboxConfig};
 use fluxvm_network::egress_proxy;
 use fluxvm_network::tls_intercept::InterceptCa;
-use futures_util::StreamExt as _;
 use http_body_util::{BodyExt, Full};
 use http_body_util::{StreamBody, combinators::BoxBody};
 use hyper::body::Frame;
