@@ -477,6 +477,8 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
     var signalSources: [DispatchSourceSignal] = []
     var vsockConnections: [VZVirtioSocketConnection] = []
     var lastConfiguration: VZVirtualMachineConfiguration?
+    /// Secure Boot state read before start: a running VM holds efi.bin open.
+    var secureBootAtBoot: [String: Any]?
     var privateLinks: [String: PrivateLink] = [:]
     var consoleBridges: [ConsolePortBridge] = []
     var serialLog: SerialLog?
@@ -548,6 +550,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                     ? VZEFIVariableStore(url: file("efi.bin"))
                     : try VZEFIVariableStore(creatingVariableStoreAt: file("efi.bin"))
                 try self.configureSecureBoot(store)
+                if !self.dryRun { self.secureBootAtBoot = self.readSecureBoot(store) }
                 boot.variableStore = store
                 c.bootLoader = boot
             }

@@ -331,7 +331,10 @@ These compile against the macOS 27 SDK and are validated at admission. Except fo
   `platform_key` (X.509, DER or PEM), `kek`/`db`/`dbx` (certificates, SHA-256 hashes or EFI signature lists),
   `default_signatures: false` and `reset: true` (clear previously enrolled keys first). `secure_boot: false` turns it off and keeps the
   keys; leaving it out does not touch `efi.bin`. Refused with direct kernel boot and for macOS guests. `{"cmd":"secure-boot-status"}` reports
-  the state and signature counts. **Verified** on the M4: enable with default keys (2 KEK, 2 db, 26 dbx), status, disable, and a stock Debian 13 cloud image booting through the API with `secure_boot: true` (guest efivars: `SecureBoot=1`, `SetupMode=0`). `secure-boot-status` fails with "variable store already in use" while the VM runs, so read it only when no guest holds `efi.bin`.
+  the state and signature counts. **Verified** on the M4: enable with default keys (2 KEK, 2 db, 26 dbx), status, disable, and a stock Debian 13 cloud image booting through the API with `secure_boot: true` (guest efivars: `SecureBoot=1`, `SetupMode=0`). The guest kernel reports "Secure boot enabled" and runs in lockdown (integrity), so it loads only signed modules: an out-of-tree
+  module such as `virtio_flux.ko` must be signed with an enrolled key (for example a MOK) to load under Secure Boot. While the VM runs,
+  Virtualization keeps `efi.bin` locked, so `secure-boot-status` returns the state read just before start, marked `"as_of": "boot"`;
+  with the VM stopped it reads the store.
 - **Recovery (macOS guests):** `recovery: true` starts the guest in macOS Recovery.
 - **Rosetta cache (Linux guests):** with `rosetta: true`, `rosetta_cache` is `"default"`, a guest socket path or an abstract socket name for
   `rosettad`'s AOT cache. A Mac without Rosetta fails at boot with a pointer to `fluxvm-vz-runner install-rosetta`.
