@@ -10,7 +10,39 @@ import AccessoryAccess
 
 private let fluxUSBService = "dev.zyvor.fluxvm.usbd"
 
+/// Reports a passthrough device the host took back (unplugged, or released from the Accessory Access menu).
+@available(macOS 27.0, *)
+final class FluxUSBControllerObserver: NSObject, VZUSBController.Delegate {
+    func usbController(_ usbController: VZUSBController,
+                       usbPassthroughDeviceDidDisconnect device: VZUSBPassthroughDevice) {
+        emit(["event": "usb-passthrough-disconnected", "uuid": device.uuid.uuidString])
+    }
+}
+
 extension Runner {
+    /// Watches every USB controller for passthrough devices the framework detached on its own.
+    func observeUSBControllers(_ machine: VZVirtualMachine) {
+        guard #available(macOS 27.0, *), !machine.usbControllers.isEmpty else { return }
+        let observer = FluxUSBControllerObserver()
+        for c in machine.usbControllers { c.delegate = observer }
+        usbObserver = observer
+    }
+
+    /// `usb-list`: the devices attached to the VM's USB controllers right now.
+    func listUSB() -> [String: Any] {
+        guard #available(macOS 15.0, *), let vm else { return ["ok": true, "items": []] }
+        var items: [[String: Any]] = []
+        for c in vm.usbControllers {
+            for d in c.usbDevices {
+                var kind = "mass-storage"
+                if #available(macOS 27.0, *), d is VZUSBPassthroughDevice { kind = "passthrough" }
+                items.append(["uuid": d.uuid.uuidString, "kind": kind,
+                              "hotplugged": kind == "passthrough" || hotplugUSB.contains(d.uuid)])
+            }
+        }
+        return ["ok": true, "items": items]
+    }
+
     func listPhysicalUSB(completion: @escaping ([String: Any]) -> Void) {
         guard #available(macOS 27.0, *) else {
             completion(["ok": false, "error": "physical USB passthrough needs macOS 27+"])

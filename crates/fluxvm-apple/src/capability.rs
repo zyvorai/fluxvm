@@ -110,8 +110,12 @@ pub const CAPABILITIES: &[Capability] = &[
         "NUMA, hugepages, cpuset, vfio",
         "no such controls on Apple silicon",
     ),
+    yes(
+        "EFI Secure Boot",
+        "macOS 27+ Linux EFI guests: Apple or custom platform key, Microsoft or custom KEK/db/dbx",
+    ),
     no(
-        "secure boot, TPM, confidential profiles",
+        "TPM, confidential profiles",
         "not offered by Virtualization.framework",
     ),
     no("hotplug (cpu, memory, disks, nics)", "not supported"),
@@ -189,6 +193,63 @@ fn validate_vmnet(v: &fluxvm_core::model::AppleVmnetSpec) -> Result<()> {
         }
         in_net("forward guest_ip", &f.guest_ip)?;
     }
+    if v.disable_dhcp && v.reserved_ip.is_some() {
+        bail!("apple.vmnet reserved_ip needs DHCP; drop disable_dhcp");
+    }
+    if let Some(p) = &v.ipv6_prefix {
+        let ok = p.split_once('/').is_some_and(|(addr, len)| {
+            addr.parse::<std::net::Ipv6Addr>().is_ok()
+                && len.parse::<u8>().is_ok_and(|l| (1..=128).contains(&l))
+        });
+        if !ok {
+            bail!("apple.vmnet ipv6_prefix {p:?} must look like fd00:1::/64");
+        }
+    }
+    if v.mtu.is_some_and(|m| !(1280..=9000).contains(&m)) {
+        bail!("apple.vmnet mtu must be 1280..=9000");
+    }
+    if let Some(i) = &v.external_interface {
+        if v.mode != fluxvm_core::model::AppleVmnetMode::Shared {
+            bail!("apple.vmnet external_interface needs mode shared");
+        }
+        if i.is_empty() || i.len() > 15 || !i.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            bail!("apple.vmnet external_interface {i:?} is not an interface name such as en0");
+        }
+    }
+    Ok(())
+}
+
+/// EFI Secure Boot (macOS 27+) is applied to the EFI variable store, so it needs a Linux guest that boots EFI.
+fn validate_secure_boot(req: &CreateVmRequest, macos_guest: bool) -> Result<()> {
+    let keys = req.apple.as_ref().and_then(|a| a.efi_secure_boot.as_ref());
+    if req.secure_boot != Some(true) {
+        if keys.is_some() {
+            bail!("apple.efi_secure_boot needs secure_boot: true");
+        }
+        return Ok(());
+    }
+    if macos_guest {
+        bail!("secure_boot is for Linux guests; macOS guests always boot securely");
+    }
+    if req.kernel.is_some() {
+        bail!("secure_boot needs EFI boot from the disk; direct kernel boot bypasses the firmware");
+    }
+    if let Some(k) = keys {
+        for p in k
+            .platform_key
+            .iter()
+            .chain(&k.kek)
+            .chain(&k.db)
+            .chain(&k.dbx)
+        {
+            if !p.is_absolute() {
+                bail!(
+                    "apple.efi_secure_boot path {} must be absolute",
+                    p.display()
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -251,6 +312,14 @@ pub fn validate_disk(d: &fluxvm_core::model::AppleDisk) -> Result<()> {
     }
     if d.kind != AppleDiskKind::Nbd && d.url.is_some() {
         bail!("url is for nbd disks");
+    }
+    if let Some(id) = &d.block_device_id {
+        if d.controller != fluxvm_core::model::AppleDiskController::Virtio {
+            bail!("block_device_id needs the virtio controller");
+        }
+        if id.is_empty() || id.len() > 20 || !id.bytes().all(|b| b.is_ascii_graphic()) {
+            bail!("block_device_id {id:?}: 1-20 printable ASCII characters");
+        }
     }
     if d.kind != AppleDiskKind::Image {
         if d.caching != AppleDiskCaching::Automatic {
@@ -517,10 +586,29 @@ pub fn validate_request(req: &CreateVmRequest) -> Result<()> {
         "NUMA, cpuset or hugepages"
     );
     reject!(!req.vfio_devices.is_empty(), "VFIO device passthrough");
-    reject!(
-        req.secure_boot == Some(true) || req.tpm == Some(true),
-        "secure boot or a TPM"
-    );
+    reject!(req.tpm == Some(true), "a TPM");
+    validate_secure_boot(req, macos_guest)?;
+    if let Some(apple) = &req.apple {
+        if apple.recovery && !macos_guest {
+            bail!("apple.recovery (start up from macOS Recovery) is for macOS guests");
+        }
+        if let Some(cache) = &apple.rosetta_cache {
+            if !apple.rosetta {
+                bail!("apple.rosetta_cache needs apple.rosetta");
+            }
+            let ok = cache == "default"
+                || (cache.starts_with('/') && cache.len() <= 104)
+                || (!cache.starts_with('/')
+                    && !cache.is_empty()
+                    && cache.len() <= 107
+                    && cache.bytes().all(|b| b.is_ascii_graphic()));
+            if !ok {
+                bail!(
+                    "apple.rosetta_cache must be \"default\", a guest socket path or an abstract socket name, not {cache:?}"
+                );
+            }
+        }
+    }
     for share in &req.shared_folders {
         if !share.host_path.is_dir() {
             bail!(
@@ -715,6 +803,15 @@ mod tests {
     }
 
     #[test]
+    fn efi_secure_boot_is_accepted_for_linux_efi_guests() {
+        assert!(validate_request(&req(r#""secure_boot":true"#)).is_ok());
+        let custom = r#""secure_boot":true,"apple":{"efi_secure_boot":{"platform_key":"/pk.der","db":["/db.esl"],"default_signatures":false}}"#;
+        assert!(validate_request(&req(custom)).is_ok());
+        let mac = r#""secure_boot":true,"apple":{"guest_os":"macos"}"#;
+        assert!(validate_request(&req(mac)).is_err());
+    }
+
+    #[test]
     fn a_plain_request_is_accepted() {
         assert!(validate_request(&req(r#""vcpus":2,"memory_mib":2048"#)).is_ok());
         assert!(validate_request(&req(r#""network":{"mode":"user"}"#)).is_ok());
@@ -817,7 +914,25 @@ mod tests {
     fn vmnet_spec_is_validated() {
         let ok = r#""network":{"mode":"user"},"apple":{"vmnet":{"mode":"host-only","subnet":"192.168.105.0","mask":"255.255.255.0","reserved_ip":"192.168.105.10","forwards":[{"host_port":8080,"guest_port":80,"guest_ip":"192.168.105.10"},{"protocol":"udp","host_port":8080,"guest_port":53,"guest_ip":"192.168.105.10"}]}}"#;
         assert!(validate_request(&req(ok)).is_ok());
+        let v6 = r#""apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0","ipv6_prefix":"fd00:1::/64","mtu":9000,"external_interface":"en0","disable_nat66":true,"disable_dns_proxy":true}}"#;
+        assert!(validate_request(&req(v6)).is_ok());
         for (json, needle) in [
+            (
+                r#""apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0","ipv6_prefix":"fd00::"}}"#,
+                "ipv6_prefix",
+            ),
+            (
+                r#""apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0","mtu":100}}"#,
+                "mtu",
+            ),
+            (
+                r#""apple":{"vmnet":{"mode":"host-only","subnet":"10.0.0.0","mask":"255.0.0.0","external_interface":"en0"}}"#,
+                "mode shared",
+            ),
+            (
+                r#""apple":{"vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0","disable_dhcp":true,"reserved_ip":"10.0.0.9"}}"#,
+                "needs DHCP",
+            ),
             (
                 r#""apple":{"bridge_interface":"en0","vmnet":{"mode":"shared","subnet":"10.0.0.0","mask":"255.0.0.0"}}"#,
                 "mutually exclusive",
@@ -1002,7 +1117,20 @@ mod tests {
             (r#""hugepages":true"#, "hugepages"),
             (r#""numa_node":1"#, "NUMA"),
             (r#""tpm":true"#, "TPM"),
-            (r#""secure_boot":true"#, "secure boot"),
+            (r#""secure_boot":true,"kernel":"/boot/Image""#, "EFI boot"),
+            (
+                r#""apple":{"efi_secure_boot":{"db":["/k.der"]}}"#,
+                "needs secure_boot",
+            ),
+            (
+                r#""secure_boot":true,"apple":{"efi_secure_boot":{"db":["k.der"]}}"#,
+                "absolute",
+            ),
+            (r#""apple":{"recovery":true}"#, "macOS guests"),
+            (
+                r#""apple":{"rosetta_cache":"default"}"#,
+                "needs apple.rosetta",
+            ),
             (r#""initrd":"/boot/initrd""#, "need kernel"),
             (r#""vfio_devices":["0000:01:00.0"]"#, "VFIO"),
             (r#""memory_mib":128"#, "512 MiB"),
@@ -1080,6 +1208,7 @@ mod tests {
             r#"{"name":"data","kind":"block","path":"/dev/disk4","sync":"none","controller":"usb"}"#,
             r#"{"kind":"nbd","url":"nbd://10.0.0.5:10809/vol","read_only":true}"#,
             r#"{"kind":"nbd","url":"nbd+unix:///vol?socket=/tmp/nbd.sock"}"#,
+            r#"{"path":"/d/a.raw","block_device_id":"data-01"}"#,
         ];
         for d in ok {
             let r = req(&format!(r#""apple":{{"extra_disks":[{d}]}}"#));
@@ -1104,6 +1233,14 @@ mod tests {
             (r#"{"path":"/d/a.raw","url":"nbd://x/y"}"#, "nbd disks"),
             (r#"{"name":"root","path":"/d/a.raw"}"#, "root"),
             (r#"{"name":"Big Disk","path":"/d/a.raw"}"#, "a-z"),
+            (
+                r#"{"path":"/d/a.raw","controller":"nvme","block_device_id":"x"}"#,
+                "virtio controller",
+            ),
+            (
+                r#"{"path":"/d/a.raw","block_device_id":"this-serial-is-way-too-long"}"#,
+                "1-20",
+            ),
         ] {
             let r = req(&format!(r#""apple":{{"extra_disks":[{d}]}}"#));
             let err = format!("{:#}", validate_request(&r).expect_err(d));

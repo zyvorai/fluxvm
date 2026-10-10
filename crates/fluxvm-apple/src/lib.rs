@@ -14,6 +14,7 @@ pub mod macos_install;
 mod runner;
 pub mod ssh;
 mod usb_passthrough;
+pub mod vz27;
 pub mod vznet;
 
 pub use capability::{

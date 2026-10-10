@@ -22,9 +22,22 @@ final class FluxVirtioBus: NSObject, VZCustomVirtioDeviceConfigurationDelegate, 
     private let vmID: String
     private let deviceQueue: DispatchQueue
     private var device: VZCustomVirtioDevice?
+    // Touched only on `deviceQueue`.
     private var requestCount: UInt64 = 0
     private var bulkRequestCount: UInt64 = 0
     private var errorCount: UInt64 = 0
+    private var resetCount: UInt64 = 0
+    private var driverReady = false
+
+    private struct SavedState: Codable {
+        static let currentVersion = 1
+        let version: Int
+        let requests: UInt64
+        let bulkRequests: UInt64
+        let errors: UInt64
+        let resets: UInt64
+        let driverReady: Bool
+    }
 
     init(vmID: String) {
         self.vmID = vmID
@@ -51,6 +64,67 @@ final class FluxVirtioBus: NSObject, VZCustomVirtioDeviceConfigurationDelegate, 
     ) {
         self.device = device
         device.delegate = self
+    }
+
+    // MARK: Lifecycle
+
+    func customVirtioDeviceDidAcceptDriverOk(_ device: VZCustomVirtioDevice) {
+        driverReady = true
+        emit(["event": "virtio-driver-ok", "vm_id": vmID])
+    }
+
+    func customVirtioDeviceWillStop(_ device: VZCustomVirtioDevice) {
+        driverReady = false
+        emit(["event": "virtio-stop", "vm_id": vmID])
+    }
+
+    func customVirtioDeviceWillPause(_ device: VZCustomVirtioDevice) {
+        emit(["event": "virtio-pause", "vm_id": vmID])
+    }
+
+    func customVirtioDeviceWillResume(_ device: VZCustomVirtioDevice) {
+        emit(["event": "virtio-resume", "vm_id": vmID])
+    }
+
+    /// The guest driver or `requestReset()` reset the device: queues are gone until the driver sets DRIVER_OK again.
+    func customVirtioDeviceWillReset(_ device: VZCustomVirtioDevice) {
+        driverReady = false
+        resetCount &+= 1
+        emit(["event": "virtio-reset", "vm_id": vmID, "resets": resetCount])
+    }
+
+    func customVirtioDeviceSaveState(forRestore device: VZCustomVirtioDevice) -> Data? {
+        let state = SavedState(version: SavedState.currentVersion, requests: requestCount,
+                               bulkRequests: bulkRequestCount, errors: errorCount,
+                               resets: resetCount, driverReady: driverReady)
+        return try? JSONEncoder().encode(state)
+    }
+
+    func customVirtioDeviceShouldRestore(_ device: VZCustomVirtioDevice, saveState: Data) -> Bool {
+        if saveState.isEmpty { return true }
+        guard let state = try? JSONDecoder().decode(SavedState.self, from: saveState),
+              state.version == SavedState.currentVersion else { return false }
+        requestCount = state.requests
+        bulkRequestCount = state.bulkRequests
+        errorCount = state.errors
+        resetCount = state.resets
+        driverReady = state.driverReady
+        return true
+    }
+
+    /// Host-initiated reset; false when the guest has no device yet.
+    func requestReset() -> Bool {
+        guard let device else { return false }
+        deviceQueue.async { device.requestReset() }
+        return true
+    }
+
+    func status() -> [String: Any] {
+        deviceQueue.sync {
+            ["ok": true, "device": device != nil, "driver_ok": driverReady,
+             "requests": requestCount, "bulk_requests": bulkRequestCount,
+             "errors": errorCount, "resets": resetCount]
+        }
     }
 
     func customVirtioDevice(_ device: VZCustomVirtioDevice,
@@ -125,6 +199,7 @@ final class FluxVirtioBus: NSObject, VZCustomVirtioDeviceConfigurationDelegate, 
                 "requests": String(requestCount),
                 "bulk_requests": String(bulkRequestCount),
                 "errors": String(errorCount),
+                "resets": String(resetCount),
             ])
         case "map-probe":
             guard let (address, length) = mappingTuple(request.payload, prefix: "") else {
@@ -250,5 +325,19 @@ func fluxVMCustomVirtioConfigurationImpl(vmID: String) -> VZCustomVirtioDeviceCo
     // exactly the lifetime of its one VM process.
     fluxVirtioBusKeepAlive[vmID] = bus
     return bus.configuration()
+}
+
+@available(macOS 27.0, *)
+func fluxVMCustomVirtioReset(vmID: String) -> [String: Any] {
+    guard let bus = fluxVirtioBusKeepAlive[vmID] else {
+        return ["ok": false, "error": "no custom Virtio device; set apple.custom_virtio=true"]
+    }
+    return bus.requestReset() ? ["ok": true] : ["ok": false, "error": "the guest has not created the device yet"]
+}
+
+@available(macOS 27.0, *)
+func fluxVMCustomVirtioStatus(vmID: String) -> [String: Any] {
+    fluxVirtioBusKeepAlive[vmID]?.status()
+        ?? ["ok": false, "error": "no custom Virtio device; set apple.custom_virtio=true"]
 }
 #endif
