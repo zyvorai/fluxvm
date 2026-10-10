@@ -1696,6 +1696,7 @@ impl Service {
                 command,
                 timeout_seconds: Some(15),
                 policy: None,
+                process: None,
             },
             Duration::from_secs(20),
         )
@@ -1763,6 +1764,7 @@ impl Service {
                     command: probe.clone(),
                     timeout_seconds: Some(10),
                     policy: None,
+                    process: None,
                 },
                 Duration::from_secs(15),
             )
@@ -1836,6 +1838,7 @@ impl Service {
                 ),
                 timeout_seconds: Some(5),
                 policy: None,
+                process: None,
             },
             Duration::from_secs(10),
         ).await? {

@@ -46,6 +46,7 @@ impl VmManager {
                 command,
                 timeout_seconds,
                 policy,
+                process: None,
             },
             wait,
         )

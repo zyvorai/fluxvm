@@ -47,6 +47,10 @@ pub enum AgentRequest {
         /// the guest. Absent = run unconfined, as before.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         policy: Option<ExecPolicy>,
+        /// Run `argv` directly instead of `/bin/sh -c command` (images without a shell). Older agents ignore it,
+        /// so callers that need it must know the guest's agent supports it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        process: Option<ExecProcess>,
     },
     /// Write `content_base64` (decoded) to `path` inside the guest,
     /// creating parent directories as needed. Replaces machinectl's
@@ -99,6 +103,45 @@ pub enum AgentRequest {
         entropy_base64: Option<String>,
     },
 }
+/// A process started with execve: no shell, so arguments stay literal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecProcess {
+    pub argv: Vec<String>,
+    /// `KEY=value` entries added to (or, with `clean_env`, replacing) the agent's environment.
+    #[serde(default)]
+    pub env: Vec<String>,
+    #[serde(default)]
+    pub clean_env: bool,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub user: Option<ExecRunAs>,
+}
+
+impl ExecProcess {
+    /// Rejects an empty argv and malformed environment entries before anything is spawned.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.argv.first().is_none_or(|a| a.is_empty()) {
+            return Err("process.argv needs a program".into());
+        }
+        if self.argv.iter().any(|a| a.contains('\0')) {
+            return Err("process.argv entries cannot contain NUL".into());
+        }
+        for e in &self.env {
+            let Some((k, _)) = e.split_once('=') else {
+                return Err(format!("process.env entry {e:?} is not KEY=value"));
+            };
+            if k.is_empty() || k.contains('\0') || e.contains('\0') {
+                return Err(format!("process.env entry {e:?} has an invalid name"));
+            }
+        }
+        if self.cwd.as_deref().is_some_and(|c| !c.starts_with('/')) {
+            return Err("process.cwd must be absolute".into());
+        }
+        Ok(())
+    }
+}
+
 fn default_pty_cols() -> u16 {
     80
 }
@@ -335,6 +378,7 @@ mod tests {
                 command: "echo hi".into(),
                 timeout_seconds: Some(5),
                 policy: None,
+                process: None,
             },
         );
         let line = encode_line(&env).unwrap();
@@ -352,6 +396,51 @@ mod tests {
                 assert_eq!(timeout_seconds, Some(5));
             }
             other => panic!("unexpected request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_process_is_optional_and_validated() {
+        let old: AgentRequest = decode_line(r#"{"op":"exec","command":"true"}"#).unwrap();
+        assert!(matches!(old, AgentRequest::Exec { process: None, .. }));
+        let line = encode_line(&AgentRequest::Exec {
+            command: String::new(),
+            timeout_seconds: None,
+            policy: None,
+            process: Some(ExecProcess {
+                argv: vec!["/bin/echo".into(), "$(id)".into()],
+                env: vec!["A=1".into()],
+                cwd: Some("/tmp".into()),
+                user: Some(ExecRunAs {
+                    uid: 65534,
+                    gid: 65534,
+                }),
+                ..Default::default()
+            }),
+        })
+        .unwrap();
+        let AgentRequest::Exec {
+            process: Some(p), ..
+        } = decode_line(&line).unwrap()
+        else {
+            panic!("process lost: {line}")
+        };
+        assert!(p.validate().is_ok());
+        assert_eq!(p.argv[1], "$(id)");
+        for bad in [
+            ExecProcess::default(),
+            ExecProcess {
+                argv: vec!["x".into()],
+                env: vec!["NOEQUALS".into()],
+                ..Default::default()
+            },
+            ExecProcess {
+                argv: vec!["x".into()],
+                cwd: Some("rel".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?}");
         }
     }
 

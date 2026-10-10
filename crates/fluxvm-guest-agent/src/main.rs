@@ -179,11 +179,16 @@ fn handle_connection(
             command,
             timeout_seconds,
             policy,
+            process,
         } => {
             let timeout = Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_EXEC_TIMEOUT_SECS));
-            match policy {
-                Some(policy) => exec_policy::exec_confined(&command, timeout, &policy),
-                None => exec_with_timeout(&command, timeout),
+            match (policy, process) {
+                (Some(_), Some(_)) => AgentResponse::Error {
+                    message: "exec process cannot be combined with policy".into(),
+                },
+                (Some(policy), None) => exec_policy::exec_confined(&command, timeout, &policy),
+                (None, Some(process)) => exec_process(&process, timeout),
+                (None, None) => exec_with_timeout(&command, timeout),
             }
         }
         AgentRequest::PutFile {
@@ -523,9 +528,49 @@ fn open_shell(
 /// nothing is draining, so it never exits, so `try_wait` never returns).
 #[cfg(target_os = "linux")]
 fn exec_with_timeout(command: &str, timeout: Duration) -> AgentResponse {
-    let mut child = match Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
+    let mut cmd = Command::new("/bin/sh");
+    cmd.arg("-c").arg(command);
+    run_with_timeout(cmd, timeout)
+}
+
+/// Runs `process.argv` with execve (no shell), with its environment, directory and identity.
+#[cfg(target_os = "linux")]
+fn exec_process(process: &fluxvm_guest_protocol::ExecProcess, timeout: Duration) -> AgentResponse {
+    use std::os::unix::process::CommandExt;
+    if let Err(message) = process.validate() {
+        return AgentResponse::Error { message };
+    }
+    let mut cmd = Command::new(&process.argv[0]);
+    cmd.args(&process.argv[1..]);
+    if process.clean_env {
+        cmd.env_clear();
+    }
+    for e in &process.env {
+        if let Some((k, v)) = e.split_once('=') {
+            cmd.env(k, v);
+        }
+    }
+    if let Some(cwd) = &process.cwd {
+        cmd.current_dir(cwd);
+    }
+    if let Some(user) = process.user {
+        // Drop supplementary groups first: setgid/setuid alone keep root's.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setgroups(0, std::ptr::null()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        cmd.gid(user.gid).uid(user.uid);
+    }
+    run_with_timeout(cmd, timeout)
+}
+
+#[cfg(target_os = "linux")]
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> AgentResponse {
+    let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

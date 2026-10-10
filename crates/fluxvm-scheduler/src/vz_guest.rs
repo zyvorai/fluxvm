@@ -129,6 +129,7 @@ impl VmManager {
             command: command.clone(),
             timeout_seconds: Some(secs),
             policy: policy.clone(),
+            process: None,
         };
         if let Some(r) = self.vz_agent(vm, request, Duration::from_secs(secs)).await {
             return Ok(r);
