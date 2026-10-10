@@ -1,0 +1,7 @@
+{
+  "name": "micro-agent",
+  "image": "agent-micro",
+  "profile": "tiny",
+  "offline": true,
+  "ttl_seconds": 600
+}

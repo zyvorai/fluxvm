@@ -199,6 +199,15 @@ mod tests {
     }
 
     #[test]
+    fn shipped_agent_micro_example_parses() {
+        let req: crate::SandboxCreateRequest =
+            serde_json::from_str(include_str!("../../../examples/sandbox-agent-micro.json"))
+                .unwrap();
+        assert_eq!(req.image.as_deref(), Some("agent-micro"));
+        assert!(req.offline && req.spec.is_none());
+    }
+
+    #[test]
     fn only_sandboxes_are_eligible() {
         assert!(autopause_eligible(&vm(
             BackendKind::FluxVm,

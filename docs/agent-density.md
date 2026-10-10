@@ -18,7 +18,7 @@ How to run many small Linux agent sandboxes on one Apple Silicon Mac with the `v
 ```
 
 An explicit `vcpus` or `memory_mib` wins over the profile. Warm slots are standard-sized, so `tiny` and `small` sandboxes cold-boot
-(about 8 s with `debian-13`; a smaller image such as [agent-micro](agent-micro.md) boots faster). A `standard` profile is the same as
+(about 8 s with `debian-13`); `"image": "agent-micro"` gives them the [vsock guest agent](agent-micro.md) instead of SSH. A `standard` profile is the same as
 no profile and can claim a warm slot. See [examples/sandbox-tiny.json](../examples/sandbox-tiny.json).
 
 ## Admission on real memory pressure

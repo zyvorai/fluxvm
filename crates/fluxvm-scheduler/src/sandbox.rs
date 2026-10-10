@@ -22,6 +22,10 @@ pub struct SandboxCreateRequest {
     pub template: Option<String>,
     #[serde(default)]
     pub spec: Option<CreateVmRequest>,
+    /// macOS, with neither `template` nor `spec`: the guest image instead of `debian-13`, for example `agent-micro`
+    /// (see `docs/agent-micro.md`). Another image cold-boots (warm slots are `debian-13`).
+    #[serde(default)]
+    pub image: Option<String>,
     #[serde(default)]
     pub ttl_seconds: Option<u64>,
     /// Default guest port for `/sandbox/{id}/…` HTTP proxy (overrides config).
@@ -246,9 +250,15 @@ impl VmManager {
             req.memory_mib,
         );
         // The shape a warm slot has: nothing but defaults asked for, and no tenant to scope the VM to (token quotas were checked above).
+        if req.image.is_some() && (req.template.is_some() || req.spec.is_some()) {
+            bail!(
+                "`image` replaces the default spec; with `template` or `spec`, set the image there"
+            );
+        }
         let default_shape = cfg!(target_os = "macos")
             && req.template.is_none()
             && req.spec.is_none()
+            && req.image.is_none()
             && req.volumes.is_empty()
             && vcpus.is_none()
             && memory_mib.is_none()
@@ -266,7 +276,11 @@ impl VmManager {
             spec
         } else if cfg!(target_os = "macos") {
             // Nothing asked for: a small Debian VM on the Mac's own hypervisor, so `sandbox_create {}` just works.
-            serde_json::from_value(crate::sandbox_pool::default_sandbox_spec())?
+            let mut spec = crate::sandbox_pool::default_sandbox_spec();
+            if let Some(image) = &req.image {
+                spec["image"] = serde_json::json!(image);
+            }
+            serde_json::from_value(spec)?
         } else {
             bail!("sandbox create requires `template` or `spec`");
         };
