@@ -14,7 +14,7 @@
   versioned JSON control channel (`ping`, `echo`, `capabilities`, `stats`, `map-probe`); queue 1 is a bulk queue
   (`bulk_zero`/`fill`/`copy`/`crc32`). The guest driver is in `guest/virtio-flux` (`/dev/fluxvm`, `/dev/fluxvm-bulk`,
   `fluxvm_virtioctl`). Verified on an Apple M4 with a Debian 13 guest (after #200): `ping`, `echo`, `stats` and `capabilities`.
-  **Open:** `fluxvm_virtioctl bulk-test` on queue 1 never completes and later control requests then hang; root cause not found.
+  **Bulk queue:** `fluxvm_virtioctl bulk-test` hung because the driver gave the device a kernel-stack request buffer; it now uses a heap buffer and `bulk-fill` of 1 B to 1 MiB passes with a CRC that matches an independent computation (zero, copy and crc32 are not exercised).
 - **Shared vmnet broker** (`macos/vmnetd`, `fluxvm-vmnetd`): VMs that name the same network with `apple.vmnet.name` share it
   through a broker over XPC ([docs/VMNET_BROKER.md](docs/VMNET_BROKER.md)). Not verified: on the test host the ad-hoc signed
   broker (`com.apple.vm.networking`) was killed at launch (SIP on), so the two-runner test did not run. Without a broker a
@@ -33,7 +33,7 @@
   against the real M4 output.
 - Unit tests on the M4: `fluxvm-apple` 49 (plus 1 `backend` integration test and 6 source-contract tests, which only grep Swift
   and C source), `fluxvm-agent` 55, `fluxvm-core` 79, `fluxvm-scheduler` 204; clippy on `fluxvm-apple` and `fluxvm-agent` is clean.
-- Still not verified: the two-runner broker test, physical USB, more than one Mac, the custom Virtio bulk queue.
+- Still not verified: the two-runner broker test, physical USB, more than one Mac, the custom Virtio zero/copy/crc32 operations.
 
 ### Added: a Mac section on the website, and an architecture guide
 - A `/mac` page on the docs site: measured numbers (one Apple M4, macOS 27.2), what runs on a Mac, how it works, which Mac to

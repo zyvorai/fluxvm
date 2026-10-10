@@ -28,7 +28,7 @@ Recorded in full in [macos-architecture.md](macos-architecture.md#14-what-is-ver
 
 - Verified: unit tests and clippy; `host-capabilities` on the M4; loopback fleet placement with one real node and two fake ones; the custom Virtio control queue (ping, echo, stats, capabilities) after PR #200.
 - Fixed in PR #200: the device id (`0xFF00` gave PCI `1af4:0f40`, which Linux does not bind; it is now `0x3F`), `virtio_flux.c` on kernel 6.12, and the fmt gate.
-- Open: the bulk queue (`bulk-test`, queue 1) hangs and even control requests hang afterwards; root cause not found.
+- Bulk queue: fixed in a follow-up. `bulk-test` hung because the driver put its request on the kernel stack, which is not valid virtqueue memory; with a heap buffer `bulk-fill` of 1 B to 1 MiB works and the CRC matches. Only `bulk-fill` is exercised; zero, copy and crc32 are not.
 - Blocked: `fluxvm-vmnetd` and `FluxVMUSBAccess.app` were killed at launch (SIGKILL) when ad-hoc signed with their entitlements on a SIP-on host, so two-runner vmnet sharing and physical USB attach were not run.
 - Not run: placement across two real Macs.
 

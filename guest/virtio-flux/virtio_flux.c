@@ -174,7 +174,7 @@ static long fluxvm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
     struct fluxvm_file *ctx = file->private_data;
     struct fluxvm_bulk_test t;
     u8 *area, *reply;
-    char request[256];
+    char *request;
     size_t used = 0;
     int ret, n;
     u32 crc;
@@ -188,8 +188,11 @@ static long fluxvm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
     area = kmalloc(t.length, GFP_KERNEL | __GFP_ZERO);
     reply = kzalloc(4096, GFP_KERNEL);
-    if (!area || !reply) { kfree(area); kfree(reply); return -ENOMEM; }
-    n = scnprintf(request, sizeof(request),
+    /* Virtqueue buffers must be linearly mapped: a stack buffer (vmalloc'd with
+     * VMAP_STACK) gives the device a bogus address, so the request is heap-allocated. */
+    request = kzalloc(256, GFP_KERNEL);
+    if (!area || !reply || !request) { kfree(area); kfree(reply); kfree(request); return -ENOMEM; }
+    n = scnprintf(request, 256,
         "{\"version\":1,\"request_id\":\"bulk-test\",\"operation\":\"bulk-fill\","
         "\"payload\":{\"physical_address\":\"%llu\",\"length\":\"%u\",\"value\":\"%u\"}}",
         (unsigned long long)virt_to_phys(area), t.length, t.value);
@@ -204,6 +207,7 @@ static long fluxvm_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 out:
     kfree(area);
     kfree(reply);
+    kfree(request);
     return ret;
 }
 

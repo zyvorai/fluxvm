@@ -33,7 +33,7 @@ The runner control protocol adds:
 Details in [macos-architecture.md](macos-architecture.md#14-what-is-verified).
 
 1. Runner `host-capabilities`: verified. Compile of the vmnetd and USB helper: built, but both were killed at launch (SIGKILL) under ad-hoc signing on a SIP-on host.
-2. Linux guest with `virtio_flux.ko`: after PR #200 (id `0x3F`, kernel 6.12 build fixes), `ping`, `echo`, `stats` and `capabilities` work. `bulk-test` (queue 1) hangs; open.
+2. Linux guest with `virtio_flux.ko`: after PR #200 (id `0x3F`, kernel 6.12 build fixes), `ping`, `echo`, `stats` and `capabilities` work. `bulk-test` (queue 1, bulk-fill) passes after the driver stopped using a stack buffer for its request; the other bulk operations are not exercised.
 3. Two runners on one named vmnet network: not run (broker could not start).
 4. Accessory Access consent, USB list and attach: not run (helper could not start; no USB devices attached).
 5. Fleet placement: verified only on loopback with one real Mac and two fake nodes; no second Mac.
