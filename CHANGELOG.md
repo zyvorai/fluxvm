@@ -140,7 +140,8 @@
 - **Boot artifacts**: `scripts/build-oci-boot.sh` (Linux arm64) and the `oci-boot` CI workflow build `oci-kernel` and
   `oci-initrd` from `guest/oci-vz.config.fragment`, using checksummed kernel and e2fsprogs sources. New config keys:
   `apple.oci_kernel`, `oci_initrd`, `oci_cmdline` and `oci_builder_memory_mib`.
-- `scripts/oci-live-test.sh` is the hardware test (not yet run on a Mac).
+- `scripts/oci-live-test.sh` is the hardware test; it passes on an Apple M4 (exit codes, exec, offline and allow-listed network, a private
+  network between sandboxes, `linux/amd64` under Rosetta, a warm-pool claim).
 
 ### Added: running services in container sandboxes
 - **Published ports**: `oci.ports` (`HOST:CONTAINER`; `fluxctl sandbox run -p`, MCP `oci_ports`) become runner forwards on the
@@ -207,8 +208,9 @@
   `_misses_total`, `fluxvm_sandbox_balloons_inflated`, `fluxvm_vz_agent_calls_total`, `fluxvm_vz_agent_ssh_fallbacks_total`.
 - Scripts: `scripts/density-smoke.sh`, `scripts/e2e-smoke.sh`; guides: [docs/integration.md](docs/integration.md),
   [deploy/launchd-notes.md](deploy/launchd-notes.md), [deploy/kairon-node-mac.md](deploy/kairon-node-mac.md).
-- Not verified on hardware: bridged and vmnet networking, macOS 27 features, macOS guest install and provisioning, USB attach,
-  building and booting `agent-micro`, a multi-Mac fleet.
+- Verified on an Apple M4 since: building and booting `agent-micro` (`scripts/e2e-smoke.sh` with the guest agent answering over vsock),
+  USB disk hot-attach (`scripts/vz-devices-live-test.sh`), and cloning a prepared macOS guest. Not verified: bridged networking, vmnet,
+  macOS guest install and provisioning through the API, physical USB passthrough, a multi-Mac fleet.
 
 ### Added: macOS guest clones, VMPal-parity options, and MCP VM lifecycle tools
 - **Clone prepared macOS guests** ([docs/macos.md](docs/macos.md#macos-guests)): `POST /v1/vms` with `backend: "vz"`,
@@ -233,7 +235,7 @@
 - macOS defaults for the state and run directories, a `cp -c` raw-disk clone, and a `hdiutil` NoCloud seed builder.
 - `scripts/macos-live-test.sh`: boots a real VM through the API and exercises the lifecycle (**PASS** on an Apple M4).
 - Verified on macOS: core 70, scheduler 171, api 56, network, storage 17, guest-protocol 14 unit tests when the backend landed;
-  `fluxvm-apple` now has 16. Not verified: macOS guests, Linux-only crates.
+  `fluxvm-apple` had 16 (it has 49 unit tests, 1 integration test and 6 source-contract tests by 0.4.0). Not verified at the time: macOS guests (cloned and reached over SSH later, see below), Linux-only crates.
 - **Developer features on the `vz` backend** (each verified live on an Apple M4, see `scripts/macos-live-test.sh`): TCP port forwards
   (including `guests: true` on the NAT gateway), virtiofs shared folders, named images (`debian-13`, `debian-12`, `ubuntu-24.04`,
   downloaded, checksum-verified and cached offline-tolerantly), snapshots with restore (memory and disk, about 0.7 s to save and 1.4 s to
