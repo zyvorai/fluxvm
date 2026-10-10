@@ -22,7 +22,7 @@ pub use control::{ControlReply, call as control_call, call_with as control_call_
 pub use runner::{
     EGRESS_PORT, ForwardConfig, OneShotVm, RunnerConfig, SNAPSHOT_FILES, STATE_FILE, ShareConfig,
     adopt_macos_template, clone_file, console_port_socket, find_runner, ip_file, oci_meta_dir,
-    read_guest_ip, snapshot_dir, write_oci_meta_as,
+    read_guest_ip, release_mac, snapshot_dir, write_oci_meta_as,
 };
 
 use anyhow::{Context, Result, bail};

@@ -399,14 +399,63 @@ fn short_socket(id8: &str, kind: &str, requested: PathBuf) -> PathBuf {
         .unwrap_or(requested)
 }
 
+const MAC_FILE: &str = "vz-mac";
+
+/// MACs of deleted VMs, shared by every daemon of this user. The Mac's DHCP server keeps a lease per MAC for a day, so a
+/// fresh MAC per VM runs its /24 dry after about 250 creates; a recycled MAC gets its old address back.
+fn mac_pool() -> Option<PathBuf> {
+    socket_dir().ok().map(|d| d.join("vz-mac-pool"))
+}
+
+fn valid_mac(m: &str) -> bool {
+    m.len() == 17 && m.starts_with("02:")
+}
+
+/// Hands a deleted VM's MAC back for reuse. Call before removing its workspace.
+pub fn release_mac(workspace: &Path) {
+    if let Some(pool) = mac_pool() {
+        release_mac_to(workspace, &pool);
+    }
+}
+
+fn release_mac_to(workspace: &Path, pool: &Path) {
+    let Ok(m) = fs::read_to_string(workspace.join(MAC_FILE)) else {
+        return;
+    };
+    let m = m.trim();
+    if valid_mac(m) && fs::create_dir_all(pool).is_ok() {
+        let _ = fs::rename(workspace.join(MAC_FILE), pool.join(m.replace(':', "-")));
+    }
+}
+
+/// Moves a pooled MAC into `f`; the rename is atomic, so two new VMs never get the same one.
+fn reuse_mac(pool: &Path, f: &Path) -> Option<String> {
+    for e in fs::read_dir(pool).ok()?.flatten() {
+        if fs::rename(e.path(), f).is_ok()
+            && let Ok(m) = fs::read_to_string(f)
+            && valid_mac(m.trim())
+        {
+            return Some(m.trim().to_owned());
+        }
+    }
+    None
+}
+
 /// A locally-administered MAC kept in the workspace so a VM keeps its identity (and DHCP lease) across restarts.
 fn stable_mac(workspace: &Path) -> Result<String> {
-    let f = workspace.join("vz-mac");
+    stable_mac_from(workspace, mac_pool().as_deref())
+}
+
+fn stable_mac_from(workspace: &Path, pool: Option<&Path>) -> Result<String> {
+    let f = workspace.join(MAC_FILE);
     if let Ok(m) = fs::read_to_string(&f) {
         let m = m.trim().to_owned();
         if m.len() == 17 {
             return Ok(m);
         }
+    }
+    if let Some(m) = pool.and_then(|p| reuse_mac(p, &f)) {
+        return Ok(m);
     }
     let u = uuid::Uuid::new_v4();
     let b = u.as_bytes();
@@ -690,6 +739,38 @@ mod one_shot_tests {
         let conf = RunnerConfig::for_launch(&req, &ctx).unwrap();
         let share = conf.shares.iter().find(|s| s.tag == "fluxvm-meta").unwrap();
         assert!(share.read_only && share.host_path == meta);
+    }
+
+    #[test]
+    fn a_deleted_vms_mac_goes_to_the_next_new_vm() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, c) = (
+            dir.path().join("a"),
+            dir.path().join("b"),
+            dir.path().join("c"),
+        );
+        for w in [&a, &b, &c] {
+            fs::create_dir_all(w).unwrap();
+        }
+        let pool = dir.path().join("pool");
+        let mac = stable_mac_from(&a, Some(&pool)).unwrap();
+        assert_eq!(
+            stable_mac_from(&a, Some(&pool)).unwrap(),
+            mac,
+            "stable across launches"
+        );
+        release_mac_to(&a, &pool);
+        assert!(!a.join(MAC_FILE).exists());
+        assert_eq!(
+            stable_mac_from(&b, Some(&pool)).unwrap(),
+            mac,
+            "reused by the next VM"
+        );
+        assert_ne!(
+            stable_mac_from(&c, Some(&pool)).unwrap(),
+            mac,
+            "the pool is empty again"
+        );
     }
 }
 

@@ -116,6 +116,16 @@ wait "$HPID" || true
 GOT="$(cat "$T/port.out")"
 [[ "$(sshc 'cat /tmp/port.in')" == from-host ]] && ok "console port: host to guest" || bad "console port: guest read '$(sshc 'cat /tmp/port.in')'"
 [[ "$GOT" == *from-guest* ]] && ok "console port: guest to host" || bad "console port: host read '$GOT'"
+# The same round trip through `fluxctl port-connect` and the daemon's websocket; the FIFO keeps its stdin open.
+mkfifo "$T/cli.in"; exec 4<>"$T/cli.in"
+./target/debug/fluxctl --server "http://127.0.0.1:$PORT" port-connect "$ID" test < "$T/cli.in" > "$T/cli.out" 2>&1 & CPID=$!
+sleep 2
+sshc 'sudo sh -c "exec 3<>/dev/virtio-ports/test; echo via-cli >&3; timeout 20 head -n1 <&3 > /tmp/cli.in"' & GPID=$!
+for _ in $(seq 1 20); do grep -q via-cli "$T/cli.out" && break; sleep 1; done
+echo to-guest-via-cli >&4
+wait "$GPID" || true; kill "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null || true; exec 4>&-
+grep -q via-cli "$T/cli.out" && ok "port-connect: guest to host over the websocket" || bad "port-connect read '$(cat "$T/cli.out")'"
+[[ "$(sshc 'cat /tmp/cli.in')" == to-guest-via-cli ]] && ok "port-connect: host to guest over the websocket" || bad "port-connect: guest read '$(sshc 'cat /tmp/cli.in')'"
 
 # Display: the Linux scanout takes display_width x display_height.
 MODE="$(sshc 'cat /sys/class/drm/card*-Virtual-1/modes 2>/dev/null | head -1')"
