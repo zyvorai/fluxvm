@@ -62,6 +62,7 @@ struct Config: Decodable {
     let rosetta: Bool?
     let nested_virtualization: Bool?
     let usb_controller: Bool?
+    let usb_controllers: Int?       // XHCI controller count (1-4)
     let vmnet: FluxVMNetSpec?       // macOS 26+ per-VM vmnet network (nil: NAT or bridge)
     let custom_virtio: Bool?        // macOS 27+ custom Virtio device hook (Linux guests)
     let shares: [Share]?
@@ -729,7 +730,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
             guard #available(macOS 15.0, *) else {
                 throw err("USB XHCI passthrough support needs macOS 15 or later")
             }
-            c.usbControllers = [VZXHCIControllerConfiguration()]
+            c.usbControllers = (0..<min(max(cfg.usb_controllers ?? 1, 1), 4)).map { _ in VZXHCIControllerConfiguration() }
         }
         try self.configureClipboard(c)
         try self.configureCustomVirtio(c)
@@ -967,7 +968,7 @@ final class Runner: NSObject, VZVirtualMachineDelegate, NSWindowDelegate {
                 sem.signal()
             case "usb-attach":
                 guard let path = o["path"] as? String else { response = ["ok": false, "error": "usb-attach needs path"]; sem.signal(); break }
-                self.attachUSBMassStorage(path: path, readOnly: (o["read_only"] as? Bool) ?? false) { response = $0; sem.signal() }
+                self.attachUSBMassStorage(path: path, readOnly: (o["read_only"] as? Bool) ?? false, bus: (o["bus"] as? Int) ?? 0) { response = $0; sem.signal() }
             case "usb-detach":
                 guard let id = o["uuid"] as? String else { response = ["ok": false, "error": "usb-detach needs uuid"]; sem.signal(); break }
                 self.detachUSB(uuid: id) { response = $0; sem.signal() }

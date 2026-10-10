@@ -182,7 +182,7 @@ impl VmManager {
             && disk.kind == AppleDiskKind::Image
             && disk.controller == AppleDiskController::Usb;
         if live {
-            let uuid = fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only)
+            let uuid = fluxvm_apple::usb_attach(&vm, &disk.path, disk.read_only, disk.usb_bus)
                 .await
                 .context("hot-attaching the USB disk")?;
             let mut map = read_hotplug(&vm.workspace);

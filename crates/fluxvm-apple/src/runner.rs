@@ -48,6 +48,8 @@ pub struct RunnerConfig {
     pub rosetta: bool,
     pub nested_virtualization: bool,
     pub usb_controller: bool,
+    /// XHCI controllers to create (1-4) when `usb_controller` is set.
+    pub usb_controllers: u8,
     pub vmnet: Option<fluxvm_core::model::AppleVmnetSpec>,
     pub custom_virtio: bool,
     /// virtiofs shares, tagged `fs0`, `fs1`, … in request order (the tags the guest-side mount uses).
@@ -202,7 +204,8 @@ impl RunnerConfig {
             microphone: apple.microphone,
             rosetta: apple.rosetta,
             nested_virtualization: apple.nested_virtualization,
-            usb_controller: apple.usb_controller,
+            usb_controller: apple.usb_controller || apple.usb_controllers > 0,
+            usb_controllers: apple.usb_controllers.max(1),
             vmnet: apple.vmnet.clone(),
             custom_virtio: apple.custom_virtio,
             restore_state: req

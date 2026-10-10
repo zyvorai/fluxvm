@@ -1600,6 +1600,9 @@ enum DiskCommand {
         /// vz: virtio (default), nvme or usb.
         #[arg(long, value_parser = ["virtio", "nvme", "usb"])]
         controller: Option<String>,
+        /// vz, usb controller, hot-attach only: the XHCI bus (0-based; see `create --usb-controllers`).
+        #[arg(long)]
+        usb_bus: Option<u8>,
     },
     /// Grow `root` or a data disk (live or stopped).
     Resize {
@@ -2869,11 +2872,13 @@ async fn run_remote(
                 caching,
                 sync,
                 controller,
+                usb_bus,
             } => {
                 let mut body =
                     json!({"name": name, "size_gib": size_gib, "path": path, "backing": backing});
                 let vz = json!({"kind": kind, "url": url, "read_only": read_only.then_some(true),
-                    "caching": caching, "sync": sync, "controller": controller});
+                    "caching": caching, "sync": sync, "controller": controller,
+                    "usb_bus": usb_bus});
                 for (k, v) in vz.as_object().into_iter().flatten() {
                     if !v.is_null() {
                         body[k] = v.clone();
@@ -3896,6 +3901,7 @@ async fn main() -> Result<()> {
                 caching,
                 sync,
                 controller,
+                usb_bus,
             } => {
                 if m.get(id).await?.backend == fluxvm_core::model::BackendKind::Vz {
                     let disk: fluxvm_core::model::AppleDisk = serde_json::from_value(
@@ -3905,6 +3911,7 @@ async fn main() -> Result<()> {
                             "caching": caching.as_deref().unwrap_or("automatic"),
                             "sync": sync.as_deref().unwrap_or("full"),
                             "controller": controller.as_deref().unwrap_or("virtio"),
+                            "usb_bus": usb_bus,
                         }),
                     )?;
                     let info = m.attach_vz_disk(id, &name, disk, size_gib).await?;

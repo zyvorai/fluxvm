@@ -158,9 +158,11 @@ extension Runner {
         return ["ok":true,"memory_mib":configured,"target_mib":reclaimed,"actual_mib":reclaimed]
     }
 
-    func attachUSBMassStorage(path: String, readOnly: Bool, completion: @escaping ([String: Any])->Void) {
+    func attachUSBMassStorage(path: String, readOnly: Bool, bus: Int = 0, completion: @escaping ([String: Any])->Void) {
         guard #available(macOS 15.0, *) else { completion(["ok":false,"error":"USB hotplug needs macOS 15+"]); return }
-        guard let c = vm?.usbControllers.first else { completion(["ok":false,"error":"no XHCI controller; set apple.usb_controller=true"]); return }
+        guard let buses = vm?.usbControllers, !buses.isEmpty else { completion(["ok":false,"error":"no XHCI controller; set apple.usb_controller=true"]); return }
+        guard bus >= 0, bus < buses.count else { completion(["ok":false,"error":"usb bus \(bus) does not exist (\(buses.count) controller(s))"]); return }
+        let c = buses[bus]
         do {
             let a = try VZDiskImageStorageDeviceAttachment(url: URL(fileURLWithPath: path), readOnly: readOnly)
             let d = VZUSBMassStorageDevice(configuration: VZUSBMassStorageDeviceConfiguration(attachment: a))
@@ -174,7 +176,8 @@ extension Runner {
 
     func detachUSB(uuid: String, completion: @escaping ([String: Any])->Void) {
         guard #available(macOS 15.0, *) else { completion(["ok":false,"error":"USB hotplug needs macOS 15+"]); return }
-        guard let u = UUID(uuidString: uuid), let c = vm?.usbControllers.first,
+        guard let u = UUID(uuidString: uuid),
+              let c = vm?.usbControllers.first(where: { $0.usbDevices.contains { $0.uuid == u } }),
               let d = c.usbDevices.first(where: { $0.uuid == u }) else { completion(["ok":false,"error":"USB device not attached"]); return }
         c.detach(device: d) { e in
             guard e == nil else { completion(["ok":false,"error":e!.localizedDescription]); return }

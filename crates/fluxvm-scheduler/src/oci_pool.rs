@@ -395,7 +395,7 @@ impl VmManager {
                 .await
                 .with_context(|| format!("pointing {} at the volume", share.tag))?;
         }
-        fluxvm_apple::usb_attach(slot, &disk, apple.root_read_only)
+        fluxvm_apple::usb_attach(slot, &disk, apple.root_read_only, None)
             .await
             .context("attaching the rootfs")?;
         fluxvm_apple::warm_claim(

@@ -609,6 +609,10 @@ pub struct AppleSpec {
     /// Opt-in so hosts that still run the supported macOS 14 baseline do not regress.
     #[serde(default)]
     pub usb_controller: bool,
+    /// Number of XHCI controllers (USB buses), 1-4; implies `usb_controller`. 0 keeps the default of one when
+    /// `usb_controller` is set. Hot-plugged USB disks pick a bus with `usb_bus`.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub usb_controllers: u8,
     /// macOS 26+ custom vmnet network (shared or host-only) with its own DHCP pool, reservation and port forwards.
     #[serde(default)]
     pub vmnet: Option<AppleVmnetSpec>,
@@ -752,6 +756,10 @@ pub struct AppleDisk {
     /// Virtio controller only: the serial the guest sees, for a stable `/dev/disk/by-id/virtio-<id>` (1-20 ASCII).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_device_id: Option<String>,
+    /// USB controller, hot-plug only: which XHCI bus (0-based, below `apple.usb_controllers`) a hot-attached disk joins.
+    /// Disks present at boot are placed by Virtualization.framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usb_bus: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -842,6 +850,7 @@ impl Default for AppleSpec {
             rosetta: false,
             nested_virtualization: false,
             usb_controller: false,
+            usb_controllers: 0,
             vmnet: None,
             custom_virtio: false,
             egress_allow: Vec::new(),
@@ -2179,4 +2188,8 @@ mod migration_tls_model_tests {
         .unwrap();
         assert!(value.get("tls").is_some());
     }
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
 }
